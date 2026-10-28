@@ -66,9 +66,11 @@ class Wipe {
 public:
     bool enable;
     Polyline path;
+    // Orca:
     struct RetractionValues{
-        double retractLengthBeforeWipe;
-        double retractLengthDuringWipe;
+        double retraction_length_before_wipe = 0.;
+        double retraction_length_during_wipe = 0.;
+        double retraction_length_after_wipe  = 0.;
     };
 
     Wipe() : enable(false) {}
@@ -113,7 +115,8 @@ public:
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
         m_is_first_print(true),
         m_last_wipe_tower_print_z(print_config.z_offset.value),
-        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config))
+        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config)),
+        m_sparse_layers_combined(wipe_tower_sparse_layers_combined(print_config))
     {
         // Precomputed rather than accumulated while emitting, so that the clearance validator and
         // the emitter cannot disagree about where the compacted tower sits on any given layer.
@@ -142,16 +145,26 @@ public:
 
     bool enable_timelapse_print() const { return m_enable_timelapse_print; }
 
+    // Orca #15035: the WipeTower2 tower's first-layer envelope (brim included) in tower-local
+    // coordinates, which the skip-point entry routing goes around.
+    void set_wipe_tower_bbx(const BoundingBoxf &bbx) { m_wipe_tower_bbx = bbx; }
+
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
     std::string append_tcr(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
     std::string append_tcr2(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
+    std::string tower_height_tag(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, const std::string &tcr_gcode) const;
 
     // Postprocesses gcode: rotates and moves G1 extrusions and returns result
     std::string post_process_wipe_tower_moves(const WipeTower::ToolChangeResult& tcr, const Vec2f& translation, float angle) const;
     // Left / right edges of the wipe tower, for the planning of wipe moves.
 
     Vec2d extruder_offset_at(size_t extruder_id) const;
+    // Orca #15035: the skip-point entry routing of WipeTower2 towers (BBS append_tcr parity).
+    Polyline    generate_path_to_wipe_tower(const Point &start_pos, const Point &end_pos, const BoundingBox &avoid_polygon, const BoundingBox &printer_bbx,
+                                            const Vec2f &outward) const;
+    BoundingBox printer_travel_bounds(GCode &gcodegen) const;
+    std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
 
 private:
     const float                                                  m_left;
@@ -182,6 +195,10 @@ private:
     // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
     // option: smooth timelapse keeps a tower on every layer regardless.
     const bool                                                   m_sparse_layers_skipped;
+    // Orca #15841: combined tower layers are thicker than the object layer they sit on, the only case
+    // where the tower's height is not the one process_layer already declared.
+    const bool                                                   m_sparse_layers_combined;
+    BoundingBoxf                                                 m_wipe_tower_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
 };
@@ -304,7 +321,9 @@ public:
     bool            needs_retraction(const Polyline& travel, ExtrusionRole role, LiftType& lift_type);
     std::string     retract(bool toolchange = false, bool is_last_retraction = false, LiftType lift_type = LiftType::NormalLift, ExtrusionRole role = erNone);
     std::string     unretract() { return m_writer.unlift() + m_writer.unretract(); }
-    std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false);
+    // Orca #15144: defer_temp_wait (wait_for_temp_on_wipe_tower) raises the new filament's target ahead
+    // of the tool change and leaves the blocking wait to the wipe tower.
+    std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false, bool defer_temp_wait = false);
     // Emit PA for this filament's active flow variant (Standard / High-Flow), not raw column = id.
     // reset_adaptive=false keeps the two set_extruder sites that historically skipped the reset.
     std::string     set_filament_pressure_advance(unsigned filament_id, bool reset_adaptive = true);
@@ -400,7 +419,19 @@ private:
         const float skirt_start_angle,
         const LayerTools &layer_tools,
         const Layer& layer,
+        unsigned int extruder_id,
+        std::vector<coordf_t> &skirt_done);
+    std::string generate_object_skirt_group(const Print &print,
+        const PrintObject &object,
+        size_t instance_id,
+        const LayerTools &layer_tools,
+        const Layer& layer,
         unsigned int extruder_id);
+    std::string generate_object_brim(const Print &print,
+        const PrintObject &object,
+        size_t instance_id,
+        bool first_layer,
+        bool shared_brims);
 
     LayerResult process_layer(
         const Print                     &print,
@@ -550,8 +581,7 @@ private:
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);
 
-    std::set<ObjectID>              m_objsWithBrim; // indicates the objs with brim
-    std::set<ObjectID>              m_objSupportsWithBrim; // indicates the objs' supports with brim
+    std::set<ObjectInstanceID>      m_objsWithBrim; // indicates the object instances with brim
     // Cache for custom seam enforcers/blockers for each layer.
     SeamPlacer                          m_seam_placer;
 
@@ -691,8 +721,8 @@ private:
 
     std::unique_ptr<SmallAreaInfillFlowCompensator> m_small_area_infill_flow_compensator;
     
-    // Heights (print_z) at which the skirt has already been extruded.
-    std::vector<coordf_t>               m_skirt_done;
+    // Heights (print_z) at which each grouped skirt has already been extruded.
+    std::vector<std::vector<coordf_t>>   m_skirt_group_done;
     // Has the brim been extruded already? Brim is being extruded only for the first object of a multi-object print.
     bool                                m_brim_done;
     // Flag indicating whether the nozzle temperature changes from 1st to 2nd layer were performed.
@@ -715,6 +745,9 @@ private:
     // time_lapse_gcode hands the firmware (M9711 U/V), so both nozzles of a dual-nozzle machine
     // are photographed the same way. Initialised at the start of every export.
     TimelapsePosPicker m_timelapse_pos_picker;
+    // Whether time_lapse_gcode names the picker's results (set once per export).
+    bool               m_timelapse_uses_pos{ false };
+    bool               m_timelapse_uses_clear_to_x0{ false };
     // Objects printed so far in a print-by-object export, the current one last (BambuStudio's
     // m_printed_objects); the picker keeps clear of the finished ones.
     std::vector<const PrintObject*> m_printed_objects;
@@ -748,6 +781,10 @@ private:
     // BambuStudio's generate_timelapse_gcode: expands time_lapse_gcode for the active filament, with
     // the picked safe position (none when skip_pos_pick: the inline farthest-point photo).
     TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick = false);
+    // Orca #16680: the time_lapse_gcode placeholders (layer, extruders, safe spot) for every printer.
+    // The picker runs when always_pick or when the template names its results. Requires an active filament.
+    DynamicConfig timelapse_gcode_config(const Print &print, coordf_t print_z, int photo_extruder, bool skip_pos_pick,
+                                         bool always_pick, Point *safe_pos = nullptr);
     // Inline farthest-point photo: called with the end point of every extrusion move.
     void check_and_insert_inline_timelapse(std::string &gcode, const Point &endpoint_scaled);
 

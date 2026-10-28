@@ -32,24 +32,6 @@ const double GizmoObjectManipulation::mm_to_in = 0.0393700787;
 const double GizmoObjectManipulation::oz_to_g = 28.34952;
 const double GizmoObjectManipulation::g_to_oz = 0.035274;
 
-// Helper function to be used by drop to bed button. Returns lowest point of this
-// volume in world coordinate system.
-static double get_volume_min_z(const GLVolume* volume)
-{
-    const Transform3f& world_matrix = volume->world_matrix().cast<float>();
-
-    // need to get the ModelVolume pointer
-    const ModelObject* mo = wxGetApp().model().objects[volume->composite_id.object_id];
-    const ModelVolume* mv = mo->volumes[volume->composite_id.volume_id];
-    const TriangleMesh& hull = mv->get_convex_hull();
-
-    float min_z = std::numeric_limits<float>::max();
-    for (const stl_vertex& vert : hull.its.vertices) {
-        min_z = std::min(min_z, Vec3f::UnitZ().dot(world_matrix * vert));
-    }
-    return min_z;
-}
-
 GizmoObjectManipulation::GizmoObjectManipulation(GLCanvas3D& glcanvas)
     : m_glcanvas(glcanvas)
 {
@@ -264,12 +246,14 @@ void GizmoObjectManipulation::update_reset_buttons_visibility()
 {
     const Selection& selection = m_glcanvas.get_selection();
 
+    // Assembly view has its own selection and transformations, which drop_selection() doesn't update
+    m_enable_drop_to_bed = m_glcanvas.get_canvas_type() == GLCanvas3D::ECanvasType::CanvasView3D && selection.can_drop();
+
     if (selection.is_single_full_instance() || selection.is_single_volume_or_modifier()) {
         const GLVolume *               volume = selection.get_first_volume();
 
         Vec3d rotation;
         Vec3d scale;
-        double min_z = 0.;
 
         if (selection.is_single_full_instance()) {
             rotation = volume->get_instance_rotation();
@@ -278,12 +262,10 @@ void GizmoObjectManipulation::update_reset_buttons_visibility()
         else {
             rotation = volume->get_volume_rotation();
             scale = volume->get_volume_scaling_factor();
-            min_z = get_volume_min_z(volume);
         }
         m_show_clear_rotation = !rotation.isApprox(m_init_rotation);
         m_show_reset_0_rotation = !rotation.isApprox(Vec3d::Zero());
         m_show_clear_scale = (m_cache.scale / 100.0f - Vec3d::Ones()).norm() > 0.001;
-        m_show_drop_to_bed = (std::abs(min_z) > EPSILON);
     }
 }
 
@@ -499,9 +481,12 @@ void GizmoObjectManipulation::on_change(const std::string &opt_key, int axis, do
 bool GizmoObjectManipulation::render_combo(
     ImGuiWrapper *imgui_wrapper, const std::string &label, const std::vector<std::string> &lines, size_t &selection_idx, float label_width, float item_width)
 {
-    ImGui::AlignTextToFramePadding();
-    imgui_wrapper->text(label);
-    ImGui::SameLine(label_width);
+    if (!label.empty()) {
+        ImGui::AlignTextToFramePadding();
+        imgui_wrapper->text(label);
+        ImGui::SameLine(label_width);
+    }
+
     ImGui::PushItemWidth(item_width);
 
     size_t selection_out = selection_idx;
@@ -637,8 +622,9 @@ static const char* label_scale_values[2][3] = {
 { "##size_x", "##size_y", "##size_z"}
 };
 
-bool GizmoObjectManipulation::reset_button(ImGuiWrapper *imgui_wrapper, float caption_max, float unit_size, float space_size, float end_text_size)
+bool GizmoObjectManipulation::reset_button(ImGuiWrapper *imgui_wrapper, bool enabled)
 {
+    imgui_wrapper->disabled_begin(!enabled);
     bool        pressed   = false;
     ImTextureID normal_id = m_glcanvas.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_RESET);
     ImTextureID hover_id  = m_glcanvas.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_RESET_HOVER);
@@ -648,14 +634,18 @@ bool GizmoObjectManipulation::reset_button(ImGuiWrapper *imgui_wrapper, float ca
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
 
-    pressed = ImGui::ImageButton3(normal_id, hover_id, button_size);
+    // ORCA: a disabled button keeps its place but draws nothing, so the layout does not shift.
+    pressed = ImGui::ImageButton3(normal_id, hover_id, button_size, {0, 0}, {1, 1}, -1, {0, 0, 0, 0}, {1, 1, 1, enabled ? 1.f : 0.f});
 
     ImGui::PopStyleVar(1);
+
+    imgui_wrapper->disabled_end();
     return pressed;
 }
 
-bool GizmoObjectManipulation::reset_zero_button(ImGuiWrapper *imgui_wrapper, float caption_max, float unit_size, float space_size, float end_text_size)
+bool GizmoObjectManipulation::reset_zero_button(ImGuiWrapper *imgui_wrapper, bool enabled)
 {
+    imgui_wrapper->disabled_begin(!enabled);
     bool        pressed   = false;
     ImTextureID normal_id = m_glcanvas.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_RESET_ZERO);
     ImTextureID hover_id  = m_glcanvas.get_gizmos_manager().get_icon_texture_id(GLGizmosManager::MENU_ICON_NAME::IC_TOOLBAR_RESET_ZERO_HOVER);
@@ -665,9 +655,12 @@ bool GizmoObjectManipulation::reset_zero_button(ImGuiWrapper *imgui_wrapper, flo
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
 
-    pressed = ImGui::ImageButton3(normal_id, hover_id, button_size);
+    // ORCA: a disabled button keeps its place but draws nothing, so the layout does not shift.
+    pressed = ImGui::ImageButton3(normal_id, hover_id, button_size, {0, 0}, {1, 1}, -1, {0, 0, 0, 0}, {1, 1, 1, enabled ? 1.f : 0.f});
 
     ImGui::PopStyleVar(1);
+
+    imgui_wrapper->disabled_end();
     return pressed;
 }
 
@@ -851,8 +844,20 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
     };
 
     float space_size    = imgui_wrapper->get_style_scaling() * 8;
-    float position_size = imgui_wrapper->calc_text_size(_L("Position")).x + space_size;
-    float caption_max    = imgui_wrapper->calc_text_size(_L("Object coordinates")).x + 2 * space_size;
+    //ORCA
+    float coord_combo_width = std::max({
+        imgui_wrapper->calc_text_size(_L("World")).x,
+        imgui_wrapper->calc_text_size(_L("Object")).x,
+        imgui_wrapper->calc_text_size(_L("Part")).x
+    }) + imgui_wrapper->calc_text_size("xxx"sv).x + imgui_wrapper->scaled(3.5f);
+    // Edge: the Align/Distribute row below starts its icons at caption_max too, so its caption
+    // counts here (it is wider than "Position").
+    float label_max = std::max({
+        imgui_wrapper->calc_text_size(_L("Position")).x,
+        imgui_wrapper->calc_text_size(" " + _L("Align") + "/" + _L("Distribute")).x,
+        imgui_wrapper->calc_text_size(" " + _L("Align selected")).x
+    });
+    float caption_max = std::max(label_max, coord_combo_width - 3 * space_size);
     float end_text_size = imgui_wrapper->calc_text_size(this->m_new_unit_string).x;
 
     // position
@@ -885,7 +890,7 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
     unsigned int current_active_id = ImGui::GetActiveID();
 
     Selection &              selection = m_glcanvas.get_selection();
-    std::vector<std::string> modes     = {_u8L("World coordinates"), _u8L("Object coordinates")};//_u8L("Part coordinates")
+    std::vector<std::string> modes     = {_u8L("World"), _u8L("Object")};//_u8L("Part") // ORCA use shorter terms to make UI more compact
     if (selection.is_multiple_full_object() || selection.is_wipe_tower()) {
         modes.pop_back();
     }
@@ -895,16 +900,18 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         selection_idx = 0;
     }
 
-    float caption_cs_size     = imgui_wrapper->calc_text_size(""sv).x;
-    float caption_size        = caption_cs_size + 2 * space_size;
-    float combox_content_size = imgui_wrapper->calc_text_size(_L("Object coordinates")).x * 1.2 + imgui_wrapper->calc_text_size("xxx"sv).x + imgui_wrapper->scaled(3);
     ImGuiWrapper::push_combo_style(m_glcanvas.get_scale());
     bool combox_changed = false;
-    if (render_combo(imgui_wrapper, "", modes, selection_idx, caption_size, combox_content_size)) {
+    if (render_combo(imgui_wrapper, "", modes, selection_idx, 0, coord_combo_width)) {
         combox_changed = true;
     }
     ImGuiWrapper::pop_combo_style();
-    caption_max = combox_content_size - 4 * space_size;
+    // ORCA: after pop_combo_style(), whose light popup background would hide the tooltip's white text.
+    if (ImGui::IsItemHovered()) {
+        auto tooltip_str = _L("Coordinate system used for transform actions.");
+        imgui_wrapper->tooltip(tooltip_str, imgui_wrapper->calc_text_size(tooltip_str).x + 3 * space_size);
+    }
+
     // ORCA use TextColored to match axes color
     float offset_to_center = (unit_size - ImGui::CalcTextSize("O").x) / 2;
     ImGui::SameLine(caption_max + index * space_size + offset_to_center);
@@ -991,7 +998,8 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         ImGuiWrapper::push_combo_style(m_glcanvas.get_scale());
         ImGui::AlignTextToFramePadding();
         ImGui::PushID(1);
-        if (render_combo(imgui_wrapper, "", align_modes, align_mode_idx, caption_size, combox_content_size)) {
+        const float align_combo_width = imgui_wrapper->calc_text_size(_L("Object coordinates")).x * 1.2 + imgui_wrapper->calc_text_size("xxx"sv).x + imgui_wrapper->scaled(3);
+        if (render_combo(imgui_wrapper, "", align_modes, align_mode_idx, 0, align_combo_width)) {
             if (align_modes.size() > 1 && show_align_parts_objects)
                 m_align_choice_type = (AlignChoiceType) align_mode_idx;
         }
@@ -1178,6 +1186,15 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         if (auto *move_gizmo = dynamic_cast<GLGizmoMove3D *>(dock_owner))
             move_gizmo->render_snap_to_surface_ui(imgui_wrapper, ImGui::GetFontSize() * 20.0f);
         ImGui::Separator();
+        // ORCA #16323: Drop uses the same check as the context menu and Auto-Drop (model parts only).
+        imgui_wrapper->disabled_begin(!m_enable_drop_to_bed);
+        if (imgui_wrapper->button(_L("Drop"))) {
+            wxGetApp().plater()->drop_selection();
+            UpdateAndShow(true);
+        }
+        imgui_wrapper->disabled_end();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            imgui_wrapper->tooltip(_L("Move the selection along Z so that its lowest point touches the bed."), ImGui::GetFontSize() * 20.0f);
         bool hide_other_plates = wxGetApp().app_config->get_bool("hide_other_plates_on_move");
         if (imgui_wrapper->checkbox(_L("Hide other plates while moving"), hide_other_plates))
             wxGetApp().app_config->set_bool("hide_other_plates_on_move", hide_other_plates);
@@ -1538,10 +1555,13 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
     };
 
     float space_size    = imgui_wrapper->get_style_scaling() * 8;
-    float position_size = imgui_wrapper->calc_text_size(_L("Rotate (relative)")).x + space_size;
-    float World_size    = imgui_wrapper->calc_text_size(_L("World coordinates")).x + space_size;
-    float caption_max   = std::max(position_size, World_size) + 2 * space_size;
-    float end_text_size = imgui_wrapper->calc_text_size(this->m_new_unit_string).x;
+    // ORCA
+    float caption_max = std::max({
+        imgui_wrapper->calc_text_size(_L("Relative")).x,
+        imgui_wrapper->calc_text_size(_L("Absolute")).x,
+        imgui_wrapper->calc_text_size(_L("World")).x
+    }) + 3.f * space_size;
+    float end_text_size = ImGui::CalcTextSize("°").x; // ORCA rotate gizmo not uses mm or inch
 
     // position
     Vec3d original_position;
@@ -1560,7 +1580,11 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
     ImGui::AlignTextToFramePadding();
     unsigned int current_active_id = ImGui::GetActiveID();
     ImGui::PushItemWidth(caption_max);
-    imgui_wrapper->text(_L("World coordinates"));
+    imgui_wrapper->text(_L("World")); // ORCA
+    if (ImGui::IsItemHovered()) {
+        auto tooltip_str = _L("Coordinate system used for transform actions.");
+        imgui_wrapper->tooltip(tooltip_str, imgui_wrapper->calc_text_size(tooltip_str).x + 3 * space_size);
+    }
     // ORCA use TextColored to match axes color
     float offset_to_center = (unit_size - ImGui::CalcTextSize("O").x) / 2;
     ImGui::SameLine(caption_max + index * space_size + offset_to_center);
@@ -1576,7 +1600,7 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
     // ImGui::PushItemWidth(unit_size * 2);
     bool is_relative_input = false;
     ImGui::AlignTextToFramePadding();
-    imgui_wrapper->text(_L("Rotate (relative)"));
+    imgui_wrapper->text(_L("Relative")); // ORCA
     ImGui::SameLine(caption_max + index * space_size);
     ImGui::PushItemWidth(unit_size);
     if (ImGui::BBLInputDouble(label_values[1][0], &rotation[0], 0.0f, 0.0f, "%.2f")) {
@@ -1605,19 +1629,14 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
         }
     }
 
-    if (m_show_clear_rotation) {
-        ImGui::SameLine(caption_max + 3 * unit_size + 4 * space_size + end_text_size);
-        if (reset_button(imgui_wrapper, caption_max, unit_size, space_size, end_text_size)) {
-            reset_rotation_value(true);
-        }
-        if (ImGui::IsItemHovered()) {
-            float tooltip_size = imgui_wrapper->calc_text_size(_L("Reset current rotation to the value when open the rotation tool.")).x + 3 * space_size;
-            imgui_wrapper->tooltip(_u8L("Reset current rotation to the value when open the rotation tool."), tooltip_size);
-        }
-    } else {
-        ImGui::SameLine(caption_max + 3 * unit_size + 5 * space_size + end_text_size);
-        ImGui::InvisibleButton("", ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
+    ImGui::SameLine(caption_max + index_unit * unit_size + (++index) * space_size + end_text_size);
+    if (reset_button(imgui_wrapper, m_show_clear_rotation)) // ORCA reserve icon space to prevent changes on layout
+        reset_rotation_value(true);
+    if (m_show_clear_rotation && ImGui::IsItemHovered()) {
+        float tooltip_size = imgui_wrapper->calc_text_size(_L("Reset current rotation to the value when open the rotation tool.")).x + 3 * space_size;
+        imgui_wrapper->tooltip(_u8L("Reset current rotation to the value when open the rotation tool."), tooltip_size);
     }
+
     // send focus to m_glcanvas
     bool focued_on_text = false;
     for (int j = 0; j < 3; j++) {
@@ -1632,7 +1651,7 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
     index      = 1;
     index_unit = 1;
     ImGui::AlignTextToFramePadding();
-    imgui_wrapper->text(_L("Rotate (absolute)"));
+    imgui_wrapper->text(_L("Absolute"));
     ImGui::SameLine(caption_max + index * space_size);
     ImGui::PushItemWidth(unit_size);
     bool is_absolute_input = false;
@@ -1662,13 +1681,12 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
         }
     }
 
-    if (m_show_reset_0_rotation) {
-        ImGui::SameLine(caption_max + 3 * unit_size + 4 * space_size + end_text_size);
-        if (reset_zero_button(imgui_wrapper, caption_max, unit_size, space_size, end_text_size)) { reset_rotation_value(false); }
-        if (ImGui::IsItemHovered()) {
-            float tooltip_size = imgui_wrapper->calc_text_size(_L("Reset current rotation to real zeros.")).x + 3 * space_size;
-            imgui_wrapper->tooltip(_L("Reset current rotation to real zeros."), tooltip_size);
-        }
+    ImGui::SameLine(caption_max + index_unit * unit_size + (++index) * space_size + end_text_size);
+    if (reset_zero_button(imgui_wrapper, m_show_reset_0_rotation)) // ORCA reserve icon space to prevent changes on layout
+        reset_rotation_value(false);
+    if (m_show_reset_0_rotation && ImGui::IsItemHovered()) {
+        float tooltip_size = imgui_wrapper->calc_text_size(_L("Reset current rotation to real zeros.")).x + 3 * space_size;
+        imgui_wrapper->tooltip(_L("Reset current rotation to real zeros."), tooltip_size);
     }
     // send focus to m_glcanvas
     bool absolute_focued_on_text = false;
@@ -1755,8 +1773,17 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
     };
 
     float space_size = imgui_wrapper->get_style_scaling() * 8;
-    float scale_size = imgui_wrapper->calc_text_size(_L("Scale")).x + space_size;
-    float caption_max   = imgui_wrapper->calc_text_size(_L("Object coordinates")).x + 2 * space_size;
+    // ORCA
+    float coord_combo_width = std::max({
+        imgui_wrapper->calc_text_size(_L("World")).x,
+        imgui_wrapper->calc_text_size(_L("Object")).x,
+        imgui_wrapper->calc_text_size(_L("Part")).x
+    }) + imgui_wrapper->calc_text_size("xxx"sv).x + imgui_wrapper->scaled(3.5f);
+    float label_max = std::max({
+        imgui_wrapper->calc_text_size(_L("Scale")).x,
+        imgui_wrapper->calc_text_size(_L("Size")).x
+    });
+    float caption_max = std::max(label_max, coord_combo_width - 3 * space_size);
     float end_text_size = imgui_wrapper->calc_text_size(this->m_new_unit_string).x;
     ImGui::AlignTextToFramePadding();
     unsigned int current_active_id = ImGui::GetActiveID();
@@ -1773,7 +1800,7 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
     int index_unit = 1;
 
     Selection &              selection = m_glcanvas.get_selection();
-    std::vector<std::string> modes     = {_u8L("World coordinates"), _u8L("Object coordinates"), _u8L("Part coordinates")};
+    std::vector<std::string> modes     = {_u8L("World"), _u8L("Object"), _u8L("Part")}; // ORCA use shorter terms to make UI more compact
     if (selection.is_single_full_object()) { modes.pop_back(); }
     if (selection.is_multiple_full_object()) {
         modes.pop_back();
@@ -1785,17 +1812,18 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
         selection_idx = 0;
     }
 
-    float caption_cs_size     = imgui_wrapper->calc_text_size(""sv).x;
-    float caption_size        = caption_cs_size + 2 * space_size;
-    float combox_content_size = imgui_wrapper->calc_text_size(_L("Object coordinates")).x * 1.2 + imgui_wrapper->calc_text_size("xxx"sv).x + imgui_wrapper->scaled(3);
     ImGuiWrapper::push_combo_style(m_glcanvas.get_scale());
     bool combox_changed = false;
-    if (render_combo(imgui_wrapper, "", modes, selection_idx, caption_size, combox_content_size)) {
+    if (render_combo(imgui_wrapper, "", modes, selection_idx, 0, coord_combo_width)) {
         combox_changed = true;
     }
     ImGuiWrapper::pop_combo_style();
-    caption_max = combox_content_size - 4 * space_size;
-    //ImGui::Dummy(ImVec2(caption_max, -1));
+    // ORCA: after pop_combo_style(), whose light popup background would hide the tooltip's white text.
+    if (ImGui::IsItemHovered()) {
+        auto tooltip_str = _L("Coordinate system used for transform actions.");
+        imgui_wrapper->tooltip(tooltip_str, imgui_wrapper->calc_text_size(tooltip_str).x + 3 * space_size);
+    }
+
     // ORCA use TextColored to match axes color
     float offset_to_center = (unit_size - ImGui::CalcTextSize("O").x) / 2;
     ImGui::SameLine(caption_max + space_size + offset_to_center);
@@ -1826,14 +1854,9 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
         m_buffered_scale = scale;
     }
 
-    if (m_show_clear_scale) {
-        ImGui::SameLine(caption_max + 3 * unit_size + 4 * space_size + end_text_size);
-        if (reset_button(imgui_wrapper, caption_max, unit_size, space_size, end_text_size))
-            reset_scale_value();
-    } else {
-        ImGui::SameLine(caption_max + 3 * unit_size + 5 * space_size + end_text_size);
-        ImGui::InvisibleButton("", ImVec2(ImGui::GetFontSize(), ImGui::GetFontSize()));
-    }
+    ImGui::SameLine(caption_max + 3 * unit_size + 4 * space_size + end_text_size);
+    if (reset_button(imgui_wrapper, m_show_clear_scale))
+        reset_scale_value();
 
     //Size
     Vec3d original_size;

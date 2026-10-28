@@ -56,6 +56,12 @@ void ConfigManipulation::toggle_line(const std::string& opt_key, const bool togg
         cb_toggle_line(opt_key, toggle);
 }
 
+void ConfigManipulation::set_option_label(const std::string& opt_key, const wxString& label)
+{
+    if (cb_set_option_label)
+        cb_set_option_label(opt_key, label);
+}
+
 void ConfigManipulation::check_nozzle_recommended_temperature_range(DynamicPrintConfig *config) {
     if (is_msg_dlg_already_exist)
         return;
@@ -764,8 +770,18 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool have_infill = config->option<ConfigOptionPercent>("sparse_infill_density")->value > 0;
     // sparse_infill_filament uses the same logic as in Print::extruders()
     for (auto el : { "sparse_infill_pattern", "infill_combination", "fill_multiline","infill_direction",
-        "minimum_sparse_infill_area", "infill_anchor", "infill_anchor_max","infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
+                     "infill_complete_top",
+        "minimum_sparse_infill_area", "infill_shift_step","sparse_infill_rotate_template","symmetric_infill_y_axis"})
         toggle_line(el, have_infill);
+
+    // Orca: the concentric patterns follow the surface outline instead of crossing it, so there is
+    // nothing for an infill anchor to attach to. Hide the anchor settings for them.
+    {
+        const InfillPattern anchor_pattern = config->opt_enum<InfillPattern>("sparse_infill_pattern");
+        const bool have_infill_anchor = have_infill && anchor_pattern != ipConcentric && anchor_pattern != ipSpiralInset;
+        toggle_line("infill_anchor", have_infill_anchor);
+        toggle_line("infill_anchor_max", have_infill_anchor);
+    }
 
     bool have_combined_infill = config->opt_bool("infill_combination") && have_infill;
     toggle_line("infill_combination_max_layer_height", have_combined_infill);
@@ -774,6 +790,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     InfillPattern pattern = config->opt_enum<InfillPattern>("sparse_infill_pattern");
     bool          have_multiline_infill_pattern = pattern == ipGyroid || pattern == ipGrid || pattern == ipRectilinear || pattern == ipTpmsD || pattern == ipTpmsFK || pattern == ipCrossHatch || pattern == ipHoneycomb || pattern == ipLateralLattice || pattern == ipLateralHoneycomb ||
                                                   pattern == ipCubic || pattern == ipStars || pattern == ipAlignedRectilinear || pattern == ipLightning || pattern == ip3DHoneycomb || pattern == ipAdaptiveCubic || pattern == ipSupportCubic;
+
+    // The sparse infill density is the surface density of the adaptive TPMS infill; at 100% the infill is solid.
+    bool have_adaptive_infill_pattern = have_infill && config->option<ConfigOptionPercent>("sparse_infill_density")->value < 100 &&
+                            is_adaptive_infill_pattern(pattern);
+    toggle_line("adaptive_infill_mode", have_adaptive_infill_pattern);
+    bool have_adaptive_infill = have_adaptive_infill_pattern && config->opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") != AdaptiveInfillMode::Disabled;
+    toggle_line("adaptive_infill_interior_density", have_adaptive_infill);
+    toggle_line("adaptive_infill_gradient", have_adaptive_infill);
+
+    // gyroid_optimized only applies when the sparse infill pattern is gyroid without adaptive density;
+    // hide the whole line otherwise.
+    toggle_line("gyroid_optimized", have_infill && pattern == ipGyroid && !have_adaptive_infill);
+    toggle_line("sparse_infill_smooth_factor", is_smoothable_infill_pattern(pattern, config->opt_int("fill_multiline")));
 
     // If there is infill, enable/disable fill_multiline according to whether the pattern supports multiline infill.
     if (have_infill) {
@@ -810,30 +839,65 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("symmetric_infill_y_axis", is_zig_zag || is_cross_zag || is_locked_zig);
 
+    bool is_3Dhoneycomb = config->option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value == InfillPattern::ip3DHoneycomb;
+    toggle_line("infill_complete_top", have_infill && is_3Dhoneycomb);
+
     bool has_spiral_vase         = config->opt_bool("spiral_mode");
     toggle_line("spiral_mode_smooth", has_spiral_vase);
     toggle_line("spiral_mode_max_xy_smoothing", has_spiral_vase && config->opt_bool("spiral_mode_smooth"));
     toggle_line("spiral_starting_flow_ratio", has_spiral_vase);
     toggle_line("spiral_finishing_flow_ratio", has_spiral_vase);
-    bool has_top_shell    = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
+    bool has_top_shell_layers = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
+    bool has_top_shell    = has_top_shell_layers && config->option<ConfigOptionPercent>("top_surface_density")->value > 0;
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
-    bool has_solid_infill = has_top_shell || has_bottom_shell;
+    bool has_solid_infill = has_top_shell_layers || has_bottom_shell;
     toggle_field("top_surface_pattern", has_top_shell);
-    toggle_field("undertop_surface_pattern", has_top_shell);
+    // EdgeSlicer: the undertop pattern serves top surfaces below 100% density, 0% included, so it follows the
+    // top shell layers rather than has_top_shell (which, since Orca #14929, also needs a top surface density > 0).
+    toggle_field("undertop_surface_pattern", has_top_shell_layers);
     // Orca: undertop infill only applies when the top surface is not 100% dense and there is a solid layer under it
     toggle_line("undertop_surface_pattern",
                 config->option<ConfigOptionPercent>("top_surface_density")->value < 100 && config->opt_int("top_shell_layers") > 2);
     toggle_field("bottom_surface_pattern", has_bottom_shell);
-    toggle_field("top_surface_density", has_top_shell);
+    toggle_field("top_surface_density", has_top_shell_layers);
     toggle_field("bottom_surface_density", has_bottom_shell);
+    toggle_field("top_layer_direction", has_top_shell);
+    toggle_field("bottom_layer_direction", has_bottom_shell);
+
+    toggle_line("top_surface_expansion", has_top_shell);
+    toggle_line("top_surface_expansion_margin", has_top_shell);
+    bool has_top_surface_expansion = config->opt_float("top_surface_expansion") > 0;
+    toggle_field("top_surface_expansion_margin", has_top_surface_expansion);
+    toggle_line("top_surface_expansion_direction", has_top_shell);
+    toggle_field("top_surface_expansion_direction", has_top_surface_expansion);
+
+    // Orca: Archimedean Chords and Octagram Spiral are the centered surface patterns that the
+    // pattern-centering and separated-infill features act on.
+    auto is_centered_pattern = [](InfillPattern p) {
+        return p == InfillPattern::ipArchimedeanChords || p == InfillPattern::ipOctagramSpiral;
+    };
+    bool is_top_centered    = is_centered_pattern(config->option<ConfigOptionEnum<InfillPattern>>("top_surface_pattern")->value);
+    bool is_bottom_centered = is_centered_pattern(config->option<ConfigOptionEnum<InfillPattern>>("bottom_surface_pattern")->value);
+    bool has_centered_surface = (has_top_shell && is_top_centered) || (has_bottom_shell && is_bottom_centered);
+
+    // Orca: center of surface pattern
+    toggle_line("center_of_surface_pattern", has_centered_surface);
+
+    // Orca: separate infills
+    toggle_line("separated_infills", is_separable_infill_pattern(pattern));
+
+    // Fill order is only meaningful for the center-based surface fill patterns; hide it otherwise.
+    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipSpiralInset || p == ipArchimedeanChords || p == ipOctagramSpiral; };
+    toggle_line("top_surface_fill_order", has_top_shell && is_centered_fill(config->opt_enum<InfillPattern>("top_surface_pattern")));
+    toggle_line("bottom_surface_fill_order", has_bottom_shell && is_centered_fill(config->opt_enum<InfillPattern>("bottom_surface_pattern")));
 
     for (auto el : { "infill_direction", "sparse_infill_line_width", "gap_fill_target","filter_out_gap_fill","infill_wall_overlap",
-        "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle", "bridge_expansion_extra",
+        "sparse_infill_speed", "bridge_speed", "internal_bridge_speed", "bridge_angle", "internal_bridge_angle", "relative_bridge_angle", "bridge_expansion_extra",
         "solid_infill_direction", "solid_infill_rotate_template", "internal_solid_infill_pattern", "solid_infill_filament",
         })
         toggle_field(el, have_infill || has_solid_infill);
 
-    toggle_field("top_shell_thickness", ! has_spiral_vase && has_top_shell);
+    toggle_field("top_shell_thickness", ! has_spiral_vase && has_top_shell_layers);
     toggle_field("bottom_shell_thickness", ! has_spiral_vase && has_bottom_shell);
 
     toggle_field("wall_direction", !has_spiral_vase);
@@ -887,21 +951,29 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_brim = (config->opt_enum<BrimType>("brim_type") != btNoBrim);
     toggle_field("brim_object_gap", have_brim);
+    toggle_field("brim_use_efc_outline", have_brim);
+    toggle_field("combine_brims", have_brim);
     bool have_brim_width = (config->opt_enum<BrimType>("brim_type") != btNoBrim) && config->opt_enum<BrimType>("brim_type") != btAutoBrim &&
                            config->opt_enum<BrimType>("brim_type") != btPainted;
     toggle_field("brim_width", have_brim_width);
+    toggle_field("brim_flow_ratio", have_brim);
     // wall_filament uses the same logic as in Print::extruders()
     toggle_field("wall_filament", have_perimeters || have_brim);
     toggle_field("outer_wall_filament", have_perimeters);
 
-    bool have_brim_ear = (config->opt_enum<BrimType>("brim_type") == btEar);
+    const BrimType brim_type = config->opt_enum<BrimType>("brim_type");
+    const bool have_auto_brim_ear = brim_type == btEar;
+    const bool have_painted_brim_ear = brim_type == btPainted;
+    set_option_label("brim_width", have_auto_brim_ear ? _L("Brim ear radius") : _L("Brim width"));
     const auto brim_width = config->opt_float("brim_width");
-    // disable brim_ears_max_angle and brim_ears_detection_length if brim_width is 0
+    // Automatic brim ear settings require a non-zero brim width.
     toggle_field("brim_ears_max_angle", brim_width > 0.0f);
     toggle_field("brim_ears_detection_length", brim_width > 0.0f);
-    // hide brim_ears_max_angle and brim_ears_detection_length if brim_ear is not selected
-    toggle_line("brim_ears_max_angle", have_brim_ear);
-    toggle_line("brim_ears_detection_length", have_brim_ear);
+    // Painted ears carry their own radius and do not depend on brim_width.
+    toggle_field("brim_ears_outer_only", have_painted_brim_ear || brim_width > 0.0f);
+    toggle_line("brim_ears_max_angle", have_auto_brim_ear);
+    toggle_line("brim_ears_detection_length", have_auto_brim_ear);
+    toggle_line("brim_ears_outer_only", have_auto_brim_ear || have_painted_brim_ear);
 
     // Hide Elephant foot compensation layers if neither elefant_foot_compensation nor the
     // elephant foot layers density (Orca #11526) is in use.
@@ -1007,6 +1079,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
     toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
+    // Orca #13459
+    for (auto el : {"small_support_perimeter_speed", "small_support_perimeter_threshold"})
+        toggle_line(el, have_support_material);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);
@@ -1028,7 +1103,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                  have_support_material && ((!support_is_normal_tree || support_style == smsTreeHybrid) || have_raft));
 
     bool has_ironing = (config->opt_enum<IroningType>("ironing_type") != IroningType::NoIroning);
-    for (auto el : { "ironing_pattern", "ironing_flow", "ironing_spacing", "ironing_angle", "ironing_inset"})
+    for (auto el : { "ironing_pattern", "ironing_flow", "ironing_spacing", "ironing_angle", "ironing_inset", "ironing_angle_fixed" })
         toggle_line(el, has_ironing);
     
     toggle_line("ironing_speed", has_ironing || has_support_ironing);
@@ -1079,9 +1154,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && !is_BBL_Printer);
+    // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
+    // tower is always printed unrotated (Print::apply clears the angle), so the line stays
+    // visible but greyed out there; its tooltip says why.
+    toggle_line("wipe_tower_rotation_angle", have_prime_tower);
+    toggle_field("wipe_tower_rotation_angle", have_prime_tower && !is_BBL_Printer);
 
     // Orca: both tower generators skip sparse layers, so this is not a wipe tower 2 exclusive.
     toggle_line("wipe_tower_no_sparse_layers", have_prime_tower);
+    // Orca #15841: dropping the sparse layers outright leaves nothing to combine, so the two are exclusive.
+    toggle_line("wipe_tower_sparse_layers_combination", have_prime_tower && !config->opt_bool("wipe_tower_no_sparse_layers"));
 
     // Tower interface options: both generators, every printer. The run-in only ever enters the tower
     // through a wall gap, so it is greyed out (and ignored by the generators) without them.
@@ -1172,7 +1254,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
-        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width"})
+        "min_feature_size", "min_length_factor", "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width",
+        "wall_maximum_resolution", "wall_maximum_deviation"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
 
@@ -1188,13 +1271,20 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     if(gcf_is_klipper)
         toggle_field("accel_to_decel_factor", config->opt_bool("accel_to_decel_enable", 0));
 
+    // Only Klipper's EXCLUDE_OBJECT_DEFINE carries the outline.
+    toggle_line("exclude_object_tolerance", gcf_is_klipper && config->opt_bool("exclude_object"));
+
     bool have_make_overhang_printable = config->opt_bool("make_overhang_printable");
     toggle_line("make_overhang_printable_angle", have_make_overhang_printable);
     toggle_line("make_overhang_printable_hole_size", have_make_overhang_printable);
 
-    toggle_line("min_width_top_surface", config->opt_bool("only_one_wall_top") || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
+    // Orca: the one-wall options act on top/bottom surfaces, which exist only with a shell. An unfilled surface
+    // (0% surface density) is still a surface, so these are gated on the layer counts alone.
+    toggle_line("only_one_wall_first_layer", has_bottom_shell);
+    toggle_line("only_one_wall_top", has_top_shell_layers);
+    toggle_line("min_width_top_surface", (has_top_shell_layers && config->opt_bool("only_one_wall_top")) || ((config->opt_float("min_length_factor") > 0.5f) && have_arachne)); // 0.5 is default value
 
-    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted" })
+    for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
@@ -1268,6 +1358,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
 
     toggle_line("infill_overhang_angle", config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLateralHoneycomb);
+
+    bool lightning_options = config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLightning;
+    for (auto el : { "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle" })
+        toggle_line(el, lightning_options);
 }
 
 void ConfigManipulation::update_print_sla_config(DynamicPrintConfig* config, const bool is_global_config/* = false*/)

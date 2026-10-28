@@ -634,6 +634,17 @@ void ShowcaseView::build_panel()
     row(_L("Photo"), m_floor_texture);
     m_floor_image = new wxButton(m_side, wxID_ANY, _L("Choose picture..."));
     row(_L("Picture"), m_floor_image);
+    {
+        wxArrayString turns;
+        for (const char *t : { "0", "90", "180", "270" })
+            turns.Add(wxString::FromUTF8(t));
+        m_floor_rotation = choice(turns);
+        m_floor_rotation->SetToolTip(_L("Turn the photo or picture counter-clockwise, seen from above. The top of the picture points to the back of the plate at 0."));
+        row(_L("Rotate"), m_floor_rotation);
+    }
+    m_floor_flip = new wxCheckBox(m_side, wxID_ANY, _L("Flip left to right"));
+    grid->AddSpacer(0);
+    grid->Add(m_floor_flip);
     m_floor_tile = new wxSpinCtrl(m_side, wxID_ANY, "300", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 10, 5000, 300);
     m_floor_tile->SetToolTip(_L("How large one copy of the photo or picture is on the floor."));
     row(_L("Tile size (mm)"), m_floor_tile);
@@ -700,6 +711,15 @@ void ShowcaseView::build_panel()
     m_exposure = slider(0, -30, 30);
     m_exposure->SetToolTip(_L("Brightness of the model and the environment, in tenths of a stop."));
     row(_L("Exposure"), m_exposure);
+    // Realism 1a (D-R1): Neutral keeps filament colours true; Filmic rolls bright highlights off
+    // softly, like a camera. The order follows Showcase::ToneCurve.
+    wxArrayString tones;
+    tones.Add(_L("Neutral"));
+    tones.Add(_L("Filmic"));
+    m_tone = choice(tones);
+    m_tone->SetToolTip(_L("How light is turned into the picture's colours. Neutral keeps the filament colours true; "
+                          "Filmic rolls very bright highlights off softly, like a camera."));
+    row(_L("Tone"), m_tone);
 
     // --- Materials (D4) -----------------------------------------------------------------------
     header(_L("Materials"), "materials");
@@ -711,7 +731,8 @@ void ShowcaseView::build_panel()
     layer_lines.Add(_L("Exaggerated"));
     m_layer_lines = choice(layer_lines);
     m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
-                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
+                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports. "
+                                 "Model only: the toolpaths view already shows the real layers."));
     row(_L("Layer lines"), m_layer_lines);
     // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
     // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
@@ -1075,6 +1096,12 @@ void ShowcaseView::build_panel()
         }, true);
     });
     m_floor_image->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_choose_floor_image(); });
+    m_floor_rotation->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_floor_rotation->GetSelection();
+        if (sel >= 0 && sel < 4)
+            edit([sel](Showcase::Scene &s) { s.floor.rotation = sel * 90; });
+    });
+    m_floor_flip->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.floor.flip = m_floor_flip->GetValue(); }); });
     m_floor_tile->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
         const float mm = float(m_floor_tile->GetValue());
         edit([mm](Showcase::Scene &s) {
@@ -1151,6 +1178,11 @@ void ShowcaseView::build_panel()
     });
     m_exposure->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         edit([this](Showcase::Scene &s) { s.lighting.exposure = float(m_exposure->GetValue()) / 10.f; });
+    });
+    m_tone->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_tone->GetSelection();
+        if (sel >= 0)
+            edit([sel](Showcase::Scene &s) { s.lighting.tone = sel == 1 ? Showcase::ToneCurve::Filmic : Showcase::ToneCurve::Neutral; });
     });
     m_layer_lines->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_layer_lines->GetSelection();
@@ -1500,6 +1532,8 @@ void ShowcaseView::sync_controls()
                                                                          (f != nullptr ? f->tile_mm * s.floor.texture_scale : 300.f);
         m_floor_tile->SetValue(std::clamp(int(std::lround(tile)), 10, 5000));
     }
+    m_floor_rotation->SetSelection(std::clamp(Showcase::floor_rotation_snap(double(s.floor.rotation)) / 90, 0, 3));
+    m_floor_flip->SetValue(s.floor.flip);
     m_floor_reflection->SetValue(int(std::lround(s.floor.reflection * 100.f)));
     m_floor_contact->SetValue(int(std::lround(s.floor.contact_shadow * 100.f)));
 
@@ -1534,6 +1568,7 @@ void ShowcaseView::sync_controls()
         env_rot += 360;
     m_env_rotation->SetValue(env_rot);
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
+    m_tone->SetSelection(s.lighting.tone == Showcase::ToneCurve::Filmic ? 1 : 0);
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
     m_source->SetSelection(s.source == "toolpaths" ? 1 : 0);
     m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
@@ -1740,8 +1775,10 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_layer_lines, m_use_as_cover, m_source, m_smooth_auto })
+                                                          m_exposure, m_tone, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
+    // The toolpaths are the real layers, so the procedural lines only apply to the model.
+    m_layer_lines->Enable(editable && s.source != "toolpaths");
     m_smooth->Enable(editable && s.materials.toolpath_smoothness >= 0.f);
     for (wxChoice *c : m_mat_choices)
         c->Enable(editable);
@@ -1755,6 +1792,8 @@ void ShowcaseView::update_enabled()
     m_floor_texture->Enable(editable && floor_on && !showcase_floors().floors.empty());
     m_floor_image->Enable(editable && floor_on);
     m_floor_tile->Enable(editable && floor_on && (photo || picture));
+    m_floor_rotation->Enable(editable && floor_on && (photo || picture));
+    m_floor_flip->Enable(editable && floor_on && (photo || picture));
     m_floor_reflection->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
     m_floor_contact->Enable(editable && floor_on && s.floor.type != Showcase::FloorType::None);
     m_bg_color1->Enable(editable && s.background.type != Showcase::BackgroundType::Transparent);

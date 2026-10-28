@@ -89,7 +89,8 @@ struct Stored
     std::string fingerprint_after;  // ... of the loaded model
 };
 
-Stored store_and_load(const std::string &history_json)
+Stored store_and_load(const std::string &history_json,
+                      SaveStrategy       strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary)
 {
     Stored      out;
     Model       src_model = cube_model();
@@ -119,8 +120,16 @@ Stored store_and_load(const std::string &history_json)
     params.model           = &src_model;
     params.config          = &store_config;
     params.plate_data_list = {plate};
-    params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    params.strategy        = strategy;
     const bool stored      = store_bbs_3mf(params);
+    out.model_settings     = zip_entry(test_file, "Metadata/model_settings.config");
+    if (strategy & SaveStrategy::SkipModel) {
+        // A sliced-plate file carries no model to load back; what it wrote is the point.
+        out.ok = stored && !out.model_settings.empty();
+        delete plate;
+        boost::filesystem::remove(test_file);
+        return out;
+    }
 
     Model                     dst_model;
     DynamicPrintConfig        dst_config;
@@ -464,4 +473,31 @@ TEST_CASE("A project without a history, and a file from an older build, load wit
     // A newer file read by an older build is the other direction: an unknown <metadata> key is
     // skipped by the loader (the same path edgeslicer_dual_nozzle_confirm takes).
     REQUIRE(none.model_settings.find("<plate>") != std::string::npos);
+}
+
+TEST_CASE("Sliced-plate files leave out the EdgeSlicer-only plate metadata", "[PlateHistory][3mf]")
+{
+    // A .gcode.3mf (export, printer or Bambu Connect send) and a cloud print's config 3MF get shared:
+    // the print history (printer names) and the dual-nozzle confirmation (printer serial) stay in the
+    // project file only.
+    History h;
+    h.add(entry_at(5, Action::SentAndStarted, "feedfacecafebeef"));
+
+    const SaveStrategy sliced = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode |
+                                SaveStrategy::SkipModel;
+    const SaveStrategy config_3mf = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipModel | SaveStrategy::WithSliceInfo |
+                                    SaveStrategy::SkipAuxiliary;
+    for (const SaveStrategy strategy : {sliced, config_3mf}) {
+        const Stored stored = store_and_load(h.serialize(), strategy);
+        REQUIRE(stored.ok);
+        REQUIRE(stored.model_settings.find("<plate>") != std::string::npos);
+        REQUIRE(stored.model_settings.find("edgeslicer_print_history") == std::string::npos);
+        REQUIRE(stored.model_settings.find("edgeslicer_dual_nozzle_confirm") == std::string::npos);
+    }
+
+    // The project save keeps both.
+    const Stored project = store_and_load(h.serialize());
+    REQUIRE(project.ok);
+    REQUIRE(project.model_settings.find("edgeslicer_print_history") != std::string::npos);
+    REQUIRE(project.model_settings.find("edgeslicer_dual_nozzle_confirm") != std::string::npos);
 }

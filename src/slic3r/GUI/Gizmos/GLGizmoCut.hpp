@@ -131,6 +131,19 @@ class GLGizmoCut3D : public GLGizmoBase
 
     bool m_is_slider_editing_done { false };
 
+    // Multiple Dovetail cuts
+    // EDGE (owner, 2026-10-24): at most 20 dovetails. Every Count / Gap change re-runs the whole
+    // groove cut for the part preview (process_contours()), about seven plane cuts per dovetail.
+    static constexpr int GrooveCountMax { 20 };
+    // The radius the dovetails are spaced by (Cut::calculate_groove_width()): 0 = this object's own
+    // m_radius; a recipe sets it so a re-edit or a Copy cut keeps the spacing in mm (D5).
+    float m_groove_plane_radius { 0.f };
+    float groove_radius() const { return m_groove_plane_radius > 0.f ? m_groove_plane_radius : float(m_radius); }
+    int m_groove_count_init { 1 };
+    int m_groove_count { 1 };
+    float m_groove_gap { 10.f }; // distance between multiple dovetail cuts
+    float m_groove_gap_init { 10.f }; 
+
     // Input params for cut with snaps
     float m_snap_bulge_proportion{ 0.15f };
     float m_snap_space_proportion{ 0.3f };
@@ -147,6 +160,24 @@ class GLGizmoCut3D : public GLGizmoBase
     // "Add connectors" for the rest of the session.
     bool             m_flexi_forced_after_cut{ false };
     std::vector<std::string> m_flexi_kinds;
+
+    // Push-fit Pin connector (tests/design_pushfit_connector.md): the panel's working values,
+    // copied into every selected Pin connector on each edit.
+    PushFitParams    m_pushfit;
+    // The preset selector: 0 S, 1 M, 2 L, 3 Auto, 4 Custom (Auto is a one-shot sizing).
+    int              m_pushfit_preset_ui{ 1 };
+    bool             m_pushfit_auto_misfit{ false };
+    bool             m_pushfit_same_length{ true };
+    bool             m_pushfit_same_clearance{ true };
+    bool             m_pushfit_advanced{ false };
+    // The connector the panel last loaded its values from, so selecting another Pin shows its own.
+    int              m_pushfit_shown_idx{ -1 };
+    std::vector<std::string> m_pushfit_presets;
+    std::vector<std::string> m_pushfit_cutouts;
+    std::vector<std::string> m_pushfit_poses;
+    // The translucent hole envelopes drawn on each side of a placed Pin (upper, lower).
+    GLModel          m_pushfit_hole_models[2];
+    bool             m_pushfit_hole_models_dirty{ true };
 
     // --- Curved cut (phase 1) ---------------------------------------------
     // Surface: Flat | Curved | Draw. Curved replaces the flat cut plane with a
@@ -1012,8 +1043,10 @@ protected:
     void add_horizontal_scaled_interval(float interval);
     void add_horizontal_shift(float shift);
     void render_color_marker(float size, const ImU32& color);
-    void render_groove_float_input(const std::string &label, float &in_val, const float &init_val, float &in_tolerance);
+    void render_groove_two_float_input(const std::string &label, float &in_val, const float &init_val, float &in_tolerance);
+    void render_groove_float_input(const std::string &label, float &in_val, const float &init_val, const bool disabled);
     void render_groove_angle_input(const std::string &label, float &in_val, const float &init_val, float min_val, float max_val);
+    void render_groove_int_input(const std::string& label, int& in_val, const int& init_val, int min_val, int max_val);
     bool render_angle_input(const std::string& label, float& in_val, const float& init_val, float min_val, float max_val);
     void render_snap_specific_input(const std::string& label, const wxString& tooltip, float& in_val, const float& init_val, const float min_val, const float max_val);
     void render_connectors_window_footer(float x, float y);
@@ -1030,6 +1063,14 @@ protected:
     double flexi_section_inscribed_radius() const;
     float  flexi_nozzle_diameter() const;
     double flexi_slice_closing_radius() const;
+    // Push-fit Pin
+    bool   is_pushfit_type() const { return m_connector_type == CutConnectorType::PushFit; }
+    bool   render_pushfit_mm_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
+    bool   render_pushfit_checkbox(const wxString& label, bool& value);
+    void   render_pushfit_inputs(CutConnectors& connectors);
+    void   render_pushfit_profile_inset();
+    void   render_pushfit_hole_envelopes(const Transform3d& view_model_matrix);
+    void   sync_pushfit_params(CutConnectors& connectors);
     void render_cut_plane_input_window(CutConnectors &connectors, float x, float y, float bottom_limit);
     void init_input_window_data(CutConnectors &connectors);
     void render_input_window_warning() const;
@@ -1063,7 +1104,8 @@ private:
     void switch_to_mode(size_t new_mode);
     bool render_cut_mode_combo();
     bool render_double_input(const std::string& label, double& value_in);
-    bool render_slider_double_input(const std::string& label, float& value_in, float& tolerance_in, float min_val = -0.1f, float max_tolerance = -0.1f);
+    bool render_slider_two_input(const std::string& label, float& value_in, float& tolerance_in, float min_val = -0.1f, float max_tolerance = -0.1f);
+    bool render_slider_input(const std::string& label, float& value_in, float min_val = -0.1f, float max_val = 100.f);
     void render_move_center_input(int axis);
     void render_connect_mode_radio_button(CutConnectorMode mode);
     bool render_reset_button(const std::string& label_id, const std::string& tooltip) const;
@@ -1185,6 +1227,7 @@ private:
 
     void toggle_model_objects_visibility();
 
+    std::vector<Vec3i32> offset_indices(const std::vector<Vec3i32>& base_indices, size_t vo);
     indexed_triangle_set its_make_groove_plane();
 
     indexed_triangle_set get_connector_mesh(CutConnectorAttributes connector_attributes);

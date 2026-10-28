@@ -40,6 +40,7 @@
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
+#include "../Utils/ElegooCc2.hpp"
 #include <wx/choice.h>
 #include <wx/combobox.h>
 #include <wx/panel.h>
@@ -445,7 +446,7 @@ static FlashforgeMaterialMapWidget* as_ff_map_widget(wxWindow* window)
 // the tray the way the swatches do. Positional (third_party_slots_from), never the raw tray id.
 static wxString third_party_slot_tile_label(const PrintHostDevices::Status& st, int protocol_index)
 {
-    for (const ThirdPartyDeviceSlot& ds : third_party_slots_from(st.slots, st.qidi_box))
+    for (const ThirdPartyDeviceSlot& ds : third_party_slots_from(st.slots, st.mmu_grouped()))
         if (ds.index == protocol_index)
             return from_u8(slot_display_label(ds));
     return wxString::Format("%d", protocol_index + 1);
@@ -636,6 +637,12 @@ void PrintHostSendDialog::build_device_ui()
     m_qidi_panel->SetSizer(m_qidi_sizer);
     content_sizer->Add(m_qidi_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
 
+    m_vendor_panel = new wxPanel(this, wxID_ANY);
+    m_vendor_sizer = new wxBoxSizer(wxVERTICAL);
+    m_vendor_panel->SetSizer(m_vendor_sizer);
+    m_vendor_panel->Hide();
+    content_sizer->Add(m_vendor_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+
     m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
         m_device_sel = m_combo_devices->GetSelection();
         refresh_device_status();
@@ -684,6 +691,12 @@ void PrintHostSendDialog::refresh_device_status()
                 text += "  ";
             text += _L("QIDI Box: each filament is fed from the slot picked below. A print is only started "
                        "once every filament has a slot.");
+        } else if ((m_device_status.happy_hare || m_device_status.afc) && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            // Read-only on purpose: no gate or lane mapping goes out at print start.
+            text += _L("Happy Hare / AFC: the gates or lanes are shown as the printer reports them. The slicer does not "
+                       "set which one feeds each filament; the printer's own tool-to-gate map does.");
         }
         // A printer that may carry a QIDI Box and did not answer: nobody knows what its Box would
         // feed, so a print is not started without the person saying so.
@@ -707,6 +720,7 @@ void PrintHostSendDialog::refresh_device_status()
     }
     rebuild_mapping_rows();
     rebuild_qidi_options();
+    rebuild_vendor_options();
     update_mapping_enabled();
     update_print_button();
     content_sizer->Layout();
@@ -1044,7 +1058,7 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         model.filaments.push_back(std::move(sf));
         m_mapping_filament.push_back(f.index);
     }
-    model.slots     = third_party_slots_from(m_device_status.slots, m_device_status.qidi_box);
+    model.slots     = third_party_slots_from(m_device_status.slots, m_device_status.mmu_grouped());
     model.read_only = third_party_map_read_only();
     model.mapping.resize(model.filaments.size(), -1);
     // Always fill the visual auto-match, including read-only (K3): the cards show the match, but
@@ -1057,6 +1071,14 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         // filament's own material first and never colour alone. Same rule as the wxChoice rows.
         model.mapping[i] = initial_slot_position(m_device_status.slots, preselect_slot(*f), f->colour, f->type,
                                                  m_device_status.qidi_box);
+        // Happy Hare / AFC: nothing is sent, so show what the printer does without being told:
+        // tool T<n> feeds from gate/lane n (its default tool-to-gate map), not a colour match.
+        if (m_device_status.happy_hare || m_device_status.afc) {
+            model.mapping[i] = -1;
+            for (size_t p = 0; p < m_device_status.slots.size(); ++p)
+                if (m_device_status.slots[p].index == model.filaments[i].index)
+                    model.mapping[i] = (int) p;
+        }
     }
 
     m_filament_map = new ThirdPartyFilamentMapPanel(m_mapping_panel);
@@ -2680,9 +2702,51 @@ void ElegooPrintHostSendDialog::EndModal(int ret)
         app_config->set("recent", CONFIG_KEY_TIMELAPSE, std::to_string(m_timeLapse));
         app_config->set("recent", CONFIG_KEY_HEATEDBEDLEVELING, std::to_string(m_heatedBedLeveling));
         app_config->set("recent", CONFIG_KEY_BEDTYPE, std::to_string(static_cast<int>(m_BedType)));
+        // The auto-refill choice, for this printer only (owner D7: remembered per printer).
+        if (m_auto_refill && m_auto_refill->IsShown() && !m_auto_refill_key.empty())
+            app_config->set(CONFIG_SECTION_AUTO_REFILL, m_auto_refill_key, m_auto_refill->GetValue() ? "1" : "0");
     }
 
     PrintHostSendDialog::EndModal(ret);
+}
+
+bool ElegooPrintHostSendDialog::picked_is_cc2() const
+{
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size() && ElegooCc2::is_cc2_model(m_devices[m_device_sel].printer_model))
+        return true;
+    return ElegooCc2::is_cc2_model(m_printer_model) || ElegooCc2::is_cc2_model(m_model_key);
+}
+
+// The CANVAS auto-refill: when a tray runs out mid-print, the printer goes on from another tray with
+// the same filament. ElegooSlicer sets it (method 2004) before every start on a printer with a CANVAS;
+// here it is a checkbox, shown only when the picked Centauri Carbon 2 reported a connected CANVAS.
+void ElegooPrintHostSendDialog::rebuild_vendor_options()
+{
+    if (!m_vendor_panel || !m_vendor_sizer)
+        return;
+    m_vendor_sizer->Clear(true);
+    m_auto_refill = nullptr;
+    m_auto_refill_key.clear();
+    if (!m_device_status.canvas || !picked_is_cc2()) {
+        m_vendor_panel->Hide();
+        return;
+    }
+    std::string device_id, address;
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
+        device_id = m_devices[m_device_sel].id;
+        address   = m_devices[m_device_sel].address;
+    }
+    m_auto_refill_key = ElegooCc2::auto_refill_memory_key(device_id, address);
+    const AppConfig*  app_config = wxGetApp().app_config;
+    const std::string remembered = (app_config && !m_auto_refill_key.empty()) ?
+                                       app_config->get(CONFIG_SECTION_AUTO_REFILL, m_auto_refill_key) : std::string();
+    m_auto_refill = new wxCheckBox(m_vendor_panel, wxID_ANY, _L("CANVAS auto-refill"));
+    m_auto_refill->SetValue(ElegooCc2::auto_refill_initial(remembered, m_device_status.canvas_auto_refill));
+    m_auto_refill->SetToolTip(_L("When a CANVAS tray runs out during the print, continue from another tray with the same "
+                                 "filament. Set on the printer just before the print starts; remembered for this printer."));
+    m_vendor_sizer->Add(m_auto_refill, 0, wxBOTTOM, FromDIP(4));
+    m_vendor_panel->Show(true);
+    m_vendor_panel->Layout();
 }
 
 std::vector<ElegooCanvasMapping::UsedFilament> ElegooPrintHostSendDialog::used_filaments() const
@@ -2719,6 +2783,9 @@ std::map<std::string, std::string> ElegooPrintHostSendDialog::extendedInfo() con
     if (m_device_status.canvas) {
         info["canvasAttached"] = "1";
         info["slotMap"]        = ElegooStartPrint::format_slot_map(slot_map());
+        // The Centauri Carbon 2's auto-refill (ElegooCc2::start_print_over sends 2004 with it).
+        if (m_auto_refill)
+            info["canvasAutoRefill"] = m_auto_refill->GetValue() ? "1" : "0";
     }
     return info;
 }

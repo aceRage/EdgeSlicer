@@ -100,6 +100,8 @@ set(lisbslic3r_sources
     ImageFill.cpp
     FlexiJoint.cpp
     FlexiJoint.hpp
+    PushFit.cpp
+    PushFit.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
@@ -111,6 +113,12 @@ set(lisbslic3r_sources
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
+    Showcase/ShowcaseTone.cpp
+    Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
     Showcase/ShowcaseWebP.hpp
     Showcase/ShowcaseVideo.cpp
@@ -234,8 +242,12 @@ set(lisbslic3r_sources
     Fill/FillBase.hpp
     Fill/FillConcentric.cpp
     Fill/FillConcentric.hpp
+    Fill/FillSpiralInset.cpp
+    Fill/FillSpiralInset.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
+    Fill/FillCornerSmoothing.cpp
+    Fill/FillCornerSmoothing.hpp
     FDMHollowing.cpp
     FDMHollowing.hpp
     Fill/Fill.cpp
@@ -254,6 +266,8 @@ set(lisbslic3r_sources
     Fill/FillPlanePath.hpp
     Fill/FillRectilinear.cpp
     Fill/FillRectilinear.hpp
+    Fill/AdaptiveInfillField.cpp
+    Fill/AdaptiveInfillField.hpp
     Fill/FillTpmsD.cpp
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp
@@ -286,6 +300,8 @@ set(lisbslic3r_sources
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
+    Format/DXF.cpp
+    Format/DXF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
     Format/objparser.cpp
@@ -685,6 +701,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    SpreadPaint.cpp
+    SpreadPaint.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp

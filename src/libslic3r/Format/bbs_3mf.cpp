@@ -360,10 +360,12 @@ static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
 // EdgeSlicer: the per-plate filament arrangement the user confirmed before slicing on a Bambu
-// two-extruder printer (DualNozzleSync::Confirmation JSON). Not written into Bambu exports.
+// two-extruder printer (DualNozzleSync::Confirmation JSON). Project files only: not written into
+// Bambu exports or sliced-plate files (m_sliced_plate_export).
 static constexpr const char* DUAL_NOZZLE_CONFIRM_ATTR = "edgeslicer_dual_nozzle_confirm";
 // EdgeSlicer: when and where the plate was sent (PlatePrintHistory.hpp). One metadata element per
-// plate, written only when the plate has a history and never into Bambu exports; a build that does
+// plate, written only when the plate has a history and never into Bambu exports or sliced-plate
+// files (.gcode.3mf, printer and Bambu Connect sends); a build that does
 // not know the key skips it.
 static constexpr const char* PRINT_HISTORY_ATTR = "edgeslicer_print_history";
 
@@ -1064,6 +1066,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // which is what every pre-phase-3 file's connectors were loaded as.
                 bool             processed{ true };
                 FlexiJointParams flexi;
+                // The push-fit Pin's parameters (type PushFit). `has_pushfit` false: none in
+                // the file, the defaults stand.
+                bool             has_pushfit{ false };
+                PushFitParams    pushfit;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -2428,7 +2434,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // a 3MF (a project saved with the joint placed but not yet cut), so the
                     // bound is the last enumerator instead - still a range check on untrusted
                     // file content, just one that covers the whole enum.
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::FlexiJoint)) {
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::PushFit)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
@@ -2440,6 +2446,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // the defaults set by CutInfo stand.
                     if (connector.has_flexi)
                         model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
+                    if (connector.has_pushfit)
+                        model_object->volumes[connector.volume_id]->cut_info.pushfit = connector.pushfit;
                 }
             }
 
@@ -2970,6 +2978,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_flexi = true;
                             }
+                            // The push-fit Pin's parameters. Untrusted file content: every value
+                            // is clamped by pushfit_from_attributes() (pushfit_sanitize).
+                            if (connector.type == int(CutConnectorType::PushFit) &&
+                                connector_tree.get_optional<double>("<xmlattr>.pushfit_diameter")) {
+                                connector.pushfit = pushfit_from_attributes([&connector_tree](const std::string& name) -> std::optional<double> {
+                                    if (boost::optional<double> v = connector_tree.get_optional<double>("<xmlattr>." + name))
+                                        return *v;
+                                    return std::nullopt;
+                                });
+                                connector.processed   = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                                connector.has_pushfit = true;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -3074,6 +3094,43 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     add_error("Invalid cut recipe rotation matrix");
                     continue;
                 }
+            }
+            {
+                // Version 5 (OD11 PR D): the cut instance's linear transform, the same
+                // 16-number row-major form. Absent = not recorded.
+                const std::string m = rt.get<std::string>("<xmlattr>.instance_linear", "");
+                std::vector<double> v;
+                if (!m.empty()) {
+                    std::istringstream iss(m);
+                    double x;
+                    while (iss >> x)
+                        v.push_back(x);
+                }
+                if (v.size() == 16) {
+                    Transform3d t = Transform3d::Identity();
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col)
+                            t(row, col) = v[size_t(row) * 4 + size_t(col)];
+                    r.instance_linear     = t;
+                    r.instance_linear_set = true;
+                }
+                // Per half: 16 numbers per model part.
+                const std::string hp = rt.get<std::string>("<xmlattr>.half_part_matrices", "");
+                std::vector<double> hv;
+                if (!hp.empty()) {
+                    std::istringstream iss(hp);
+                    double x;
+                    while (iss >> x)
+                        hv.push_back(x);
+                }
+                if (!hv.empty() && hv.size() % 16 == 0)
+                    for (size_t k = 0; k < hv.size(); k += 16) {
+                        Transform3d t = Transform3d::Identity();
+                        for (int row = 0; row < 4; ++row)
+                            for (int col = 0; col < 4; ++col)
+                                t(row, col) = hv[k + size_t(row) * 4 + size_t(col)];
+                        r.half_part_matrices.push_back(t);
+                    }
             }
 
             // --- shared parameters ---------------------------------------------------
@@ -3210,6 +3267,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 g.angle_init         = groove_tree->get<float>("<xmlattr>.angle_init", 0.f);
                 g.depth_tolerance    = groove_tree->get<float>("<xmlattr>.depth_tolerance", 0.1f);
                 g.width_tolerance    = groove_tree->get<float>("<xmlattr>.width_tolerance", 0.1f);
+                // Version 5 (multiple dovetails). Absent in <= 4: one dovetail.
+                g.count              = std::max(1, groove_tree->get<int>("<xmlattr>.count", 1));
+                g.gap                = groove_tree->get<float>("<xmlattr>.gap", 10.f);
+                g.plane_radius       = groove_tree->get<float>("<xmlattr>.plane_radius", 0.f);
             }
 
             // --- connectors ----------------------------------------------------------
@@ -3249,12 +3310,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     const int type  = ct.get<int>("<xmlattr>.type", 0);
                     const int style = ct.get<int>("<xmlattr>.style", 0);
                     const int shape = ct.get<int>("<xmlattr>.shape", 0);
-                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::FlexiJoint)) ? type  : 0;
+                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::PushFit)) ? type  : 0;
                     rc.style = (style >= 0 && style <= int(CutConnectorStyle::Undef))     ? style : 0;
                     rc.shape = (shape >= 0 && shape <= int(CutConnectorShape::Undef))     ? shape : 0;
                     // The Flexi joint's own parameters, when this is one. Same defaulting
                     // rule as cut_information.xml: every field falls back to the
                     // FlexiJointParams default, and the counts that drive loops are clamped.
+                    if (rc.type == int(CutConnectorType::PushFit))
+                        rc.pushfit = pushfit_from_attributes([&ct](const std::string& name) -> std::optional<double> {
+                            if (boost::optional<double> v = ct.get_optional<double>("<xmlattr>." + name))
+                                return *v;
+                            return std::nullopt;
+                        });
                     if (rc.type == int(CutConnectorType::FlexiJoint)) {
                         const FlexiJointParams def;
                         FlexiJointParams &fj = rc.flexi;
@@ -6843,6 +6910,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
+        // A sliced-plate file (.gcode.3mf export, a send to a printer or Bambu Connect, a cloud print's
+        // config 3MF), not a project save or backup. Such files leave the machine and get shared, so
+        // the EdgeSlicer-only plate metadata (print history with printer names, the dual-nozzle
+        // confirmation with the printer serial) stays out of them.
+        bool m_sliced_plate_export { false };
         // Export Bambu 3MF (StoreParams::bambu_compat): the project config converted once up front,
         // the context the per-object conversions need, and what was changed.
         bool m_bambu_compat { false };
@@ -6961,6 +7033,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_skip_auxiliary = store_params.strategy & SaveStrategy::SkipAuxiliary;
         m_share_mesh       = store_params.strategy & SaveStrategy::ShareMesh;
         m_from_backup_save = store_params.strategy & SaveStrategy::Backup;
+        m_sliced_plate_export = (m_save_gcode || (store_params.strategy & SaveStrategy::WithSliceInfo)) && !m_from_backup_save;
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
@@ -8563,6 +8636,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
                     connectors_tree.put("<xmlattr>.r_tolerance", volume->cut_info.radius_tolerance);
                     connectors_tree.put("<xmlattr>.h_tolerance", volume->cut_info.height_tolerance);
+                    // The push-fit Pin: its holes and the pin object are rebuilt from these by a
+                    // re-cut, and a reopened project shows them in the panel. Pin volumes only, so
+                    // nothing changes in a file without pins.
+                    if (volume->cut_info.is_pushfit()) {
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        for (const auto& [name, value] : pushfit_attributes(volume->cut_info.pushfit))
+                            connectors_tree.put("<xmlattr>." + name, value);
+                    }
                     // A Flexi joint regenerates its whole geometry from these parameters at
                     // cut time, so they have to survive a save/load or a project reopened
                     // before the cut would come back with a different joint. Written only for
@@ -8896,6 +8977,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     bool _BBS_3MF_Exporter::_add_project_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, Model& model)
     {
         if (m_bambu_compat) {
+            // Bambu Connect hangs on import when the key is missing (see below); an empty list is accepted.
+            if (m_bambu_project.find("print_compatible_printers") == m_bambu_project.end()) {
+                BambuExport::Value empty;
+                empty.vector  = true;
+                empty.strings = true;
+                m_bambu_project["print_compatible_printers"] = empty;
+            }
             const std::string out = BambuExport::to_json(m_bambu_project, "project_settings", "project", BambuExport::export_version());
             if (!mz_zip_writer_add_mem(&archive, BBS_PROJECT_CONFIG_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
                 add_error("Unable to add project config file to archive");
@@ -8914,10 +9002,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         const DynamicPrintConfig* to_write = &config;
         DynamicPrintConfig        aligned;
         if (m_save_gcode) {
+            // Bambu Connect turns white and hangs on import when project_settings.config has no
+            // print_compatible_printers key. PresetBundle::full_fff_config() only writes it when the
+            // print preset has a non-empty compatible_printers, which user process presets usually
+            // do not. An empty list is accepted by Bambu Connect, and on load PresetBundle ignores an
+            // empty list, so the reloaded preset is not restricted or marked modified.
+            if (config.option("print_compatible_printers") == nullptr) {
+                aligned = config;
+                aligned.option<ConfigOptionStrings>("print_compatible_printers", true);
+                to_write = &aligned;
+            }
             const auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"));
             const auto* map     = config.option<ConfigOptionInts>("filament_map");
             if (colours != nullptr && map != nullptr && map->values.size() < colours->values.size()) {
-                aligned = config;
+                if (to_write != &aligned)
+                    aligned = config;
                 aligned.option<ConfigOptionInts>("filament_map")->values.resize(colours->values.size(), 1);
                 to_write = &aligned;
             }
@@ -9324,10 +9423,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 }
                 stream << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->dual_nozzle_confirm.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->dual_nozzle_confirm.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DUAL_NOZZLE_CONFIRM_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->dual_nozzle_confirm) << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->print_history.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->print_history.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINT_HISTORY_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->print_history) << "\"/>\n";
 
                 if (save_gcode)
@@ -9545,6 +9644,26 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                         oss << (row == 0 && col == 0 ? "" : " ") << r.rotation_m(row, col);
                 rt.put("<xmlattr>.rotation", oss.str());
             }
+            if (r.instance_linear_set) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                for (int row = 0; row < 4; ++row)
+                    for (int col = 0; col < 4; ++col)
+                        oss << (row == 0 && col == 0 ? "" : " ") << r.instance_linear(row, col);
+                rt.put("<xmlattr>.instance_linear", oss.str());
+            }
+            if (!r.half_part_matrices.empty()) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                bool first = true;
+                for (const Transform3d &t : r.half_part_matrices)
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col) {
+                            oss << (first ? "" : " ") << t(row, col);
+                            first = false;
+                        }
+                rt.put("<xmlattr>.half_part_matrices", oss.str());
+            }
 
             rt.put("<xmlattr>.thickness",          r.thickness);
             rt.put("<xmlattr>.thickness_offset",   int(r.thickness_offset));
@@ -9622,6 +9741,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 g.put("<xmlattr>.angle_init",       r.groove.angle_init);
                 g.put("<xmlattr>.depth_tolerance",  r.groove.depth_tolerance);
                 g.put("<xmlattr>.width_tolerance",  r.groove.width_tolerance);
+                g.put("<xmlattr>.count",            r.groove.count);
+                g.put("<xmlattr>.gap",              r.groove.gap);
+                g.put("<xmlattr>.plane_radius",     r.groove.plane_radius);
             }
 
             if (!r.connectors.empty()) {
@@ -9647,6 +9769,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     ct.put("<xmlattr>.type",        c.type);
                     ct.put("<xmlattr>.style",       c.style);
                     ct.put("<xmlattr>.shape",       c.shape);
+                    // The push-fit Pin (recipe version 6), only for pins.
+                    if (c.type == int(CutConnectorType::PushFit))
+                        for (const auto& [name, value] : pushfit_attributes(c.pushfit))
+                            ct.put("<xmlattr>." + name, value);
                     // The Flexi joint rebuilds its whole geometry from these, so a re-cut that
                     // did not have them would produce a differently shaped joint. Written only
                     // for the flexi type, so nothing changes for any other connector.

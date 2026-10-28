@@ -8,10 +8,14 @@
 #include <boost/log/trivial.hpp>
 
 #include <nlohmann/json.hpp>
+#include <boost/algorithm/string.hpp>
 
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <map>
+#include <string>
+#include <vector>
 
 namespace Slic3r {
 namespace PrintHostDevices {
@@ -36,6 +40,10 @@ std::string Slot::label() const
         out += " " + type;
         if (!sub_type.empty() && sub_type != type)
             out += " " + sub_type;
+        if (!color_name.empty())
+            out += " " + color_name;
+    } else if (!color_name.empty()) {
+        out += " " + color_name;
     } else if (!loaded) {
         out += " (empty)";
     }
@@ -87,14 +95,18 @@ static std::string moonraker_base(const std::string& host)
     return "http://" + h;
 }
 
-static bool moonraker_get(const std::string& url, std::string& body, std::string& error, int timeout_s)
+static bool moonraker_get(const std::string& url, std::string& body, std::string& error, int timeout_s,
+                          const std::string& apikey = {})
 {
     bool ok = false;
-    Http::get(url).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+    auto http = Http::get(url);
+    http.tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(timeout_s)
         .timeout_max(timeout_s)
-        .size_limit(512 * 1024)
-        .on_error([&](std::string reply, std::string err, unsigned status) {
+        .size_limit(512 * 1024);
+    if (!apikey.empty())
+        http.header("X-Api-Key", apikey);
+    http.on_error([&](std::string reply, std::string err, unsigned status) {
             error = err.empty() ? ("HTTP " + std::to_string(status)) : err;
             if (!reply.empty())
                 body = reply;
@@ -126,6 +138,97 @@ static std::string colour_of(const std::string& raw)
         if (!std::isxdigit((unsigned char) s[i]))
             return std::string();
     return "#" + s.substr(0, 6);
+}
+
+// Happy Hare / AFC also send "0xRRGGBB", CSS names ("red"), and "#None".
+// Slot.color is "#RRGGBB" or empty: an unknown name must not leak into auto-match as a colour.
+struct ParsedSlotColour
+{
+    std::string hex;
+    std::string name;
+};
+
+static ParsedSlotColour parse_slot_colour(const std::string& raw)
+{
+    ParsedSlotColour out;
+    std::string      s = raw;
+    boost::trim(s);
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s = s.substr(2);
+    out.hex = colour_of(s);
+    if (!out.hex.empty()) {
+        boost::algorithm::to_upper(out.hex); // firmware sends "ff0000"; the table and the matcher use "#FF0000"
+        return out;
+    }
+    std::string key = s;
+    if (!key.empty() && key[0] == '#')
+        key = key.substr(1);
+    boost::algorithm::to_lower(key);
+    if (key.empty() || key == "none")
+        return out;
+    static const std::map<std::string, const char*> named = {
+        {"black", "#000000"},   {"white", "#FFFFFF"},  {"red", "#FF0000"},     {"green", "#008000"},
+        {"blue", "#0000FF"},    {"yellow", "#FFFF00"}, {"orange", "#FFA500"},  {"purple", "#800080"},
+        {"pink", "#FFC0CB"},    {"cyan", "#00FFFF"},   {"magenta", "#FF00FF"}, {"brown", "#A52A2A"},
+        {"grey", "#808080"},    {"gray", "#808080"},   {"teal", "#008080"},    {"lime", "#00FF00"},
+        {"navy", "#000080"},    {"maroon", "#800000"}, {"olive", "#808000"},   {"silver", "#C0C0C0"},
+        {"gold", "#FFD700"},    {"violet", "#EE82EE"}, {"indigo", "#4B0082"},  {"aqua", "#00FFFF"},
+        {"fuchsia", "#FF00FF"}, {"coral", "#FF7F50"},  {"salmon", "#FA8072"},  {"khaki", "#F0E68C"},
+        {"ivory", "#FFFFF0"},   {"beige", "#F5F5DC"},  {"tan", "#D2B48C"},     {"turquoise", "#40E0D0"},
+        {"lightblue", "#ADD8E6"}, {"light_blue", "#ADD8E6"}, {"darkblue", "#00008B"}, {"dark_blue", "#00008B"},
+    };
+    const auto it = named.find(key);
+    if (it != named.end()) {
+        out.hex = it->second;
+        return out;
+    }
+    out.name = s;
+    return out;
+}
+
+std::string print_host_slot_colour(const std::string& raw)
+{
+    return parse_slot_colour(raw).hex;
+}
+
+static void apply_slot_colour(Slot& s, const std::string& raw)
+{
+    const ParsedSlotColour c = parse_slot_colour(raw);
+    s.color      = c.hex;
+    s.color_name = c.name;
+}
+
+static bool slot_names_filament(const Slot& s)
+{
+    return !s.type.empty() || !s.color.empty() || !s.color_name.empty();
+}
+
+static int arr_int(const json& a, size_t i, int fallback = 0)
+{
+    if (i >= a.size())
+        return fallback;
+    if (a[i].is_number_integer())
+        return a[i].get<int>();
+    if (a[i].is_number())
+        return static_cast<int>(a[i].get<double>());
+    return fallback;
+}
+
+static int json_int(const json& j, const char* key, int fallback = 0)
+{
+    if (!j.is_object() || !j.contains(key))
+        return fallback;
+    const json& v = j[key];
+    if (v.is_number_integer())
+        return v.get<int>();
+    if (v.is_number())
+        return static_cast<int>(v.get<double>());
+    if (v.is_string()) {
+        try {
+            return std::stoi(v.get<std::string>());
+        } catch (...) {}
+    }
+    return fallback;
 }
 
 static const json& array_at(const json& j, const char* key)
@@ -205,6 +308,151 @@ static void slots_from_print_task_config(const json& status, std::vector<Slot>& 
             have_filaments = true;
         out.push_back(std::move(s));
     }
+}
+
+// Happy Hare `mmu` (https://github.com/moggieuk/Happy-Hare): num_gates, gate_status
+// (-1 unknown, 0 empty, 1/2 loaded), gate_material, gate_color. Ported from upstream
+// OrcaSlicer MoonrakerPrinterAgent::fetch_hh_filament_info; empty gates stay in the list
+// so the dialog can show the unit, but they do not count as named filaments.
+static constexpr int k_max_mmu_gates = 32;
+
+static json mmu_object_from(const json& root)
+{
+    if (!root.is_object())
+        return json::object();
+    if (root.contains("num_gates"))
+        return root;
+    if (root.contains("mmu") && root["mmu"].is_object())
+        return root["mmu"];
+    const auto result = root.find("result");
+    if (result != root.end() && result->is_object()) {
+        const auto status = result->find("status");
+        if (status != result->end() && status->is_object() && status->contains("mmu") && (*status)["mmu"].is_object())
+            return (*status)["mmu"];
+    }
+    return json::object();
+}
+
+static void slots_from_happy_hare(const json& mmu, std::vector<Slot>& out, bool& have_filaments)
+{
+    if (!mmu.is_object() || mmu.empty())
+        return;
+    int n = json_int(mmu, "num_gates", 0);
+    if (n <= 0)
+        return;
+    if (n > k_max_mmu_gates)
+        n = k_max_mmu_gates;
+    const json& gate_status   = array_at(mmu, "gate_status");
+    const json& gate_material = array_at(mmu, "gate_material");
+    const json& gate_color    = array_at(mmu, "gate_color");
+    // Zip the first n entries of each array by index. Extra gate_status values
+    // are ignored; they must not skip gate_material[i] / gate_color[i].
+    for (int i = 0; i < n; ++i) {
+        Slot s;
+        s.index  = i;
+        // Upstream skips status <= 0 and empty material. Keep the row so the unit is visible;
+        // only a loaded gate with a type/colour counts as a named filament.
+        const int  status = arr_int(gate_status, static_cast<size_t>(i), 0);
+        const bool loaded = status > 0;
+        if (loaded) {
+            s.type   = arr_str(gate_material, static_cast<size_t>(i));
+            apply_slot_colour(s, arr_str(gate_color, static_cast<size_t>(i)));
+            s.loaded = !s.type.empty();
+        }
+        if (slot_names_filament(s))
+            have_filaments = true;
+        out.push_back(std::move(s));
+    }
+}
+
+// AFC / BoxTurtle Moonraker database namespace `lane_data`:
+// { "result": { "value": { "lane1": { "lane": "0", "material": "PLA", "color": "#FF0000" }, ... } } }
+// Ported from upstream MoonrakerPrinterAgent::fetch_moonraker_filament_data. Also accepts a
+// `lanes` array if a firmware writes that instead of per-key objects.
+static int afc_lane_index(const json& lane_obj)
+{
+    if (!lane_obj.is_object() || !lane_obj.contains("lane"))
+        return -1;
+    const json& v = lane_obj["lane"];
+    if (v.is_number_integer())
+        return v.get<int>();
+    if (v.is_number())
+        return static_cast<int>(v.get<double>());
+    if (v.is_string()) {
+        try {
+            return std::stoi(v.get_ref<const std::string&>());
+        } catch (...) {}
+    }
+    return -1;
+}
+
+static json afc_value_from(const json& root)
+{
+    if (!root.is_object())
+        return json::object();
+    const auto result = root.find("result");
+    if (result != root.end() && result->is_object()) {
+        const auto value = result->find("value");
+        if (value != result->end() && (value->is_object() || value->is_array()))
+            return *value;
+    }
+    return root;
+}
+
+static void add_afc_lane(const json& lane_obj, std::vector<Slot>& tmp, std::vector<char>& seen, bool& have_filaments)
+{
+    const int idx = afc_lane_index(lane_obj);
+    if (idx < 0 || idx >= k_max_mmu_gates)
+        return;
+    if (seen[static_cast<size_t>(idx)])
+        return;
+    if (static_cast<int>(tmp.size()) >= k_max_mmu_gates)
+        return;
+    seen[static_cast<size_t>(idx)] = 1;
+    Slot s;
+    s.index  = idx;
+    s.type   = str_at(lane_obj, "material");
+    apply_slot_colour(s, str_at(lane_obj, "color"));
+    s.loaded = !s.type.empty();
+    if (!s.loaded) {
+        s.color.clear();
+        s.color_name.clear();
+    }
+    if (slot_names_filament(s))
+        have_filaments = true;
+    tmp.push_back(std::move(s));
+}
+
+static void slots_from_afc_value(const json& value, std::vector<Slot>& out, bool& have_filaments)
+{
+    std::vector<Slot> tmp;
+    std::vector<char> seen(static_cast<size_t>(k_max_mmu_gates), 0);
+    if (value.is_array()) {
+        for (const json& child : value)
+            add_afc_lane(child, tmp, seen, have_filaments);
+    } else if (value.is_object()) {
+        if (value.contains("lanes") && value["lanes"].is_array()) {
+            for (const json& child : value["lanes"])
+                add_afc_lane(child, tmp, seen, have_filaments);
+        } else {
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                if (it->is_object())
+                    add_afc_lane(*it, tmp, seen, have_filaments);
+            }
+        }
+    }
+    std::sort(tmp.begin(), tmp.end(), [](const Slot& a, const Slot& b) { return a.index < b.index; });
+    for (Slot& s : tmp)
+        out.push_back(std::move(s));
+}
+
+static void adopt_named_slots(Status& st, std::vector<Slot> slots, bool have_filaments)
+{
+    if (!have_filaments || slots.empty())
+        return;
+    st.slots                 = std::move(slots);
+    st.slots_have_filaments  = true;
+    st.note.clear();
 }
 
 // A number or a boolean, as the QIDI firmware is not consistent about which it sends.
@@ -481,6 +729,13 @@ static Status fill_from_status(const json& status, const std::string& host_type_
                            st.slots.end());
         }
     }
+    // Happy Hare lives under status.mmu when the query asked for it (display only: no mapping is
+    // sent at start). Never on QIDI firmware, whose Box numbering is a different thing and is what
+    // goes out as value_tN.
+    if (st.slots.empty() && !st.qidi) {
+        slots_from_happy_hare(mmu_object_from(status), st.slots, st.slots_have_filaments);
+        st.happy_hare = !st.slots.empty();
+    }
     if (st.slots.empty())
         slots_from_extruders(status, st.slots);
     if (st.qidi_box_inconsistent)
@@ -532,7 +787,8 @@ Status status_from_canvas(const CanvasQueryResult& r)
             st.note = no_filament_note("elegoolink");
         return st;
     }
-    st.canvas = true;
+    st.canvas             = true;
+    st.canvas_auto_refill = r.info.auto_refill;
     for (const CanvasTray& t : r.info.trays) {
         Slot s;
         s.index    = t.slot_index;
@@ -558,10 +814,12 @@ Status status_from_canvas(const CanvasQueryResult& r)
     return st;
 }
 
-// A Centauri Carbon 1: its CANVAS over SDCP. Any other Elegoo model has nothing this fork can read.
+// A Centauri Carbon 1: its CANVAS over SDCP. A Centauri Carbon 2 / Centauri 2: over MQTT, with the
+// device's API key as the access code; a CC2 without a CANVAS answers no_canvas, so nothing is
+// mapped and the plate goes out as sliced. Any other Elegoo model has nothing this fork can read.
 static Status probe_elegoo(const Device& d, int timeout_s)
 {
-    if (!canvas_capable_model(d.printer_model)) {
+    if (!canvas_reader_model(d.printer_model)) {
         Status st;
         st.note = no_filament_note(d.host_type);
         return st;
@@ -569,7 +827,7 @@ static Status probe_elegoo(const Device& d, int timeout_s)
     CanvasQueryOptions opts;
     opts.frame_timeout_ms = std::max(1, timeout_s) * 1000;
     opts.step_timeout_ms  = std::max(2, 2 * timeout_s) * 1000;
-    return status_from_canvas(canvas_query(d.address, opts));
+    return status_from_canvas(canvas_query_for(d.address, d.printer_model, d.apikey, opts));
 }
 
 Status probe(const Device& d, int timeout_s)
@@ -611,9 +869,10 @@ Status probe(const Device& d, int timeout_s)
     }
     std::string body;
     if (!moonraker_get(base + "/printer/objects/query?print_stats&print_task_config&multi_color_controller"
-                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3" +
+                              "&output_pin%20polar_cooler&extruder&extruder1&extruder2&extruder3"
+                              "&mmu&AFC" +
                            qidi_objects,
-                       body, st.error, timeout_s)) {
+                       body, st.error, timeout_s, d.apikey)) {
         st.note = "this printer did not answer" + (st.error.empty() ? std::string() : (": " + st.error));
         return st;
     }
@@ -649,6 +908,26 @@ Status probe(const Device& d, int timeout_s)
     }
     parsed.probed  = true;
     parsed.error   = st.error;
+
+    // AFC / BoxTurtle keeps its lanes in Moonraker's database, which no objects query can name, so
+    // that one needs its own GET. Only when the query above showed an `AFC` object (Moonraker leaves
+    // out objects a printer lacks): a plain Klipper box, a U1 or a QIDI costs no extra request, and
+    // the dialog's UI thread is never held for a probe that cannot find an MMU. A 404 or timeout
+    // here must not fail a probe that already got print_stats.
+    if (!parsed.slots_have_filaments && !parsed.qidi && status.contains("AFC")) {
+        const int   addon_timeout_s = std::min(timeout_s, 2);
+        std::string lane_body, lane_err;
+        if (moonraker_get(base + "/server/database/item?namespace=lane_data", lane_body, lane_err, addon_timeout_s, d.apikey)) {
+            bool              have = false;
+            std::vector<Slot> slots;
+            json              lane_json = json::parse(lane_body, nullptr, false);
+            if (lane_json.is_object() || lane_json.is_array())
+                slots_from_afc_value(afc_value_from(lane_json), slots, have);
+            adopt_named_slots(parsed, std::move(slots), have);
+            if (have)
+                parsed.afc = true;
+        }
+    }
     return parsed;
 }
 
@@ -897,6 +1176,40 @@ Status parse_qidi_status(const std::string& status_json, const QidiFilaList& fil
     if (st.qidi && !st.slots_have_filaments && qidi_variables_present(qidi_variables_of(status)))
         st = fill_from_status(status, host_type_key, &filas);
     st.probed = can_probe(host_type_key);
+    return st;
+}
+
+Status parse_happy_hare_mmu(const std::string& json_text, const std::string& host_type_key)
+{
+    json root = json::parse(json_text, nullptr, false);
+    Status st;
+    st.probed = can_probe(host_type_key);
+    if (!root.is_object()) {
+        st.note = no_filament_note(host_type_key);
+        return st;
+    }
+    st.online = true;
+    slots_from_happy_hare(mmu_object_from(root), st.slots, st.slots_have_filaments);
+    st.happy_hare = !st.slots.empty();
+    if (st.slots.empty() || !st.slots_have_filaments)
+        st.note = no_filament_note(host_type_key);
+    return st;
+}
+
+Status parse_afc_lane_data(const std::string& json_text, const std::string& host_type_key)
+{
+    json root = json::parse(json_text, nullptr, false);
+    Status st;
+    st.probed = can_probe(host_type_key);
+    if (!(root.is_object() || root.is_array())) {
+        st.note = no_filament_note(host_type_key);
+        return st;
+    }
+    st.online = true;
+    slots_from_afc_value(afc_value_from(root), st.slots, st.slots_have_filaments);
+    st.afc = !st.slots.empty();
+    if (st.slots.empty() || !st.slots_have_filaments)
+        st.note = no_filament_note(host_type_key);
     return st;
 }
 

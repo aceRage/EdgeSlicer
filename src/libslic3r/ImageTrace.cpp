@@ -25,6 +25,7 @@
 #include "EmbossShape.hpp"
 #include "Model.hpp"
 #include "NSVGUtils.hpp"
+#include "SvgSplit.hpp" // svg_split_nearest_filament
 #include "UntrustedInput.hpp"
 
 namespace Slic3r {
@@ -168,21 +169,69 @@ ImageTraceParams sanitize(const ImageTraceParams &in)
     return p;
 }
 
-// ---- palette (deterministic k-means over a colour histogram) ---------------------------------
+// ---- palette (deterministic k-means over a colour histogram, in CIE Lab) --------------------
+//
+// Colours are clustered in CIE Lab (D65), so distances are perceptual (delta E): a small vivid
+// pink is far from a purple, while dark glow and JPEG noise around a line are close to it.
+// Pixels which only blend their neighbours (anti-aliased edges, glow halos) are left out of the
+// histogram, so they can not crowd out small but real colours.
+
+using Lab = std::array<double, 3>;
+
+double srgb_to_linear(double c) { return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4); }
+double linear_to_srgb(double c) { return c <= 0.0031308 ? 12.92 * c : 1.055 * std::pow(c, 1. / 2.4) - 0.055; }
+
+// sRGB 0..255 -> CIE Lab (D65)
+Lab rgb_to_lab(const std::array<double, 3> &rgb)
+{
+    static const std::array<double, 256> lut = [] {
+        std::array<double, 256> l{};
+        for (int i = 0; i < 256; ++i)
+            l[size_t(i)] = srgb_to_linear(i / 255.);
+        return l;
+    }();
+    auto lin = [](double v) {
+        v = std::clamp(v, 0., 255.);
+        // exact for pixels, computed for the mean colours of histogram bins
+        return v == std::floor(v) ? lut[size_t(v)] : srgb_to_linear(v / 255.);
+    };
+    const double r = lin(rgb[0]), g = lin(rgb[1]), b = lin(rgb[2]);
+    const double x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
+    const double y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+    const double z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883;
+    auto f = [](double t) { return t > 0.008856 ? std::cbrt(t) : 7.787 * t + 16. / 116.; };
+    const double fx = f(x), fy = f(y), fz = f(z);
+    return {116. * fy - 16., 500. * (fx - fy), 200. * (fy - fz)};
+}
+
+// CIE Lab (D65) -> sRGB 0..255 (clamped)
+std::array<double, 3> lab_to_rgb(const Lab &lab)
+{
+    const double fy = (lab[0] + 16.) / 116.;
+    const double fx = fy + lab[1] / 500.;
+    const double fz = fy - lab[2] / 200.;
+    auto finv = [](double f) { double f3 = f * f * f; return f3 > 0.008856 ? f3 : (f - 16. / 116.) / 7.787; };
+    const double x = finv(fx) * 0.95047, y = finv(fy), z = finv(fz) * 1.08883;
+    const double r = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+    const double g = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+    const double b = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+    auto out = [](double c) { return std::clamp(linear_to_srgb(std::clamp(c, 0., 1.)) * 255., 0., 255.); };
+    return {out(r), out(g), out(b)};
+}
 
 struct Palette
 {
-    std::vector<std::array<double, 3>> centers;
-    std::vector<double>                weights;
+    std::vector<Lab>    centers; // CIE Lab
+    std::vector<double> weights;
 };
 
 struct HistBin
 {
-    double                 weight = 0.;
-    std::array<double, 3>  color{0., 0., 0.};
+    double weight = 0.;
+    Lab    color{0., 0., 0.}; // CIE Lab of the mean colour of the bin
 };
 
-int nearest(const std::vector<std::array<double, 3>> &centers, const std::array<double, 3> &c)
+int nearest(const std::vector<Lab> &centers, const Lab &c)
 {
     int    best   = 0;
     double best_d = std::numeric_limits<double>::max();
@@ -200,8 +249,8 @@ int nearest(const std::vector<std::array<double, 3>> &centers, const std::array<
 void lloyd(const std::vector<HistBin> &bins, Palette &pal, int iterations)
 {
     for (int it = 0; it < iterations; ++it) {
-        std::vector<std::array<double, 3>> sum(pal.centers.size(), {0., 0., 0.});
-        std::vector<double>                w(pal.centers.size(), 0.);
+        std::vector<Lab>    sum(pal.centers.size(), {0., 0., 0.});
+        std::vector<double> w(pal.centers.size(), 0.);
         for (const HistBin &b : bins) {
             int k = nearest(pal.centers, b.color);
             for (int c = 0; c < 3; ++c)
@@ -215,7 +264,7 @@ void lloyd(const std::vector<HistBin> &bins, Palette &pal, int iterations)
                 changed = true;
                 continue;
             }
-            std::array<double, 3> c{sum[k][0] / w[k], sum[k][1] / w[k], sum[k][2] / w[k]};
+            Lab c{sum[k][0] / w[k], sum[k][1] / w[k], sum[k][2] / w[k]};
             if (dist2(c, pal.centers[k]) > 1e-6)
                 changed = true;
             next.centers.push_back(c);
@@ -227,50 +276,113 @@ void lloyd(const std::vector<HistBin> &bins, Palette &pal, int iterations)
     }
 }
 
+// CIE Lab of every pixel, rows from the top
+std::vector<Lab> image_to_lab(const TraceImage &image)
+{
+    std::vector<Lab> out(size_t(image.width) * size_t(image.height));
+    for (size_t i = 0; i < out.size(); ++i) {
+        const uint8_t *p = &image.rgba[i * 4];
+        // background of line art repeats the same colour, convert it once
+        if (i > 0 && std::memcmp(p, p - 4, 3) == 0)
+            out[i] = out[i - 1];
+        else
+            out[i] = rgb_to_lab({double(p[0]), double(p[1]), double(p[2])});
+    }
+    return out;
+}
+
+// Pixels which only blend their neighbours: the colour lies on the way between the colours of two
+// opposite neighbours (distance 1 or 2 px, four directions), and these differ clearly. Anti-aliased
+// edges and glow halos are such pixels; a smooth gradient is not (its neighbours differ little).
+std::vector<char> blend_pixels(const TraceImage &image, const std::vector<Lab> &lab)
+{
+    constexpr double MIN_STEP2 = 12. * 12.; // delta E between the opposite neighbours
+    constexpr double MAX_OFF2  = 0.25 * 0.25; // distance from their segment, relative to its length
+    const int         W = image.width, H = image.height;
+    std::vector<char> blend(size_t(W) * size_t(H), 0);
+    auto solid = [&image, W](int x, int y) { return image.rgba[(size_t(y) * size_t(W) + size_t(x)) * 4 + 3] >= ALPHA_SOLID; };
+    const int dirs[4][2] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            if (!solid(x, y))
+                continue;
+            const Lab &c  = lab[size_t(y) * size_t(W) + size_t(x)];
+            bool       is = false;
+            for (int r = 1; r <= 2 && !is; ++r)
+                for (const auto &d : dirs) {
+                    int ax = std::clamp(x - r * d[0], 0, W - 1), ay = std::clamp(y - r * d[1], 0, H - 1);
+                    int bx = std::clamp(x + r * d[0], 0, W - 1), by = std::clamp(y + r * d[1], 0, H - 1);
+                    if (!solid(ax, ay) || !solid(bx, by))
+                        continue;
+                    const Lab &a = lab[size_t(ay) * size_t(W) + size_t(ax)];
+                    const Lab &b = lab[size_t(by) * size_t(W) + size_t(bx)];
+                    Lab    seg{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+                    double len2 = seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2];
+                    if (len2 < MIN_STEP2)
+                        continue;
+                    double t = ((c[0] - a[0]) * seg[0] + (c[1] - a[1]) * seg[1] + (c[2] - a[2]) * seg[2]) / len2;
+                    if (t <= 0.1 || t >= 0.9)
+                        continue;
+                    Lab closest{a[0] + t * seg[0], a[1] + t * seg[1], a[2] + t * seg[2]};
+                    if (dist2(c, closest) <= MAX_OFF2 * len2) {
+                        is = true;
+                        break;
+                    }
+                }
+            blend[size_t(y) * size_t(W) + size_t(x)] = is ? 1 : 0;
+        }
+    return blend;
+}
+
 std::vector<int> label_pixels(const TraceImage &image, const Palette &pal);
 
-// Remove colours which only blend two other colours along their common edges (anti-aliasing of
-// an exported logo): almost all of their pixels touch another colour and the colour lies between
-// two other colours. A real colour of the image (even a gradient level) covers areas.
+// Remove colours which only blend two other colours where these meet: anti-aliasing of an
+// exported logo, or the glow between a line and the background. The colour lies between two
+// other colours, and almost all of its pixels touch both colours of such a pair. A real colour of the
+// image covers areas (even a gradient level), and a thin line of its own colour on the
+// background touches only the background, so line art keeps its colours.
 void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bins, Palette &pal)
 {
-    constexpr double MIN_EDGE_FRACTION = 0.6;
+    constexpr double MIN_TOUCH_FRACTION = 0.75;
+    constexpr int    RADIUS             = 1;
     while (pal.centers.size() >= 3) {
-        const size_t        k      = pal.centers.size();
-        std::vector<int>    labels = label_pixels(image, pal);
-        std::vector<double> total(k, 0.), edge(k, 0.);
-        const int           W = image.width, H = image.height;
+        const size_t     k      = pal.centers.size();
+        std::vector<int> labels = label_pixels(image, pal);
+        const int        W = image.width, H = image.height;
+        // labels around every pixel, one bit per colour (k <= IMAGE_TRACE_MAX_COLORS + 1)
+        std::vector<uint32_t> around(labels.size(), 0);
         for (int y = 0; y < H; ++y)
             for (int x = 0; x < W; ++x) {
-                int l = labels[size_t(y) * size_t(W) + size_t(x)];
-                if (l < 0)
+                if (labels[size_t(y) * size_t(W) + size_t(x)] < 0)
                     continue;
-                total[size_t(l)] += 1.;
-                bool is_edge = false;
-                const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
-                for (int d = 0; d < 4 && !is_edge; ++d) {
-                    int nx = x + dx[d], ny = y + dy[d];
-                    if (nx < 0 || ny < 0 || nx >= W || ny >= H)
-                        continue;
-                    is_edge = labels[size_t(ny) * size_t(W) + size_t(nx)] != l;
-                }
-                if (is_edge)
-                    edge[size_t(l)] += 1.;
+                uint32_t mask = 0;
+                for (int ny = std::max(0, y - RADIUS); ny <= std::min(H - 1, y + RADIUS); ++ny)
+                    for (int nx = std::max(0, x - RADIUS); nx <= std::min(W - 1, x + RADIUS); ++nx)
+                        if (int l = labels[size_t(ny) * size_t(W) + size_t(nx)]; l >= 0)
+                            mask |= uint32_t(1) << l;
+                around[size_t(y) * size_t(W) + size_t(x)] = mask;
             }
+        std::vector<double> total(k, 0.);
+        for (int l : labels)
+            if (l >= 0)
+                total[size_t(l)] += 1.;
+        // anti-aliasing blends sRGB values, so "between" is decided in sRGB
+        std::vector<std::array<double, 3>> rgb;
+        for (const Lab &c : pal.centers)
+            rgb.push_back(lab_to_rgb(c));
         int    worst       = -1;
         double worst_score = 0.;
         for (size_t c = 0; c < k; ++c) {
             if (total[c] <= 0.)
                 continue;
-            double fraction = edge[c] / total[c];
-            if (fraction < MIN_EDGE_FRACTION || fraction <= worst_score)
-                continue;
-            bool between = false;
-            for (size_t a = 0; a < k && !between; ++a)
-                for (size_t b = a + 1; b < k && !between; ++b) {
+            // pairs of colours which c lies between (a glow can be between the background and
+            // each of several line colours)
+            std::vector<uint32_t> pairs;
+            for (size_t a = 0; a < k; ++a)
+                for (size_t b = a + 1; b < k; ++b) {
                     if (a == c || b == c)
                         continue;
-                    const auto &ca = pal.centers[a], &cb = pal.centers[b], &cc = pal.centers[c];
+                    const auto &ca = rgb[a], &cb = rgb[b], &cc = rgb[c];
                     std::array<double, 3> seg{cb[0] - ca[0], cb[1] - ca[1], cb[2] - ca[2]};
                     double len2 = seg[0] * seg[0] + seg[1] * seg[1] + seg[2] * seg[2];
                     if (len2 < 1.)
@@ -279,9 +391,22 @@ void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bin
                     if (t < 0.1 || t > 0.9)
                         continue;
                     std::array<double, 3> closest{ca[0] + t * seg[0], ca[1] + t * seg[1], ca[2] + t * seg[2]};
-                    between = dist2(cc, closest) <= 0.04 * len2; // within 20 % of the distance
+                    if (dist2(cc, closest) <= 0.04 * len2) // within 20 % of the distance
+                        pairs.push_back((uint32_t(1) << a) | (uint32_t(1) << b));
                 }
-            if (between) {
+            if (pairs.empty())
+                continue;
+            // pixels of c which touch both colours of one of these pairs
+            double touch = 0.;
+            for (size_t i = 0; i < labels.size(); ++i)
+                if (labels[i] == int(c))
+                    for (uint32_t both : pairs)
+                        if ((around[i] & both) == both) {
+                            touch += 1.;
+                            break;
+                        }
+            double fraction = touch / total[c];
+            if (fraction >= MIN_TOUCH_FRACTION && fraction > worst_score) {
                 worst       = int(c);
                 worst_score = fraction;
             }
@@ -294,45 +419,95 @@ void remove_edge_blends(const TraceImage &image, const std::vector<HistBin> &bin
     }
 }
 
-Palette compute_palette(const TraceImage &image, int k)
+// k colours of the image. exclude_dominant: the most common colour is the background, which is
+// left out, so the share of a small colour is measured against the drawing only (line art on a
+// large background keeps its small colours).
+Palette compute_palette(const TraceImage &image, int k, bool exclude_dominant)
 {
-    // 5 bits per channel
-    std::vector<HistBin> hist(32 * 32 * 32);
-    for (size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
-        const uint8_t *p = &image.rgba[i];
-        if (p[3] < ALPHA_SOLID)
-            continue;
-        HistBin &b = hist[(size_t(p[0] >> 3) << 10) | (size_t(p[1] >> 3) << 5) | size_t(p[2] >> 3)];
-        b.weight += 1.;
-        for (int c = 0; c < 3; ++c)
-            b.color[c] += p[c];
-    }
-    std::vector<HistBin> bins;
-    for (HistBin &b : hist)
-        if (b.weight > 0.) {
+    const std::vector<Lab>  lab   = image_to_lab(image);
+    const std::vector<char> blend = blend_pixels(image, lab);
+
+    // 5 bits per channel, the mean colour of every bin
+    auto histogram = [&image, &blend](bool skip_blends) {
+        std::vector<double>                weight(32 * 32 * 32, 0.);
+        std::vector<std::array<double, 3>> sum(32 * 32 * 32, {0., 0., 0.});
+        for (size_t i = 0; i * 4 + 3 < image.rgba.size(); ++i) {
+            const uint8_t *p = &image.rgba[i * 4];
+            if (p[3] < ALPHA_SOLID || (skip_blends && blend[i]))
+                continue;
+            size_t idx = (size_t(p[0] >> 3) << 10) | (size_t(p[1] >> 3) << 5) | size_t(p[2] >> 3);
+            weight[idx] += 1.;
             for (int c = 0; c < 3; ++c)
-                b.color[c] /= b.weight;
-            bins.push_back(b);
+                sum[idx][c] += p[c];
         }
+        std::vector<HistBin> bins;
+        for (size_t i = 0; i < weight.size(); ++i)
+            if (weight[i] > 0.)
+                bins.push_back({weight[i], rgb_to_lab({sum[i][0] / weight[i], sum[i][1] / weight[i], sum[i][2] / weight[i]})});
+        return bins;
+    };
+    std::vector<HistBin> bins = histogram(true);
+    if (bins.empty())
+        bins = histogram(false); // nothing but blends (noise): use every pixel
     Palette pal;
     if (bins.empty() || k <= 0)
         return pal;
 
-    // Deterministic seeding: the most common colour first, then the colour farthest from the
-    // seeds weighted by its count (k-means++ without randomness)
+    // Colours closer than this are one colour [delta E]
+    constexpr double MERGE_DIST2 = 10. * 10.;
+    // Deterministic seeding: the most common colour first, then the colour farthest from the seeds
+    // weighted by the square root of its count (k-means++ without randomness, which favours
+    // distinct colours over large areas of almost the same colour). Colours with a tiny share of
+    // the drawing (everything which differs from the most common colour) are noise and never seed,
+    // the share is not measured against the whole image, so small colours of line art can seed.
     size_t first = 0;
     for (size_t i = 1; i < bins.size(); ++i)
         if (bins[i].weight > bins[first].weight)
             first = i;
     pal.centers.push_back(bins[first].color);
+    double drawing = 0.;
+    for (const HistBin &b : bins)
+        if (dist2(b.color, bins[first].color) >= MERGE_DIST2)
+            drawing += b.weight;
+    const double min_seed = 0.003 * drawing;
+    // The pixels of one colour spread over several bins (noise), so the count of a seed is the
+    // count of the colours around it: cells of the Lab space, 3 x 3 x 3 cells of 8 delta E
+    std::vector<double> around(bins.size(), 0.);
+    {
+        static constexpr double CELL = 8.;
+        static constexpr int    NL = 14, NA = 33; // L 0..100, a and b -128..128
+        static constexpr int    SL = NL + 2, SA = NA + 2; // padded by one cell
+        auto cell = [](const Lab &c) {
+            return std::array<int, 3>{std::clamp(int(std::floor(c[0] / CELL)), 0, NL - 1) + 1,
+                                      std::clamp(int(std::floor((c[1] + 128.) / CELL)), 0, NA - 1) + 1,
+                                      std::clamp(int(std::floor((c[2] + 128.) / CELL)), 0, NA - 1) + 1};
+        };
+        auto index = [](int l, int a, int b) { return (size_t(l) * SA + size_t(a)) * SA + size_t(b); };
+        std::vector<double> grid(size_t(SL) * SA * SA, 0.);
+        for (const HistBin &b : bins) {
+            auto c = cell(b.color);
+            grid[index(c[0], c[1], c[2])] += b.weight;
+        }
+        for (size_t i = 0; i < bins.size(); ++i) {
+            auto c = cell(bins[i].color);
+            for (int dl = -1; dl <= 1; ++dl)
+                for (int da = -1; da <= 1; ++da)
+                    for (int db = -1; db <= 1; ++db)
+                        around[i] += grid[index(c[0] + dl, c[1] + da, c[2] + db)];
+        }
+    }
     while (int(pal.centers.size()) < k) {
-        double best = 0.;
+        double best   = 0.;
         size_t best_i = 0;
         for (size_t i = 0; i < bins.size(); ++i) {
+            if (around[i] < min_seed)
+                continue;
             double d = std::numeric_limits<double>::max();
-            for (const auto &c : pal.centers)
+            for (const Lab &c : pal.centers)
                 d = std::min(d, dist2(c, bins[i].color));
-            double score = d * bins[i].weight;
+            if (d < MERGE_DIST2)
+                continue;
+            double score = d * std::sqrt(bins[i].weight);
             if (score > best) {
                 best   = score;
                 best_i = i;
@@ -344,19 +519,22 @@ Palette compute_palette(const TraceImage &image, int k)
     }
     lloyd(bins, pal, 50);
 
-    // Merge colours which are only anti-aliasing of edges (tiny share) or almost the same
+    // Merge colours with a tiny share (of the drawing when the background is left out) or almost
+    // the same colour
     const double total = std::accumulate(pal.weights.begin(), pal.weights.end(), 0.);
-    constexpr double MIN_SHARE   = 0.004;
-    constexpr double MERGE_DIST2 = 24. * 24.;
+    constexpr double MIN_SHARE = 0.004;
     for (bool merged = true; merged && pal.centers.size() > 1;) {
         merged = false;
+        double reference = total;
+        if (exclude_dominant)
+            reference -= *std::max_element(pal.weights.begin(), pal.weights.end());
         // smallest cluster under the share limit
         size_t smallest = 0;
         for (size_t i = 1; i < pal.weights.size(); ++i)
             if (pal.weights[i] < pal.weights[smallest])
                 smallest = i;
         size_t a = 0, b = 0;
-        if (pal.weights[smallest] < MIN_SHARE * total) {
+        if (pal.weights[smallest] < MIN_SHARE * reference) {
             a = smallest;
             double best = std::numeric_limits<double>::max();
             for (size_t i = 0; i < pal.centers.size(); ++i)
@@ -391,15 +569,22 @@ Palette compute_palette(const TraceImage &image, int k)
     return pal;
 }
 
-// Label of every pixel: index of nearest palette colour, -1 for transparent pixels
+// Label of every pixel: index of nearest palette colour (delta E), -1 for transparent pixels
 std::vector<int> label_pixels(const TraceImage &image, const Palette &pal)
 {
     std::vector<int> labels(size_t(image.width) * size_t(image.height), -1);
+    const uint8_t   *prev       = nullptr;
+    int              prev_label = -1;
     for (size_t i = 0; i < labels.size(); ++i) {
         const uint8_t *p = &image.rgba[i * 4];
         if (p[3] < ALPHA_SOLID)
             continue;
-        labels[i] = nearest(pal.centers, {double(p[0]), double(p[1]), double(p[2])});
+        // background of line art repeats the same colour, convert it once
+        if (prev == nullptr || std::memcmp(p, prev, 3) != 0) {
+            prev_label = nearest(pal.centers, rgb_to_lab({double(p[0]), double(p[1]), double(p[2])}));
+            prev       = p;
+        }
+        labels[i] = prev_label;
     }
     return labels;
 }
@@ -951,7 +1136,7 @@ ImageTraceResult trace_image(const TraceImage &image, const ImageTraceParams &pa
         levels.push_back(std::move(level));
     } else {
         const bool remove_bg = p.remove_background && !has_alpha;
-        Palette    pal       = compute_palette(analysis, p.colors + (remove_bg ? 1 : 0));
+        Palette    pal       = compute_palette(analysis, p.colors + (remove_bg ? 1 : 0), remove_bg);
         if (pal.centers.empty()) {
             result.error = "The image has no visible pixels.";
             return result;
@@ -981,7 +1166,8 @@ ImageTraceResult trace_image(const TraceImage &image, const ImageTraceParams &pa
         for (int i = 0; i < int(pal.centers.size()); ++i)
             if (i != background)
                 order.push_back(i);
-        std::stable_sort(order.begin(), order.end(), [&pal](int a, int b) { return luminance(pal.centers[a]) < luminance(pal.centers[b]); });
+        // (by CIE L, the lightness)
+        std::stable_sort(order.begin(), order.end(), [&pal](int a, int b) { return pal.centers[a][0] < pal.centers[b][0]; });
         if (int(order.size()) > p.colors)
             order.resize(size_t(p.colors)); // can not happen, safety
         result.colors_found = int(order.size());
@@ -1008,7 +1194,7 @@ ImageTraceResult trace_image(const TraceImage &image, const ImageTraceParams &pa
                         f[x] = 1.f;
                 }
             }
-            const std::array<double, 3> &c = pal.centers[size_t(order[r])];
+            const std::array<double, 3> c = lab_to_rgb(pal.centers[size_t(order[r])]);
             for (int k = 0; k < 3; ++k)
                 level.color[k] = uint8_t(std::clamp(std::lround(c[k]), 0l, 255l));
             levels.push_back(std::move(level));
@@ -1268,6 +1454,75 @@ std::string image_trace_color_to_hex(const std::array<uint8_t, 3> &color)
     char buffer[8];
     std::snprintf(buffer, sizeof(buffer), "#%02X%02X%02X", color[0], color[1], color[2]);
     return buffer;
+}
+
+std::vector<std::pair<std::string, ExPolygons>> image_trace_dxf_layers(const ImageTraceResult &result, const std::vector<std::string> &names)
+{
+    std::vector<std::pair<std::string, ExPolygons>> out;
+    // SVG is Y down: mirror around the height of the image
+    const coord_t height = coord_t(std::llround(result.height / SCALING_FACTOR));
+    for (size_t i = 0; i < result.layers.size(); ++i) {
+        const ImageTraceLayer &layer = result.layers[i];
+        ExPolygons             shape = layer.shape;
+        for (ExPolygon &e : shape) {
+            auto flip = [height](Polygon &p) {
+                for (Point &pt : p.points)
+                    pt.y() = height - pt.y();
+                std::reverse(p.points.begin(), p.points.end()); // keep the orientation (contour CCW, holes CW)
+            };
+            flip(e.contour);
+            for (Polygon &h : e.holes)
+                flip(h);
+        }
+        std::string name = i < names.size() ? names[i] : std::string();
+        if (name.empty())
+            name = result.layers.size() == 1 ? "Trace" : "Level " + std::to_string(i + 1) + " " + image_trace_color_to_hex(layer.color);
+        out.emplace_back(std::move(name), std::move(shape));
+    }
+    return out;
+}
+
+TraceFilamentPlan plan_trace_filaments(const std::vector<std::array<uint8_t, 3>> &levels, const std::vector<std::string> &filaments,
+                                       TraceFilamentMatch mode)
+{
+    TraceFilamentPlan plan;
+    switch (mode) {
+    case TraceFilamentMatch::AddNew: {
+        // filaments of the project followed by the ones added for earlier levels
+        std::vector<std::string> working = filaments;
+        for (const auto &color : levels) {
+            double d       = 0.;
+            int    nearest = svg_split_nearest_filament(color, working, &d);
+            if (nearest > 0 && d <= IMAGE_TRACE_REUSE_DELTA_E) {
+                plan.filaments.push_back(nearest);
+                continue;
+            }
+            std::string hex = image_trace_color_to_hex(color);
+            working.push_back(hex);
+            plan.add.push_back(hex);
+            plan.filaments.push_back(int(working.size()));
+        }
+        break;
+    }
+    case TraceFilamentMatch::ReplaceColours:
+        // level i on filament i, whatever the printer: recolour the existing ones, add the rest
+        for (size_t i = 0; i < levels.size(); ++i) {
+            std::string hex = image_trace_color_to_hex(levels[i]);
+            if (i < filaments.size()) {
+                std::array<uint8_t, 3> old;
+                if (!svg_split_parse_hex(filaments[i], old) || old != levels[i])
+                    plan.recolour.push_back({int(i) + 1, hex});
+            } else
+                plan.add.push_back(hex);
+            plan.filaments.push_back(int(i) + 1);
+        }
+        break;
+    case TraceFilamentMatch::Nearest:
+        for (const auto &color : levels)
+            plan.filaments.push_back(svg_split_nearest_filament(color, filaments));
+        break;
+    }
+    return plan;
 }
 
 } // namespace Slic3r

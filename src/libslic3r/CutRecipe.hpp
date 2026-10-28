@@ -44,6 +44,7 @@
 // FlexiJointParams, carried per connector. Neither CurvedCut.hpp nor DrawCut.hpp
 // pulls it in, so it has to be named here.
 #include <libslic3r/FlexiJoint.hpp>
+#include <libslic3r/PushFit.hpp>
 
 namespace Slic3r {
 
@@ -102,7 +103,38 @@ class ModelObject;
 //
 // A version <= 3 recipe therefore loads and re-cuts identically; no migration is
 // needed for 4 and cut_recipe_migrate_draw_v2() is untouched by it.
-static constexpr int CutRecipeVersion = 4;
+//  5  multiple dovetails (OrcaSlicer #12318, OD11, 2026-10-24): CutRecipeGroove grew
+//       count          how many dovetails side by side (1 = the single one of old);
+//       gap            the distance between neighbours, mm;
+//       plane_radius   the gizmo radius the dovetail's outer width - and so the
+//                      spacing - was computed with (Cut::calculate_groove_width()).
+//                      Stored so that a re-edit, and a Copy cut onto an object of
+//                      another size, space the dovetails exactly as the cut did.
+//                      0 means "not recorded", which only a count-1 recipe can be,
+//                      and a single dovetail does not depend on it.
+//     instance_linear (OD11 PR D, also new in 5): the cut instance's transform
+//                    without its offset, at the moment of the cut. The halves'
+//                    meshes sit in instance_linear x object frame, the recipe's mesh
+//                    in the object frame; Edit cut needs the pair to carry the
+//                    halves' painting back onto the uncut stand-in.
+//                    instance_linear_set false = not recorded (<= 4).
+//     half_part_matrices (OD11 PR D, also new in 5): PER HALF - each object's own
+//                    recipe copy - the volume matrices of its model parts (cut
+//                    connectors left out, volume order) right after the cut. A
+//                    project load zeroes the offset of a one-volume object's volume
+//                    and moves it into the instance, which loses the cut frame the
+//                    painting carry needs; these keep it. Empty = not recorded.
+//     New fields, no changed meanings: a version <= 4 recipe loads as count 1 and
+//     re-cuts identically. The bump is so an OLDER build refuses a version 5 recipe
+//     rather than silently re-cutting a three-dovetail joint as one.
+//  6  the push-fit Pin connector (tests/design_pushfit_connector.md, 2026-10-24):
+//       CutRecipeConnector grew `pushfit` (PushFitParams), meaningful only for the new
+//       connector type PushFit = 5. New fields, no changed meanings: a version <= 5 recipe
+//       has no pins and re-cuts identically. The bump is MANDATORY rather than cosmetic: an
+//       older reader clamps an unknown connector type to 0 (Plug), so a v5 build reading a
+//       pin recipe would silently re-cut every pin as a plug. With 6 it refuses the recipe -
+//       the halves load, "Edit cut" is not offered.
+static constexpr int CutRecipeVersion = 6;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -141,6 +173,10 @@ struct CutRecipeGroove
     float angle_init{ 0.f };
     float depth_tolerance{ 0.1f };
     float width_tolerance{ 0.1f };
+    // Version 5: multiple dovetails. See CutRecipeVersion.
+    int   count{ 1 };
+    float gap{ 10.f };
+    float plane_radius{ 0.f };
 
     bool operator==(const CutRecipeGroove& o) const;
     bool operator!=(const CutRecipeGroove& o) const { return !(*this == o); }
@@ -148,6 +184,9 @@ struct CutRecipeGroove
     template<class Archive> void serialize(Archive& ar) {
         ar(depth, width, flaps_angle, angle, depth_init, width_init, flaps_angle_init, angle_init,
            depth_tolerance, width_tolerance);
+        // VERSION 5. Cereal is the undo stack and the project backup, never another
+        // build's file, so appending is safe.
+        ar(count, gap, plane_radius);
     }
 };
 
@@ -172,13 +211,15 @@ struct CutRecipeConnector
     int         shape{ 0 };  // CutConnectorShape
     // Only meaningful for CutConnectorType::FlexiJoint.
     FlexiJointParams flexi;
+    // Only meaningful for CutConnectorType::PushFit (recipe version 6).
+    PushFitParams    pushfit;
 
     bool operator==(const CutRecipeConnector& o) const;
     bool operator!=(const CutRecipeConnector& o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive& ar) {
         ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle,
-           type, style, shape, flexi);
+           type, style, shape, flexi, pushfit);
     }
 };
 
@@ -294,6 +335,13 @@ struct CutRecipe
     // the object frame.
     Vec3d       plane_center{ Vec3d::Zero() };
     Transform3d rotation_m{ Transform3d::Identity() };
+    // VERSION 5. The cut instance's matrix without offset when the cut was made: the
+    // frame the halves' meshes are in, relative to `mesh`. See CutRecipeVersion.
+    Transform3d instance_linear{ Transform3d::Identity() };
+    bool        instance_linear_set{ false };
+    // VERSION 5, per half: see CutRecipeVersion. Not part of operator== - the two halves of
+    // one cut carry the same recipe with different frames.
+    std::vector<Transform3d> half_part_matrices;
 
     // --- the surface ------------------------------------------------------
     CutRecipeSheet  sheet;   // kind == Curved
@@ -401,6 +449,8 @@ struct CutRecipe
         ar(upper_visibility, lower_visibility);
         ar(connectors);
         ar(mesh, mesh_hash);
+        // VERSION 5 (OD11 PR D).
+        ar(instance_linear, instance_linear_set, half_part_matrices);
     }
 };
 
@@ -495,7 +545,8 @@ CutRecipeStroke cut_recipe_stroke_from_chain(const DrawCutChain& chain, double s
 // goes through the identical R' construction, so a connector's own frame stays a
 // proper rotation too. z_angle is negated for a non-Circle shape - a mirrored
 // triangle presents the same polygon turned the other way - and left alone for a
-// Circle, where it means nothing. type (Plug / Dowel / Snap / FlexiJoint) is a
+// Circle, where it means nothing - except for a Pin, whose flats give the round pin an
+// orientation, so its z_angle negates too. type (Plug / Dowel / Snap / FlexiJoint / Pin) is a
 // mating ROLE, not a chirality, and is NEVER touched: a mirrored assembly still
 // needs one plug and one dowel to mate, which is the entire reason the owner
 // wants a mirrored connector layout in the first place.

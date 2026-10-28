@@ -8,6 +8,7 @@
 #include "libslic3r/format.hpp"
 #include "GCodeProcessor.hpp"
 #include "PreCoolingInjector.hpp"
+#include "libslic3r/CostEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -74,7 +75,19 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     "_DURING_PRINT_EXHAUST_FAN",
     " WIPE_TOWER_START",
     " WIPE_TOWER_END",
-    " PA_CHANGE:"
+    " PA_CHANGE:",
+    "@PRINT_TIME_TOTAL_SEC@",
+    "@PRINT_TIME_DAY@",
+    "@PRINT_TIME_HOUR@",
+    "@PRINT_TIME_MINUTE@",
+    "@PRINT_TIME_SEC@",
+    "@USED_FILAMENT_LENGTH@",
+    "@NORMAL_PRINT_TIME@",
+    "@SILENT_PRINT_TIME@",
+    "@TOTAL_WEIGHT@",
+    "@TOTAL_COST@",
+    "@TOTAL_WIPE_TOWER_COST@",
+    "@TOTAL_WIPE_TOWER_FILAMENT@"
 };
 
 const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
@@ -95,7 +108,19 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
     "_DURING_PRINT_EXHAUST_FAN",
     " WIPE_TOWER_START",
     " WIPE_TOWER_END",
-    " PA_CHANGE:"
+    " PA_CHANGE:",
+    "@PRINT_TIME_TOTAL_SEC@",
+    "@PRINT_TIME_DAY@",
+    "@PRINT_TIME_HOUR@",
+    "@PRINT_TIME_MINUTE@",
+    "@PRINT_TIME_SEC@",
+    "@USED_FILAMENT_LENGTH@",
+    "@NORMAL_PRINT_TIME@",
+    "@SILENT_PRINT_TIME@",
+    "@TOTAL_WEIGHT@",
+    "@TOTAL_COST@",
+    "@TOTAL_WIPE_TOWER_COST@",
+    "@TOTAL_WIPE_TOWER_FILAMENT@"
 };
 
 
@@ -4705,6 +4730,68 @@ void GCodeProcessor::run_post_process()
         return ret;
     };
 
+    // Process inline placeholders (print_time_*, used_filament_length and the print statistics known only after export)
+    auto process_inline_placeholders = [&](std::string& gcode_line) {
+        bool processed = false;
+        // Every inline placeholder contains '@', so a line without one has nothing to replace.
+        if (gcode_line.find('@') == std::string::npos)
+            return processed;
+
+        auto replace_tag = [&gcode_line, &processed](ETags tag, const std::string& value) {
+            const std::string& placeholder = reserved_tag(tag);
+            size_t pos = gcode_line.find(placeholder);
+            while (pos != std::string::npos) {
+                gcode_line.replace(pos, placeholder.length(), value);
+                processed = true;
+                pos = gcode_line.find(placeholder, pos + value.length());
+            }
+        };
+
+        double print_time_total_sec = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
+        if (print_time_total_sec < 0.0)
+            print_time_total_sec = 0.0;
+
+        int total_seconds = static_cast<int>(print_time_total_sec);
+        int print_time_day = total_seconds / 86400;
+        int day_remainder_seconds = total_seconds % 86400;
+        int print_time_hour = day_remainder_seconds / 3600;
+        int print_time_minute = (day_remainder_seconds % 3600) / 60;
+        int print_time_sec = day_remainder_seconds % 60;
+
+        double total_filament_mm = 0.0;
+        for (const auto& mm : filament_mm) {
+            total_filament_mm += mm;
+        }
+
+        replace_tag(ETags::Print_Time_Total_Sec_Placeholder, Slic3r::float_to_string_decimal_point(print_time_total_sec, 2));
+        replace_tag(ETags::Print_Time_Day_Placeholder, std::to_string(print_time_day));
+        replace_tag(ETags::Print_Time_Hour_Placeholder, std::to_string(print_time_hour));
+        replace_tag(ETags::Print_Time_Minute_Placeholder, std::to_string(print_time_minute));
+        replace_tag(ETags::Print_Time_Sec_Placeholder, std::to_string(print_time_sec));
+        replace_tag(ETags::Used_Filament_Length_Placeholder,
+                    Slic3r::float_to_string_decimal_point(total_filament_mm / 1000.0, 2)); // Convert mm to m
+        // Same values as the print statistics that filename_format gets (PrintStatistics::config(), filled in by
+        // update_print_estimated_stats() in GCode.cpp), which runs only after this post-processing.
+        // EDGE: from m_result's modes, which include the machine prepare time (get_time()), as the statistics do.
+        const auto mode_time_dhm = [this](PrintEstimatedStatistics::ETimeMode mode) {
+            return short_time(get_time_dhms(m_result.print_statistics.modes[static_cast<size_t>(mode)].time));
+        };
+        replace_tag(ETags::Normal_Print_Time_Placeholder, mode_time_dhm(PrintEstimatedStatistics::ETimeMode::Normal));
+        replace_tag(ETags::Silent_Print_Time_Placeholder, is_stealth_time_estimator_enabled() ?
+                                                              mode_time_dhm(PrintEstimatedStatistics::ETimeMode::Stealth) :
+                                                              short_time("N/A"));
+        // EDGE: total_cost is the cost breakdown's total (filament, flush and tower included, plus time_cost per
+        // hour), the value update_print_estimated_stats() gives PrintStatistics::total_cost.
+        replace_tag(ETags::Total_Weight_Placeholder, Slic3r::float_to_string_decimal_point(filament_total_g, 2));
+        replace_tag(ETags::Total_Cost_Placeholder, Slic3r::float_to_string_decimal_point(compute_cost(m_result).total, 2));
+        replace_tag(ETags::Total_Wipe_Tower_Cost_Placeholder,
+                    Slic3r::float_to_string_decimal_point(m_print->print_statistics().total_wipe_tower_cost, 2));
+        replace_tag(ETags::Total_Wipe_Tower_Filament_Placeholder,
+                    Slic3r::float_to_string_decimal_point(m_print->print_statistics().total_wipe_tower_filament, 2));
+
+        return processed;
+    };
+
     // check for temporary lines
     auto is_temporary_decoration = [](const std::string_view gcode_line) {
         // remove trailing '\n'
@@ -4956,6 +5043,8 @@ void GCodeProcessor::run_post_process()
                         gcode_line.clear();
                     if (!processed)
                         processed = process_used_filament(gcode_line);
+                    if (!gcode_line.empty())
+                        process_inline_placeholders(gcode_line);
                     if (!processed && !is_temporary_decoration(gcode_line)) {
                         if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G0") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G1")) {
                             export_lines.append_line(gcode_line);

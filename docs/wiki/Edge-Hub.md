@@ -30,6 +30,20 @@ Through the hub you get LAN phone access (QR / token link), optional remote acce
 | Firewall (Windows installer) | Adds a rule for **TCP 13640** for the hub. |
 | Closing slicer windows | Hub can keep running in the tray. |
 
+## Which copy owns the hub (launch flags)
+
+All copies of EdgeSlicer that share a data folder share one hub. By default a copy that starts with no hub running starts one, and a copy that finds a hub from another build or another install asks it to quit and starts its own (once per process; a copy the hub started never does).
+
+A copy that must leave the hub alone, typically a test build, can run as a client only:
+
+| Switch | Effect |
+|---|---|
+| `--take-hub` or `EDGESLICER_TAKE_HUB=1` | Normal behaviour, even when the switches below ask otherwise. Strongest. |
+| `--no-hub` or `EDGESLICER_NO_HUB=1` | Never start, restart or take over the hub or go2rtc, and never ask a running hub to quit. |
+| A file named `edgeslicer_no_hub` next to `EdgeSlicer.exe` | Same as `--no-hub` for every launch of that copy (test copies installed by edgebuild get it). |
+
+Order: `--take-hub` / `EDGESLICER_TAKE_HUB`, then `--no-hub` / `EDGESLICER_NO_HUB`, then the marker file, then normal. The log says which one applied. A no-hub copy still uses a running hub as a client (Stream tab, Mobile Hub page, own-camera view, the Printers tab). It cannot change phone access or the shared camera list, and says so; with no hub running those panels report that no hub is running.
+
 ## Related
 
 - [Phone access and the companion app](Phone-access)  
