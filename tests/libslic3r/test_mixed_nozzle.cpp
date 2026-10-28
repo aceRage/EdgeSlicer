@@ -88,8 +88,8 @@ std::string validate_message(Model &model, const DynamicPrintConfig &config)
     // a real session sees. Nothing else about the config changes between the two.
     print.apply(model, config);
     print.apply(model, config);
-    StringObjectException warning;
-    const std::string msg = print.validate(&warning).string;
+    std::vector<StringObjectException> warnings;
+    const std::string msg = print.validate(&warnings).string;
     // A green validation returns an empty string, which makes a failing REQUIRE unreadable; report
     // the state the checks under test actually keyed off instead.
     return msg.empty() ? ("[accepted; filaments used=" + std::to_string(print.extruders().size())

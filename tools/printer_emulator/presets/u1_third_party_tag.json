@@ -1,0 +1,18 @@
+{
+  "id": "u1_tag",
+  "personality": "u1",
+  "name": "EMU Snapmaker U1 tags",
+  "edgeslicer_preset": "Snapmaker U1 (0.4 nozzle)",
+  "bind": "127.0.0.32",
+  "port": 80,
+  "lan": false,
+  "state": "standby",
+  "slots": [
+    {"type": "PLA", "sub": "Silk", "vendor": "iBoss", "color": "#C8C8D0", "loaded": true, "official": false},
+    {"type": "PLA", "sub": "Matte", "vendor": "Snapmaker", "color": "#D93A2B", "loaded": true, "official": true},
+    {"type": "PETG", "sub": "", "vendor": "eSun", "color": "#1E5AA8", "loaded": true, "official": false},
+    {"type": "TPU", "sub": "95A", "vendor": "Snapmaker", "color": "#000000", "loaded": false}
+  ],
+  "u1": {"mqtt": {"enabled": false, "pairing_port": 1884, "lan_port": 8883, "code": "12345678", "auto_approve": true}},
+  "faults": {}
+}

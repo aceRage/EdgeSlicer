@@ -1,7 +1,7 @@
 {
     "name": "UltiMaker",
     "url": "",
-    "version": "02.04.00.06",
+    "version": "02.04.00.07",
     "force_update": "0",
     "description": "UltiMaker configurations",
     "machine_model_list": [
@@ -28,16 +28,12 @@
             "sub_path": "process/fdm_process_common.json"
         },
         {
-            "name": "0.12mm Fine @UltiMaker 2",
-            "sub_path": "process/0.12mm Fine @UltiMaker 2.json"
+            "name": "0.10mm Fine @UltiMaker 2",
+            "sub_path": "process/0.10mm Fine @UltiMaker 2.json"
         },
         {
-            "name": "0.18mm Standard @UltiMaker 2",
-            "sub_path": "process/0.18mm Standard @UltiMaker 2.json"
-        },
-        {
-            "name": "0.25mm Draft @UltiMaker 2",
-            "sub_path": "process/0.25mm Darft @UltiMaker 2.json"
+            "name": "0.15mm Standard @UltiMaker 2",
+            "sub_path": "process/0.15mm Standard @UltiMaker 2.json"
         },
         {
             "name": "0.15mm Standard @UltiMaker 2 0.6 nozzle",
@@ -46,6 +42,10 @@
         {
             "name": "0.18mm Standard @UltiMaker S5",
             "sub_path": "process/0.18mm Standard @UltiMaker S5.json"
+        },
+        {
+            "name": "0.20mm Draft @UltiMaker 2",
+            "sub_path": "process/0.20mm Draft @UltiMaker 2.json"
         },
         {
             "name": "0.20mm Standard @UltiMaker 2 0.8 nozzle",

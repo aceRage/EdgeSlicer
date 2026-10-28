@@ -230,7 +230,7 @@ Print &tube_with_tab(Print &print, Model &model, const DynamicPrintConfig &confi
     return print;
 }
 
-DynamicPrintConfig narrow_wall_config(bool only_one_wall_top)
+DynamicPrintConfig narrow_wall_config(bool only_one_wall_top, double top_surface_expansion)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -244,6 +244,7 @@ DynamicPrintConfig narrow_wall_config(bool only_one_wall_top)
         { "precise_outer_wall",    true },
         { "wall_sequence",         "inner wall/outer wall" },
         { "only_one_wall_top",     only_one_wall_top },
+        { "top_surface_expansion", top_surface_expansion },
     });
     return config;
 }
@@ -298,14 +299,19 @@ double far_wall_inner_wall_length(const Print &print, double print_z)
 
 TEST_CASE("Only one wall on top surfaces keeps the inner walls of narrow walls away from the top surface", "[PrintObject][Perimeters]")
 {
+    // Orca #14929 (OD2): 0 re-onions the region beside the top surface, 2 clips the inner walls over it.
+    // Upstream's #16174 test runs both; #352 dropped the GENERATE as top_surface_expansion was not ported yet.
+    const double top_surface_expansion = GENERATE(0.0, 2.0);
+    CAPTURE(top_surface_expansion);
+
     struct TabTopLayer {
         double perimeters;
         double far_wall_inner_walls;
     };
-    auto tab_top_layer_for = [](bool only_one_wall_top) {
+    auto tab_top_layer_for = [top_surface_expansion](bool only_one_wall_top) {
         Print print;
         Model model;
-        tube_with_tab(print, model, narrow_wall_config(only_one_wall_top));
+        tube_with_tab(print, model, narrow_wall_config(only_one_wall_top, top_surface_expansion));
         print.process();
         REQUIRE_FALSE(print.objects().empty());
         return TabTopLayer{ perimeter_length_at(print, tab_top_z), far_wall_inner_wall_length(print, tab_top_z) };
@@ -357,8 +363,8 @@ TEST_CASE("Internal bridge areas keep holes so they are not re-bridged on the ne
 }
 
 // Orca #16570: sloping walls shift adjacent infill contours so the solid anchor strip can
-// collapse below a printable width. Edge has no Spiral Inset pattern and no relative_bridge_angle
-// setting, so those GENERATE keys from upstream are dropped.
+// collapse below a printable width. Edge has no Spiral Inset pattern, so that GENERATE key from
+// upstream is dropped. (relative_bridge_angle came with the OrcaSlicer #12055 port.)
 TEST_CASE("Internal bridge ends have support along sloping infill boundaries", "[PrintObject][InternalBridge][Regression]")
 {
     const std::string solid_pattern  = GENERATE("rectilinear", "concentric");
@@ -374,6 +380,7 @@ TEST_CASE("Internal bridge ends have support along sloping infill boundaries", "
                                    {"sparse_infill_line_width", 0.23},
                                    {"wall_loops", 3},
                                    {"internal_bridge_angle", 90},
+                                   {"relative_bridge_angle", false},
                                    {"layer_height", 0.02},
                                    {"initial_layer_print_height", 0.1},
                                    {"nozzle_diameter", 0.2},
@@ -558,5 +565,35 @@ TEST_CASE("Z contouring follows the surface of each instance as it is turned", "
         INFO("rotation " << z_rotation);
         CHECK(matched > 100);
         CHECK(lifted > 0);
+    }
+}
+
+// OD2 review: options read by prepare_infill() (bridge_over_infill(), the separated-infill bodies) must
+// invalidate posPrepareInfill, or changing them after a first slice changes nothing in the GUI. Not crossing
+// zero, top_surface_density keeps the perimeters.
+TEST_CASE("Changing a fill-preparation option re-runs the infill preparation", "[PrintObject][Invalidation]")
+{
+    struct Change { const char *key; const char *from; const char *to; };
+    const std::vector<Change> changes{
+        { "top_surface_density", "100%", "50%" },
+        { "separated_infills", "0", "1" },
+        { "center_of_surface_pattern", "each_surface", "each_model" },
+    };
+    for (const Change &change : changes) {
+        CAPTURE(change.key);
+        Print              print;
+        Model              model;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { change.key, change.from } });
+        init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+        print.process();
+        REQUIRE(print.is_step_done(posPrepareInfill));
+        REQUIRE(print.is_step_done(posInfill));
+
+        config.set_deserialize_strict({ { change.key, change.to } });
+        CHECK(print.apply(model, config) == PrintBase::APPLY_STATUS_INVALIDATED);
+        CHECK_FALSE(print.is_step_done(posPrepareInfill));
+        CHECK_FALSE(print.is_step_done(posInfill));
+        CHECK(print.is_step_done(posPerimeters));
     }
 }

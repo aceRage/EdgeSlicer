@@ -15,6 +15,8 @@ static const ColorRGBA DEF_COLOR   = {0.7f, 0.7f, 0.7f, 1.f};
 static const ColorRGBA SELECTED_COLOR = {0.0f, 0.5f, 0.5f, 1.0f};
 static const ColorRGBA ERR_COLOR = {1.0f, 0.3f, 0.3f, 0.5f};
 static const ColorRGBA HOVER_COLOR = {0.7f, 0.7f, 0.7f, 0.5f};
+static constexpr float BRIM_EAR_RADIUS_MIN = 0.1f;
+static constexpr float BRIM_EAR_RADIUS_MAX = 100.f;
 
 static ModelVolume *get_model_volume(const Selection &selection, Model &model)
 {
@@ -41,7 +43,7 @@ GLGizmoBrimEars::GLGizmoBrimEars(GLCanvas3D &parent, const std::string &icon_fil
 
 bool GLGizmoBrimEars::on_init()
 {
-    m_new_point_head_diameter = get_brim_default_radius();
+    m_new_point_head_radius = get_brim_default_radius();
 
     m_shortcut_key = WXK_CONTROL_E;
 
@@ -50,7 +52,7 @@ bool GLGizmoBrimEars::on_init()
     // FIXME: maybe should be using GUI::shortkey_alt_prefix() or equivalent?
     const wxString alt   = _L("Alt+");
 
-    m_desc["head_diameter"]    = _L("Head diameter");
+    m_desc["brim_ear_radius"]  = _L("Brim ear radius");
     m_desc["max_angle"]        = _L("Max angle");
     m_desc["detection_radius"] = _L("Detection radius");
     m_desc["remove_selected"]  = _L("Remove selected points");
@@ -63,7 +65,7 @@ bool GLGizmoBrimEars::on_init()
     m_desc["right_click_caption"]      = _L("Right click");
     m_desc["right_click"]              = _L("Delete a brim ear");
     m_desc["ctrl_mouse_wheel_caption"] = ctrl + _L("Mouse wheel");
-    m_desc["ctrl_mouse_wheel"]         = _L("Adjust head diameter");
+    m_desc["ctrl_mouse_wheel"]         = _L("Adjust brim ear radius");
     m_desc["alt_mouse_wheel_caption"]  = alt + _L("Mouse wheel");
     m_desc["alt_mouse_wheel"]          = _L("Adjust section view");
 
@@ -377,7 +379,7 @@ bool GLGizmoBrimEars::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_p
         Transform3d             inverse_trsf = volume->get_instance_transformation().get_matrix_no_offset().inverse();
         std::pair<Vec3f, Vec3f> pos_and_normal;
         if (unproject_on_mesh2(mouse_position, pos_and_normal)) {
-            render_hover_point = CacheEntry(BrimPoint(pos_and_normal.first, m_new_point_head_diameter / 2.f), false, (inverse_trsf * m_world_normal).cast<float>(), true);
+            render_hover_point = CacheEntry(BrimPoint(pos_and_normal.first, m_new_point_head_radius), false, (inverse_trsf * m_world_normal).cast<float>(), true);
         } else {
             render_hover_point.reset();
         }
@@ -416,7 +418,7 @@ bool GLGizmoBrimEars::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_p
                 Vec3d object_pos = trsf.inverse() * world_pos;
                 // brim ear always face up
                 Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Add brim ear");
-                add_point_to_cache(object_pos.cast<float>(), m_new_point_head_diameter / 2.f, false, (inverse_trsf * m_world_normal).cast<float>());
+                add_point_to_cache(object_pos.cast<float>(), m_new_point_head_radius, false, (inverse_trsf * m_world_normal).cast<float>());
                 m_parent.set_as_dirty();
                 m_wait_for_up_event = true;
                 find_single();
@@ -509,9 +511,9 @@ bool GLGizmoBrimEars::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_p
     // mouse wheel up
     if (action == SLAGizmoEventType::MouseWheelUp) {
         if (control_down) {
-            float initial_value = m_new_point_head_diameter;
+            float initial_value = m_new_point_head_radius;
             begin_radius_change(initial_value);
-            m_new_point_head_diameter = std::min(20., initial_value + 0.1);
+            m_new_point_head_radius = std::min(BRIM_EAR_RADIUS_MAX, initial_value + 0.1f);
             update_cache_radius();
             return true;
         }
@@ -521,9 +523,9 @@ bool GLGizmoBrimEars::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_p
 
     if (action == SLAGizmoEventType::MouseWheelDown) {
         if (control_down) {
-            float initial_value = m_new_point_head_diameter;
+            float initial_value = m_new_point_head_radius;
             begin_radius_change(initial_value);
-            m_new_point_head_diameter = std::max(5., initial_value - 0.1);
+            m_new_point_head_radius = std::max(BRIM_EAR_RADIUS_MIN, initial_value - 0.1f);
             update_cache_radius();
             return true;
         }
@@ -607,18 +609,18 @@ std::vector<const ConfigOption *> GLGizmoBrimEars::get_config_options(const std:
 
 void GLGizmoBrimEars::begin_radius_change(float initial_value)
 {
-    if (m_old_point_head_diameter == 0.f)
-        m_old_point_head_diameter = initial_value;
+    if (m_old_point_head_radius == 0.f)
+        m_old_point_head_radius = initial_value;
 }
 
 void GLGizmoBrimEars::update_cache_radius()
 {
     if (render_hover_point)
-        render_hover_point->brim_point.head_front_radius = m_new_point_head_diameter / 2.f;
+        render_hover_point->brim_point.head_front_radius = m_new_point_head_radius;
 
     for (auto &cache_entry : m_editing_cache)
         if (cache_entry.selected) {
-            cache_entry.brim_point.head_front_radius = m_new_point_head_diameter / 2.f;
+            cache_entry.brim_point.head_front_radius = m_new_point_head_radius;
             find_single();
             update_model_object();
         }
@@ -627,18 +629,18 @@ void GLGizmoBrimEars::update_cache_radius()
 
 void GLGizmoBrimEars::apply_radius_change()
 {
-    if (m_old_point_head_diameter == 0.f) return;
+    if (m_old_point_head_radius == 0.f) return;
 
     // momentarily restore the old value to take snapshot
     for (auto& cache_entry : m_editing_cache)
         if (cache_entry.selected)
-            cache_entry.brim_point.head_front_radius = m_old_point_head_diameter / 2.f;
-    float backup              = m_new_point_head_diameter;
-    m_new_point_head_diameter = m_old_point_head_diameter;
-    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Change point head diameter");
-    m_new_point_head_diameter = backup;
+            cache_entry.brim_point.head_front_radius = m_old_point_head_radius;
+    float backup              = m_new_point_head_radius;
+    m_new_point_head_radius = m_old_point_head_radius;
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Change brim ear radius");
+    m_new_point_head_radius = backup;
     update_cache_radius();
-    m_old_point_head_diameter = 0.f;
+    m_old_point_head_radius = 0.f;
 }
 
 void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limit)
@@ -669,7 +671,7 @@ void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limi
     }
 
     float                 space_size      = m_imgui->get_style_scaling() * 8;
-    std::vector<wxString> text_list       = {m_desc["head_diameter"], m_desc["max_angle"], m_desc["detection_radius"], m_desc["clipping_of_view"]};
+    std::vector<wxString> text_list       = {m_desc["brim_ear_radius"], m_desc["max_angle"], m_desc["detection_radius"], m_desc["clipping_of_view"]};
     float                 widest_text     = m_imgui->find_widest_text(text_list);
     float                 caption_size    = widest_text + space_size + ImGui::GetStyle().WindowPadding.x;
     float                 input_text_size = m_imgui->scaled(10.0f);
@@ -695,11 +697,11 @@ void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limi
     //  - save the initial value of the slider before one starts messing with it
     //  - keep updating the head radius during sliding so it is continuosly refreshed in 3D scene
     //  - take correct undo/redo snapshot after the user is done with moving the slider
-    float initial_value = m_new_point_head_diameter;
-    m_imgui->text(m_desc["head_diameter"]);
+    float initial_value = m_new_point_head_radius;
+    m_imgui->text(m_desc["brim_ear_radius"]);
     ImGui::SameLine(caption_size);
     ImGui::PushItemWidth(slider_width);
-    m_imgui->bbl_slider_float_style("##head_diameter", &m_new_point_head_diameter, 5, 20, "%.1f", 1.0f, true);
+    m_imgui->bbl_slider_float_style("##brim_ear_radius", &m_new_point_head_radius, BRIM_EAR_RADIUS_MIN, BRIM_EAR_RADIUS_MAX, "%.1f", 1.0f, true);
     if (m_imgui->get_last_slider_status().clicked) {
         begin_radius_change(initial_value);
     }
@@ -710,7 +712,7 @@ void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limi
     }
     ImGui::SameLine(drag_left_width);
     ImGui::PushItemWidth(1.5 * slider_icon_width);
-    ImGui::BBLDragFloat("##head_diameter_input", &m_new_point_head_diameter, 0.05f, 0.0f, 0.0f, "%.1f");
+    ImGui::BBLDragFloat("##brim_ear_radius_input", &m_new_point_head_radius, 0.05f, BRIM_EAR_RADIUS_MIN, BRIM_EAR_RADIUS_MAX, "%.1f");
     ImGui::AlignTextToFramePadding();
 
     m_imgui->text(m_desc["max_angle"]);
@@ -934,9 +936,9 @@ void GLGizmoBrimEars::on_stop_dragging()
     m_point_before_drag = CacheEntry();
 }
 
-void GLGizmoBrimEars::on_load(cereal::BinaryInputArchive &ar) { ar(m_new_point_head_diameter, m_editing_cache, m_selection_empty); }
+void GLGizmoBrimEars::on_load(cereal::BinaryInputArchive &ar) { ar(m_new_point_head_radius, m_editing_cache, m_selection_empty); }
 
-void GLGizmoBrimEars::on_save(cereal::BinaryOutputArchive &ar) const { ar(m_new_point_head_diameter, m_editing_cache, m_selection_empty); }
+void GLGizmoBrimEars::on_save(cereal::BinaryOutputArchive &ar) const { ar(m_new_point_head_radius, m_editing_cache, m_selection_empty); }
 
 void GLGizmoBrimEars::select_point(int i)
 {
@@ -944,11 +946,11 @@ void GLGizmoBrimEars::select_point(int i)
         for (auto &point_and_selection : m_editing_cache) point_and_selection.selected = (i == AllPoints);
         m_selection_empty = (i == NoPoints);
 
-        if (i == AllPoints) m_new_point_head_diameter = m_editing_cache[0].brim_point.head_front_radius * 2.f;
+        if (i == AllPoints) m_new_point_head_radius = m_editing_cache[0].brim_point.head_front_radius;
     } else {
         m_editing_cache[i].selected = true;
         m_selection_empty           = false;
-        m_new_point_head_diameter   = m_editing_cache[i].brim_point.head_front_radius * 2.f;
+        m_new_point_head_radius     = m_editing_cache[i].brim_point.head_front_radius;
     }
 }
 
@@ -1035,8 +1037,7 @@ void GLGizmoBrimEars::auto_generate()
     auto             add_point = [this, &trsf, &normal](const Point &p) {
         Vec3d world_pos  = {float(p.x() * SCALING_FACTOR), float(p.y() * SCALING_FACTOR), -0.0001};
         Vec3d object_pos = trsf.inverse() * world_pos;
-        // m_editing_cache.emplace_back(BrimPoint(object_pos.cast<float>(), m_new_point_head_diameter / 2), false, normal);
-        add_point_to_cache(object_pos.cast<float>(), m_new_point_head_diameter / 2, false, normal);
+        add_point_to_cache(object_pos.cast<float>(), m_new_point_head_radius, false, normal);
     };
     for (const ExPolygon &ex_poly : m_first_layer) {
         Polygon  out_poly   = ex_poly.contour;
@@ -1182,8 +1183,11 @@ void GLGizmoBrimEars::reset_all_pick() { std::map<GLVolume *, std::shared_ptr<Pi
 float GLGizmoBrimEars::get_brim_default_radius() const
 {
     const double              nozzle_diameter = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
-    const DynamicPrintConfig &pring_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    return pring_cfg.get_abs_value("initial_layer_line_width", nozzle_diameter) * 16.0f;
+    const DynamicPrintConfig &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    return std::clamp(
+        float(print_cfg.get_abs_value("initial_layer_line_width", nozzle_diameter) * 8.0),
+        BRIM_EAR_RADIUS_MIN,
+        BRIM_EAR_RADIUS_MAX);
 }
 
 ExPolygon GLGizmoBrimEars::make_polygon(BrimPoint point, const Geometry::Transformation &trsf)

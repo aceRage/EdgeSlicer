@@ -339,6 +339,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IconManager.hpp
     GUI/ImageGrid.cpp
     GUI/ImageGrid.h
+    GUI/ImGuiFontRanges.cpp
+    GUI/ImGuiFontRanges.hpp
     GUI/ImGuiWrapper.cpp
     GUI/ImGuiWrapper.hpp
     GUI/IMSlider.cpp
@@ -532,6 +534,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
     GUI/PrintersPanel.cpp
+    GUI/PrinterRowsBridge.cpp
+    GUI/PrinterRowsBridge.hpp
     GUI/PrintersPanel.hpp
     GUI/HomePanel.cpp
     GUI/ModelBrowserPanel.cpp
@@ -558,6 +562,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
     GUI/BambuNetInfo.hpp
@@ -566,6 +571,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemoteSliceV1.cpp
+    GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
     GUI/BambuSendMapping.hpp
     GUI/BambuReprint.cpp
@@ -975,10 +982,19 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooCanvasMapping.cpp
     Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
+    Utils/ElegooCc2.cpp
+    Utils/ElegooCc2.hpp
+    Utils/ElegooCc2Net.cpp
+    Utils/ElegooCc2Monitor.cpp
+    Utils/ElegooCc2Monitor.hpp
+    Utils/ElegooCc2Status.cpp
+    Utils/ElegooCc2Status.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/ElegooSdcp.cpp
     Utils/ElegooSdcp.hpp
+    Utils/ElegooSdcpFiles.cpp
+    Utils/ElegooSdcpFiles.hpp
     Utils/ElegooSdcpMonitor.cpp
     Utils/ElegooSdcpMonitor.hpp
     Utils/EmbossStyleManager.cpp
@@ -1063,6 +1079,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/OctoPrint.hpp
     Utils/PresetUpdater.cpp
     Utils/PresetUpdater.hpp
+    Utils/VendorInstallStamp.cpp
+    Utils/VendorInstallStamp.hpp
     Utils/PrintHost.cpp
     Utils/PrintHost.hpp
     Utils/PrintHostDevices.cpp
@@ -1306,6 +1324,8 @@ if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD)
     # (the linker's /OPT:REF drops them from the binaries anyway). Together they keep this /Z7
     # library under the 4 GB static-library limit, so it stays cacheable: 4.3 GB without /Zc:inline,
     # 3.9 GB with it at 8 sources per batch, 3.4 GB at -DSLIC3R_UNITY_BUILD_BATCH_SIZE=16 (use that).
+    # By 2026-10-24 the code had grown it back to 4.09 GB (LNK1248), so the end of this file also
+    # splits the library in two (libslic3r_gui_part2) for this configuration.
     target_compile_options(libslic3r_gui PRIVATE /Zc:inline)
 elseif (MSVC AND SLIC3R_MSVC_Z7)
     # With /Z7 the debug info embedded in this library pushes it past the 4 GB static-library limit
@@ -1446,3 +1466,82 @@ if (SLIC3R_SENTRY)
     target_compile_definitions(libslic3r_gui PUBLIC SLIC3R_SENTRY)
     target_link_libraries(libslic3r_gui sentry::sentry)
 endif()
+
+# /Z7 unity builds without the PCH (the compiler-cache configuration of the agent build VM; CI,
+# release and Visual Studio builds use /Zi and never take this branch): the debug info embedded in
+# every object put libslic3r_gui.lib over the 4 GB static-library limit (LNK1248, 4.09 GB on
+# 2026-10-24). Move the second half of the C++ sources into a second static library. The split
+# point is a unity-batch boundary, so every batch keeps exactly the neighbours it has in
+# the one-library build. The part copies libslic3r_gui's include directories, definitions and
+# options, and the two link each other (a static-library cycle, which CMake repeats on the link
+# line), so consumers still link only libslic3r_gui. This must stay the last libslic3r_gui setting.
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD AND NOT SLIC3R_PCH)
+    get_target_property(_gui_all libslic3r_gui SOURCES)
+    # Balance the two libraries by estimated size: a source with its own translation unit (a SKIP
+    # source) weighs 8, a batched source 1 (on 2026-10-24 an own-TU object averaged 26 MB, a 16-source
+    # batch 52 MB). The split goes at the first batch boundary that reaches half the total weight.
+    set(_gui_total 0)
+    foreach (_s IN LISTS _gui_all)
+        if (_s MATCHES "\\.cpp$")
+            get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+            if (_skip)
+                math(EXPR _gui_total "${_gui_total} + 8")
+            else ()
+                math(EXPR _gui_total "${_gui_total} + 1")
+            endif ()
+        endif ()
+    endforeach ()
+    set(_gui_split -1)
+    set(_gui_weight 0)
+    set(_gui_seen 0)
+    foreach (_s IN LISTS _gui_all)
+        if (NOT _s MATCHES "\\.cpp$")
+            continue ()
+        endif ()
+        get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+        if (_skip)
+            math(EXPR _gui_weight "${_gui_weight} + 8")
+        else ()
+            math(EXPR _gui_at_boundary "${_gui_seen} % ${SLIC3R_UNITY_BUILD_BATCH_SIZE}")
+            math(EXPR _gui_twice "${_gui_weight} * 2")
+            if (_gui_split LESS 0 AND _gui_at_boundary EQUAL 0 AND _gui_seen GREATER 0 AND NOT _gui_twice LESS _gui_total)
+                set(_gui_split ${_gui_seen})
+            endif ()
+            math(EXPR _gui_weight "${_gui_weight} + 1")
+            math(EXPR _gui_seen "${_gui_seen} + 1")
+        endif ()
+    endforeach ()
+    if (_gui_split LESS 0)
+        set(_gui_split ${_gui_seen})
+    endif ()
+    set(_gui_keep "")
+    set(_gui_part2 "")
+    set(_gui_seen 0)
+    foreach (_s IN LISTS _gui_all)
+        if (NOT _s MATCHES "\\.cpp$")
+            list(APPEND _gui_keep "${_s}")
+            continue ()
+        endif ()
+        if (_gui_seen LESS _gui_split)
+            list(APPEND _gui_keep "${_s}")
+        else ()
+            list(APPEND _gui_part2 "${_s}")
+        endif ()
+        get_source_file_property(_skip "${_s}" SKIP_UNITY_BUILD_INCLUSION)
+        if (NOT _skip)
+            math(EXPR _gui_seen "${_gui_seen} + 1")
+        endif ()
+    endforeach ()
+    list(LENGTH _gui_part2 _gui_part2_n)
+endif ()
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD AND NOT SLIC3R_PCH AND _gui_part2_n GREATER 0)
+    message(STATUS "libslic3r_gui: /Z7 unity build, ${_gui_part2_n} sources moved to libslic3r_gui_part2 (4 GB .lib limit)")
+    set_property(TARGET libslic3r_gui PROPERTY SOURCES ${_gui_keep})
+    add_library(libslic3r_gui_part2 STATIC ${_gui_part2})
+    slic3r_unity_build(libslic3r_gui_part2)
+    target_include_directories(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_DEFINITIONS>)
+    target_compile_options(libslic3r_gui_part2 PRIVATE $<TARGET_PROPERTY:libslic3r_gui,COMPILE_OPTIONS>)
+    target_link_libraries(libslic3r_gui_part2 libslic3r_gui)
+    target_link_libraries(libslic3r_gui libslic3r_gui_part2)
+endif ()

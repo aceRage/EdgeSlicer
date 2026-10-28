@@ -207,11 +207,63 @@ std::string mirror_change_fingerprint(const std::string& logged_in_uid)
                 return std::string();
             fp += tree;
         }
-        const bfs::path man_path = bfs::path(Slic3r::data_dir()) / "user" / "default" / ".bs_mirror_manifest.json";
+        const bfs::path dst_root = bfs::path(Slic3r::data_dir()) / "user" / "default";
+        const bfs::path man_path = dst_root / ".bs_mirror_manifest.json";
         fp += "manifest=" + mirror::file_stamp(man_path.string()) + "\n";
+        // The mirror's output folder, after the manifest line so a run's own writes never count as
+        // "the source moved while it ran" (fingerprint_source_part). Fork-native user presets live
+        // here too, so saving one also makes the next start run the mirror: correct, just not free.
+        boost::system::error_code ec;
+        if (bfs::is_directory(dst_root, ec)) {
+            const std::string dest = mirror::source_tree_fingerprint(dst_root.string());
+            if (dest.empty())
+                return std::string();
+            fp += "dest=\n" + dest;
+        } else {
+            fp += "dest=<none>\n";
+        }
         return fp;
     } catch (...) {
         return std::string();
+    }
+}
+
+namespace {
+bfs::path mirror_gate_path() { return bfs::path(Slic3r::data_dir()) / "cache" / "preset_mirror_gate.txt"; }
+} // namespace
+
+bool mirror_startup_can_skip(const std::string& fingerprint)
+{
+    try {
+        if (fingerprint.empty())
+            return false;
+        const bfs::path p = mirror_gate_path();
+        boost::system::error_code ec;
+        if (!bfs::exists(p, ec))
+            return false;
+        return mirror::mirror_gate_record_allows_skip(read_file(p), Snapmaker_VERSION, fingerprint);
+    } catch (...) {
+        return false;
+    }
+}
+
+void mirror_persist_gate(const std::string& last_clean_fingerprint)
+{
+    try {
+        const bfs::path   p      = mirror_gate_path();
+        const std::string record = mirror::mirror_gate_record(Snapmaker_VERSION, last_clean_fingerprint);
+        boost::system::error_code ec;
+        if (record.empty()) {
+            bfs::remove(p, ec);
+            return;
+        }
+        bfs::create_directories(p.parent_path(), ec);
+        std::string err;
+        if (!Slic3r::write_file_atomically(p.string(), record, &err)) {
+            BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] could not keep the skip gate: " << err;
+            bfs::remove(p, ec); // never leave an older record that could vouch for the wrong state
+        }
+    } catch (...) {
     }
 }
 

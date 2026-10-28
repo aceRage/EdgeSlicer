@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace libvgcode {
@@ -93,6 +94,26 @@ public:
     //
     void set_smooth_look(bool enabled, const std::array<float, 128>& looks);
     bool is_smooth_look() const;
+    //
+    // EDGE (Showcase realism 1b): a host's own lighting for the smooth look. `prelude` is GLSL put
+    // ahead of the segments fragment shader (after its #version line, with EXTERNAL_LIGHTING
+    // defined) and compiled into a second program; it must define
+    //   vec3 external_lit(vec3 n, vec3 v, vec3 tangent, vec3 base_color, vec3 world_position,
+    //                     float groove, float shadow, int look);
+    //   vec4 external_output(vec3 lit);
+    // and must not declare any name the segments fragment shader declares. `sampler_units` places
+    // the prelude's samplers (each on a unit of its own, clear of 0-4 and 10). An empty prelude
+    // drops the program. Returns false, with the compiler's message in `error`, when it does not
+    // build; the built-in look is then kept. Needs the GL context current. Desktop GL only (the ES
+    // build always returns false).
+    //
+    bool set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                              std::string* error = nullptr);
+    // The prelude's program, for the host to set its uniforms before render() (0 = none).
+    unsigned int get_fragment_prelude_program() const;
+    // Draw the smooth look with the prelude's lighting (only while the smooth look is on and the
+    // prelude built). Off by default; Preview never sets it.
+    void set_use_fragment_prelude(bool use);
     //
     // ORCA: section view. Cuts away where dot(plane, (x, y, z, 1)) < 0; { 0, 0, 0, 1 } keeps all.
     //

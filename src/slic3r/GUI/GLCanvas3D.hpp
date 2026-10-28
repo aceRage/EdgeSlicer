@@ -799,11 +799,7 @@ public:
     }
 
     void load_arrange_settings();
-    ArrangeSettings& get_arrange_settings();// { return get_arrange_settings(this); }
-    ArrangeSettings& get_arrange_settings(PrintSequence print_seq) {
-        return (print_seq == PrintSequence::ByObject) ? m_arrange_settings_fff_seq_print
-            : m_arrange_settings_fff;
-    }
+    ArrangeSettings& get_arrange_settings();
 
     class SequentialPrintClearance
     {
@@ -1336,17 +1332,6 @@ public:
     void highlight_toolbar_item(const std::string& item_name);
     void highlight_gizmo(const std::string& gizmo_name);
 
-    ArrangeSettings get_arrange_settings() const {
-        const ArrangeSettings &settings = get_arrange_settings();
-        ArrangeSettings ret = settings;
-        if (&settings == &m_arrange_settings_fff_seq_print) {
-            ret.distance = std::max(ret.distance,
-                                    float(min_object_distance(*m_config)));
-        }
-
-        return ret;
-    }
-
     // Timestamp for FPS calculation and notification fade-outs.
     static int64_t timestamp_now() {
 #ifdef _WIN32
@@ -1399,6 +1384,11 @@ public:
     Vec3d _mouse_to_3d(const Point& mouse_pos, float* z = nullptr);
 
     bool make_current_for_postinit();
+    // The ImGui font size and style scale this canvas uses (em unit, display scale). _resize() applies
+    // it; post_init applies it before the first new_frame(), so the font atlas is built once at the
+    // size the first render keeps, not at the default size and again at the first resize (startup
+    // round 2: each build is 0.5-1.2 s).
+    void apply_imgui_scaling();
     // Ultra: make a usable GL context current and finish the one-time GL init, with no
     // dependency on this canvas ever having been shown on screen. Prefers the visible
     // canvas's context (GTK hidden-canvas SetCurrent fails) and falls back to this.
@@ -1524,6 +1514,9 @@ private:
     // Orca #15770: X-Ray view.
     bool _is_xray_view_active() const;
     void _render_xray_volumes();
+    // Orca #16681: the painting gizmos clip the selected instance at the plate; see _render_below_plate_volumes().
+    bool _is_below_plate_view_active() const;
+    void _render_below_plate_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
     //BBS: render a plane for assemble
@@ -1559,7 +1552,7 @@ private:
     void _render_selection_sidebar_hints();
     //BBS: GUI refactor: adjust main toolbar position
     bool _render_orient_menu(float left, float right, float bottom, float top);
-    bool _render_arrange_menu(float left, float right, float bottom, float top);
+    void _render_arrange_menu(float left, float right, float bottom, float top);
     void _render_3d_navigator();
     /**
      * @brief Renders the fit-camera button next to the 3D navigator.
