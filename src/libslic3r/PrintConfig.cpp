@@ -2810,6 +2810,41 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
+    // Multi-colour (coextruded) filaments, P1 (tests/design_multicolour_filament_view.md, 4.1).
+    // Per slot, next to filament_multi_colors, and visual only: Print::apply() strips them
+    // (visual_only_option_keys()), so they never reach the slicer, the G-code or a re-slice.
+    // Deliberately not in the static PrintConfig, so print_config_diffs and the placeholder
+    // parser cannot see them either.
+    def = this->add("filament_colour_split", coStrings);
+    def->label = L("Colour proportions");
+    def->tooltip = L("Visual only. How much of the strand each colour of a multi-colour filament takes, in percent, "
+                     "'|'-separated in the order of the colours. Empty means an equal split.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("filament_colour_angle", coFloats);
+    def->label = L("Colour rotation");
+    def->tooltip = L("Visual only. Which way the first colour of a multi-colour filament faces, in degrees "
+                     "anticlockwise from the printer's front, seen from above.");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -360;
+    def->max = 360;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
+    def = this->add("filament_colour_twist", coFloats);
+    def->label = L("Colour twist");
+    def->tooltip = L("Visual only. How far a multi-colour filament turns while it is extruded, in degrees per metre "
+                     "of filament. 0 means it does not turn.");
+    def->sidetext = u8"°/m"; // degrees per metre, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -3600;
+    def->max = 3600;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
     def->tooltip  = L("first small thumb");
@@ -6902,7 +6937,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("seam_gap", coFloatOrPercent);
     def->label = L("Seam gap");
     def->tooltip = L("In order to reduce the visibility of the seam in a closed loop extrusion, the loop is interrupted and shortened by a specified amount.\n"
-                     "This amount can be specified in millimeters or as a percentage of the current extruder diameter. The default value for this parameter is 10%.");
+                     "This amount can be specified in millimeters or as a percentage of the nozzle diameter. The default value for this parameter is 10%.");
     def->sidetext = L("mm or %");
     def->min = 0;
     def->mode = comAdvanced;
@@ -7432,6 +7467,21 @@ void PrintConfigDef::init_fff_params()
                     "so the tower ends up below the model and the toolhead has to reach down to it. "
                     "Layouts where that would collide with an already printed object are rejected. "
                     "Has no effect with smooth timelapse, which needs a tower on every layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #15841.
+    def = this->add("wipe_tower_sparse_layers_combination", coBool);
+    def->label = L("Combine sparse layers");
+    def->tooltip = L("If enabled, consecutive layers on which the prime tower has no filament change are printed as a single "
+                     "thicker tower layer instead of one thin layer each, the same way infill combination merges sparse infill. "
+                     "The merged layer is printed at the top of the run, at the height of everything it covers.\n\n"
+                     "Only whole layers are merged, and never past the maximum layer height of the nozzle printing the tower "
+                     "(three quarters of the nozzle diameter when that is left at 0). Two or more layers therefore have to fit "
+                     "under that limit before anything changes at all: at a 0.2 mm layer height under a 0.3 mm maximum nothing "
+                     "is merged, while at 0.1 mm three layers become one.\n\n"
+                     "Unlike \"No sparse layers\" the tower keeps following the model, so the toolhead never has to reach down to it. "
+                     "Has no effect with \"No sparse layers\" or smooth timelapse, which needs a tower on every layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8804,7 +8854,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: on Bambu Lab printers the brim then grows with the tower height (8 mm from 100 mm up), on other printers the prime tower gets no brim.");
+    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: the brim then grows with the tower height (8 mm from 100 mm up).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
@@ -10952,6 +11002,112 @@ const std::vector<std::string>& part_support_keys()
         "support_threshold_angle",
     };
     return s_keys;
+}
+
+const std::set<std::string>& visual_only_option_keys()
+{
+    // Multi-colour filaments P1. Glow (G1) and the gradient cycle length (P6) add their keys here.
+    static const std::set<std::string> s_keys {
+        "filament_colour_split",
+        "filament_colour_angle",
+        "filament_colour_twist",
+    };
+    return s_keys;
+}
+
+namespace {
+
+// One visual-only vector option, whatever its element type, through its typed values vector.
+template<typename Fn>
+bool visit_visual_only_vector(ConfigOption *opt, Fn &&fn)
+{
+    if (opt == nullptr || !opt->is_vector())
+        return false;
+    if (auto *v = dynamic_cast<ConfigOptionStrings*>(opt)) { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionFloats*>(opt))  { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionPercents*>(opt)){ fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionInts*>(opt))    { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionBools*>(opt))   { fn(v->values); return true; }
+    assert(false); // a new visual-only vector type: add it above
+    return false;
+}
+
+} // namespace
+
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
+        if (def == nullptr || opt == nullptr)
+            continue;
+        // New slots take the definition's default (the first element of the default vector), not a
+        // copy of slot 1 as ConfigOptionVector::resize() would give them.
+        const size_t old_size = opt->size();
+        opt->resize(n, def->default_value.get());
+        for (size_t i = old_size; i < n; ++i)
+            opt->set_at(def->default_value.get(), i, 0);
+    }
+}
+
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index)
+{
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [index](auto &values) {
+            if (index < values.size())
+                values.erase(values.begin() + index);
+        });
+}
+
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to)
+{
+    if (from == to)
+        return;
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [from, to](auto &values) {
+            if (from >= values.size() || to >= values.size())
+                return;
+            auto value = values[from];
+            values.erase(values.begin() + from);
+            values.insert(values.begin() + to, value);
+        });
+}
+
+void strip_visual_only_options(DynamicPrintConfig &config)
+{
+    for (const std::string &key : visual_only_option_keys())
+        config.erase(key);
+}
+
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig snapshot;
+    for (const std::string &key : visual_only_option_keys())
+        if (const ConfigOption *opt = config.option(key))
+            snapshot.set_key_value(key, opt->clone());
+    return snapshot;
+}
+
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        if (const ConfigOption *opt = snapshot.option(key))
+            config.set_key_value(key, opt->clone());
+        else
+            config.erase(key);
+    }
+    visual_only_resize_slots(config, n);
+}
+
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors)
+{
+    const auto *multi = config.option<ConfigOptionStrings>("filament_multi_colors");
+    auto       *split = config.option<ConfigOptionStrings>("filament_colour_split");
+    if (multi == nullptr || split == nullptr)
+        return;
+    for (size_t i = 0; i < split->values.size() && i < multi->values.size(); ++i)
+        if (i >= old_multi_colors.size() || old_multi_colors[i] != multi->values[i])
+            split->values[i].clear();
 }
 
 DynamicPrintConfig DynamicPrintConfig::full_print_config()

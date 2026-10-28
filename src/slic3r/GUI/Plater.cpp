@@ -2932,6 +2932,8 @@ Sidebar::Sidebar(Plater *parent)
             // takes precedence over the single-color value.)
             auto* multi_colors = pb->project_config.option<ConfigOptionStrings>("filament_multi_colors");
             auto* color_modes  = pb->project_config.option<ConfigOptionInts>("filament_colour_mode");
+            // Multi-colour P1: replaced slots start with an equal split again (design 4.5).
+            const std::vector<std::string> old_multi_colors_before_palette = multi_colors ? multi_colors->values : std::vector<std::string>{};
             if (multi_colors)
                 multi_colors->values.resize(target_count);
             if (color_modes)
@@ -2953,6 +2955,7 @@ Sidebar::Sidebar(Plater *parent)
             const std::vector<MixedFilament> old_mixed_snapshot = pb->mixed_filaments.mixed_filaments();
 
             pb->set_num_filaments(static_cast<unsigned int>(target_count), std::vector<std::string>{});
+            reset_colour_split_where_colours_changed(pb->project_config, old_multi_colors_before_palette);
 
             // Restore custom entries that were wiped by clear_custom_entries
             // in update_multi_material_filament_presets.  add_batch_custom_
@@ -10178,6 +10181,8 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
         ConfigOptionStrings* co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
         ConfigOptionStrings* mco = preset_bundle->project_config.option<ConfigOptionStrings>("filament_multi_colors");
         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
+        // Multi-colour P1: a slot whose colours the sync replaces starts with an equal split (design 4.5).
+        const std::vector<std::string> old_multi_colors_before_sync = mco ? mco->values : std::vector<std::string>{};
 
         // Snapmaker #1052: slot 0's name is taken only after Edge's own fallback
         // (CANVAS Generic @ECC, then vendor/colour resolve). Upstream records a
@@ -10229,6 +10234,7 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
                 cmo->values[i] = FilamentColorModeToConfig(syncedData[i].m_color.NormalizedMode());
             }
         }
+        reset_colour_split_where_colours_changed(preset_bundle->project_config, old_multi_colors_before_sync);
 
         if (created_user_presets) {
             // The new presets must be compatible and visible before the combos are rebuilt below.
@@ -12923,9 +12929,19 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     "mixed_filament_pointillism_pixel_size",
                                     "mixed_filament_pointillism_line_gap",
                                     "mixed_filament_component_bias_enabled",
-                                    "mixed_filament_surface_indentation"
+                                    "mixed_filament_surface_indentation",
+                                    // Multi-colour P1: visual only, they follow the adopted colours.
+                                    "filament_colour_split",
+                                    "filament_colour_angle",
+                                    "filament_colour_twist"
                                 };
+                                // A file without them gets the defaults, not the previous project's values
+                                // (apply_only() keeps a key the file lacks), as PresetBundle's project load does.
+                                for (const std::string &key : visual_only_option_keys())
+                                    if (!config_loaded.has(key))
+                                        preset_bundle->project_config.erase(key);
                                 preset_bundle->project_config.apply_only(config_loaded, imported_project_option_keys, true);
+                                visual_only_resize_slots(preset_bundle->project_config, desired_physical_filaments);
                                 if (current_num_filaments != desired_physical_filaments) {
                                     q->confirm_auto_generated_gradients(desired_physical_filaments);
                                     preset_bundle->set_num_filaments(unsigned(desired_physical_filaments));
