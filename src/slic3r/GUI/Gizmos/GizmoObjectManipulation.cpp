@@ -32,24 +32,6 @@ const double GizmoObjectManipulation::mm_to_in = 0.0393700787;
 const double GizmoObjectManipulation::oz_to_g = 28.34952;
 const double GizmoObjectManipulation::g_to_oz = 0.035274;
 
-// Helper function to be used by drop to bed button. Returns lowest point of this
-// volume in world coordinate system.
-static double get_volume_min_z(const GLVolume* volume)
-{
-    const Transform3f& world_matrix = volume->world_matrix().cast<float>();
-
-    // need to get the ModelVolume pointer
-    const ModelObject* mo = wxGetApp().model().objects[volume->composite_id.object_id];
-    const ModelVolume* mv = mo->volumes[volume->composite_id.volume_id];
-    const TriangleMesh& hull = mv->get_convex_hull();
-
-    float min_z = std::numeric_limits<float>::max();
-    for (const stl_vertex& vert : hull.its.vertices) {
-        min_z = std::min(min_z, Vec3f::UnitZ().dot(world_matrix * vert));
-    }
-    return min_z;
-}
-
 GizmoObjectManipulation::GizmoObjectManipulation(GLCanvas3D& glcanvas)
     : m_glcanvas(glcanvas)
 {
@@ -264,12 +246,14 @@ void GizmoObjectManipulation::update_reset_buttons_visibility()
 {
     const Selection& selection = m_glcanvas.get_selection();
 
+    // Assembly view has its own selection and transformations, which drop_selection() doesn't update
+    m_enable_drop_to_bed = m_glcanvas.get_canvas_type() == GLCanvas3D::ECanvasType::CanvasView3D && selection.can_drop();
+
     if (selection.is_single_full_instance() || selection.is_single_volume_or_modifier()) {
         const GLVolume *               volume = selection.get_first_volume();
 
         Vec3d rotation;
         Vec3d scale;
-        double min_z = 0.;
 
         if (selection.is_single_full_instance()) {
             rotation = volume->get_instance_rotation();
@@ -278,12 +262,10 @@ void GizmoObjectManipulation::update_reset_buttons_visibility()
         else {
             rotation = volume->get_volume_rotation();
             scale = volume->get_volume_scaling_factor();
-            min_z = get_volume_min_z(volume);
         }
         m_show_clear_rotation = !rotation.isApprox(m_init_rotation);
         m_show_reset_0_rotation = !rotation.isApprox(Vec3d::Zero());
         m_show_clear_scale = (m_cache.scale / 100.0f - Vec3d::Ones()).norm() > 0.001;
-        m_show_drop_to_bed = (std::abs(min_z) > EPSILON);
     }
 }
 
@@ -923,11 +905,12 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
     if (render_combo(imgui_wrapper, "", modes, selection_idx, 0, coord_combo_width)) {
         combox_changed = true;
     }
+    ImGuiWrapper::pop_combo_style();
+    // ORCA: after pop_combo_style(), whose light popup background would hide the tooltip's white text.
     if (ImGui::IsItemHovered()) {
         auto tooltip_str = _L("Coordinate system used for transform actions.");
         imgui_wrapper->tooltip(tooltip_str, imgui_wrapper->calc_text_size(tooltip_str).x + 3 * space_size);
     }
-    ImGuiWrapper::pop_combo_style();
 
     // ORCA use TextColored to match axes color
     float offset_to_center = (unit_size - ImGui::CalcTextSize("O").x) / 2;
@@ -1203,6 +1186,15 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
         if (auto *move_gizmo = dynamic_cast<GLGizmoMove3D *>(dock_owner))
             move_gizmo->render_snap_to_surface_ui(imgui_wrapper, ImGui::GetFontSize() * 20.0f);
         ImGui::Separator();
+        // ORCA #16323: Drop uses the same check as the context menu and Auto-Drop (model parts only).
+        imgui_wrapper->disabled_begin(!m_enable_drop_to_bed);
+        if (imgui_wrapper->button(_L("Drop"))) {
+            wxGetApp().plater()->drop_selection();
+            UpdateAndShow(true);
+        }
+        imgui_wrapper->disabled_end();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            imgui_wrapper->tooltip(_L("Move the selection along Z so that its lowest point touches the bed."), ImGui::GetFontSize() * 20.0f);
         bool hide_other_plates = wxGetApp().app_config->get_bool("hide_other_plates_on_move");
         if (imgui_wrapper->checkbox(_L("Hide other plates while moving"), hide_other_plates))
             wxGetApp().app_config->set_bool("hide_other_plates_on_move", hide_other_plates);
@@ -1825,11 +1817,12 @@ void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_w
     if (render_combo(imgui_wrapper, "", modes, selection_idx, 0, coord_combo_width)) {
         combox_changed = true;
     }
+    ImGuiWrapper::pop_combo_style();
+    // ORCA: after pop_combo_style(), whose light popup background would hide the tooltip's white text.
     if (ImGui::IsItemHovered()) {
         auto tooltip_str = _L("Coordinate system used for transform actions.");
         imgui_wrapper->tooltip(tooltip_str, imgui_wrapper->calc_text_size(tooltip_str).x + 3 * space_size);
     }
-    ImGuiWrapper::pop_combo_style();
 
     // ORCA use TextColored to match axes color
     float offset_to_center = (unit_size - ImGui::CalcTextSize("O").x) / 2;
