@@ -78,6 +78,9 @@ if command -v timeout > /dev/null 2>&1; then LIMIT="timeout 900"
 elif command -v gtimeout > /dev/null 2>&1; then LIMIT="gtimeout 900"
 else LIMIT=""; fi
 
+# Fresh datadirs on every run: a model-only fixture takes its filament colour from whatever the
+# datadir last loaded, so a rerun into the same <out> must not inherit an earlier run's U1 settings.
+rm -rf "$OUT/datadir_golden" "$OUT/datadir_candidate"
 mkdir -p "$OUT/fixtures" "$OUT/golden" "$OUT/candidate" "$OUT/diff" "$OUT/datadir_golden" "$OUT/datadir_candidate"
 OUT=$(cd "$OUT" && pwd)
 MODEL="$REPO/resources/handy_models/3DBenchy.3mf"
