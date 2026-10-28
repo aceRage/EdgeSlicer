@@ -8,10 +8,13 @@
 
 #include "libslic3r/Showcase/MultiColourFilament.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -117,6 +120,34 @@ TEST_CASE("The shared GLSL is one text for the shader and the C++ check", "[Mult
     CHECK(prelude.find("vec3 external_base_color(vec3 base_color, vec2 section, vec3 right, vec3 dir, float extruded_volume, int look, int role)") !=
           std::string::npos);
     CHECK(prelude.find("#version") == std::string::npos);   // libvgcode puts the prelude after its own
+}
+
+TEST_CASE("The coextruded-colour prelude shares no name with libvgcode's shader or realism 1b's prelude", "[MultiColour][Glsl]")
+{
+    // Both preludes go into the same program (libvgcode::Viewer::set_base_color_prelude/set_fragment_prelude).
+    const std::vector<std::string> mine = { "mc_colors", "mc_bounds", "mc_params", "mc_global", "external_base_color" };
+    for (const std::string &n : Slic3r::Showcase::libvgcode_fragment_globals()) {
+        INFO(n);
+        CHECK(n.rfind("mc_", 0) != 0);
+        CHECK(std::find(mine.begin(), mine.end(), n) == mine.end());
+    }
+    auto repo_file = [](const std::string &relative) {
+        std::ifstream     in(std::string(TEST_DATA_DIR) + "/../../" + relative, std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        return ss.str();
+    };
+    std::string       error;
+    const std::string lighting = Slic3r::Showcase::toolpath_prelude(repo_file("resources/shaders/140/showcase_material.fs"),
+                                                                    repo_file("resources/shaders/140/showcase_toolpath.glsl"), &error);
+    INFO(error);
+    REQUIRE_FALSE(lighting.empty());
+    CHECK(lighting.find("mc_") == std::string::npos);
+    CHECK(lighting.find("external_base_color") == std::string::npos);
+    for (const std::string &n : Slic3r::Showcase::glsl_global_names(lighting)) {
+        INFO(n);
+        CHECK(std::find(mine.begin(), mine.end(), n) == mine.end());
+    }
 }
 
 TEST_CASE("The shader's bead colour matches the reference model at random inputs", "[MultiColour][Glsl]")
