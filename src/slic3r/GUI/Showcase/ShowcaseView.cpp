@@ -734,7 +734,8 @@ void ShowcaseView::build_panel()
     layer_lines.Add(_L("Exaggerated"));
     m_layer_lines = choice(layer_lines);
     m_layer_lines->SetToolTip(_L("Printed layer lines on the model at its real layer height. A layer is often thinner than a pixel "
-                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports."));
+                                 "when the whole model is in view, so the lines show in close-ups and in large, high quality exports. "
+                                 "Model only: the toolpaths view already shows the real layers."));
     row(_L("Layer lines"), m_layer_lines);
     // Multi-colour P2 (design 4.4): the coextruded look of dual- and tri-colour filaments.
     m_coextruded = new wxCheckBox(m_side, wxID_ANY, _L("Coextruded colours"));
@@ -1832,8 +1833,10 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_tone, m_layer_lines, m_coextruded, m_use_as_cover, m_source, m_smooth_auto })
+                                                          m_exposure, m_tone, m_coextruded, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
+    // The toolpaths are the real layers, so the procedural lines only apply to the model.
+    m_layer_lines->Enable(editable && s.source != "toolpaths");
     m_smooth->Enable(editable && s.materials.toolpath_smoothness >= 0.f);
     for (wxChoice *c : m_mat_choices)
         c->Enable(editable);

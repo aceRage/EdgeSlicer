@@ -1514,6 +1514,9 @@ private:
     // Orca #15770: X-Ray view.
     bool _is_xray_view_active() const;
     void _render_xray_volumes();
+    // Orca #16681: the painting gizmos clip the selected instance at the plate; see _render_below_plate_volumes().
+    bool _is_below_plate_view_active() const;
+    void _render_below_plate_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
     //BBS: render a plane for assemble
