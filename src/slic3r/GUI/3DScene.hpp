@@ -357,7 +357,7 @@ public:
     virtual void        render();
 
     //BBS: add simple render function for thumbnail
-    void simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_objects, std::vector<ColorRGBA>& extruder_colors, bool ban_light =false);
+    void simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_objects, std::vector<ColorRGBA>& extruder_colors, bool ban_light =false, bool ban_color_volume = false);
 
     void                set_bounding_boxes_as_dirty() {
         m_transformed_bounding_box.reset();
