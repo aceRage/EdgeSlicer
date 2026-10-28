@@ -1874,9 +1874,11 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 
 bool wipe_tower_rotation_supported()
 {
-    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), plus the printer's
+    // wipe_tower_type (Orca #12781): only WipeTower2 (Type 2) rotates.
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    return bundle != nullptr && !bundle->is_bbl_vendor();
+    return bundle != nullptr && !bundle->is_bbl_vendor() &&
+           resolve_wipe_tower_type(bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
 }
 
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)

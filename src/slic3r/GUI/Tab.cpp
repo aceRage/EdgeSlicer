@@ -2000,7 +2000,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
     }
 
-    if(opt_key == "purge_in_prime_tower")
+    // Orca #12781: the Process tab's WipeTower2-only options follow wipe_tower_type too.
+    if(opt_key == "purge_in_prime_tower" || opt_key == "wipe_tower_type")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
 
     if (m_type == Preset::TYPE_PRINT && opt_key == "dithering_local_z_mode") {
@@ -2084,7 +2085,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
     }
 
-    if(opt_key == "purge_in_prime_tower")
+    // Orca #12781: the Process tab's WipeTower2-only options follow wipe_tower_type too.
+    if(opt_key == "purge_in_prime_tower" || opt_key == "wipe_tower_type")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
 
 
@@ -6168,6 +6170,7 @@ if (is_marlin_flavor)
         optgroup->append_single_option_line("manual_filament_change", "semm#manual-filament-change");
 
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
+        optgroup->append_single_option_line("wipe_tower_type", "semm#wipe-tower-type");
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
         optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
@@ -6705,6 +6708,11 @@ void TabPrinter::toggle_options()
     }
 
     if (m_active_page->title() == L("Multimaterial")) {
+        // Orca #12781: Bambu Lab printers always use the Type 1 tower, so they never see the choice.
+        // The ramming / loading options below drive the Type 2 tower (WipeTower2) only.
+        toggle_line("wipe_tower_type", !is_BBL_printer);
+        const bool supports_wipe_tower_2 = !is_BBL_printer && m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
+
         // SoftFever: hide specific settings for BBL printer
         for (auto el : {
                  "enable_filament_ramming",
@@ -6714,7 +6722,7 @@ void TabPrinter::toggle_options()
                  "extra_loading_move",
                  "high_current_on_filament_swap",
              })
-            toggle_option(el, !is_BBL_printer);
+            toggle_option(el, supports_wipe_tower_2);
 
         auto bSEMM = m_config->opt_bool("single_extruder_multi_material");
         if (!bSEMM && m_config->opt_bool("manual_filament_change")) {
@@ -6724,15 +6732,15 @@ void TabPrinter::toggle_options()
         }
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
-        toggle_option("purge_in_prime_tower", bSEMM && !is_BBL_printer);
+        toggle_option("purge_in_prime_tower", bSEMM && supports_wipe_tower_2);
 
         // Orca #13703: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
-        // using the Type 2 wipe tower (here: every non-BBL printer). SEMM already always travels to the tower
+        // using the Type 2 wipe tower. SEMM already always travels to the tower
         // as part of the purge, so the option is irrelevant there.
         const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
-        toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
+        toggle_option("tool_change_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
         // Orca #15144: same scope as the option above.
-        toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
+        toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;

@@ -936,6 +936,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "tool_change_on_wipe_tower"
             || opt_key == "wait_for_temp_on_wipe_tower"
             || opt_key == "purge_in_prime_tower"
+            || opt_key == "wipe_tower_type"
             || opt_key == "z_offset"
             || opt_key == "support_multi_bed_types"
             // Chameleon brim: changes which extruder each brim run prints under
@@ -6522,6 +6523,15 @@ Polygons Print::first_layer_islands() const
     return islands;
 }
 
+WipeTowerType Print::wipe_tower_type() const
+{
+    // As upstream: the vendor flag (set by the GUI and the CLI before slicing) makes it Type1 on a
+    // Bambu Lab printer; otherwise the printer's wipe_tower_type, Type2 by default. Not
+    // resolve_wipe_tower_type(): its printer_model test would also catch a non-Bambu-vendor preset
+    // with a Bambu Lab model, which sliced with WipeTower2 before this option existed.
+    return is_BBL_printer() ? WipeTowerType::Type1 : m_config.wipe_tower_type.value;
+}
+
 Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) const
 {
     Points corners;
@@ -6554,7 +6564,7 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
         // first-layer footprint. The Bambu rib path above already uses the generated
         // outline; this fallback is the non-Bambu WipeTower2 path.
         Vec2d center = (pts[0] + pts[2])/2.;
-        const bool   has_cone   = !is_BBL_printer() && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone;
+        const bool   has_cone   = this->wipe_tower_type() == WipeTowerType::Type2 && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone;
         const double cone_angle = has_cone ? m_config.wipe_tower_cone_angle.value : 0.;
         const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height,
                                                                                 m_wipe_tower_data.depth, cone_angle);
@@ -6737,9 +6747,10 @@ void Print::_make_wipe_tower()
     for (unsigned int i = 0; i<number_of_extruders; ++i)
         wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
 
-    const auto bUseWipeTower2 = is_BBL_printer() ? false : true;
+    // Orca #12781: the tower generator follows wipe_tower_type (always Type1 on Bambu Lab printers).
+    const bool bUseWipeTower2 = this->wipe_tower_type() == WipeTowerType::Type2;
     // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
-    if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && !is_BBL_printer()) {
+    if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && bUseWipeTower2) {
         for (unsigned int i = 0; i < number_of_extruders; ++i) {
             for (unsigned int j = 0; j < number_of_extruders; ++j) {
                 if (wipe_volumes[i][j] > 0) {
@@ -6750,7 +6761,7 @@ void Print::_make_wipe_tower()
     }
 
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
-    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
+    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
 
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
