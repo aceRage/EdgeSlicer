@@ -7,6 +7,7 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/GUI/RemoteHub.hpp"
+#include "slic3r/GUI/RemoteSliceV1.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -984,4 +985,130 @@ TEST_CASE("a P1/A1 live-view camera (b<hash>) is registered once and kept across
     const LiveMap   live       = live_of(registered, true);
     CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, own), registered, &live)));
     CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams({}, own), merge_desired_streams({}, own), &live)));
+}
+
+// ---- PR D: arrange (EdgeSlicerApp docs/design_native_slice_parity.md section 5) ------------
+// The allow-list entries of the new instance routes, the /pair flags, the manifest version and the
+// `blocked` reason /api/plates gives a plate the PC will not slice.
+
+TEST_CASE("arrange: the hub proxies the new instance routes and nothing around them", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    // arrange / orient one plate (all=1 is a query value, so the path stays this closed set)
+    CHECK(instance_api_allowed("POST", "/api/plates/0/arrange"));
+    CHECK(instance_api_allowed("POST", "/api/plates/12/arrange"));
+    CHECK(instance_api_allowed("POST", "/api/plates/3/orient"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/arrange"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/plates/0/arrange"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/orient"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates//arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/arrange/x"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/all/arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/arrange"));
+
+    // the instances on no plate: a name in the index position, matched on its own
+    CHECK(instance_api_allowed("GET", "/api/plates/loose"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/loose"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loose/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loose/layout"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loosely"));
+
+    CHECK(instance_api_allowed("POST", "/api/objects/printable"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/objects/printable"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/objects/printable/x"));
+    CHECK(instance_api_allowed("POST", "/api/undo"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/undo"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/redo"));
+
+    // what was there before is unchanged
+    CHECK(instance_api_allowed("GET", "/api/plates"));
+    CHECK(instance_api_allowed("GET", "/api/plates/0/layout"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/layout"));
+    CHECK(instance_api_allowed("POST", "/api/objects/transform"));
+    CHECK(instance_api_allowed("POST", "/api/plates/0/send"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/debug/anything"));
+}
+
+TEST_CASE("arrange: /pair lists slice_arrange, slice_orient and slice_undo, and the manifest is v4", "[RemoteHub][arrange]")
+{
+    const auto f   = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    auto       has = [&f](const char* s) { return std::find(f.begin(), f.end(), s) != f.end(); };
+    CHECK(has("slice_arrange"));
+    CHECK(has("slice_orient"));
+    CHECK(has("slice_undo"));
+    for (const char* s : { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" })
+        CHECK(has(s));
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size()); // no flag twice
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 4);
+}
+
+TEST_CASE("arrange: why a plate cannot slice", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::plate_blocked;
+    // { outside, printable, off_plate }
+    const PlateInstance inside { false, true }, over { true, true }, off_inside { false, false }, off_over { true, false };
+    const PlateInstance away { true, true, true }, off_away { true, false, true };
+
+    CHECK(plate_blocked({}, false) == "empty");
+    CHECK(plate_blocked({}, true) == "empty");
+    CHECK(plate_blocked({ inside }, false) == "");
+    CHECK(plate_blocked({ inside, off_inside }, false) == "");
+    // locked alone does not stop a slice: only when Arrange would be the fix
+    CHECK(plate_blocked({ inside }, true) == "");
+
+    // a printable object over the edge greys Slice out even next to one that fits
+    CHECK(plate_blocked({ over }, false) == "outside");
+    CHECK(plate_blocked({ inside, over }, false) == "outside");
+    CHECK(plate_blocked({ over, off_inside }, false) == "outside");
+    CHECK(plate_blocked({ over }, true) == "locked");
+    CHECK(plate_blocked({ inside, over }, true) == "locked");
+
+    // nothing set to print: an object over the edge that is not printed does not matter
+    CHECK(plate_blocked({ off_inside }, false) == "not_printable");
+    CHECK(plate_blocked({ off_inside, off_over }, false) == "not_printable");
+    CHECK(plate_blocked({ off_over }, true) == "not_printable");
+    // ... and one printable object inside is enough
+    CHECK(plate_blocked({ off_over, inside }, false) == "");
+
+    // an instance still registered to the plate but wholly off it is left out of the slice: it only
+    // matters when nothing printable is left (and Arrange plate then picks it up)
+    CHECK(plate_blocked({ inside, away }, false) == "");
+    CHECK(plate_blocked({ away }, false) == "outside");
+    CHECK(plate_blocked({ away }, true) == "locked");
+    CHECK(plate_blocked({ away, off_inside }, false) == "outside");
+    CHECK(plate_blocked({ away, over, inside }, false) == "outside");
+    CHECK(plate_blocked({ off_away }, false) == "not_printable");
+}
+
+TEST_CASE("arrange: blocked is null or one of the documented strings", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::blocked_json;
+    CHECK(blocked_json("").is_null());
+    CHECK(blocked_json("outside") == "outside");
+    const std::set<std::string> allowed = { "empty", "outside", "locked", "not_printable" };
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    for (bool locked : { false, true })
+        for (int n = 0; n <= 2; ++n)
+            for (int mask = 0; mask < (1 << (3 * n)); ++mask) {
+                std::vector<PlateInstance> v;
+                for (int i = 0; i < n; ++i) {
+                    const bool outside = mask >> (3 * i) & 1;
+                    v.push_back({ outside, bool(mask >> (3 * i + 1) & 1), outside && (mask >> (3 * i + 2) & 1) });
+                }
+                const std::string r = Slic3r::GUI::SliceV1::plate_blocked(v, locked);
+                CHECK((r.empty() || allowed.count(r) == 1));
+            }
+}
+
+TEST_CASE("arrange: a guarded undo only takes back the step it was told about", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::undo_matches;
+    CHECK(undo_matches("", "Arrange"));
+    CHECK(undo_matches("", ""));
+    CHECK(undo_matches("Arrange", "Arrange"));
+    CHECK_FALSE(undo_matches("Arrange", "Set Position"));
+    CHECK_FALSE(undo_matches("Arrange", ""));
+    CHECK_FALSE(undo_matches("Arrange", "arrange"));
 }

@@ -2792,6 +2792,11 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         n.textContent = e.message || String(e);
         connHint(n);
     }
+    // An unsliced plate's state line: why the PC will not slice it (/api/plates `blocked`), if anything.
+    function plateStateText(p) {
+        var b = { outside: 'Objects off the bed · tap to arrange', locked: 'Objects off the bed · plate locked', not_printable: 'Every object set not to print', empty: 'Empty' }[p.blocked];
+        return b || (p.printable ? 'Not sliced' : 'Empty');
+    }
     function startSlice(plate) {
         api('/slice?plate=' + plate, { method: 'POST' }).then(function(j) {
             activeJob = j.job;
@@ -3073,6 +3078,9 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // ---- Plate layout editor: accurate top-down footprints from /api/plates/{i}/layout; a tap
     // selects, a drag moves, the bar below rotates / scales / centres via /api/objects/transform ----
     var plateData = null, plateSel = null, plateIndex = -1, plateBusy = false;
+    // Objects on no plate (pushed off every bed, e.g. by a smaller printer) from /api/plates/loose;
+    // Arrange (one plate or all, through /api/plates/{i}/arrange and its job) puts things back.
+    var plateLoose = [], plateArranging = false;
     // The sheet has two modes: Prepare (arrange the objects) and Preview (scrub the sliced layers).
     var plateMode = 'prepare';
     try { plateMode = localStorage.getItem('snorca_plate_mode') === 'preview' ? 'preview' : 'prepare'; } catch (e) {}
@@ -3115,7 +3123,8 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         var close = el('span', 'btn small', 'Close'); close.onclick = closePlate; head.appendChild(close);
     }
     function loadPlate() {
-        api('/plates/' + plateIndex + '/layout').then(function(d) {
+        var loose = api('/plates/loose').then(function(l) { return l.objects || []; }).catch(function() { return []; });
+        api('/plates/' + plateIndex + '/layout').then(function(d) { return loose.then(function(l) { plateLoose = l; return d; }); }).then(function(d) {
             plateData = d;
             if (plateSel && !d.objects.some(function(o) { return o.obj === plateSel.obj && o.inst === plateSel.inst; })) plateSel = null;
             if (plateSel) plateSel = d.objects.filter(function(o) { return o.obj === plateSel.obj && o.inst === plateSel.inst; })[0];
@@ -3128,6 +3137,31 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         var body = 'obj=' + plateSel.obj + '&inst=' + plateSel.inst + '&' + params;
         api('/objects/transform', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
             .then(function() { plateBusy = false; loadPlate(); if (then) then(); })
+            .catch(function(e) { plateBusy = false; fail(e); loadPlate(); });
+    }
+    // Arrange this plate (all: every plate, objects on no plate included) the way the PC's own
+    // Arrange buttons do; the job ends once the PC has moved the objects, then the plate reloads.
+    function arrangePlate(all) {
+        if (plateArranging || plateBusy) return;
+        plateArranging = true; plateSel = null; renderPlateCtl();
+        api('/plates/' + plateIndex + '/arrange' + (all ? '?all=1' : ''), { method: 'POST' }).then(function(j) {
+            var poll = function() {
+                api('/jobs/' + j.job).then(function(s) {
+                    if (s.state === 'running') { setTimeout(poll, 700); return; }
+                    plateArranging = false; thumbStamp = Date.now(); lastPresetsJson = '';
+                    if (s.state === 'error') fail(new Error('Arrange failed: ' + s.error));
+                    loadPlate();
+                }).catch(function() { setTimeout(poll, 1500); });
+            };
+            poll();
+        }).catch(function(e) { plateArranging = false; fail(e); renderPlateCtl(); });
+    }
+    // Centre an object that is on no plate on this one (transform plate=).
+    function bringToPlate(o) {
+        if (plateBusy || plateArranging) return;
+        plateBusy = true;
+        api('/objects/transform', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'obj=' + o.obj + '&inst=' + o.inst + '&plate=' + plateIndex })
+            .then(function() { plateBusy = false; thumbStamp = Date.now(); loadPlate(); })
             .catch(function(e) { plateBusy = false; fail(e); loadPlate(); });
     }
     function svgEl(tag, attrs) { var e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (var k in attrs) e.setAttribute(k, attrs[k]); return e; }
@@ -3541,7 +3575,31 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
     function renderPlateCtl() {
         var ctl = document.querySelector('#plate .ctl'); ctl.innerHTML = '';
-        if (!plateSel) { ctl.appendChild(el('div', 'hint', plateData && plateData.objects.length ? 'Tap an object to select it, drag to move it. Pinch to zoom, drag the bed to pan.' : 'This plate is empty.')); return; }
+        if (!plateSel) {
+            if (plateArranging) { ctl.appendChild(el('div', 'hint', 'Arranging on the PC…')); return; }
+            var out = plateData ? plateData.objects.filter(function(o) { return o.outside; }).length : 0;
+            ctl.appendChild(el('div', 'hint', out ? (out + (out === 1 ? ' object hangs' : ' objects hang') + ' over the edge of the plate: Arrange moves ' + (out === 1 ? 'it' : 'them') + ' back.') :
+                plateData && plateData.objects.length ? 'Tap an object to select it, drag to move it. Pinch to zoom, drag the bed to pan.' : 'This plate is empty.'));
+            var ra = el('div', 'row');
+            ra.appendChild(el('span', 'k', 'Arrange'));
+            if (plateData && plateData.objects.length && !plateData.locked) { var ap = el('span', 'btn small', 'This plate'); ap.onclick = function() { arrangePlate(false); }; ra.appendChild(ap); }
+            var aa = el('span', 'btn small', 'All plates'); aa.onclick = function() { arrangePlate(true); }; ra.appendChild(aa);
+            if (plateData && plateData.locked) ra.appendChild(el('span', 'hint', 'This plate is locked on the PC'));
+            ctl.appendChild(ra);
+            if (plateLoose.length) {
+                var rl = el('div', 'row');
+                rl.appendChild(el('span', 'k', 'No plate'));
+                rl.appendChild(el('span', 'hint', plateLoose.length + (plateLoose.length === 1 ? ' object is' : ' objects are') + ' on no plate:'));
+                plateLoose.slice(0, 4).forEach(function(o) {
+                    var b = el('span', 'btn small', 'Bring ' + (o.name.length > 16 ? o.name.slice(0, 15) + '…' : o.name) + ' here');
+                    b.onclick = function() { bringToPlate(o); };
+                    rl.appendChild(b);
+                });
+                if (plateLoose.length > 4) rl.appendChild(el('span', 'hint', '+' + (plateLoose.length - 4) + ' more: Arrange all plates'));
+                ctl.appendChild(rl);
+            }
+            return;
+        }
         var o = plateSel;
         var gsel = document.querySelector('#plate g[data-obj="' + o.obj + '"][data-inst="' + o.inst + '"]');
         var r1 = el('div', 'row');
@@ -3934,7 +3992,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                 var body = el('div', 'body');
                 var left = el('div');
                 left.appendChild(el('div', 'title', (p.name ? p.name : 'Plate ' + (p.index + 1)) + (p.index === data.current_plate ? ' ·' : '')));
-                left.appendChild(el('div', 'meta state', p.sliced ? (fmtTime(p.time_s) + ' · ' + Math.round(p.filament_g || 0) + ' g' + (p.ready_for_print ? '' : ' · not printable')) : (p.printable ? 'Not sliced' : 'Empty')));
+                left.appendChild(el('div', 'meta state', p.sliced ? (fmtTime(p.time_s) + ' · ' + Math.round(p.filament_g || 0) + ' g' + (p.ready_for_print ? '' : ' · not printable')) : plateStateText(p)));
                 body.appendChild(left);
                 var btns = el('div', 'btns');
                 if (p.printable && !p.locked) {

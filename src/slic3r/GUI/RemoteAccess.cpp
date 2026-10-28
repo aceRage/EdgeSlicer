@@ -5,6 +5,7 @@
 #include "GLCanvas3D.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_App.hpp"
+#include "GUI_ObjectList.hpp"
 #include "HMS.hpp"
 #include "MainFrame.hpp"
 #include "PartPlate.hpp"
@@ -716,6 +717,51 @@ void RemoteAccess::note_slice_done(bool finished_all, bool ok, const std::string
         }
 }
 
+// PR D: plate membership as /plates and the arrange jobs report it - per plate the instances
+// registered on it (overhanging ones included, which the layout used to drop), and how many
+// instances are on no plate at all (pushed fully off the bed, e.g. by a smaller printer). GUI thread.
+struct PlateMembership
+{
+    std::vector<std::vector<SliceV1::PlateInstance>> plates; // by plate index
+    std::vector<int>                                 outside; // per plate: instances hanging over its edge
+    int                                              loose { 0 };
+};
+static PlateMembership plate_membership(Plater* plater)
+{
+    PartPlateList& plates = plater->get_partplate_list();
+    Model&         model  = plater->model();
+    PlateMembership m;
+    m.plates.resize(plates.get_plate_count());
+    m.outside.assign(plates.get_plate_count(), 0);
+    for (size_t oi = 0; oi < model.objects.size(); ++oi)
+        for (size_t ii = 0; ii < model.objects[oi]->instances.size(); ++ii) {
+            const int pi = plates.find_instance((int) oi, (int) ii); // registered, not necessarily contained
+            if (pi < 0 || pi >= (int) m.plates.size()) { ++m.loose; continue; }
+            PartPlate*             p = plates.get_plate(pi);
+            SliceV1::PlateInstance st;
+            st.outside   = !p->contain_instance_totally((int) oi, (int) ii);
+            st.printable = model.objects[oi]->instances[ii]->printable;
+            st.off_plate = st.outside && !p->intersect_instance((int) oi, (int) ii);
+            m.plates[pi].push_back(st);
+            if (st.outside) ++m.outside[pi];
+        }
+    return m;
+}
+
+// What an arrange / orient job reports when it ends: the state its caller re-reads anyway.
+static nlohmann::json plate_membership_json(Plater* plater)
+{
+    PartPlateList&        plates = plater->get_partplate_list();
+    const PlateMembership m      = plate_membership(plater);
+    nlohmann::json        j;
+    j["plates"]      = plates.get_plate_count();
+    j["loose_count"] = m.loose;
+    j["blocked"]     = nlohmann::json::array();
+    for (int i = 0; i < plates.get_plate_count(); ++i)
+        j["blocked"].push_back(SliceV1::blocked_json(SliceV1::plate_blocked(m.plates[i], plates.get_plate(i)->is_locked())));
+    return j;
+}
+
 RemoteAccess::ApiResponse RemoteAccess::api_plates()
 {
     auto out = std::make_shared<nlohmann::json>();
@@ -731,7 +777,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
         j["slicing"]       = plater->is_background_process_slicing();
         j["filaments"]     = nlohmann::json::array();
         std::vector<double> density;
-        if (auto* d = bundle->full_config().option<ConfigOptionFloats>("filament_density"))
+        // Kept alive: full_config() is a temporary, and an option pointer into it dangled by the
+        // time it was read (a length_error on macOS that left /plates without its plates).
+        const DynamicPrintConfig full = bundle->full_config();
+        if (auto* d = full.option<ConfigOptionFloats>("filament_density"))
             density = d->values;
         const ConfigOptionStrings* colors = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
         for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
@@ -741,6 +790,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
             j["filaments"].push_back(f);
         }
         j["plates"] = nlohmann::json::array();
+        const PlateMembership members = plate_membership(plater);
+        j["loose_count"] = members.loose; // PR D: instances on no plate (GET /api/plates/loose)
         for (int i = 0; i < plates.get_plate_count(); ++i) {
             PartPlate*     p = plates.get_plate(i);
             nlohmann::json jp;
@@ -757,6 +808,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
             jp["plate_box"] = { pb.min.x(), pb.min.y(), pb.max.x(), pb.max.y() };
             jp["printable"]       = p->has_printable_instances();
             jp["locked"]          = p->is_locked();
+            // PR D: why the PC will not slice it (null when nothing on the plate stops it), and how
+            // many of its instances hang over the edge.
+            jp["blocked"]         = SliceV1::blocked_json(SliceV1::plate_blocked(members.plates[i], p->is_locked()));
+            jp["outside_count"]   = members.outside[i];
             jp["sliced"]          = p->is_slice_result_valid();
             jp["ready_for_print"] = p->is_slice_result_ready_for_print();
             jp["slicing_percent"] = p->get_slicing_percent();
@@ -959,9 +1014,58 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
 
 // ------------------------------------------------------------ plate layout ----
 
+// One instance as the plate layout draws it (world mm): bounding box, size, position, Z rotation,
+// uniform scale, the convex hull of its model parts, the colour of its filament and whether it is
+// set to print. Shared by the plate layout and the instances on no plate.
+static nlohmann::json layout_instance_json(ModelObject* o, size_t oi, size_t ii, const ConfigOptionStrings* colors)
+{
+    ModelInstance* mi = o->instances[ii];
+    nlohmann::json ji;
+    ji["obj"]  = oi;
+    ji["inst"] = ii;
+    ji["name"] = o->name;
+    const BoundingBoxf3 bb = o->instance_bounding_box(ii);
+    ji["bbox"] = { bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y() };
+    ji["size"] = { bb.size().x(), bb.size().y(), bb.size().z() };
+    const Vec3d off = mi->get_offset();
+    ji["offset"] = { off.x(), off.y(), off.z() };
+    ji["rz"]     = mi->get_rotation().z() * 180.0 / M_PI;
+    ji["scale"]  = mi->get_scaling_factor().x();
+    ji["hull"]   = nlohmann::json::array();
+    {
+        // From the meshes themselves: the volumes' cached 2D hulls are empty until
+        // something (arrange, collision checks) computes them.
+        Points pts;
+        for (const ModelVolume* v : o->volumes)
+            if (v->is_model_part()) {
+                // The volume's 3D convex hull projects to the same outline as the mesh
+                // with a fraction of the vertices; fall back to the mesh when absent.
+                const indexed_triangle_set& its = v->get_convex_hull().its.indices.empty() ? v->mesh().its : v->get_convex_hull().its;
+                const Transform3f t = (mi->get_transformation().get_matrix() * v->get_matrix()).cast<float>();
+                its_collect_mesh_projection_points_above(its, t, -1.e9f, pts);
+            }
+        const Polygon hull = Geometry::convex_hull(std::move(pts));
+        for (const Point& pt : hull.points)
+            ji["hull"].push_back({ unscale<double>(pt.x()), unscale<double>(pt.y()) });
+        if (hull.points.empty()) // degenerate mesh: fall back to the bounding box
+            ji["hull"] = { { bb.min.x(), bb.min.y() }, { bb.max.x(), bb.min.y() }, { bb.max.x(), bb.max.y() }, { bb.min.x(), bb.max.y() } };
+    }
+    int extruder = 0;
+    if (const ConfigOptionInt* e = o->config.get().option<ConfigOptionInt>("extruder")) extruder = e->value;
+    std::string color;
+    if (colors && !colors->values.empty())
+        color = (extruder > 0 && (size_t) extruder <= colors->values.size()) ? colors->values[extruder - 1] : colors->values[0];
+    ji["color"]     = color;
+    ji["printable"] = mi->printable; // PR D: the object list's Printable toggle (POST /api/objects/printable)
+    return ji;
+}
+
 // Top-down view of one plate: every instance registered on it with the convex hull of the
 // transformed model (world mm), bounding box, position / Z rotation / uniform scale and the
 // colour of its filament. The phone draws this and edits it through api_object_transform.
+// PR D: "registered" includes the instances hanging over the plate's edge (they used to be left
+// out, so a plate the slicer refused looked empty); `outside` is the slicer's own test
+// (instance_outside_set, what greys Slice out), not a bounding-box guess.
 RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
 {
     auto out = std::make_shared<nlohmann::json>();
@@ -975,6 +1079,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
         j["index"]     = plate;
         j["name"]      = p->get_plate_name();
         j["plate_box"] = { pb.min.x(), pb.min.y(), pb.max.x(), pb.max.y() };
+        j["locked"]    = p->is_locked();
         j["exclude"]   = nlohmann::json::array();
         for (const BoundingBoxf3& e : p->get_exclude_areas())
             j["exclude"].push_back({ e.min.x(), e.min.y(), e.max.x(), e.max.y() });
@@ -985,45 +1090,9 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
         for (size_t oi = 0; oi < model.objects.size(); ++oi) {
             ModelObject* o = model.objects[oi];
             for (size_t ii = 0; ii < o->instances.size(); ++ii) {
-                if (plates.find_instance_belongs((int) oi, (int) ii) != plate) continue;
-                ModelInstance* mi = o->instances[ii];
-                nlohmann::json ji;
-                ji["obj"]  = oi;
-                ji["inst"] = ii;
-                ji["name"] = o->name;
-                const BoundingBoxf3 bb = o->instance_bounding_box(ii);
-                ji["bbox"] = { bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y() };
-                ji["size"] = { bb.size().x(), bb.size().y(), bb.size().z() };
-                const Vec3d off = mi->get_offset();
-                ji["offset"] = { off.x(), off.y(), off.z() };
-                ji["rz"]     = mi->get_rotation().z() * 180.0 / M_PI;
-                ji["scale"]  = mi->get_scaling_factor().x();
-                ji["hull"]   = nlohmann::json::array();
-                {
-                    // From the meshes themselves: the volumes' cached 2D hulls are empty until
-                    // something (arrange, collision checks) computes them.
-                    Points pts;
-                    for (const ModelVolume* v : o->volumes)
-                        if (v->is_model_part()) {
-                            // The volume's 3D convex hull projects to the same outline as the mesh
-                            // with a fraction of the vertices; fall back to the mesh when absent.
-                            const indexed_triangle_set& its = v->get_convex_hull().its.indices.empty() ? v->mesh().its : v->get_convex_hull().its;
-                            const Transform3f t = (mi->get_transformation().get_matrix() * v->get_matrix()).cast<float>();
-                            its_collect_mesh_projection_points_above(its, t, -1.e9f, pts);
-                        }
-                    const Polygon hull = Geometry::convex_hull(std::move(pts));
-                    for (const Point& pt : hull.points)
-                        ji["hull"].push_back({ unscale<double>(pt.x()), unscale<double>(pt.y()) });
-                    if (hull.points.empty()) // degenerate mesh: fall back to the bounding box
-                        ji["hull"] = { { bb.min.x(), bb.min.y() }, { bb.max.x(), bb.min.y() }, { bb.max.x(), bb.max.y() }, { bb.min.x(), bb.max.y() } };
-                }
-                int extruder = 0;
-                if (const ConfigOptionInt* e = o->config.get().option<ConfigOptionInt>("extruder")) extruder = e->value;
-                std::string color;
-                if (colors && !colors->values.empty())
-                    color = (extruder > 0 && (size_t) extruder <= colors->values.size()) ? colors->values[extruder - 1] : colors->values[0];
-                ji["color"]    = color;
-                ji["outside"]  = !(bb.min.x() >= pb.min.x() && bb.max.x() <= pb.max.x() && bb.min.y() >= pb.min.y() && bb.max.y() <= pb.max.y());
+                if (!p->contain_instance((int) oi, (int) ii)) continue;
+                nlohmann::json ji = layout_instance_json(o, oi, ii, colors);
+                ji["outside"]  = !p->contain_instance_totally((int) oi, (int) ii);
                 ji["selected"] = sel.is_single_full_instance() && sel.get_object_idx() == (int) oi && sel.get_instance_idx() == (int) ii;
                 j["objects"].push_back(ji);
             }
@@ -1036,22 +1105,57 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
     return r;
 }
 
+// PR D: the instances registered on no plate - pushed fully off every bed (a printer change to a
+// smaller bed, a move off the plate) - in the layout's shape (world mm, the plate list's frame),
+// each `outside: true`. Arrange all plates picks them up; transform plate={i} centres one on a plate.
+RemoteAccess::ApiResponse RemoteAccess::api_plates_loose()
+{
+    auto out = std::make_shared<nlohmann::json>();
+    bool ok  = run_on_main([out]() {
+        Plater*        plater = wxGetApp().plater();
+        PartPlateList& plates = plater->get_partplate_list();
+        const ConfigOptionStrings* colors = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+        const Selection& sel = plater->get_view3D_canvas3D()->get_selection();
+        Model& model = plater->model();
+        nlohmann::json& j = *out;
+        j["objects"] = nlohmann::json::array();
+        for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+            ModelObject* o = model.objects[oi];
+            for (size_t ii = 0; ii < o->instances.size(); ++ii) {
+                if (plates.find_instance((int) oi, (int) ii) >= 0) continue;
+                nlohmann::json ji = layout_instance_json(o, oi, ii, colors);
+                ji["outside"]  = true;
+                ji["selected"] = sel.is_single_full_instance() && sel.get_object_idx() == (int) oi && sel.get_instance_idx() == (int) ii;
+                j["objects"].push_back(ji);
+            }
+        }
+        j["count"] = j["objects"].size();
+    }, 30000);
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    r.body = out->dump();
+    return r;
+}
+
 // Move / rotate / scale one instance the way the sidebar does it (selection + the canvas'
 // do_move / do_rotate / do_scale, so undo, plate membership and dirty state follow).
 // Form: obj=&inst=[&x=&y= (absolute instance position, mm)][&rz= (absolute Z rotation, deg)]
 //       [&scale= (absolute uniform factor)][&center=1 (centre the model on its plate)]
+//       [&plate= (PR D: centre it on that plate - how an object on no plate is brought back)]
 RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& form)
 {
     auto get = [&](const char* k) { return query_param(form, k); };
     auto num = [&](const char* k, double def, bool& has) { const std::string v = get(k); has = !v.empty(); try { return has ? std::stod(v) : def; } catch (...) { has = false; return def; } };
-    bool has_obj, has_inst, has_x, has_y, has_rz, has_scale;
+    bool has_obj, has_inst, has_x, has_y, has_rz, has_scale, has_plate;
     const int    obj   = (int) num("obj", -1, has_obj);
     const int    inst  = (int) num("inst", 0, has_inst);
     const double x     = num("x", 0, has_x), y = num("y", 0, has_y), rz = num("rz", 0, has_rz), scale = num("scale", 1, has_scale);
-    const bool   center = get("center") == "1";
+    const int    to_plate = (int) num("plate", -1, has_plate);
+    const bool   center   = get("center") == "1" || has_plate;
     ApiResponse r;
     if (!has_obj || obj < 0) { r.status = 400; r.body = json_error("obj is required"); return r; }
     if (has_scale && (scale < 0.01 || scale > 100)) { r.status = 400; r.body = json_error("scale must be between 0.01 and 100"); return r; }
+    if (has_plate && to_plate < 0) { r.status = 400; r.body = json_error("plate must be a plate index"); return r; }
     if (!has_x && !has_y && !has_rz && !has_scale && !center) { r.status = 400; r.body = json_error("nothing to change"); return r; }
     auto result = std::make_shared<std::pair<int, std::string>>(500, "");
     auto out    = std::make_shared<nlohmann::json>();
@@ -1062,6 +1166,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
         if (obj >= (int) model.objects.size()) { *result = { 404, "no such object" }; return; }
         ModelObject* o = model.objects[obj];
         if (inst < 0 || inst >= (int) o->instances.size()) { *result = { 404, "no such instance" }; return; }
+        if (has_plate && to_plate >= plater->get_partplate_list().get_plate_count()) { *result = { 404, "no such plate" }; return; }
         plater->select_view_3D("3D");
         GLCanvas3D* canvas = plater->get_view3D_canvas3D();
         Selection&  sel    = canvas->get_selection();
@@ -1089,7 +1194,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
         if (has_y) { target.y() = y; move = true; }
         if (center) {
             PartPlateList& plates = plater->get_partplate_list();
-            const int      pi     = plates.find_instance_belongs(obj, inst);
+            // PR D: plate= names the plate; otherwise the plate it is on, or the one it hangs off
+            // (find_instance_belongs alone sent an overhanging object to the current plate).
+            int pi = has_plate ? to_plate : plates.find_instance_belongs(obj, inst);
+            if (pi < 0) pi = plates.find_instance(obj, inst);
             PartPlate*     p      = pi >= 0 ? plates.get_plate(pi) : plates.get_curr_plate();
             const BoundingBoxf3  bb = o->instance_bounding_box(inst);
             const BoundingBoxf3& pb = p->get_bounding_box(false);
@@ -1112,11 +1220,193 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
         (*out)["rz"]     = mi->get_rotation().z() * 180.0 / M_PI;
         (*out)["scale"]  = mi->get_scaling_factor().x();
         (*out)["plate"]  = plater->get_partplate_list().find_instance_belongs(obj, inst);
+        std::string undo_label; // PR D: what POST /api/undo?expect= takes back
+        plater->undo_redo_topmost_string_getter(true, undo_label);
+        (*out)["undo_label"] = undo_label;
         *result = { 200, "" };
     }, 60000);
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
     if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
     r.body = out->dump();
+    return r;
+}
+
+// ------------------------------------------------------- arrange (PR D) ----
+
+// Ends an arrange / orient job once the UI job worker has applied it. It rides on a marker job
+// queued right behind the desktop's own ArrangeJob / OrientJob: the worker finalizes jobs in queue
+// order on the GUI thread, so the marker's finalize means the arrange is on the plates. A queue that
+// is cleared before that (another arrange, a project load: Worker::cancel_all) drops the marker
+// without finalizing it, and this guard's destructor ends the job as cancelled instead of leaving it
+// running for ever.
+struct PlateJobEnd
+{
+    int  id;
+    bool ended { false };
+    explicit PlateJobEnd(int id) : id(id) {}
+    ~PlateJobEnd()
+    {
+        if (!ended) RemoteAccess::get().finish_plate_job(id, "cancelled", "another task on the PC replaced it", nlohmann::json());
+    }
+};
+
+// Arrange (or orient) plate `plate`, or every plate, exactly as the desktop's own buttons do: the
+// plate's Arrange / Orient icon (select the plate, PREPARE_STATE_MENU: only that plate) or the
+// toolbar's Arrange all (PREPARE_STATE_DEFAULT: every unlocked plate, the instances on no plate, and
+// new plates when they do not fit). Plater::arrange / orient take the undo snapshot and queue the
+// job on the UI worker; this answers at once with the job, which /api/jobs/{id} follows.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_arrange(int plate, bool all, bool orient)
+{
+    // Orient all is the toolbar's Orient over the selection (or everything without one): which
+    // objects it turns depends on what the PC has selected, so the phone orients one plate only.
+    if (orient && all) { ApiResponse r; r.status = 400; r.body = json_error("orient takes one plate"); return r; }
+    auto result = std::make_shared<std::pair<int, std::string>>(500, "");
+    auto out    = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([this, result, out, plate, all, orient]() {
+        Plater*        plater = wxGetApp().plater();
+        PartPlateList& plates = plater->get_partplate_list();
+        if (plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
+        if (plate < 0 || plate >= plates.get_plate_count()) { *result = { 404, "no such plate" }; return; }
+        if (plater->model().objects.empty()) { *result = { 409, "nothing to arrange" }; return; }
+        Worker& worker = plater->get_ui_job_worker();
+        // can_arrange(): objects and an idle worker - the same test that enables the toolbar button.
+        if (!plater->can_arrange()) { *result = { 409, "the PC is busy with another task; try again" }; return; }
+        PartPlate* p = plates.get_plate(plate);
+        if (!all && p->empty()) { *result = { 409, "plate is empty" }; return; }
+        // The job itself only shows a notification for a locked plate and does nothing.
+        if (!all && p->is_locked()) { *result = { 409, "plate is locked" }; return; }
+        plater->select_view_3D("3D");
+        if (!all && plates.get_curr_plate_index() != plate && plater->select_plate(plate) != 0) { *result = { 500, "could not select the plate" }; return; }
+        plater->set_prepare_state(all ? GUI::Job::PREPARE_STATE_DEFAULT : GUI::Job::PREPARE_STATE_MENU);
+        take_error();
+        if (orient) plater->orient(); else plater->arrange();
+        if (worker.is_idle()) { *result = { 409, "the PC did not start it; try again" }; return; }
+        Job job;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            job.id    = m_next_job++;
+            job.plate = all ? -1 : plate;
+            job.kind  = orient ? "orient" : "arrange";
+            job.state = "running";
+            job.text  = orient ? "orienting" : "arranging";
+            m_jobs.push_back(job);
+            if (m_jobs.size() > 50)
+                m_jobs.erase(m_jobs.begin());
+        }
+        auto end = std::make_shared<PlateJobEnd>(job.id);
+        queue_job(worker, [](GUI::Job::Ctl&) {}, [end](bool canceled, std::exception_ptr&) {
+            end->ended = true;
+            Plater* plater = wxGetApp().plater();
+            // An error the job wanted to show (show_error) while nobody was at the PC; with the
+            // window shown the desktop shows it itself.
+            const std::string shown = RemoteAccess::get().take_error();
+            RemoteAccess::get().finish_plate_job(end->id, canceled ? "cancelled" : shown.empty() ? "done" : "error", shown,
+                                                 plater ? plate_membership_json(plater) : nlohmann::json());
+        });
+        std::string undo_label;
+        plater->undo_redo_topmost_string_getter(true, undo_label);
+        (*out)["job"]        = job.id;
+        (*out)["plate"]      = job.plate;
+        (*out)["kind"]       = job.kind;
+        (*out)["undo_label"] = undo_label; // what POST /api/undo?expect= takes back
+        *result = { 200, "" };
+    }, 30000, orient ? "starting an orient" : "starting an arrange");
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
+    r.body = out->dump();
+    return r;
+}
+
+void RemoteAccess::finish_plate_job(int id, const std::string& state, const std::string& error, const nlohmann::json& result)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (Job& j : m_jobs)
+        if (j.id == id && j.state == "running") {
+            j.state   = state;
+            j.percent = state == "done" ? 100 : j.percent;
+            j.text    = state;
+            j.error   = error;
+            j.result  = result;
+        }
+    BOOST_LOG_TRIVIAL(info) << "RemoteAccess: job " << id << " " << state << (error.empty() ? "" : ": " + error);
+}
+
+// The object list's Printable toggle (ObjectList::toggle_printable_state) for one instance, or every
+// instance of the object without inst=. Form: obj=[&inst=]&on=1|0. Undoable like the desktop's.
+RemoteAccess::ApiResponse RemoteAccess::api_object_printable(const std::string& form)
+{
+    auto get = [&](const char* k) { return query_param(form, k); };
+    auto idx = [&](const char* k, int def) { const std::string v = get(k); try { return v.empty() ? def : std::stoi(v); } catch (...) { return -2; } };
+    const int         obj  = idx("obj", -1);
+    const int         inst = idx("inst", -1);
+    const std::string on   = get("on");
+    ApiResponse r;
+    if (obj < 0) { r.status = 400; r.body = json_error("obj is required"); return r; }
+    if (inst < -1) { r.status = 400; r.body = json_error("inst must be an instance index"); return r; }
+    if (on != "1" && on != "0") { r.status = 400; r.body = json_error("on must be 1 or 0"); return r; }
+    const bool printable = on == "1";
+    auto result = std::make_shared<std::pair<int, std::string>>(500, "");
+    auto out    = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([=]() {
+        Plater* plater = wxGetApp().plater();
+        if (plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
+        Model& model = plater->model();
+        if (obj >= (int) model.objects.size()) { *result = { 404, "no such object" }; return; }
+        ModelObject* o = model.objects[obj];
+        if (inst >= (int) o->instances.size()) { *result = { 404, "no such instance" }; return; }
+        plater->take_snapshot(""); // the object list's own (unnamed) snapshot
+        for (int i = 0; i < (int) o->instances.size(); ++i)
+            if (inst < 0 || i == inst) {
+                o->instances[i]->printable = printable;
+                if (ObjectList* list = wxGetApp().obj_list()) list->update_printable_state(obj, i);
+            }
+        plater->get_view3D_canvas3D()->update_instance_printable_state_for_objects({ (size_t) obj });
+        plater->update();
+        plater->reload_paint_after_background_process_apply();
+        (*out)["obj"]       = obj;
+        (*out)["inst"]      = inst;
+        (*out)["printable"] = printable;
+        (*out)["plate"]     = plater->get_partplate_list().find_instance(obj, inst < 0 ? 0 : inst);
+        *result = { 200, "" };
+    }, 30000);
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
+    r.body = out->dump();
+    return r;
+}
+
+// One undo step, as Ctrl+Z in the 3D view. expect= (the undo_label an arrange, orient or transform
+// answered with) must still name the topmost step, or nothing is undone (409 with the step's label):
+// a phone's Undo never takes back what somebody did at the PC since.
+RemoteAccess::ApiResponse RemoteAccess::api_undo(const std::string& expect)
+{
+    auto result = std::make_shared<std::pair<int, std::string>>(500, "");
+    auto label  = std::make_shared<std::string>();
+    bool ok     = run_on_main([result, label, expect]() {
+        Plater* plater = wxGetApp().plater();
+        if (plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
+        if (!plater->get_ui_job_worker().is_idle()) { *result = { 409, "the PC is busy with another task; try again" }; return; }
+        plater->select_view_3D("3D");
+        plater->undo_redo_topmost_string_getter(true, *label);
+        if (!plater->can_undo()) { *result = { 409, "nothing to undo" }; return; }
+        if (!SliceV1::undo_matches(expect, *label)) { *result = { 409, "the last change on the PC is not the one to undo" }; return; }
+        plater->undo();
+        *result = { 200, "" };
+    }, 30000, "an undo");
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    nlohmann::json j;
+    if (result->first != 200) {
+        j["error"] = result->second;
+        j["label"] = *label;
+        r.status   = result->first;
+        r.body     = j.dump();
+        return r;
+    }
+    j["ok"]    = true;
+    j["label"] = *label;
+    r.body     = j.dump();
     return r;
 }
 
@@ -1287,6 +1577,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_jobs(int id)
         o["text"] = j.text; o["error"] = j.error;
         if (j.kind == "send" || j.kind == "control") { o["printer"] = j.printer; o["mode"] = j.mode; o["result"] = j.result; }
         if (j.kind == "control") o["action"] = j.mode; // pause | resume | stop, under its own name
+        if (j.kind == "arrange" || j.kind == "orient") o["result"] = j.result; // PR D: plates, loose_count, blocked afterwards
         return o;
     };
     if (id < 0) {
@@ -2768,7 +3059,10 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     if (path.empty() || path == "/") {
         nlohmann::json j;
         j["name"]    = "EdgeSlicer remote API";
-        j["version"] = 3; // 3: slice_v1 (plates/{index}/result, jobs/{id}/cancel, presets type, image ETags)
+        // 3: slice_v1 (plates/{index}/result, jobs/{id}/cancel, presets type, image ETags);
+        // 4: PR D, arrange (layout lists overhanging instances, plates/loose, blocked, arrange /
+        //    orient, objects/printable, transform plate=, undo)
+        j["version"] = SliceV1::INSTANCE_API_VERSION;
         j["routes"]  = nlohmann::json::array({
             { {"method", "GET"},  {"path", "/api"},                        {"description", "this manifest"} },
             { {"method", "GET"},  {"path", "/api/info"},                   {"description", "this instance: pid, project title and path, slicing flag, hidden flag, archive_dir (where the G-code archive keeps its sidecars)"} },
@@ -2777,14 +3071,19 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/quit[?discard=1]"},       {"description", "close this instance; without discard the unsaved project is saved first (an unnamed one under <datadir>/hub/saves)"} },
             { {"method", "POST"}, {"path", "/api/attention/clear"},        {"description", "dismiss the needs-attention flag (see /api/info: needs_attention, attention_reason, attention[])"} },
             { {"method", "POST"}, {"path", "/api/project/open"},           {"description", "form body path={file uploaded through the hub}&mode=load|import; load (.3mf) saves the current project first, import adds the model to the plate"} },
-            { {"method", "GET"},  {"path", "/api/plates"},                 {"description", "project, printer preset, filaments and every plate with objects, slice state, time and filament estimates"} },
+            { {"method", "GET"},  {"path", "/api/plates"},                 {"description", "project, printer preset, filaments and every plate with objects, slice state, time and filament estimates; loose_count = instances on no plate; per plate blocked = why the PC will not slice it (null | empty | outside (a printable object hangs over the edge: Arrange fixes it) | locked (the same on a locked plate) | not_printable (every object set not to print)) and outside_count"} },
+            { {"method", "GET"},  {"path", "/api/plates/loose"},           {"description", "the instances on no plate (pushed fully off the bed, e.g. by a printer change): {count, objects [the layout's per-instance fields, outside true]}"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/thumbnail.png"}, {"description", "rendered plate preview"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, exclude areas, every instance with its convex hull (mm), bbox, position, Z rotation, scale, colour"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area)"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?all=1]"}, {"description", "arrange that plate like its Arrange icon, or with all=1 every plate like the toolbar's Arrange (objects on no plate included; plates are added when they do not fit); returns {job, plate (-1 = all), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/orient"},  {"description", "auto-orient the objects on that plate like its Orient icon; the same job shape as arrange (kind orient)"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview/status"}, {"description", "sliced / slicing / slicing_percent / result_id for that plate, without changing what the PC shows"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/result"},  {"description", "a sliced plate's results (404 when it is not sliced): {index, result_id, time_s, time_silent_s?, prepare_time_s, layers? (layer count), gcode_bytes?, filaments [{index, preset, type, color, grams, meters, cost, price_per_kg, model_g, support_g, flush_g, tower_g}] (slots that extruded anything), total {grams, meters, cost (filament + machine time), material_cost, machine_cost, flush_grams, filament_changes}, cost {prices_known, machine_rate_known, machine_rate_per_h, material, machine, fees, total_cost, markup, selling_price, has_markup}, warnings [{code, severity info|warning|error, text, object?, z?}]}. The desktop's own figures: the preview's cost panel (your price and rate overrides included, fees and markup as it shows them). Cache-Control: private, no-cache + ETag (If-None-Match answers 304). Plate images (thumbnail.png, preview.png) also carry an ETag, and with ?v={result_id} (non-zero) Cache-Control: private, max-age=86400"} },
-            { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1]: move / rotate / scale one instance like the sidebar (undoable)"} },
+            { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1][&plate={index}]: move / rotate / scale one instance like the sidebar (undoable); plate= centres it on that plate (an object on no plate comes back that way); answers {offset, rz, scale, plate, undo_label}"} },
+            { {"method", "POST"}, {"path", "/api/objects/printable"},       {"description", "form obj=[&inst=]&on=1|0: the object list's Printable toggle for one instance, or every instance of the object (undoable); answers {obj, inst, printable, plate}"} },
+            { {"method", "POST"}, {"path", "/api/undo[?expect={label}]"},   {"description", "one undo step, as Ctrl+Z in the 3D view; with expect (the undo_label arrange, orient or transform answered) nothing is undone unless that is still the last change (409 with its label); answers {ok, label}"} },
             { {"method", "GET"},  {"path", "/api/printers[?plate={index}]"}, {"description", "known printers with live status and what a send needs: kind bambu|printhost|connect|snapmaker, online, lan_mode, access_code_set, sdcard, has_ams, model_matches, can_upload, can_print, options (the desktop's remembered defaults), upload_name (the file name the desktop's export would give plate {index}, the current plate without it - print hosts, the connected Snapmaker and a Snapmaker over the LAN); a Snapmaker over the LAN adds ip, port, added_by, toolheads, layer, total_layers and left_time_s, so one card can show everything /api/snapmaker/devices reports; and what a control needs: can_pause, can_resume, can_stop, print_status, stage, print_error {code, message, job_id, actions[]} (null when there is none; each action is {id, verb, label, needs_job_id, remote_safe} - the same buttons the desktop error dialog draws for that code) and the hms summary; a print host or connected Snapmaker that answers as a Moonraker printer adds bed_temp, bed_target and nozzles too (absent when it does not); and what the phone's native printer screen draws: controls {heaters[] {id bed|chamber|nozzle{N}, label, temp, target, min, max, settable, active}, speed {kind level|factor, value, min, max, settable, levels[]}, light {on} (absent without one), fans[] {id, label, percent}} on a Bambu printer, a LAN Snapmaker and a Moonraker print host, and ams[] {id, nozzle, side L|R|'', humidity_level, humidity_pct, temp, trays[] {id, exists, type, sub_type, color, remain, can_load, can_unload, filament_why}} plus ext_spools[] {ams_id 254|255, side, exists, type, color, can_load, can_unload} on a Bambu printer; controls.filament {load, unload, assumed} where load / unload is offered, and can_load / can_unload on each U1 toolhead; an Elegoo Centauri Carbon (a ph: device on elegoolink, listed whatever preset is selected) fills the same fields from the hub's own SDCP connection (print_status printing|paused|complete|cancelled|error|standby, offline while it does not answer), with the chamber in controls.heaters and chamber_temp, its light and part / aux / chamber fans settable, temperatures and speed read-only, the CANVAS as ams[] {id, type canvas, name, trays[] {..., active}}, camera_hint {available, max_streams, rkind elegoo, route /elegoo?id= (the Stream tab tile, #599), ip} and sdcp {live, age_s, firmware, machine_status, print_status, phase, canvas_attached}; the printer's connection is on demand: a request (this route unless ?watching=0, a control, a CANVAS read, an upload) opens it for 60 s, nobody asking means a check-in every 5 min, and a print is held to its end while ?notify=1 (the hub: somebody is subscribed); between connections the row shows the last status with sdcp.live false and no buttons"} },
             { {"method", "POST"}, {"path", "/api/printers/{id}/control"},  {"description", "form action=pause|resume|stop[&confirm=1][&dry_run=1]: pause, resume or stop the print on that printer, exactly as the desktop's own buttons do (stop = cancel the print and needs confirm=1; pause and resume do not). Returns a job id; the job's result says what the printer then reported. 409 when the printer's own state does not allow it (see can_pause / can_resume / can_stop). {id} is any id /api/printers lists, sm:{id} for a Snapmaker over the LAN included. The same route answers a Bambu printer error with the buttons its own dialog would draw: action=resume_error|stop_error|ignore_error|idle_ignore_error|ack_close&err={code} (stop_error needs confirm=1). Which of them a given error offers is print_error.actions on GET /api/printers, where each entry is {id, verb, label, needs_job_id, remote_safe}; a verb the error does not offer, one whose code is no longer the one the printer reports, or one that needs a job_id the printer has not got, is 409, and a verb this phase keeps desktop-only (the AMS controls, drying, nozzle recheck, buzzer, purification) is 403. The same route also changes the settings the desktop Device tab changes, as that printer's `controls` on GET /api/printers lists them: action=set_temp&heater=bed|chamber|nozzle{N}&target={C} (0 = off; confirm=1 is required above 50 C while the printer is not printing; 400 above the heater's max, 409 for a read-only heater), action=set_speed&value={level 1..4 on a Bambu, only while printing | speed factor % on a Klipper printer}, action=set_light&on=1|0, action=set_fan&fan={id}&percent=0..100 - a Bambu printer through the same MachineObject calls the Device tab makes, a Moonraker printer as one /printer/gcode/script. And filament: action=load_filament|unload_filament&ams={AMS id, 128+ AMS HT, 254/255 external spool}&slot={0..3} on a Bambu printer (command_ams_change_filament, as the Device tab's Load / Unload), slot={toolhead 0..3} on a Snapmaker U1 whose G-code help lists the macros (controls.filament.assumed: INNER_FILAMENT_UNLOAD / SM_PRINT_AUTO_FEED, unverified); 409 while printing or paused, or when that slot's can_load / can_unload is false"} },
             { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses"}, {"description", "the timelapse videos on that printer, newest first: {printer {id, name, kind}, source bambu_storage|moonraker, files [{name, size, time (unix s, 0 = unknown), duration_s (null = unknown), mime, has_thumbnail}], note?, stale}. A Snapmaker over the LAN (sm:{id}) or a Moonraker print host (host, ph:{id}, connect) is read through Moonraker's `timelapse` file root; a Bambu printer through the storage tunnel the Device tab uses, over the LAN (it needs the printer's IP and access code on this PC, an SD card, and the network plug-in's storage component). stale = the printer's storage was busy (a video being copied) and this is the last list. Failures are {error, code}: no_printer 404, offline 409, no_storage 409, no_lan 409, busy 409, unsupported 501, no_tunnel 501, printer_error 502/504"} },
@@ -2865,6 +3164,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         return api_filament_add();
     if (path == "/plates" && method == "GET")
         return api_plates();
+    if (path == "/plates/loose" && method == "GET")
+        return api_plates_loose();
     if (path.compare(0, 8, "/plates/") == 0 && method == "GET") {
         const std::string rest = path.substr(8);
         const size_t      slash = rest.find('/');
@@ -2896,9 +3197,21 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             return api_send(num(rest.substr(0, slash), -1), body.empty() ? query : body);
         if (slash != std::string::npos && rest.substr(slash) == "/send/preview")
             return api_send_preview(num(rest.substr(0, slash), -1), body.empty() ? query : body);
+        if (slash != std::string::npos && (rest.substr(slash) == "/arrange" || rest.substr(slash) == "/orient")) {
+            std::string all = query_param(query, "all");
+            if (all.empty()) all = query_param(body, "all");
+            return api_plate_arrange(num(rest.substr(0, slash), -1), all == "1", rest.substr(slash) == "/orient");
+        }
     }
     if (path == "/objects/transform" && method == "POST")
         return api_object_transform(body.empty() ? query : body);
+    if (path == "/objects/printable" && method == "POST")
+        return api_object_printable(body.empty() ? query : body);
+    if (path == "/undo" && method == "POST") {
+        std::string expect = query_param(query, "expect");
+        if (expect.empty()) expect = query_param(body, "expect");
+        return api_undo(expect);
+    }
     if (path == "/printers" && method == "GET") {
         // The hub's own poll says whether anybody is subscribed to notifications (notify=1|0), which
         // decides whether an Elegoo printer's print is watched to its end (ElegooSdcpMonitor).
