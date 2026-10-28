@@ -31,7 +31,9 @@ def srgb_to_lab(rgb):
     m = np.array([[0.4124564, 0.3575761, 0.1804375],
                   [0.2126729, 0.7151522, 0.0721750],
                   [0.0193339, 0.1191920, 0.9503041]])
-    xyz = lin @ m.T
+    # numpy 2 on macOS Accelerate raises spurious FP warnings from matmul; the result is exact.
+    with np.errstate(all="ignore"):
+        xyz = lin @ m.T
     xyz /= np.array([0.95047, 1.0, 1.08883])
     eps = 216.0 / 24389.0
     k = 24389.0 / 27.0
