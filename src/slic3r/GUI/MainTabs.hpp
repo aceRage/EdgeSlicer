@@ -49,8 +49,9 @@ inline int tab_from_name(const std::string &name)
     return -1;
 }
 
-// Ctrl+1..4 on a settings field (Field.cpp): Home, Prepare, Preview, Device - the same four tabs
-// those keys opened before Showcase moved Device up by one. -1 for any other key.
+// Former Field.cpp Ctrl+1..4 map (no longer bound: AltGr is Ctrl+Alt and stole AZERTY `{`/`~`/`#`).
+// Home, Prepare, Preview, Device — the same four tabs those keys opened before Showcase moved
+// Device up by one. Stream (5) was never in this map. -1 for any other key.
 constexpr int tab_for_field_shortcut(char key)
 {
     return key == '1' ? Home : key == '2' ? Editor3D : key == '3' ? Preview : key == '4' ? Monitor : -1;
