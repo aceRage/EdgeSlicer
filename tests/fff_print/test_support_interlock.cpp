@@ -414,8 +414,7 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
     {
         // Diagnostics for a failure below: where the support layers and cap A lie.
         std::ostringstream diag;
-        diag << "capA bbox " << get_extents(cap_a_region).min.transpose() << " .. " << get_extents(cap_a_region).max.transpose() << "
-";
+        diag << "capA bbox " << get_extents(cap_a_region).min.transpose() << " .. " << get_extents(cap_a_region).max.transpose() << std::endl;
         for (size_t i = 0; i < off.size(); ++ i)
             if (off[i]->print_z > 9. && off[i]->print_z < 10.3) {
                 std::vector<const ExtrusionPath*> paths;
@@ -424,8 +423,7 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
                 for (const ExtrusionPath *p : paths)
                     for (const Point &pt : p->polyline.points)
                         bb.merge(pt);
-                diag << "z " << off[i]->print_z << " paths " << paths.size() << " bbox " << bb.min.transpose() << " .. " << bb.max.transpose() << "
-";
+                diag << "z " << off[i]->print_z << " paths " << paths.size() << " bbox " << bb.min.transpose() << " .. " << bb.max.transpose() << std::endl;
             }
         UNSCOPED_INFO(diag.str());
     }
@@ -492,4 +490,79 @@ TEST_CASE("Woven body stripes with a don't-care support filament get a body fila
         CHECK(has_body);
     }
     CHECK(woven >= 2);
+}
+
+namespace {
+
+// Area covered twice or more by different support extrusions of one layer (mm²), and the area
+// covered at all. Each path is widened to 0.8 of its line width with butt ends, so neighbouring
+// lines of a solid fill (one spacing apart) and the two sides of a stripe boundary never touch,
+// while two fills laid over the same place do.
+std::pair<double, double> support_overlap(const SupportLayer &layer)
+{
+    std::vector<const ExtrusionPath*> paths;
+    collect_paths(layer.support_fills, paths);
+    Polygons all;
+    double sum = 0.;
+    for (const ExtrusionPath *path : paths) {
+        if (path->polyline.points.size() < 2)
+            continue;
+        Polygons p = union_(offset(path->polyline, float(0.4 * scale_(path->width)), ClipperLib::jtMiter, 3., ClipperLib::etOpenButt));
+        for (const Polygon &poly : p)
+            sum += poly.area();
+        polygons_append(all, std::move(p));
+    }
+    double covered = 0.;
+    for (const ExPolygon &ex : union_ex(all))
+        covered += ex.area();
+    return { std::max(0., sum - covered) * SCALING_FACTOR * SCALING_FACTOR, covered * SCALING_FACTOR * SCALING_FACTOR };
+}
+
+} // namespace
+
+TEST_CASE("Woven layers do not lay two support fills over the same place", "[SupportInterlock]")
+{
+    const std::string style = GENERATE(std::string("normal"), std::string("organic"), std::string("tree_hybrid"));
+    const int model_id = GENERATE(0, 1, 2);
+    CAPTURE(style, model_id);
+    auto make_model = [model_id]() {
+        if (model_id == 0)
+            return capped_stem();
+        if (model_id == 1)
+            return cap_beside_ledge(8.6);
+        // Several small roofs at nearby heights: tips and roofs of neighbouring branches meet.
+        TriangleMesh model = make_cube(4, 4, 12);
+        model.translate(13., 13., 0.);
+        for (int i = 0; i < 4; ++ i) {
+            TriangleMesh arm = make_cube(8, 4, 1.5);
+            const double arm_x[4] = { 17., 1., 13., 13. }, arm_y[4] = { 13., 13., 17., 5. };
+            arm.translate(arm_x[i], arm_y[i], 8. + 0.2 * i);
+            model.merge(arm);
+        }
+        return model;
+    };
+    auto config = [&style](bool on) {
+        DynamicPrintConfig c = interlock_config(style, on, 4);
+        c.set_key_value("support_on_build_plate_only", new ConfigOptionBool(false));
+        c.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.));
+        return c;
+    };
+    Print print_off, print_on;
+    init_and_process_print({ make_model() }, print_off, config(false));
+    init_and_process_print({ make_model() }, print_on,  config(true));
+    const auto off = print_off.objects().front()->support_layers();
+    const auto on  = print_on .objects().front()->support_layers();
+    REQUIRE(off.size() == on.size());
+    size_t woven = 0;
+    for (size_t i = 0; i < on.size(); ++ i) {
+        if (! on[i]->interlock_woven)
+            continue;
+        ++ woven;
+        const auto [ov_on, cov_on]   = support_overlap(*on[i]);
+        const auto [ov_off, cov_off] = support_overlap(*off[i]);
+        CAPTURE(on[i]->print_z, ov_on, ov_off, cov_on, cov_off);
+        // The weave may not add overlap beyond what the same layer already had with it off.
+        CHECK(ov_on <= ov_off + 0.01 * cov_on + 0.5);
+    }
+    CHECK(woven >= 1);
 }
