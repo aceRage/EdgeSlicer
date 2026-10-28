@@ -3276,7 +3276,8 @@ void MainFrame::init_menubar_as_editor()
         fileMenu->AppendSeparator();
 
 #ifndef __APPLE__
-        append_menu_item(fileMenu, wxID_EXIT, _L("Quit"), wxString::Format(_L("Quit")),
+        // Orca #16722: Ctrl+Q quits on Windows and Linux (macOS has the system Cmd+Q).
+        append_menu_item(fileMenu, wxID_EXIT, _L("Quit") + sep + ctrl_t + "Q", wxString::Format(_L("Quit")),
             [this](wxCommandEvent&) { request_quit(false); }, "menu_exit", nullptr);
 #else
         append_menu_item(fileMenu, wxID_EXIT, _L("Quit"), wxString::Format(_L("Quit")),
