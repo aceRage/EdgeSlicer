@@ -2984,6 +2984,52 @@ bool PresetCollection::clone_presets(std::vector<Preset const *> const &presets,
     return true;
 }
 
+const Preset* PresetCollection::create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides)
+{
+    if (name.empty() || !parent.is_system || parent.name == name)
+        return nullptr;
+    if (const Preset *existing = find_preset(name, false); existing != nullptr && existing->name == name)
+        return nullptr;
+
+    Preset preset = parent;
+    preset.name                = name;
+    preset.vendor              = nullptr;
+    preset.renamed_from.clear();
+    preset.m_excluded_from.clear();
+    preset.setting_id.clear();
+    preset.base_id.clear();
+    preset.is_default          = false;
+    preset.is_system           = false;
+    preset.is_external         = false;
+    preset.is_project_embedded = false;
+    preset.is_visible          = true;
+    preset.is_dirty            = false;
+    preset.alias.clear();
+    preset.config.apply(overrides, true);
+    preset.config.option<ConfigOptionString>("inherits", true)->value = parent.name;
+    if (m_type == Preset::TYPE_FILAMENT)
+        preset.config.option<ConfigOptionStrings>("filament_settings_id", true)->values = { name };
+    preset.file = this->path_for_preset(preset);
+
+    lock();
+    auto         it  = this->find_preset_internal(name);
+    const size_t pos = size_t(it - m_presets.begin());
+    Preset      &inserted = *m_presets.insert(it, preset);
+    // The insert shifted the presets after it: keep the selection on the same preset without
+    // re-selecting it, which would throw away the user's unsaved edits.
+    if (m_idx_selected != size_t(-1) && m_idx_selected >= pos && m_idx_selected < m_presets.size() - 1)
+        ++m_idx_selected;
+    set_custom_preset_alias(inserted);
+    DynamicPrintConfig parent_config = parent.config;
+    const bool         saved         = inserted.save(&parent_config);
+    const std::string  inserted_name = inserted.name;
+    unlock();
+    if (!saved)
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": could not save " << name;
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << name << " inherits " << parent.name;
+    return find_preset(inserted_name, false);
+}
+
 bool PresetCollection::clone_presets_for_printer(std::vector<Preset const *> const &     templates,
                                                  std::vector<std::string> &              failures,
                                                  std::string const &                     printer,

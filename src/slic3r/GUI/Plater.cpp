@@ -808,70 +808,74 @@ std::string extract_base_filament_name(const std::string& full_name)
 // Resolve a machine filament name to a matching local filament preset.
 // Filament presets follow the convention "BaseName @Model nozzle",
 // e.g. "Generic PA-CF @U1 0.4 nozzle".  Split by '@' to extract the
-// base name, trim, and compare exactly — so "Generic PA" does NOT
+// base name, trim, and compare exactly - so "Generic PA" does NOT
 // accidentally match "Generic PA-CF".
 // Orca #13265: with no exact name, the preset of the reported vendor and type whose default colour
 // is closest to the reported colour wins, before the "Generic <type>" fallback.
-Preset* resolve_filament_preset(PresetBundle* preset_bundle, 
+// The rules are FilamentSyncMatch::match_preset() (tested there). User presets count for the exact
+// name too: a third-party spool's own preset ("iBoss PLA Silk @U1 0.4 nozzle") used to be skipped,
+// so every sync fell back to Generic.
+Preset* resolve_filament_preset(PresetBundle* preset_bundle,
     const std::string& filament_name, const std::string& filament_type,
-    const std::string& filament_vendor = {}, const std::string& filament_colour = {})
+    const std::string& filament_vendor = {}, const std::string& filament_colour = {},
+    FilamentSyncMatch::MatchKind* kind = nullptr)
 {
+    if (kind)
+        *kind = FilamentSyncMatch::MatchKind::None;
     if (!preset_bundle || filament_name.empty())
         return nullptr;
 
-    auto to_lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        return s;
-    };
-
+    std::vector<Preset*>                         presets;
+    std::vector<FilamentSyncMatch::Candidate>    candidates;
     for (auto& preset : preset_bundle->filaments) {
-        if (!preset.is_compatible || !preset.is_system)
+        if (preset.is_default || preset.is_project_embedded)
             continue;
-
-        std::string base = extract_base_filament_name(preset.name);
-        if (to_lower(base) == to_lower(filament_name)) {
-            return &preset;
-        }
+        FilamentSyncMatch::Candidate c;
+        c.name          = preset.name;
+        c.vendor        = preset.config.opt_string("filament_vendor", 0u);
+        c.type          = preset.config.opt_string("filament_type", 0u);
+        c.colour        = preset.config.opt_string("default_filament_colour", 0u);
+        c.is_system     = preset.is_system;
+        c.is_compatible = preset.is_compatible;
+        c.is_base       = preset_bundle->filaments.get_preset_base(preset) == &preset;
+        presets.push_back(&preset);
+        candidates.push_back(std::move(c));
     }
+    const FilamentSyncMatch::Match m = FilamentSyncMatch::match_preset(candidates, filament_name, filament_type, filament_vendor, filament_colour);
+    if (kind)
+        *kind = m.kind;
+    if (m.index < 0)
+        return nullptr;
+    if (m.kind == FilamentSyncMatch::MatchKind::VendorType)
+        BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
+                                << " " << filament_colour << ": " << presets[size_t(m.index)]->name;
+    return presets[size_t(m.index)];
+}
 
-    // Orca #13265: closest colour among the presets of this vendor and type. A user preset only
-    // counts when it is detached from its parent (its own base), as upstream.
-    if (!filament_vendor.empty() && !filament_colour.empty()) {
-        std::vector<Preset*>     candidates;
-        std::vector<std::string> colours;
-        for (auto& preset : preset_bundle->filaments) {
-            if (!preset.is_compatible || preset_bundle->filaments.get_preset_base(preset) != &preset)
-                continue;
-            if (to_lower(preset.config.opt_string("filament_vendor", 0u)) != to_lower(filament_vendor) ||
-                to_lower(preset.config.opt_string("filament_type", 0u)) != to_lower(filament_type))
-                continue;
-            candidates.push_back(&preset);
-            colours.push_back(preset.config.opt_string("default_filament_colour", 0u));
-        }
-        const int best = FilamentSyncMatch::closest_colour_index(filament_colour, colours);
-        if (best >= 0) {
-            BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
-                                    << " " << filament_colour << ": " << candidates[best]->name;
-            return candidates[best];
-        }
-    }
-
-    const std::string generic_prefix = "Generic ";
-    std::string generic_base = generic_prefix + filament_type;
-    for (auto& preset : preset_bundle->filaments) {
-        if (!preset.is_compatible || !preset.is_system)
-            continue;
-
-        std::string base = extract_base_filament_name(preset.name);
-        std::string type = preset.config.opt_string("filament_type", static_cast<unsigned int>(0));
-
-        if ((to_lower(type) == to_lower(filament_type)) && 
-                (to_lower(base) == to_lower(generic_base))) {
-            return &preset;
-        }
-    }
-
-    return nullptr;
+// A third-party spool (a vendor other than Generic/Snapmaker) that only matched the Generic preset of
+// its type gets a user preset of its own: it inherits that Generic preset (so it stays compatible
+// with the printer and keeps its pressure-advance and temperature defaults) and carries the spool's
+// vendor and colour, named like the U1's own presets so the dropdown's "Machine Filament" section and
+// the next sync find it by name. Returns the new preset, or the generic one when nothing was created.
+Preset* user_preset_for_third_party_spool(PresetBundle* preset_bundle, Preset* generic,
+    const std::string& filament_name, const std::string& filament_vendor, const std::string& filament_colour)
+{
+    if (!preset_bundle || !generic || !generic->is_system || FilamentSyncMatch::is_stock_vendor(filament_vendor))
+        return generic;
+    const std::string name = FilamentSyncMatch::third_party_preset_name(filament_name, generic->name);
+    if (name.empty())
+        return generic;
+    if (Preset* existing = preset_bundle->filaments.find_preset(name, false); existing != nullptr && existing->name == name)
+        return existing->is_compatible ? existing : generic;
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("filament_vendor", new ConfigOptionStrings({ filament_vendor }));
+    if (!filament_colour.empty())
+        overrides.set_key_value("default_filament_colour", new ConfigOptionStrings({ filament_colour }));
+    const Preset* created = preset_bundle->filaments.create_inherited_user_preset(*generic, name, overrides);
+    if (created == nullptr)
+        return generic;
+    BOOST_LOG_TRIVIAL(info) << "Filament sync: created user preset " << name << " for a " << filament_vendor << " spool";
+    return preset_bundle->filaments.find_preset(name, false);
 }
 
 void build_design_filament_list(PresetBundle* preset_bundle, std::vector<FilamentData>& out_list)
@@ -10179,6 +10183,7 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
         // (CANVAS Generic @ECC, then vendor/colour resolve). Upstream records a
         // single resolve_filament_preset(); that would skip the CANVAS Generic path.
         std::string slot0_matched_preset;
+        bool        created_user_presets = false;
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
             Preset* matched = nullptr;
@@ -10192,9 +10197,21 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
                 else
                     matched = resolve_filament_preset(preset_bundle, "Generic " + syncedData[i].m_type, syncedData[i].m_type);
             }
-            if (!matched)
+            if (!matched) {
+                FilamentSyncMatch::MatchKind kind = FilamentSyncMatch::MatchKind::None;
                 matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
-                                                  syncedData[i].m_vendor, synced_colour);
+                                                  syncedData[i].m_vendor, synced_colour, &kind);
+                // U1: a third-party tag (iBoss, eSun...) that only found "Generic <type>" gets its own
+                // user preset on top of it, which the next sync and the dropdown then find by name.
+                if (!canvas_generic && kind == FilamentSyncMatch::MatchKind::Generic) {
+                    Preset* own = user_preset_for_third_party_spool(preset_bundle, matched, syncedData[i].m_name,
+                                                                    syncedData[i].m_vendor, synced_colour);
+                    if (own != matched) {
+                        matched = own;
+                        created_user_presets = true;
+                    }
+                }
+            }
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
                 if (i == 0)
@@ -10211,6 +10228,13 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
             if (cmo && i < cmo->values.size()) {
                 cmo->values[i] = FilamentColorModeToConfig(syncedData[i].m_color.NormalizedMode());
             }
+        }
+
+        if (created_user_presets) {
+            // The new presets must be compatible and visible before the combos are rebuilt below.
+            preset_bundle->update_compatible(PresetSelectCompatibleType::Never);
+            if (Tab* filament_tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT))
+                filament_tab->update_tab_ui();
         }
 
         if (dlg.shouldDeleteMixedFilaments()) {
