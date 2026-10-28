@@ -7419,6 +7419,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Wipe tower type");
     def->tooltip = L("Choose the wipe tower implementation for multi-material prints. "
                      "Type 1 suits printers that cut the filament and purge the old one into the tower, as Bambu Lab printers do. "
+                     "Type 1 purges through your printer's change filament G-code (flush_length); if that G-code doesn't use it, "
+                     "only the prime volume is purged and there is no ramming. "
                      "Type 2 suits MMU, ramming and tool-changer setups, and is the safe choice for most printers.");
     def->enum_keys_map = &ConfigOptionEnum<WipeTowerType>::get_enum_values();
     def->enum_values.emplace_back("type1");

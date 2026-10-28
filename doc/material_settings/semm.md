@@ -14,6 +14,7 @@ The prime tower is a structure that is printed before the actual print to ensure
 Printer setting (Multimaterial page, Advanced) that chooses which wipe tower implementation builds the prime tower.
 
 - **Type 1**: the tower Bambu Lab printers use. It suits printers that cut the filament and purge the old one into the tower. Bambu Lab printers always use Type 1 and do not show this option.
+  Type 1 purges through your printer's change filament G-code (the `flush_length` / `flush_length_N` placeholders). If that G-code doesn't use them, only the prime volume is purged, with no ramming, and colours may bleed. EdgeSlicer warns when you pick Type 1 for such a printer.
 - **Type 2** (default): the tower for MMU, ramming and tool-changer setups. It is the safe choice for every other printer and is what they sliced with before this option existed. Ramming, cone walls, tower rotation, priming and the other Type 2 tower options are only shown with Type 2.
 
 ## Ramming

@@ -2004,6 +2004,20 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
     if(opt_key == "purge_in_prime_tower" || opt_key == "wipe_tower_type")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
 
+    // The Type 1 tower purges only the prime volume itself; the flush volume reaches the nozzle
+    // through the change-filament G-code's {flush_length} placeholders. Say so when this printer's
+    // template has none, since colours would then bleed. Informational only: the choice stands.
+    if (m_type == Preset::TYPE_PRINTER && opt_key == "wipe_tower_type" && m_config->has("wipe_tower_type") &&
+        m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type1 &&
+        m_config->has("change_filament_gcode") &&
+        m_config->opt_string("change_filament_gcode").find("flush_length") == std::string::npos) {
+        MessageDialog(wxGetApp().plater(),
+                      _L("Type 1 purges through the printer's change filament G-code (flush_length). "
+                         "This printer's change filament G-code does not use it, so only the prime volume is purged "
+                         "and colours may bleed. Type 2 is recommended unless you add the flush to that G-code."),
+                      _L("Wipe tower type"), wxICON_WARNING | wxOK).ShowModal();
+    }
+
     if (m_type == Preset::TYPE_PRINT && opt_key == "dithering_local_z_mode") {
         const bool local_z_enabled = boost::any_cast<bool>(value);
         DynamicPrintConfig new_conf = *m_config;

@@ -564,9 +564,15 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     // A cone wall is a WipeTower2 feature: the Bambu Lab tower generator (like Bambu Studio's) only
     // knows rectangle and rib walls and would print a cone as a rectangle. Say so instead of letting
     // the choice look honoured.
-    if (is_BBL_Printer && is_global_config && config->has("wipe_tower_wall_type") &&
+    // Orca #12781: the same holds for a non-Bambu printer set to the Type 1 tower.
+    const bool wipe_tower_type1 = is_BBL_Printer ||
+        (wxGetApp().preset_bundle != nullptr &&
+         resolve_wipe_tower_type(wxGetApp().preset_bundle->printers.get_edited_preset().config) == WipeTowerType::Type1);
+    if (wipe_tower_type1 && is_global_config && config->has("wipe_tower_wall_type") &&
         config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type") == WipeTowerWallType::wtwCone) {
-        const wxString msg_text = _(L("Bambu Lab printers do not support a cone prime tower wall.\nReset to Rectangle."));
+        const wxString msg_text = is_BBL_Printer ?
+            _(L("Bambu Lab printers do not support a cone prime tower wall.\nReset to Rectangle.")) :
+            _(L("The Type 1 wipe tower does not support a cone prime tower wall.\nReset to Rectangle."));
         MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
         DynamicPrintConfig new_conf = *config;
         is_msg_dlg_already_exist = true;
