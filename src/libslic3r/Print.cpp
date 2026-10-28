@@ -6808,6 +6808,10 @@ void Print::_make_wipe_tower()
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
         WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_config.prime_volume, m_wipe_tower_data.tool_ordering.first_extruder(),
                              m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z);
+        // Edge: a Type1 tower on a non-Bambu printer (wipe_tower_type override) must tag its G-code
+        // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
+        // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
+        wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
