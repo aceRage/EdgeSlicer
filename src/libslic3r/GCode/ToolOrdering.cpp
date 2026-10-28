@@ -822,6 +822,18 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
             layer_tools.extruders.push_back(extruder_interface);
+        // EdgeSlicer (support interface interlock): woven body stripes with a "don't care" support
+        // filament print with the first non-interface extruder on the layer (GCode.cpp). On a support
+        // layer that holds nothing else, that would be the interface filament itself, and the weave
+        // would be all interface. Schedule the object's own (body-coloured) filament there.
+        if (support_layer->interlock_woven && object.config().support_filament.value == 0) {
+            const unsigned int iface = unsigned(object.config().support_interface_filament.value);
+            for (unsigned int e : object.object_extruders())
+                if (e != iface && e >= 1 && ! object.print()->config().filament_soluble.get_at(e - 1)) {
+                    layer_tools.extruders.push_back(e);
+                    break;
+                }
+        }
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);

@@ -13,6 +13,7 @@
 
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -376,4 +377,89 @@ TEST_CASE("Support interface interlock with the owner's tree hybrid settings", "
         CHECK(s.interface_length > 10.);
         CHECK(on[depth]->interlock_woven);
     }
+}
+
+TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped underside)", "[SupportInterlock]")
+{
+    // Two caps side by side, undersides at 10.0 and 10.2 mm, on one stem. The object is centred on its
+    // bounding box, so cap A (the lower one) lies at x < 0 in object coordinates. On the layer that is
+    // cap A's top roof, cap B's roof is one layer down (woven): the weave must stay over cap B.
+    TriangleMesh model = make_cube(6, 6, 10);
+    model.translate(12., 7., 0.);
+    TriangleMesh cap_a = make_cube(15, 20, 2);
+    cap_a.translate(0., 0., 10.);
+    model.merge(cap_a);
+    TriangleMesh cap_b = make_cube(15, 20, 1.8);
+    cap_b.translate(15., 0., 10.2);
+    model.merge(cap_b);
+    auto config = [](bool on) {
+        DynamicPrintConfig c = interlock_config("tree_hybrid", on);
+        c.set_key_value("support_on_build_plate_only", new ConfigOptionBool(false));
+        c.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.2));
+        return c;
+    };
+    Print print_off, print_on;
+    init_and_process_print({ model }, print_off, config(false));
+    init_and_process_print({ model }, print_on,  config(true));
+    const auto off = print_off.objects().front()->support_layers();
+    const auto on  = print_on .objects().front()->support_layers();
+    REQUIRE(off.size() == on.size());
+    // Cap A's top roof layer: the highest support layer under z = 10.
+    size_t contact = size_t(-1);
+    for (size_t i = 0; i < on.size(); ++ i)
+        if (on[i]->print_z < 10. - 0.05 && ! on[i]->support_fills.entities.empty())
+            contact = i;
+    REQUIRE(contact != size_t(-1));
+    auto over_cap_a = [](const SupportLayer &layer, ExtrusionRole role) {
+        std::vector<const ExtrusionPath*> paths;
+        collect_paths(layer.support_fills, paths);
+        double len = 0.;
+        for (const ExtrusionPath *path : paths)
+            if (path->role() == role)
+                for (size_t i = 1; i < path->polyline.points.size(); ++ i) {
+                    const Point &a = path->polyline.points[i - 1], &b = path->polyline.points[i];
+                    if (a.x() < - scale_(1.) && b.x() < - scale_(1.))
+                        len += unscale<double>((b - a).cast<double>().norm());
+                }
+        return len;
+    };
+    // No body stripes against cap A's underside ...
+    CHECK(over_cap_a(*on[contact], erSupportMaterial) < 1.);
+    // ... and cap A's top roof is printed as with the weave off.
+    const double iface_off = over_cap_a(*off[contact], erSupportMaterialInterface);
+    const double iface_on  = over_cap_a(*on[contact],  erSupportMaterialInterface);
+    REQUIRE(iface_off > 10.);
+    CHECK(iface_on > 0.95 * iface_off);
+    CHECK(iface_on < 1.05 * iface_off);
+    // The weave did happen (over cap B, one layer under its top roof).
+    CHECK(on[contact]->interlock_woven);
+}
+
+TEST_CASE("Woven body stripes with a don't-care support filament get a body filament scheduled", "[SupportInterlock]")
+{
+    // support_filament = 0 (the hand-test project): the body stripes print with the first
+    // non-interface extruder of the layer, so every woven layer must have one.
+    const std::string style = GENERATE(std::string("normal"), std::string("tree_hybrid"));
+    CAPTURE(style);
+    DynamicPrintConfig config = interlock_config(style, true);
+    config.set_key_value("support_filament", new ConfigOptionInt(0));
+    config.set_key_value("independent_support_layer_height", new ConfigOptionBool(true));
+    config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.15));
+    Print print;
+    init_and_process_print({ capped_stem() }, print, config);
+    const PrintObject &object = *print.objects().front();
+    ToolOrdering ordering(object, (unsigned int) -1);
+    size_t woven = 0;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (! layer->interlock_woven)
+            continue;
+        ++ woven;
+        CAPTURE(layer->print_z);
+        const LayerTools &lt = ordering.tools_for_layer(layer->print_z);
+        bool has_body = false;
+        for (unsigned int e : lt.extruders)
+            has_body |= e != 1; // 0-based; the interface is filament 2
+        CHECK(has_body);
+    }
+    CHECK(woven >= 2);
 }

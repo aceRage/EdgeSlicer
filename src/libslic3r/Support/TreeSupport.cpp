@@ -2287,6 +2287,10 @@ void TreeSupport::draw_circles()
                 // EdgeSlicer (support interface interlock): roof areas by depth under the top roof
                 // layer (1 = right under it), for the woven band. Sized 0 with the feature off.
                 std::vector<ExPolygons> interlock_by_depth(m_support_params.interlock_layers > 0 ? m_support_params.interlock_layers + 1 : 0);
+                // Areas the weave must leave alone on this layer: top roof (depth 0) nodes, sharp tails.
+                // A deeper node's area, grown by its overhang, can reach over a neighbouring contact on
+                // a stepped or sloped underside; the shallower node wins there.
+                ExPolygons interlock_keep;
                 ExPolygons collision_sharp_tails;
                 ExPolygons collision_base;
                 // BBS port: with Z-overrides-X/Y, carve roofs against the z-distance
@@ -2385,6 +2389,10 @@ void TreeSupport::draw_circles()
                     if (node.is_processed && node.movement.cast<double>().squaredNorm() > max_move_sq)
                         append(extra_wall_areas, area);
 
+                    if (! interlock_by_depth.empty() && obj_layer_nr > 0 &&
+                        (node.is_sharp_tail || (node.support_roof_layers_below > 0 && node.distance_to_top >= 0 &&
+                                                int(top_interface_layers) - node.support_roof_layers_below <= 0)))
+                        append(interlock_keep, area);
                     if (obj_layer_nr>0 && node.distance_to_top < 0)
                         append(roof_gap_areas, area);
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 &&
@@ -2448,6 +2456,10 @@ void TreeSupport::draw_circles()
                     ExPolygons roof_all = roof_areas;
                     append(roof_all, roof_1st_layer);
                     Polygons remaining = to_polygons(roof_all);
+                    // Shallower wins: never weave over a top roof area, a roof gap or a sharp tail.
+                    append(interlock_keep, roof_gap_areas);
+                    if (! interlock_keep.empty())
+                        remaining = diff(remaining, to_polygons(interlock_keep));
                     Polygons woven_all;
                     const coord_t beam_width = m_support_params.interlock_beam_width();
                     const coord_t line_width = coord_t(scale_(m_support_params.interlock_line_spacing));
@@ -2885,6 +2897,11 @@ void TreeSupport::draw_circles()
                         for (auto& roof1 : ts_layer->roof_1st_layer) {
                             //if (hole.contains(roof1.contour.points.front()) && hole.contains(roof1.contour.bounding_box().center()))
                             bool is_inside_hole = std::all_of(roof1.contour.points.begin(), roof1.contour.points.end(), [&hole](Point& pt) { return hole.contains(pt); });
+                            // EdgeSlicer (support interface interlock): what the weave left of the roof
+                            // can be a sliver; growing it over the hole would print over the stripes.
+                            if (is_inside_hole && ! ts_layer->interlock_roof.empty() &&
+                                opening_ex(ExPolygons{ roof1 }, 0.5f * float(line_width_scaled)).empty())
+                                continue;
                             if (is_inside_hole) {
                                 Polygon hole_reoriented = hole;
                                 if (roof1.contour.is_counter_clockwise())
@@ -2899,6 +2916,9 @@ void TreeSupport::draw_circles()
                                 //       So instead we need to replace its members one by one.
                                 auto tmp1 = diff_ex(roof1, get_collision(0, m_ts_data->layer_heights[layer_nr].obj_layer_nr));
                                 tmp1 = diff_ex(tmp1, ts_layer->roof_areas);
+                                // EdgeSlicer (support interface interlock): nor over the woven stripes.
+                                for (const SupportLayer::InterlockRoofPart &part : ts_layer->interlock_roof)
+                                    tmp1 = diff_ex(tmp1, part.areas);
                                 if (!tmp1.empty()) {
                                     roof1.contour = std::move(tmp1[0].contour);
                                     roof1.holes = std::move(tmp1[0].holes);
