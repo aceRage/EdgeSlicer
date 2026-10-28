@@ -2127,6 +2127,8 @@ void validate_build_cubes(Slic3r::Model& model, Slic3r::Print& print, DynamicPri
 }
 
 // Build cubes and run validate(), collecting warnings; returns the blocking error.
+// The Model dies on return, so callers must not touch a warning's `object` pointer;
+// use validate_build_cubes() with a test-scope Model/Print for that.
 StringObjectException validate_cubes(const DynamicPrintConfig& config,
                                      std::vector<StringObjectException>& warnings,
                                      int n = 1, bool overlap = false)
@@ -2311,8 +2313,13 @@ TEST_CASE("Print::validate concatenates layered-clearance collisions into one wa
     // that entry by type so unrelated default-config warnings don't affect the assertion.
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
+    // Model/Print live in the test scope: the warning's `object` points into the Model.
+    Slic3r::Model model;
+    Slic3r::Print print;
+    validate_build_cubes(model, print, config, /*n=*/3, /*overlap=*/true);
+
     std::vector<StringObjectException> warnings;
-    StringObjectException err = validate_cubes(config, warnings, /*n=*/3, /*overlap=*/true);
+    StringObjectException err = print.validate(&warnings);
 
     CHECK(err.string.empty());
     auto is_layered = [](const StringObjectException& w) {
