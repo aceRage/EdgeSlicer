@@ -124,16 +124,19 @@ render() {   # env exe datadir fixture out extra-args...  (env: NAME=VALUE or em
     grep -q '"ok": *true' "$out.report.json" 2>/dev/null
 }
 
-run_still() {   # name [--model <handy model file>] [--alpha-exact] [render args...]
+run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact] [render args...]
+    # --settings: the U1 project settings without slicing (the scene does not depend on what the
+    # datadir loaded before; --slice fixtures always get them)
     name=$1; shift
     alpha=
     premul=
     model=$MODEL
     if [ "${1:-}" = "--model" ]; then model="$REPO/resources/handy_models/$2"; shift 2; fi
+    settings=
+    if [ "${1:-}" = "--settings" ]; then settings=$SLICE_SETTINGS; shift; fi
     if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; premul=--premultiplied; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
-    settings=
     [ "${1:-}" = "--slice" ] && settings=$SLICE_SETTINGS
     "$PY" "$HERE/make_fixture.py" "$model" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
     g="$OUT/golden/$name.png"
@@ -187,8 +190,8 @@ run_still transparent --alpha-exact
 run_still toolpaths --slice
 run_still toolpaths_finishes --slice
 run_still toolpaths_silk --slice
-run_still silk_walls
-run_still silk_top --model OrcaCube_v2.3mf
+run_still silk_walls --settings
+run_still silk_top --model OrcaCube_v2.3mf --settings
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.
