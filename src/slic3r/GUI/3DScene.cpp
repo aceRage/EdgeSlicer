@@ -570,7 +570,8 @@ void GLVolume::render()
 void GLVolume::simple_render(GLShaderProgram*        shader,
                              ModelObjectPtrs&        model_objects,
                              std::vector<ColorRGBA>& extruder_colors,
-                             bool                    ban_light)
+                             bool                    ban_light,
+                             bool                    ban_color_volume)
 {
     if (this->is_left_handed())
         glFrontFace(GL_CW);
@@ -604,7 +605,7 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         }
     } while (0);
 
-    if (color_volume && !picking) {
+    if (color_volume && !picking && !ban_color_volume) {
         // Orca #15776 adapt: keep per-triangle MMU paint under selection and lift
         // the painted extruder colors so the volume still reads as selected.
         // force_native_color / force_neutral_color cover paint, color-clip, and
