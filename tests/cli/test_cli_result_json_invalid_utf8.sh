@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
-# CLI smoke: a non-UTF-8 object name / path must still produce result.json.
+# CLI smoke: a path that is not valid UTF-8 must still produce result.json.
 #
 # nlohmann dump() throws type_error.316 on invalid UTF-8. record_exit_reson()
 # serialises result.json inside a catch-all, so a throw used to leave no file.
-# Object names from STL paths on Linux can be arbitrary bytes and reach
-# error_string via Print::validate() when --no-check keeps the raw message.
+# On Linux a directory name can be arbitrary bytes; the output directory reaches
+# result.json as sliced_plates[].gcode, the path of the written G-code.
 #
-# This run stops at validate (object taller than the bed). No G-code is written.
+# Linux only: Windows (NTFS) and macOS (APFS) store names as Unicode, so they
+# cannot hold the invalid byte this test needs. Manual, not wired into ctest:
+# it needs an installed EdgeSlicer binary, like tests/cli/test_cli_arrange_rotations.sh.
 #
 # usage: sh tests/cli/test_cli_result_json_invalid_utf8.sh <path to EdgeSlicer> [python]
 set -u
 BIN="${1:-}"
 PY="${2:-python3}"
 [ -f "$BIN" ] || { echo "SKIP: binary not found: $BIN"; exit 77; }
+[ "$(uname -s)" = "Linux" ] || { echo "SKIP: needs a Linux file system for a non-UTF-8 directory name"; exit 77; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/edge-cli-utf8-result.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
-# ASCII STL box. 500 mm tall so U1 (256 mm) validate fails before process().
-"$PY" -I - "$WORK/src.stl" <<'PYEOF'
+# A 20 mm ASCII STL box: it slices on any printer, so the run reaches the success result.
+"$PY" -I - "$WORK/box.stl" <<'PYEOF'
 import sys
-out, sx, sy, sz = sys.argv[1], 20.0, 20.0, 500.0
+out, sx, sy, sz = sys.argv[1], 20.0, 20.0, 20.0
 v = [(x, y, z) for z in (0, sz) for y in (0, sy) for x in (0, sx)]
 with open(out, "w") as f:
     f.write("solid box\n")
@@ -33,47 +36,41 @@ with open(out, "w") as f:
     f.write("endsolid box\n")
 PYEOF
 
-# Linux path / object name: arbitrary bytes, here a lone 0xFF.
-BAD_STL="$WORK/bad"$'\xff'".stl"
-cp "$WORK/src.stl" "$BAD_STL"
-OUT="$WORK/out"
+# The output directory carries a lone 0xFF byte.
+OUT="$WORK/out"$'\xff'
 mkdir -p "$OUT" "$WORK/datadir"
 
-# --no-check keeps validate's err.string (includes the object name) as error_string.
 set +e
-"$BIN" --slice 0 --allow-newer-file --no-thumbnails --progress-json --no-check \
+"$BIN" --slice 0 --allow-newer-file --no-thumbnails \
     --outputdir "$OUT" --datadir "$WORK/datadir" \
     --printer-preset "Snapmaker U1 (0.4 nozzle)" \
     --process-preset "0.20mm Standard @Snapmaker U1 (0.4 nozzle)" \
     --filament-presets "Snapmaker PLA Matte @U1" \
-    "$BAD_STL"
+    "$WORK/box.stl"
 rc=$?
 set -e
 
 RESULT="$OUT/result.json"
 if [ ! -f "$RESULT" ]; then
-    echo "FAIL: result.json missing after non-UTF-8 object name (cli exit $rc)"
+    echo "FAIL: result.json missing with a non-UTF-8 output directory (cli exit $rc)"
     exit 1
 fi
-for gcode in "$OUT"/plate_*.gcode; do
-    if [ -e "$gcode" ]; then
-        echo "FAIL: G-code was written; smoke must stop at validate"
-        exit 1
-    fi
-done
 
 "$PY" -I - "$RESULT" <<'PYEOF'
 import json, sys
 path = sys.argv[1]
 with open(path, "rb") as f:
     raw = f.read()
-doc = json.loads(raw.decode("utf-8"))
-err = doc.get("error_string") or ""
-if "\ufffd" not in err:
-    sys.stderr.write("FAIL: error_string has no U+FFFD replacement: %r\n" % err[:200])
-    sys.exit(1)
 if b"\xff" in raw:
     sys.stderr.write("FAIL: result.json still contains a raw 0xFF byte\n")
     sys.exit(1)
-print("PASS: result.json written; error_string carries U+FFFD")
+doc = json.loads(raw.decode("utf-8"))
+if doc.get("return_code") != 0:
+    sys.stderr.write("FAIL: slice did not succeed: %r\n" % doc.get("error_string"))
+    sys.exit(1)
+gcode = (doc.get("sliced_plates") or [{}])[0].get("gcode") or ""
+if "�" not in gcode:
+    sys.stderr.write("FAIL: sliced_plates[0].gcode has no U+FFFD replacement: %r\n" % gcode[:200])
+    sys.exit(1)
+print("PASS: result.json written; the G-code path carries U+FFFD")
 PYEOF
