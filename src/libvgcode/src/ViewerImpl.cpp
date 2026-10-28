@@ -766,6 +766,69 @@ void ViewerImpl::SegmentsUniforms::init(unsigned int shader_id)
     clipping_plane         = glGetUniformLocation(shader_id, "clipping_plane");
 }
 
+void ViewerImpl::ShadedSegmentsUniforms::init(unsigned int shader_id)
+{
+    // ORCA: realistic view
+    shadow_map       = glGetUniformLocation(shader_id, "shadow_map");
+    shadow_light_vp  = glGetUniformLocation(shader_id, "shadow_light_vp");
+    shadow_intensity = glGetUniformLocation(shader_id, "shadow_intensity");
+    shadow_map_texel = glGetUniformLocation(shader_id, "shadow_map_texel");
+    exposure         = glGetUniformLocation(shader_id, "exposure");
+    saturation       = glGetUniformLocation(shader_id, "saturation");
+    light_top_dir    = glGetUniformLocation(shader_id, "light_top_dir");
+    // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
+    smooth_mode      = glGetUniformLocation(shader_id, "smooth_mode");
+    role_tex         = glGetUniformLocation(shader_id, "role_tex");
+    look_a           = glGetUniformLocation(shader_id, "look_a");
+    look_b           = glGetUniformLocation(shader_id, "look_b");
+    layer_colors.init(shader_id);
+}
+
+bool ViewerImpl::set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                                      std::string* error)
+{
+    if (m_prelude_shader_id != 0) {
+        glsafe(glDeleteProgram(m_prelude_shader_id));
+        m_prelude_shader_id = 0;
+    }
+    m_uni_prelude        = SegmentsUniforms();
+    m_uni_prelude_shaded = ShadedSegmentsUniforms();
+    if (prelude.empty())
+        return true;
+#ifdef ENABLE_OPENGL_ES
+    if (error != nullptr)
+        *error = "LibVGCode: no fragment prelude in the OpenGL ES build";
+    return false;
+#else
+    // The prelude goes after the fragment shader's #version line, with EXTERNAL_LIGHTING defined.
+    const std::string body(Segments_Fragment_Shader);
+    const size_t      eol = body.find('\n');
+    if (eol == std::string::npos) {
+        if (error != nullptr)
+            *error = "LibVGCode: unexpected segments fragment shader";
+        return false;
+    }
+    const std::string fragment = body.substr(0, eol + 1) + "#define EXTERNAL_LIGHTING\n" + prelude + "\n" + body.substr(eol + 1);
+    try {
+        m_prelude_shader_id = init_shader("segments (host prelude)", Segments_Vertex_Shader, fragment.c_str());
+    } catch (const std::exception& e) {
+        m_prelude_shader_id = 0;
+        if (error != nullptr)
+            *error = e.what();
+        return false;
+    }
+    m_uni_prelude.init(m_prelude_shader_id);
+    m_uni_prelude_shaded.init(m_prelude_shader_id);
+    // As the segments program, plus the prelude's own samplers.
+    set_sampler_units(m_prelude_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
+                                             { "segment_index_tex", 3 }, { "shadow_map", m_shadow_map_texture_unit },
+                                             { "role_tex", SMOOTH_ROLES_UNIT } });
+    for (const auto& [name, unit] : sampler_units)
+        set_sampler_units(m_prelude_shader_id, { { name.c_str(), unit } });
+    return true;
+#endif // ENABLE_OPENGL_ES
+}
+
 void ViewerImpl::init(const std::string& opengl_context_version)
 {
     if (m_initialized)
@@ -791,20 +854,7 @@ void ViewerImpl::init(const std::string& opengl_context_version)
 #endif // ENABLE_OPENGL_ES
 
     m_uni_segments.init(m_segments_shader_id);
-    // ORCA: realistic view
-    m_uni_segments_shadow_map_id             = glGetUniformLocation(m_segments_shader_id, "shadow_map");
-    m_uni_segments_shadow_light_vp_id        = glGetUniformLocation(m_segments_shader_id, "shadow_light_vp");
-    m_uni_segments_shadow_intensity_id       = glGetUniformLocation(m_segments_shader_id, "shadow_intensity");
-    m_uni_segments_shadow_map_texel_id       = glGetUniformLocation(m_segments_shader_id, "shadow_map_texel");
-    m_uni_segments_exposure_id               = glGetUniformLocation(m_segments_shader_id, "exposure");
-    m_uni_segments_saturation_id             = glGetUniformLocation(m_segments_shader_id, "saturation");
-    m_uni_segments_light_top_dir_id          = glGetUniformLocation(m_segments_shader_id, "light_top_dir");
-    // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
-    m_uni_segments_smooth_mode_id            = glGetUniformLocation(m_segments_shader_id, "smooth_mode");
-    m_uni_segments_role_tex_id               = glGetUniformLocation(m_segments_shader_id, "role_tex");
-    m_uni_segments_look_a_id                 = glGetUniformLocation(m_segments_shader_id, "look_a");
-    m_uni_segments_look_b_id                 = glGetUniformLocation(m_segments_shader_id, "look_b");
-    m_uni_segments_layer_colors.init(m_segments_shader_id);
+    m_uni_segments_shaded.init(m_segments_shader_id);
     // EDGE (core profile): every sampler on its own unit from the start (see set_sampler_units()).
     // render_segments() sets the same units again on every draw; shadow_map takes the unit the host
     // will name in set_shadow_map(), 4 until then.
@@ -947,6 +997,11 @@ void ViewerImpl::shutdown()
     if (m_segments_shader_id != 0) {
         glsafe(glDeleteProgram(m_segments_shader_id));
         m_segments_shader_id = 0;
+    }
+    // EDGE (Showcase realism 1b)
+    if (m_prelude_shader_id != 0) {
+        glsafe(glDeleteProgram(m_prelude_shader_id));
+        m_prelude_shader_id = 0;
     }
     if (m_segments_caster_shader_id != 0) {
         glsafe(glDeleteProgram(m_segments_caster_shader_id));
@@ -2161,8 +2216,14 @@ void ViewerImpl::update_heights_widths()
 void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projection_matrix, const Vec3& camera_position)
 {
     // ORCA: realistic view. The shadow caster pass draws depth only.
-    const unsigned int shader_id = m_rendering_shadow_casters ? m_segments_caster_shader_id : m_segments_shader_id;
-    const SegmentsUniforms& uni = m_rendering_shadow_casters ? m_uni_segments_caster : m_uni_segments;
+    // EDGE (Showcase realism 1b): the host's prelude program replaces the shaded one while the smooth
+    // look is on and the host asked for it.
+    const bool prelude = !m_rendering_shadow_casters && m_use_prelude && m_smooth_look && m_roles_tex_id != 0 && m_prelude_shader_id != 0;
+    const unsigned int shader_id = m_rendering_shadow_casters ? m_segments_caster_shader_id :
+                                   prelude                    ? m_prelude_shader_id :
+                                                                m_segments_shader_id;
+    const SegmentsUniforms& uni = m_rendering_shadow_casters ? m_uni_segments_caster : prelude ? m_uni_prelude : m_uni_segments;
+    const ShadedSegmentsUniforms& shaded = prelude ? m_uni_prelude_shaded : m_uni_segments_shaded;
     if (shader_id == 0)
         return;
 
@@ -2195,17 +2256,17 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
     glsafe(glUniform4fv(uni.clipping_plane, 1, m_clipping_plane.data()));
     if (!m_rendering_shadow_casters) {
         // ORCA: realistic view
-        glsafe(glUniform1i(m_uni_segments_shadow_map_id, m_shadow_map_texture_unit));
-        glsafe(glUniformMatrix4fv(m_uni_segments_shadow_light_vp_id, 1, GL_FALSE, m_shadow_light_vp.data()));
-        glsafe(glUniform1f(m_uni_segments_shadow_intensity_id, m_shadow_intensity));
-        glsafe(glUniform1f(m_uni_segments_shadow_map_texel_id, m_shadow_map_texel));
-        glsafe(glUniform1f(m_uni_segments_exposure_id, m_exposure));
-        glsafe(glUniform1f(m_uni_segments_saturation_id, m_saturation));
-        glsafe(glUniform3fv(m_uni_segments_light_top_dir_id, 1, m_light_top_dir.data()));
-        set_layer_colors(m_uni_segments_layer_colors);
+        glsafe(glUniform1i(shaded.shadow_map, m_shadow_map_texture_unit));
+        glsafe(glUniformMatrix4fv(shaded.shadow_light_vp, 1, GL_FALSE, m_shadow_light_vp.data()));
+        glsafe(glUniform1f(shaded.shadow_intensity, m_shadow_intensity));
+        glsafe(glUniform1f(shaded.shadow_map_texel, m_shadow_map_texel));
+        glsafe(glUniform1f(shaded.exposure, m_exposure));
+        glsafe(glUniform1f(shaded.saturation, m_saturation));
+        glsafe(glUniform3fv(shaded.light_top_dir, 1, m_light_top_dir.data()));
+        set_layer_colors(shaded.layer_colors);
         // EDGE (Showcase S5): the smooth bead look, off unless Showcase asked for it.
         const bool smooth = m_smooth_look && m_roles_tex_id != 0;
-        glsafe(glUniform1i(m_uni_segments_smooth_mode_id, smooth ? 1 : 0));
+        glsafe(glUniform1i(shaded.smooth_mode, smooth ? 1 : 0));
         if (smooth) {
             std::array<float, 64> a{}, b{};
             for (size_t e = 0; e < 16; ++e)
@@ -2213,8 +2274,8 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
                     a[e * 4 + k] = m_looks[e * 8 + k];
                     b[e * 4 + k] = m_looks[e * 8 + 4 + k];
                 }
-            glsafe(glUniform4fv(m_uni_segments_look_a_id, 16, a.data()));
-            glsafe(glUniform4fv(m_uni_segments_look_b_id, 16, b.data()));
+            glsafe(glUniform4fv(shaded.look_a, 16, a.data()));
+            glsafe(glUniform4fv(shaded.look_b, 16, b.data()));
         }
     }
 
@@ -2295,7 +2356,7 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
         glsafe(glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &curr_roles_texture));
         glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_roles_tex_id));
         glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R16UI, m_roles_buf_id));
-        glsafe(glUniform1i(m_uni_segments_role_tex_id, SMOOTH_ROLES_UNIT));
+        glsafe(glUniform1i(shaded.role_tex, SMOOTH_ROLES_UNIT));
         glsafe(glActiveTexture(GL_TEXTURE0));
     }
 

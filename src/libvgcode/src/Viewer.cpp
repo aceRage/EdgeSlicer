@@ -85,6 +85,22 @@ bool Viewer::is_smooth_look() const
     return m_impl->is_smooth_look();
 }
 
+bool Viewer::set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                                  std::string* error)
+{
+    return m_impl->set_fragment_prelude(prelude, sampler_units, error);
+}
+
+unsigned int Viewer::get_fragment_prelude_program() const
+{
+    return m_impl->get_fragment_prelude_program();
+}
+
+void Viewer::set_use_fragment_prelude(bool use)
+{
+    m_impl->set_use_fragment_prelude(use);
+}
+
 void Viewer::set_clipping_plane(const std::array<float, 4>& plane)
 {
     m_impl->set_clipping_plane(plane);
