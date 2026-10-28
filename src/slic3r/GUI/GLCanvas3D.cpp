@@ -3785,7 +3785,8 @@ void GLCanvas3D::render(bool only_init)
         //only_body = true;
         only_current = true;
     }
-    else if ((gizmo_type == GLGizmosManager::FdmSupports) || (gizmo_type == GLGizmosManager::Seam) || (gizmo_type == GLGizmosManager::MmSegmentation) || (gizmo_type == GLGizmosManager::FuzzySkin))
+    else if ((gizmo_type == GLGizmosManager::FdmSupports) || (gizmo_type == GLGizmosManager::Seam) || (gizmo_type == GLGizmosManager::MmSegmentation) || (gizmo_type == GLGizmosManager::FuzzySkin)
+             || _is_below_plate_view_active())
         no_partplate = true;
     else if (gizmo_type == GLGizmosManager::BrimEars && !camera.is_looking_downward())
         show_grid = false;
@@ -3811,6 +3812,7 @@ void GLCanvas3D::render(bool only_init)
             {
                 FrameProfiler::Scope scope(*m_frame_profiler, "objects");
                 _render_objects(GLVolumeCollection::ERenderType::Opaque, !m_gizmos.is_running());
+                _render_below_plate_volumes();
             }
             _render_sla_slices();
             _render_selection();
@@ -3821,7 +3823,9 @@ void GLCanvas3D::render(bool only_init)
             FrameProfiler::Scope scope(*m_frame_profiler, "bed");
             if (!no_partplate)
                 _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
-            if (!no_partplate) //BBS: add outline logic
+            // Orca #16681: the painting gizmos hide the bed mesh on purpose and draw the plate instead, so the
+            // plate list is the only bed reference in the scene while the below-plate view is active.
+            if (!no_partplate || _is_below_plate_view_active()) //BBS: add outline logic
                 _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid, m_plate_focus_visible_plates);
         }
         if (plate_first) {
@@ -10958,6 +10962,84 @@ bool GLCanvas3D::_is_xray_view_active() const
         return false;
     return !(m_picking_enabled && m_layers_editing.is_enabled() && m_layers_editing.last_object_id != -1 &&
              m_layers_editing.object_max_z() > 0.0f);
+}
+
+bool GLCanvas3D::_is_below_plate_view_active() const
+{
+    return dynamic_cast<const GLGizmoPainterBase*>(m_gizmos.get_current()) != nullptr && m_gizmos.is_hiding_instances();
+}
+
+// The painting gizmo clips the selected object at the plate, so the part under the plate is not drawn.
+// This pass draws that part of the selected instance again at 50% opacity, depth writes off.
+void GLCanvas3D::_render_below_plate_volumes()
+{
+    if (!_is_below_plate_view_active() || m_volumes.empty())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("gouraud");
+    if (shader == nullptr)
+        return;
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Transform3d& view_matrix = camera.get_view_matrix();
+    const Transform3d& proj_matrix = camera.get_projection_matrix();
+    const int object_idx = m_selection.get_object_idx();
+    const int instance_idx = m_selection.get_instance_idx();
+
+    // Depth test stays on so whatever is already in the depth buffer hides the ghost; depth writes
+    // are off and back faces are culled, so each pixel blends only the near surface once.
+    const GLboolean cull_face = ::glIsEnabled(GL_CULL_FACE);
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glCullFace(GL_BACK));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    shader->start_using();
+    // Keep z <= SINKING_Z_THRESHOLD, the complement of the clip the painting gizmo applies.
+    shader->set_uniform("z_range", std::array<float, 2>{ -FLT_MAX, float(SINKING_Z_THRESHOLD) });
+    shader->set_uniform("clipping_plane", m_volumes.get_clipping_plane());
+    shader->set_uniform("use_color_clip_plane", false);
+    shader->set_uniform("is_outline", false);
+    shader->set_uniform("slope.actived", false);
+    shader->set_uniform("print_volume.type", -1);
+    shader->set_uniform("extruder_printable_heights", std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    shader->set_uniform("shadow_intensity", 0.0f);
+
+    // simple_render() needs these to reach the plain surface; with ban_color_volume it ignores both.
+    ModelObjectPtrs&       model_objects   = wxGetApp().model().objects;
+    std::vector<ColorRGBA> extruder_colors = get_extruders_colors();
+
+    for (GLVolume* volume : m_volumes.volumes) {
+        // is_active cannot gate this pass: the color painter marks the whole instance inactive and
+        // draws it in its own gizmo pass. The instance and print-part checks below are what pick
+        // this ghost out of the scene.
+        if (volume->object_idx() != object_idx || volume->instance_idx() != instance_idx ||
+            volume->is_modifier || volume->is_wipe_tower || volume->volume_idx() < 0)
+            continue;
+
+        volume->set_render_color();
+        ColorRGBA color = volume->render_color;
+        color.a(0.5f);
+        volume->model.set_color(color);
+
+        const Transform3d model_matrix = volume->world_matrix();
+        shader->set_uniform("view_model_matrix", view_matrix * model_matrix);
+        shader->set_uniform("projection_matrix", proj_matrix);
+        shader->set_uniform("volume_world_matrix", model_matrix);
+        const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
+        shader->set_uniform("view_normal_matrix", view_normal_matrix);
+        // Painted facets would send render() through the MMU segmentation sub-models, which carry
+        // their own opaque filament colours; the ghost draws the plain surface so the alpha holds.
+        volume->simple_render(shader, model_objects, extruder_colors, false, true);
+    }
+    shader->stop_using();
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDepthMask(GL_TRUE));
+    if (cull_face == GL_FALSE)
+        glsafe(::glDisable(GL_CULL_FACE));
 }
 
 void GLCanvas3D::_render_xray_volumes()
