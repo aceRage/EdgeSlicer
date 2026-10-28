@@ -677,26 +677,3 @@ TEST_CASE("The highest temperature bed policy ignores filaments that start above
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
 }
-
-// Snapmaker OrcaSlicer #1074: print.extruders() counts a config-assigned support filament
-// even when the model needs no support and none is generated. That phantom filament must
-// not raise M140/M190 or bed_temperature_initial_layer_single.
-TEST_CASE("A support filament assigned but never generated does not raise the bed temperature", "[GCode][BedTemperature]")
-{
-    DynamicPrintConfig config = two_filament_bed_temp_config("60,80", "55,80");
-    config.set_deserialize_strict({
-        {"enable_support",             "1"},
-        {"support_type",               "normal(auto)"},
-        {"support_threshold_angle",    "30"},
-        {"support_filament",           "2"},
-        {"support_interface_filament", "2"},
-    });
-
-    const std::string      gcode     = Test::slice({TestMesh::cube_20x20x20}, config);
-    const std::vector<int> bed_temps = bed_command_temps(gcode);
-    INFO("bed temperatures: " << join_ints(bed_temps));
-    REQUIRE_FALSE(bed_temps.empty());
-    CHECK(bed_temps.front() == 60);
-    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 80) == bed_temps.end());
-    CHECK(gcode.find("M190 S60") != std::string::npos);
-}

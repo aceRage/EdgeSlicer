@@ -5811,16 +5811,35 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             print_object_instances_ordering = sort_object_instances_by_model_order(*this);
             //        print_object_instances_ordering = sort_object_instances_by_max_z(print);
             print_object_instance_sequential_active = print_object_instances_ordering.begin();
+            std::vector<unsigned int> first_layer_used_filaments;
+            std::vector<unsigned int> used_filaments;
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end(); ++print_object_instance_sequential_active) {
                 tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
+                if (!tool_ordering.empty())
+                    append(first_layer_used_filaments, tool_ordering.front().extruders);
+                append(used_filaments, tool_ordering.all_extruders());
                 if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                     append(printExtruders, tool_ordering.tools_for_layer(layers_to_print.front().first).extruders);
                 }
             }
+            // A mixed (virtual) slot only reaches the nozzle as its physical components.
+            const size_t num_physical = m_config.filament_diameter.size();
+            m_mixed_filament_mgr.expand_0based_extruder_ids(first_layer_used_filaments, num_physical);
+            m_mixed_filament_mgr.expand_0based_extruder_ids(used_filaments, num_physical);
+            this->set_slice_used_filaments(first_layer_used_filaments, used_filaments);
         }
         else {
             tool_ordering = this->tool_ordering();
             tool_ordering.assign_custom_gcodes(*this);
+
+            std::vector<unsigned int> first_layer_used_filaments;
+            if (!tool_ordering.empty())
+                first_layer_used_filaments = tool_ordering.front().extruders;
+            std::vector<unsigned int> used_filaments = tool_ordering.all_extruders();
+            const size_t num_physical = m_config.filament_diameter.size();
+            m_mixed_filament_mgr.expand_0based_extruder_ids(first_layer_used_filaments, num_physical);
+            m_mixed_filament_mgr.expand_0based_extruder_ids(used_filaments, num_physical);
+            this->set_slice_used_filaments(first_layer_used_filaments, used_filaments);
             has_wipe_tower = this->has_wipe_tower() && tool_ordering.has_wipe_tower();
             initial_extruder_id = tool_ordering.first_extruder();
             print_object_instances_ordering = chain_print_object_instances(*this);

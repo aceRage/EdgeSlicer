@@ -3314,38 +3314,6 @@ static BambuBedType to_bambu_bed_type(BedType type)
 // Defined further below; used to skip the automatic chamber M141/M191 when the start G-code sets it.
 static bool custom_gcode_sets_temperature(const std::string& gcode, const int mcode_set_temp_dont_wait, const int mcode_set_temp_and_wait, const bool include_g10, int& temp_out);
 
-// Filaments that touch the bed: the first ToolOrdering layer that actually prints
-// object or support, plus a brim's wall filament when the first layer has no walls
-// (wall_loops = 0). Seeded into m_initial_layer_extruders before first-layer M140/M190
-// so a hotter filament that only starts higher up cannot raise the bed.
-static void note_bed_touching_extruders(std::set<unsigned int> &dst, const ToolOrdering &ordering, const Print &print)
-{
-    for (const LayerTools &lt : ordering) {
-        if (lt.extruders.empty())
-            continue;
-        if (!lt.has_object && !lt.has_support)
-            continue;
-        dst.insert(lt.extruders.begin(), lt.extruders.end());
-        break;
-    }
-    if (!print.has_brim())
-        return;
-    for (const auto &obj_entry : print.get_brimMapByExtruder())
-        for (const auto &per_extruder : obj_entry.second)
-            if (!per_extruder.second.empty())
-                dst.insert(per_extruder.first);
-    for (const PrintObject *object : print.objects()) {
-        if (!object->object_first_layer_wall_extruders.empty() || object->layers().empty())
-            continue;
-        // No first-layer walls: brim still follows wall_filament (see getObjectExtruderMap).
-        for (const LayerRegion *layerm : object->layers().front()->regions()) {
-            const unsigned int wall = layerm->region().extruder(frExternalPerimeter);
-            if (wall > 0)
-                dst.insert(wall - 1);
-        }
-    }
-}
-
 void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     PROFILE_FUNC();
@@ -3618,9 +3586,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 if (inst->print_object == prev)
                     continue;
                 prev = inst->print_object;
-                ToolOrdering object_ordering(*inst->print_object, (unsigned int) -1);
-                append(extruder_ids, object_ordering.all_extruders());
-                note_bed_touching_extruders(m_initial_layer_extruders, object_ordering, print);
+                append(extruder_ids, ToolOrdering(*inst->print_object, (unsigned int) -1).all_extruders());
             }
         }
         sort_remove_duplicates(extruder_ids);
@@ -3672,7 +3638,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
         this->set_extruders(tool_ordering.all_extruders());
-        note_bed_touching_extruders(m_initial_layer_extruders, tool_ordering, print);
         print_object_instances_ordering =
             // By default, order object instances using a nearest neighbor search.
             print.config().print_order == PrintOrder::Default ? chain_print_object_instances(print)
@@ -3692,7 +3657,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     print.throw_if_canceled();
 
     // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
-    // Bed stays the max of filaments that touch the bed / actually extrude.
+    // Bed stays the max of the first layer's filaments (Orca #16770).
     // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
     int compat_first_layer_bed_temp    = 0;
     int compat_first_layer_nozzle_temp = 0;
@@ -3925,10 +3890,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("bbl_bed_temperature_gcode", new ConfigOptionBool(false));
         this->placeholder_parser().set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("bed_temperature", new ConfigOptionInts(*bed_temp_opt));
-        // The single bed temperature value is the max over filaments that touch the bed
-        // or actually extrude, not every filament assigned in the config.
+        // BBS: the single bed temperature value accommodates the highest-temperature filament of the first layer
+        // (Orca #16770: the same first-layer filaments as M140/M190, not the initial extruder only).
         int bed_temp_single = 0;
-        for (const unsigned int extruder_id : bed_temperature_extruders(print))
+        for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
             bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
         this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
@@ -4366,8 +4331,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatible image. Bed stays the max of filaments that
-            // touch the bed / actually extrude. Nozzle is the first printing
+            // SoftFever: write compatible image. Bed stays the max of the first layer's
+            // filaments (get_bed_temperature_max). Nozzle is the first printing
             // filament when tool ordering already exists. On a single-filament plate
             // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
             // / unsigned(-1), so fall back to the first used filament. The U1 trailer
@@ -5879,37 +5844,19 @@ int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer,
     return bed_temp_opt->get_at(extruder_id);
 }
 
-// Max bed temperature over filaments that touch the bed / actually extrude.
-// A compatible mixed print (e.g. PLA 65C + TPU 35C) still runs the highest of those.
-// A hotter support-interface filament that starts above layer 1, or a support
-// filament assigned when no support is generated, must not raise M140/M190.
+// BBS
+// Max bed temperature over the filaments printed on the first layer, so a compatible mixed first layer
+// (e.g. PLA 65C + TPU 35C) runs the highest bed temperature.
 // A value of 0 means the filament does not support the current bed type, and is naturally skipped by max().
 int GCode::get_bed_temperature_max(const Print& print, const bool is_first_layer) const
 {
     int max_bed_temp = 0;
-    for (const unsigned int extruder_id : bed_temperature_extruders(print))
+    // Orca #16770: only the filaments printed on the first layer touch the bed, so a filament that starts higher up,
+    // such as a support interface, must not raise the bed temperature for the rest of the print.
+    for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
         max_bed_temp = std::max(
             max_bed_temp, get_bed_temperature(extruder_id, is_first_layer, print.config().curr_bed_type));
     return max_bed_temp;
-}
-
-// Extruders that should set the bed temperature.
-// Prefer filaments that touch the bed (m_initial_layer_extruders, seeded from
-// ToolOrdering and refined when the first layer is exported). Next, extruders
-// that actually print (m_writer.extruders() / ToolOrdering). Print::extruders()
-// is derived from the configuration: support_filament is counted whenever
-// support is enabled, even if no support is generated. Fall back to that list
-// only before the writer is populated.
-std::vector<unsigned int> GCode::bed_temperature_extruders(const Print& print) const
-{
-    if (!m_initial_layer_extruders.empty())
-        return {m_initial_layer_extruders.begin(), m_initial_layer_extruders.end()};
-
-    std::vector<unsigned int> ids = m_writer.extruder_ids();
-    if (!ids.empty())
-        return ids;
-
-    return print.extruders();
 }
 
 // Write 1st layer bed temperatures into the G-code.
@@ -5919,8 +5866,8 @@ std::vector<unsigned int> GCode::bed_temperature_extruders(const Print& print) c
 void GCode::_print_first_layer_bed_temperature(
     GCodeOutputStream& file, Print& print, const std::string& gcode, bool wait)
 {
-    // Bed temperature accommodates the highest-temperature filament that touches
-    // the bed / actually extrudes, not every filament assigned in the config.
+    // BBS: bed temperature accommodates the highest-temperature filament of the print
+    // (max over all used extruders instead of the first printing extruder only).
     int bed_temp = get_bed_temperature_max(print, true);
 
     // Is the bed temperature set by the provided custom G-code?
@@ -7561,9 +7508,8 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode += m_writer.set_temperature(temperature, false, extruder.id());
         }
 
-        // Stay at the highest later-layer temperature of the filaments that
-        // touched the bed. A hotter filament that starts above layer 1 must
-        // not raise M140 here.
+        // BBS: bed temperature accommodates the highest-temperature filament of the print
+        // (max over all used extruders instead of the first extruder of this layer only).
         int bed_temp = get_bed_temperature_max(print, false);
         gcode += m_writer.set_bed_temperature(bed_temp);
         // Mark the temperature transition from 1st to 2nd layer to be finished.

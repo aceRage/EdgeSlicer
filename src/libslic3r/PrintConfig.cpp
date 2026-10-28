@@ -12773,7 +12773,7 @@ TemperaturesConfigDef::TemperaturesConfigDef()
 
     new_def("bed_temperature", coInts, "Bed temperature", "Vector of bed temperatures for each extruder/filament.")
     new_def("bed_temperature_initial_layer", coInts, "Initial layer bed temperature", "Vector of initial layer bed temperatures for each extruder/filament. Provides the same value as first_layer_bed_temperature.")
-    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of first-layer filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over the filaments that touch the bed or actually extrude, not every filament assigned in the config.")
+    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of first-layer filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over the filaments printed on the first layer.")
     new_def("chamber_temperature", coInts, "Chamber temperature", "Vector of chamber temperatures for each extruder/filament.")
     new_def("overall_chamber_temperature", coInt, "Overall chamber temperature", "Overall chamber temperature. This value is the maximum chamber temperature of any extruder/filament used.")
     new_def("first_layer_bed_temperature", coInts, "First layer bed temperature", "Vector of first layer bed temperatures for each extruder/filament. Provides the same value as bed_temperature_initial_layer.")
