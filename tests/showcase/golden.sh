@@ -70,7 +70,13 @@ exe_in() {
 }
 GEXE=$(exe_in "$GOLDEN_DIR") || { echo "no EdgeSlicer executable in $GOLDEN_DIR" >&2; exit 2; }
 CEXE=$(exe_in "$CAND") || { echo "no EdgeSlicer executable in $CAND" >&2; exit 2; }
-PY=${PYTHON:-python}
+if [ -n "$PYTHON" ]; then PY=$PYTHON
+elif command -v python3 > /dev/null 2>&1; then PY=python3   # macOS ships python3 only
+else PY=python; fi
+# A 900 s cap per render where the system has one (macOS has neither timeout nor gtimeout by default).
+if command -v timeout > /dev/null 2>&1; then LIMIT="timeout 900"
+elif command -v gtimeout > /dev/null 2>&1; then LIMIT="gtimeout 900"
+else LIMIT=""; fi
 
 mkdir -p "$OUT/fixtures" "$OUT/golden" "$OUT/candidate" "$OUT/diff" "$OUT/datadir_golden" "$OUT/datadir_candidate"
 OUT=$(cd "$OUT" && pwd)
@@ -114,11 +120,12 @@ verdict() {   # (v_ names: sh has no locals, and the callers' name/line/rc must 
 STATUS=0
 render() {   # env exe datadir fixture out extra-args...  (env: NAME=VALUE or empty)
     renv=$1; exe=$2; dd=$3; fx=$4; out=$5; shift 5
+    # shellcheck disable=SC2086  # $LIMIT is a command prefix and must split into words
     if [ -n "$renv" ]; then
-        timeout 900 env "$renv" "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
+        $LIMIT env "$renv" "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
             --datadir "$dd" --report "$out.report.json" "$@" > "$out.log" 2>&1
     else
-        timeout 900 "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
+        $LIMIT "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
             --datadir "$dd" --report "$out.report.json" "$@" > "$out.log" 2>&1
     fi
     grep -q '"ok": *true' "$out.report.json" 2>/dev/null
