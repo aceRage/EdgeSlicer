@@ -512,9 +512,16 @@ static float part_joint_radius(const Perimeter &perimeter, const GlobalModelInfo
 }
 
 //Extract perimeter polygons of the given layer
+// fallback_out (optional) gets one flag per returned polygon: true for a collection's fallback polygon.
 Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out,
-                                   bool has_precise_seam_modifiers) {
+                                   bool has_precise_seam_modifiers, std::vector<bool> *fallback_out) {
   Polygons polygons;
+  auto mark = [&polygons, fallback_out](bool fallback) {
+    if (fallback_out != nullptr) {
+      fallback_out->resize(polygons.size(), false);
+      fallback_out->back() = fallback;
+    }
+  };
   for (const LayerRegion *layer_region : layer->regions()) {
     for (const ExtrusionEntity *ex_entity : layer_region->perimeters.entities) {
       if (ex_entity->is_collection()) { //collection of inner, outer, and overhang perimeters
@@ -537,6 +544,7 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
             perimeter->collect_points(p);
             polygons.emplace_back(std::move(p));
             corresponding_regions_out.push_back(layer_region);
+            mark(false);
           }
         }
         if (polygons.size() == collection_begin) {
@@ -544,12 +552,14 @@ Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerR
           ex_entity->collect_points(p);
           polygons.emplace_back(std::move(p));
           corresponding_regions_out.push_back(layer_region);
+          mark(true);
         }
       } else {
         Points p;
         ex_entity->collect_points(p);
         polygons.emplace_back(std::move(p));
         corresponding_regions_out.push_back(layer_region);
+        mark(false);
       }
     }
   }
@@ -1610,11 +1620,15 @@ void SeamPlacer::gather_seam_candidates(const PrintObject *po, const SeamPlacerI
                         //NOTE corresponding region ptr may be null, if the layer has zero perimeters
                         const bool has_precise_seam_modifiers = !global_model_info.precise_seam_strong_volumes.empty() ||
                                                                !global_model_info.precise_seam_weak_volumes.empty();
-                        Polygons polygons = extract_perimeter_polygons(layer, regions, has_precise_seam_modifiers);
+                        std::vector<bool> fallback;
+                        Polygons polygons = extract_perimeter_polygons(layer, regions, has_precise_seam_modifiers, &fallback);
                         for (size_t poly_index = 0; poly_index < polygons.size(); ++poly_index) {
+                          const size_t perimeters_before = layer_seams.perimeters.size();
                           process_perimeter_polygon(polygons[poly_index], unscaled_z,
                                                     regions[poly_index], global_model_info, layer_seams,
                                                     warnings);
+                          if (layer_seams.perimeters.size() > perimeters_before && poly_index < fallback.size())
+                            layer_seams.perimeters.back().from_fallback = fallback[poly_index];
                         }
                         auto functor = SeamCandidateCoordinateFunctor { layer_seams.points };
                         seam_data.layers[layer_idx].points_tree =
@@ -2338,6 +2352,11 @@ std::vector<std::vector<SeamPlacer::PlannedSeam>> SeamPlacer::plan_object_seams(
           continue;
         if (seam_position == spNearest)
           pick_seam_point(points, start, comparator);
+        // A fallback polygon merges every loop of an island with no recognisable outer loop (Orca #16334 makes
+        // one per such island): auto-paint would paint seams on that merged outline. The seam
+        // itself is still picked above, as before.
+        if (perimeter.from_fallback)
+          continue;
         loops.emplace_back(perimeter.start_index, perimeter.end_index);
         Polygon polygon;
         polygon.points.reserve(perimeter.end_index - perimeter.start_index);

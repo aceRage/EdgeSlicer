@@ -26,7 +26,7 @@
 
 namespace Slic3r { namespace SeamPlacerImpl {
 Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion *> &corresponding_regions_out,
-                                    bool has_precise_seam_modifiers);
+                                    bool has_precise_seam_modifiers, std::vector<bool> *fallback_out);
 }} // namespace Slic3r::SeamPlacerImpl
 
 using namespace Slic3r;
@@ -107,11 +107,16 @@ bool on_outline(const Polygon &polygon, const BoundingBoxf &r)
     return true;
 }
 
-Polygons extract(const Layer &layer)
+// Also returns which polygons are a collection's fallback (all of its points merged), which seam auto-paint skips.
+Polygons extract(const Layer &layer, std::vector<bool> *fallback = nullptr)
 {
     std::vector<const LayerRegion *> regions;
-    Polygons polygons = SeamPlacerImpl::extract_perimeter_polygons(&layer, regions, false);
+    std::vector<bool>                flags;
+    Polygons polygons = SeamPlacerImpl::extract_perimeter_polygons(&layer, regions, false, &flags);
     CHECK(regions.size() == polygons.size());
+    CHECK(flags.size() == polygons.size());
+    if (fallback != nullptr)
+        *fallback = flags;
     return polygons;
 }
 
@@ -139,9 +144,11 @@ TEST_CASE("Fully overhanging outer loop is its own seam perimeter regardless of 
         region.perimeters.append(std::move(island_b));
     }
 
-    const Polygons polygons = extract(layer);
+    std::vector<bool> fallback;
+    const Polygons    polygons = extract(layer, &fallback);
     // Exactly the two outer loops; the inner loop is not merged into either of them.
     REQUIRE(polygons.size() == 2);
+    CHECK(fallback == std::vector<bool>{ false, false });
     const Polygon &a = overhang_first ? polygons[1] : polygons[0];
     const Polygon &b = overhang_first ? polygons[0] : polygons[1];
     CHECK(on_outline(a, OUTER_A));
@@ -175,10 +182,13 @@ TEST_CASE("A collection without a recognizable outer loop gets its own fallback 
     layer.get_region(0)->perimeters.append(std::move(island_a));
     layer.get_region(0)->perimeters.append(std::move(island_b));
 
-    const Polygons polygons = extract(layer);
+    std::vector<bool> fallback;
+    const Polygons    polygons = extract(layer, &fallback);
     REQUIRE(polygons.size() == 2);
     CHECK(on_outline(polygons[0], OUTER_A));
     CHECK(on_outline(polygons[1], OUTER_B));
+    // Edge: the second polygon is the collection's fallback, so seam auto-paint leaves it alone.
+    CHECK(fallback == std::vector<bool>{ false, true });
 }
 
 TEST_CASE("Mixed overhang and external outer loop is taken once", "[SeamPlacer][Regression]")
