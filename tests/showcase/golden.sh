@@ -74,6 +74,8 @@ PY=${PYTHON:-python}
 mkdir -p "$OUT/fixtures" "$OUT/golden" "$OUT/candidate" "$OUT/diff" "$OUT/datadir_golden" "$OUT/datadir_candidate"
 OUT=$(cd "$OUT" && pwd)
 MODEL="$REPO/resources/handy_models/3DBenchy.3mf"
+# A U1 project's printer, filament and process: a fresh datadir's "Default Printer" does not slice.
+SLICE_SETTINGS="$REPO/tests/data/support_corpus/onepart_group.3mf"
 REPORT="$OUT/report.txt"
 : > "$REPORT"
 echo "golden:    $GEXE ($(head -1 "$GOLDEN_DIR/COMMIT.txt" 2>/dev/null))" | tee -a "$REPORT"
@@ -93,18 +95,18 @@ expected() {
 
 # One fixture's verdict: report line $2 with compare.py's code $3, for fixture $1 (a video frame
 # is <name>/<frame>).
-verdict() {
-    name=$1; line=$2; rc=$3
-    if expected "${name%%/*}"; then
-        if [ "$rc" -eq 1 ]; then
-            line="$line (CHANGED ON PURPOSE: review it in index.html)"
-            rc=0
-        elif [ "$rc" -eq 0 ]; then
-            line="$line (expected a change, none seen)"
+verdict() {   # (v_ names: sh has no locals, and the callers' name/line/rc must survive)
+    v_name=$1; v_line=$2; v_rc=$3
+    if expected "${v_name%%/*}"; then
+        if [ "$v_rc" -eq 1 ]; then
+            v_line="$v_line (CHANGED ON PURPOSE: review it in index.html)"
+            v_rc=0
+        elif [ "$v_rc" -eq 0 ]; then
+            v_line="$v_line (expected a change, none seen)"
         fi
     fi
-    echo "$name: $line" | tee -a "$REPORT"
-    [ "$rc" -ne 0 ] && [ "$STATUS" -eq 0 ] && STATUS=1
+    echo "$v_name: $v_line" | tee -a "$REPORT"
+    [ "$v_rc" -ne 0 ] && [ "$STATUS" -eq 0 ] && STATUS=1
     return 0
 }
 
@@ -128,7 +130,9 @@ run_still() {   # name [--alpha-exact] [render args...]
     if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; premul=--premultiplied; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
-    "$PY" "$HERE/make_fixture.py" "$MODEL" "$HERE/fixtures/$name.json" "$fx" || { STATUS=2; return; }
+    settings=
+    [ "${1:-}" = "--slice" ] && settings=$SLICE_SETTINGS
+    "$PY" "$HERE/make_fixture.py" "$MODEL" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
     g="$OUT/golden/$name.png"
     c="$OUT/candidate/$name.png"
     if [ "$KEEP" = 0 ] || [ ! -f "$g" ]; then
