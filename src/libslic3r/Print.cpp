@@ -2494,6 +2494,32 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    // ORCA #16719: a filament flow ratio of 0 makes GCode::_extrude divide 0 by 0 and write NaN (or a huge E)
+    // into the G-code. Refuse it for every filament the plate prints, plus filament 1 when no flow variants
+    // are active, because _extrude then scales and divides every extrusion by filament 1's ratio
+    // (ResolvedFilamentFlow::uncached_flow_ratio). The division itself is unchanged for non-zero ratios.
+    {
+        const ConfigOptionFloats &flow_ratios    = m_config.filament_flow_ratio;
+        const size_t              filament_count = flow_variant_filament_count(m_config);
+        auto refuse_flow_ratio = [](unsigned int filament_id) {
+            StringObjectException err;
+            // TRN %1% is the filament number as shown in the filament list, starting from 1.
+            err.string  = (boost::format(L("The flow ratio of filament %1% must be greater than 0.")) % (filament_id + 1)).str();
+            err.opt_key = "filament_flow_ratio";
+            return err;
+        };
+        if (!flow_ratios.values.empty()) {
+            if (!filament_flow_variants_active(m_config) && !(flow_ratios.get_at(0) > 0.))
+                return refuse_flow_ratio(0);
+            // extruders(true): a filament reached only by a "Change filament" custom G-code also extrudes
+            // (Fable review of #759; the other validate checks use the same list).
+            for (unsigned int filament_id : this->extruders(true))
+                if (filament_id < filament_count &&
+                    !(get_value_at(m_config, flow_ratios, ConfigFlowDomain::Filament, filament_id) > 0.))
+                    return refuse_flow_ratio(filament_id);
+        }
+    }
+
     if (m_config.print_sequence == PrintSequence::ByObject) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
             return {L("Smooth mode of timelapse is not supported when \"by object\" sequence is enabled.")};
