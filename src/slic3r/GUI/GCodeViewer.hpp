@@ -307,7 +307,7 @@ private:
     // built), and whether building it failed (not retried).
     unsigned int m_showcase_mc_program = 0;
     bool         m_showcase_mc_failed  = false;
-    void         apply_showcase_multicolour(const ShowcaseLook &look);
+    // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
 
 public:
     GCodeViewer();
@@ -369,6 +369,8 @@ public:
         // ---- end multi-colour ----
     };
     void render_for_showcase(const ShowcaseLook &look);
+    // Multi-colour P3: the coextruded-colour program and its slot table (render_for_showcase()).
+    void apply_showcase_multicolour(const ShowcaseLook &look);
     void end_showcase();
     bool showcase_active() const { return m_showcase.active; }
     size_t layers_count() const { return m_viewer.get_layers_count(); }
