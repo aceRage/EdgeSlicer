@@ -102,6 +102,14 @@ std::string format_split(const std::array<float, MAX_COLOURS> &proportion, int n
 // summing to 100. n * MIN_PERCENT <= 100 for every n <= MAX_COLOURS.
 std::array<int, MAX_COLOURS> quantize_percent(const std::array<float, MAX_COLOURS> &proportion, int n);
 
+// Which colour a swatch shows at the point (px, py), measured from the swatch centre in screen
+// pixels (y down), for a swatch that looks down on the strand with the printer's front at the
+// bottom (editor P2). 2 colours: a straight divider through the swatch, colour 1 on the side the
+// rotation points to and covering its proportion of the width along that axis. 3 and 4 colours: a
+// pie, slice i covering its proportion of the turn, colour 1 centred on the rotation. hw, hh are
+// the swatch half extents. Returns the colour index 0..n-1.
+int swatch_slice(const Filament &f, float px, float py, float hw, float hh);
+
 // Slot `slot` of a project / full config: filament_multi_colors + filament_colour_mode (+ the
 // filament_colour fallback) and the visual-only keys. Missing keys and short vectors take their
 // defaults (equal split, angle 0, twist 0). Gradient slots (filament_colour_mode = 1) and slots

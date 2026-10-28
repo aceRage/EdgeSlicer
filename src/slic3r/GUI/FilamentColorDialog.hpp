@@ -1,14 +1,17 @@
 #pragma once
 
 #include "GUI_Utils.hpp"
+#include "FilamentColorUtils.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp"
 
+#include <array>
 #include <string>
 #include <utility>
 #include <vector>
 
 class wxStaticBitmap;
 class wxStaticText;
+class SpinInput;
 
 namespace Slic3r
 {
@@ -24,7 +27,16 @@ public:
     /**
      * @brief Creates the filament color dialog.
      */
-    FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament, const FilamentColor& currentColor);
+    FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament, const FilamentColor& currentColor,
+                        const FilamentColorUtils::ColourMakeUp& currentMakeUp = FilamentColorUtils::ColourMakeUp());
+
+    /**
+     * @brief Gets the colour make-up (proportions, rotation, twist) chosen in the editor. Visual only.
+     */
+    const FilamentColorUtils::ColourMakeUp& MakeUp() const
+    {
+        return _makeUp;
+    }
 
     /**
      * @brief Gets the selected color result.
@@ -40,6 +52,13 @@ private:
     void SelectCustomColor(const std::string& color);
     void UpdatePreview();
     void UpdateSwatchSelection();
+    void BuildMakeUpUi(wxWindow* parent, wxSizer* sizer, int contentMargin, int contentWidth);
+    void SyncMakeUpFromSelection(bool resetSplit);
+    void SetColourCount(int count);
+    void SetPercent(int index, int value);
+    void SetAngle(double angleDeg);
+    void PickChipColour(int index);
+    void RefreshMakeUp();
     void OpenMoreColorDialog();
     void PlaceNearFilamentPanel();
     void UpdateRoundedShape();
@@ -59,6 +78,17 @@ private:
     wxStaticBitmap* _previewBitmap { nullptr };
     wxStaticText* _nameLabel { nullptr };
     wxStaticText* _skuLabel { nullptr };
+    // Colour make-up editor (multi-colour P2). The colours live in _selection.colors.
+    FilamentColorUtils::ColourMakeUp _makeUp;
+    std::array<int, 4> _percent { 50, 50, 0, 0 };
+    SpinInput* _countSpin { nullptr };
+    std::array<SpinInput*, 4> _percentSpin { nullptr, nullptr, nullptr, nullptr };
+    std::array<wxWindow*, 4> _chips { nullptr, nullptr, nullptr, nullptr };
+    SpinInput* _angleSpin { nullptr };
+    SpinInput* _twistSpin { nullptr };
+    wxWindow* _disc { nullptr };
+    wxWindow* _wall { nullptr };
+    bool _syncingMakeUp { false };
     bool _dragPending { false };
     bool _isDragging { false };
     wxPoint _dragStartMouse;

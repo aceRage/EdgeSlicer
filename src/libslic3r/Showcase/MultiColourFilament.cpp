@@ -169,6 +169,25 @@ RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, floa
     return colour_at(filament_angle(direction_turns(vx, vy), filament_length_m));
 }
 
+int swatch_slice(const Filament &f, float px, float py, float hw, float hh)
+{
+    if (f.n <= 1)
+        return 0;
+    if (f.n == 2) {
+        const float th = f.rotation_deg * float(PI / 180.);
+        // Screen direction of colour 1 (front at the bottom, anticlockwise from above).
+        const float dx = std::sin(th), dy = std::cos(th);
+        const float h  = std::abs(dx) * hw + std::abs(dy) * hh;
+        const float t  = px * dx + py * dy;
+        return t >= h - 2.f * h * f.proportion[0] ? 0 : 1;
+    }
+    const float phi = f.filament_angle(direction_turns(px, -py), 0.f);
+    for (int i = 0; i < f.n; ++i)
+        if (phi < f.boundary(i + 1))
+            return i;
+    return f.n - 1;
+}
+
 float direction_turns(float x, float y)
 {
     return wrap_turns(float(std::atan2(double(y), double(x)) / (2. * PI)) + 0.25f);

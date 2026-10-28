@@ -576,3 +576,31 @@ TEST_CASE("Export Bambu 3MF drops the visual-only keys (D8)", "[MultiColour][Bam
     // The colours themselves still go, under Bambu's name.
     CHECK(out.find("filament_multi_colour") != out.end());
 }
+
+TEST_CASE("Swatch slices follow the proportions and the rotation (P2)", "[MultiColour][Swatch]")
+{
+    Filament f;
+    f.n = 2;
+    f.proportion = { 0.5f, 0.5f, 0.f, 0.f };
+    // Rotation 0: colour 1 faces the front, which is the bottom of the swatch (y down).
+    CHECK(swatch_slice(f, 0.f, 6.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, 0.f, -6.f, 18.f, 8.f) == 1);
+    // Rotation 90: colour 1 faces the right.
+    f.rotation_deg = 90.f;
+    CHECK(swatch_slice(f, 10.f, 0.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, -10.f, 0.f, 18.f, 8.f) == 1);
+    // 30/70: colour 1 covers the first 30% of the width along its axis.
+    f.proportion = { 0.3f, 0.7f, 0.f, 0.f };
+    CHECK(swatch_slice(f, 16.f, 0.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, 8.f, 0.f, 18.f, 8.f) == 1);
+
+    // A pie for three colours: colour 1 centred on the front at rotation 0.
+    Filament g;
+    g.n = 3;
+    g.proportion = { 0.5f, 0.25f, 0.25f, 0.f };
+    CHECK(swatch_slice(g, 0.f, 6.f, 18.f, 8.f) == 0);   // front
+    CHECK(swatch_slice(g, 10.f, 0.f, 18.f, 8.f) == 1);  // right
+    CHECK(swatch_slice(g, -10.f, -1.f, 18.f, 8.f) == 2); // left
+    Filament one;
+    CHECK(swatch_slice(one, 3.f, 3.f, 18.f, 8.f) == 0);
+}

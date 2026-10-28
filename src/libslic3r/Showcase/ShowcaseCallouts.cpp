@@ -901,6 +901,11 @@ CalloutLabel build_callout_label(const Callout &callout, const LabelFilament &f,
         label.color_name = f.color_name;
     if (fields.swatch && !f.colors.empty())
         label.swatches = f.colors;
+    if (fields.swatch && f.coextruded && f.colors.size() > 1) {
+        label.swatch_disc      = true;
+        label.swatch_split     = f.split;
+        label.swatch_angle_deg = f.angle_deg;
+    }
     if (fields.hex && !f.colors.empty())
         label.hex = co_upper_hex(f.colors.front());
     std::vector<std::string> parts;
