@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
@@ -404,13 +405,13 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
     const auto off = print_off.objects().front()->support_layers();
     const auto on  = print_on .objects().front()->support_layers();
     REQUIRE(off.size() == on.size());
-    // Cap A's top roof layer: the highest support layer under z = 10.
-    size_t contact = size_t(-1);
-    for (size_t i = 0; i < on.size(); ++ i)
-        if (on[i]->print_z < 10. - 0.05 && ! on[i]->support_fills.entities.empty())
-            contact = i;
-    REQUIRE(contact != size_t(-1));
-    auto over_cap_a = [](const SupportLayer &layer, ExtrusionRole role) {
+    // Cap A's footprint in object coordinates: the object layer between 10.0 and 10.2 mm holds cap A only.
+    ExPolygons cap_a_region;
+    for (const Layer *layer : print_on.objects().front()->layers())
+        if (layer->print_z > 10.05 && layer->print_z < 10.25 && cap_a_region.empty())
+            cap_a_region = offset_ex(layer->lslices, - float(scale_(1.)));
+    REQUIRE(! cap_a_region.empty());
+    auto over_cap_a = [&cap_a_region](const SupportLayer &layer, ExtrusionRole role) {
         std::vector<const ExtrusionPath*> paths;
         collect_paths(layer.support_fills, paths);
         double len = 0.;
@@ -418,11 +419,22 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
             if (path->role() == role)
                 for (size_t i = 1; i < path->polyline.points.size(); ++ i) {
                     const Point &a = path->polyline.points[i - 1], &b = path->polyline.points[i];
-                    if (a.x() < - scale_(1.) && b.x() < - scale_(1.))
+                    bool in_a = false, in_b = false;
+                    for (const ExPolygon &ex : cap_a_region) {
+                        in_a |= ex.contains(a);
+                        in_b |= ex.contains(b);
+                    }
+                    if (in_a && in_b)
                         len += unscale<double>((b - a).cast<double>().norm());
                 }
         return len;
     };
+    // Cap A's top roof layer: the highest support layer under z = 10 with interface over cap A.
+    size_t contact = size_t(-1);
+    for (size_t i = 0; i < off.size(); ++ i)
+        if (off[i]->print_z < 10. - 0.05 && over_cap_a(*off[i], erSupportMaterialInterface) > 10.)
+            contact = i;
+    REQUIRE(contact != size_t(-1));
     // No body stripes against cap A's underside ...
     CHECK(over_cap_a(*on[contact], erSupportMaterial) < 1.);
     // ... and cap A's top roof is printed as with the weave off.

@@ -828,9 +828,10 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         // would be all interface. Schedule the object's own (body-coloured) filament there.
         if (support_layer->interlock_woven && object.config().support_filament.value == 0) {
             const unsigned int iface = unsigned(object.config().support_interface_filament.value);
+            // object_extruders() is 0-based; this collection phase is 1-based.
             for (unsigned int e : object.object_extruders())
-                if (e != iface && e >= 1 && ! object.print()->config().filament_soluble.get_at(e - 1)) {
-                    layer_tools.extruders.push_back(e);
+                if (e + 1 != iface && ! object.print()->config().filament_soluble.get_at(e)) {
+                    layer_tools.extruders.push_back(e + 1);
                     break;
                 }
         }
