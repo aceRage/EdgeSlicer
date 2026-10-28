@@ -1505,3 +1505,36 @@ TEST_CASE("A merged tower layer declares its own height to the G-code processor"
     CHECK_THAT(combined.tallest_printed, WithinAbs(0.4f, 1e-4f));
     CHECK(count_height_tags(combined.gcode, "0.4") >= count_height_tags(plain.gcode, "0.4") + combined.folded);
 }
+
+// OD16 review L1: only a height tag ahead of the first extrusion covers a tower block. The Type1 writer
+// switches to bridge flow mid-block on a narrowing tower and tags that, which must not count.
+TEST_CASE("A tower block declares its height only with a tag before its first extrusion", "[WipeTower][CombineSparseLayers]")
+{
+    const std::string tag = ";HEIGHT:";
+    // The WipeTower2 writer's header: tag first.
+    CHECK(wipe_tower_gcode_declares_height_first(";HEIGHT:0.3\n;TYPE:Prime tower\nG1 X10 Y10 E0.5\n", tag));
+    // Travels, retractions and comments before the tag do not end the search.
+    CHECK(wipe_tower_gcode_declares_height_first("G1 X5 Y5 F7200\nG1 E-0.8 F2100\n; CP TOOLCHANGE START\n;HEIGHT:0.3\nG1 X10 E0.4\n", tag));
+    // A tag only after an extrusion (the bridge-flow switch) does not count.
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\nG1 X10 Y5 E0.42\n;HEIGHT:0.200000\nG1 X10 Y10 E0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G3 X1 Y1 I1 J0 E0.2\n;HEIGHT:0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("", tag));
+}
+
+// OD16 review L2: the brim chamfer counts printed layers, so a folded-away layer does not use up a step.
+TEST_CASE("The brim chamfer steps once per printed tower layer", "[WipeTower][CombineSparseLayers]")
+{
+    struct Layer { bool combined_away; };
+    // First layer 0; layers 2, 3 and 5 folded away.
+    const std::vector<Layer> plan{ {false}, {false}, {true}, {true}, {false}, {true}, {false} };
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 0) == 0);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 1) == 1);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 4) == 2);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 6) == 3);
+    // Below the first layer the distance stays negative, as before.
+    CHECK(wipe_tower_printed_layer_distance(plan, 4, 1) == -3);
+    // Nothing folded: the plain index difference.
+    const std::vector<Layer> plain(7, Layer{ false });
+    CHECK(wipe_tower_printed_layer_distance(plain, 1, 6) == 5);
+}

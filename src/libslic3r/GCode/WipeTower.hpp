@@ -668,6 +668,25 @@ void combine_sparse_wipe_tower_plan(PlanLayers &plan, const FilamentParams &filp
     }
 }
 
+// Edge (OD16 review): how many printed tower layers `current` is above `first_layer_idx`, for the brim
+// chamfer that shrinks one loop per layer. Plain index difference (negative below the first layer),
+// less the layers folded away in between, so a combined tower still steps its chamfer down one loop
+// per printed layer. Without the combination this is exactly current - first_layer_idx.
+template<class PlanLayers>
+int wipe_tower_printed_layer_distance(const PlanLayers &plan, size_t first_layer_idx, size_t current)
+{
+    int distance = int(current) - int(first_layer_idx);
+    for (size_t i = first_layer_idx + 1; distance > 0 && i <= current && i < plan.size(); ++i)
+        if (plan[i].combined_away)
+            --distance;
+    return distance;
+}
+
+// Edge (OD16 review): whether a wipe tower ToolChangeResult's G-code declares its layer height (a
+// `tag` line) before its first extrusion. A tag after an extrusion (the Type1 writer's bridge-flow
+// switch on a narrowing tower) does not cover the paths before it.
+bool wipe_tower_gcode_declares_height_first(const std::string &gcode, const std::string &tag);
+
 
 
 

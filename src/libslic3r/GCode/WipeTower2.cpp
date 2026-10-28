@@ -2913,7 +2913,8 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Non-first layer + chamfer enabled: apply gradual reduction
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
-            int    dist_to_1st = (int) current_idx - (int) m_first_layer_idx;
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative
@@ -2948,9 +2949,13 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         const std::vector<TowerInterface::GapPoint> loop_gaps = interface_gaps_of_layer();
         for (int i = 0; i < loops_num; ++i) {
             poly   = offset(poly, scale_(spacing)).front();
-            m_outer_wall[m_z_pos].push_back(to_polyline(poly));
-            // Orca #15035: the brim and conflict checks read it at the tower position, like the G-code.
-            m_outer_wall[m_z_pos].back().translate(Point::new_scale(m_rib_offset.x(), m_rib_offset.y()));
+            // Edge (OD16 review): a layer folded into a later one prints nothing, so the conflict checker
+            // and the object brim must not see a wall at its z.
+            if (! m_layer_info->combined_away) {
+                m_outer_wall[m_z_pos].push_back(to_polyline(poly));
+                // Orca #15035: the brim and conflict checks read it at the tower position, like the G-code.
+                m_outer_wall[m_z_pos].back().translate(Point::new_scale(m_rib_offset.x(), m_rib_offset.y()));
+            }
             if (! loop_gaps.empty()) {
                 Polygon   inserted;
                 Polylines pieces = TowerInterface::cut_wall_gaps(poly, loop_gaps, 2.5f * m_perimeter_width, inserted);

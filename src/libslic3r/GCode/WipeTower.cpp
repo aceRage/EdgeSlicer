@@ -66,6 +66,32 @@ bool wipe_tower_sparse_layers_combined(const PrintConfig &config)
            config.timelapse_type.value != TimelapseType::tlSmooth;
 }
 
+bool wipe_tower_gcode_declares_height_first(const std::string &gcode, const std::string &tag)
+{
+    size_t start = 0;
+    while (start < gcode.size()) {
+        size_t end = gcode.find('\n', start);
+        if (end == std::string::npos)
+            end = gcode.size();
+        size_t b = gcode.find_first_not_of(" \t", start);
+        if (b < end) {
+            if (gcode.compare(b, tag.size(), tag) == 0)
+                return true;
+            // An extruding move (G1/G2/G3 with a positive E) ends the search; travels and retracts do not.
+            if (gcode[b] == 'G' && b + 1 < end && (gcode[b + 1] == '1' || gcode[b + 1] == '2' || gcode[b + 1] == '3') &&
+                (b + 2 >= end || gcode[b + 2] == ' ')) {
+                const size_t comment = gcode.find(';', b);
+                const size_t code_end = std::min(end, comment);
+                for (size_t e = gcode.find('E', b); e < code_end; e = gcode.find('E', e + 1))
+                    if (e + 1 < code_end && gcode[e - 1] == ' ' && gcode[e + 1] != '-')
+                        return false;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
 bool wipe_tower_layer_is_combined_away(const std::vector<WipeTower::ToolChangeResult> &layer_tool_changes)
 {
     return ! layer_tool_changes.empty() && layer_tool_changes.front().combined_away;
@@ -1281,6 +1307,10 @@ Polygon WipeTower::rib_wall_polygon(const box_coordinates &wt_box) const
 
 void WipeTower::record_outer_wall(const Polygon &wall)
 {
+    // Edge (OD16 review): a layer folded into a later one prints nothing, so the conflict checker and
+    // the object brim must not see a wall at its z.
+    if (m_layer_info != m_plan.end() && m_layer_info->combined_away)
+        return;
     // To the frame the writer emits in: the layer's y shift, then the rib offset.
     Polyline pl = to_polyline(wall);
     pl.translate(scaled(m_rib_offset.x()), scaled(m_rib_offset.y() + m_y_shift));
@@ -2116,7 +2146,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         else {
             // limit max chamfer width to 3 mm
             int chamfer_loops_num = (int)(max_chamfer_width / spacing);
-            int dist_to_1st = m_layer_info - m_plan.begin() - m_first_layer_idx;
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
+            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, size_t(m_layer_info - m_plan.begin()));
             // A layer below the tower's first real layer gets no chamfer. With "no sparse layers"
             // the first real layer is the first tool change, which can sit far up the print; the
             // layers below it are sparse and never printed, but their walls still go into

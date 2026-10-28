@@ -981,14 +981,16 @@ static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
 // Orca #15841: a folded tower layer is thicker than the object layer it sits on, so the height process_layer
 // emitted is not the tower's. Both writers declare one, but each in its own printer's tag dialect and the
 // processor reads only its printer's. Declare it here, where the printer is known, unless the tower
-// already wrote the right tag. _extrude puts the object's height back on the next object path, since
-// the last role is then erWipeTower.
+// already wrote the right tag ahead of its first extrusion (Edge, OD16 review: the Type1 writer's
+// bridge-flow tags on a narrowing tower come mid-block and do not cover the paths before them).
+// _extrude puts the object's height back on the next object path, since the last role is then
+// erWipeTower.
 std::string WipeTowerIntegration::tower_height_tag(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr,
                                                    const std::string &tcr_gcode) const
 {
     const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height);
     if (! m_sparse_layers_combined || std::abs(gcodegen.m_last_height - tcr.layer_height) <= EPSILON ||
-        tcr_gcode.find(tag) != std::string::npos)
+        wipe_tower_gcode_declares_height_first(tcr_gcode, tag))
         return {};
     // Keep m_last_height what the G-code last declared, so a second visit does not repeat it.
     gcodegen.m_last_height = tcr.layer_height;
