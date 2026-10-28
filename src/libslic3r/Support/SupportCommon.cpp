@@ -80,7 +80,7 @@ static void support_interlock_weave_layers(
     // base interface layer. Organic supports drop the intermediate layers where only roof is left, so
     // the intermediate layers alone would miss exactly the heights to weave.
     SupportGeneratorLayersPtr grid;
-    for (const SupportGeneratorLayersPtr *layers : { &intermediate_layers, &interface_layers, &base_interface_layers })
+    for (const SupportGeneratorLayersPtr *layers : std::initializer_list<const SupportGeneratorLayersPtr*>{ &intermediate_layers, &interface_layers, &base_interface_layers })
         for (SupportGeneratorLayer *layer : *layers)
             if (layer != nullptr)
                 grid.push_back(layer);
