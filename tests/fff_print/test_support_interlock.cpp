@@ -411,6 +411,24 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
         if (layer->print_z > 10.05 && layer->print_z < 10.25 && cap_a_region.empty())
             cap_a_region = offset_ex(layer->lslices, - float(scale_(1.)));
     REQUIRE(! cap_a_region.empty());
+    {
+        // Diagnostics for a failure below: where the support layers and cap A lie.
+        std::ostringstream diag;
+        diag << "capA bbox " << get_extents(cap_a_region).min.transpose() << " .. " << get_extents(cap_a_region).max.transpose() << "
+";
+        for (size_t i = 0; i < off.size(); ++ i)
+            if (off[i]->print_z > 9. && off[i]->print_z < 10.3) {
+                std::vector<const ExtrusionPath*> paths;
+                collect_paths(off[i]->support_fills, paths);
+                BoundingBox bb;
+                for (const ExtrusionPath *p : paths)
+                    for (const Point &pt : p->polyline.points)
+                        bb.merge(pt);
+                diag << "z " << off[i]->print_z << " paths " << paths.size() << " bbox " << bb.min.transpose() << " .. " << bb.max.transpose() << "
+";
+            }
+        UNSCOPED_INFO(diag.str());
+    }
     auto over_cap_a = [&cap_a_region](const SupportLayer &layer, ExtrusionRole role) {
         std::vector<const ExtrusionPath*> paths;
         collect_paths(layer.support_fills, paths);
