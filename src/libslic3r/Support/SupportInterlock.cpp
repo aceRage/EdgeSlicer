@@ -98,4 +98,63 @@ SupportInterlockSplit support_interlock_split(const ExPolygons &footprint, doubl
     return out;
 }
 
+Polylines support_interlock_fill_lines(const ExPolygons &pieces, double angle, coord_t line_spacing)
+{
+    Polylines out;
+    if (pieces.empty() || line_spacing <= 0)
+        return out;
+    const double nx = - std::sin(angle), ny = std::cos(angle); // stripe normal
+    const double dx =   std::cos(angle), dy = std::sin(angle); // stripe direction
+    const double s  = double(line_spacing);
+    auto to_xy = [nx, ny, dx, dy](double u, double v) {
+        return Point(coord_t(std::round(u * nx + v * dx)), coord_t(std::round(u * ny + v * dy)));
+    };
+    for (const ExPolygon &piece : pieces) {
+        double umin = std::numeric_limits<double>::max(), umax = - umin, vmin = umin, vmax = - umin;
+        for (const Point &p : piece.contour.points) {
+            const double u = nx * double(p.x()) + ny * double(p.y());
+            const double v = dx * double(p.x()) + dy * double(p.y());
+            umin = std::min(umin, u); umax = std::max(umax, u);
+            vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+        }
+        vmin -= s;
+        vmax += s;
+        // Lines in increasing stripe coordinate, each clipped to the piece and shortened at the ends.
+        Polylines lines;
+        for (int64_t n = int64_t(std::ceil(umin / s - 0.5)); double(n) + 0.5 <= umax / s; ++ n) {
+            const double u = (double(n) + 0.5) * s;
+            Polyline line;
+            line.points = { to_xy(u, vmin), to_xy(u, vmax) };
+            for (Polyline &seg : intersection_pl(Polylines{ std::move(line) }, piece)) {
+                if (seg.length() < 1.5 * s)
+                    continue;
+                seg.clip_start(0.5 * s);
+                seg.clip_end(0.5 * s);
+                if (seg.points.size() >= 2)
+                    lines.emplace_back(std::move(seg));
+            }
+        }
+        // Join each line to the previous one when their ends are close: a zig-zag along the piece.
+        // Only within the piece: a link between two pieces could cross a stripe of the other kind.
+        const double join  = 2. * s;
+        const size_t first = out.size();
+        for (Polyline &line : lines) {
+            if (out.size() > first) {
+                Polyline &cur = out.back();
+                const Point &end = cur.last_point();
+                const double d_front = (line.first_point() - end).cast<double>().norm();
+                const double d_back  = (line.last_point()  - end).cast<double>().norm();
+                if (d_back < d_front)
+                    line.reverse();
+                if (std::min(d_front, d_back) <= join) {
+                    append(cur.points, std::move(line.points));
+                    continue;
+                }
+            }
+            out.emplace_back(std::move(line));
+        }
+    }
+    return out;
+}
+
 } // namespace Slic3r

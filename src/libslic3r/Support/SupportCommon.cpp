@@ -68,20 +68,33 @@ static void support_interlock_weave_layers(
     SupportGeneratorLayerStorage      &layer_storage)
 {
     const size_t num_woven = support_params.interlock_layers;
-    if (num_woven == 0 || ! support_params.has_top_contacts || top_contacts.empty() || intermediate_layers.empty())
+    if (num_woven == 0 || ! support_params.has_top_contacts || top_contacts.empty())
         return;
     const coord_t beam_width = support_params.interlock_beam_width();
     const coord_t line_width = coord_t(scale_(support_params.interlock_line_spacing));
     if (beam_width <= 0 || line_width <= 0)
         return;
     const bool snug_supports    = support_params.support_style == smsSnug;
-    const int  num_intermediate = int(intermediate_layers.size());
 
-    // The interface and base interface layers at each intermediate layer, matched by print_z.
-    auto index_of = [&intermediate_layers](const SupportGeneratorLayer *layer) -> int {
-        auto it = std::lower_bound(intermediate_layers.begin(), intermediate_layers.end(), layer->print_z - EPSILON,
+    // The support layer heights the depth is counted on: every print_z of an intermediate, interface or
+    // base interface layer. Organic supports drop the intermediate layers where only roof is left, so
+    // the intermediate layers alone would miss exactly the heights to weave.
+    SupportGeneratorLayersPtr grid;
+    for (const SupportGeneratorLayersPtr *layers : { &intermediate_layers, &interface_layers, &base_interface_layers })
+        for (SupportGeneratorLayer *layer : *layers)
+            if (layer != nullptr)
+                grid.push_back(layer);
+    std::stable_sort(grid.begin(), grid.end(), [](const SupportGeneratorLayer *l, const SupportGeneratorLayer *r) { return l->print_z < r->print_z; });
+    grid.erase(std::unique(grid.begin(), grid.end(), [](const SupportGeneratorLayer *l, const SupportGeneratorLayer *r) { return std::abs(l->print_z - r->print_z) < EPSILON; }), grid.end());
+    if (grid.empty())
+        return;
+    const int num_intermediate = int(grid.size());
+
+    // The interface and base interface layers at each height, matched by print_z.
+    auto index_of = [&grid](const SupportGeneratorLayer *layer) -> int {
+        auto it = std::lower_bound(grid.begin(), grid.end(), layer->print_z - EPSILON,
             [](const SupportGeneratorLayer *l, coordf_t z) { return l->print_z < z; });
-        return it != intermediate_layers.end() && std::abs((*it)->print_z - layer->print_z) < EPSILON ? int(it - intermediate_layers.begin()) : -1;
+        return it != grid.end() && std::abs((*it)->print_z - layer->print_z) < EPSILON ? int(it - grid.begin()) : -1;
     };
     std::vector<std::vector<SupportGeneratorLayer*>> interface_at(num_intermediate), base_interface_at(num_intermediate);
     auto bucket = [&index_of](const SupportGeneratorLayersPtr &layers, std::vector<std::vector<SupportGeneratorLayer*>> &out, bool skip_bottom) {
@@ -114,11 +127,11 @@ static void support_interlock_weave_layers(
         for (int idx = range.begin(); idx < range.end(); ++ idx) {
             if (interface_at[idx].empty() && base_interface_at[idx].empty())
                 continue;
-            const coordf_t z = intermediate_layers[idx]->print_z;
+            const coordf_t z = grid[idx]->print_z;
             // Top contacts 1..num_woven layers above this one, by depth. A contact only counts when it
             // sits wholly above this layer, so a contact layer is never woven into itself.
             std::vector<Polygons> contacts_at_depth(num_woven + 1);
-            const coordf_t z_deepest = intermediate_layers[std::min(num_intermediate - 1, idx + int(num_woven) - 1)]->print_z;
+            const coordf_t z_deepest = grid[std::min(num_intermediate - 1, idx + int(num_woven) - 1)]->print_z;
             auto it = std::lower_bound(top_contacts.begin(), top_contacts.end(), z - EPSILON,
                 [](const SupportGeneratorLayer *l, coordf_t zz) { return l->print_z < zz; });
             for (; it != top_contacts.end(); ++ it) {
@@ -128,7 +141,7 @@ static void support_interlock_weave_layers(
                 if (contact.bottom_z < z - EPSILON)
                     continue;
                 size_t depth = 1;
-                while (depth < num_woven && contact.bottom_z - EPSILON > intermediate_layers[std::min(num_intermediate - 1, idx + int(depth) - 1)]->print_z)
+                while (depth < num_woven && contact.bottom_z - EPSILON > grid[std::min(num_intermediate - 1, idx + int(depth) - 1)]->print_z)
                     ++ depth;
                 const Polygons &src = snug_supports && contact.overhang_polygons ? *contact.overhang_polygons : contact.polygons;
                 polygons_append(contacts_at_depth[depth], src);
@@ -185,7 +198,7 @@ static void support_interlock_weave_layers(
         Woven &w = woven[idx];
         if (w.all.empty())
             continue;
-        const SupportGeneratorLayer &intermediate = *intermediate_layers[idx];
+        const SupportGeneratorLayer &intermediate = *grid[idx];
         for (SupportGeneratorLayer *layer : interface_at[idx])
             layer->polygons = diff(layer->polygons, w.all);
         for (SupportGeneratorLayer *layer : base_interface_at[idx])
@@ -2094,9 +2107,6 @@ void generate_support_toolpaths(
         auto filler_base_interface  = std::unique_ptr<Fill>(base_interface_layers.empty() ? nullptr :
             Fill::new_from_type(base_interface_density > 0.95 || support_params.with_sheath ? ipRectilinear : ipSupportBase));
         auto filler_support         = std::unique_ptr<Fill>(Fill::new_from_type(support_params.base_fill_pattern));
-        // EdgeSlicer (support interface interlock): solid rectilinear along each woven stripe.
-        auto filler_interlock       = std::unique_ptr<Fill>(Fill::new_from_type(ipRectilinear));
-        filler_interlock->set_bounding_box(bbox_object);
         // Ultra (support groups): one interface filler per group, so each group's interface is laid
         // down with its own contact_fill_pattern. Empty for a single-group object.
         std::vector<std::unique_ptr<Fill>> filler_interface_groups;
@@ -2493,8 +2503,8 @@ void generate_support_toolpaths(
                     extrude_base_interface(*extra);
 
             // EdgeSlicer (support interface interlock): the woven stripes. Solid, with lines along the
-            // stripe on the shared stripe grid (SupportInterlock.hpp), so every stripe holds exactly
-            // support_interface_interlock_beam_lines lines. Body stripes print with the support body
+            // stripe on the shared stripe grid (support_interlock_fill_lines), so every stripe holds
+            // exactly support_interface_interlock_beam_lines lines. Body stripes print with the support body
             // filament (erSupportMaterial), interface stripes with the interface filament
             // (erSupportMaterialInterface) - or, for a support group that pins its own interface
             // filament, into that group's interface_by_extruder bucket, like the rest of its interface.
@@ -2504,10 +2514,6 @@ void generate_support_toolpaths(
                     continue;
                 const size_t group = size_t(layer_ex.layer->support_group);
                 const SupportParameters &params_g = (group_mode && group < num_groups) ? *(*groups)[group].params : support_params;
-                Fill *filler = filler_interlock.get();
-                filler->angle   = item.angle;
-                filler->spacing = params_g.interlock_line_spacing;
-                filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor));
                 const Flow flow = item.body ?
                     params_g.support_material_flow.with_height(float(layer_ex.layer->height)) :
                     layer_ex.layer->bridging ?
@@ -2526,11 +2532,12 @@ void generate_support_toolpaths(
                     }
                 }
                 const size_t num_before = dst->size();
-                fill_expolygons_generate_paths(
+                extrusion_entities_append_paths(
                     *dst,
-                    union_safety_offset_ex(layer_ex.polygons_to_extrude()),
-                    filler, 1.f,
-                    item.body ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, flow);
+                    support_interlock_fill_lines(union_ex(layer_ex.polygons_to_extrude()), item.angle,
+                                                 coord_t(scale_(params_g.interlock_line_spacing))),
+                    item.body ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface,
+                    flow.mm3_per_mm(), flow.width(), flow.height());
                 // Design D5: purge must not land in the woven body stripes (ToolOrdering's flush into
                 // support skips layers flagged here).
                 if (item.body && dst->size() > num_before)

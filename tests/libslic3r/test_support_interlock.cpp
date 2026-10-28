@@ -7,8 +7,6 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/Fill/FillBase.hpp"
-#include "libslic3r/Surface.hpp"
 #include "libslic3r/Support/SupportInterlock.hpp"
 
 using namespace Slic3r;
@@ -171,11 +169,8 @@ TEST_CASE("Interlock leaves islands narrower than two beams unsplit", "[SupportI
     CHECK_THAT(area_of(split2.unsplit), WithinRel(narrow.front().area(), 1e-6));
 }
 
-TEST_CASE("A woven stripe filled solid along its length holds exactly its lines", "[SupportInterlock]")
+TEST_CASE("A woven stripe holds exactly its lines, half a line in from its sides", "[SupportInterlock]")
 {
-    // The same filler setup generate_support_toolpaths uses for the stripes: rectilinear, density 1,
-    // spacing = the stripe grid's line spacing, angle = the stripe direction, bounding box centred on
-    // the object origin.
     const int    lines = GENERATE(1, 2, 3);
     const double angle = GENERATE(0., M_PI / 2., 0.6);
     CAPTURE(lines, angle);
@@ -183,22 +178,12 @@ TEST_CASE("A woven stripe filled solid along its length holds exactly its lines"
     const ExPolygons footprint { square_mm(-8., -8., 16.) };
     const SupportInterlockSplit split = support_interlock_split(footprint, angle, beam_n, line_w);
 
-    std::unique_ptr<Fill> filler(Fill::new_from_type(ipRectilinear));
-    filler->set_bounding_box(BoundingBox(Point(-scale_(1.), -scale_(1.)), Point(scale_(1.), scale_(1.))));
-    filler->angle   = float(angle);
-    filler->spacing = spacing_mm;
-    filler->link_max_length = 0;
-    FillParams params;
-    params.density     = 1.f;
-    params.dont_adjust = true;
-
     size_t checked = 0;
     for (const ExPolygon &stripe : union_ex(split.body)) {
         const auto [lo, hi] = stripe_extent(to_polygons(stripe), angle);
         if (hi - lo < 0.99 * double(beam_n))
             continue; // clipped by the outline
-        Surface surface(stInternal, stripe);
-        const Polylines polylines = filler->fill_surface(&surface, params);
+        const Polylines polylines = support_interlock_fill_lines(ExPolygons{ stripe }, angle, line_w);
         // Count the long segments: the fill lines along the stripe. Links between them are short.
         size_t long_segments = 0;
         for (const Polyline &pl : polylines)
@@ -207,11 +192,22 @@ TEST_CASE("A woven stripe filled solid along its length holds exactly its lines"
                 if (d.norm() < scale_(3.))
                     continue;
                 ++ long_segments;
-                // Parallel to the stripe.
+                // Parallel to the stripe ...
                 const double cross = std::abs(d.x() * std::sin(angle) - d.y() * std::cos(angle)) / d.norm();
                 CHECK(cross < 1e-3);
+                // ... half a line in from a stripe side, on the line grid.
+                const double u = support_interlock_stripe_coordinate(pl.points[i], angle);
+                const double k = (u - lo) / double(line_w) - 0.5;
+                CHECK_THAT(k - std::round(k), WithinAbs(0., 0.01));
             }
         CHECK(long_segments == size_t(lines));
+        // Every point stays inside the stripe.
+        for (const Polyline &pl : polylines)
+            for (const Point &pt : pl.points) {
+                const double u = support_interlock_stripe_coordinate(pt, angle);
+                CHECK(u > lo);
+                CHECK(u < hi);
+            }
         ++ checked;
     }
     CHECK(checked >= 2);

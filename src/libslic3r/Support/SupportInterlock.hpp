@@ -54,4 +54,14 @@ Polygons support_interlock_body_mask(const BoundingBox &bbox, double angle, coor
 // filled; they are handed to the neighbouring stripe of the other kind so no area is lost.
 SupportInterlockSplit support_interlock_split(const ExPolygons &footprint, double angle, coord_t beam_width, coord_t min_line_width);
 
+// Solid fill lines for woven stripes running in direction `angle`: one line on every half-grid
+// position (n + 1/2) * line_spacing of the stripe coordinate, clipped to `pieces` and shortened by
+// half a line at both ends. A stripe `beam_lines * line_spacing` wide, on the grid of
+// support_interlock_split, gets exactly `beam_lines` lines, each half a line in from the stripe sides,
+// so the neighbouring stripes of the other filament butt up against it with no gap and no overlap.
+// (FillRectilinear cannot do this: it keeps its lines half a spacing inside the region, which drops
+// the outermost line of a stripe that is a whole number of lines wide.) Neighbouring lines of a piece
+// are joined into a zig-zag where their ends are close.
+Polylines support_interlock_fill_lines(const ExPolygons &pieces, double angle, coord_t line_spacing);
+
 } // namespace Slic3r
