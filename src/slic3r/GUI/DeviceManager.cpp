@@ -7613,7 +7613,16 @@ void DeviceManager::fetch_bind_list_async(std::function<void()> done)
     std::thread([this, agent, token = std::weak_ptr<int>(m_refresh_token), done = std::move(done)]() mutable {
         unsigned int http_code = 0;
         std::string  body;
-        const int    result = agent->get_user_print_info(&http_code, &body);
+        // This is a bare std::thread: an exception from the plug-in would be std::terminate. A failed
+        // fetch still has to reach the CallAfter below, so `done` runs and the UI does not wait for it.
+        int result = -1;
+        try {
+            result = agent->get_user_print_info(&http_code, &body);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw: " << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw an unknown exception";
+        }
         Slic3r::GUI::wxGetApp().CallAfter([this, token, result, body = std::move(body), done = std::move(done)]() {
             if (token.expired())
                 return;
@@ -7886,7 +7895,7 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
             if (last_selected->second->is_connecting() && !need_disconnect)
                 return false;
 
-            if (!need_disconnect) {m_agent->disconnect_printer(); }
+            if (!need_disconnect && m_agent) {m_agent->disconnect_printer(); }
         }
     }
 
