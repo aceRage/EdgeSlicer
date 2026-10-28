@@ -6,11 +6,15 @@
 #include "../BoundingBox.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Config.hpp"
+#include "../ExPolygon.hpp"
+#include "../Geometry/ConvexHull.hpp"
+#include "../Line.hpp"
 #include "../PrintConfig.hpp"
 #include "../libslic3r.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 
 namespace Slic3r {
@@ -283,6 +287,46 @@ std::optional<Vec2d> wipe_tower_position_clear_of_exclusion(const ConfigBase    
         if (clear_at(candidate))
             return candidate;
     return std::nullopt;
+}
+
+std::optional<Point> nearest_clear_wipe_tower_anchor(const BoundingBox &anchor_bounds, const Polygon &footprint,
+                                                     const Polygons &obstacles, const Point &target)
+{
+    // The anchors that put the footprint on a convex obstacle form the obstacle grown by the
+    // reflected footprint. For two convex shapes that Minkowski sum is the hull of the
+    // differences of their vertices.
+    const Polygon tower = Geometry::convex_hull(footprint.points);
+    Polygons      blocked;
+    blocked.reserve(obstacles.size());
+    for (const Polygon &obstacle : obstacles) {
+        Points differences;
+        differences.reserve(obstacle.size() * tower.size());
+        for (const Point &o : obstacle.points)
+            for (const Point &f : tower.points)
+                differences.emplace_back(o - f);
+        blocked.emplace_back(Geometry::convex_hull(std::move(differences)));
+    }
+
+    // Grown by a hair so bounds pinned to one coordinate on a cramped plate still have an area.
+    BoundingBox bounds = anchor_bounds;
+    bounds.offset(SCALED_EPSILON);
+    const ExPolygons clear = diff_ex(Polygons{ bounds.polygon() }, blocked);
+
+    std::optional<Point> nearest;
+    double               nearest_distance = std::numeric_limits<double>::max();
+    for (const ExPolygon &region : clear) {
+        if (region.contains(target))
+            return target;
+        for (const Line &edge : to_lines(region)) {
+            Point        closest;
+            const double distance = edge.distance_to_squared(target, &closest);
+            if (distance < nearest_distance) {
+                nearest_distance = distance;
+                nearest          = closest;
+            }
+        }
+    }
+    return nearest;
 }
 
 } // namespace Slic3r
