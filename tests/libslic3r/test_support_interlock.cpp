@@ -184,6 +184,11 @@ TEST_CASE("A woven stripe holds exactly its lines, half a line in from its sides
         const auto [lo, hi] = stripe_extent(to_polygons(stripe), angle);
         if (hi - lo < 0.99 * double(beam_n))
             continue; // clipped by the outline
+        // Long enough along the stripe that its lines count as long segments below (corner stripes
+        // of a rotated grid can be full width but short).
+        const auto [vlo, vhi] = stripe_extent(to_polygons(stripe), angle + M_PI / 2.);
+        if (vhi - vlo < scale_(6.))
+            continue;
         const Polylines polylines = support_interlock_fill_lines(ExPolygons{ stripe }, angle, line_w);
         // Count the long segments: the fill lines along the stripe. Links between them are short.
         size_t long_segments = 0;
