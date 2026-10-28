@@ -6330,6 +6330,10 @@ TEST_CASE("update_multi_material_filament_presets aligns multi_colors and colour
         bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
             {"#FF0000", "#00FF00", "#0000FF"};
         bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0};
+        // Multi-colour P1's visual-only keys carry the same stale three-slot tail.
+        bundle.project_config.set_key_value("filament_colour_split", new ConfigOptionStrings{"30|70", "", "50|50"});
+        bundle.project_config.set_key_value("filament_colour_angle", new ConfigOptionFloats{45., 0., 90.});
+        bundle.project_config.set_key_value("filament_colour_twist", new ConfigOptionFloats{90., 0., 180.});
 
         bundle.update_multi_material_filament_presets();
 
@@ -6341,6 +6345,20 @@ TEST_CASE("update_multi_material_filament_presets aligns multi_colors and colour
         REQUIRE(modes->values.size() == 2);
         CHECK(multi->values[0] == "#FF0000");
         CHECK(multi->values[1] == "#00FF00");
+
+        // The visual-only keys follow the physical count too, and the kept slots keep their values.
+        const auto *split = bundle.project_config.option<ConfigOptionStrings>("filament_colour_split");
+        const auto *angle = bundle.project_config.option<ConfigOptionFloats>("filament_colour_angle");
+        const auto *twist = bundle.project_config.option<ConfigOptionFloats>("filament_colour_twist");
+        REQUIRE(split != nullptr);
+        REQUIRE(angle != nullptr);
+        REQUIRE(twist != nullptr);
+        REQUIRE(split->values.size() == 2);
+        REQUIRE(angle->values.size() == 2);
+        REQUIRE(twist->values.size() == 2);
+        CHECK(split->values[0] == "30|70");
+        CHECK(angle->values[0] == 45.);
+        CHECK(twist->values[0] == 90.);
     }
 
     SECTION("real multi-colour and gradient slots survive alignment")
