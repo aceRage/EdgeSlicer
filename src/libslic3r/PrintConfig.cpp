@@ -7682,7 +7682,7 @@ void PrintConfigDef::init_fff_params()
                       "Top interface layers must be at least this plus one.\n"
                       "With exactly one more top interface layer, the bottom (bonding) layer is woven too, "
                       "which adds about 2 filament changes per height where a support roof starts on "
-                      "single-nozzle printers. With two or more extra layers the weave adds no filament changes.");
+                      "single-nozzle printers. With two or more extra layers and a non-soluble interface the weave adds no filament changes.");
     def->sidetext = L("layers");
     def->min      = 2;
     def->max      = 4;

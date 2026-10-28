@@ -282,3 +282,66 @@ TEST_CASE("Support interface interlock with four top interface layers leaves the
     CHECK(role_stats(*on[2]).body_length > 10.);
     CHECK(dump(*on[3]) == dump(*off[3]));
 }
+
+namespace {
+
+// Cap A as in capped_stem(), next to a ledge that carries a stem up to a higher cap B. The support
+// under cap B stands on the ledge, so it has a bottom contact and bottom interface layers around the
+// heights where cap A's band is woven: an interface layer there holds only bottom interface.
+TriangleMesh cap_beside_ledge(double ledge_top)
+{
+    TriangleMesh model = make_cube(6, 6, 10);
+    model.translate(7., 7., 0.);
+    TriangleMesh cap_a = make_cube(20, 20, 2);
+    cap_a.translate(0., 0., 10.);
+    model.merge(cap_a);
+    TriangleMesh ledge = make_cube(20, 20, ledge_top);
+    ledge.translate(30., 0., 0.);
+    model.merge(ledge);
+    TriangleMesh stem_b = make_cube(6, 6, 14. - ledge_top);
+    stem_b.translate(37., 7., ledge_top);
+    model.merge(stem_b);
+    TriangleMesh cap_b = make_cube(20, 20, 2);
+    cap_b.translate(30., 0., 14.);
+    model.merge(cap_b);
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Support interface interlock keeps its interface stripes where a bottom interface shares the height", "[SupportInterlock]")
+{
+    const double ledge_top = GENERATE(8.2, 8.4, 8.6, 8.8, 9.0);
+    CAPTURE(ledge_top);
+    auto config = [](bool on) {
+        DynamicPrintConfig c = interlock_config("normal", on);
+        c.set_key_value("support_on_build_plate_only", new ConfigOptionBool(false));
+        c.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(5));
+        return c;
+    };
+    Print print_off, print_on;
+    init_and_process_print({ cap_beside_ledge(ledge_top) }, print_off, config(false));
+    init_and_process_print({ cap_beside_ledge(ledge_top) }, print_on,  config(true));
+    const auto off = print_off.objects().front()->support_layers();
+    const auto on  = print_on .objects().front()->support_layers();
+    REQUIRE(off.size() == on.size());
+    // Cap A's top contact: the highest support layer under its underside (z = 10).
+    size_t contact = size_t(-1);
+    for (size_t i = 0; i < off.size(); ++ i)
+        if (off[i]->print_z < 10. - 0.05)
+            contact = i;
+    REQUIRE(contact != size_t(-1));
+    REQUIRE(contact >= 2);
+    for (size_t depth = 1; depth <= 2; ++ depth) {
+        CAPTURE(depth);
+        const RoleStats s_off = role_stats(*off[contact - depth]);
+        const RoleStats s_on  = role_stats(*on [contact - depth]);
+        CAPTURE(s_off.interface_length, s_on.interface_length, s_on.body_length);
+        // The woven layers print both filaments under cap A ...
+        CHECK(s_on.body_length > 10.);
+        // ... and the bonding layer (depth 2, all body with the feature off) gains interface stripes:
+        // they must not end up in a second interface layer at the same height, which is never printed.
+        if (depth == 2)
+            CHECK(s_on.interface_length > s_off.interface_length + 20.);
+    }
+}
