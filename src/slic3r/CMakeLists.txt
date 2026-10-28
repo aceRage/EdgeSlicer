@@ -534,6 +534,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
     GUI/PrintersPanel.cpp
+    GUI/PrinterRowsBridge.cpp
+    GUI/PrinterRowsBridge.hpp
     GUI/PrintersPanel.hpp
     GUI/HomePanel.cpp
     GUI/ModelBrowserPanel.cpp
@@ -560,6 +562,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
     GUI/BambuNetInfo.hpp
@@ -979,6 +982,13 @@ set(SLIC3R_GUI_SOURCES
     Utils/ElegooCanvasMapping.cpp
     Utils/ElegooCanvasMapping.hpp
     Utils/ElegooCanvasQuery.cpp
+    Utils/ElegooCc2.cpp
+    Utils/ElegooCc2.hpp
+    Utils/ElegooCc2Net.cpp
+    Utils/ElegooCc2Monitor.cpp
+    Utils/ElegooCc2Monitor.hpp
+    Utils/ElegooCc2Status.cpp
+    Utils/ElegooCc2Status.hpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/ElegooSdcp.cpp

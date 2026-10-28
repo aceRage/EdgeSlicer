@@ -26,6 +26,8 @@
 #include "wx/textctrl.h"
 #include <wx/timer.h>
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -91,6 +93,15 @@ public:
     // printer_model, for a device saved without one.
     void set_canvas_device(const PrintHostDevices::Device& device, const std::string& preset_model);
 
+    // The shared, vendor-neutral device page (resources/web/orca/device.html, owner D6 2026-10-26)
+    // for a printer that has no device page of its own, as a full URL of our page server; empty for
+    // every other printer, which keeps its own web page. `row_id` is the printer's /api/printers id
+    // ("ph:<device id>", or "host" for the preset's own address). Today: the Elegoo Centauri Carbon 2.
+    static wxString shared_device_page_url(const PrintHostDevices::Device& device, const std::string& preset_model,
+                                           const std::string& row_id);
+    // The same page for any row id (the Printers tab's "Open Device page").
+    static wxString shared_device_page_url(const std::string& row_id);
+
     void sys_color_changed();
     void msw_rescale();
 
@@ -125,6 +136,12 @@ private:
     std::string   m_model_key;
     std::vector<PrintHostDevices::Device> m_devices;
     wxTimer       m_retry_timer;
+    // The shared device page's channel (PrinterRowsBridge): one read in flight, and whether this
+    // view still exists when a worker answers.
+    std::shared_ptr<bool>              m_alive { std::make_shared<bool>(true) };
+    std::shared_ptr<std::atomic<bool>> m_rows_reading { std::make_shared<std::atomic<bool>>(false) };
+    // Tells the shared device page whether it is on screen (it polls only then).
+    void set_device_page_active(bool active);
     std::string   m_retry_url;      // the URL to load again when the timer fires
     std::string   m_retry_page;     // its page (no query), which the retry count belongs to
     int           m_retry_count { 0 };

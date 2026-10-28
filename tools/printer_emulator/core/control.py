@@ -81,7 +81,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return self.send(200, {"emulator": True, "version": VERSION, "home": sup.home,
                                        "session": sup.log.session, "pid": os.getpid()})
             if p == "/emu/printers":
-                return self.send(200, {"printers": [x.describe() for x in sup.printers.values()],
+                return self.send(200, {"printers": [x.describe() for x in sup.printer_list()],
                                        "mark": sup.log.mark(), "home": sup.home, "config": sup.config_path})
             if p == "/emu/presets":
                 return self.send(200, {"presets": sup.presets})
@@ -193,7 +193,7 @@ def bundle(sup):
             except OSError:
                 pass
         z.writestr("printers.json", json.dumps(sup.config, indent=2))
-        uploads = {pid: pr.personality.files for pid, pr in sup.printers.items()}
+        uploads = {pr.id: pr.personality.files for pr in sup.printer_list()}
         z.writestr("uploads.json", json.dumps(uploads, indent=2, default=str))
         z.writestr("README.txt", "EdgeSlicer printer emulator bundle, session %s, made %s.\n"
                                  "logs/*.jsonl: one line per request the emulated printer got.\n" % (sup.log.session, stamp))

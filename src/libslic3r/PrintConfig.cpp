@@ -151,6 +151,19 @@ static t_config_enum_values s_keys_map_FuzzySkinMode {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinMode)
 
+static t_config_enum_values s_keys_map_TopSurfaceExpansionDirection {
+    { "inward_and_outward", int(TopSurfaceExpansionDirection::InwardAndOutward) },
+    { "inward",             int(TopSurfaceExpansionDirection::Inward) },
+    { "outward",            int(TopSurfaceExpansionDirection::Outward) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TopSurfaceExpansionDirection)
+
+static t_config_enum_values s_keys_map_CenterOfSurfacePattern{
+    {"each_surface", int(CenterOfSurfacePattern::Each_Surface)},
+    {"each_model", int(CenterOfSurfacePattern::Each_Model)},
+    {"each_assembly", int(CenterOfSurfacePattern::Each_Assembly)}};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CenterOfSurfacePattern)
+
 static t_config_enum_values s_keys_map_InfillPattern {
     { "monotonic", ipMonotonic },
     { "monotonicline", ipMonotonicLine },
@@ -240,6 +253,14 @@ static t_config_enum_values s_keys_map_WallDirection{
     { "cw",   int(WallDirection::Clockwise)},
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallDirection)
+
+//Orca
+static t_config_enum_values s_keys_map_SurfaceFillOrder{
+    { "default",  int(SurfaceFillOrder::Default) },
+    { "outward",  int(SurfaceFillOrder::Outward) },
+    { "inward",   int(SurfaceFillOrder::Inward) },
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SurfaceFillOrder)
 
 //BBS
 static t_config_enum_values s_keys_map_PrintSequence {
@@ -2316,6 +2337,47 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.insert(def->enum_labels.begin(), L("Solid default"));
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCount));
 
+    def = this->add("top_surface_expansion", coFloat);
+    def->label = L("Top surface expansion");
+    def->category = L("Strength");
+    def->tooltip = L("Expands the top surfaces by this distance to connect distinct top surfaces and fill gaps.\n"
+                     "Useful for cases where the top surface is interrupted by a raised feature, such as text on a plane."
+                     "Expanding it removes the holes beneath these features and creates a continuous path with a better finish for printing on top."
+                     "The expansion is applied to the original top surface, before any other processing such as bridging or overhang detection.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("top_surface_expansion_margin", coFloat);
+    def->label = L("Top expansion wall margin");
+    def->category = L("Strength");
+    def->tooltip = L("Using “Top surface expansion” may cause a surface that did not previously touch the model's outer walls to now do so.\n"
+                     "This can cause contraction marks (such as the hull line) on the outer walls.\n"
+                     "By adding a small margin, this contraction will not occur directly on the walls, thereby preventing a visible mark.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("top_surface_expansion_direction", coEnum);
+    def->label = L("Top expansion direction");
+    def->category = L("Strength");
+    def->tooltip = L("Direction in which the top surface expansion grows.\n"
+                     " - Inward grows into the holes and gaps left by features rising from the middle of a top surface.\n"
+                     " - Outward grows the outer edge of the surface, connecting surfaces separated by features that can divide a surface, such as a lattice pattern.\n"
+                     " - Inward and Outward does both.");
+    def->enum_keys_map = &ConfigOptionEnum<TopSurfaceExpansionDirection>::get_enum_values();
+    def->enum_values.push_back("inward_and_outward");
+    def->enum_values.push_back("inward");
+    def->enum_values.push_back("outward");
+    def->enum_labels.push_back(L("Inward and Outward"));
+    def->enum_labels.push_back(L("Inward"));
+    def->enum_labels.push_back(L("Outward"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<TopSurfaceExpansionDirection>(TopSurfaceExpansionDirection::InwardAndOutward));
+
     def = this->add("bottom_surface_pattern", coEnum);
     def->label = L("Bottom surface pattern");
     def->category = L("Strength");
@@ -2324,6 +2386,40 @@ void PrintConfigDef::init_fff_params()
     def->enum_values = def_top_fill_pattern->enum_values;
     def->enum_labels = def_top_fill_pattern->enum_labels;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipMonotonic));
+
+    auto def_top_fill_order = def = this->add("top_surface_fill_order", coEnum);
+    def->label = L("Top surface fill order");
+    def->category = L("Strength");
+    def->tooltip = L("Direction in which top surfaces are filled when using a center-based pattern "
+                     "(Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).\n"
+                     "Outward starts at the center of the surface, so any excess material is pushed "
+                     "towards the edge where it is least visible. Inward starts at the edge and ends "
+                     "with the tight curves at the center.\n"
+                     "Default uses shortest-path ordering, which may run in either direction.");
+    def->enum_keys_map = &ConfigOptionEnum<SurfaceFillOrder>::get_enum_values();
+    def->enum_values.push_back("default");
+    def->enum_values.push_back("outward");
+    def->enum_values.push_back("inward");
+    def->enum_labels.push_back(L("Default"));
+    def->enum_labels.push_back(L("Outward"));
+    def->enum_labels.push_back(L("Inward"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SurfaceFillOrder>(SurfaceFillOrder::Default));
+
+    def = this->add("bottom_surface_fill_order", coEnum);
+    def->label = L("Bottom surface fill order");
+    def->category = L("Strength");
+    def->tooltip = L("Direction in which bottom surfaces are filled when using a center-based pattern "
+                     "(Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).\n"
+                     "Inward starts each surface with the wider outer curves, which improves first layer "
+                     "adhesion on build plates where the tight curves at the center may not stick. "
+                     "Outward starts at the center, pushing any excess material towards the edge.\n"
+                     "Default uses shortest-path ordering, which may run in either direction.");
+    def->enum_keys_map = &ConfigOptionEnum<SurfaceFillOrder>::get_enum_values();
+    def->enum_values = def_top_fill_order->enum_values;
+    def->enum_labels = def_top_fill_order->enum_labels;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<SurfaceFillOrder>(SurfaceFillOrder::Default));
 
 	def                = this->add("internal_solid_infill_pattern", coEnum);
     def->label         = L("Internal solid infill pattern");
@@ -2713,6 +2809,41 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 1;
     def->set_default_value(new ConfigOptionInts{ 0 });
+
+    // Multi-colour (coextruded) filaments, P1 (tests/design_multicolour_filament_view.md, 4.1).
+    // Per slot, next to filament_multi_colors, and visual only: Print::apply() strips them
+    // (visual_only_option_keys()), so they never reach the slicer, the G-code or a re-slice.
+    // Deliberately not in the static PrintConfig, so print_config_diffs and the placeholder
+    // parser cannot see them either.
+    def = this->add("filament_colour_split", coStrings);
+    def->label = L("Colour proportions");
+    def->tooltip = L("Visual only. How much of the strand each colour of a multi-colour filament takes, in percent, "
+                     "'|'-separated in the order of the colours. Empty means an equal split.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("filament_colour_angle", coFloats);
+    def->label = L("Colour rotation");
+    def->tooltip = L("Visual only. Which way the first colour of a multi-colour filament faces, in degrees "
+                     "anticlockwise from the printer's front, seen from above.");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -360;
+    def->max = 360;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
+    def = this->add("filament_colour_twist", coFloats);
+    def->label = L("Colour twist");
+    def->tooltip = L("Visual only. How far a multi-colour filament turns while it is extruded, in degrees per metre "
+                     "of filament. 0 means it does not turn.");
+    def->sidetext = u8"°/m"; // degrees per metre, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -3600;
+    def->max = 3600;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
 
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
@@ -3224,6 +3355,26 @@ void PrintConfigDef::init_fff_params()
     def->max = 360;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(45));
+
+    def = this->add("top_layer_direction", coFloat);
+    def->label = L("Top layer direction");
+    def->category = L("Strength");
+    def->tooltip = L("Optional absolute angle for top-layer infill and ironing base direction. Set to -1 to use the current solid infill direction behavior.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->min = -1;
+    def->max = 360;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(-1));
+
+    def = this->add("bottom_layer_direction", coFloat);
+    def->label = L("Bottom layer direction");
+    def->category = L("Strength");
+    def->tooltip = L("Optional absolute angle for bottom-layer infill. Set to -1 to use the current solid infill direction behavior.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->min = -1;
+    def->max = 360;
+    def->mode = comSimple;
+    def->set_default_value(new ConfigOptionFloat(-1));
 
     def = this->add("sparse_infill_density", coPercent);
     def->label = L("Sparse infill density");
@@ -3838,6 +3989,50 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts{ -1 });
+
+    // Orca #11194: filament ironing overrides. Nil (the default) means "use the process value".
+    def = this->add("filament_ironing_flow", coPercents);
+    def->label = L("Ironing flow");
+    def->tooltip = L("Filament-specific override for ironing flow. This allows you to customize the ironing flow "
+                     "for each filament type. Too high value results in overextrusion on the surface.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionPercentsNullable{ ConfigOptionPercentsNullable::nil_value() });
+
+    def = this->add("filament_ironing_spacing", coFloats);
+    def->label = L("Ironing line spacing");
+    def->tooltip = L("Filament-specific override for ironing line spacing. This allows you to customize the spacing "
+                     "between ironing lines for each filament type.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 1;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ ConfigOptionFloatsNullable::nil_value() });
+
+    def = this->add("filament_ironing_inset", coFloats);
+    def->label = L("Ironing inset");
+    def->tooltip = L("Filament-specific override for ironing inset. This allows you to customize the distance to keep "
+                     "from the edges when ironing for each filament type.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ ConfigOptionFloatsNullable::nil_value() });
+
+    def = this->add("filament_ironing_speed", coFloats);
+    def->label = L("Ironing speed");
+    def->tooltip = L("Filament-specific override for ironing speed. This allows you to customize the print speed "
+                     "of ironing lines for each filament type.");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable{ ConfigOptionFloatsNullable::nil_value() });
 
     def = this->add("fuzzy_skin", coEnum);
     def->label = L("Fuzzy Skin");
@@ -5280,14 +5475,22 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloats { 20 });
 
     def           = this->add("ironing_angle", coFloat);
-    def->label    = L("Ironing angle");
+    def->label    = L("Ironing angle offset");
     def->category = L("Quality");
-    def->tooltip  = L("The angle ironing is done at. A negative number disables this function and uses the default method.");
+    def->tooltip  = L("The angle of ironing lines offset from the top surface.");
     def->sidetext = "°";	// degrees, don't need translation
-    def->min      = -1;
+    def->min      = 0;
     def->max      = 359;
     def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(-1));
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    // Orca #11195
+    def           = this->add("ironing_angle_fixed", coBool);
+    def->label    = L("Fixed ironing angle");
+    def->category = L("Quality");
+    def->tooltip  = L("Use a fixed absolute angle for ironing.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("zaa_enabled", coBool);
     def->label    = L("Z contouring enabled");
@@ -6734,7 +6937,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("seam_gap", coFloatOrPercent);
     def->label = L("Seam gap");
     def->tooltip = L("In order to reduce the visibility of the seam in a closed loop extrusion, the loop is interrupted and shortened by a specified amount.\n"
-                     "This amount can be specified in millimeters or as a percentage of the current extruder diameter. The default value for this parameter is 10%.");
+                     "This amount can be specified in millimeters or as a percentage of the nozzle diameter. The default value for this parameter is 10%.");
     def->sidetext = L("mm or %");
     def->min = 0;
     def->mode = comAdvanced;
@@ -7264,6 +7467,21 @@ void PrintConfigDef::init_fff_params()
                     "so the tower ends up below the model and the toolhead has to reach down to it. "
                     "Layouts where that would collide with an already printed object are rejected. "
                     "Has no effect with smooth timelapse, which needs a tower on every layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #15841.
+    def = this->add("wipe_tower_sparse_layers_combination", coBool);
+    def->label = L("Combine sparse layers");
+    def->tooltip = L("If enabled, consecutive layers on which the prime tower has no filament change are printed as a single "
+                     "thicker tower layer instead of one thin layer each, the same way infill combination merges sparse infill. "
+                     "The merged layer is printed at the top of the run, at the height of everything it covers.\n\n"
+                     "Only whole layers are merged, and never past the maximum layer height of the nozzle printing the tower "
+                     "(three quarters of the nozzle diameter when that is left at 0). Two or more layers therefore have to fit "
+                     "under that limit before anything changes at all: at a 0.2 mm layer height under a 0.3 mm maximum nothing "
+                     "is merged, while at 0.1 mm three layers become one.\n\n"
+                     "Unlike \"No sparse layers\" the tower keeps following the model, so the toolhead never has to reach down to it. "
+                     "Has no effect with \"No sparse layers\" or smooth timelapse, which needs a tower on every layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8454,6 +8672,36 @@ void PrintConfigDef::init_fff_params()
     def->max      = 100;
     def->set_default_value(new ConfigOptionPercent(100));
 
+    def           = this->add("separated_infills", coBool);
+    def->label    = L("Separated infills");
+    def->category = L("Strength");
+    def->tooltip  = L("Centers the internal infill of each part on itself, as if it were sliced on its own, instead of on the "
+                       "whole assembly. Parts that touch or overlap are treated as one body and share a center; separate parts "
+                       "(or distinct 3D objects) each get their own.\n"
+                       "Useful when an assembly groups several objects that should each keep a consistent, self-centered infill.\n"
+                       "Adaptive Cubic and Support Cubic always center each part on itself, and Lightning infill is generated for "
+                       "the whole object and is unaffected.");
+    def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def                = this->add("center_of_surface_pattern", coEnum);
+    def->label         = L("Center surface pattern on");
+    def->category      = L("Strength");
+    def->tooltip       = L("Chooses where the centering point of centered top/bottom surface patterns (Archimedean Chords, "
+                                 "Octagram Spiral) is placed.\n"
+                                 " - Each Surface: centers the pattern on every individual surface region, so each island is symmetric on its own.\n"
+                                 " - Each Model: centers the pattern on each connected body. Parts that touch or overlap share one center; "
+                                 "parts detached from the rest each get their own.\n"
+                                 " - Each Assembly: uses a single shared center for the whole object or assembly.");
+    def->enum_keys_map = &ConfigOptionEnum<CenterOfSurfacePattern>::get_enum_values();
+    def->enum_values.push_back("each_surface");
+    def->enum_values.push_back("each_model");
+    def->enum_values.push_back("each_assembly");
+    def->enum_labels.push_back(L("Each Surface"));
+    def->enum_labels.push_back(L("Each Model"));
+    def->enum_labels.push_back(L("Each Assembly"));
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
 
     def = this->add("travel_speed", coFloats);
     def->label = L("Travel");
@@ -8606,7 +8854,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: on Bambu Lab printers the brim then grows with the tower height (8 mm from 100 mm up), on other printers the prime tower gets no brim.");
+    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: the brim then grows with the tower height (8 mm from 100 mm up).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
@@ -10443,6 +10691,10 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         value = "tree(auto)";
     } else if (opt_key == "support_base_pattern" && value == "none") {
         value = "hollow";
+    } else if (opt_key == "ironing_angle" && boost::starts_with(value, "-")) {
+        // Orca #10841: ironing_angle is now an offset from the top surface direction (0..359);
+        // the old "-1 = default method" is offset 0.
+        value = "0";
     } else if (opt_key == "different_settings_to_system") {
         std::string copy_value = value;
         copy_value.erase(std::remove(copy_value.begin(), copy_value.end(), '\"'), copy_value.end()); // remove '"' in string
@@ -10547,6 +10799,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
 
     // Ignore the following obsolete configuration keys:
     static std::set<std::string> ignore = {
+        // Orca #11682 option, superseded by top_surface_fill_order / bottom_surface_fill_order (#14179).
+        "anisotropic_surfaces",
         "acceleration", "scale", "rotate", "duplicate", "duplicate_grid",
         "bed_size",
         "print_center", "g0", "wipe_tower_per_color_wipe", 
@@ -10748,6 +11002,112 @@ const std::vector<std::string>& part_support_keys()
         "support_threshold_angle",
     };
     return s_keys;
+}
+
+const std::set<std::string>& visual_only_option_keys()
+{
+    // Multi-colour filaments P1. Glow (G1) and the gradient cycle length (P6) add their keys here.
+    static const std::set<std::string> s_keys {
+        "filament_colour_split",
+        "filament_colour_angle",
+        "filament_colour_twist",
+    };
+    return s_keys;
+}
+
+namespace {
+
+// One visual-only vector option, whatever its element type, through its typed values vector.
+template<typename Fn>
+bool visit_visual_only_vector(ConfigOption *opt, Fn &&fn)
+{
+    if (opt == nullptr || !opt->is_vector())
+        return false;
+    if (auto *v = dynamic_cast<ConfigOptionStrings*>(opt)) { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionFloats*>(opt))  { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionPercents*>(opt)){ fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionInts*>(opt))    { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionBools*>(opt))   { fn(v->values); return true; }
+    assert(false); // a new visual-only vector type: add it above
+    return false;
+}
+
+} // namespace
+
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
+        if (def == nullptr || opt == nullptr)
+            continue;
+        // New slots take the definition's default (the first element of the default vector), not a
+        // copy of slot 1 as ConfigOptionVector::resize() would give them.
+        const size_t old_size = opt->size();
+        opt->resize(n, def->default_value.get());
+        for (size_t i = old_size; i < n; ++i)
+            opt->set_at(def->default_value.get(), i, 0);
+    }
+}
+
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index)
+{
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [index](auto &values) {
+            if (index < values.size())
+                values.erase(values.begin() + index);
+        });
+}
+
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to)
+{
+    if (from == to)
+        return;
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [from, to](auto &values) {
+            if (from >= values.size() || to >= values.size())
+                return;
+            auto value = values[from];
+            values.erase(values.begin() + from);
+            values.insert(values.begin() + to, value);
+        });
+}
+
+void strip_visual_only_options(DynamicPrintConfig &config)
+{
+    for (const std::string &key : visual_only_option_keys())
+        config.erase(key);
+}
+
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig snapshot;
+    for (const std::string &key : visual_only_option_keys())
+        if (const ConfigOption *opt = config.option(key))
+            snapshot.set_key_value(key, opt->clone());
+    return snapshot;
+}
+
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        if (const ConfigOption *opt = snapshot.option(key))
+            config.set_key_value(key, opt->clone());
+        else
+            config.erase(key);
+    }
+    visual_only_resize_slots(config, n);
+}
+
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors)
+{
+    const auto *multi = config.option<ConfigOptionStrings>("filament_multi_colors");
+    auto       *split = config.option<ConfigOptionStrings>("filament_colour_split");
+    if (multi == nullptr || split == nullptr)
+        return;
+    for (size_t i = 0; i < split->values.size() && i < multi->values.size(); ++i)
+        if (i >= old_multi_colors.size() || old_multi_colors[i] != multi->values[i])
+            split->values[i].clear();
 }
 
 DynamicPrintConfig DynamicPrintConfig::full_print_config()

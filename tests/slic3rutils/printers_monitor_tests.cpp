@@ -220,3 +220,38 @@ TEST_CASE("printers monitor: the running job's plate picture from the archive", 
     for (const char* bad : { "printers_thumb:", "printers_thumb:../x", "printers_thumb:.hidden", "printers_thumb:a/b", "printers_thumb:a b" })
         CHECK(parse_message(bad).kind == Message::Kind::Invalid);
 }
+
+TEST_CASE("printers monitor: the shared device page (owner D6)", "[PrintersMonitor]")
+{
+    // A Centauri Carbon 2 row (it carries "cc2") is drawn by the shared device page; others keep theirs.
+    const json rows = json::parse(R"([
+        {"id":"ph:cc2a","kind":"printhost","url":"http://192.168.1.40","cc2":{"protocol":"mqtt"}},
+        {"id":"ph:k1","kind":"printhost","url":"http://192.168.1.41"},
+        {"id":"ph:new","kind":"printhost","device_page":true},
+        {"id":"01P00A1","kind":"bambu"}])");
+    CHECK(uses_device_page(rows[0]));
+    CHECK_FALSE(uses_device_page(rows[1]));
+    CHECK(uses_device_page(rows[2]));
+    CHECK_FALSE(uses_device_page(json::parse(R"({"id":"x","cc2":"not an object"})")));
+    const auto t = targets_of(rows);
+    CHECK(t.at("ph:cc2a").device_page);
+    CHECK_FALSE(t.at("ph:k1").device_page);
+    // Opened in the Device tab's web view; with the view not there, the old rules (its address).
+    CHECK(open_way(t.at("ph:cc2a"), false, true) == OpenWay::DevicePage);
+    CHECK(open_way(t.at("ph:cc2a"), true, false) == OpenWay::Browser);
+    CHECK(open_way(t.at("ph:new"), false, true) == OpenWay::DevicePage);
+    CHECK(open_way(t.at("ph:new"), false, false) == OpenWay::NotHere);
+    CHECK(open_way(t.at("ph:k1"), false, true) == OpenWay::PrinterWebView);
+
+    // The page's address names the row, percent-encoded, and reads back the same id.
+    CHECK(device_page_path("ph:cc2a", true) == "/web/orca/device.html?embed=1&theme=dark&id=ph%3Acc2a");
+    CHECK(device_page_path("host", false) == "/web/orca/device.html?embed=1&theme=light&id=host");
+    CHECK(device_page_path("bad id", true).empty());
+    CHECK(device_page_path("", true).empty());
+    CHECK(device_page_id("http://127.0.0.1:13618/web/orca/device.html?embed=1&theme=dark&id=ph%3Acc2a") == "ph:cc2a");
+    // __edgeTheme rewrites ?theme= in place; the id is still found wherever it is.
+    CHECK(device_page_id("http://127.0.0.1:1/web/orca/device.html?id=host&embed=1&theme=light#x") == "host");
+    CHECK(device_page_id("http://127.0.0.1:1/web/orca/monitor.html?id=host").empty());
+    CHECK(device_page_id("http://192.168.1.40/web/orca/device.html?id=%22%3E").empty()); // decodes to a refused id
+    CHECK(device_page_id("http://127.0.0.1:1/web/orca/device.html?embed=1").empty());
+}

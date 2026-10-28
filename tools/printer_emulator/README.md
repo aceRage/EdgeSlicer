@@ -76,10 +76,33 @@ trays; **Upload and Print** sends the chunked upload and then Cmd 128 with its `
 Stream tab and the Printers tab show the emulated camera (a test pattern with the printer's name and
 a clock).
 
+**Elegoo Centauri Carbon 2:** not created on first start; use **Add printer** with the preset
+`elegoo_cc2_combo` (CANVAS, `127.0.0.22`) or `elegoo_cc2_plain` (no CANVAS, `127.0.0.23`). Printer preset
+**Elegoo Centauri Carbon 2 0.4 nozzle**, host type **Elegoo Link**, hostname the address, API key empty (the
+default access code 123456). It answers `/system/info`, the chunked `PUT /upload` and MQTT on port 1883
+(registration, 1002 status, 2005 CANVAS, 1020 start with its `slot_map`). No camera and no SDCP.
+It also does what the hub's CC2 monitor uses: the whole status in 1002 (temperatures, fans, light,
+progress, layers), method 6000 status pushes on `elegoo/<sn>/api_status` (once a second while
+printing), `{"type":"PING"}` -> `{"type":"PONG"}`, pause / stop / resume (1021 / 1022 / 1023) and the
+CANVAS auto-refill (2004). Faults for the monitor: push ids that skip, no pushes, no PONG, a refused
+2004.
+
 **Snapmaker U1:** add it by IP from the phone app or the Printers tab (**Add printer**, IP
 **127.0.0.31**; the hub's `POST /api/snapmaker/add?ip=127.0.0.31`). A send from the phone (or
 `/api/plates/{i}/send`) uploads the file with `print=false`, then sends the toolhead mapping
 macros and starts it.
+
+**U1 with third-party tags:** **Add printer** with the preset `u1_third_party_tag` (`127.0.0.32`):
+toolhead 1 reads an iBoss PLA Silk tag, 2 a Snapmaker PLA Matte, 3 an eSun PETG, 4 is empty. It is
+what the U1 reports for a spool with a third-party RFID tag (print_task_config), for the phone
+app, the hub and the send dialogs.
+
+**Not the desktop Device page.** Its *Add device > Bind Via IP* pairs over MQTT on port 1884 and
+then runs the session over MQTT/TLS with the printer's certificate on 8883. The emulator's brokers
+are off by default, plain TCP when on, and hand out placeholder certificates, so that bind cannot
+complete: the slicer must report a failed connection (before fix/mqtt-connect-refused it closed
+instead). The sidebar's Machine Filament section and filament Sync are fed only by that page, so
+they need a real U1.
 
 ## Set the slots
 

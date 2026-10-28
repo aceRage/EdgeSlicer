@@ -90,6 +90,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Format/DXF.hpp"
 #include "libslic3r/Format/STEP.hpp"
 #include "libslic3r/Format/STEPExport.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -807,70 +808,74 @@ std::string extract_base_filament_name(const std::string& full_name)
 // Resolve a machine filament name to a matching local filament preset.
 // Filament presets follow the convention "BaseName @Model nozzle",
 // e.g. "Generic PA-CF @U1 0.4 nozzle".  Split by '@' to extract the
-// base name, trim, and compare exactly — so "Generic PA" does NOT
+// base name, trim, and compare exactly - so "Generic PA" does NOT
 // accidentally match "Generic PA-CF".
 // Orca #13265: with no exact name, the preset of the reported vendor and type whose default colour
 // is closest to the reported colour wins, before the "Generic <type>" fallback.
-Preset* resolve_filament_preset(PresetBundle* preset_bundle, 
+// The rules are FilamentSyncMatch::match_preset() (tested there). User presets count for the exact
+// name too: a third-party spool's own preset ("iBoss PLA Silk @U1 0.4 nozzle") used to be skipped,
+// so every sync fell back to Generic.
+Preset* resolve_filament_preset(PresetBundle* preset_bundle,
     const std::string& filament_name, const std::string& filament_type,
-    const std::string& filament_vendor = {}, const std::string& filament_colour = {})
+    const std::string& filament_vendor = {}, const std::string& filament_colour = {},
+    FilamentSyncMatch::MatchKind* kind = nullptr)
 {
+    if (kind)
+        *kind = FilamentSyncMatch::MatchKind::None;
     if (!preset_bundle || filament_name.empty())
         return nullptr;
 
-    auto to_lower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-        return s;
-    };
-
+    std::vector<Preset*>                         presets;
+    std::vector<FilamentSyncMatch::Candidate>    candidates;
     for (auto& preset : preset_bundle->filaments) {
-        if (!preset.is_compatible || !preset.is_system)
+        if (preset.is_default || preset.is_project_embedded)
             continue;
-
-        std::string base = extract_base_filament_name(preset.name);
-        if (to_lower(base) == to_lower(filament_name)) {
-            return &preset;
-        }
+        FilamentSyncMatch::Candidate c;
+        c.name          = preset.name;
+        c.vendor        = preset.config.opt_string("filament_vendor", 0u);
+        c.type          = preset.config.opt_string("filament_type", 0u);
+        c.colour        = preset.config.opt_string("default_filament_colour", 0u);
+        c.is_system     = preset.is_system;
+        c.is_compatible = preset.is_compatible;
+        c.is_base       = preset_bundle->filaments.get_preset_base(preset) == &preset;
+        presets.push_back(&preset);
+        candidates.push_back(std::move(c));
     }
+    const FilamentSyncMatch::Match m = FilamentSyncMatch::match_preset(candidates, filament_name, filament_type, filament_vendor, filament_colour);
+    if (kind)
+        *kind = m.kind;
+    if (m.index < 0)
+        return nullptr;
+    if (m.kind == FilamentSyncMatch::MatchKind::VendorType)
+        BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
+                                << " " << filament_colour << ": " << presets[size_t(m.index)]->name;
+    return presets[size_t(m.index)];
+}
 
-    // Orca #13265: closest colour among the presets of this vendor and type. A user preset only
-    // counts when it is detached from its parent (its own base), as upstream.
-    if (!filament_vendor.empty() && !filament_colour.empty()) {
-        std::vector<Preset*>     candidates;
-        std::vector<std::string> colours;
-        for (auto& preset : preset_bundle->filaments) {
-            if (!preset.is_compatible || preset_bundle->filaments.get_preset_base(preset) != &preset)
-                continue;
-            if (to_lower(preset.config.opt_string("filament_vendor", 0u)) != to_lower(filament_vendor) ||
-                to_lower(preset.config.opt_string("filament_type", 0u)) != to_lower(filament_type))
-                continue;
-            candidates.push_back(&preset);
-            colours.push_back(preset.config.opt_string("default_filament_colour", 0u));
-        }
-        const int best = FilamentSyncMatch::closest_colour_index(filament_colour, colours);
-        if (best >= 0) {
-            BOOST_LOG_TRIVIAL(info) << "Filament sync: closest-colour preset for " << filament_vendor << " " << filament_type
-                                    << " " << filament_colour << ": " << candidates[best]->name;
-            return candidates[best];
-        }
-    }
-
-    const std::string generic_prefix = "Generic ";
-    std::string generic_base = generic_prefix + filament_type;
-    for (auto& preset : preset_bundle->filaments) {
-        if (!preset.is_compatible || !preset.is_system)
-            continue;
-
-        std::string base = extract_base_filament_name(preset.name);
-        std::string type = preset.config.opt_string("filament_type", static_cast<unsigned int>(0));
-
-        if ((to_lower(type) == to_lower(filament_type)) && 
-                (to_lower(base) == to_lower(generic_base))) {
-            return &preset;
-        }
-    }
-
-    return nullptr;
+// A third-party spool (a vendor other than Generic/Snapmaker) that only matched the Generic preset of
+// its type gets a user preset of its own: it inherits that Generic preset (so it stays compatible
+// with the printer and keeps its pressure-advance and temperature defaults) and carries the spool's
+// vendor and colour, named like the U1's own presets so the dropdown's "Machine Filament" section and
+// the next sync find it by name. Returns the new preset, or the generic one when nothing was created.
+Preset* user_preset_for_third_party_spool(PresetBundle* preset_bundle, Preset* generic,
+    const std::string& filament_name, const std::string& filament_vendor, const std::string& filament_colour)
+{
+    if (!preset_bundle || !generic || !generic->is_system || FilamentSyncMatch::is_stock_vendor(filament_vendor))
+        return generic;
+    const std::string name = FilamentSyncMatch::third_party_preset_name(filament_name, generic->name);
+    if (name.empty())
+        return generic;
+    if (Preset* existing = preset_bundle->filaments.find_preset(name, false); existing != nullptr && existing->name == name)
+        return existing->is_compatible ? existing : generic;
+    DynamicPrintConfig overrides;
+    overrides.set_key_value("filament_vendor", new ConfigOptionStrings({ filament_vendor }));
+    if (!filament_colour.empty())
+        overrides.set_key_value("default_filament_colour", new ConfigOptionStrings({ filament_colour }));
+    const Preset* created = preset_bundle->filaments.create_inherited_user_preset(*generic, name, overrides);
+    if (created == nullptr)
+        return generic;
+    BOOST_LOG_TRIVIAL(info) << "Filament sync: created user preset " << name << " for a " << filament_vendor << " spool";
+    return preset_bundle->filaments.find_preset(name, false);
 }
 
 void build_design_filament_list(PresetBundle* preset_bundle, std::vector<FilamentData>& out_list)
@@ -2574,6 +2579,11 @@ Sidebar::Sidebar(Plater *parent)
                 // is still one click away, behind "Edit connection..." inside this dialog; it used
                 // to open unasked, which made a farm look like one printer's settings page.
                 show_print_host_devices_dialog(this->GetParent());
+                // A device added, edited or removed in there changes what the Device tab shows (a
+                // printer's own page, the shared device page, or "set up a connection"): follow it
+                // now, not at the next preset switch. The owner's CC2, added there with an empty API
+                // key and no serial, stayed on missing_connection.html until the slicer was closed.
+                update_all_preset_comboboxes(true);
             });
 
         combo_printer->bind_machine_connecting_button_handler([this]() {
@@ -2922,6 +2932,8 @@ Sidebar::Sidebar(Plater *parent)
             // takes precedence over the single-color value.)
             auto* multi_colors = pb->project_config.option<ConfigOptionStrings>("filament_multi_colors");
             auto* color_modes  = pb->project_config.option<ConfigOptionInts>("filament_colour_mode");
+            // Multi-colour P1: replaced slots start with an equal split again (design 4.5).
+            const std::vector<std::string> old_multi_colors_before_palette = multi_colors ? multi_colors->values : std::vector<std::string>{};
             if (multi_colors)
                 multi_colors->values.resize(target_count);
             if (color_modes)
@@ -2943,6 +2955,7 @@ Sidebar::Sidebar(Plater *parent)
             const std::vector<MixedFilament> old_mixed_snapshot = pb->mixed_filaments.mixed_filaments();
 
             pb->set_num_filaments(static_cast<unsigned int>(target_count), std::vector<std::string>{});
+            reset_colour_split_where_colours_changed(pb->project_config, old_multi_colors_before_palette);
 
             // Restore custom entries that were wiped by clear_custom_entries
             // in update_multi_material_filament_presets.  add_batch_custom_
@@ -4168,6 +4181,18 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                                  MainFrame::PrintSelectType::eSendGcode;
             }
 
+            // A printer with no device page of its own (an Elegoo Centauri Carbon 2) gets the shared,
+            // vendor-neutral device page instead of its address (owner D6, 2026-10-26).
+            {
+                const bool        picked = ph_picked && !ph_picked->address.empty();
+                const std::string model  = printer_model_opt ? printer_model_opt->value : std::string();
+                const wxString    shared = PrinterWebView::shared_device_page_url(picked ? *ph_picked : PrintHostDevices::from_config(cfg), model,
+                                                                                  picked ? "ph:" + ph_picked->id : std::string("host"));
+                if (!shared.empty()) {
+                    url    = shared;
+                    apikey = wxString();
+                }
+            }
             p_mainframe->load_printer_url(url, apikey);
             if (p_mainframe->m_printer_view) {
                 p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
@@ -10057,7 +10082,8 @@ void Sidebar::show_canvas_sync_dialog()
 {
     if (!wxGetApp().plater())
         return;
-    const std::string address = canvas_address_for_current_printer();
+    std::string       token;
+    const std::string address = canvas_address_for_current_printer(&token);
     if (address.empty()) {
         SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
         dlg.SetOKLabel(_L("Got it"));
@@ -10065,7 +10091,8 @@ void Sidebar::show_canvas_sync_dialog()
         dlg.ShowModal();
         return;
     }
-    const CanvasQueryResult result = query_canvas_with_progress(this, address);
+    const std::string model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
+    const CanvasQueryResult result = query_canvas_with_progress(this, address, model, token);
     if (!result.ok) {
         SyncRichConfirmDialog dlg(this, canvas_failure_text(result), wxOK);
         dlg.SetOKLabel(_L("Got it"));
@@ -10154,11 +10181,14 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
         ConfigOptionStrings* co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
         ConfigOptionStrings* mco = preset_bundle->project_config.option<ConfigOptionStrings>("filament_multi_colors");
         ConfigOptionInts*    cmo = preset_bundle->project_config.option<ConfigOptionInts>("filament_colour_mode");
+        // Multi-colour P1: a slot whose colours the sync replaces starts with an equal split (design 4.5).
+        const std::vector<std::string> old_multi_colors_before_sync = mco ? mco->values : std::vector<std::string>{};
 
         // Snapmaker #1052: slot 0's name is taken only after Edge's own fallback
         // (CANVAS Generic @ECC, then vendor/colour resolve). Upstream records a
         // single resolve_filament_preset(); that would skip the CANVAS Generic path.
         std::string slot0_matched_preset;
+        bool        created_user_presets = false;
         for (size_t i = 0; i < effective_size; ++i) {
             const std::string synced_colour = into_u8(getMainColor(syncedData[i].m_color).GetAsString(wxC2S_HTML_SYNTAX));
             Preset* matched = nullptr;
@@ -10172,9 +10202,21 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
                 else
                     matched = resolve_filament_preset(preset_bundle, "Generic " + syncedData[i].m_type, syncedData[i].m_type);
             }
-            if (!matched)
+            if (!matched) {
+                FilamentSyncMatch::MatchKind kind = FilamentSyncMatch::MatchKind::None;
                 matched = resolve_filament_preset(preset_bundle, syncedData[i].m_name, syncedData[i].m_type,
-                                                  syncedData[i].m_vendor, synced_colour);
+                                                  syncedData[i].m_vendor, synced_colour, &kind);
+                // U1: a third-party tag (iBoss, eSun...) that only found "Generic <type>" gets its own
+                // user preset on top of it, which the next sync and the dropdown then find by name.
+                if (!canvas_generic && kind == FilamentSyncMatch::MatchKind::Generic) {
+                    Preset* own = user_preset_for_third_party_spool(preset_bundle, matched, syncedData[i].m_name,
+                                                                    syncedData[i].m_vendor, synced_colour);
+                    if (own != matched) {
+                        matched = own;
+                        created_user_presets = true;
+                    }
+                }
+            }
             if (matched) {
                 preset_bundle->set_filament_preset(i, matched->name);
                 if (i == 0)
@@ -10191,6 +10233,14 @@ void Sidebar::apply_machine_filament_sync(std::vector<FilamentData>& machineFila
             if (cmo && i < cmo->values.size()) {
                 cmo->values[i] = FilamentColorModeToConfig(syncedData[i].m_color.NormalizedMode());
             }
+        }
+        reset_colour_split_where_colours_changed(preset_bundle->project_config, old_multi_colors_before_sync);
+
+        if (created_user_presets) {
+            // The new presets must be compatible and visible before the combos are rebuilt below.
+            preset_bundle->update_compatible(PresetSelectCompatibleType::Never);
+            if (Tab* filament_tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT))
+                filament_tab->update_tab_ui();
         }
 
         if (dlg.shouldDeleteMixedFilaments()) {
@@ -12879,9 +12929,19 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     "mixed_filament_pointillism_pixel_size",
                                     "mixed_filament_pointillism_line_gap",
                                     "mixed_filament_component_bias_enabled",
-                                    "mixed_filament_surface_indentation"
+                                    "mixed_filament_surface_indentation",
+                                    // Multi-colour P1: visual only, they follow the adopted colours.
+                                    "filament_colour_split",
+                                    "filament_colour_angle",
+                                    "filament_colour_twist"
                                 };
+                                // A file without them gets the defaults, not the previous project's values
+                                // (apply_only() keeps a key the file lacks), as PresetBundle's project load does.
+                                for (const std::string &key : visual_only_option_keys())
+                                    if (!config_loaded.has(key))
+                                        preset_bundle->project_config.erase(key);
                                 preset_bundle->project_config.apply_only(config_loaded, imported_project_option_keys, true);
+                                visual_only_resize_slots(preset_bundle->project_config, desired_physical_filaments);
                                 if (current_num_filaments != desired_physical_filaments) {
                                     q->confirm_auto_generated_gradients(desired_physical_filaments);
                                     preset_bundle->set_num_filaments(unsigned(desired_physical_filaments));
@@ -20861,6 +20921,8 @@ void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, i
         _obj->config.set_key_value("top_solid_infill_flow_ratio", new ConfigOptionFloat(1.0f));
         _obj->config.set_key_value("infill_direction", new ConfigOptionFloat(45));
         _obj->config.set_key_value("solid_infill_direction", new ConfigOptionFloat(135));
+        _obj->config.set_key_value("center_of_surface_pattern", new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
+        _obj->config.set_key_value("separated_infills", new ConfigOptionBool(false));
         _obj->config.set_key_value("align_infill_direction_to_model", new ConfigOptionBool(true));
         _obj->config.set_key_value("ironing_type", new ConfigOptionEnum<IroningType>(IroningType::NoIroning));
         _obj->config.set_key_value("internal_solid_infill_speed", new ConfigOptionFloats { internal_solid_speed });
@@ -20868,7 +20930,13 @@ void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, i
         _obj->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
         _obj->config.set_key_value("gap_fill_target", new ConfigOptionEnum<GapFillTarget>(GapFillTarget::gftNowhere));
         print_config->set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloats { 0 });
+        // ORCA: request the calibration's special toolpath order (chords first, center spiral
+        // last and inside-out) so opposing directions collide into the tactile lip the test
+        // reads. The special order only applies while the fill order is Default, so reset the
+        // profile's fill order on the calibration objects; changing the setting on the object
+        // afterwards deliberately overrides the special order.
         _obj->config.set_key_value("calib_flowrate_topinfill_special_order", new ConfigOptionBool(true));
+        _obj->config.set_key_value("top_surface_fill_order", new ConfigOptionEnum<SurfaceFillOrder>(SurfaceFillOrder::Default));
 
         // extract flowrate from name, filename format: flowrate_xxx
         std::string obj_name = _obj->name;
@@ -23757,6 +23825,88 @@ void Plater::export_stl_part()
     Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
 }
 
+// "Export outline as DXF": the 2D shape an SVG or text part is embossed from, in the plane of the
+// part (X right, Y up as in the gizmo), in millimetres. Size of the part (shape scale and the
+// scale of the volume and instance) is applied, the position on the plate is not.
+void Plater::export_outline_dxf()
+{
+    if (p->model.objects.empty())
+        return;
+    const Selection &selection = p->get_selection();
+    if (!selection.is_single_volume_or_modifier())
+        return;
+    const GLVolume *gl_volume = selection.get_first_volume();
+    if (gl_volume == nullptr)
+        return;
+    const int obj_idx = gl_volume->object_idx();
+    const int vol_idx = gl_volume->volume_idx();
+    if (obj_idx < 0 || obj_idx >= int(p->model.objects.size()))
+        return;
+    const ModelObject *model_object = p->model.objects[obj_idx];
+    if (vol_idx < 0 || vol_idx >= int(model_object->volumes.size()))
+        return;
+    const ModelVolume *model_volume = model_object->volumes[vol_idx];
+    if (!model_volume->emboss_shape.has_value())
+        return;
+
+    const EmbossShape &shape = *model_volume->emboss_shape;
+    ExPolygons         outline;
+    for (const ExPolygonsWithId &e : shape.shapes_with_ids)
+        expolygons_append(outline, e.expoly);
+    outline = union_ex(outline);
+    if (outline.empty()) {
+        show_error(this, _L("This part has no outline to export."));
+        return;
+    }
+
+    // shape units -> mm, then the scale of the part
+    double sx = shape.scale, sy = shape.scale;
+    sx *= model_volume->get_scaling_factor(X);
+    sy *= model_volume->get_scaling_factor(Y);
+    if (const ModelInstance *inst = selection.get_instance_idx() >= 0 && selection.get_instance_idx() < int(model_object->instances.size()) ?
+                                        model_object->instances[selection.get_instance_idx()] : nullptr) {
+        sx *= inst->get_scaling_factor(X);
+        sy *= inst->get_scaling_factor(Y);
+    }
+    const double kx = sx / SCALING_FACTOR, ky = sy / SCALING_FACTOR;
+    for (ExPolygon &e : outline) {
+        auto fix = [kx, ky](Polygon &poly) {
+            for (Point &pt : poly.points)
+                pt = Point(coord_t(std::llround(pt.x() * kx)), coord_t(std::llround(pt.y() * ky)));
+        };
+        fix(e.contour);
+        for (Polygon &h : e.holes)
+            fix(h);
+    }
+
+    const std::string obj_name  = sanitize_stl_filename(model_object->name);
+    const std::string part_name = sanitize_stl_filename(model_volume->name);
+    const std::string stem      = (obj_name == "part") ? part_name : (part_name == "part") ? obj_name : obj_name + " - " + part_name;
+
+    boost::filesystem::path output_file = p->get_export_file_path(FT_STL);
+    const std::string       out_dir     = output_file.parent_path().string();
+    wxFileDialog dlg(this, _L("Export DXF file:"),
+                     is_shapes_dir(out_dir) ? from_u8(wxGetApp().app_config->get_last_dir()) : from_path(output_file.parent_path()),
+                     from_u8(stem + ".dxf"), _L("DXF files") + " (*.dxf)|*.dxf", wxFD_SAVE | wxFD_OVERWRITE_PROMPT | wxPD_APP_MODAL);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    wxString out_path = dlg.GetPath();
+    if (!out_path.Lower().EndsWith(".dxf")) {
+        out_path += ".dxf";
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(into_u8(out_path), ec) &&
+            wxMessageBox(wxString::Format(_L("The file %s already exists\nDo you want to replace it?"), out_path), _L("Confirm Save As"),
+                         wxYES_NO | wxICON_WARNING, this) != wxYES)
+            return;
+    }
+    wxGetApp().app_config->update_last_output_dir(into_path(out_path).parent_path().string());
+
+    wxBusyCursor wait;
+    std::string  err;
+    if (!Slic3r::export_dxf(into_u8(out_path), {{model_volume->name.empty() ? std::string("Outline") : model_volume->name, std::move(outline)}}, &err))
+        show_error(this, from_u8(_u8L("Could not export the DXF file.") + " " + err));
+}
+
 static bool selection_is_full_objects(const Selection &selection)
 {
     return !selection.is_empty() && !selection.is_wipe_tower() &&
@@ -23995,6 +24145,12 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     publish(p->model, strategy);
 
     DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    // Bambu Connect checks print_compatible_printers against the printer it sends to, and hangs on
+    // import when the key is missing. A user process preset has an empty list, so a sliced or
+    // Bambu-compatible file names the current printer's system preset instead. Project saves keep
+    // the preset's own list; PresetBundle::load_config_file ignores a list that is only this name.
+    if ((strategy & SaveStrategy::WithGcode) || bambu_report != nullptr)
+        wxGetApp().preset_bundle->fill_print_compatible_printers_for_export(cfg);
     const std::string path_u8 = into_u8(path);
     wxBusyCursor wait;
 

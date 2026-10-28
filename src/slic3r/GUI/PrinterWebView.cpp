@@ -7,6 +7,10 @@
 #include "slic3r/GUI/MainFrame.hpp"
 #include "slic3r/GUI/Widgets/Button.hpp"
 #include "slic3r/GUI/ElegooCanvasUI.hpp"
+#include "slic3r/GUI/PrinterRowsBridge.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
+#include "slic3r/Utils/HubHomeLogic.hpp"
+#include "slic3r/Utils/PrintersMonitor.hpp"
 #include "common_func/common_func.hpp"
 
 #include <wx/sizer.h>
@@ -87,6 +91,8 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
         evt.Skip();
         if (evt.IsShown())
             release_startup_hold("the Device tab was opened");
+        // The shared device page polls only while it is on screen.
+        set_device_page_active(evt.IsShown());
         // The CANVAS card reads the printer when the tab is opened (at most every 10 s).
         if (evt.IsShown() && m_canvas && m_canvas->has_target())
             m_canvas->refresh(true);
@@ -152,6 +158,7 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 PrinterWebView::~PrinterWebView()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Start";
+    *m_alive = false;
     m_retry_timer.Stop();
     SetEvtHandlerEnabled(false);
     SSWCP::on_webview_delete(m_browser);
@@ -289,6 +296,12 @@ void PrinterWebView::load_picked_device()
     } catch (...) {}
     wxString wurl   = from_u8(url);
     wxString apikey = from_u8(d.apikey);
+    // A printer with no page of its own (the Centauri Carbon 2) gets the shared device page.
+    const wxString shared = shared_device_page_url(d, m_canvas_model, "ph:" + d.id);
+    if (!shared.empty()) {
+        wurl   = shared;
+        apikey = wxString();
+    }
     load_url(wurl, apikey);
     // The Storage tab and the CANVAS card follow the picker.
     set_storage_device(d, "ph:" + d.id, m_canvas_model);
@@ -302,7 +315,9 @@ void PrinterWebView::set_canvas_device(const PrintHostDevices::Device& device, c
     m_canvas_model          = preset_model;
     const std::string model = device.printer_model.empty() ? preset_model : device.printer_model;
     const bool        was   = m_canvas->IsShown();
-    const bool        shown = m_canvas->set_target(device.host_type == "elegoolink" ? device.address : std::string(), model);
+    // A Centauri Carbon 2's CANVAS is on its shared device page: no second card above it.
+    const bool        own_page = device.host_type == "elegoolink" && !ElegooCc2::is_cc2_model(model);
+    const bool        shown = m_canvas->set_target(own_page ? device.address : std::string(), model, device.apikey);
     if (was != shown)
         Layout();
 }
@@ -398,6 +413,9 @@ void PrinterWebView::sys_color_changed()
     }
     if (m_storage)
         m_storage->sys_color_changed();
+    // The shared device page switches in place (window.__edgeTheme also updates its ?theme=).
+    if (m_browser != nullptr && !PrintersMonitor::device_page_id(m_browser->GetCurrentURL().ToUTF8().data()).empty())
+        WebView::RunScript(m_browser, wxString::FromUTF8(HubHome::theme_script(wxGetApp().dark_mode())));
 }
 
 void PrinterWebView::msw_rescale()
@@ -612,8 +630,55 @@ void PrinterWebView::OnLoaded(wxWebViewEvent &evt)
     SendAPIKey();
 }
 
+wxString PrinterWebView::shared_device_page_url(const PrintHostDevices::Device& device, const std::string& preset_model,
+                                               const std::string& row_id)
+{
+    if (!ElegooCc2::wants_shared_device_page(device.host_type, device.address, device.printer_model, preset_model))
+        return wxString();
+    return shared_device_page_url(row_id);
+}
+
+wxString PrinterWebView::shared_device_page_url(const std::string& row_id)
+{
+    const std::string path = PrintersMonitor::device_page_path(row_id, wxGetApp().dark_mode());
+    return path.empty() ? wxString() : wxString::FromUTF8(wxGetApp().page_url(path));
+}
+
+void PrinterWebView::set_device_page_active(bool active)
+{
+    if (m_browser == nullptr || PrintersMonitor::device_page_id(m_browser->GetCurrentURL().ToUTF8().data()).empty())
+        return;
+    WebView::RunScript(m_browser, wxString::Format("if (window.__printersActive) window.__printersActive(%s);", active ? "true" : "false"));
+}
+
 void PrinterWebView::OnScriptMessage(wxWebViewEvent& evt) {
     // BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetString().ToUTF8().data();
+    const std::string raw = evt.GetString().ToUTF8().data();
+    if (raw.compare(0, 9, "printers_") == 0) {
+        // The shared device page (device.html) - only our own page, and only for the printer it is
+        // about: it reads the rows, and pauses / resumes / stops that one printer (PrinterRowsBridge,
+        // the Printers tab's own answers).
+        const std::string url = m_browser ? std::string(m_browser->GetCurrentURL().ToUTF8().data()) : std::string();
+        const std::string id  = PrintersMonitor::device_page_id(url);
+        if (id.empty() || !wxGetApp().is_own_page_url(url)) {
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: ignored a printers_ message from a page that is not the device page";
+            return;
+        }
+        const PrintersMonitor::Message m = PrintersMonitor::parse_message(raw);
+        if (m.kind == PrintersMonitor::Message::Kind::Control && m.id != id) {
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: the device page asked to control another printer; refused";
+            return;
+        }
+        wxWebView* browser = m_browser;
+        PrinterRowsBridge::Reply reply = [browser](const std::string& fn, const nlohmann::json& arg) {
+            const std::string js = PrintersMonitor::script_call(fn, arg);
+            if (browser != nullptr && !js.empty())
+                WebView::RunScript(browser, wxString::FromUTF8(js));
+        };
+        if (!PrinterRowsBridge::handle(m, m_alive, m_rows_reading, reply))
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: refused message \"" << raw.substr(0, 80) << "\"";
+        return;
+    }
 
     // if (wxGetApp().get_mode() == comDevelop)
     //     wxLogMessage("Script message received; value = %s, handler = %s", evt.GetString(), evt.GetMessageHandler());

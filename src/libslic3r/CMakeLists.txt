@@ -113,6 +113,12 @@ set(lisbslic3r_sources
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
+    Showcase/ShowcaseTone.cpp
+    Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
     Showcase/ShowcaseWebP.hpp
     Showcase/ShowcaseVideo.cpp
@@ -294,6 +300,8 @@ set(lisbslic3r_sources
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
+    Format/DXF.cpp
+    Format/DXF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
     Format/objparser.cpp

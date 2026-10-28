@@ -5,6 +5,7 @@
     "from": "system",
     "setting_id": "0pllUBj7uWuhIr0v",
     "instantiation": "true",
+    "filament_id": "EPLAB00",
     "fan_cooling_layer_time": [
         "80"
     ],

@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -1216,7 +1217,8 @@ TEST_CASE("Elephant foot layers density thins the solid layers above the first o
 // loops that only look adjacent. (Ported from OrcaSlicer #15085.)
 namespace {
 
-Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, double spacing, float density = 1.f)
+Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, double spacing, float density = 1.f,
+                                    Slic3r::SurfaceFillOrder fill_order = Slic3r::SurfaceFillOrder::Default)
 {
     std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
     filler->spacing = spacing;
@@ -1226,6 +1228,7 @@ Slic3r::Polylines spiral_inset_fill(const Slic3r::ExPolygon &surface_shape, doub
     Slic3r::FillParams fill_params;
     fill_params.density     = density;
     fill_params.dont_adjust = true;
+    fill_params.fill_order  = fill_order;
 
     Slic3r::Surface surface(Slic3r::stBottom, surface_shape);
     return filler->fill_surface(&surface, fill_params);
@@ -1416,13 +1419,15 @@ TEST_CASE("Spiral inset fill closes the gaps with variable width walls", "[Fill]
     CHECK(2 * spirals < walls_across);
 }
 
-// EdgeSlicer: the top/bottom surface fill order options (OrcaSlicer #14179) are not ported, so the
-// spiral always runs the way upstream's "Default" order does: outward, from the centre to the edge.
+// The top/bottom surface fill order (OrcaSlicer #14179, OD2): Default and Outward run the spiral from the
+// centre to the edge, Inward from the edge to the centre.
 TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]")
 {
+    const Slic3r::SurfaceFillOrder order = GENERATE(Slic3r::SurfaceFillOrder::Default, Slic3r::SurfaceFillOrder::Outward);
+    CAPTURE(int(order));
     const double            spacing = 0.45;
     const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 10, 10);
-    const Slic3r::Polylines paths   = spiral_inset_fill(square, spacing);
+    const Slic3r::Polylines paths   = spiral_inset_fill(square, spacing, 1.f, order);
     REQUIRE(paths.size() == 1);
 
     const Slic3r::Point centre = Slic3r::Point::new_scale(5, 5);
@@ -1431,6 +1436,26 @@ TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]
     // It starts near the middle and ends on the outermost ring, within a spacing of the outline.
     CHECK(spiral.first_point().distance_to(centre) < scale_(2.0 * spacing));
     CHECK(spiral.last_point().distance_to(centre) > scale_(5.0 - 1.5 * spacing));
+}
+
+TEST_CASE("Spiral inset fill runs inward with the Inward fill order", "[Fill][SpiralInset]")
+{
+    const double            spacing = 0.45;
+    const Slic3r::ExPolygon square  = spiral_rectangle(0, 0, 10, 10);
+    const Slic3r::Polylines outward = spiral_inset_fill(square, spacing, 1.f, Slic3r::SurfaceFillOrder::Default);
+    const Slic3r::Polylines inward  = spiral_inset_fill(square, spacing, 1.f, Slic3r::SurfaceFillOrder::Inward);
+    REQUIRE(inward.size() == 1);
+    REQUIRE(outward.size() == 1);
+
+    const Slic3r::Point centre = Slic3r::Point::new_scale(5, 5);
+    const Slic3r::Polyline &spiral = inward.front();
+    CAPTURE(unscale<double>(spiral.first_point().distance_to(centre)), unscale<double>(spiral.last_point().distance_to(centre)));
+    CHECK(spiral.first_point().distance_to(centre) > scale_(5.0 - 1.5 * spacing));
+    CHECK(spiral.last_point().distance_to(centre) < scale_(2.0 * spacing));
+    // The same path, only the other way round.
+    Slic3r::Polyline reversed = outward.front();
+    reversed.reverse();
+    CHECK(reversed.points == spiral.points);
 }
 
 TEST_CASE("Spiral inset fill is deterministic and covers a solid square", "[Fill][SpiralInset]")
@@ -2305,4 +2330,277 @@ TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][TpmsAdaptive
         for (const Point &point : path.equally_spaced_points(scale_(0.25)))
             max_distance = std::max(max_distance, printed_tree.distance_from_lines<false>(point));
     CHECK(unscale<double>(max_distance) <= 0.012);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Orca #16274 (OD2): separated infills and per-body octrees. Catch2 v2 port of upstream's cases.
+// ---------------------------------------------------------------------------------------------------
+
+// Orca: Slices the meshes as the parts of one object, where they are.
+// EdgeSlicer: our Test::init_print() arranges and centres the first part, so the parts are added here
+// uncentred to one instance at the bed origin: the same mesh then lands at the same bed position in
+// every print, which unmatched_between_prints() relies on.
+static Print &slice_parts(Print &print, DynamicPrintConfig config, const std::vector<TriangleMesh> &parts)
+{
+    config.set_deserialize_strict({{"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2},
+                                   {"elefant_foot_compensation", 0},
+                                   {"top_shell_thickness", 0},
+                                   {"bottom_shell_thickness", 0}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "parts.stl";
+    for (const TriangleMesh &part : parts)
+        object->add_volume(TriangleMesh(part), ModelVolumeType::MODEL_PART, false);
+    object->add_instance()->set_offset(Vec3d(0., 0., 0.)); // bed coordinates = mesh coordinates, as upstream's regions expect
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+    return print;
+}
+
+// Orca: Two identical cubes in one mesh that never touch, so each is a body of its own.
+static Print &slice_two_bodies(Print &print, const DynamicPrintConfig &config, double height)
+{
+    TriangleMesh mesh = make_cube(20, 20, height);
+    TriangleMesh second = make_cube(20, 20, height);
+    second.translate(33, 7, 0);
+    mesh.merge(second);
+    return slice_parts(print, config, {mesh});
+}
+
+// Orca: Counts the points sampled along both sets that the other set does not repeat.
+static void count_unmatched(const Polylines &a, const Polylines &b, size_t &sampled, size_t &unmatched)
+{
+    const std::array<const Polylines *, 2> sets{&a, &b};
+    for (size_t i = 0; i < 2; ++ i) {
+        const Polylines                          &other = *sets[1 - i];
+        const AABBTreeLines::LinesDistancer<Line> distancer(to_lines(other));
+        for (const Polyline &path : *sets[i])
+            for (const Point &point : path.equally_spaced_points(scale_(0.2))) {
+                ++ sampled;
+                unmatched += other.empty() || distancer.distance_from_lines<false>(point) > scale_(0.05);
+            }
+    }
+}
+
+static Polylines layer_paths(const Layer &layer, ExtrusionRole role)
+{
+    Polylines polylines;
+    for (const LayerRegion *region : layer.regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (entity->role() == role)
+                entity->collect_polylines(polylines);
+    return polylines;
+}
+
+// Orca: Share of the paths of a role that the other body does not repeat around its own center.
+static double unmatched_between_bodies(const Print &print, ExtrusionRole role)
+{
+    size_t sampled = 0, unmatched = 0;
+    for (const Layer *layer : print.objects().front()->layers()) {
+        REQUIRE(layer->lslices.size() == 2);
+        const Polylines          polylines = layer_paths(*layer, role);
+        std::array<Polylines, 2> paths;
+        for (size_t body = 0; body < 2; ++ body) {
+            // Orca: Exclude the links along the walls, which each body may chain differently.
+            paths[body] = intersection_pl(polylines, shrink(to_polygons(layer->lslices[body]), scale_(3.)));
+            for (Polyline &path : paths[body])
+                path.translate(-layer->lslices_bboxes[body].center());
+        }
+        count_unmatched(paths[0], paths[1], sampled, unmatched);
+    }
+    REQUIRE(sampled > 0);
+    return double(unmatched) / double(sampled);
+}
+
+// Orca: Share of the paths of a role inside a bed region that two slices of the same body do not share.
+static double unmatched_between_prints(const Print &a, const Print &b, ExtrusionRole role, const Polygons &region)
+{
+    const PrintObject &object_a = *a.objects().front(), &object_b = *b.objects().front();
+    REQUIRE(object_a.layer_count() == object_b.layer_count());
+    size_t sampled = 0, unmatched = 0;
+    for (size_t i = 0; i < object_a.layer_count(); ++ i) {
+        std::array<Polylines, 2> paths;
+        for (const PrintObject *object : {&object_a, &object_b}) {
+            Polylines &out = paths[object == &object_b];
+            out = layer_paths(*object->get_layer(int(i)), role);
+            for (Polyline &path : out)
+                path.translate(object->instances().front().shift);
+            out = intersection_pl(out, region);
+        }
+        count_unmatched(paths[0], paths[1], sampled, unmatched);
+    }
+    REQUIRE(sampled > 0);
+    return double(unmatched) / double(sampled);
+}
+
+TEST_CASE("Separated infill centers the sparse infill of each body on itself", "[Fill][SeparatedInfill][Regression]")
+{
+    const std::string pattern = GENERATE("line", "zigzag", "crosszag", "honeycomb", "3dhoneycomb", "crosshatch", "tpmsd", "tpmsfk", "gyroid");
+    const bool separated = GENERATE(false, true);
+    CAPTURE(pattern, separated);
+    auto config = DynamicPrintConfig::full_print_config();
+    // Orca: The Zig Zag patterns mirror each body about its own center.
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "20%"},
+                                   {"symmetric_infill_y_axis", true},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"separated_infills", separated}});
+    Print print;
+    const double unmatched = unmatched_between_bodies(slice_two_bodies(print, config, 2.), erInternalInfill);
+    // Orca: Without separation both bodies cut one object-wide pattern at different places.
+    if (separated)
+        CHECK(unmatched < 0.02);
+    else
+        CHECK(unmatched > 0.5);
+}
+
+TEST_CASE("Separated infill centers monotonic and rectilinear bridges on each body", "[Fill][SeparatedInfill][InternalBridge][Regression]")
+{
+    // Orca: Bridges use the Monotonic pattern below monotonic top surfaces and Rectilinear otherwise.
+    const std::string top_pattern = GENERATE("monotonicline", "rectilinear");
+    const bool separated = GENERATE(false, true);
+    CAPTURE(top_pattern, separated);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", "rectilinear"},
+                                   {"sparse_infill_density", "15%"},
+                                   {"top_surface_pattern", top_pattern},
+                                   {"top_shell_layers", 4},
+                                   {"bottom_shell_layers", 0},
+                                   {"separated_infills", separated}});
+    Print print;
+    const double unmatched = unmatched_between_bodies(slice_two_bodies(print, config, 4.), erInternalBridgeInfill);
+    if (separated)
+        CHECK(unmatched < 0.02);
+    else
+        CHECK(unmatched > 0.5);
+}
+
+// Orca: Share of the infill of an off center pillar, and of the frame of four overlapping bars around it,
+// that each body sliced alone does not repeat. The frame is one body of several parts that holds the pillar.
+static std::pair<double, double> frame_and_pillar_unmatched(const DynamicPrintConfig &config)
+{
+    auto box = [](double x, double y, double size_x, double size_y) {
+        TriangleMesh mesh = make_cube(size_x, size_y, 6);
+        mesh.translate(float(x), float(y), 0.f);
+        return mesh;
+    };
+    const std::vector<TriangleMesh> frame{box(0, 0, 60, 14), box(0, 46, 60, 14), box(0, 0, 14, 60), box(46, 0, 14, 60)};
+    const std::vector<TriangleMesh> pillar{box(18, 20, 16, 16)};
+    std::vector<TriangleMesh>       both = frame;
+    both.push_back(pillar.front());
+    Print print_both, print_frame, print_pillar;
+    slice_parts(print_both, config, both);
+    slice_parts(print_frame, config, frame);
+    slice_parts(print_pillar, config, pillar);
+
+    // Orca: Bed regions 3 mm inside the walls, away from the links along them.
+    auto rect = [](double x0, double y0, double x1, double y1) {
+        return Polygon({Point::new_scale(x0, y0), Point::new_scale(x1, y0), Point::new_scale(x1, y1), Point::new_scale(x0, y1)});
+    };
+    return {unmatched_between_prints(print_both, print_pillar, erInternalInfill, {rect(21, 23, 31, 33)}),
+            unmatched_between_prints(print_both, print_frame, erInternalInfill, diff(Polygons{rect(3, 3, 57, 57)}, Polygons{rect(11, 11, 49, 49)}))};
+}
+
+TEST_CASE("Separated infill fills each body like the body sliced alone", "[Fill][SeparatedInfill][Regression]")
+{
+    // Orca: Hilbert Curve and the Zig Zag links follow the extent of the box, not only its center.
+    const std::string pattern = GENERATE("hilbertcurve", "zigzag", "crosszag", "gyroid");
+    CAPTURE(pattern);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "20%"},
+                                   {"symmetric_infill_y_axis", true},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"separated_infills", true}});
+    const std::pair<double, double> unmatched = frame_and_pillar_unmatched(config);
+    CHECK(unmatched.first < 0.02);
+    CHECK(unmatched.second < 0.02);
+}
+
+TEST_CASE("Adaptive infill fills each body like the body sliced alone", "[Fill][SeparatedInfill][Regression]")
+{
+    const std::string pattern = GENERATE("adaptivecubic", "supportcubic");
+    // Orca: Octree infill centers each body whether or not separated infills are enabled.
+    const bool separated = GENERATE(false, true);
+    CAPTURE(pattern, separated);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", pattern},
+                                   {"sparse_infill_density", "40%"},
+                                   {"top_shell_layers", 0},
+                                   {"bottom_shell_layers", 0},
+                                   {"separated_infills", separated}});
+    // Orca: The octree of the whole object is laid out from its center, which the off center pillar does not share.
+    const std::pair<double, double> unmatched = frame_and_pillar_unmatched(config);
+    CHECK(unmatched.first < 0.02);
+    CHECK(unmatched.second < 0.02);
+}
+
+// EdgeSlicer: the connected-body pass (Orca #14674 / #16274) on the two-cube object: two bodies, each with
+// the box of its own cube, and none at all while the options are off and the pattern is not an octree one.
+TEST_CASE("Separated infill finds the connected bodies of an object", "[Fill][SeparatedInfill]")
+{
+    const bool separated = GENERATE(false, true);
+    CAPTURE(separated);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"sparse_infill_pattern", "grid"},
+                                   {"sparse_infill_density", "20%"},
+                                   {"separated_infills", separated}});
+    Print print;
+    slice_two_bodies(print, config, 2.);
+    const PrintObject &object = *print.objects().front();
+    if (! separated) {
+        CHECK(object.separated_body_bboxes().empty());
+        for (const Layer *layer : object.layers())
+            CHECK(layer->lslices_separated_component_ids.empty());
+        return;
+    }
+    REQUIRE(object.separated_body_bboxes().size() == 2);
+    for (const Layer *layer : object.layers()) {
+        REQUIRE(layer->lslices_separated_component_ids.size() == layer->lslices.size());
+        for (size_t i = 0; i < layer->lslices.size(); ++ i) {
+            const BoundingBox &body   = object.separated_body_bboxes()[layer->lslices_separated_component_ids[i]];
+            const BoundingBox &island = layer->lslices_bboxes[i];
+            CHECK(body.min == island.min);
+            CHECK(body.max == island.max);
+        }
+    }
+}
+
+// EdgeSlicer: the top/bottom surface fill order (Orca #14179) keeps a forced order through the path planner.
+TEST_CASE("A forced top surface fill order prints the concentric loops outward", "[Fill][FillOrder]")
+{
+    auto loops_for = [](const char *order) {
+        auto config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"top_surface_pattern", "concentric"},
+                                       {"top_surface_fill_order", order},
+                                       {"wall_loops", 1},
+                                       {"top_shell_layers", 1},
+                                       {"sparse_infill_density", "15%"}});
+        Print print;
+        Model model;
+        Slic3r::Test::init_print({make_cube(20, 20, 2)}, print, model, config, false);
+        print.process();
+        const Layer *top = print.objects().front()->layers().back();
+        Polylines paths = layer_paths(*top, erTopSolidInfill);
+        const Point centre = top->lslices_bboxes.front().center();
+        std::vector<double> distances;
+        for (const Polyline &path : paths)
+            distances.push_back(unscale<double>((path.first_point() - centre).cast<double>().norm()));
+        return distances;
+    };
+    const std::vector<double> outward = loops_for("outward");
+    const std::vector<double> inward  = loops_for("inward");
+    REQUIRE(outward.size() > 3);
+    REQUIRE(inward.size() > 3);
+    CAPTURE(outward.front(), outward.back(), inward.front(), inward.back());
+    // Outward starts in the middle and ends at the walls, Inward the other way round.
+    CHECK(outward.front() < outward.back());
+    CHECK(inward.front() > inward.back());
 }

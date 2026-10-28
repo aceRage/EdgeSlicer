@@ -23,9 +23,10 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conformance_scan import REPO, load_ledger, scan_reads, scan_sends  # noqa: E402
 from emu_proc import EmulatorProcess, assert_loopback, free_port  # noqa: E402
-from proto_clients import WsClient, elegoo_upload, http, is_response, multipart  # noqa: E402
+from proto_clients import MqttClient, WsClient, elegoo_upload, http, is_response, multipart  # noqa: E402
+import hashlib  # noqa: E402
 
-PERSONALITIES = ("qidi", "elegoo_cc1", "u1")
+PERSONALITIES = ("qidi", "elegoo_cc1", "u1", "elegoo_cc2")
 fails, notes, checks = [], [], 0
 
 
@@ -113,6 +114,36 @@ def live_keys(printers):
     w.cmd(128, {"Filename": "/local/c.gcode"})
     keys_of(w.recv_json(want=is_response(128)), out["elegoo_cc1"])
     w.close()
+
+    # CC2: /system/info, a PUT upload, MQTT registration, 1001, 1002, 2005, 2004, 1020, a PING and a push.
+    c2 = printers["elegoo_cc2"]
+    keys_of(get_json(c2["bind"], c2["port"], "/system/info?X-Token=123456"), out["elegoo_cc2"])
+    md5 = hashlib.md5(GCODE).hexdigest()
+    st, raw = http(c2["bind"], c2["port"], "/upload", "PUT", GCODE, "application/octet-stream",
+                   headers={"Content-Range": "bytes 0-%d/%d" % (len(GCODE) - 1, len(GCODE)), "X-File-Name": "c.gcode",
+                            "X-File-MD5": md5, "X-Token": "123456"})
+    keys_of(json.loads(raw or b"{}"), out["elegoo_cc2"])
+    sn = get_json(c2["bind"], c2["port"], "/system/info?X-Token=123456")["system_info"]["sn"]
+    m = MqttClient(c2["bind"], 1883, "1_PC_5150", user="elegoo", password="123456")
+    m.subscribe("elegoo/%s/1_PC_5150/api_response" % sn)
+    m.subscribe("elegoo/%s/1_PC_5150_req/register_response" % sn)
+    m.publish("elegoo/%s/api_register" % sn, json.dumps({"client_id": "1_PC_5150", "request_id": "1_PC_5150_req"}))
+    keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
+    for i, (method, params) in enumerate(((1001, {}), (1002, {}), (2005, {}), (2004, {"auto_refill": True}),
+                                          (1020, {"storage_media": "local", "filename": "c.gcode", "config": {"slot_map": []}}))):
+        m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"id": 10 + i, "method": method, "params": params}))
+        keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
+    # The heartbeat's PONG and a status push (method 6000): pause the print the 1020 above started.
+    m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"type": "PING"}))
+    keys_of(json.loads(m.next_message()[1]), out["elegoo_cc2"])
+    m.subscribe("elegoo/%s/api_status" % sn)
+    m.publish("elegoo/%s/1_PC_5150/api_request" % sn, json.dumps({"id": 30, "method": 1021, "params": {}}))
+    for _ in range(4):
+        topic, payload = m.next_message()
+        keys_of(json.loads(payload), out["elegoo_cc2"])
+        if topic.endswith("/api_status"):
+            break
+    m.close()
     return out
 
 
@@ -141,6 +172,7 @@ def main():
     from core import safety
     cc1_host = next(h for h in ("127.0.0.%d" % n for n in range(240, 254))
                     if all(safety.port_free(h, p) for p in (80, 3030, 3031)))
+    cc2_host = next(h for h in ("127.0.0.%d" % n for n in range(224, 240)) if safety.port_free(h, 1883))
     qh, uh = assert_loopback("127.0.0.%d" % (150 + os.getpid() % 30)), assert_loopback("127.0.0.%d" % (120 + os.getpid() % 30))
     printers = {
         "qidi": {"id": "cf-qidi", "personality": "qidi", "bind": qh, "port": free_port(qh), "qidi": {"boxes": 1, "polar_cooler": True, "stale_value_t": {"0": "slot1"}},
@@ -149,6 +181,9 @@ def main():
                        "slots": [{"type": "PLA", "color": "#E03030", "loaded": True}], "faults": {}},
         "u1": {"id": "cf-u1", "personality": "u1", "bind": uh, "port": free_port(uh),
                "slots": [{"type": "PLA", "color": "#E03030", "loaded": True}], "faults": {}},
+        "elegoo_cc2": {"id": "cf-cc2", "personality": "elegoo_cc2", "bind": assert_loopback(cc2_host),
+                       "port": free_port(cc2_host), "canvas": {"attached": True, "active_tray": 0},
+                       "slots": [{"type": "PLA", "color": "#E03030", "loaded": True}], "faults": {}},
     }
     emu = EmulatorProcess(os.path.join(work, "emuhome"), list(printers.values()))
     try:

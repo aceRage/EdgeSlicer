@@ -283,10 +283,7 @@ static std::vector<PathType> generate_spiral_insets(const FillParams&           
     flush_spiral();
 
     // An outward fill order runs every spiral from its centre to its outer edge, innermost island first.
-    // EdgeSlicer: upstream reads params.fill_order here, from the top/bottom surface fill order
-    // options (OrcaSlicer #14179, owner decision OD2), which we have not ported. Their default
-    // ("Default", anything but Inward) is outward, so every spiral runs outward.
-    {
+    if (params.fill_order != SurfaceFillOrder::Inward) {
         for (PathType& path : output)
             path.reverse();
         std::reverse(output.begin(), output.end());

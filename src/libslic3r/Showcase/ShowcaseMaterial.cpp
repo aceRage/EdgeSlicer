@@ -1,8 +1,11 @@
 #include "ShowcaseMaterial.hpp"
 
+#include "../PrintConfig.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 
 namespace Slic3r {
@@ -73,6 +76,12 @@ float smoothstep01(float e0, float e1, float x)
 } // namespace
 
 const char *to_string(Finish v) { return material_enum_name(v, FINISH_NAMES); }
+
+const std::vector<std::string> &reserved_finish_names()
+{
+    static const std::vector<std::string> names = { "multicolour_silk" };
+    return names;
+}
 bool        from_string(const std::string &s, Finish &v) { return material_enum_parse(s, v, FINISH_NAMES); }
 const char *to_string(LayerLines v) { return material_enum_name(v, LAYER_LINES_NAMES); }
 bool        from_string(const std::string &s, LayerLines &v) { return material_enum_parse(s, v, LAYER_LINES_NAMES); }
@@ -278,6 +287,27 @@ LayerSpan LayerTable::layer_at(float z) const
     return s;
 }
 
+int LayerTable::index_at(float z) const
+{
+    if (m_tops.empty())
+        return 0;
+    const int last = int(m_tops.size()) - 1;
+    if (z > m_tops.back()) {
+        const float h = m_tops.size() > 1 ? m_tops.back() - m_tops[m_tops.size() - 2] : m_tops.back();
+        return h > 0.f ? last + 1 + int(std::floor((z - m_tops.back()) / h)) : last;
+    }
+    return int(std::lower_bound(m_tops.begin(), m_tops.end(), z) - m_tops.begin());
+}
+
+int uniform_layer_index_at(float z, float first_layer_height, float layer_height)
+{
+    if (first_layer_height <= 0.f)
+        first_layer_height = layer_height;
+    if (z < first_layer_height || layer_height <= 0.f)
+        return 0;
+    return 1 + int(std::floor((z - first_layer_height) / layer_height));
+}
+
 LayerSpan uniform_layer_at(float z, float first_layer_height, float layer_height)
 {
     if (first_layer_height <= 0.f)
@@ -295,6 +325,129 @@ float layer_phase(const LayerSpan &span, float z)
 {
     const float h = span.height();
     return h > 0.f ? std::clamp((z - span.bottom) / h, 0.f, 1.f) : 0.f;
+}
+
+// --- skin direction (1c) -------------------------------------------------------------------------
+
+namespace {
+
+// [0, 180): a line and its reverse.
+float skin_line_angle(double deg)
+{
+    if (!std::isfinite(deg))
+        return 0.f;
+    double a = std::fmod(deg, 180.);
+    if (a < 0.)
+        a += 180.;
+    if (a >= 180.)
+        a -= 180.;
+    return float(a);
+}
+
+// A plain rotate template ("0,90", "0 45 90"): its angles; false for the metalanguage or rubbish.
+bool skin_plain_template(const std::string &text, std::vector<double> &out)
+{
+    out.clear();
+    std::string token;
+    auto flush = [&]() {
+        if (token.empty())
+            return true;
+        char        *end = nullptr;
+        const double v   = std::strtod(token.c_str(), &end);
+        if (end == nullptr || *end != '\0' || !std::isfinite(v))
+            return false;
+        out.push_back(v);
+        token.clear();
+        return true;
+    };
+    for (char c : text) {
+        if (c == ',' || std::isspace((unsigned char) c)) {
+            if (!flush())
+                return false;
+        } else if (std::isdigit((unsigned char) c) || c == '.')
+            token += c;
+        else
+            return false;   // + - % * @ ' " c m / N n Z z $ L l U u Q q ~ ^ | # : the rotate metalanguage
+    }
+    return flush() && !out.empty();
+}
+
+} // namespace
+
+float SkinTangent::angle_at(int layer) const
+{
+    if (pattern != SkinPattern::Lines || angles_deg.empty())
+        return 0.f;
+    const int n = int(angles_deg.size());
+    const int i = ((layer % n) + n) % n;
+    return angles_deg[size_t(i)];
+}
+
+std::array<float, 2> SkinTangent::direction_at(int layer) const
+{
+    if (pattern != SkinPattern::Lines || angles_deg.empty())
+        return { 0.f, 0.f };
+    const double a = double(angle_at(layer)) * 3.14159265358979323846 / 180.;
+    return { float(std::cos(a)), float(std::sin(a)) };
+}
+
+std::array<float, 2> SkinTangent::ring_direction(float x, float y, float cx, float cy)
+{
+    const float dx = x - cx, dy = y - cy;
+    const float l  = std::sqrt(dx * dx + dy * dy);
+    if (!(l > 1e-6f))
+        return { 0.f, 0.f };
+    return { -dy / l, dx / l };
+}
+
+SkinTangent skin_tangent_mode(const SkinSettings &s)
+{
+    SkinTangent t;
+    const std::string &p = s.pattern;
+    if (p == "concentric" || p == "spiralinset") {
+        t.pattern = SkinPattern::Concentric;
+        return t;
+    }
+    const bool aligned = p == "alignedrectilinear";
+    if (!(aligned || p == "rectilinear" || p == "monotonic" || p == "monotonicline"))
+        return t;   // Isotropic
+    t.zigzag = !(p == "monotonic" || p == "monotonicline");
+
+    std::vector<double> angles;
+    if (s.surface_direction >= 0.)
+        angles = { s.surface_direction };   // fixed, no turn per layer
+    else if (!s.rotate_template.empty()) {
+        if (!skin_plain_template(s.rotate_template, angles))
+            return SkinTangent();           // the metalanguage: not modelled
+    } else if (aligned)
+        angles = { s.solid_infill_direction };
+    else
+        angles = { s.solid_infill_direction, s.solid_infill_direction + 90. };
+
+    const double offset = s.align_to_model ? s.model_rotation_deg : 0.;
+    t.pattern = SkinPattern::Lines;
+    for (double a : angles)
+        t.angles_deg.push_back(skin_line_angle(a + offset));
+    return t;
+}
+
+SkinSettings skin_settings(const DynamicPrintConfig &config, bool top, double model_rotation_deg)
+{
+    SkinSettings s;
+    const char *pattern_key   = top ? "top_surface_pattern" : "bottom_surface_pattern";
+    const char *direction_key = top ? "top_layer_direction" : "bottom_layer_direction";
+    if (const ConfigOption *o = config.option(pattern_key))
+        s.pattern = o->serialize();
+    if (const ConfigOptionFloat *o = config.option<ConfigOptionFloat>("solid_infill_direction"))
+        s.solid_infill_direction = o->value;
+    if (const ConfigOptionFloat *o = config.option<ConfigOptionFloat>(direction_key))
+        s.surface_direction = o->value;
+    if (const ConfigOptionString *o = config.option<ConfigOptionString>("solid_infill_rotate_template"))
+        s.rotate_template = o->value;
+    if (const ConfigOptionBool *o = config.option<ConfigOptionBool>("align_infill_direction_to_model"))
+        s.align_to_model = o->value;
+    s.model_rotation_deg = model_rotation_deg;
+    return s;
 }
 
 } // namespace Showcase

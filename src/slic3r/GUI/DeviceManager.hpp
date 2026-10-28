@@ -19,6 +19,7 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "BambuCloudWatch.hpp"
 #include "FirstRequestGate.hpp"
 #include "SsdpConnectType.hpp"
 #include "BindListRefresh.hpp"
@@ -1432,6 +1433,15 @@ public:
     void lan_watch_tick();
     static constexpr long long LAN_WATCH_SET_MS = 10 * 1000;
 
+    // Ultra: a cloud-bound printer only reports to a client subscribed to it, and the plug-in
+    // subscribes the selected printer and the Multi-device pages' list - nothing else. So every
+    // other cloud printer had no status at all on the hub's rows (BambuCloudWatch.hpp). This hands
+    // every online cloud printer to add_subscribe, and again one that has gone quiet, at the pace in
+    // BambuCloudWatch::subscribe_due. Signed in only; GUI thread, off the same heartbeat, every
+    // CLOUD_WATCH_TICK_MS.
+    void cloud_watch_tick();
+    static constexpr long long CLOUD_WATCH_TICK_MS = 5 * 1000;
+
     // The backoff ladder, in milliseconds: how long a LAN printer must have looked disconnected
     // before the first retry, and how long between retries after that. The numbers and the formula
     // live in LanReconnectLadder.hpp, which is wx-free, so a unit test can check the
@@ -1460,6 +1470,9 @@ private:
     std::string m_lan_watch_id;
     std::chrono::steady_clock::time_point m_lan_watch_set_at {};
     std::string m_lan_watch_set; // the last set handed to the plug-in, for the log
+    // cloud_watch_tick: when each cloud printer was last handed to add_subscribe, and the last tick.
+    BambuCloudWatch::Asked m_cloud_watch_asked;
+    std::chrono::steady_clock::time_point m_cloud_watch_at {};
     long long   m_lan_watch_since { 0 };
     MachineObject* lan_watch_rotate();
     // When something other than the rotation last chose a printer (set_selected_machine: a send,
