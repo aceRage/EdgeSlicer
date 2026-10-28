@@ -73,7 +73,7 @@ TEST_CASE("Deleting an object remaps higher object indices on the plates", "[Par
     REQUIRE(list.get_plate(0)->add_instance(0, 0, false) == 0);
     REQUIRE(list.get_plate(1)->add_instance(1, 0, false) == 0);
 
-    model.delete_object(0);
+    model.delete_object(size_t(0));
     list.notify_instance_removed(0, -1);
 
     REQUIRE(list.get_plate(0)->empty());
