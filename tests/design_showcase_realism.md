@@ -173,6 +173,19 @@ Translucency in toolpath mode comes later (it needs order-independent transparen
 
 **Checks:** unit tests for the tangent mode from config combinations; a golden still of a silk vase (walls) and a silk flat plaque (top skin) at a raking light; a hand check that the band moves the right way while orbiting.
 
+**As built (feat/showcase-1c, 2026-10-28).**
+- `Showcase::skin_tangent_mode(SkinSettings)` and `skin_settings(config, top, rotation)` in `ShowcaseMaterial` (GL-free; the multi-colour P4 reuses them). They follow Fill.cpp:
+  - `top_layer_direction` / `bottom_layer_direction` >= 0 fixes the angle;
+  - otherwise a plain `solid_infill_rotate_template` ("0,90") gives each layer its absolute angle;
+  - otherwise the solid infill direction, turned 90° on odd layers, for every line pattern except aligned rectilinear;
+  - plus the object's Z rotation with `align_infill_direction_to_model`.
+  - Patterns: rectilinear, monotonic, monotonic line and aligned rectilinear give lines; concentric and spiral inset give rings around the object's XY centre; the rest give a round highlight. The rotate metalanguage gives a round highlight too.
+  - `SkinTangent::zigzag` (false for monotonic) is for P4.
+  - The shader picks the layer with `layer_index_at()` (mirrored by `LayerTable::index_at` / `uniform_layer_index_at`), just below a top face and just above a bottom one. The raft is not counted, so a raft can flip the parity of the 90° turn.
+- The shared `shade_material()` reflects the environment off Filament's bent normal for anisotropic finishes, at the raised roughness. The same code runs for the mesh and the toolpaths (tangent `seg_dir`). Without an environment, S5's Kajiya-Kay streak is added per light.
+- "multicolour_silk" is reserved (`reserved_finish_names()`); `from_string` rejects it.
+- Golden fixtures: `silk_walls` (Benchy) and `silk_top` (OrcaCube) at a 15° key light. `golden.sh --model` picks the handy model.
+
 ### 2.4 1d: subsurface scattering and thin-wall translucency
 
 **What the user sees:**
