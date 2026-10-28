@@ -118,6 +118,8 @@ void EnsureFilamentColorFieldsAligned(DynamicPrintConfig &config)
     const size_t oldMultiCount = multiColors->values.size();
     multiColors->resize(targetCount);
     modes->resize(targetCount);
+    // The visual-only multi-colour keys (split, angle, twist) follow the same slots.
+    visual_only_resize_slots(config, targetCount);
 
     for (size_t i = 0; i < targetCount; ++i)
     {
@@ -179,6 +181,7 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
 {
     EraseStringOptionAt(config, "filament_multi_colors", index);
     EraseIntOptionAt(config, "filament_colour_mode", index);
+    visual_only_erase_slot(config, index);
     EnsureFilamentColorFieldsAligned(config);
 }
 
@@ -217,6 +220,10 @@ static std::vector<std::string> s_project_options {
     "filament_colour",
     "filament_multi_colors",
     "filament_colour_mode",
+    // Multi-colour filaments: visual only, stripped at Print::apply (visual_only_option_keys()).
+    "filament_colour_split",
+    "filament_colour_angle",
+    "filament_colour_twist",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",
@@ -3831,6 +3838,11 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         }
 
         // 4) Load the project config values (the per extruder wipe matrix etc).
+        // A file without the visual-only multi-colour keys (an older project, a Bambu 3MF) loads their
+        // defaults, not what the previous project had: apply_only() keeps a key the file lacks.
+        for (const std::string &key : visual_only_option_keys())
+            if (!config.has(key))
+                this->project_config.erase(key);
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());

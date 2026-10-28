@@ -2810,6 +2810,41 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
+    // Multi-colour (coextruded) filaments, P1 (tests/design_multicolour_filament_view.md, 4.1).
+    // Per slot, next to filament_multi_colors, and visual only: Print::apply() strips them
+    // (visual_only_option_keys()), so they never reach the slicer, the G-code or a re-slice.
+    // Deliberately not in the static PrintConfig, so print_config_diffs and the placeholder
+    // parser cannot see them either.
+    def = this->add("filament_colour_split", coStrings);
+    def->label = L("Colour proportions");
+    def->tooltip = L("Visual only. How much of the strand each colour of a multi-colour filament takes, in percent, "
+                     "'|'-separated in the order of the colours. Empty means an equal split.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("filament_colour_angle", coFloats);
+    def->label = L("Colour rotation");
+    def->tooltip = L("Visual only. Which way the first colour of a multi-colour filament faces, in degrees "
+                     "anticlockwise from the printer's front, seen from above.");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -360;
+    def->max = 360;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
+    def = this->add("filament_colour_twist", coFloats);
+    def->label = L("Colour twist");
+    def->tooltip = L("Visual only. How far a multi-colour filament turns while it is extruded, in degrees per metre "
+                     "of filament. 0 means it does not turn.");
+    def->sidetext = u8"°/m"; // degrees per metre, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -3600;
+    def->max = 3600;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
     def->tooltip  = L("first small thumb");
@@ -10952,6 +10987,77 @@ const std::vector<std::string>& part_support_keys()
         "support_threshold_angle",
     };
     return s_keys;
+}
+
+const std::set<std::string>& visual_only_option_keys()
+{
+    // Multi-colour filaments P1. Glow (G1) and the gradient cycle length (P6) add their keys here.
+    static const std::set<std::string> s_keys {
+        "filament_colour_split",
+        "filament_colour_angle",
+        "filament_colour_twist",
+    };
+    return s_keys;
+}
+
+namespace {
+
+// One visual-only vector option, whatever its element type, through its typed values vector.
+template<typename Fn>
+bool visit_visual_only_vector(ConfigOption *opt, Fn &&fn)
+{
+    if (opt == nullptr || !opt->is_vector())
+        return false;
+    if (auto *v = dynamic_cast<ConfigOptionStrings*>(opt)) { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionFloats*>(opt))  { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionPercents*>(opt)){ fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionInts*>(opt))    { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionBools*>(opt))   { fn(v->values); return true; }
+    assert(false); // a new visual-only vector type: add it above
+    return false;
+}
+
+} // namespace
+
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
+        if (def == nullptr || opt == nullptr)
+            continue;
+        // New slots take the definition's default (the first element of the default vector).
+        opt->resize(n, def->default_value.get());
+    }
+}
+
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index)
+{
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [index](auto &values) {
+            if (index < values.size())
+                values.erase(values.begin() + index);
+        });
+}
+
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to)
+{
+    if (from == to)
+        return;
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [from, to](auto &values) {
+            if (from >= values.size() || to >= values.size())
+                return;
+            auto value = values[from];
+            values.erase(values.begin() + from);
+            values.insert(values.begin() + to, value);
+        });
+}
+
+void strip_visual_only_options(DynamicPrintConfig &config)
+{
+    for (const std::string &key : visual_only_option_keys())
+        config.erase(key);
 }
 
 DynamicPrintConfig DynamicPrintConfig::full_print_config()
