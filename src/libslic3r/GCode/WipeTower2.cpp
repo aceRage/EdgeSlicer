@@ -1523,6 +1523,7 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_z_pos(0.f)
     , m_bridging(float(config.wipe_tower_bridging))
     , m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config))
+    , m_sparse_layers_combined(wipe_tower_sparse_layers_combined(config))
     , m_gcode_flavor(config.gcode_flavor)
     , m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool)))
     , m_infill_speed(float(get_value_at(config, default_region_config.sparse_infill_speed, ConfigFlowDomain::Process, initial_tool)))
@@ -1685,6 +1686,7 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_extra_loading_move                 = o.m_extra_loading_move;
     m_bridging                           = o.m_bridging;
     m_sparse_layers_skipped              = o.m_sparse_layers_skipped;
+    m_sparse_layers_combined             = o.m_sparse_layers_combined;
     m_set_extruder_trimpot               = o.m_set_extruder_trimpot;
     m_adhesion                           = o.m_adhesion;
     m_gcode_flavor                       = o.m_gcode_flavor;
@@ -1767,6 +1769,7 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
         pow(config.filament_diameter.get_at(idx), 2)); // all extruders are assumed to have the same filament diameter at this point
     float nozzle_diameter         = float(config.nozzle_diameter.get_at(idx));
     m_filpar[idx].nozzle_diameter = nozzle_diameter; // to be used in future with (non-single) multiextruder MM
+    m_filpar[idx].max_layer_height = WipeTower::filament_max_layer_height(config, idx);
 
     float max_vol_speed = float(
         get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, filament_id));
@@ -2983,7 +2986,9 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
 
     // Ask our writer about how much material was consumed.
     // Skip this in case the layer is sparse and config option to not print sparse layers is enabled.
-    if (!m_sparse_layers_skipped || toolchanges_on_layer || first_layer) {
+    // Orca #15841: a folded layer prints nothing, so it consumes nothing and adds no height of its own.
+    const bool combined_away = m_layer_info != m_plan.end() && m_layer_info->combined_away;
+    if ((!m_sparse_layers_skipped || toolchanges_on_layer || first_layer) && !combined_away) {
         if (m_current_tool < m_used_filament_length.size())
             m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
         m_current_height += m_layer_info->height;
@@ -3588,6 +3593,37 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     if (m_plan.empty())
         return;
 
+    // Orca #15841: before planning, since the layer heights this rewrites feed the extrusion flow of
+    // every later pass. Edge: a layer with Local-Z tool changes or reserve slots purges at its own z
+    // just like a nominal tool change, so it is not sparse; and a Local-Z tool change leaves its new
+    // filament loaded too (the nominal ones of the layer follow it, see the loop below).
+    if (m_sparse_layers_combined) {
+        auto tool_after = [](const WipeTowerInfo &layer, size_t tool) -> size_t {
+            if (! layer.tool_changes.empty())
+                return layer.tool_changes.back().new_tool;
+            if (! layer.local_z_tool_changes.empty())
+                return layer.local_z_tool_changes.back().new_tool;
+            return tool;
+        };
+        size_t start_tool = m_current_tool;
+        for (const WipeTowerInfo &layer : m_plan) {
+            if (! layer.local_z_tool_changes.empty()) {
+                start_tool = layer.local_z_tool_changes.front().old_tool;
+                break;
+            }
+            if (! layer.tool_changes.empty()) {
+                start_tool = layer.tool_changes.front().old_tool;
+                break;
+            }
+        }
+        combine_sparse_wipe_tower_plan(
+            m_plan, m_filpar, m_first_layer_idx, start_tool,
+            [](const WipeTowerInfo &layer) {
+                return layer.tool_changes.empty() && layer.local_z_tool_changes.empty() && layer.local_z_reserve_slot_count == 0;
+            },
+            tool_after);
+    }
+
     plan_tower();
 
     if (m_wall_type == int(WipeTowerWallType::wtwRib)) {
@@ -3694,6 +3730,10 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
             } else
                 layer_result[idx] = merge_tcr(layer_result[idx], finish_layer_tcr);
         }
+
+        if (layer.combined_away)
+            for (WipeTower::ToolChangeResult &tcr : layer_result)
+                tcr.combined_away = true;
 
         result.emplace_back(std::move(layer_result));
         local_z_result.emplace_back(std::move(local_z_layer_result));

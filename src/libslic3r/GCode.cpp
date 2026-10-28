@@ -978,6 +978,25 @@ static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
     return moved;
 }
 
+// Orca #15841: a folded tower layer is thicker than the object layer it sits on, so the height process_layer
+// emitted is not the tower's. Both writers declare one, but each in its own printer's tag dialect and the
+// processor reads only its printer's. Declare it here, where the printer is known, unless the tower
+// already wrote the right tag. _extrude puts the object's height back on the next object path, since
+// the last role is then erWipeTower.
+std::string WipeTowerIntegration::tower_height_tag(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr,
+                                                   const std::string &tcr_gcode) const
+{
+    const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height);
+    if (! m_sparse_layers_combined || std::abs(gcodegen.m_last_height - tcr.layer_height) <= EPSILON ||
+        tcr_gcode.find(tag) != std::string::npos)
+        return {};
+    // Keep m_last_height what the G-code last declared, so a second visit does not repeat it.
+    gcodegen.m_last_height = tcr.layer_height;
+    char buf[64];
+    sprintf(buf, "%s%g\n", tag.c_str(), tcr.layer_height);
+    return buf;
+}
+
 std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
     if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
@@ -1399,6 +1418,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
+    gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
@@ -1621,6 +1641,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
+    gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
     check_add_eol(toolchange_gcode_str);
 
@@ -2052,7 +2073,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                 // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
                 // resulting in a wipe tower with sparse layers.
                 double wipe_tower_z  = -1;
-                bool   ignore_sparse = false;
+                // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+                bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
                 if (m_sparse_layers_skipped) {
                     wipe_tower_z  = m_last_wipe_tower_print_z;
                     ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;
@@ -2071,7 +2093,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
         // resulting in a wipe tower with sparse layers.
         double wipe_tower_z  = -1;
-        bool   ignore_sparse = false;
+        // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+        bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
         if (m_sparse_layers_skipped) {
             ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
             if (size_t(m_layer_idx) < m_compacted_tower_z.size())
@@ -2106,7 +2129,8 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
     if (m_layer_idx >= (int) m_tool_changes.size())
         return true;
 
-    bool ignore_sparse = false;
+    // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+    bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
     if (m_sparse_layers_skipped)
         ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
 
