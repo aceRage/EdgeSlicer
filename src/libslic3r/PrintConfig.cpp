@@ -11026,8 +11026,12 @@ void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
         auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
         if (def == nullptr || opt == nullptr)
             continue;
-        // New slots take the definition's default (the first element of the default vector).
+        // New slots take the definition's default (the first element of the default vector), not a
+        // copy of slot 1 as ConfigOptionVector::resize() would give them.
+        const size_t old_size = opt->size();
         opt->resize(n, def->default_value.get());
+        for (size_t i = old_size; i < n; ++i)
+            opt->set_at(def->default_value.get(), i, 0);
     }
 }
 

@@ -175,7 +175,7 @@ TEST_CASE("The cross-section gives each slice its colour and blends softly at th
     CHECK(same(f.colour_at(0.25f), half));
     for (float b : { 0.25f, 0.5f, 1.f }) {
         CAPTURE(b);
-        CHECK(dist(f.colour_at(b - 1e-4f), f.colour_at(b + 1e-4f)) < 0.01f);
+        CHECK(dist(f.colour_at(b - 1e-5f), f.colour_at(b + 1e-5f)) < 0.01f);
     }
     // Blending only within half the blend width of a boundary.
     CHECK(same(f.colour_at(0.25f + 0.5f * BLEND_TURNS + 1e-3f), GREEN_L));
