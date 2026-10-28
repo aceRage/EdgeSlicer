@@ -245,6 +245,11 @@ private:
         unsigned int texture = 0;     // mode 2: R32F tops
         int          count  = 0;
         int          width  = 0;
+        // 1c: the top and bottom skins' settings from the object's config (the silk tangent),
+        // without the instance's rotation (added per draw); valid when `skin`.
+        bool                   skin = false;
+        Showcase::SkinSettings skin_top;
+        Showcase::SkinSettings skin_bottom;
     };
     const LayerInfo *layers_for(int object_idx);
     void            release_layers();

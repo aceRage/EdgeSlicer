@@ -83,4 +83,11 @@ std::optional<Vec2d> wipe_tower_position_clear_of_exclusion(const ConfigBase    
                                                             const Vec2d              &preferred,
                                                             const Vec2d              &current);
 
+// Orca #16728: where to put a tower whose saved position no longer fits: of the anchors (the tower's
+// position) inside `anchor_bounds`, the one nearest `target` whose `footprint` touches none of
+// the `obstacles`. `footprint` is relative to the anchor, brim included; an obstacle is taken
+// as its convex hull. Empty when every anchor in bounds meets an obstacle. All coordinates scaled.
+std::optional<Point> nearest_clear_wipe_tower_anchor(const BoundingBox &anchor_bounds, const Polygon &footprint,
+                                                     const Polygons &obstacles, const Point &target);
+
 } // namespace Slic3r

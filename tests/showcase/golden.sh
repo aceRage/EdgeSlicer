@@ -11,7 +11,8 @@
 #     --golden <dir>     the golden install (default C:/Dev/EdgeSlicerTest/_baseline)
 #     --out <dir>        where fixtures, renders, diffs and the report go (default ./showcase_golden)
 #     --only <name>      one fixture (studio_white, dark_gradient, build_plate, desk_wood, transparent,
-#                        toolpaths, toolpaths_finishes, toolpaths_silk, video)
+#                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
+#                        video)
 #     --size <px>        the stills' shorter side (default 540)
 #     --keep-goldens     reuse goldens already in <out>/golden
 #     --max-delta <n>    largest per-channel difference in 8-bit steps (default 2)
@@ -52,7 +53,7 @@ while [ $# -gt 0 ]; do
     --expect-change) EXPECT=$2; shift 2 ;;
     --golden-env) GENV=$2; shift 2 ;;
     --candidate-env) CENV=$2; shift 2 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) CAND=$1; shift ;;
     esac
 done
@@ -69,8 +70,17 @@ exe_in() {
 }
 GEXE=$(exe_in "$GOLDEN_DIR") || { echo "no EdgeSlicer executable in $GOLDEN_DIR" >&2; exit 2; }
 CEXE=$(exe_in "$CAND") || { echo "no EdgeSlicer executable in $CAND" >&2; exit 2; }
-PY=${PYTHON:-python}
+if [ -n "${PYTHON:-}" ]; then PY=$PYTHON
+elif command -v python3 > /dev/null 2>&1; then PY=python3   # macOS ships python3 only
+else PY=python; fi
+# A 900 s cap per render where the system has one (macOS has neither timeout nor gtimeout by default).
+if command -v timeout > /dev/null 2>&1; then LIMIT="timeout 900"
+elif command -v gtimeout > /dev/null 2>&1; then LIMIT="gtimeout 900"
+else LIMIT=""; fi
 
+# Fresh datadirs on every run: a model-only fixture takes its filament colour from whatever the
+# datadir last loaded, so a rerun into the same <out> must not inherit an earlier run's U1 settings.
+rm -rf "$OUT/datadir_golden" "$OUT/datadir_candidate"
 mkdir -p "$OUT/fixtures" "$OUT/golden" "$OUT/candidate" "$OUT/diff" "$OUT/datadir_golden" "$OUT/datadir_candidate"
 OUT=$(cd "$OUT" && pwd)
 MODEL="$REPO/resources/handy_models/3DBenchy.3mf"
@@ -113,26 +123,32 @@ verdict() {   # (v_ names: sh has no locals, and the callers' name/line/rc must 
 STATUS=0
 render() {   # env exe datadir fixture out extra-args...  (env: NAME=VALUE or empty)
     renv=$1; exe=$2; dd=$3; fx=$4; out=$5; shift 5
+    # shellcheck disable=SC2086  # $LIMIT is a command prefix and must split into words
     if [ -n "$renv" ]; then
-        timeout 900 env "$renv" "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
+        $LIMIT env "$renv" "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
             --datadir "$dd" --report "$out.report.json" "$@" > "$out.log" 2>&1
     else
-        timeout 900 "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
+        $LIMIT "$exe" --showcase-render "$fx" --out "$out" --size "$SIZE" --quality high \
             --datadir "$dd" --report "$out.report.json" "$@" > "$out.log" 2>&1
     fi
     grep -q '"ok": *true' "$out.report.json" 2>/dev/null
 }
 
-run_still() {   # name [--alpha-exact] [render args...]
+run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact] [render args...]
+    # --settings: the U1 project settings without slicing (the scene does not depend on what the
+    # datadir loaded before; --slice fixtures always get them)
     name=$1; shift
     alpha=
     premul=
+    model=$MODEL
+    if [ "${1:-}" = "--model" ]; then model="$REPO/resources/handy_models/$2"; shift 2; fi
+    settings=
+    if [ "${1:-}" = "--settings" ]; then settings=$SLICE_SETTINGS; shift; fi
     if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; premul=--premultiplied; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
-    settings=
     [ "${1:-}" = "--slice" ] && settings=$SLICE_SETTINGS
-    "$PY" "$HERE/make_fixture.py" "$MODEL" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
+    "$PY" "$HERE/make_fixture.py" "$model" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
     g="$OUT/golden/$name.png"
     c="$OUT/candidate/$name.png"
     if [ "$KEEP" = 0 ] || [ ! -f "$g" ]; then
@@ -184,6 +200,8 @@ run_still transparent --alpha-exact
 run_still toolpaths --slice
 run_still toolpaths_finishes --slice
 run_still toolpaths_silk --slice
+run_still silk_walls --settings
+run_still silk_top --model OrcaCube_v2.3mf --settings
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

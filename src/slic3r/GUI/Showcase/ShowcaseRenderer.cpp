@@ -533,6 +533,12 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
     std::vector<coordf_t> boundaries;
     try {
         const DynamicPrintConfig full = wxGetApp().preset_bundle->full_config();
+        // 1c: which way the object's top and bottom skins run (its own settings over the plate's).
+        DynamicPrintConfig object_config = full;
+        object_config.apply(mo->config.get(), true);
+        info.skin_top    = Showcase::skin_settings(object_config, true, 0.);
+        info.skin_bottom = Showcase::skin_settings(object_config, false, 0.);
+        info.skin        = true;
         const SlicingParameters  sp   = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
         std::vector<coordf_t>    profile;
         PrintObject::update_layer_height_profile(*mo, sp, profile);
@@ -1167,7 +1173,9 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         shader->set_uniform("mat_line_shade", mp.line_shade);
         shader->set_uniform("mat_fiber_noise", mp.fiber_noise);
 
-        const LayerInfo *layers = line_depth > 0.f && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
+        // 1c: an anisotropic finish needs the layers too, for the skin's turn per layer.
+        const bool       aniso  = mp.anisotropy > 0.f && !v->is_wipe_tower;
+        const LayerInfo *layers = (line_depth > 0.f || aniso) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;
         shader->set_uniform("layer_mode", mode);
         if (layers != nullptr) {
@@ -1183,6 +1191,40 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         }
 
         const Transform3d world = v->world_matrix();
+
+        // 1c: the silk sheen's tangent on flat top and bottom faces (Showcase::skin_tangent_mode()).
+        int   skin_mode[2]  = { 0, 0 };
+        int   skin_count[2] = { 0, 0 };
+        float skin_angles[16] = {};
+        Vec2f skin_center     = Vec2f::Zero();
+        if (aniso && layers != nullptr && layers->skin) {
+            const double rotation = std::atan2(world.matrix()(1, 0), world.matrix()(0, 0)) * 180. / PI;
+            for (int s = 0; s < 2; ++s) {
+                Showcase::SkinSettings settings = s == 0 ? layers->skin_top : layers->skin_bottom;
+                settings.model_rotation_deg     = rotation;
+                const Showcase::SkinTangent st  = Showcase::skin_tangent_mode(settings);
+                skin_mode[s] = int(st.pattern);
+                if (st.pattern == Showcase::SkinPattern::Lines) {
+                    if (st.angles_deg.size() > 8)
+                        skin_mode[s] = int(Showcase::SkinPattern::Isotropic);   // more than the shader holds
+                    else {
+                        skin_count[s] = int(st.angles_deg.size());
+                        for (size_t i = 0; i < st.angles_deg.size(); ++i)
+                            skin_angles[size_t(s) * 8 + i] = float(double(st.angles_deg[i]) * PI / 180.);
+                    }
+                }
+            }
+            const BoundingBoxf3 box = v->transformed_bounding_box();
+            skin_center             = Vec2f(float(box.center().x()), float(box.center().y()));
+        }
+        shader->set_uniform("skin_mode_top", skin_mode[0]);
+        shader->set_uniform("skin_mode_bottom", skin_mode[1]);
+        shader->set_uniform("skin_count_top", skin_count[0]);
+        shader->set_uniform("skin_count_bottom", skin_count[1]);
+        if (const int at = shader->get_uniform_location("skin_angles"); at >= 0)
+            glsafe(::glUniform1fv(at, 16, skin_angles));
+        shader->set_uniform("skin_center", skin_center);
+
         shader->set_uniform("view_model_matrix", view * world);
         shader->set_uniform("projection_matrix", projection);
         shader->set_uniform("volume_world_matrix", world);

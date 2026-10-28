@@ -11,6 +11,10 @@
 //   approximation for the specular part.
 // - Procedural layer lines on the mesh at the object's real layer heights (design 2.6.2), faded
 //   out below ~1.5 px a layer so far shots do not moire (layer_fade, as layer_line_fade() in C++).
+// - 1c: the silk sheen follows the lines. Walls keep the horizontal tangent (the perimeters); flat
+//   top and bottom faces take the skin's line direction from the print settings (skin_mode_*,
+//   Showcase::skin_tangent_mode()), turned layer by layer as the slicer turns it, or the rings of a
+//   concentric skin; patterns without one direction get a round highlight.
 // - Linear lighting. 1a (tests/design_showcase_realism.md 2.1): with hdr_output the shader writes
 //   linear light into the objects' RGBA16F layer and the post pass (showcase_post.fs) applies the
 //   exposure, the tone curve and the sRGB encoding. Without it (the floor's mirror pass, or no float
@@ -56,6 +60,15 @@ uniform float     layer_height;
 uniform sampler2D layer_table;
 uniform int       layer_count;
 uniform int       layer_table_width;
+
+// 1c: the top / bottom skin's lines (SkinTangent). Mode 0 isotropic, 1 lines, 2 concentric. Lines:
+// layer i runs at skin_angles[base + i % count] radians (base 0 top, 8 bottom).
+uniform int   skin_mode_top;
+uniform int   skin_mode_bottom;
+uniform int   skin_count_top;
+uniform int   skin_count_bottom;
+uniform float skin_angles[16];
+uniform vec2  skin_center;           // concentric: the rings' centre (world XY)
 
 // Nothing under the floor (and the mirrored pass keeps to its side of it).
 uniform bool  clip_floor;
@@ -257,6 +270,12 @@ void shade_material(vec3 n, vec3 v, vec3 t, vec3 albedo, float roughness, float 
         float d = anisotropy > 0.0 ? ggx_aniso(h, n, t, b, at, ab) : ggx(max(dot(n, h), 0.0), a);
         vec3 f = fresnel(f0, dot(h, v));
         specular += d * smith_visibility(n_dot_v, n_dot_l, a) * f * n_dot_l * radiance;
+        // 1c: without an environment the sliding band comes from the lights alone: a Kajiya-Kay
+        // streak with the line as the fibre (S5's toolpath silk).
+        if (anisotropy > 0.0 && !use_env) {
+            float th = dot(t, h);
+            specular += anisotropy * 0.35 * pow(sqrt(max(1.0 - th * th, 0.0)), 80.0) * n_dot_l * f * radiance;
+        }
         // Clear coat: a sharp second lobe (gloss, transparent).
         if (clearcoat > 0.0) {
             float ac = 0.08 * 0.08;
@@ -266,11 +285,20 @@ void shade_material(vec3 n, vec3 v, vec3 t, vec3 albedo, float roughness, float 
         diffuse += albedo * kd * n_dot_l * radiance;
     }
 
-    // Image-based light.
+    // Image-based light. 1c: an anisotropic finish reflects the environment off a normal bent
+    // towards the plane across the lines, sampled at a roughness raised across them: the usual
+    // approximation (Filament's bent normal; there is no anisotropic prefiltered map). The
+    // reflection then slides along the lines as the view moves, the silk band.
     vec3 r = reflect(-v, n);
+    vec3 r_aniso = r;
+    if (anisotropy > 0.0) {
+        vec3 across = cross(t, v);
+        vec3 bent = cross(across, t);
+        r_aniso = reflect(-v, normalize(mix(n, bent, clamp(anisotropy, 0.0, 1.0))));
+    }
     float env_rough = clamp(roughness * (1.0 + 0.6 * anisotropy), 0.0, 1.0);
     vec3 ambient = use_env ? env_diffuse(n) * env_intensity : plain_diffuse(n);
-    vec3 reflected = use_env ? env_specular(r, env_rough) * env_intensity : plain_specular(r, env_rough);
+    vec3 reflected = use_env ? env_specular(r_aniso, env_rough) * env_intensity : plain_specular(r_aniso, env_rough);
     diffuse += albedo * kd * ambient;
     specular += reflected * env_brdf(f0, env_rough, n_dot_v);
     if (clearcoat > 0.0) {
@@ -352,6 +380,61 @@ vec2 layer_at(float z)
     return vec2(first + k * layer_height, first + (k + 1.0) * layer_height);
 }
 
+// 1c: the index of the layer containing z, 0 = the first (LayerTable::index_at /
+// uniform_layer_index_at in C++); 0 without layer information.
+int layer_index_at(float z)
+{
+    if (layer_mode == 2 && layer_count > 0 && layer_table_width > 0) {
+        int hi = layer_count - 1;
+        float last = layer_top(hi);
+        if (z > last) {
+            float prev = hi > 0 ? layer_top(hi - 1) : 0.0;
+            float h = max(last - prev, 1e-4);
+            return hi + 1 + int(floor((z - last) / h));
+        }
+        int lo = 0;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (layer_top(mid) < z)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
+    }
+    if (layer_mode != 1)
+        return 0;
+    float first = first_layer_height > 0.0 ? first_layer_height : layer_height;
+    if (z < first || layer_height <= 0.0)
+        return 0;
+    return 1 + int(floor((z - first) / layer_height));
+}
+
+// 1c: the silk lobe's tangent on a flat top (up) or bottom face: the skin's lines there. False for
+// a skin without one direction (the highlight is then round).
+bool skin_tangent(vec3 n, out vec3 t)
+{
+    bool  top  = n.z > 0.0;
+    int   mode = top ? skin_mode_top : skin_mode_bottom;
+    t = vec3(1.0, 0.0, 0.0);
+    if (mode == 1) {
+        int count = top ? skin_count_top : skin_count_bottom;
+        // The layer that made the face: just below a top face, just above a bottom one.
+        int i = layer_index_at(world_pos.z + (top ? -0.001 : 0.001));
+        int k = count > 0 ? i - (i / count) * count : 0;
+        float a = skin_angles[(top ? 0 : 8) + k];
+        t = vec3(cos(a), sin(a), 0.0);
+    } else if (mode == 2) {
+        vec2 r = world_pos.xy - skin_center;
+        if (length(r) > 1e-4)
+            t = vec3(-r.y, r.x, 0.0) / length(r);
+    } else
+        return false;
+    t = t - n * dot(t, n);
+    t = length(t) > 1e-4 ? normalize(t) : normalize(cross(vec3(0.0, 1.0, 0.0), n));
+    return true;
+}
+
 // 0 at 1 px a layer and below, 1 at 2 px and above (layer_line_fade() in C++).
 float layer_fade(float layer_px) { return smoothstep(1.0, 2.0, layer_px); }
 
@@ -393,12 +476,21 @@ void main()
         roughness = clamp(roughness - mat_fiber_noise * 0.25 * step(0.93, speck), 0.03, 1.0);
     }
 
-    // The anisotropic lobe's tangent follows the layers (horizontal) on the mesh.
+    // The anisotropic lobe's tangent follows the layers (horizontal) on walls; 1c: on flat top and
+    // bottom faces it follows the skin's lines, or the lobe goes round where they have no direction.
     vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 t = normalize(cross(up, n));
+    float anisotropy = mat_anisotropy;
+    if (anisotropy > 0.0 && abs(n.z) > 0.9) {
+        vec3 skin_t;
+        if (skin_tangent(n, skin_t))
+            t = skin_t;
+        else
+            anisotropy = 0.0;
+    }
 
     vec3 diffuse, specular;
-    shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, mat_anisotropy, mat_clearcoat, key_shadow(n),
+    shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_shadow(n),
                    diffuse, specular);
 
     vec3 lit = diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5);
