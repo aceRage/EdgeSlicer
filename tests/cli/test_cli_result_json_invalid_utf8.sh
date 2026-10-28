@@ -55,10 +55,12 @@ if [ ! -f "$RESULT" ]; then
     echo "FAIL: result.json missing after non-UTF-8 object name (cli exit $rc)"
     exit 1
 fi
-if [ -e "$OUT"/plate_*.gcode ]; then
-    echo "FAIL: G-code was written; smoke must stop at validate"
-    exit 1
-fi
+for gcode in "$OUT"/plate_*.gcode; do
+    if [ -e "$gcode" ]; then
+        echo "FAIL: G-code was written; smoke must stop at validate"
+        exit 1
+    fi
+done
 
 "$PY" -I - "$RESULT" <<'PYEOF'
 import json, sys
