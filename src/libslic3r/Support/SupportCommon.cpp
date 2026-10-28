@@ -168,6 +168,17 @@ static void support_interlock_weave_layers(
             for (const SupportGeneratorLayer *layer : base_interface_at[idx])
                 polygons_append(footprint, layer->polygons);
             Polygons remaining = union_(footprint);
+            // Never weave where another roof's top contact sits at this same height (a stepped
+            // underside): that area is a top roof, whatever band the footprint came from.
+            {
+                Polygons same_z_contacts;
+                auto it_same = std::lower_bound(top_contacts.begin(), top_contacts.end(), z - EPSILON,
+                    [](const SupportGeneratorLayer *l, coordf_t zz) { return l->print_z < zz; });
+                for (; it_same != top_contacts.end() && (*it_same)->print_z < z + EPSILON; ++ it_same)
+                    polygons_append(same_z_contacts, (*it_same)->polygons);
+                if (! same_z_contacts.empty())
+                    remaining = diff(remaining, same_z_contacts);
+            }
 
             // Assign the footprint to depths: first where a contact lies right above, nearest depth
             // first, then the regularization fringe within `margin` of a contact.

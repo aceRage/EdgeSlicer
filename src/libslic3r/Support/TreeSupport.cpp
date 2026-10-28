@@ -2458,6 +2458,22 @@ void TreeSupport::draw_circles()
                     Polygons remaining = to_polygons(roof_all);
                     // Shallower wins: never weave over a top roof area, a roof gap or a sharp tail.
                     append(interlock_keep, roof_gap_areas);
+                    // ... nor under the model itself: whatever lies under an object layer that starts
+                    // within the top Z distance above this support layer is the top roof, whichever
+                    // node it came from (node areas grown by their overhang and the roof closing can
+                    // reach over a neighbouring, higher-up roof's contact on a stepped underside).
+                    {
+                        const coordf_t z_lo = ts_layer->print_z - EPSILON;
+                        const coordf_t z_hi = ts_layer->print_z + m_object_config->support_top_z_distance.value + EPSILON;
+                        for (const Layer *object_layer : m_object->layers()) {
+                            const coordf_t bottom = object_layer->print_z - object_layer->height;
+                            if (bottom > z_hi)
+                                break;
+                            if (bottom >= z_lo)
+                                append(interlock_keep, offset_ex(object_layer->lslices,
+                                    float(scale_(m_ts_data->m_xy_distance)) + float(line_width_scaled)));
+                        }
+                    }
                     if (! interlock_keep.empty())
                         remaining = diff(remaining, to_polygons(interlock_keep));
                     Polygons woven_all;
