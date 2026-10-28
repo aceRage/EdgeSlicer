@@ -8161,6 +8161,7 @@ void GLGizmoCut3D::render_groove_int_input(const std::string& label, int& in_val
             is_changed = true;
         }
     }
+    m_imgui->request_frames_while_held(); // ORCA auto-repeat of the +/- buttons
     
     ImGui::SameLine();
     m_imgui->disabled_begin(in_val == init_val);

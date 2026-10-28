@@ -1413,12 +1413,18 @@ void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
             filament_extruder_map.erase(m_filament_idx);
     }
 
+    // Multi-colour P1: a slot given new colours starts with an equal split (design 4.5).
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = config->option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
+
     DynamicPrintConfig new_config = *config;
     new_config.set_key_value("filament_colour", filament_colors);
     new_config.set_key_value("filament_multi_colors", filament_multi_colors);
     new_config.set_key_value("filament_colour_mode", filament_colour_modes);
 
     config->apply(new_config);
+    reset_colour_split_where_colours_changed(*config, old_multi_colors);
     wxGetApp().plater()->update_project_dirty_from_presets();
     if (wxGetApp().app_config != nullptr)
         wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
