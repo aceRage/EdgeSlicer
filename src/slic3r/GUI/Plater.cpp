@@ -8915,6 +8915,8 @@ void Sidebar::on_filaments_delete(size_t filament_id)
     }
 }
 
+int Sidebar::editing_filament_index() const { return p->editing_filament; }
+
 void Sidebar::edit_filament() {
     const int previous_editing_filament = p->editing_filament;
     p->editing_filament = -1;

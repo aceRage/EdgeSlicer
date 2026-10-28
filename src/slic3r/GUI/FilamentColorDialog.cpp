@@ -750,50 +750,54 @@ void FilamentColorDialog::BuildUi()
     cardSizer->AddSpacer(FromDIP(28));
     cardSizer->Add(currentRow, 0, wxEXPAND | wxLEFT | wxRIGHT, contentMargin);
 
-    wxStaticText* officialLabel = new wxStaticText(card, wxID_ANY, _L("Official Filaments"));
-    officialLabel->SetFont(DialogFont(wxFONTWEIGHT_MEDIUM));
-    officialLabel->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
-    officialLabel->SetMinSize(wxSize(-1, FromDIP(20)));
-    BindDragWindow(officialLabel);
-    cardSizer->AddSpacer(FromDIP(20));
-    cardSizer->Add(officialLabel, 0, wxLEFT | wxRIGHT, contentMargin);
-
-    wxPanel* swatchPanel = new wxPanel(card, wxID_ANY);
-    swatchPanel->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
-    const int swatchColumns = 10;
-    const int swatchColorSize = FromDIP(24);
-    const int swatchFrameInset = FromDIP(3);
-    const wxSize swatchSize(swatchColorSize + swatchFrameInset * 2, swatchColorSize + swatchFrameInset * 2);
-    const int swatchHGap = FromDIP(5);
-    const int swatchVGap = 0;
-    wxGridSizer* swatchSizer = new wxGridSizer(0, swatchColumns, swatchVGap, swatchHGap);
-    const std::vector<ColorSortItem> sortedItems = BuildSortedColorItems(_filament.colors);
-    for (const ColorSortItem& item : sortedItems)
+    // Without a library entry (a filament that has no official colours) only the make-up shows.
+    if (!_filament.colors.empty())
     {
-        if (item.colorItem == nullptr)
-            continue;
+        wxStaticText* officialLabel = new wxStaticText(card, wxID_ANY, _L("Official Filaments"));
+        officialLabel->SetFont(DialogFont(wxFONTWEIGHT_MEDIUM));
+        officialLabel->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+        officialLabel->SetMinSize(wxSize(-1, FromDIP(20)));
+        BindDragWindow(officialLabel);
+        cardSizer->AddSpacer(FromDIP(20));
+        cardSizer->Add(officialLabel, 0, wxLEFT | wxRIGHT, contentMargin);
 
-        const FilamentColorItem* colorItem = item.colorItem;
-        FilamentColorSwatch* swatch = new FilamentColorSwatch(swatchPanel, *colorItem, _languageCode, swatchSize);
-        swatch->Bind(wxEVT_LEFT_UP, [this, colorItem](wxMouseEvent&)
+        wxPanel* swatchPanel = new wxPanel(card, wxID_ANY);
+        swatchPanel->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
+        const int swatchColumns = 10;
+        const int swatchColorSize = FromDIP(24);
+        const int swatchFrameInset = FromDIP(3);
+        const wxSize swatchSize(swatchColorSize + swatchFrameInset * 2, swatchColorSize + swatchFrameInset * 2);
+        const int swatchHGap = FromDIP(5);
+        const int swatchVGap = 0;
+        wxGridSizer* swatchSizer = new wxGridSizer(0, swatchColumns, swatchVGap, swatchHGap);
+        const std::vector<ColorSortItem> sortedItems = BuildSortedColorItems(_filament.colors);
+        for (const ColorSortItem& item : sortedItems)
         {
-            if (colorItem != nullptr)
-                SelectFilamentColor(*colorItem);
-        });
-        swatchSizer->Add(swatch, 0);
-        _swatchBySku.emplace_back(swatch, colorItem->sku);
+            if (item.colorItem == nullptr)
+                continue;
+
+            const FilamentColorItem* colorItem = item.colorItem;
+            FilamentColorSwatch* swatch = new FilamentColorSwatch(swatchPanel, *colorItem, _languageCode, swatchSize);
+            swatch->Bind(wxEVT_LEFT_UP, [this, colorItem](wxMouseEvent&)
+            {
+                if (colorItem != nullptr)
+                    SelectFilamentColor(*colorItem);
+            });
+            swatchSizer->Add(swatch, 0);
+            _swatchBySku.emplace_back(swatch, colorItem->sku);
+        }
+        const size_t swatchCount = _swatchBySku.size();
+        const size_t swatchColumnCount = static_cast<size_t>(swatchColumns);
+        int swatchRows = 0;
+        if (swatchCount > 0)
+            swatchRows = static_cast<int>((swatchCount + swatchColumnCount - 1) / swatchColumnCount);
+        const int swatchVisibleRows = std::max(2, swatchRows);
+        const int swatchPanelHeight = swatchVisibleRows * swatchSize.GetHeight() + (swatchVisibleRows - 1) * swatchVGap;
+        swatchPanel->SetMinSize(wxSize(contentWidth, swatchPanelHeight));
+        swatchPanel->SetSizer(swatchSizer);
+        cardSizer->AddSpacer(FromDIP(20));
+        cardSizer->Add(swatchPanel, 0, wxLEFT | wxRIGHT, contentMargin);
     }
-    const size_t swatchCount = _swatchBySku.size();
-    const size_t swatchColumnCount = static_cast<size_t>(swatchColumns);
-    int swatchRows = 0;
-    if (swatchCount > 0)
-        swatchRows = static_cast<int>((swatchCount + swatchColumnCount - 1) / swatchColumnCount);
-    const int swatchVisibleRows = std::max(2, swatchRows);
-    const int swatchPanelHeight = swatchVisibleRows * swatchSize.GetHeight() + (swatchVisibleRows - 1) * swatchVGap;
-    swatchPanel->SetMinSize(wxSize(contentWidth, swatchPanelHeight));
-    swatchPanel->SetSizer(swatchSizer);
-    cardSizer->AddSpacer(FromDIP(20));
-    cardSizer->Add(swatchPanel, 0, wxLEFT | wxRIGHT, contentMargin);
 
     MoreColorPanel* moreButton = new MoreColorPanel(card, wxSize(contentWidth, FromDIP(40)));
     moreButton->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&)
