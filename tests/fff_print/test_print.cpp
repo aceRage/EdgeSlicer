@@ -2208,7 +2208,8 @@ TEST_CASE("Print::validate coalesces motion-ability warnings into one", "[Print]
 
 namespace {
 // Two filaments, one 20 mm cube printed with filament `cube_filament` (1-based), and the given flow ratios.
-StringObjectException validate_flow_ratios(const std::vector<double> &flow_ratios, int cube_filament)
+// tool_change_filament (1-based, 0 = none) adds a "Change filament" custom G-code at z 5 mm on the plate.
+StringObjectException validate_flow_ratios(const std::vector<double> &flow_ratios, int cube_filament, int tool_change_filament = 0)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -2227,6 +2228,9 @@ StringObjectException validate_flow_ratios(const std::vector<double> &flow_ratio
     object->add_instance()->set_offset(Vec3d(80., 40., 0.));
     object->ensure_on_bed();
     object->config.set("extruder", cube_filament);
+    if (tool_change_filament > 0)
+        model.plates_custom_gcodes[model.curr_plate_index].gcodes.push_back(
+            CustomGCode::Item{ 5., CustomGCode::ToolChange, tool_change_filament, "", "" });
     print.apply(model, config);
     std::vector<StringObjectException> warnings;
     return print.validate(&warnings);
@@ -2269,6 +2273,14 @@ TEST_CASE("Print::validate refuses filament 1's flow ratio of 0 while flow varia
     StringObjectException err = validate_flow_ratios({0., 1.}, 2);
     CHECK(err.opt_key == "filament_flow_ratio");
     CHECK(err.string.find("filament 1") != std::string::npos);
+}
+
+// Edge (Fable review of #759): a filament reached only by a "Change filament" custom G-code extrudes too.
+TEST_CASE("Print::validate refuses a flow ratio of 0 on a filament only a custom tool change uses", "[Print][validate][Regression]")
+{
+    StringObjectException err = validate_flow_ratios({1., 0.}, 1, 2);
+    CHECK(err.opt_key == "filament_flow_ratio");
+    CHECK(err.string.find("filament 2") != std::string::npos);
 }
 
 TEST_CASE("Print::validate accepts non-zero flow ratios", "[Print][validate]")

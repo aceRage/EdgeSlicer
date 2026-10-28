@@ -2509,7 +2509,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         if (!flow_ratios.values.empty()) {
             if (!filament_flow_variants_active(m_config) && !(flow_ratios.get_at(0) > 0.))
                 return refuse_flow_ratio(0);
-            for (unsigned int filament_id : extruders)
+            // extruders(true): a filament reached only by a "Change filament" custom G-code also extrudes
+            // (Fable review of #759; the other validate checks use the same list).
+            for (unsigned int filament_id : this->extruders(true))
                 if (filament_id < filament_count &&
                     !(get_value_at(m_config, flow_ratios, ConfigFlowDomain::Filament, filament_id) > 0.))
                     return refuse_flow_ratio(filament_id);
