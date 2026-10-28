@@ -1179,11 +1179,11 @@ static std::vector<std::string> s_Preset_print_options {
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "top_color_penetration_layers", "bottom_color_penetration_layers",
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "offset_layers", "detect_overhang_wall", "unsupported_wall_last", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
-    "seam_position", "staggered_inner_seams", "seam_prefer_part_joints", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "adaptive_infill_mode", "adaptive_infill_interior_density", "adaptive_infill_gradient", "gyroid_optimized", "sparse_infill_pattern", "sparse_infill_smooth_factor", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle", "top_surface_pattern", "undertop_surface_pattern", "bottom_surface_pattern",
-    "infill_direction", "solid_infill_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis", "infill_complete_top","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
-    "align_infill_direction_to_model", "extra_solid_infills",
+    "seam_position", "staggered_inner_seams", "seam_prefer_part_joints", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "adaptive_infill_mode", "adaptive_infill_interior_density", "adaptive_infill_gradient", "gyroid_optimized", "sparse_infill_pattern", "sparse_infill_smooth_factor", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle", "top_surface_pattern", "top_surface_expansion", "top_surface_expansion_margin", "top_surface_expansion_direction", "undertop_surface_pattern", "bottom_surface_pattern", "top_surface_fill_order", "bottom_surface_fill_order",
+    "infill_direction", "solid_infill_direction", "top_layer_direction", "bottom_layer_direction", "counterbore_hole_bridging","infill_shift_step", "sparse_infill_rotate_template", "solid_infill_rotate_template", "symmetric_infill_y_axis", "infill_complete_top","skeleton_infill_density", "infill_lock_depth", "skin_infill_depth", "skin_infill_density",
+    "align_infill_direction_to_model", "center_of_surface_pattern", "separated_infills", "extra_solid_infills",
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
-    "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_inset",
+    "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
     "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling",
     "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing",
     "over_support_surfaces", "over_support_flow", "over_support_speed",
@@ -1209,7 +1209,7 @@ static std::vector<std::string> s_Preset_print_options {
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
     "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
-    "wipe_tower_no_sparse_layers", "compatible_printers", "compatible_printers_condition", "inherits",
+    "wipe_tower_no_sparse_layers", "wipe_tower_sparse_layers_combination", "compatible_printers", "compatible_printers_condition", "inherits",
     "flush_into_infill", "flush_into_objects", "flush_into_support",
      "tree_support_branch_angle", "tree_support_angle_slow", "tree_support_wall_count",
      "stabilizer_supports", "stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap", "stabilizer_pillar_diameter", "stabilizer_max_island_width", "stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_brace_max_unbraced", "stabilizer_brace_max_span", "stabilizer_column_shape", "stabilizer_column_width", "stabilizer_column_length", "stabilizer_column_min_height", "stabilizer_wall_loops", "stabilizer_infill_density", "stabilizer_infill_pattern", "hollow_interior", "hollow_shell_thickness",
@@ -1231,7 +1231,7 @@ static std::vector<std::string> s_Preset_print_options {
      "bridge_density","internal_bridge_density", "precise_outer_wall", "bridge_acceleration",
      "sparse_infill_acceleration", "internal_solid_infill_acceleration", "tree_support_auto_brim", 
      "tree_support_brim_width", "gcode_comments", "gcode_label_objects",
-     "initial_layer_travel_speed", "exclude_object", "slow_down_layers", "infill_anchor", "infill_anchor_max","initial_layer_min_bead_width",
+     "initial_layer_travel_speed", "exclude_object", "exclude_object_tolerance", "slow_down_layers", "infill_anchor", "infill_anchor_max","initial_layer_min_bead_width",
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
@@ -1285,6 +1285,8 @@ static std::vector<std::string> s_Preset_filament_options {
     //SoftFever
     "enable_pressure_advance", "pressure_advance","adaptive_pressure_advance","adaptive_pressure_advance_model","adaptive_pressure_advance_overhangs", "adaptive_pressure_advance_bridges","chamber_temperature", "chamber_minimal_temperature", "filament_shrink","filament_shrinkage_compensation_z", "support_material_interface_fan_speed","internal_bridge_fan_speed", "filament_notes" /*,"filament_seam_gap"*/,
     "ironing_fan_speed",
+    // Orca #11194: filament ironing overrides
+    "filament_ironing_flow", "filament_ironing_spacing", "filament_ironing_inset", "filament_ironing_speed",
     "filament_loading_speed", "filament_loading_speed_start",
     "filament_unloading_speed", "filament_unloading_speed_start", "filament_toolchange_delay", "filament_cooling_moves", "filament_stamping_loading_speed", "filament_stamping_distance",
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
@@ -2980,6 +2982,52 @@ bool PresetCollection::clone_presets(std::vector<Preset const *> const &presets,
     this->select_preset_by_name(old_name, true);
     unlock();
     return true;
+}
+
+const Preset* PresetCollection::create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides)
+{
+    if (name.empty() || !parent.is_system || parent.name == name)
+        return nullptr;
+    if (const Preset *existing = find_preset(name, false); existing != nullptr && existing->name == name)
+        return nullptr;
+
+    Preset preset = parent;
+    preset.name                = name;
+    preset.vendor              = nullptr;
+    preset.renamed_from.clear();
+    preset.m_excluded_from.clear();
+    preset.setting_id.clear();
+    preset.base_id.clear();
+    preset.is_default          = false;
+    preset.is_system           = false;
+    preset.is_external         = false;
+    preset.is_project_embedded = false;
+    preset.is_visible          = true;
+    preset.is_dirty            = false;
+    preset.alias.clear();
+    preset.config.apply(overrides, true);
+    preset.config.option<ConfigOptionString>("inherits", true)->value = parent.name;
+    if (m_type == Preset::TYPE_FILAMENT)
+        preset.config.option<ConfigOptionStrings>("filament_settings_id", true)->values = { name };
+    preset.file = this->path_for_preset(preset);
+
+    lock();
+    auto         it  = this->find_preset_internal(name);
+    const size_t pos = size_t(it - m_presets.begin());
+    Preset      &inserted = *m_presets.insert(it, preset);
+    // The insert shifted the presets after it: keep the selection on the same preset without
+    // re-selecting it, which would throw away the user's unsaved edits.
+    if (m_idx_selected != size_t(-1) && m_idx_selected >= pos && m_idx_selected < m_presets.size() - 1)
+        ++m_idx_selected;
+    set_custom_preset_alias(inserted);
+    DynamicPrintConfig parent_config = parent.config;
+    const bool         saved         = inserted.save(&parent_config);
+    const std::string  inserted_name = inserted.name;
+    unlock();
+    if (!saved)
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": could not save " << name;
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << name << " inherits " << parent.name;
+    return find_preset(inserted_name, false);
 }
 
 bool PresetCollection::clone_presets_for_printer(std::vector<Preset const *> const &     templates,

@@ -12,6 +12,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mass_limited_acceleration.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
+	test_multicolour_visual_only.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
 	test_gcode_timing.cpp
@@ -23,6 +24,8 @@ add_executable(${_TEST_NAME}_tests
 	test_image_row_walls.cpp
 	test_model.cpp
 	test_print.cpp
+	test_custom_gcode_placeholders.cpp
+	test_exclude_object_tolerance.cpp
 	test_gcode_file_header.cpp
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
@@ -55,6 +58,7 @@ add_executable(${_TEST_NAME}_tests
 	test_fdm_hollowing.cpp
 	test_extra_bridge_layer_determinism.cpp
 	test_bridge_controls.cpp
+	test_ironing_overrides.cpp
 	test_bed_temperature.cpp
 	test_chamber_temperature.cpp
 	test_texture_displacement.cpp

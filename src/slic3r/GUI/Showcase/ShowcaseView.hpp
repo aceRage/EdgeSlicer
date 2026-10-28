@@ -383,6 +383,7 @@ private:
     wxSlider                *m_env_intensity = nullptr;
     wxSlider                *m_env_rotation = nullptr;
     wxSlider                *m_exposure = nullptr;
+    wxChoice                *m_tone = nullptr;   // realism 1a: the post pass's tone curve
     wxSlider                *m_shadow_softness = nullptr;
     wxChoice                *m_layer_lines = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;

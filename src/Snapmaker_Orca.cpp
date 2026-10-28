@@ -163,7 +163,7 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_ORIENT_FAILED, "An error occurred when auto-orienting object(s)."},
     {CLI_MODIFIED_PARAMS_TO_PRINTER, "Found modified parameter in printer preset in the 3mf file, which should not be changed."},
         {CLI_FILE_VERSION_NOT_SUPPORTED, "Unsupported 3MF version. Please make sure the 3MF file was created with the official version of Bambu Studio, not a beta version."},
-    {CLI_NO_SUITABLE_OBJECTS, "One of the plate is empty or has no object fully inside it. Please check that the 3mf contains no empty plate in EdgeSlicer before uploading."},
+    {CLI_NO_SUITABLE_OBJECTS, "The plate has nothing to slice: it is empty, or no object on it is both printable and fully inside the print volume."},
     {CLI_VALIDATE_ERROR, "There are some incorrect slicing parameters in the 3mf. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECTS_PARTLY_INSIDE, "Some objects are located over the boundary of the heated bed."},
     {CLI_EXPORT_CACHE_DIRECTORY_CREATE_FAILED, "Failed creating directory when exporting cache data."},
@@ -1780,7 +1780,7 @@ int CLI::run(int argc, char **argv)
     std::vector<plate_obj_size_info_t> plate_obj_size_infos;
     int plate_to_slice = 0, filament_count = 0, duplicate_count = 0, real_duplicate_count = 0;
     bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false;
-    bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
+    bool allow_rotations = false, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
     Semver file_version;
     std::map<size_t, bool> orients_requirement;
     std::vector<Preset*> project_presets;
@@ -4575,6 +4575,7 @@ int CLI::run(int argc, char **argv)
 
     BOOST_LOG_TRIVIAL(info) << "finished model pre-process commands\n";
     bool oriented_or_arranged = false;
+    bool arranged_without_rotations = false;
     //BBS: add orient and arrange logic here
     for (auto& model : m_models)
     {
@@ -4833,6 +4834,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start plate %1%'s arranging...") % (i + 1);
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 //arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished plate %1%'s arranging") % (i + 1);
 
                 //step-4: postprocess the bed index and result
@@ -5265,6 +5267,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start %1% th arranging...")%arrange_count;
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished %1% th arranging...")%arrange_count;
 
                 //Step-4:postprocess by partplate list&&apply the result
@@ -5782,10 +5785,17 @@ int CLI::run(int argc, char **argv)
                             continue;
                         // An empty estimate is a plate that prints no tower (one filament and
                         // neither smooth timelapse, wrapping detection nor a raft).
-                        Vec3d wt_pos, wt_size;
-                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size);
+                        Vec3d                            wt_pos, wt_size;
+                        Slic3r::GUI::WipeTowerRelocation relocation;
+                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size, 0, false, &relocation);
                         if (wt_size(0) < EPSILON || wt_size(1) < EPSILON)
                             continue;
+                        // Orca #16728: a re-placed tower moves clear of the plate's objects where there is room.
+                        if (relocation.moved)
+                            BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1%: the wipe tower no longer fits at its saved position {%2%, %3%} and was moved %4%")
+                                % (index + 1) % m_print_config.option<ConfigOptionFloats>("wipe_tower_x", true)->get_at(index)
+                                % m_print_config.option<ConfigOptionFloats>("wipe_tower_y", true)->get_at(index)
+                                % (relocation.overlaps_objects ? "onto an object, as no free space is left" : "to free space");
                         // That clamp only knows the bed edges. A tower left on bed_exclude_area fails
                         // validation ("Prime Tower is too close to exclusion area", -64; Qidi Q1 Pro:
                         // the raw default y = 220 reaches the y 240-245 strip), where the GUI never puts
@@ -5871,7 +5881,15 @@ int CLI::run(int argc, char **argv)
 
                         if (count == 0) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else if ((plate_to_slice != 0) || pre_check) {
@@ -6075,7 +6093,15 @@ int CLI::run(int argc, char **argv)
 
                         if (print->empty()) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume after apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else {

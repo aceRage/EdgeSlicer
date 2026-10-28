@@ -6524,6 +6524,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6587,6 +6593,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_disconnect()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6661,6 +6673,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_subscribe()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -6733,6 +6751,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_unsubscribe() {
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();
@@ -7476,6 +7500,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
 
         std::weak_ptr<SSWCP_Instance> weak_ptr = shared_from_this();
         auto                          engine   = get_current_engine();
+        // No engine (a create that failed, or a call for a client already torn down): the worker
+        // below would dereference null and take the slicer down.
+        if (!engine) {
+            handle_general_fail(-1, "invalid engine");
+            return;
+        }
 
         if (m_work_thread.joinable())
             m_work_thread.join();

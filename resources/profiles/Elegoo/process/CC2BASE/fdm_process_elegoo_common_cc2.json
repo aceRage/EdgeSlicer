@@ -86,7 +86,7 @@
     "gcode_label_objects": "0",
     "staggered_inner_seams": "0",
     "wipe_before_external_loop": "0",
-    "exclude_object": "1",
+    "exclude_object": "0",
     "wipe_speed": "100%",
     "print_flow_ratio": "0.97",
     "wall_sequence": "inner wall/outer wall",

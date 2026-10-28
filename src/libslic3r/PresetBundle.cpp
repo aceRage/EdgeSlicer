@@ -118,6 +118,8 @@ void EnsureFilamentColorFieldsAligned(DynamicPrintConfig &config)
     const size_t oldMultiCount = multiColors->values.size();
     multiColors->resize(targetCount);
     modes->resize(targetCount);
+    // The visual-only multi-colour keys (split, angle, twist) follow the same slots.
+    visual_only_resize_slots(config, targetCount);
 
     for (size_t i = 0; i < targetCount; ++i)
     {
@@ -179,6 +181,7 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
 {
     EraseStringOptionAt(config, "filament_multi_colors", index);
     EraseIntOptionAt(config, "filament_colour_mode", index);
+    visual_only_erase_slot(config, index);
     EnsureFilamentColorFieldsAligned(config);
 }
 
@@ -217,6 +220,10 @@ static std::vector<std::string> s_project_options {
     "filament_colour",
     "filament_multi_colors",
     "filament_colour_mode",
+    // Multi-colour filaments: visual only, stripped at Print::apply (visual_only_option_keys()).
+    "filament_colour_split",
+    "filament_colour_angle",
+    "filament_colour_twist",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",
@@ -2875,10 +2882,15 @@ unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
     if (filament_presets.empty())
         return 0;
     this->filament_presets = filament_presets;
+    // The slots' colours as they were, so a slot whose colours the sync replaced starts with an equal split.
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = project_config.option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
     ConfigOptionStrings *filament_color = project_config.option<ConfigOptionStrings>("filament_colour");
     filament_color->resize(filament_presets.size());
     filament_color->values = filament_colors;
     EnsureFilamentColorFieldsAligned(project_config);
+    reset_colour_split_where_colours_changed(project_config, old_multi_colors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets();
     return filament_presets.size();
@@ -3120,6 +3132,24 @@ const std::set<std::string> ignore_settings_list ={
     "inherits",
     "print_settings_id", "filament_settings_id", "printer_settings_id"
 };
+
+std::string PresetBundle::current_printer_system_name() const
+{
+    const Preset &printer = this->printers.get_edited_preset();
+    if (printer.is_system)
+        return printer.name;
+    return printer.inherits();
+}
+
+void PresetBundle::fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const
+{
+    auto *list = config.option<ConfigOptionStrings>("print_compatible_printers", true);
+    if (!list->values.empty())
+        return;
+    const std::string name = current_printer_system_name();
+    if (!name.empty())
+        list->values.push_back(name);
+}
 
 DynamicPrintConfig PresetBundle::full_fff_config() const
 {
@@ -3652,6 +3682,14 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         //}
         //else
             print_different_keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.end());
+        // An export fills the list with the printer's system name when the preset has none (Bambu
+        // Connect needs the key). That is not a restriction the user set, so do not apply it.
+        if (print_compatible_printers.size() == 1) {
+            const std::string printer_system = !inherits_values[num_filaments + 1].empty() ?
+                inherits_values[num_filaments + 1] : config.opt_string("printer_settings_id");
+            if (print_compatible_printers.front() == printer_system)
+                print_compatible_printers.clear();
+        }
         if (!print_compatible_printers.empty()) {
             ConfigOptionStrings* compatible_printers = config.option<ConfigOptionStrings>("compatible_printers", true);
             compatible_printers->values = print_compatible_printers;
@@ -3805,6 +3843,11 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         }
 
         // 4) Load the project config values (the per extruder wipe matrix etc).
+        // A file without the visual-only multi-colour keys (an older project, a Bambu 3MF) loads their
+        // defaults, not what the previous project had: apply_only() keeps a key the file lacks.
+        for (const std::string &key : visual_only_option_keys())
+            if (!config.has(key))
+                this->project_config.erase(key);
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
@@ -5191,7 +5234,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     "toolchange_ordering", "toolchange_cyclic_order", "toolchange_cyclic_first_layer",
     // Firmware / G-code output features.
     "timelapse_type",                        // camera timelapse moves differ per machine
-    "exclude_object", "gcode_label_objects", // object labelling for the firmware's exclude-object
+    "exclude_object", "exclude_object_tolerance", "gcode_label_objects", // object labelling for the firmware's exclude-object
     "enable_arc_fitting",                    // G2/G3 support
     "gcode_add_line_number", "gcode_comments",
     "filename_format", "post_process",       // output naming and machine-specific scripts

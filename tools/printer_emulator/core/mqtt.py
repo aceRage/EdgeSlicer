@@ -133,9 +133,28 @@ class _Session(socketserver.BaseRequestHandler):
 
     def on_connect(self, body):
         n = int.from_bytes(body[0:2], "big")
+        flags = body[2 + n + 1]
         i = 2 + n + 1 + 1 + 2  # protocol name, level, flags, keepalive
         n = int.from_bytes(body[i:i + 2], "big")
         self.client_id = body[i + 2:i + 2 + n].decode()
+        i += 2 + n
+        user = password = None
+        if flags & 0x04:  # will topic and message
+            for _ in range(2):
+                n = int.from_bytes(body[i:i + 2], "big")
+                i += 2 + n
+        if flags & 0x80:
+            n = int.from_bytes(body[i:i + 2], "big")
+            user = body[i + 2:i + 2 + n].decode("utf-8", "replace")
+            i += 2 + n
+        if flags & 0x40:
+            n = int.from_bytes(body[i:i + 2], "big")
+            password = body[i + 2:i + 2 + n].decode("utf-8", "replace")
+        if self.broker.auth is not None and not self.broker.auth(user, password):
+            self.broker.note("connect", {"client": self.client_id, "refused": True, "why": "bad user name or password"})
+            self.send(packet(0x20, bytes([0, 4])))
+            self.close()
+            return
         if not self.broker.admit(self.client_id):
             self.broker.note("connect", {"client": self.client_id, "refused": True, "why": "not authorised"})
             self.send(packet(0x20, bytes([0, 5])))
@@ -164,13 +183,14 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 class Broker:
-    """One listening MQTT broker. `admit(client_id)` decides CONNECT; `on_message(session, topic,
+    """One listening MQTT broker. `auth(user, password)` and `admit(client_id)` decide CONNECT; `on_message(session, topic,
     payload)` sees every PUBLISH after it was routed to the subscribers; `note(kind, payload)`
     logs."""
 
-    def __init__(self, name, host, port, admit=None, on_message=None, note=None):
+    def __init__(self, name, host, port, admit=None, on_message=None, note=None, auth=None):
         self.name, self.host, self.port = name, host, port
         self.admit = admit or (lambda cid: True)
+        self.auth = auth  # auth(user, password) -> bool; None = anybody (the U1's brokers)
         self.on_message = on_message or (lambda s, t, p: None)
         self._note = note
         self.lock = threading.Lock()

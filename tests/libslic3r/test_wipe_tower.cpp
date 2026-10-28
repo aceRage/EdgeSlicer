@@ -13,6 +13,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
@@ -1173,4 +1174,367 @@ TEST_CASE("A rotated WipeTower2 tower prints inside its rotated footprint", "[Wi
     CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
     CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
     CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
+}
+
+// Orca #15035: a WipeTower2 rib tower is shifted by its rib offset, so the ribs, which reach past
+// the body box, start at the tower position instead of hanging off its left and front edges, and it
+// is placed and checked by the box around its first-layer wall (the square the pre-slice estimate
+// reserves), like the Type1 rib tower.
+TEST_CASE("A WipeTower2 rib tower prints inside its footprint, from the tower position", "[WipeTower][RibOffset][GCode]")
+{
+    const double angle = GENERATE(0., 90.);
+    CAPTURE(angle);
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "wipe_tower_wall_type", "rib" },
+                                 { "wipe_tower_rib_width", 8 },
+                                 { "wipe_tower_extra_rib_length", 0 },
+                                 { "wipe_tower_fillet_wall", true },
+                                 { "wipe_tower_rotation_angle", angle } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+
+    const auto  &wtd  = print.wipe_tower_data();
+    const double brim = wtd.brim_width;
+    // A 6 mm tall tower is far below the stability minimum: the ribs, not the body, are extended
+    // to it, so the footprint is at least that deep.
+    CHECK(wtd.width >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+    CHECK(wtd.depth >= WipeTower::get_limit_depth_by_height(6.f) - 0.01);
+
+    const Vec2d              anchor(140., 140.);
+    const Eigen::Rotation2Dd unturn(-Geometry::deg2rad(angle));
+    const std::vector<Vec2d> pts = tower_extrusion_points(gcode);
+    REQUIRE(pts.size() > 20);
+    BoundingBoxf local;
+    for (const Vec2d &p : pts)
+        local.merge(Vec2d(unturn * (p - anchor)));
+    // The first layer's brim runs around the rib wall, whose box starts at the tower position:
+    // without the shift the ribs reached about 2.8 mm (half the 8 mm rib, diagonally) further out.
+    const double slack = 0.35; // a line's half width, plus the rounding of the G-code
+    CHECK(local.min.x() > -brim - slack);
+    CHECK(local.min.y() > -brim - slack);
+    CHECK(local.min.x() < -brim + slack);
+    CHECK(local.min.y() < -brim + slack);
+    CHECK(local.max.x() < wtd.width + brim + slack);
+    CHECK(local.max.y() < wtd.depth + brim + slack);
+    CHECK(local.max.x() > wtd.width + brim - slack);
+
+    // The post-slice footprint (bed check, timelapse keep-out, skirt) is that ribbed outline.
+    REQUIRE(wtd.wipe_tower_mesh_data.has_value());
+    const BoundingBox bottom = get_extents(wtd.wipe_tower_mesh_data->bottom);
+    CHECK_THAT(unscaled(bottom.min.x()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.min.y()), WithinAbs(-brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.x()), WithinAbs(wtd.width + brim, 0.05));
+    CHECK_THAT(unscaled(bottom.max.y()), WithinAbs(wtd.depth + brim, 0.05));
+    BoundingBoxf corners;
+    for (const Point &c : print.first_layer_wipe_tower_corners())
+        corners.merge(Vec2d(unscale<double>(c.x()), unscale<double>(c.y())));
+    const BoundingBoxf ext = wipe_tower_rotated_extents(wtd.width, wtd.depth, brim, angle);
+    CHECK_THAT(corners.min.x(), WithinAbs(anchor.x() + ext.min.x(), 0.1));
+    CHECK_THAT(corners.max.x(), WithinAbs(anchor.x() + ext.max.x(), 0.1));
+    CHECK_THAT(corners.min.y(), WithinAbs(anchor.y() + ext.min.y(), 0.1));
+    CHECK_THAT(corners.max.y(), WithinAbs(anchor.y() + ext.max.y(), 0.1));
+}
+
+TEST_CASE("A rectangle WipeTower2 tower is not shifted", "[WipeTower][RibOffset][GCode]")
+{
+    Print              print;
+    const std::string  gcode = slice_stagger_project(stagger_slice_config(false), print);
+    const auto        &wtd   = print.wipe_tower_data();
+    BoundingBoxf       local;
+    for (const Vec2d &p : tower_extrusion_points(gcode))
+        local.merge(Vec2d(p - Vec2d(140., 140.)));
+    CHECK(local.min.x() > -wtd.brim_width - 0.35);
+    CHECK(local.min.x() < -wtd.brim_width + 0.35);
+    CHECK(wtd.width == Approx(30.)); // the body, prime_tower_width
+}
+
+// Orca #11831: prime_tower_brim_width -1 ("auto", shipped by the FlashForge Creator 5 and some Qidi
+// processes) gives a WipeTower2 tower the brim the plate preview and the clearance checks reserve
+// for it, sized from the tower height. It used to print no brim at all.
+TEST_CASE("A WipeTower2 tower with the auto brim prints a brim", "[WipeTower][AutoBrim][GCode]")
+{
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", -1 } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+    const auto       &wtd   = print.wipe_tower_data();
+
+    CHECK(gcode.find("; WIPE_TOWER_BRIM_START") != std::string::npos);
+    // A 6 mm tall tower: 6 / 100 * 8 = 0.48 mm of auto brim, laid as one loop of about 0.44 mm.
+    const float auto_brim = WipeTower::get_auto_brim_by_height(float(wtd.height));
+    CHECK(auto_brim > 0.4f);
+    CHECK(auto_brim < 0.6f);
+    CHECK(wtd.brim_width > 0.3);
+    CHECK(wtd.brim_width < 0.6);
+
+    // An explicit 0 still means no brim.
+    Print              print_none;
+    DynamicPrintConfig cfg_none = stagger_slice_config(false);
+    cfg_none.set_deserialize_strict({ { "prime_tower_brim_width", 0 } });
+    const std::string gcode_none = slice_stagger_project(cfg_none, print_none);
+    CHECK(gcode_none.find("; WIPE_TOWER_BRIM_START") == std::string::npos);
+    CHECK(print_none.wipe_tower_data().brim_width == Approx(0.));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Orca #15841 "Combine sparse layers": folding a run of toolchange-free layers into one thicker
+// tower layer.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Sparse layers are combined only when every layer is still the tower's to place", "[WipeTower][CombineSparseLayers]") {
+    PrintConfig cfg;
+    cfg.timelapse_type.value              = TimelapseType::tlTraditional;
+    cfg.wipe_tower_no_sparse_layers.value = false;
+
+    cfg.wipe_tower_sparse_layers_combination.value = false;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+    cfg.wipe_tower_sparse_layers_combination.value = true;
+    CHECK(wipe_tower_sparse_layers_combined(cfg));
+
+    // Dropping the sparse layers outright leaves nothing to combine.
+    cfg.wipe_tower_no_sparse_layers.value = true;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+    CHECK(wipe_tower_sparse_layers_skipped(cfg));
+    cfg.wipe_tower_no_sparse_layers.value = false;
+
+    // Smooth timelapse parks the nozzle on the tower every layer, so no layer may be folded away.
+    // (Edge has no wrapping detection option, upstream's other case.)
+    cfg.timelapse_type.value = TimelapseType::tlSmooth;
+    CHECK_FALSE(wipe_tower_sparse_layers_combined(cfg));
+}
+
+TEST_CASE("Combine sparse layers is a print preset key and defaults off", "[WipeTower][CombineSparseLayers][Config]") {
+    CHECK_FALSE(PrintConfig().wipe_tower_sparse_layers_combination.value);
+    const std::vector<std::string> &keys = Preset::print_options();
+    CHECK(std::find(keys.begin(), keys.end(), "wipe_tower_sparse_layers_combination") != keys.end());
+}
+
+TEST_CASE("A layer folded into a later one is marked on the results the emitter reads", "[WipeTower][CombineSparseLayers]") {
+    WipeTower::ToolChangeResult folded = make_tcr(1, 1, 0.2f);
+    folded.combined_away               = true;
+    CHECK(wipe_tower_layer_is_combined_away({folded}));
+    CHECK_FALSE(wipe_tower_layer_is_combined_away({make_tcr(1, 1, 0.2f)}));
+    CHECK_FALSE(wipe_tower_layer_is_combined_away({}));
+}
+
+TEST_CASE("A run of sparse layers prints once, on its last layer, at the height it covers", "[WipeTower][CombineSparseLayers]") {
+    // Eight 0.1 mm layers on a 0.3 mm cap: a toolchange on the first and the last, sparse between.
+    std::vector<float>       heights(8, 0.1f);
+    const std::vector<char>  sparse{0, 1, 1, 1, 1, 1, 1, 0};
+    const std::vector<float> caps(8, 0.3f);
+
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, sparse, caps, 0);
+    REQUIRE(combined.size() == heights.size());
+    // Three layers fill the cap exactly: the run flushes on layers 3 and 6, the two below each go.
+    CHECK(combined == std::vector<char>{0, 1, 1, 0, 1, 1, 0, 0});
+    CHECK_THAT(heights[3], WithinAbs(0.3f, 1e-5f));
+    CHECK_THAT(heights[6], WithinAbs(0.3f, 1e-5f));
+    // Layers that print keep the object covered: nothing is lost and nothing is printed twice.
+    float printed = 0.f;
+    for (size_t i = 0; i < heights.size(); ++i)
+        if (! combined[i])
+            printed += heights[i];
+    CHECK_THAT(printed, WithinAbs(0.8f, 1e-5f));
+    // A toolchange has to purge at its own z, so those layers are left exactly as planned.
+    CHECK_THAT(heights[0], WithinAbs(0.1f, 1e-5f));
+    CHECK_THAT(heights[7], WithinAbs(0.1f, 1e-5f));
+}
+
+TEST_CASE("The maximum layer height of the nozzle that prints the run caps the merge", "[WipeTower][CombineSparseLayers]") {
+    // The cap that counts belongs to the layer that prints the run. Five 0.1 mm layers, sparse above
+    // the first, layer 3's nozzle taking only 0.15.
+    std::vector<float> heights(5, 0.1f);
+    std::vector<float> caps(5, 0.3f);
+    caps[3]                          = 0.15f;
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, {0, 1, 1, 1, 1}, caps, 0);
+    // Layer 2 cannot hand its 0.2 mm on to layer 3, so it prints there and a fresh run starts above.
+    CHECK(combined == std::vector<char>{0, 1, 0, 1, 0});
+    CHECK_THAT(heights[2], WithinAbs(0.2f, 1e-5f));
+    CHECK_THAT(heights[4], WithinAbs(0.2f, 1e-5f));
+
+    // A single layer already past the cap is printed as planned rather than shrunk.
+    std::vector<float>      tall{0.2f, 0.4f, 0.4f};
+    const std::vector<char> tall_combined = combine_sparse_wipe_tower_layers(tall, {0, 1, 1}, {0.3f, 0.3f, 0.3f}, 0);
+    CHECK(tall_combined == std::vector<char>{0, 0, 0});
+    CHECK_THAT(tall[1], WithinAbs(0.4f, 1e-5f));
+}
+
+TEST_CASE("The tower's first layer is never folded away", "[WipeTower][CombineSparseLayers]") {
+    // It carries the brim and has to sit on the bed, however little it purges.
+    std::vector<float>      heights(4, 0.1f);
+    const std::vector<char> combined = combine_sparse_wipe_tower_layers(heights, {1, 1, 1, 1}, std::vector<float>(4, 0.5f), 0);
+    CHECK(combined.front() == 0);
+    CHECK_THAT(heights.front(), WithinAbs(0.1f, 1e-5f));
+    // Everything above it merges into the top layer, which the cap still fits.
+    CHECK(combined == std::vector<char>{0, 1, 1, 0});
+    CHECK_THAT(heights.back(), WithinAbs(0.3f, 1e-5f));
+    // Edge: no first layer marked (size_t(-1)) means nothing is combined.
+    std::vector<float> unmarked(4, 0.1f);
+    CHECK(combine_sparse_wipe_tower_layers(unmarked, {1, 1, 1, 1}, std::vector<float>(4, 0.5f), size_t(-1)) == std::vector<char>(4, 0));
+}
+
+TEST_CASE("Edge: the combination cap follows the filament's nozzle", "[WipeTower][CombineSparseLayers]") {
+    PrintConfig cfg;
+    cfg.nozzle_diameter.values  = {0.4, 0.6};
+    cfg.max_layer_height.values = {0., 0.5};
+    cfg.filament_diameter.values = {1.75, 1.75};
+    // Two filaments on two nozzles (a toolchanger): filament i prints with nozzle i. 0 = 3/4 nozzle.
+    CHECK_THAT(WipeTower::filament_max_layer_height(cfg, 0), WithinAbs(0.3f, 1e-5f));
+    CHECK_THAT(WipeTower::filament_max_layer_height(cfg, 1), WithinAbs(0.5f, 1e-5f));
+}
+
+namespace {
+
+// One 10 mm cube walled in filament 1 with its solid shells in filament 2: the tower changes tools on
+// the two bottom and three top shell layers only, so every layer between is a toolchange-free run
+// "Combine sparse layers" folds. WipeTower2 (not a Bambu Lab printer), single nozzle.
+DynamicPrintConfig sparse_run_config(double layer_height, const char *max_layer_height, bool combine)
+{
+    DynamicPrintConfig config = stagger_slice_config(false);
+    config.set_deserialize_strict({ { "layer_height",                         layer_height },
+                                    { "initial_layer_print_height",           layer_height },
+                                    { "min_layer_height",                     "0.05,0.05" },
+                                    { "max_layer_height",                     std::string(max_layer_height) + "," + max_layer_height },
+                                    { "bottom_shell_layers",                  2 },
+                                    { "top_shell_layers",                     3 },
+                                    { "wipe_tower_sparse_layers_combination", combine } });
+    return config;
+}
+
+struct SparseRunResult
+{
+    size_t      planned = 0, sparse = 0, folded = 0;
+    float       tallest_printed = 0.f, printed_height = 0.f;
+    std::string gcode;
+};
+
+SparseRunResult slice_sparse_run(const DynamicPrintConfig &config)
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->config.set("extruder", 1);
+    object->config.set("solid_infill_filament", 2);
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+
+    Print print;
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    SparseRunResult r;
+    r.gcode = Test::gcode(print);
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes) {
+        if (layer.empty())
+            continue;
+        ++r.planned;
+        if (wipe_tower_layer_is_sparse(layer))
+            ++r.sparse;
+        if (wipe_tower_layer_is_combined_away(layer)) {
+            ++r.folded;
+        } else {
+            r.tallest_printed = std::max(r.tallest_printed, layer.front().layer_height);
+            r.printed_height += layer.front().layer_height;
+        }
+    }
+    return r;
+}
+
+// How often the G-code declares `height` in the tag the processor reads. The dialect is a global the
+// exporter sets from the printer, so this is only correct after a slice.
+size_t count_height_tags(const std::string &gcode, const char *height)
+{
+    const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + height + "\n";
+    size_t            n   = 0;
+    for (size_t p = gcode.find(tag); p != std::string::npos; p = gcode.find(tag, p + 1))
+        ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Combining sparse layers folds a run into whole layers the nozzle can lay down", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // 0.1 mm layers under a 0.32 mm cap: three fit (0.3), a fourth does not, so a run prints once
+    // every three layers at 0.3 mm.
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.1, "0.32", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.1, "0.32", true));
+
+    REQUIRE(plain.planned == combined.planned); // the plan still has one layer per object layer
+    REQUIRE(plain.sparse > 10);
+    CHECK(plain.folded == 0);
+    CHECK_THAT(plain.tallest_printed, WithinAbs(0.1f, 1e-4f));
+
+    CHECK(combined.folded > 0);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.3f, 1e-4f));
+    // Two of every three sparse layers fold away, leaving the toolchange layers untouched.
+    CHECK(combined.folded <= plain.sparse);
+    CHECK(combined.folded >= plain.sparse / 2);
+    // What folds away comes back as height on the layer that prints the run: no gap, nothing twice.
+    CHECK_THAT(combined.printed_height, WithinAbs(plain.printed_height, 1e-3f));
+    // Fewer tower layers reach the G-code.
+    CHECK(combined.gcode.size() < plain.gcode.size());
+}
+
+TEST_CASE("A run too thin to reach the nozzle's layer height is left alone", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // Only whole layers merge, so two 0.2 mm layers (0.4) do not fit a 0.32 mm maximum and the tower
+    // prints as if the option were off: the G-code is the same apart from the setting itself.
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.2, "0.32", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.2, "0.32", true));
+
+    REQUIRE(plain.sparse > 10);
+    CHECK(combined.folded == 0);
+    CHECK(combined.planned == plain.planned);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.2f, 1e-4f));
+    CHECK(moves_of(combined.gcode) == moves_of(plain.gcode));
+}
+
+TEST_CASE("A merged tower layer declares its own height to the G-code processor", "[WipeTower][CombineSparseLayers][GCode]")
+{
+    // 0.2 mm layers under a 0.42 mm maximum merge in pairs; every layer that prints a merged run has
+    // to say so. (The plain slice already declares 0.4 once outside the run, e.g. the final purge.)
+    const SparseRunResult plain    = slice_sparse_run(sparse_run_config(0.2, "0.42", false));
+    const SparseRunResult combined = slice_sparse_run(sparse_run_config(0.2, "0.42", true));
+
+    REQUIRE(combined.folded > 0);
+    CHECK_THAT(combined.tallest_printed, WithinAbs(0.4f, 1e-4f));
+    CHECK(count_height_tags(combined.gcode, "0.4") >= count_height_tags(plain.gcode, "0.4") + combined.folded);
+}
+
+// OD16 review L1: only a height tag ahead of the first extrusion covers a tower block. The Type1 writer
+// switches to bridge flow mid-block on a narrowing tower and tags that, which must not count.
+TEST_CASE("A tower block declares its height only with a tag before its first extrusion", "[WipeTower][CombineSparseLayers]")
+{
+    const std::string tag = ";HEIGHT:";
+    // The WipeTower2 writer's header: tag first.
+    CHECK(wipe_tower_gcode_declares_height_first(";HEIGHT:0.3\n;TYPE:Prime tower\nG1 X10 Y10 E0.5\n", tag));
+    // Travels, retractions and comments before the tag do not end the search.
+    CHECK(wipe_tower_gcode_declares_height_first("G1 X5 Y5 F7200\nG1 E-0.8 F2100\n; CP TOOLCHANGE START\n;HEIGHT:0.3\nG1 X10 E0.4\n", tag));
+    // A tag only after an extrusion (the bridge-flow switch) does not count.
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\nG1 X10 Y5 E0.42\n;HEIGHT:0.200000\nG1 X10 Y10 E0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G3 X1 Y1 I1 J0 E0.2\n;HEIGHT:0.3\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("G1 X5 Y5\n", tag));
+    CHECK_FALSE(wipe_tower_gcode_declares_height_first("", tag));
+}
+
+// OD16 review L2: the brim chamfer counts printed layers, so a folded-away layer does not use up a step.
+TEST_CASE("The brim chamfer steps once per printed tower layer", "[WipeTower][CombineSparseLayers]")
+{
+    struct Layer { bool combined_away; };
+    // First layer 0; layers 2, 3 and 5 folded away.
+    const std::vector<Layer> plan{ {false}, {false}, {true}, {true}, {false}, {true}, {false} };
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 0) == 0);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 1) == 1);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 4) == 2);
+    CHECK(wipe_tower_printed_layer_distance(plan, 0, 6) == 3);
+    // Below the first layer the distance stays negative, as before.
+    CHECK(wipe_tower_printed_layer_distance(plan, 4, 1) == -3);
+    // Nothing folded: the plain index difference.
+    const std::vector<Layer> plain(7, Layer{ false });
+    CHECK(wipe_tower_printed_layer_distance(plain, 1, 6) == 5);
 }
