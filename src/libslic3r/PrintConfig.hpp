@@ -1151,6 +1151,15 @@ void visual_only_erase_slot(DynamicPrintConfig &config, size_t index);
 void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to);
 // Erase every visual-only key (what Print::apply() does to the config it is handed).
 void strip_visual_only_options(DynamicPrintConfig &config);
+// Copy every visual-only key the config holds (a printer switch saves them before update_selections()
+// re-sizes the slots, as it saves filament_multi_colors).
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config);
+// Put a snapshot back (keys it lacks are erased) and size the keys to n slots.
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n);
+// A slot whose colours were replaced (AMS sync, the colour picker, a recommended palette) starts again
+// with an equal split; its angle and twist stay, as they belong to the feed path (design 4.5). Compares
+// filament_multi_colors now with old_multi_colors, slot by slot.
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors);
 
 class StaticPrintConfig;
 

@@ -2882,10 +2882,15 @@ unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
     if (filament_presets.empty())
         return 0;
     this->filament_presets = filament_presets;
+    // The slots' colours as they were, so a slot whose colours the sync replaced starts with an equal split.
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = project_config.option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
     ConfigOptionStrings *filament_color = project_config.option<ConfigOptionStrings>("filament_colour");
     filament_color->resize(filament_presets.size());
     filament_color->values = filament_colors;
     EnsureFilamentColorFieldsAligned(project_config);
+    reset_colour_split_where_colours_changed(project_config, old_multi_colors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets();
     return filament_presets.size();

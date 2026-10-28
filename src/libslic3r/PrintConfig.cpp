@@ -11064,6 +11064,37 @@ void strip_visual_only_options(DynamicPrintConfig &config)
         config.erase(key);
 }
 
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig snapshot;
+    for (const std::string &key : visual_only_option_keys())
+        if (const ConfigOption *opt = config.option(key))
+            snapshot.set_key_value(key, opt->clone());
+    return snapshot;
+}
+
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        if (const ConfigOption *opt = snapshot.option(key))
+            config.set_key_value(key, opt->clone());
+        else
+            config.erase(key);
+    }
+    visual_only_resize_slots(config, n);
+}
+
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors)
+{
+    const auto *multi = config.option<ConfigOptionStrings>("filament_multi_colors");
+    auto       *split = config.option<ConfigOptionStrings>("filament_colour_split");
+    if (multi == nullptr || split == nullptr)
+        return;
+    for (size_t i = 0; i < split->values.size() && i < multi->values.size(); ++i)
+        if (i >= old_multi_colors.size() || old_multi_colors[i] != multi->values[i])
+            split->values[i].clear();
+}
+
 DynamicPrintConfig DynamicPrintConfig::full_print_config()
 {
 	return DynamicPrintConfig((const PrintRegionConfig&)FullPrintConfig::defaults());

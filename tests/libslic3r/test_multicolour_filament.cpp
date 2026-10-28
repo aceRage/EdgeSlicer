@@ -4,6 +4,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
@@ -386,6 +387,82 @@ TEST_CASE("The project's filament slots carry the visual-only keys through resiz
     CHECK(project.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "20|80", "" });
     CHECK(project.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 30., 0. });
 
+}
+
+TEST_CASE("Snapshot and restore keep the visual-only keys", "[MultiColour][Config]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "", "20|80" });
+    cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 10., 20., 30. });
+    const DynamicPrintConfig snapshot = visual_only_snapshot(cfg);
+    CHECK(snapshot.has("filament_colour_split"));
+    CHECK_FALSE(snapshot.has("filament_colour_twist"));
+
+    visual_only_resize_slots(cfg, 1); // what a switch to a one-slot printer does
+    cfg.option<ConfigOptionFloats>("filament_colour_twist")->values = { 99. };
+    visual_only_restore(cfg, snapshot, 3);
+    CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "", "20|80" });
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 20., 30. });
+    // A key the snapshot lacked comes back as defaults, sized to the slots.
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 0., 0., 0. });
+}
+
+TEST_CASE("Switching printer and back keeps each slot's split, angle and twist", "[MultiColour][Config]")
+{
+    // The Tab printer-switch flow (Tab::select_preset, remember_printer_config): save the slots,
+    // update_selections() for the new printer (it re-sizes them to that printer's remembered count),
+    // then put the project's slots back.
+    PresetBundle bundle;
+    bundle.set_num_filaments(3, std::string("#FF0000"));
+    DynamicPrintConfig &project = bundle.project_config;
+    project.option<ConfigOptionStrings>("filament_multi_colors")->values = { "#FF0000|#FFFF00", "#00FF00|#0000FF", "#000000|#FFFFFF" };
+    project.option<ConfigOptionStrings>("filament_colour_split")->values = { "30|70", "40|60", "20|80" };
+    project.option<ConfigOptionFloats>("filament_colour_angle")->values  = { 10., 20., 30. };
+    project.option<ConfigOptionFloats>("filament_colour_twist")->values  = { 1., 2., 3. };
+
+    const std::vector<std::string> old_presets = bundle.filament_presets;
+    const std::vector<std::string> old_colours = project.option<ConfigOptionStrings>("filament_colour")->values;
+    const std::vector<std::string> old_multi   = project.option<ConfigOptionStrings>("filament_multi_colors")->values;
+    const std::vector<int>         old_modes   = project.option<ConfigOptionInts>("filament_colour_mode")->values;
+    const DynamicPrintConfig       old_visual  = visual_only_snapshot(project);
+
+    AppConfig app_config; // remembers no filaments for the printer: one slot
+    bundle.update_selections(app_config);
+    CHECK(project.option<ConfigOptionStrings>("filament_colour_split")->values.size() == bundle.filament_presets.size());
+
+    bundle.filament_presets = old_presets;
+    project.option<ConfigOptionStrings>("filament_colour")->values       = old_colours;
+    project.option<ConfigOptionStrings>("filament_multi_colors")->values = old_multi;
+    project.option<ConfigOptionInts>("filament_colour_mode")->values     = old_modes;
+    visual_only_restore(project, old_visual, old_presets.size());
+
+    CHECK(project.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "40|60", "20|80" });
+    CHECK(project.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 20., 30. });
+    CHECK(project.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 2., 3. });
+    // And they survive the slot alignment the switch ends with.
+    bundle.set_num_filaments(3, std::string());
+    CHECK(project.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 20., 30. });
+}
+
+TEST_CASE("A slot given new colours starts with an equal split; angle and twist stay", "[MultiColour][Config]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_multi_colors", new ConfigOptionStrings{ "#FF0000|#FFFF00", "#00FF00|#0000FF", "#000000|#FFFFFF" });
+    cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "40|60", "20|80" });
+    cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 10., 20., 30. });
+    cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 1., 2., 3. });
+    const std::vector<std::string> old_multi = cfg.option<ConfigOptionStrings>("filament_multi_colors")->values;
+
+    // Slot 2 replaced 2 -> 2 colours (an AMS sync, the colour picker, a recommended palette).
+    cfg.option<ConfigOptionStrings>("filament_multi_colors")->values[1] = "#FF00FF|#00FFFF";
+    reset_colour_split_where_colours_changed(cfg, old_multi);
+    CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "", "20|80" });
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 20., 30. });
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 2., 3. });
+
+    // Unchanged colours: nothing to reset.
+    reset_colour_split_where_colours_changed(cfg, cfg.option<ConfigOptionStrings>("filament_multi_colors")->values);
+    CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values[0] == "30|70");
 }
 
 namespace {
