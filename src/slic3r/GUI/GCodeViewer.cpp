@@ -1986,6 +1986,7 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     }
 
     m_viewer.set_smooth_look(look.smooth, look.looks);
+    apply_showcase_multicolour(look);
     m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
                                                 libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(look.exposure, 1.f);
@@ -1995,6 +1996,39 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     const libvgcode::Mat4x4 view       = libvgcode::convert(static_cast<Matrix4f>(camera.get_view_matrix().matrix().cast<float>()));
     const libvgcode::Mat4x4 projection = libvgcode::convert(static_cast<Matrix4f>(camera.get_projection_matrix().matrix().cast<float>()));
     m_viewer.render(view, projection);
+}
+
+// Multi-colour P3 (tests/design_multicolour_filament_view.md 7.2): coextruded filaments in the smooth
+// look. libvgcode's segments program is rebuilt once with Showcase/MultiColourGlsl.hpp's prelude; the
+// prelude only runs on the smooth path, so Preview draws as before. The slot table goes into its
+// uniforms every frame (a plain table when the look is off, which hands every slot its own colour).
+void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
+{
+    const bool want = look.smooth && look.coextruded_look && look.multicolour.any_multi;
+    unsigned int program = m_viewer.get_base_color_program();
+    if (want && program == 0 && !m_showcase_mc_failed) {
+        std::string error;
+        if (m_viewer.set_base_color_prelude(MultiColour::glsl_prelude(), &error))
+            program = m_viewer.get_base_color_program();
+        else {
+            m_showcase_mc_failed = true;
+            BOOST_LOG_TRIVIAL(error) << "Showcase: the coextruded-colour shader did not build, split filaments show their plain colour: " << error;
+        }
+    }
+    m_showcase_mc_program = program;
+    m_viewer.set_extruded_volume_enabled(want && look.multicolour.any_twist && program != 0);
+    if (program == 0)
+        return;
+    const MultiColour::UniformTable plain = MultiColour::pack_uniforms({}, {});
+    const MultiColour::UniformTable &t    = want ? look.multicolour : plain;
+    GLint curr_program = 0;
+    glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &curr_program));
+    glsafe(::glUseProgram(program));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global"), 1, t.global.data()));
+    glsafe(::glUseProgram(GLuint(curr_program)));
 }
 
 void GCodeViewer::end_showcase()
@@ -2010,6 +2044,7 @@ void GCodeViewer::restore_from_showcase(bool ranges)
         return;
     sv.active = false;
     m_viewer.set_smooth_look(false, {});
+    m_viewer.set_extruded_volume_enabled(false);   // multi-colour P3: frees the volumes
     m_viewer.set_light_top_dir({ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(1.f, 1.f);
     m_viewer.set_view_type(sv.view_type);

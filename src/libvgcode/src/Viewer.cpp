@@ -85,6 +85,21 @@ bool Viewer::is_smooth_look() const
     return m_impl->is_smooth_look();
 }
 
+bool Viewer::set_base_color_prelude(const std::string& prelude, std::string* error)
+{
+    return m_impl->set_base_color_prelude(prelude, error);
+}
+
+unsigned int Viewer::get_base_color_program() const
+{
+    return m_impl->get_base_color_program();
+}
+
+void Viewer::set_extruded_volume_enabled(bool enabled)
+{
+    m_impl->set_extruded_volume_enabled(enabled);
+}
+
 void Viewer::set_clipping_plane(const std::array<float, 4>& plane)
 {
     m_impl->set_clipping_plane(plane);

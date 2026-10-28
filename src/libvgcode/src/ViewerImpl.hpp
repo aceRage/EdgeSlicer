@@ -98,6 +98,10 @@ public:
     // EDGE (Showcase S5): see Viewer::set_smooth_look().
     void set_smooth_look(bool enabled, const std::array<float, 128>& looks) { m_smooth_look = enabled; m_looks = looks; }
     bool is_smooth_look() const { return m_smooth_look; }
+    // EDGE (multi-colour filaments, P3): see Viewer::set_base_color_prelude().
+    bool set_base_color_prelude(const std::string& prelude, std::string* error);
+    unsigned int get_base_color_program() const { return m_base_color_prelude.empty() ? 0 : m_segments_shader_id; }
+    void set_extruded_volume_enabled(bool enabled);
     // ORCA: section view, see Viewer::set_clipping_plane()
     void set_clipping_plane(const std::array<float, 4>& plane) { m_clipping_plane = plane; }
     void set_light_top_dir(const Vec3& direction) { m_light_top_dir = direction; }
@@ -403,6 +407,9 @@ private:
     int m_uni_segments_role_tex_id{ -1 };
     int m_uni_segments_look_a_id{ -1 };
     int m_uni_segments_look_b_id{ -1 };
+    // EDGE (multi-colour P3): the per-vertex extruded volume
+    int m_uni_segments_volume_tex_id{ -1 };
+    int m_uni_segments_use_volume_id{ -1 };
     // ORCA: the layers greyed or dimmed around the one the sliders show, in the segments and options shaders.
     struct LayerColorsUniforms
     {
@@ -548,6 +555,12 @@ private:
     // smooth bead look; drawn from a texture unit of its own.
     unsigned int m_roles_buf_id{ 0 };
     unsigned int m_roles_tex_id{ 0 };
+    // EDGE (multi-colour P3): per vertex, the volume its extruder has laid so far (R32F, mm3), built
+    // only on request (set_extruded_volume_enabled); the one-float stand-in otherwise.
+    unsigned int m_volumes_buf_id{ 0 };
+    unsigned int m_volumes_tex_id{ 0 };
+    unsigned int m_volume_fallback_buf_id{ 0 };
+    unsigned int m_volume_fallback_tex_id{ 0 };
     size_t m_enabled_options_count{ 0 };
     //
     // Caches for size of data sent to gpu, in bytes
@@ -586,6 +599,12 @@ private:
     // EDGE (Showcase S5)
     bool m_smooth_look{ false };
     std::array<float, 128> m_looks{};
+    // EDGE (multi-colour P3): the base-colour prelude m_segments_shader_id is built with ("" = none)
+    // and whether the extruded volumes are wanted.
+    std::string m_base_color_prelude;
+    bool m_use_volume{ false };
+    // The segments program's uniform locations and sampler units (after it is (re)built).
+    void init_segments_uniforms();
     // ORCA: the light the segments shader shades with, in eye space.
     Vec3 m_light_top_dir{ -0.4574957f, 0.4574957f, 0.7624929f };
 

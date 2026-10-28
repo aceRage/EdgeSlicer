@@ -10,6 +10,7 @@
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "IMSlider.hpp"
 #include "GLModel.hpp"
 #include "I18N.hpp"
@@ -302,6 +303,11 @@ private:
     ShowcaseSaved m_showcase;
     // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
     void restore_from_showcase(bool ranges);
+    // Multi-colour P3: libvgcode's segments program with the coextruded-colour prelude (0 = not
+    // built), and whether building it failed (not retried).
+    unsigned int m_showcase_mc_program = 0;
+    bool         m_showcase_mc_failed  = false;
+    void         apply_showcase_multicolour(const ShowcaseLook &look);
 
 public:
     GCodeViewer();
@@ -353,6 +359,14 @@ public:
         bool   set_light       = false;
         std::array<float, 3> light_dir_eye{ { -0.4574957f, 0.4574957f, 0.7624929f } };   // to the key light
         float  exposure        = 1.f;
+
+        // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
+        // The slot table for Showcase/MultiColourGlsl.hpp's uniforms (MultiColour::pack_uniforms()),
+        // drawn only with the smooth look. coextruded_look = false (the scene's "Coextruded colours"
+        // switch, P2) draws every slot in its plain colour.
+        bool                         coextruded_look = true;
+        MultiColour::UniformTable    multicolour;
+        // ---- end multi-colour ----
     };
     void render_for_showcase(const ShowcaseLook &look);
     void end_showcase();
