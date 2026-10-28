@@ -37,12 +37,12 @@ PYEOF
 BAD_STL="$WORK/bad"$'\xff'".stl"
 cp "$WORK/src.stl" "$BAD_STL"
 OUT="$WORK/out"
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$WORK/datadir"
 
 # --no-check keeps validate's err.string (includes the object name) as error_string.
 set +e
 "$BIN" --slice 0 --allow-newer-file --no-thumbnails --progress-json --no-check \
-    --outputdir "$OUT" \
+    --outputdir "$OUT" --datadir "$WORK/datadir" \
     --printer-preset "Snapmaker U1 (0.4 nozzle)" \
     --process-preset "0.20mm Standard @Snapmaker U1 (0.4 nozzle)" \
     --filament-presets "Snapmaker PLA Matte @U1" \
