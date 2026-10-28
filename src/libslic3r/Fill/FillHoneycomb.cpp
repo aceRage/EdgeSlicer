@@ -70,7 +70,12 @@ void FillHoneycomb::_fill_surface_single(
                 x += m.distance;
             }
             p.rotate(-direction.first, m.hex_center);
-            p.simplify(5 * spacing); // simplify to 5x line width
+            // EdgeSlicer: `spacing` is in millimetres while the points are scaled, so this is no five line
+            // widths simplification: it only drops the vertex repeated where one row of cells joins the
+            // next. Upstream dropped the call (#16742) after #11435 moved multiline_fill() to a Clipper2
+            // offset; ours still shifts every vertex along its own normal, and the two copies of a repeated
+            // vertex would get different normals, kinking every extra line at each row joint. Keep it.
+            p.simplify(5 * spacing);
             // Orca: round the corners of the honeycomb cells. Done before the clipping, so that the
             // curves are cut by the region boundary just like the sharp path would be.
             smooth_polyline_corners(p, params.corner_smoothing());

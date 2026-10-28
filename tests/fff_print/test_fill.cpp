@@ -1687,6 +1687,34 @@ TEST_CASE("Honeycomb infill rounds its cell corners with the smooth factor", "[F
     REQUIRE(sharpest_turn_cosine(smooth) > 0.9);
 }
 
+// EdgeSlicer (OrcaSlicer #16742 kept for Honeycomb): the honeycomb's simplify(5 * spacing) takes a tolerance
+// in millimetres on scaled points, so it only drops a repeated vertex and keeps every real corner. Our
+// multiline_fill() still shifts each vertex along its own normal, so it needs that repeated vertex gone.
+TEST_CASE("Honeycomb simplify only drops the repeated row joint vertex that multiline needs gone", "[Fill][Regression]")
+{
+    const float spacing = 0.45f;
+    // Two hexagon-like turns with the vertex repeated where one row joins the next.
+    const Polyline joined{ Point::new_scale(0., 0.), Point::new_scale(2., 1.15), Point::new_scale(2., 1.15),
+                           Point::new_scale(2., 3.46), Point::new_scale(0., 4.61) };
+    Polyline simplified = joined;
+    simplified.simplify(5 * spacing);
+    REQUIRE(simplified.points == Points{ joined[0], joined[1], joined[3], joined[4] });
+
+    FillParams params;
+    params.multiline = 2;
+    Polylines with_repeat{ joined };
+    multiline_fill(with_repeat, params, spacing);
+    Polylines without_repeat{ simplified };
+    multiline_fill(without_repeat, params, spacing);
+    REQUIRE(with_repeat.size() == 2);
+    REQUIRE(without_repeat.size() == 2);
+    for (size_t line = 0; line < 2; ++line) {
+        // The two copies of the repeated vertex get different normals: the extra line jogs at the joint.
+        REQUIRE(with_repeat[line][1] != with_repeat[line][2]);
+        REQUIRE(without_repeat[line].size() == 4);
+    }
+}
+
 // Point count, number of turns sharper than 25 degrees and length of the sparse infill of a print.
 // A rounded corner is a run of much gentler turns, so smoothing shows up as fewer sharp ones.
 struct SparseInfillShape {

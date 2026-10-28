@@ -387,7 +387,6 @@ void Fill3DHoneycomb::_fill_surface_single(
     // move pattern in place
     for (Polyline &pl : polylines){
       pl.translate(bb.min);
-      pl.simplify(5 * spacing); // simplify to 5x line width
       // Orca: round the corners of the octahedral wave. The layers where the wave degenerates to a
       // straight line have no corner to round.
       smooth_polyline_corners(pl, params.corner_smoothing());
