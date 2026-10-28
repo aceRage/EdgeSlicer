@@ -9783,7 +9783,11 @@ void GCode::append_full_config(const Print& print, std::string& str)
     static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "filament_colour_type"sv, "print_host"sv,
                                                          "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
                                                          "printhost_user"sv, "printhost_password"sv, "printhost_port"sv});
-    auto                                    is_banned = [](const std::string& key) { return banned_keys.find(key) != banned_keys.end(); };
+    // Visual-only keys (visual_only_option_keys()) are banned too: Print::apply() already strips them, this
+    // keeps the block clean should a later path build the config without it.
+    auto                                    is_banned = [](const std::string& key) {
+        return banned_keys.find(key) != banned_keys.end() || is_visual_only_option(key);
+    };
     // BBS: the idle-nozzle pre-heating keys are dumped (as Bambu Studio does) only for a printer that
     // pre-heats; every other printer's config block stays as it was before the keys existed.
     static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,

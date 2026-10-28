@@ -1494,6 +1494,10 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: add more logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter")%__LINE__;
+    // Visual-only keys (multi-colour filament split / angle / twist) never reach the slicer: dropped
+    // before anything below reads, compares or stores the config, so they cannot change G-code or
+    // invalidate a step. tests/design_multicolour_filament_view.md 6.1.
+    strip_visual_only_options(new_full_config);
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
