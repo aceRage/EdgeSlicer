@@ -1989,12 +1989,28 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
                                                 libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(look.exposure, 1.f);
+    m_viewer.set_use_fragment_prelude(look.material && m_viewer.get_fragment_prelude_program() != 0);
 
     glsafe(::glEnable(GL_DEPTH_TEST));
     const Camera                 &camera = wxGetApp().plater()->get_camera();
     const libvgcode::Mat4x4 view       = libvgcode::convert(static_cast<Matrix4f>(camera.get_view_matrix().matrix().cast<float>()));
     const libvgcode::Mat4x4 projection = libvgcode::convert(static_cast<Matrix4f>(camera.get_projection_matrix().matrix().cast<float>()));
     m_viewer.render(view, projection);
+}
+
+unsigned int GCodeViewer::showcase_material_program(const std::string &prelude, const std::vector<std::pair<std::string, int>> &sampler_units,
+                                                     std::string &error)
+{
+    // Again after a change, or when the viewer lost the program (a GL shutdown) without failing.
+    if (prelude != m_showcase_prelude || (!prelude.empty() && m_showcase_prelude_error.empty() && m_viewer.get_fragment_prelude_program() == 0)) {
+        m_showcase_prelude       = prelude;
+        m_showcase_prelude_error.clear();
+        std::string err;
+        if (!m_viewer.set_fragment_prelude(prelude, sampler_units, &err))
+            m_showcase_prelude_error = err.empty() ? std::string("unknown error") : err;
+    }
+    error = m_showcase_prelude_error;
+    return m_viewer.get_fragment_prelude_program();
 }
 
 void GCodeViewer::end_showcase()
@@ -2010,6 +2026,7 @@ void GCodeViewer::restore_from_showcase(bool ranges)
         return;
     sv.active = false;
     m_viewer.set_smooth_look(false, {});
+    m_viewer.set_use_fragment_prelude(false);
     m_viewer.set_light_top_dir({ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(1.f, 1.f);
     m_viewer.set_view_type(sv.view_type);

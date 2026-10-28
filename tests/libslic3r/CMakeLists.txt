@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_multicolour_filament.cpp
 	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
@@ -178,6 +179,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_video.cpp
     test_showcase_path.cpp
     test_showcase_tone.cpp
+    test_showcase_glsl.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
