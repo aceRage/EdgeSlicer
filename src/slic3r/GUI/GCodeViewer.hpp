@@ -300,6 +300,9 @@ private:
         bool                                                   show_supports   = true;   // S5b
     };
     ShowcaseSaved m_showcase;
+    // Realism 1b: the prelude libvgcode's material program was last built from, and why it failed.
+    std::string   m_showcase_prelude;
+    std::string   m_showcase_prelude_error;
     // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
     void restore_from_showcase(bool ranges);
 
@@ -353,8 +356,16 @@ public:
         bool   set_light       = false;
         std::array<float, 3> light_dir_eye{ { -0.4574957f, 0.4574957f, 0.7624929f } };   // to the key light
         float  exposure        = 1.f;
+        // Realism 1b: light the smooth look with the prelude program (showcase_material_program()),
+        // whose uniforms the caller has set; false keeps libvgcode's own lighting.
+        bool   material        = false;
     };
     void render_for_showcase(const ShowcaseLook &look);
+    // Realism 1b: libvgcode's segments program with Showcase's material lighting put in front of its
+    // fragment shader (libvgcode::Viewer::set_fragment_prelude). Built once per distinct prelude, and
+    // not retried after a failure (`error` then says why). 0 = none.
+    unsigned int showcase_material_program(const std::string &prelude, const std::vector<std::pair<std::string, int>> &sampler_units,
+                                           std::string &error);
     void end_showcase();
     bool showcase_active() const { return m_showcase.active; }
     size_t layers_count() const { return m_viewer.get_layers_count(); }

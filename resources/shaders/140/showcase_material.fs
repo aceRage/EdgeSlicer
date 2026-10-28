@@ -11,15 +11,22 @@
 //   approximation for the specular part.
 // - Procedural layer lines on the mesh at the object's real layer heights (design 2.6.2), faded
 //   out below ~1.5 px a layer so far shots do not moire (layer_fade, as layer_line_fade() in C++).
+// - 1c: the silk sheen follows the lines. Walls keep the horizontal tangent (the perimeters); flat
+//   top and bottom faces take the skin's line direction from the print settings (skin_mode_*,
+//   Showcase::skin_tangent_mode()), turned layer by layer as the slicer turns it, or the rings of a
+//   concentric skin; patterns without one direction get a round highlight.
 // - Linear lighting. 1a (tests/design_showcase_realism.md 2.1): with hdr_output the shader writes
 //   linear light into the objects' RGBA16F layer and the post pass (showcase_post.fs) applies the
 //   exposure, the tone curve and the sRGB encoding. Without it (the floor's mirror pass, or no float
 //   buffers) it does those itself: exposure, the Khronos PBR Neutral tone map (keeps filament
 //   colours) or the filmic curve, sRGB out.
+// - 1b: the block between the SHOWCASE_MATERIAL_COMMON markers is also the toolpaths' lighting.
+//   ShowcaseRenderer cuts it out of this file (Showcase::extract_glsl_block) and hands it, with
+//   showcase_toolpath.glsl, to libvgcode as the prelude of its smooth-path fragment shader. Keep it
+//   free of names libvgcode's shader declares (camera_position, exposure, shadow_map, world_position,
+//   UP, LUMA: Showcase::toolpath_prelude_problems() lists them) and of the varyings of this file.
 //
 // Optional: when it does not compile the Showcase canvas draws its objects with phong as in S1.
-
-const float PI = 3.14159265;
 
 uniform vec4 uniform_color;          // the filament colour, sRGB (GLModel sets it)
 
@@ -33,17 +40,10 @@ uniform float mat_alpha;
 uniform float mat_line_shade;
 uniform float mat_fiber_noise;
 
-// Lights: direction TO the light (world) and linear colour x intensity. Light 0 is the key.
-uniform int   light_count;
-uniform vec3  light_dir[3];
-uniform vec3  light_color[3];
 uniform vec3  camera_position;       // world
 uniform float exposure;              // linear multiplier (2^EV); not used with hdr_output
-// 1a: linear light out for the post pass; else tone-mapped sRGB as before.
-uniform bool  hdr_output;
 // 1a: the opaque pass writes full coverage into the HDR layer (blending is off there).
 uniform bool  force_opaque;
-uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
 
 // The key light's shadow map (unit 5, as phong).
 uniform sampler2D shadow_map;
@@ -51,14 +51,6 @@ uniform mat4  shadow_light_vp;
 uniform float shadow_intensity;      // 0 = no shadow map
 uniform float shadow_map_texel;
 uniform float shadow_softness;       // PCF footprint scale
-
-// Environment (unit 6).
-uniform bool        use_env;
-uniform samplerCube env_map;
-uniform float       env_max_lod;
-uniform float       env_intensity;
-uniform float       env_rotation;    // radians around +Z
-uniform vec3        env_sh[9];
 
 // Layer lines. layer_mode 0 off, 1 uniform (first + steps), 2 table (unit 7, R32F tops).
 uniform int       layer_mode;
@@ -68,6 +60,15 @@ uniform float     layer_height;
 uniform sampler2D layer_table;
 uniform int       layer_count;
 uniform int       layer_table_width;
+
+// 1c: the top / bottom skin's lines (SkinTangent). Mode 0 isotropic, 1 lines, 2 concentric. Lines:
+// layer i runs at skin_angles[base + i % count] radians (base 0 top, 8 bottom).
+uniform int   skin_mode_top;
+uniform int   skin_mode_bottom;
+uniform int   skin_count_top;
+uniform int   skin_count_bottom;
+uniform float skin_angles[16];
+uniform vec2  skin_center;           // concentric: the rings' centre (world XY)
 
 // Nothing under the floor (and the mirrored pass keeps to its side of it).
 uniform bool  clip_floor;
@@ -79,6 +80,27 @@ in vec4 world_pos;
 in vec3 world_normal;
 
 out vec4 out_color;
+
+// ---- BEGIN SHOWCASE_MATERIAL_COMMON ----
+// Shared with the toolpaths (1b). Uniforms and functions only; nothing from outside the block.
+
+const float PI = 3.14159265;
+
+// Lights: direction TO the light (world) and linear colour x intensity. Light 0 is the key.
+uniform int   light_count;
+uniform vec3  light_dir[3];
+uniform vec3  light_color[3];
+// 1a: linear light out for the post pass; else tone-mapped sRGB as before.
+uniform bool  hdr_output;
+uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
+
+// Environment (unit 6; the toolpaths' own unit, see ShowcaseRenderer).
+uniform bool        use_env;
+uniform samplerCube env_map;
+uniform float       env_max_lod;
+uniform float       env_intensity;
+uniform float       env_rotation;    // radians around +Z
+uniform vec3        env_sh[9];
 
 vec3 srgb_to_linear(vec3 c)
 {
@@ -180,28 +202,6 @@ vec3 env_brdf(vec3 f0, float roughness, float n_dot_v)
     return f0 * ab.x + ab.y;
 }
 
-// --- shadows ---------------------------------------------------------------------------------------
-
-float key_shadow(vec3 n)
-{
-    if (shadow_intensity <= 0.0)
-        return 1.0;
-    vec4 lp = shadow_light_vp * world_pos;
-    vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
-    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0)
-        return 1.0;
-    float n_dot_l = dot(n, normalize(light_dir[0]));
-    float bias = mix(0.0004, 0.004, clamp(1.0 - n_dot_l, 0.0, 1.0));
-    float step_size = shadow_map_texel * max(shadow_softness, 0.25);
-    float sum = 0.0;
-    for (int x = -2; x <= 2; ++x)
-        for (int y = -2; y <= 2; ++y) {
-            float closest = texture(shadow_map, proj.xy + vec2(float(x), float(y)) * step_size).r;
-            sum += (proj.z - bias > closest) ? 1.0 : 0.0;
-        }
-    return 1.0 - shadow_intensity * (sum / 25.0);
-}
-
 // --- BRDF ---------------------------------------------------------------------------------------------
 
 vec3 fresnel(vec3 f0, float cos_theta) { return f0 + (1.0 - f0) * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0); }
@@ -227,6 +227,121 @@ float smith_visibility(float n_dot_v, float n_dot_l, float a)
     float gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
     float gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
     return gv * gl / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+}
+
+float hash12(vec2 p)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// --- the material ------------------------------------------------------------------------------------
+
+// One surface point of a finish (MaterialParams), lit by the three lights and the environment.
+// n, v: unit normal and direction to the eye; t: the anisotropic lobe's tangent (along the lines;
+// any unit vector across n when anisotropy is 0); key_shade: the key light's shadow (1 = lit).
+// albedo is linear; roughness already carries the fibre speckle.
+void shade_material(vec3 n, vec3 v, vec3 t, vec3 albedo, float roughness, float f0_value, float metal_tint,
+                    float anisotropy, float clearcoat, float key_shade, out vec3 diffuse, out vec3 specular)
+{
+    float n_dot_v = max(dot(n, v), 1e-4);
+    vec3  f0 = mix(vec3(f0_value), albedo, metal_tint);
+    float kd = 1.0 - 0.7 * metal_tint;
+    float a = roughness * roughness;
+
+    // Tangent frame for the anisotropic lobe: t along the lines, b across them.
+    vec3 b = cross(n, t);
+    float at = max(a * (1.0 - 0.7 * anisotropy), 0.002);
+    float ab = min(a * (1.0 + 2.0 * anisotropy), 1.0);
+
+    diffuse = vec3(0.0);
+    specular = vec3(0.0);
+    for (int i = 0; i < 3; ++i) {
+        if (i >= light_count)
+            break;
+        vec3 l = normalize(light_dir[i]);
+        float n_dot_l = dot(n, l);
+        if (n_dot_l <= 0.0)
+            continue;
+        float shade = i == 0 ? key_shade : 1.0;
+        vec3 radiance = light_color[i] * shade;
+        vec3 h = normalize(l + v);
+        float d = anisotropy > 0.0 ? ggx_aniso(h, n, t, b, at, ab) : ggx(max(dot(n, h), 0.0), a);
+        vec3 f = fresnel(f0, dot(h, v));
+        specular += d * smith_visibility(n_dot_v, n_dot_l, a) * f * n_dot_l * radiance;
+        // 1c: without an environment the sliding band comes from the lights alone: a Kajiya-Kay
+        // streak with the line as the fibre (S5's toolpath silk).
+        if (anisotropy > 0.0 && !use_env) {
+            float th = dot(t, h);
+            specular += anisotropy * 0.35 * pow(sqrt(max(1.0 - th * th, 0.0)), 80.0) * n_dot_l * f * radiance;
+        }
+        // Clear coat: a sharp second lobe (gloss, transparent).
+        if (clearcoat > 0.0) {
+            float ac = 0.08 * 0.08;
+            specular += clearcoat * ggx(max(dot(n, h), 0.0), ac) * smith_visibility(n_dot_v, n_dot_l, ac) *
+                        fresnel(vec3(0.04), dot(h, v)) * n_dot_l * radiance;
+        }
+        diffuse += albedo * kd * n_dot_l * radiance;
+    }
+
+    // Image-based light. 1c: an anisotropic finish reflects the environment off a normal bent
+    // towards the plane across the lines, sampled at a roughness raised across them: the usual
+    // approximation (Filament's bent normal; there is no anisotropic prefiltered map). The
+    // reflection then slides along the lines as the view moves, the silk band.
+    vec3 r = reflect(-v, n);
+    vec3 r_aniso = r;
+    if (anisotropy > 0.0) {
+        vec3 across = cross(t, v);
+        vec3 bent = cross(across, t);
+        r_aniso = reflect(-v, normalize(mix(n, bent, clamp(anisotropy, 0.0, 1.0))));
+    }
+    float env_rough = clamp(roughness * (1.0 + 0.6 * anisotropy), 0.0, 1.0);
+    vec3 ambient = use_env ? env_diffuse(n) * env_intensity : plain_diffuse(n);
+    vec3 reflected = use_env ? env_specular(r_aniso, env_rough) * env_intensity : plain_specular(r_aniso, env_rough);
+    diffuse += albedo * kd * ambient;
+    specular += reflected * env_brdf(f0, env_rough, n_dot_v);
+    if (clearcoat > 0.0) {
+        vec3 coat = use_env ? env_specular(r, 0.08) * env_intensity : plain_specular(r, 0.08);
+        specular += clearcoat * coat * env_brdf(vec3(0.04), 0.08, n_dot_v);
+    }
+}
+
+// What the shader writes: linear light for the post pass (hdr_output), else exposure x the tone
+// curve x sRGB. exposure_mul is 2^EV; opaque writes full coverage into the HDR layer.
+vec4 material_output(vec3 lit, float alpha, float exposure_mul, bool opaque)
+{
+    if (hdr_output) {
+        // Linear light; the post pass applies the exposure, the curve and the encoding. Kept inside
+        // the half float range (and NaN-free) so one bad pixel cannot spread through later blurs.
+        vec3 radiance = min(max(lit * 0.8, vec3(0.0)), vec3(60000.0));
+        return vec4(radiance, opaque ? 1.0 : alpha);
+    }
+    vec3 color = lit * exposure_mul * 0.8;
+    return vec4(linear_to_srgb(tone_curve_map(color)), alpha);
+}
+// ---- END SHOWCASE_MATERIAL_COMMON ----
+
+// --- shadows ---------------------------------------------------------------------------------------
+
+float key_shadow(vec3 n)
+{
+    if (shadow_intensity <= 0.0)
+        return 1.0;
+    vec4 lp = shadow_light_vp * world_pos;
+    vec3 proj = lp.xyz / lp.w * 0.5 + 0.5;
+    if (proj.z > 1.0 || proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0)
+        return 1.0;
+    float n_dot_l = dot(n, normalize(light_dir[0]));
+    float bias = mix(0.0004, 0.004, clamp(1.0 - n_dot_l, 0.0, 1.0));
+    float step_size = shadow_map_texel * max(shadow_softness, 0.25);
+    float sum = 0.0;
+    for (int x = -2; x <= 2; ++x)
+        for (int y = -2; y <= 2; ++y) {
+            float closest = texture(shadow_map, proj.xy + vec2(float(x), float(y)) * step_size).r;
+            sum += (proj.z - bias > closest) ? 1.0 : 0.0;
+        }
+    return 1.0 - shadow_intensity * (sum / 25.0);
 }
 
 // --- layer lines ----------------------------------------------------------------------------------------
@@ -265,15 +380,63 @@ vec2 layer_at(float z)
     return vec2(first + k * layer_height, first + (k + 1.0) * layer_height);
 }
 
+// 1c: the index of the layer containing z, 0 = the first (LayerTable::index_at /
+// uniform_layer_index_at in C++); 0 without layer information.
+int layer_index_at(float z)
+{
+    if (layer_mode == 2 && layer_count > 0 && layer_table_width > 0) {
+        int hi = layer_count - 1;
+        float last = layer_top(hi);
+        if (z > last) {
+            float prev = hi > 0 ? layer_top(hi - 1) : 0.0;
+            float h = max(last - prev, 1e-4);
+            return hi + 1 + int(floor((z - last) / h));
+        }
+        int lo = 0;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (layer_top(mid) < z)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return lo;
+    }
+    if (layer_mode != 1)
+        return 0;
+    float first = first_layer_height > 0.0 ? first_layer_height : layer_height;
+    if (z < first || layer_height <= 0.0)
+        return 0;
+    return 1 + int(floor((z - first) / layer_height));
+}
+
+// 1c: the silk lobe's tangent on a flat top (up) or bottom face: the skin's lines there. False for
+// a skin without one direction (the highlight is then round).
+bool skin_tangent(vec3 n, out vec3 t)
+{
+    bool  top  = n.z > 0.0;
+    int   mode = top ? skin_mode_top : skin_mode_bottom;
+    t = vec3(1.0, 0.0, 0.0);
+    if (mode == 1) {
+        int count = top ? skin_count_top : skin_count_bottom;
+        // The layer that made the face: just below a top face, just above a bottom one.
+        int i = layer_index_at(world_pos.z + (top ? -0.001 : 0.001));
+        int k = count > 0 ? i - (i / count) * count : 0;
+        float a = skin_angles[(top ? 0 : 8) + k];
+        t = vec3(cos(a), sin(a), 0.0);
+    } else if (mode == 2) {
+        vec2 r = world_pos.xy - skin_center;
+        if (length(r) > 1e-4)
+            t = vec3(-r.y, r.x, 0.0) / length(r);
+    } else
+        return false;
+    t = t - n * dot(t, n);
+    t = length(t) > 1e-4 ? normalize(t) : normalize(cross(vec3(0.0, 1.0, 0.0), n));
+    return true;
+}
+
 // 0 at 1 px a layer and below, 1 at 2 px and above (layer_line_fade() in C++).
 float layer_fade(float layer_px) { return smoothstep(1.0, 2.0, layer_px); }
-
-float hash12(vec2 p)
-{
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
 
 void main()
 {
@@ -313,70 +476,32 @@ void main()
         roughness = clamp(roughness - mat_fiber_noise * 0.25 * step(0.93, speck), 0.03, 1.0);
     }
 
-    float n_dot_v = max(dot(n, v), 1e-4);
-    vec3  f0 = mix(vec3(mat_f0), albedo, mat_metal_tint);
-    float kd = 1.0 - 0.7 * mat_metal_tint;
-    float a = roughness * roughness;
-
-    // Tangent frame for the anisotropic lobe: t follows the layers (horizontal), b climbs the wall.
+    // The anisotropic lobe's tangent follows the layers (horizontal) on walls; 1c: on flat top and
+    // bottom faces it follows the skin's lines, or the lobe goes round where they have no direction.
     vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 t = normalize(cross(up, n));
-    vec3 b = cross(n, t);
-    float at = max(a * (1.0 - 0.7 * mat_anisotropy), 0.002);
-    float ab = min(a * (1.0 + 2.0 * mat_anisotropy), 1.0);
-
-    vec3 diffuse = vec3(0.0);
-    vec3 specular = vec3(0.0);
-    for (int i = 0; i < 3; ++i) {
-        if (i >= light_count)
-            break;
-        vec3 l = normalize(light_dir[i]);
-        float n_dot_l = dot(n, l);
-        if (n_dot_l <= 0.0)
-            continue;
-        float shade = i == 0 ? key_shadow(n) : 1.0;
-        vec3 radiance = light_color[i] * shade;
-        vec3 h = normalize(l + v);
-        float d = mat_anisotropy > 0.0 ? ggx_aniso(h, n, t, b, at, ab) : ggx(max(dot(n, h), 0.0), a);
-        vec3 f = fresnel(f0, dot(h, v));
-        specular += d * smith_visibility(n_dot_v, n_dot_l, a) * f * n_dot_l * radiance;
-        // Clear coat: a sharp second lobe (gloss, transparent).
-        if (mat_clearcoat > 0.0) {
-            float ac = 0.08 * 0.08;
-            specular += mat_clearcoat * ggx(max(dot(n, h), 0.0), ac) * smith_visibility(n_dot_v, n_dot_l, ac) *
-                        fresnel(vec3(0.04), dot(h, v)) * n_dot_l * radiance;
-        }
-        diffuse += albedo * kd * n_dot_l * radiance;
+    float anisotropy = mat_anisotropy;
+    if (anisotropy > 0.0 && abs(n.z) > 0.9) {
+        vec3 skin_t;
+        if (skin_tangent(n, skin_t))
+            t = skin_t;
+        else
+            anisotropy = 0.0;
     }
 
-    // Image-based light.
-    vec3 r = reflect(-v, n);
-    float env_rough = clamp(roughness * (1.0 + 0.6 * mat_anisotropy), 0.0, 1.0);
-    vec3 ambient = use_env ? env_diffuse(n) * env_intensity : plain_diffuse(n);
-    vec3 reflected = use_env ? env_specular(r, env_rough) * env_intensity : plain_specular(r, env_rough);
-    diffuse += albedo * kd * ambient;
-    specular += reflected * env_brdf(f0, env_rough, n_dot_v);
-    if (mat_clearcoat > 0.0) {
-        vec3 coat = use_env ? env_specular(r, 0.08) * env_intensity : plain_specular(r, 0.08);
-        specular += mat_clearcoat * coat * env_brdf(vec3(0.04), 0.08, n_dot_v);
-    }
+    vec3 diffuse, specular;
+    shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_shadow(n),
+                   diffuse, specular);
 
     vec3 lit = diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5);
 
     // Translucent: the body lets light through, the rim reflects (Fresnel edge brightening).
+    float n_dot_v = max(dot(n, v), 1e-4);
     float alpha = uniform_color.a * mat_alpha;
     if (alpha < 1.0) {
         float edge = pow(1.0 - n_dot_v, 4.0);
         alpha = clamp(mix(alpha, 1.0, edge * 0.7) + dot(specular, vec3(0.3)) * 0.5, 0.0, 1.0);
     }
 
-    if (hdr_output) {
-        // Linear light; the post pass applies the exposure, the curve and the encoding. Kept inside
-        // the half float range (and NaN-free) so one bad pixel cannot spread through later blurs.
-        vec3 radiance = min(max(lit * 0.8, vec3(0.0)), vec3(60000.0));
-        out_color = vec4(radiance, force_opaque ? 1.0 : alpha);
-        return;
-    }
-    vec3 color = lit * exposure * 0.8;
-    out_color = vec4(linear_to_srgb(tone_curve_map(color)), alpha);
+    out_color = material_output(lit, alpha, exposure, force_opaque);
 }

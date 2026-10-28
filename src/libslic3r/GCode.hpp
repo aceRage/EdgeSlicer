@@ -115,7 +115,8 @@ public:
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
         m_is_first_print(true),
         m_last_wipe_tower_print_z(print_config.z_offset.value),
-        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config))
+        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config)),
+        m_sparse_layers_combined(wipe_tower_sparse_layers_combined(print_config))
     {
         // Precomputed rather than accumulated while emitting, so that the clearance validator and
         // the emitter cannot disagree about where the compacted tower sits on any given layer.
@@ -152,6 +153,7 @@ private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
     std::string append_tcr(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
     std::string append_tcr2(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, int new_extruder_id, double z = -1.) const;
+    std::string tower_height_tag(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr, const std::string &tcr_gcode) const;
 
     // Postprocesses gcode: rotates and moves G1 extrusions and returns result
     std::string post_process_wipe_tower_moves(const WipeTower::ToolChangeResult& tcr, const Vec2f& translation, float angle) const;
@@ -193,6 +195,9 @@ private:
     // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
     // option: smooth timelapse keeps a tower on every layer regardless.
     const bool                                                   m_sparse_layers_skipped;
+    // Orca #15841: combined tower layers are thicker than the object layer they sit on, the only case
+    // where the tower's height is not the one process_layer already declared.
+    const bool                                                   m_sparse_layers_combined;
     BoundingBoxf                                                 m_wipe_tower_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
