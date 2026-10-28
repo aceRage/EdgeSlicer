@@ -50,7 +50,7 @@ inline int tab_from_name(const std::string &name)
 }
 
 // Former Field.cpp Ctrl+1..4 map (no longer bound: AltGr is Ctrl+Alt and stole AZERTY `{`/`~`/`#`).
-// Home, Prepare, Preview, Device — the same four tabs those keys opened before Showcase moved
+// Home, Prepare, Preview, Device - the same four tabs those keys opened before Showcase moved
 // Device up by one. Stream (5) was never in this map. -1 for any other key.
 constexpr int tab_for_field_shortcut(char key)
 {
