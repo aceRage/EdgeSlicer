@@ -167,9 +167,10 @@ std::vector<const SupportLayer*> roof_stack(const Print &print)
 {
     const PrintObject &object = *print.objects().front();
     std::vector<const SupportLayer*> out;
-    for (auto it = object.support_layers().rbegin(); it != object.support_layers().rend(); ++ it)
-        if (! (*it)->support_fills.entities.empty())
-            out.push_back(*it);
+    const auto layers = object.support_layers();
+    for (size_t i = layers.size(); i > 0; -- i)
+        if (! layers[i - 1]->support_fills.entities.empty())
+            out.push_back(layers[i - 1]);
     return out;
 }
 
