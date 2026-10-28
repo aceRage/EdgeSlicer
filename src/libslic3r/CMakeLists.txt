@@ -115,6 +115,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseMaterial.hpp
     Showcase/ShowcaseMaterialGlsl.cpp
     Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
