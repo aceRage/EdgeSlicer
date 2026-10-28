@@ -10,6 +10,7 @@
 #include "Print.hpp"
 #include "ShortestPath.hpp"
 #include "SupportCommon.hpp"
+#include "SupportInterlock.hpp"
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
 #include "TreeSupport.hpp"
@@ -1825,6 +1826,21 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                             ts_layer->support_fills.entities.push_back(base_eec.release());
                     }
                 }
+                // EdgeSlicer (support interface interlock, classic trees): the woven roof stripes, solid
+                // along the stripe. Body stripes in the support filament, interface stripes in the
+                // interface filament (a support group's own interface filament is not applied here).
+                for (const SupportLayer::InterlockRoofPart &part : ts_layer->interlock_roof) {
+                    const Flow &flow = part.body ? support_flow : interface_flow;
+                    Polylines lines = support_interlock_fill_lines(part.areas, part.angle,
+                        coord_t(scale_(m_support_params.interlock_line_spacing)));
+                    if (lines.empty())
+                        continue;
+                    extrusion_entities_append_paths(ts_layer->support_fills.entities, std::move(lines),
+                        part.body ? erSupportMaterial : erSupportMaterialInterface,
+                        flow.mm3_per_mm(), flow.width(), flow.height());
+                    if (part.body)
+                        ts_layer->interlock_woven = true;
+                }
                 // Ultra (support groups, Stage 5 / plan Stage 4b "per-group interface ... ironing"):
                 // iron the exposed top of the roof. A classic tree never did this - support_ironing
                 // reached it only through SupportParameters::interface_spacing, which forces the
@@ -1846,6 +1862,8 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                         append(above, upper->roof_areas);
                         append(above, upper->roof_1st_layer);
                         append(above, upper->floor_areas);
+                        for (const SupportLayer::InterlockRoofPart &part : upper->interlock_roof)
+                            append(above, part.areas);
                         if (! above.empty())
                             exposed = diff_ex(exposed, above);
                     }
@@ -2266,6 +2284,9 @@ void TreeSupport::draw_circles()
                 bool             floor_interface_as_base = false;
                 bool has_circle_node = false;
                 ExPolygons extra_wall_areas;
+                // EdgeSlicer (support interface interlock): roof areas by depth under the top roof
+                // layer (1 = right under it), for the woven band. Sized 0 with the feature off.
+                std::vector<ExPolygons> interlock_by_depth(m_support_params.interlock_layers > 0 ? m_support_params.interlock_layers + 1 : 0);
                 ExPolygons collision_sharp_tails;
                 ExPolygons collision_base;
                 // BBS port: with Z-overrides-X/Y, carve roofs against the z-distance
@@ -2369,12 +2390,20 @@ void TreeSupport::draw_circles()
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 &&
                              node.is_sharp_tail == false)
                     {
+                        // A roof node counts its roof layers down from top_interface_layers (the layer
+                        // touching the model) to 1 (roof_1st_layer): its depth under the top is the difference.
+                        if (const int depth = int(top_interface_layers) - node.support_roof_layers_below;
+                            depth >= 1 && depth < int(interlock_by_depth.size()))
+                            append(interlock_by_depth[depth], area);
                         append(roof_1st_layer, area);
                         max_layers_above_roof1 = std::max(max_layers_above_roof1, node.dist_mm_to_top);
                     }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below > 1 &&
                              node.is_sharp_tail == false)
                     {
+                        if (const int depth = int(top_interface_layers) - node.support_roof_layers_below;
+                            depth >= 1 && depth < int(interlock_by_depth.size()))
+                            append(interlock_by_depth[depth], area);
                         append(node.support_roof_layers_below <= top_base_interface_layers ? roof_base_areas : roof_areas, area);
                         max_layers_above_roof = std::max(max_layers_above_roof, node.dist_mm_to_top);
                     }
@@ -2409,6 +2438,50 @@ void TreeSupport::draw_circles()
                 ExPolygons roofs; append(roofs, roof_1st_layer); append(roofs, roof_areas);append(roofs, roof_gap_areas);
                 base_areas = diff_ex(base_areas, ClipperUtils::clip_clipper_polygons_with_subject_bbox(roofs, get_extents(base_areas)));
                 base_areas = intersection_ex(base_areas, m_machine_border);
+
+                // EdgeSlicer (support interface interlock, classic trees): weave the roof layers under the
+                // top one. The finished roof (roof_areas + roof_1st_layer) is split by depth, cut into
+                // body and interface stripes on the object grid (SupportInterlock.hpp), and the woven part
+                // leaves roof_areas / roof_1st_layer for SupportLayer::interlock_roof. The top roof layer
+                // (depth 0) is never touched. The base was cut by the full roof above, so it stays clear.
+                if (! interlock_by_depth.empty()) {
+                    ExPolygons roof_all = roof_areas;
+                    append(roof_all, roof_1st_layer);
+                    Polygons remaining = to_polygons(roof_all);
+                    Polygons woven_all;
+                    const coord_t beam_width = m_support_params.interlock_beam_width();
+                    const coord_t line_width = coord_t(scale_(m_support_params.interlock_line_spacing));
+                    for (size_t depth = 1; depth < interlock_by_depth.size() && ! remaining.empty(); ++ depth) {
+                        if (interlock_by_depth[depth].empty())
+                            continue;
+                        Polygons part = intersection(remaining, to_polygons(interlock_by_depth[depth]));
+                        if (part.empty())
+                            continue;
+                        remaining = diff(remaining, part);
+                        const float angle = m_support_params.interlock_angle(depth);
+                        SupportInterlockSplit split = support_interlock_split(union_ex(part), angle, beam_width, line_width);
+                        if (! split.body.empty()) {
+                            polygons_append(woven_all, split.body);
+                            ts_layer->interlock_roof.push_back({ union_ex(split.body), angle, true });
+                        }
+                        if (! split.interface.empty()) {
+                            polygons_append(woven_all, split.interface);
+                            ts_layer->interlock_roof.push_back({ union_ex(split.interface), angle, false });
+                        }
+                    }
+                    if (! woven_all.empty()) {
+                        // roof_areas holds the interface roof first and the base-interface roof from
+                        // first_base_roof_area on; keep that order.
+                        ExPolygons roof_iface(roof_areas.begin(), roof_areas.begin() + std::min(first_base_roof_area, roof_areas.size()));
+                        ExPolygons roof_base (roof_areas.begin() + std::min(first_base_roof_area, roof_areas.size()), roof_areas.end());
+                        roof_iface = diff_ex(roof_iface, woven_all);
+                        roof_base  = diff_ex(roof_base,  woven_all);
+                        roof_areas = std::move(roof_iface);
+                        first_base_roof_area = roof_areas.size();
+                        append(roof_areas, std::move(roof_base));
+                        roof_1st_layer = diff_ex(roof_1st_layer, woven_all);
+                    }
+                }
 
                 if (SQUARE_SUPPORT) {
                     // simplify support contours

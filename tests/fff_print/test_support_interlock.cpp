@@ -43,8 +43,8 @@ DynamicPrintConfig interlock_config(const std::string &style, bool interlock, in
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         { "enable_support",                  1 },
-        { "support_type",                    style == "organic" ? "tree(auto)" : "normal(auto)" },
-        { "support_style",                   style == "organic" ? "organic" : "default" },
+        { "support_type",                    style == "normal" ? "normal(auto)" : "tree(auto)" },
+        { "support_style",                   style == "normal" ? "default" : style },
         { "support_on_build_plate_only",     1 },
         { "layer_height",                    0.2 },
         { "initial_layer_print_height",      0.2 },
@@ -186,7 +186,10 @@ TEST_CASE("Support interface interlock is off by default", "[SupportInterlock]")
 
 TEST_CASE("Support interface interlock weaves the layers under the top contact", "[SupportInterlock]")
 {
-    const std::string style = GENERATE(std::string("normal"), std::string("organic"));
+    // "organic" runs TreeSupport3D + SupportCommon; the classic Bambu tree styles run TreeSupport.cpp
+    // (the owner's hand test of #758 used tree_hybrid, which phase 1 first missed).
+    const std::string style = GENERATE(std::string("normal"), std::string("organic"),
+                                       std::string("tree_hybrid"), std::string("tree_slim"), std::string("tree_strong"));
     CAPTURE(style);
 
     Print print_off, print_on;
@@ -343,5 +346,34 @@ TEST_CASE("Support interface interlock keeps its interface stripes where a botto
         // they must not end up in a second interface layer at the same height, which is never printed.
         if (depth == 2)
             CHECK(s_on.interface_length > s_off.interface_length + 20.);
+    }
+}
+
+TEST_CASE("Support interface interlock with the owner's tree hybrid settings", "[SupportInterlock]")
+{
+    // The #758 hand-test project: tree(auto) + tree_hybrid, body "default" filament, interface 2,
+    // 4 top interface layers, 3 woven layers, 1-line stripes, zero top Z distance.
+    auto config = [](bool on) {
+        DynamicPrintConfig c = interlock_config("tree_hybrid", on, 4);
+        c.set_key_value("support_filament", new ConfigOptionInt(0));
+        c.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.));
+        c.set_key_value("support_interface_interlock_layers", new ConfigOptionInt(3));
+        c.set_key_value("support_interface_interlock_beam_lines", new ConfigOptionInt(1));
+        return c;
+    };
+    Print print_off, print_on;
+    init_and_process_print({ capped_stem() }, print_off, config(false));
+    init_and_process_print({ capped_stem() }, print_on,  config(true));
+    const std::vector<const SupportLayer*> off = roof_stack(print_off);
+    const std::vector<const SupportLayer*> on  = roof_stack(print_on);
+    REQUIRE(off.size() >= 5);
+    REQUIRE(on.size() == off.size());
+    CHECK(dump(*on[0]) == dump(*off[0]));
+    for (size_t depth = 1; depth <= 3; ++ depth) {
+        CAPTURE(depth);
+        const RoleStats s = role_stats(*on[depth]);
+        CHECK(s.body_length > 10.);
+        CHECK(s.interface_length > 10.);
+        CHECK(on[depth]->interlock_woven);
     }
 }

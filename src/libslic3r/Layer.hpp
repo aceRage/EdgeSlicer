@@ -344,6 +344,8 @@ public:
         out.insert(out.end(), roof_areas.begin(), roof_areas.end());
         out.insert(out.end(), roof_1st_layer.begin(), roof_1st_layer.end());
         out.insert(out.end(), floor_areas.begin(), floor_areas.end());
+        for (const InterlockRoofPart &part : interlock_roof)
+            out.insert(out.end(), part.areas.begin(), part.areas.end());
         return out;
     }
 
@@ -373,6 +375,16 @@ protected:
     ExPolygons                                roof_1st_layer; // the layer just below roof. When working with PolySupport, this layer should be printed with regular material
     ExPolygons                                floor_areas;
     ExPolygons                                roof_gap_areas; // the areas in the gap between support roof and overhang
+    // EdgeSlicer (support interface interlock): the woven stripes of a classic tree roof, taken out of
+    // roof_areas / roof_1st_layer by TreeSupport::draw_circles and filled solid along the stripe by
+    // TreeSupport::generate_toolpaths. Body stripes print with the support filament, interface stripes
+    // with the interface filament. Empty unless support_interface_interlock is on.
+    struct InterlockRoofPart {
+        ExPolygons areas;
+        float      angle { 0.f };
+        bool       body  { false };
+    };
+    std::vector<InterlockRoofPart>            interlock_roof;
     enum AreaType { BaseType = 0, RoofType = 1, FloorType = 2, Roof1stLayer = 3 };
     struct AreaGroup
     {

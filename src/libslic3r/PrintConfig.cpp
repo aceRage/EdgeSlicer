@@ -7670,7 +7670,7 @@ void PrintConfigDef::init_fff_params()
                       "that alternate the body and the interface filament, and each layer's stripes are turned "
                       "90 degrees from the layer below. The interface then cannot peel off the body. "
                       "The top interface layer, the one that touches the model, is not changed.\n"
-                      "Applies to top interfaces of normal and organic tree supports. Needs at least one top "
+                      "Applies to the top interfaces of normal and tree supports (all tree styles). Needs at least one top "
                       "interface layer more than the woven layers. Not used when \"Support Filament Matching\" is on.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
