@@ -396,7 +396,7 @@ struct Loaded3mf
     DynamicPrintConfig config;
 };
 
-Loaded3mf round_trip(const DynamicPrintConfig &store_config, const std::string &name)
+Loaded3mf round_trip(DynamicPrintConfig store_config, const std::string &name)
 {
     Model        src_model;
     ModelObject *object = src_model.add_object();
