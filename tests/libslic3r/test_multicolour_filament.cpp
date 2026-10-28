@@ -592,7 +592,7 @@ TEST_CASE("Swatch slices follow the proportions and the rotation (P2)", "[MultiC
     // 30/70: colour 1 covers the first 30% of the width along its axis.
     f.proportion = { 0.3f, 0.7f, 0.f, 0.f };
     CHECK(swatch_slice(f, 16.f, 0.f, 18.f, 8.f) == 0);
-    CHECK(swatch_slice(f, 8.f, 0.f, 18.f, 8.f) == 1);
+    CHECK(swatch_slice(f, 5.f, 0.f, 18.f, 8.f) == 1);
 
     // A pie for three colours: colour 1 centred on the front at rotation 0.
     Filament g;
