@@ -137,6 +137,13 @@ Translucency in toolpath mode comes later (it needs order-independent transparen
 
 **Checks:** a golden still of the toolpath look before and after (expected to change: review side by side); a Preview identity check (smooth_mode 0: pixel-identical screenshot of Preview); `libslic3r_tests` for the GLSL include assembly.
 
+**As built (feat/showcase-1b, 2026-10-27).**
+- The shared GLSL is not a C++ string: it stays in `showcase_material.fs`, between `// ---- BEGIN/END SHOWCASE_MATERIAL_COMMON ----` markers (`shade_material()`, `material_output()` and what they use). `Showcase::toolpath_prelude()` (libslic3r `ShowcaseMaterialGlsl`) cuts it out at run time and appends `showcase_toolpath.glsl` (`external_lit()`, `external_output()`, per-extruder `sc_mat_a/b[16]`). One copy, so the mesh and the toolpaths cannot drift; `test_showcase_glsl.cpp` checks the assembly against the shipped files and that no prelude global clashes with libvgcode's segments shader (it parses `Shaders.hpp`).
+- libvgcode: `Viewer::set_fragment_prelude()` compiles a second segments program (`EXTERNAL_LIGHTING` defined, prelude after `#version`); `set_use_fragment_prelude()` selects it only while the smooth look is on. Preview never sets it, and the built-in program is unchanged.
+- The toolpaths go into the HDR objects layer (opaque, alpha 1) and the post pass, as the mesh. Fallbacks: no float buffers or `EDGESLICER_SHOWCASE_NO_HDR=1` → the material model tone-mapped in the shader; prelude fails to build or `EDGESLICER_SHOWCASE_CLASSIC_TOOLPATHS=1` → Preview's lighting as before. The export report says which ("toolpaths: material, HDR layer" ...).
+- The silk lobe's tangent in toolpath mode is already `seg_dir` here (the analytic lights); 1c adds the bent IBL lookup.
+- No toolpath shadows yet: libvgcode's own `shadow_shade()` is passed in, and Showcase does not give it a shadow map (as before 1b).
+
 ### 2.3 1c: silk sheen along the real extrusion direction
 
 **What the user sees:** silk prints show the sliding "liquid metal" band that follows the lines. On walls it runs around the part; on top skins it runs along the infill lines and flips 90° layer to layer, as a real silk print does.

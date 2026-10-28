@@ -1990,6 +1990,7 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
                                                 libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(look.exposure, 1.f);
+    m_viewer.set_use_fragment_prelude(look.material && m_viewer.get_fragment_prelude_program() != 0);
 
     glsafe(::glEnable(GL_DEPTH_TEST));
     const Camera                 &camera = wxGetApp().plater()->get_camera();
@@ -1998,10 +1999,26 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     m_viewer.render(view, projection);
 }
 
+unsigned int GCodeViewer::showcase_material_program(const std::string &prelude, const std::vector<std::pair<std::string, int>> &sampler_units,
+                                                     std::string &error)
+{
+    // Again after a change, or when the viewer lost the program (a GL shutdown) without failing.
+    if (prelude != m_showcase_prelude || (!prelude.empty() && m_showcase_prelude_error.empty() && m_viewer.get_fragment_prelude_program() == 0)) {
+        m_showcase_prelude       = prelude;
+        m_showcase_prelude_error.clear();
+        std::string err;
+        if (!m_viewer.set_fragment_prelude(prelude, sampler_units, &err))
+            m_showcase_prelude_error = err.empty() ? std::string("unknown error") : err;
+    }
+    error = m_showcase_prelude_error;
+    return m_viewer.get_fragment_prelude_program();
+}
+
 // Multi-colour P3 (tests/design_multicolour_filament_view.md 7.2): coextruded filaments in the smooth
-// look. libvgcode's segments program is rebuilt once with Showcase/MultiColourGlsl.hpp's prelude; the
-// prelude only runs on the smooth path, so Preview draws as before. The slot table goes into its
-// uniforms every frame (a plain table when the look is off, which hands every slot its own colour).
+// look. libvgcode's programs are rebuilt once with Showcase/MultiColourGlsl.hpp's prelude (the built-in
+// one and realism 1b's material one, which lights the same base colour); the prelude only runs on the
+// smooth path, so Preview draws as before. The slot table goes into their uniforms every frame (a
+// plain table when the look is off, which hands every slot its own colour).
 void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
 {
     const bool want = look.smooth && look.coextruded_look && look.multicolour.any_multi;
@@ -2023,11 +2040,16 @@ void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
     const MultiColour::UniformTable &t    = want ? look.multicolour : plain;
     GLint curr_program = 0;
     glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &curr_program));
-    glsafe(::glUseProgram(program));
-    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
-    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
-    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
-    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global"), 1, t.global.data()));
+    for (const unsigned int p : { program, m_viewer.get_fragment_prelude_program() }) {
+        if (p == 0)
+            continue;
+        glsafe(::glUseProgram(p));
+        // -1 (glUniform ignores it) in a program built before the prelude was set.
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global"), 1, t.global.data()));
+    }
     glsafe(::glUseProgram(GLuint(curr_program)));
 }
 
@@ -2044,6 +2066,7 @@ void GCodeViewer::restore_from_showcase(bool ranges)
         return;
     sv.active = false;
     m_viewer.set_smooth_look(false, {});
+    m_viewer.set_use_fragment_prelude(false);
     m_viewer.set_extruded_volume_enabled(false);   // multi-colour P3: frees the volumes
     m_viewer.set_light_top_dir({ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(1.f, 1.f);

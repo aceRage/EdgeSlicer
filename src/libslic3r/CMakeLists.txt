@@ -113,6 +113,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
     Showcase/MultiColourFilament.cpp
     Showcase/MultiColourFilament.hpp
     Showcase/MultiColourGlsl.cpp

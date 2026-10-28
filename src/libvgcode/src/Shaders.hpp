@@ -418,7 +418,18 @@ static const char* Segments_Fragment_Shader =
 "#endif\n"
 "      float crease;\n"
 "      vec3 n = smooth_normal(crease);\n"
+// EDGE (Showcase realism 1b): with a host's prelude (Viewer::set_fragment_prelude) the bead is lit by
+// the host's external_lit() and written by its external_output(), which does its own tone mapping.
+"#ifdef EXTERNAL_LIGHTING\n"
+"      float groove = 1.0 - 0.35 * clamp(look_b[int(seg_info.w + 0.5)].x, 0.0, 1.0) * crease;\n"
+"      float shade = shadow_shade(world_position, mat3(view_matrix) * n);\n"
+"      c = external_lit(n, normalize(camera_position - world_position), seg_dir, bead_base, world_position, groove,\n"
+"                       shade, int(seg_info.w + 0.5));\n"
+"      fragment_color = external_output(c);\n"
+"      return;\n"
+"#else\n"
 "      c = smooth_lit(n, crease);\n"
+"#endif\n"
 "    } else\n"
 "      c = color + color_direct * shadow_shade(world_position, shadow_normal);\n"
 "  } else {\n"

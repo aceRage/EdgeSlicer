@@ -9,8 +9,10 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
 
 #include "../3DScene.hpp"
 #include "../Camera.hpp"
@@ -31,6 +33,7 @@
 
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
 #include <cfloat>
@@ -49,6 +52,9 @@ static constexpr int SHOWCASE_SHADOW_MAP_UNIT = 5;
 // the samplers there); the floor's picture, mirror and contact shadow.
 static constexpr int SHOWCASE_ENV_UNIT        = 6;
 static constexpr int SHOWCASE_LAYER_UNIT      = 7;
+// 1b: the environment cube of the toolpaths' material program (libvgcode's segments program uses
+// units 0-4 and 10).
+static constexpr int SHOWCASE_TOOLPATH_ENV_UNIT = 11;
 static constexpr int SHOWCASE_FLOOR_TEX_UNIT  = 0;
 static constexpr int SHOWCASE_REFLECTION_UNIT = 1;
 static constexpr int SHOWCASE_CONTACT_UNIT    = 2;
@@ -313,6 +319,10 @@ void ShowcaseRenderer::release_gl()
     if (m_env_texture != 0) {
         glsafe(::glDeleteTextures(1, &m_env_texture));
         m_env_texture = 0;
+    }
+    if (m_env_fallback_texture != 0) {
+        glsafe(::glDeleteTextures(1, &m_env_fallback_texture));
+        m_env_fallback_texture = 0;
     }
     m_env_key.clear();
     if (m_floor_texture != 0) {
@@ -1470,12 +1480,33 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 
     // 5. The objects: the filament materials (S2), or S1's phong when that shader is missing; S5: or
     // the plate's toolpaths (the toolpath source, or a build-up of the sliced plate).
-    // 1a: the materials go into the HDR layer as linear light when the target has one. The toolpaths
-    // (lit by Preview's display-referred shading until 1b) and the phong fallback stay in the scene
-    // buffer: PBR Neutral has no inverse for saturated highlights, so they cannot pass the curve
-    // unchanged.
+    // 1a: the materials go into the HDR layer as linear light when the target has one. The phong
+    // fallback stays in the scene buffer: PBR Neutral has no inverse for saturated highlights, so
+    // display-referred colours cannot pass the curve unchanged.
+    // 1b: the toolpaths are lit by the same material model and go into the HDR layer too. Without
+    // the layer they tone-map themselves; without the material program (it did not build, or
+    // EDGESLICER_SHOWCASE_CLASSIC_TOOLPATHS) they keep Preview's lighting in the scene buffer.
     m_hdr_drawn = false;
-    if (!(toolpaths && draw_toolpaths())) {
+    m_toolpath_lighting.clear();
+    bool toolpaths_drawn = false;
+    if (toolpaths) {
+        const bool material = toolpath_material_program() != 0;
+        if (material && t.hdr_fbo != 0) {
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(t.hdr_fbo)));
+            glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+            glsafe(::glClear(GL_COLOR_BUFFER_BIT));
+            toolpaths_drawn = draw_toolpaths(true, true);
+            m_hdr_drawn     = toolpaths_drawn;
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(t.scene_fbo)));
+            if (toolpaths_drawn)
+                m_toolpath_lighting = "material, HDR layer";
+        } else {
+            toolpaths_drawn = draw_toolpaths(material, false);
+            if (toolpaths_drawn)
+                m_toolpath_lighting = material ? "material, tone-mapped in the shader" : "Preview lighting";
+        }
+    }
+    if (!toolpaths_drawn) {
         bool drawn = false;
         if (t.hdr_fbo != 0) {
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(t.hdr_fbo)));
@@ -1995,6 +2026,9 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     glsafe(::glViewport(0, 0, plan.internal_width, plan.internal_height));
     draw_scene(dt);
     OpenGLManager::report_gl_errors("in a Showcase export's draw");
+    // 1b: how the toolpaths were lit (the material in the HDR layer, or a fallback).
+    if (!m_toolpath_lighting.empty())
+        log << ", toolpaths: " << m_toolpath_lighting;
 
     // Resolve colour, depth and the HDR layer (SSAO and the post pass cannot read a multisampled
     // buffer); then the objects' layer over the scene (1a), then ambient occlusion over the finished
@@ -2152,7 +2186,49 @@ std::vector<double> ShowcaseRenderer::model_layer_tops()
     return tops;
 }
 
-bool ShowcaseRenderer::draw_toolpaths()
+unsigned int ShowcaseRenderer::toolpath_material_program()
+{
+    // A way back to S5's Preview-lit toolpaths (a driver that draws the material program wrongly,
+    // or comparing the two).
+    static const bool classic = [] {
+        const char *v = std::getenv("EDGESLICER_SHOWCASE_CLASSIC_TOOLPATHS");
+        return v != nullptr && *v != '\0' && *v != '0';
+    }();
+    if (classic)
+        return 0;
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr || plater->get_preview_canvas3D() == nullptr)
+        return 0;
+    if (!m_toolpath_prelude_read) {
+        m_toolpath_prelude_read = true;
+        auto read = [](const std::string &name) {
+            const std::string       path = resources_dir() + "/shaders/140/" + name;
+            boost::nowide::ifstream in(path, boost::nowide::ifstream::binary);
+            std::stringstream       ss;
+            if (in.good())
+                ss << in.rdbuf();
+            return ss.str();
+        };
+        std::string error;
+        m_toolpath_prelude = Showcase::toolpath_prelude(read("showcase_material.fs"), read("showcase_toolpath.glsl"), &error);
+        if (m_toolpath_prelude.empty())
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: the toolpaths keep Preview's lighting: " << error;
+    }
+    if (m_toolpath_prelude.empty())
+        return 0;
+    GCodeViewer &gv = plater->get_preview_canvas3D()->get_gcode_viewer();
+    if (!gv.has_data() || gv.toolpaths_skipped())
+        return 0;
+    std::string        error;
+    const unsigned int program = gv.showcase_material_program(m_toolpath_prelude, { { "env_map", SHOWCASE_TOOLPATH_ENV_UNIT } }, error);
+    if (!error.empty() && !m_toolpath_prelude_logged) {
+        m_toolpath_prelude_logged = true;
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the toolpaths' material program did not build, they keep Preview's lighting: " << error;
+    }
+    return program;
+}
+
+bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
 {
     Plater *plater = wxGetApp().plater();
     if (m_scene == nullptr || plater == nullptr || plater->get_preview_canvas3D() == nullptr)
@@ -2213,6 +2289,8 @@ bool ShowcaseRenderer::draw_toolpaths()
         }
         look.multicolour = MultiColour::pack_uniforms(slots, diameters);
     }
+    // Before the 1b material program below, so it is built with the coextruded-colour prelude.
+    gv.apply_showcase_multicolour(look);
     // ---- end multi-colour ----
 
     // The key light where the scene puts it (D14), in eye space as libvgcode lights.
@@ -2225,11 +2303,79 @@ bool ShowcaseRenderer::draw_toolpaths()
         look.light_dir_eye = { float(eye.x()), float(eye.y()), float(eye.z()) };
     }
     look.exposure = std::exp2(m_scene->lighting.exposure);
+
+    // 1b: the material model, as draw_objects_material() sets it up for the mesh.
+    const unsigned int program = material ? toolpath_material_program() : 0;
+    if (program != 0) {
+        GLint previous = 0;
+        glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &previous));
+        glsafe(::glUseProgram(program));
+        auto at = [program](const std::string &name) { return ::glGetUniformLocation(program, name.c_str()); };
+        glsafe(::glUniform1i(at("light_count"), int(std::min<size_t>(lights.size(), 3))));
+        for (size_t i = 0; i < 3; ++i) {
+            const Showcase::LightSource l = i < lights.size() ? lights[i] : Showcase::LightSource();
+            const std::string           n = std::to_string(i);
+            glsafe(::glUniform3f(at("light_dir[" + n + "]"), l.dir[0], l.dir[1], l.dir[2]));
+            glsafe(::glUniform3f(at("light_color[" + n + "]"), l.color[0], l.color[1], l.color[2]));
+        }
+        glsafe(::glUniform1i(at("hdr_output"), hdr ? 1 : 0));
+        glsafe(::glUniform1i(at("tone_curve"), int(m_scene->lighting.tone)));
+        glsafe(::glUniform1f(at("sc_exposure"), std::exp2(m_scene->lighting.exposure)));
+        const Showcase::EnvironmentInfo *env = ensure_environment();
+        glsafe(::glUniform1i(at("use_env"), env != nullptr ? 1 : 0));
+        glsafe(::glUniform1f(at("env_max_lod"), float(std::max(0, showcase_environments().levels - 1))));
+        glsafe(::glUniform1f(at("env_intensity"), m_scene->lighting.env_intensity));
+        glsafe(::glUniform1f(at("env_rotation"), float(m_scene->lighting.env_rotation_deg * PI / 180.)));
+        for (size_t i = 0; i < 9; ++i) {
+            const std::array<float, 3> c = env != nullptr ? env->sh[i] : std::array<float, 3>{ 0.f, 0.f, 0.f };
+            glsafe(::glUniform3f(at("env_sh[" + std::to_string(i) + "]"), c[0], c[1], c[2]));
+        }
+        // Per extruder: the finish's MaterialParams (the same finish the smooth look above used).
+        std::array<float, 64> mat_a{}, mat_b{};
+        for (size_t e = 0; e < 16; ++e) {
+            const int        filament = int(e) + 1;
+            Showcase::Finish finish   = Showcase::Finish::Standard;
+            if (size_t(filament) <= filaments.size())
+                finish = m_scene->materials.finish_for(filament, filaments[e].preset_name, filaments[e].type);
+            else if (const Showcase::Finish *f = m_scene->materials.override_for(filament))
+                finish = *f;
+            const Showcase::MaterialParams mp = Showcase::material_params(finish);
+            const float a[4] = { mp.roughness, mp.f0, mp.metal_tint, mp.anisotropy };
+            const float b[4] = { mp.clearcoat, mp.fiber_noise, 0.f, 0.f };
+            std::copy(a, a + 4, mat_a.begin() + e * 4);
+            std::copy(b, b + 4, mat_b.begin() + e * 4);
+        }
+        glsafe(::glUniform4fv(at("sc_mat_a"), 16, mat_a.data()));
+        glsafe(::glUniform4fv(at("sc_mat_b"), 16, mat_b.data()));
+        glsafe(::glUseProgram(GLuint(previous)));
+
+        if (env == nullptr && m_env_fallback_texture == 0) {
+            const unsigned char black[4] = { 0, 0, 0, 0 };
+            glsafe(::glGenTextures(1, &m_env_fallback_texture));
+            glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, m_env_fallback_texture));
+            for (int f = 0; f < 6; ++f)
+                glsafe(::glTexImage2D(GLenum(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f), 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, black));
+            glsafe(::glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+            glsafe(::glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+            glsafe(::glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 0));
+            glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, 0));
+        }
+        glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_TOOLPATH_ENV_UNIT));
+        glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, env != nullptr ? m_env_texture : m_env_fallback_texture));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+        look.material = true;
+    }
+
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glDepthMask(GL_TRUE));
     glsafe(::glDisable(GL_BLEND));
     gv.render_for_showcase(look);
     glsafe(::glEnable(GL_CULL_FACE));
+    if (program != 0) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_TOOLPATH_ENV_UNIT));
+        glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, 0));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
     return true;
 }
 

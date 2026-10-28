@@ -769,26 +769,96 @@ void ViewerImpl::SegmentsUniforms::init(unsigned int shader_id)
     clipping_plane         = glGetUniformLocation(shader_id, "clipping_plane");
 }
 
+void ViewerImpl::ShadedSegmentsUniforms::init(unsigned int shader_id)
+{
+    // ORCA: realistic view
+    shadow_map       = glGetUniformLocation(shader_id, "shadow_map");
+    shadow_light_vp  = glGetUniformLocation(shader_id, "shadow_light_vp");
+    shadow_intensity = glGetUniformLocation(shader_id, "shadow_intensity");
+    shadow_map_texel = glGetUniformLocation(shader_id, "shadow_map_texel");
+    exposure         = glGetUniformLocation(shader_id, "exposure");
+    saturation       = glGetUniformLocation(shader_id, "saturation");
+    light_top_dir    = glGetUniformLocation(shader_id, "light_top_dir");
+    // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
+    smooth_mode      = glGetUniformLocation(shader_id, "smooth_mode");
+    role_tex         = glGetUniformLocation(shader_id, "role_tex");
+    look_a           = glGetUniformLocation(shader_id, "look_a");
+    look_b           = glGetUniformLocation(shader_id, "look_b");
+    // EDGE (multi-colour P3)
+    volume_tex       = glGetUniformLocation(shader_id, "volume_tex");
+    use_volume       = glGetUniformLocation(shader_id, "use_volume");
+    layer_colors.init(shader_id);
+}
+
+std::string ViewerImpl::segments_fragment_text(const std::string* lighting_prelude) const
+{
+#ifdef ENABLE_OPENGL_ES
+    (void)lighting_prelude;
+    return std::string();
+#else
+    // The preludes go after the fragment shader's #version line: EDGE multi-colour P3's base colour
+    // (EXTERNAL_BASE_COLOR), then realism 1b's lighting (EXTERNAL_LIGHTING).
+    const std::string body(Segments_Fragment_Shader);
+    const size_t      eol = body.find('\n');
+    if (eol == std::string::npos)
+        return std::string();
+    std::string text = body.substr(0, eol + 1);
+    if (!m_base_color_prelude.empty())
+        text += "#define EXTERNAL_BASE_COLOR\n" + m_base_color_prelude + "\n";
+    if (lighting_prelude != nullptr)
+        text += "#define EXTERNAL_LIGHTING\n" + *lighting_prelude + "\n";
+    return text + body.substr(eol + 1);
+#endif // ENABLE_OPENGL_ES
+}
+
+bool ViewerImpl::set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                                      std::string* error)
+{
+    if (m_prelude_shader_id != 0) {
+        glsafe(glDeleteProgram(m_prelude_shader_id));
+        m_prelude_shader_id = 0;
+    }
+    m_uni_prelude        = SegmentsUniforms();
+    m_uni_prelude_shaded = ShadedSegmentsUniforms();
+    m_fragment_prelude       = prelude;
+    m_fragment_prelude_units = sampler_units;
+    if (prelude.empty())
+        return true;
+#ifdef ENABLE_OPENGL_ES
+    if (error != nullptr)
+        *error = "LibVGCode: no fragment prelude in the OpenGL ES build";
+    return false;
+#else
+    const std::string fragment = segments_fragment_text(&prelude);
+    if (fragment.empty()) {
+        if (error != nullptr)
+            *error = "LibVGCode: unexpected segments fragment shader";
+        return false;
+    }
+    try {
+        m_prelude_shader_id = init_shader("segments (host prelude)", Segments_Vertex_Shader, fragment.c_str());
+    } catch (const std::exception& e) {
+        m_prelude_shader_id = 0;
+        if (error != nullptr)
+            *error = e.what();
+        return false;
+    }
+    m_uni_prelude.init(m_prelude_shader_id);
+    m_uni_prelude_shaded.init(m_prelude_shader_id);
+    // As the segments program, plus the prelude's own samplers.
+    set_sampler_units(m_prelude_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
+                                             { "segment_index_tex", 3 }, { "shadow_map", m_shadow_map_texture_unit },
+                                             { "role_tex", SMOOTH_ROLES_UNIT }, { "volume_tex", VOLUME_UNIT } });
+    for (const auto& [name, unit] : sampler_units)
+        set_sampler_units(m_prelude_shader_id, { { name.c_str(), unit } });
+    return true;
+#endif // ENABLE_OPENGL_ES
+}
+
 void ViewerImpl::init_segments_uniforms()
 {
     m_uni_segments.init(m_segments_shader_id);
-    // ORCA: realistic view
-    m_uni_segments_shadow_map_id             = glGetUniformLocation(m_segments_shader_id, "shadow_map");
-    m_uni_segments_shadow_light_vp_id        = glGetUniformLocation(m_segments_shader_id, "shadow_light_vp");
-    m_uni_segments_shadow_intensity_id       = glGetUniformLocation(m_segments_shader_id, "shadow_intensity");
-    m_uni_segments_shadow_map_texel_id       = glGetUniformLocation(m_segments_shader_id, "shadow_map_texel");
-    m_uni_segments_exposure_id               = glGetUniformLocation(m_segments_shader_id, "exposure");
-    m_uni_segments_saturation_id             = glGetUniformLocation(m_segments_shader_id, "saturation");
-    m_uni_segments_light_top_dir_id          = glGetUniformLocation(m_segments_shader_id, "light_top_dir");
-    // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
-    m_uni_segments_smooth_mode_id            = glGetUniformLocation(m_segments_shader_id, "smooth_mode");
-    m_uni_segments_role_tex_id               = glGetUniformLocation(m_segments_shader_id, "role_tex");
-    m_uni_segments_look_a_id                 = glGetUniformLocation(m_segments_shader_id, "look_a");
-    m_uni_segments_look_b_id                 = glGetUniformLocation(m_segments_shader_id, "look_b");
-    // EDGE (multi-colour P3)
-    m_uni_segments_volume_tex_id             = glGetUniformLocation(m_segments_shader_id, "volume_tex");
-    m_uni_segments_use_volume_id             = glGetUniformLocation(m_segments_shader_id, "use_volume");
-    m_uni_segments_layer_colors.init(m_segments_shader_id);
+    m_uni_segments_shaded.init(m_segments_shader_id);
     // EDGE (core profile): every sampler on its own unit from the start (see set_sampler_units()).
     // render_segments() sets the same units again on every draw; shadow_map takes the unit the host
     // will name in set_shadow_map(), 4 until then.
@@ -803,37 +873,39 @@ bool ViewerImpl::set_base_color_prelude(const std::string& prelude, std::string*
         error->clear();
 #ifdef ENABLE_OPENGL_ES
     if (error != nullptr && !prelude.empty())
-        *error = "not available with OpenGL ES";
+        *error = "LibVGCode: no base colour prelude in the OpenGL ES build";
     return prelude.empty();
 #else
     if (!m_initialized || m_segments_shader_id == 0) {
         if (error != nullptr)
-            *error = "the viewer is not initialized";
+            *error = "LibVGCode: the viewer is not initialized";
         return false;
     }
     if (prelude == m_base_color_prelude)
         return true;
-    // The prelude goes right after the fragment shader's #version line.
-    std::string fragment = Segments_Fragment_Shader;
-    std::string program_text;
-    if (prelude.empty())
-        program_text = fragment;
-    else {
-        const size_t eol = fragment.find('\n');
-        program_text = fragment.substr(0, eol + 1) + "#define EXTERNAL_BASE_COLOR\n" + prelude + "\n" + fragment.substr(eol + 1);
-    }
+    const std::string previous = m_base_color_prelude;
+    m_base_color_prelude = prelude;
+    const std::string fragment = segments_fragment_text(nullptr);
     unsigned int id = 0;
     try {
-        id = init_shader(prelude.empty() ? "segments" : "segments_base_color", Segments_Vertex_Shader, program_text.c_str());
+        id = init_shader(prelude.empty() ? "segments" : "segments (base colour prelude)", Segments_Vertex_Shader, fragment.c_str());
     } catch (const std::exception& e) {
+        m_base_color_prelude = previous;
         if (error != nullptr)
             *error = e.what();
         return false;
     }
     glsafe(glDeleteProgram(m_segments_shader_id));
     m_segments_shader_id = id;
-    m_base_color_prelude = prelude;
     init_segments_uniforms();
+    // Realism 1b's program lights the same base colour: rebuild it with the new prelude in it.
+    if (!m_fragment_prelude.empty()) {
+        const std::string                              lighting = m_fragment_prelude;
+        const std::vector<std::pair<std::string, int>> units    = m_fragment_prelude_units;
+        std::string                                    lighting_error;
+        if (!set_fragment_prelude(lighting, units, &lighting_error) && error != nullptr)
+            *error = "LibVGCode: the fragment prelude's program did not rebuild: " + lighting_error;
+    }
     return true;
 #endif // ENABLE_OPENGL_ES
 }
@@ -856,7 +928,7 @@ void ViewerImpl::set_extruded_volume_enabled(bool enabled)
     for (size_t i = 0; i < m_vertices.size(); ++i) {
         const PathVertex& v = m_vertices[i];
         if (i > 0 && v.is_extrusion() && v.mm3_per_mm > 0.0f) {
-            const Vec3& a = m_vertices[i - 1].position;
+            const Vec3&  a  = m_vertices[i - 1].position;
             const double dx = double(v.position[0]) - double(a[0]);
             const double dy = double(v.position[1]) - double(a[1]);
             const double dz = double(v.position[2]) - double(a[2]);
@@ -1056,6 +1128,11 @@ void ViewerImpl::shutdown()
         glsafe(glDeleteProgram(m_segments_shader_id));
         m_segments_shader_id = 0;
     }
+    // EDGE (Showcase realism 1b)
+    if (m_prelude_shader_id != 0) {
+        glsafe(glDeleteProgram(m_prelude_shader_id));
+        m_prelude_shader_id = 0;
+    }
     if (m_segments_caster_shader_id != 0) {
         glsafe(glDeleteProgram(m_segments_caster_shader_id));
         m_segments_caster_shader_id = 0;
@@ -1069,10 +1146,13 @@ void ViewerImpl::shutdown()
         m_shadow_fallback_tex_id = 0;
     }
 #ifndef ENABLE_OPENGL_ES
+    // EDGE (multi-colour P3)
     delete_textures(m_volume_fallback_tex_id);
     delete_buffers(m_volume_fallback_buf_id);
 #endif // ENABLE_OPENGL_ES
     m_base_color_prelude.clear();
+    m_fragment_prelude.clear();
+    m_fragment_prelude_units.clear();
     m_initialized = false;
     OpenGLWrapper::unload_opengl();
 }
@@ -2276,8 +2356,14 @@ void ViewerImpl::update_heights_widths()
 void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projection_matrix, const Vec3& camera_position)
 {
     // ORCA: realistic view. The shadow caster pass draws depth only.
-    const unsigned int shader_id = m_rendering_shadow_casters ? m_segments_caster_shader_id : m_segments_shader_id;
-    const SegmentsUniforms& uni = m_rendering_shadow_casters ? m_uni_segments_caster : m_uni_segments;
+    // EDGE (Showcase realism 1b): the host's prelude program replaces the shaded one while the smooth
+    // look is on and the host asked for it.
+    const bool prelude = !m_rendering_shadow_casters && m_use_prelude && m_smooth_look && m_roles_tex_id != 0 && m_prelude_shader_id != 0;
+    const unsigned int shader_id = m_rendering_shadow_casters ? m_segments_caster_shader_id :
+                                   prelude                    ? m_prelude_shader_id :
+                                                                m_segments_shader_id;
+    const SegmentsUniforms& uni = m_rendering_shadow_casters ? m_uni_segments_caster : prelude ? m_uni_prelude : m_uni_segments;
+    const ShadedSegmentsUniforms& shaded = prelude ? m_uni_prelude_shaded : m_uni_segments_shaded;
     if (shader_id == 0)
         return;
 
@@ -2310,17 +2396,17 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
     glsafe(glUniform4fv(uni.clipping_plane, 1, m_clipping_plane.data()));
     if (!m_rendering_shadow_casters) {
         // ORCA: realistic view
-        glsafe(glUniform1i(m_uni_segments_shadow_map_id, m_shadow_map_texture_unit));
-        glsafe(glUniformMatrix4fv(m_uni_segments_shadow_light_vp_id, 1, GL_FALSE, m_shadow_light_vp.data()));
-        glsafe(glUniform1f(m_uni_segments_shadow_intensity_id, m_shadow_intensity));
-        glsafe(glUniform1f(m_uni_segments_shadow_map_texel_id, m_shadow_map_texel));
-        glsafe(glUniform1f(m_uni_segments_exposure_id, m_exposure));
-        glsafe(glUniform1f(m_uni_segments_saturation_id, m_saturation));
-        glsafe(glUniform3fv(m_uni_segments_light_top_dir_id, 1, m_light_top_dir.data()));
-        set_layer_colors(m_uni_segments_layer_colors);
+        glsafe(glUniform1i(shaded.shadow_map, m_shadow_map_texture_unit));
+        glsafe(glUniformMatrix4fv(shaded.shadow_light_vp, 1, GL_FALSE, m_shadow_light_vp.data()));
+        glsafe(glUniform1f(shaded.shadow_intensity, m_shadow_intensity));
+        glsafe(glUniform1f(shaded.shadow_map_texel, m_shadow_map_texel));
+        glsafe(glUniform1f(shaded.exposure, m_exposure));
+        glsafe(glUniform1f(shaded.saturation, m_saturation));
+        glsafe(glUniform3fv(shaded.light_top_dir, 1, m_light_top_dir.data()));
+        set_layer_colors(shaded.layer_colors);
         // EDGE (Showcase S5): the smooth bead look, off unless Showcase asked for it.
         const bool smooth = m_smooth_look && m_roles_tex_id != 0;
-        glsafe(glUniform1i(m_uni_segments_smooth_mode_id, smooth ? 1 : 0));
+        glsafe(glUniform1i(shaded.smooth_mode, smooth ? 1 : 0));
         if (smooth) {
             std::array<float, 64> a{}, b{};
             for (size_t e = 0; e < 16; ++e)
@@ -2328,12 +2414,12 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
                     a[e * 4 + k] = m_looks[e * 8 + k];
                     b[e * 4 + k] = m_looks[e * 8 + 4 + k];
                 }
-            glsafe(glUniform4fv(m_uni_segments_look_a_id, 16, a.data()));
-            glsafe(glUniform4fv(m_uni_segments_look_b_id, 16, b.data()));
+            glsafe(glUniform4fv(shaded.look_a, 16, a.data()));
+            glsafe(glUniform4fv(shaded.look_b, 16, b.data()));
         }
 #ifndef ENABLE_OPENGL_ES
         // EDGE (multi-colour P3)
-        glsafe(glUniform1i(m_uni_segments_use_volume_id, smooth && m_use_volume && m_volumes_tex_id != 0 ? 1 : 0));
+        glsafe(glUniform1i(shaded.use_volume, smooth && m_use_volume && m_volumes_tex_id != 0 ? 1 : 0));
 #endif // ENABLE_OPENGL_ES
     }
 
@@ -2414,7 +2500,7 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
         glsafe(glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &curr_roles_texture));
         glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_roles_tex_id));
         glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R16UI, m_roles_buf_id));
-        glsafe(glUniform1i(m_uni_segments_role_tex_id, SMOOTH_ROLES_UNIT));
+        glsafe(glUniform1i(shaded.role_tex, SMOOTH_ROLES_UNIT));
         glsafe(glActiveTexture(GL_TEXTURE0));
     }
     // EDGE (multi-colour P3): the extruded volumes, or the one-float stand-in, on their own unit.
@@ -2426,7 +2512,7 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
         glsafe(glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &curr_volume_texture));
         glsafe(glBindTexture(GL_TEXTURE_BUFFER, real ? m_volumes_tex_id : m_volume_fallback_tex_id));
         glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R32F, real ? m_volumes_buf_id : m_volume_fallback_buf_id));
-        glsafe(glUniform1i(m_uni_segments_volume_tex_id, VOLUME_UNIT));
+        glsafe(glUniform1i(shaded.volume_tex, VOLUME_UNIT));
         glsafe(glActiveTexture(GL_TEXTURE0));
     }
 

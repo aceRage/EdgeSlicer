@@ -211,7 +211,12 @@ private:
     void            draw_floor(const DrawTarget &t);
     void            draw_objects();
     // S5: the plate's toolpaths through Preview's viewer (the toolpath source, the build-up).
-    bool            draw_toolpaths();
+    // 1b: `material` lights them with showcase_material's model (toolpath_material_program()),
+    // `hdr` then writes linear light for the post pass instead of tone-mapped sRGB.
+    bool            draw_toolpaths(bool material = false, bool hdr = false);
+    // 1b: libvgcode's segments program with the material model as its prelude (built on first use;
+    // 0 when it does not build, when EDGESLICER_SHOWCASE_CLASSIC_TOOLPATHS is set, or without a slice).
+    unsigned int    toolpath_material_program();
     bool            use_toolpaths() const;
     // S2: the objects through showcase_material; false when that shader is not there. 1a: `hdr`
     // writes linear light for the post pass instead of tone-mapped sRGB.
@@ -273,6 +278,13 @@ private:
     std::map<int, LayerInfo>   m_layers;
     bool                       m_layers_valid = false;
     unsigned int               m_env_texture = 0;
+    // 1b: a black 1x1 cube on the toolpaths' environment unit when the scene has no environment
+    // (libvgcode's program keeps a samplerCube there; macOS wants a complete texture on it).
+    unsigned int               m_env_fallback_texture = 0;
+    // 1b: the toolpaths' prelude (showcase_material.fs's shared block + showcase_toolpath.glsl),
+    // read once; empty when it could not be put together.
+    std::string                m_toolpath_prelude;
+    bool                       m_toolpath_prelude_read = false;
     std::string                m_env_key;
     unsigned int               m_floor_texture = 0;
     std::string                m_floor_key;
@@ -316,6 +328,10 @@ private:
     int                        m_live_fb_failed_w = 0, m_live_fb_failed_h = 0;
     // 1a: the last draw_scene() put objects into the HDR layer (the post pass has work).
     bool                       m_hdr_drawn = false;
+    // 1b: how the last draw_scene() lit the toolpaths ("material, HDR layer", "material, tone-mapped
+    // in the shader", "Preview lighting"; empty = no toolpaths), for the export report.
+    std::string                m_toolpath_lighting;
+    bool                       m_toolpath_prelude_logged = false;
     int                        m_batch_w = 0, m_batch_h = 0, m_batch_msaa = -1;
 
     // S3
