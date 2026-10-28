@@ -1,0 +1,12 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: transparent PNG", "plate_index": 0, "source": "model", "preset_base": "studio_white",
+      "background": { "type": "transparent", "color1": "#FFFFFF", "color2": "#D9DCE1" },
+      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45 },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

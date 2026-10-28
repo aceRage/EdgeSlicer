@@ -10,6 +10,7 @@
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
+#include "BambuCloudWatch.hpp" // a Bambu row's age is its report's, not only the poll's
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
@@ -2459,6 +2460,88 @@ Testing::LinkRevocation Testing::revoke_push_for_old_link()
     return r;
 }
 
+static std::string job_name_stem(const std::string& s)
+{
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t')) --e;
+    std::string lower = s.substr(b, e - b);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    for (const char* ext : { ".gcode.3mf", ".3mf", ".gcode" }) {
+        const size_t n = std::strlen(ext);
+        if (lower.size() > n && lower.compare(lower.size() - n, n, ext) == 0) {
+            lower.resize(lower.size() - n);
+            break;
+        }
+    }
+    // What a send does to a job name: Bambu Studio / the cloud turn '%' and other characters into
+    // '_' ("Dragon-Egg_120%(X1C)" runs as "Dragon-Egg_120_(X1C)"), and spaces become '_' too. Bytes
+    // >= 0x80 (UTF-8) are kept as they are.
+    for (char& c : lower) {
+        const unsigned char u = (unsigned char) c;
+        if (u >= 0x80 || std::isalnum(u) || c == '-' || c == '(' || c == ')' || c == '+' || c == '.') continue;
+        c = '_';
+    }
+    return lower;
+}
+
+bool Testing::same_job_name(const std::string& reported, const std::string& archived)
+{
+    const std::string a = job_name_stem(reported);
+    return !a.empty() && a == job_name_stem(archived);
+}
+
+bool Testing::same_project_plate(const std::string& reported, const ArchiveRecord& r)
+{
+    const std::string job     = job_name_stem(reported);
+    const std::string project = job_name_stem(r.title);
+    if (job.empty() || project.empty()) return false;
+    if (r.plate >= 0 && job == project + "_plate_" + std::to_string(r.plate + 1)) return true;
+    if (!r.plate_name.empty() && job == project + "_" + job_name_stem(r.plate_name)) return true;
+    return r.plate == 0 && r.plate_name.empty() && job == project;
+}
+
+std::map<std::string, std::string> Testing::pick_job_thumbnails(const std::vector<ArchiveRecord>& records,
+                                                                const std::map<std::string, std::string>& jobs)
+{
+    std::map<std::string, std::string> out;
+    for (const auto& job : jobs) {
+        if (job.first.empty() || job.second.empty()) continue;
+        // Steps 1-3 in order; within a step the newest record wins.
+        for (int step = 1; step <= 3; ++step) {
+            const ArchiveRecord* best = nullptr;
+            for (const ArchiveRecord& r : records) {
+                if (r.printer.empty() || r.id.empty()) continue;
+                const bool same_printer = r.printer == job.first;
+                bool       hit          = false;
+                if (step == 1) hit = same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file));
+                else if (step == 2) hit = same_printer && same_project_plate(job.second, r);
+                else hit = !same_printer && (same_job_name(job.second, r.sent_name) || same_job_name(job.second, r.file) ||
+                                             same_project_plate(job.second, r));
+                if (hit && (!best || r.time > best->time)) best = &r;
+            }
+            if (best) {
+                out[job.first] = best->id;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+std::string Testing::thumbnail_version(const std::string& job, const std::string& record_id)
+{
+    // FNV-1a over "<job>\n<record>": stable across runs and platforms, which std::hash is not.
+    uint64_t h = 1469598103934665603ull;
+    auto feed = [&h](const std::string& s) { for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; } };
+    feed(job);
+    feed("\n");
+    feed(record_id);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
+    return std::string(buf, 12);
+}
+
 Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                                      const std::string& incoming_row_json, long incoming_instance)
 {
@@ -2479,6 +2562,12 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
         // lock); another window's row for it says it has nothing, and the holder's row is kept.
         if (incoming.contains("sdcp_connected") && cached_fresh && cached_instance != incoming_instance &&
             cached.value("sdcp_connected", false) && !incoming.value("sdcp_connected", false)) {
+            out.keep_cached = true;
+            return out;
+        }
+        // The same for a Centauri Carbon 2's MQTT connection (ElegooCc2Monitor's lock).
+        if (incoming.contains("cc2_connected") && cached_fresh && cached_instance != incoming_instance &&
+            cached.value("cc2_connected", false) && !incoming.value("cc2_connected", false)) {
             out.keep_cached = true;
             return out;
         }
@@ -4256,8 +4345,15 @@ json HubServer::printers_json()
         json row = kv.second.row;
         row["id"] = kv.first;
         const long long age_ms = now > kv.second.at ? now - kv.second.at : 0;
-        row["age_s"]  = (long long) (age_ms / 1000);
-        row["stale"]  = age_ms > PRINTERS_STALE_MS;
+        // A Bambu row also carries how old the printer's own report was when it was polled: a
+        // cloud printer nobody subscribed to was polled every ten seconds and served as fresh
+        // while it had never reported at all (BambuCloudWatch::row_freshness).
+        const bool has_report_age = row.contains("report_age_s") && row["report_age_s"].is_number_integer();
+        const BambuCloudWatch::Freshness fr = BambuCloudWatch::row_freshness(
+            age_ms, PRINTERS_STALE_MS, has_report_age, has_report_age ? row["report_age_s"].get<long long>() : 0,
+            row.value("printing", false));
+        row["age_s"]  = (long long) (fr.age_ms / 1000);
+        row["stale"]  = fr.stale;
         row["seen_at"] = kv.second.at;
         // The pid only stays in the row while that window is still there: the app addresses the
         // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
@@ -4450,14 +4546,16 @@ std::string HubServer::archive_thumbnail(const std::string& id)
 
 // The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
 // plain JSON next to a <id>.png), so this works with every slicer window closed - which is the
-// case the app asked about. Preference goes to the record whose sent name is the job the printer
-// says it is running; failing that, the newest record for that printer, which is what a person
-// looking at a card would expect. "" when there is nothing to show, and the caller answers 404.
+// case the app asked about. Only a record of the job the printer says it is running - by name,
+// then by project and plate, then the same on another printer (Testing::pick_job_thumbnails has
+// the order): the "newest record for that printer" fallback served the
+// previous job's picture for any job this PC did not send, and - because a Bambu printer reports
+// its subtask_name without the ".gcode.3mf" the archive recorded - for every Bambu job, so the
+// picture never changed. Absent when there is nothing to show, and the route answers 404.
 std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std::map<std::string, std::string>& jobs)
 {
-    struct Pick { std::string best, named; long long best_t { -1 }, named_t { -1 }; };
-    std::map<std::string, Pick>        picks;
-    std::map<std::string, std::string> out;
+    std::vector<Testing::ArchiveRecord> records;
+    std::map<std::string, std::string>  out;
 
     const fs::path            root(archive_dir());
     boost::system::error_code ec;
@@ -4475,18 +4573,21 @@ std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std:
         // is involved in building this path.
         const fs::path png = root / (id + ".png");
         if (!fs::is_regular_file(png, ig)) continue;
-        const long long t = j.value("time", (long long) 0);
-        Pick& p = picks[printer];
-        if (t > p.best_t) { p.best_t = t; p.best = png.string(); }
-        // The job the printer says it is running, matched against the name the printer was really
-        // given and against the archived file name: either can be what it reports.
-        const auto job = jobs.find(printer);
-        if (job != jobs.end() && !job->second.empty() &&
-            (j.value("sent_name", std::string()) == job->second || j.value("file", std::string()) == job->second))
-            if (t > p.named_t) { p.named_t = t; p.named = png.string(); }
+        Testing::ArchiveRecord r;
+        r.printer   = printer;
+        r.id        = id;
+        r.sent_name = j.value("sent_name", std::string());
+        r.file      = j.value("file", std::string());
+        r.time      = j.value("time", (long long) 0);
+        r.title     = j.value("project_title", std::string());
+        if (j.contains("plate") && j["plate"].is_number_integer()) r.plate = j["plate"].get<int>();
+        r.plate_name = j.value("plate_name", std::string());
+        records.push_back(std::move(r));
     }
-    for (const auto& kv : picks)
-        out[kv.first] = kv.second.named.empty() ? kv.second.best : kv.second.named;
+    // The job the printer says it is running, matched against the name the printer was really
+    // given and against the archived file name: either can be what it reports.
+    for (const auto& kv : Testing::pick_job_thumbnails(records, jobs))
+        out[kv.first] = (root / (kv.second + ".png")).string();
     return out;
 }
 
@@ -4613,6 +4714,11 @@ json HubServer::summary_json()
         if (row.contains("ip"))          p["ip"]          = row["ip"];
         if (row.contains("print_error")) p["print_error"] = row["print_error"];
         if (row.contains("stage"))       p["stage"]       = row["stage"];
+        // A Bambu row's provenance: "report" (the printer's own push, with progress behind it),
+        // "cloud_list" (the account's printer list - a status word and nothing more) or "none",
+        // and how old the printer's last report was when the window was polled (-1: none yet).
+        if (row.contains("status_source")) p["status_source"] = row["status_source"];
+        if (row.contains("report_age_s"))  p["report_age_s"]  = row["report_age_s"];
         // How the job ended ("cancelled" for a stop the person asked for): the instance's watcher
         // keeps it after the printer drops print_error. Absent when there is nothing to say.
         if (row.contains("ended") && row["ended"].is_string() && !row["ended"].get<std::string>().empty()) p["ended"] = row["ended"];
@@ -4623,7 +4729,7 @@ json HubServer::summary_json()
             if (row.contains(k)) p[k] = row[k];
         // An Elegoo SDCP printer's chamber reading, where its camera is found, and what the printer
         // itself says it is doing (ElegooSdcp::fill_row).
-        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp" })
+        for (const char* k : { "chamber_temp", "chamber_target", "camera_hint", "sdcp", "cc2" })
             if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
@@ -4642,8 +4748,11 @@ json HubServer::summary_json()
         if (!cam.empty()) p["camera"] = cam;
         // The thumbnail URL is offered whenever there is a picture to serve, so the app can draw
         // it without a probe that would 404 most of the time.
-        if (thumbs.find(id) != thumbs.end())
-            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png";
+        // `?job=` changes with the job and the picture behind it, so a client caching by URL fetches
+        // the new job's picture (the route itself ignores the query). No picture: no field.
+        if (const auto th = thumbs.find(id); th != thumbs.end())
+            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png?job=" +
+                             Testing::thumbnail_version(p["job"].get<std::string>(), fs::path(th->second).stem().string());
         out["printers"].push_back(p);
     }
     return out;

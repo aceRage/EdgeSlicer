@@ -9,6 +9,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
 
 #include "edgeslicer_version.h"
@@ -63,7 +64,7 @@ bool current_printer_reads_canvas()
     const Preset&             preset = bundle->printers.get_edited_preset();
     const DynamicPrintConfig& cfg    = preset.config;
     const auto*               model  = cfg.option<ConfigOptionString>("printer_model");
-    if (model == nullptr || !canvas_capable_model(model->value))
+    if (model == nullptr || !canvas_reader_model(model->value))
         return false;
     if (preset_host_is_elegoolink(cfg))
         return true;
@@ -74,8 +75,11 @@ bool current_printer_reads_canvas()
     return false;
 }
 
-std::string canvas_address_for_current_printer()
+std::string canvas_address_for_current_printer(std::string* token)
 {
+    std::string ignored;
+    std::string& key = token != nullptr ? *token : ignored;
+    key.clear();
     PresetBundle* bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return std::string();
@@ -83,14 +87,20 @@ std::string canvas_address_for_current_printer()
     std::string                           last;
     std::vector<PrintHostDevices::Device> devices = model_devices(preset, last);
     for (const PrintHostDevices::Device& d : devices)
-        if (d.id == last && d.host_type == "elegoolink" && !d.address.empty())
+        if (d.id == last && d.host_type == "elegoolink" && !d.address.empty()) {
+            key = d.apikey;
             return d.address;
+        }
     const std::string own = preset.config.opt_string("print_host");
-    if (!own.empty() && preset_host_is_elegoolink(preset.config))
+    if (!own.empty() && preset_host_is_elegoolink(preset.config)) {
+        key = preset.config.opt_string("printhost_apikey");
         return own;
+    }
     for (const PrintHostDevices::Device& d : devices)
-        if (d.host_type == "elegoolink" && !d.address.empty())
+        if (d.host_type == "elegoolink" && !d.address.empty()) {
+            key = d.apikey;
             return d.address;
+        }
     return std::string();
 }
 
@@ -115,14 +125,17 @@ void run_canvas_job(wxWindow* parent, const wxString& message, std::function<voi
     worker.join();
 }
 
-CanvasQueryResult query_canvas_with_progress(wxWindow* parent, const std::string& address)
+CanvasQueryResult query_canvas_with_progress(wxWindow* parent, const std::string& address, const std::string& printer_model,
+                                             const std::string& token)
 {
     CanvasQueryResult result;
     if (address.empty()) {
         result.error = "this printer has no address";
         return result;
     }
-    run_canvas_job(parent, _L("Reading the CANVAS on the printer..."), [&result, address] { result = canvas_query(address); });
+    run_canvas_job(parent, _L("Reading the CANVAS on the printer..."), [&result, address, printer_model, token] {
+        result = canvas_query_for(address, printer_model, token);
+    });
     return result;
 }
 
@@ -270,14 +283,17 @@ ElegooCanvasPanel::~ElegooCanvasPanel()
     *m_alive = false;
 }
 
-bool ElegooCanvasPanel::set_target(const std::string& address, const std::string& printer_model)
+bool ElegooCanvasPanel::set_target(const std::string& address, const std::string& printer_model, const std::string& token)
 {
-    const bool        wanted       = !address.empty() && canvas_capable_model(printer_model);
+    const bool        wanted       = !address.empty() && canvas_reader_model(printer_model);
     const std::string next_address = wanted ? address : std::string();
-    if (next_address == m_address && printer_model == m_model)
+    if (next_address == m_address && printer_model == m_model && token == m_token)
         return wanted;
     m_address = next_address;
     m_model   = printer_model;
+    m_token   = token;
+    // The capture is the CC1's SDCP diagnostic (Cmd 0 / 1 / 324); a CC2 has no SDCP to capture.
+    m_btn_capture->Show(canvas_capable_model(printer_model));
     ++m_generation; // an answer for the previous printer is dropped
     m_busy            = false;
     m_last_started_ms = 0;
@@ -304,13 +320,15 @@ void ElegooCanvasPanel::refresh(bool throttled)
     set_status(_L("Reading the CANVAS on the printer..."));
     const int                          generation = m_generation;
     const std::string                  address    = m_address;
+    const std::string                  model      = m_model;
+    const std::string                  token      = m_token;
     std::shared_ptr<std::atomic<bool>> alive      = m_alive;
     // Detached: it holds nothing of the card, only its own copies, and is bounded by the query's
     // timeouts. The answer comes back on the GUI thread and is dropped if the card is gone.
-    std::thread([this, generation, address, alive] {
+    std::thread([this, generation, address, model, token, alive] {
         CanvasQueryResult r;
         try {
-            r = canvas_query(address);
+            r = canvas_query_for(address, model, token);
         } catch (...) {
             r.error = "CANVAS query failed";
         }
@@ -329,6 +347,11 @@ void ElegooCanvasPanel::on_result(int generation, const CanvasQueryResult& resul
     m_busy = false;
     m_btn_refresh->Enable(true);
     m_units->GetSizer()->Clear(true); // the tiles and their sizers
+    // The CANVAS is optional on a Centauri Carbon 2: one that says it has none gets no card at all
+    // (the card comes back on the next read that finds one). The CC1 keeps its sentence.
+    const bool optional_canvas = ElegooCc2::is_cc2_model(m_model);
+    if (optional_canvas)
+        Show(result.ok || !result.no_canvas);
     if (!result.ok) {
         set_status(canvas_failure_text(result));
     } else {

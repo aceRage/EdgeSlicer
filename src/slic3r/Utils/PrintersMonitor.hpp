@@ -68,6 +68,9 @@ struct Target
 {
     std::string kind; // the row's kind: bambu | snapmaker | connect | printhost
     std::string url;  // its web address, when the row has one
+    // The row is drawn by the shared device page (resources/web/orca/device.html) rather than by a
+    // vendor page: a printer with no device page of its own (the Elegoo Centauri Carbon 2, owner D6).
+    bool        device_page { false };
 };
 // The ids of the last rows the page was given, with what "open" needs. The page names an id only;
 // where it goes is taken from here, never from the page.
@@ -80,14 +83,33 @@ enum class OpenWay {
     BambuMonitor,   // MainFrame::jump_to_monitor(id): the Device tab is the Bambu one
     PrinterWebView, // the printer's web UI in the Device tab's web view (a non-Bambu preset)
     Browser,        // the printer's web UI in the system browser (the Device tab is something else)
-    NotHere         // nothing to open from this window (a Bambu printer while the preset is not
+    NotHere,        // nothing to open from this window (a Bambu printer while the preset is not
                     // a Bambu one, a row without a web address); the page says why
+    DevicePage      // the shared device page for that row id, in the Device tab's web view
 };
 // bambu_monitor_shown: the Device tab currently holds the Bambu MonitorPanel.
 // printer_view_shown:  the Device tab currently holds the PrinterWebView.
 OpenWay open_way(const Target& t, bool bambu_monitor_shown, bool printer_view_shown);
 // What the page shows when open_way is NotHere.
 std::string not_here_reason(const Target& t);
+
+// ---- the shared device page ---------------------------------------------------------------------
+//
+// One vendor-neutral device page (resources/web/orca/device.html, drawn by printer_cards.js's
+// PrinterCards.device) for any printer whose /api/printers row it can draw: status, job, progress,
+// layers, temperatures, fans and light, filament units, Pause / Resume / Stop. It is fed over the
+// same "wx" channel and messages as the Printers tab, filtered to one row id. Today the Elegoo
+// Centauri Carbon 2 uses it (it has no LAN web page of its own); the other vendors converge on it
+// later (tests/design_shared_device_page.md).
+//
+// Whether a row is drawn by it: a row that says so ("device_page": true) or carries the CC2's
+// "cc2" details.
+bool uses_device_page(const nlohmann::json& row);
+// "/web/orca/device.html?embed=1&theme=<dark|light>&id=<the row id, percent-encoded>". Empty for
+// an id valid_printer_id refuses.
+std::string device_page_path(const std::string& id, bool dark);
+// The row id a device page URL names (the inverse; "" when it names none or a bad one).
+std::string device_page_id(const std::string& url);
 
 // A G-code archive record id (the sidecar's stem): 1..128 of [A-Za-z0-9._-], not starting with a dot.
 bool valid_archive_id(const std::string& id);

@@ -4,6 +4,7 @@
 // itself sits in ElegooCanvasQuery.cpp.
 
 #include "ElegooCanvas.hpp"
+#include "ElegooCc2.hpp"
 #include "ElegooSdcp.hpp" // read_frame / hub_state: what the Cmd 0 status says the printer is doing
 
 #include <nlohmann/json.hpp>
@@ -430,6 +431,11 @@ bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::str
 bool canvas_capable_model(const std::string& printer_model)
 {
     return boost::iequals(cv_trimmed(printer_model), "Elegoo Centauri Carbon");
+}
+
+bool canvas_reader_model(const std::string& printer_model)
+{
+    return canvas_capable_model(printer_model) || ElegooCc2::is_cc2_model(printer_model);
 }
 
 std::string canvas_generic_preset_name(const std::string& family)

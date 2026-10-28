@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script>
+// Theme, decided before anything is drawn - the same contract as monitor.html:
+//   1. ?theme=dark|light (the slicer passes its own); 2. window.__edgeTheme('dark'|'light') (a live
+//   switch, no reload); 3. prefers-color-scheme; 4. dark.
+(function() {
+    var root = document.documentElement, explicit = '', mq = null, q = null;
+    try { q = new URLSearchParams(location.search); } catch (e) {}
+    if (q && (q.get('theme') === 'dark' || q.get('theme') === 'light')) explicit = q.get('theme');
+    if (q && q.get('embed') === '1') root.setAttribute('data-embed', '1');
+    try { mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null; } catch (e) {}
+    function device() { return mq && mq.matches ? 'light' : 'dark'; }
+    function apply(t) { root.setAttribute('data-theme', t); }
+    apply(explicit || device());
+    if (mq) {
+        var follow = function() { if (!explicit) apply(device()); };
+        if (mq.addEventListener) mq.addEventListener('change', follow);
+        else if (mq.addListener) mq.addListener(follow);
+    }
+    window.__edgeTheme = function(t) {
+        if (t !== 'dark' && t !== 'light') return;
+        explicit = t;
+        apply(t);
+        try { var u = new URL(location.href); u.searchParams.set('theme', t); history.replaceState(history.state, '', u.toString()); } catch (e) {}
+    };
+})();
+</script>
+<title>Device</title>
+<!--
+The shared, vendor-neutral device page (owner D6, 2026-10-26): one printer's /api/printers row drawn
+by PrinterCards.device (printer_cards.js) - the same rows and the same channel as the Printers tab
+(monitor.html), filtered to the row id in ?id=. Fed by PrinterWebView over the "wx" script channel
+(PrinterRowsBridge): printers_get -> __printers, printers_control -> __printerControl, printers_job ->
+__printerJob, printers_thumb -> __printerThumb. It never talks to the loopback API or the hub.
+-->
+<style>
+:root { --bg: #2b2b2b; --bar: #1f1f1f; --card: #333; --card-off: #2e2e2e; --chip: #3d3d3d; --ctl: #3a3a3a; --ctl-hover: #474747; --border: #4a4a4a; --fg: #fff; --fg2: #ddd; --mute: #b0b0b0; --track: #222; --fill: #19a35a; --ok-fg: #5fd08a; --warn-fg: #f0a030; --err-fg: #ff9a9a; --err-bg: #3a2222; --accent: #0a7a3e; --accent-fg: #fff; --stop: #a8321f; --focus: #5aa9ef;
+        --p-printing: #0a7a3e; --p-paused: #8a5a00; --p-error: #a8321f; --p-idle: #4a4a4a; --p-offline: #3a3a3a; --pill-fg: #fff; }
+:root[data-theme="light"] { --bg: #f4f4f4; --bar: #ffffff; --card: #ffffff; --card-off: #f0f0f1; --chip: #ececec; --ctl: #eeeeee; --ctl-hover: #e0e0e0; --border: #d6d6d6; --fg: #262e30; --fg2: #323a3d; --mute: #5f6566; --track: #e3e3e3; --fill: #0a7a3e; --ok-fg: #0a6a36; --warn-fg: #7d4a00; --err-fg: #b0281b; --err-bg: #fdecea; --accent: #0a7a3e; --accent-fg: #fff; --stop: #b0281b; --focus: #1f6fb2;
+        --p-printing: #0a7a3e; --p-paused: #8f5400; --p-error: #b0281b; --p-idle: #5f6566; --p-offline: #6b6b6b; --pill-fg: #fff; }
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) { --bg: #f4f4f4; --bar: #ffffff; --card: #ffffff; --card-off: #f0f0f1; --chip: #ececec; --ctl: #eeeeee; --ctl-hover: #e0e0e0; --border: #d6d6d6; --fg: #262e30; --fg2: #323a3d; --mute: #5f6566; --track: #e3e3e3; --fill: #0a7a3e; --ok-fg: #0a6a36; --warn-fg: #7d4a00; --err-fg: #b0281b; --err-bg: #fdecea; --accent: #0a7a3e; --accent-fg: #fff; --stop: #b0281b; --focus: #1f6fb2;
+        --p-printing: #0a7a3e; --p-paused: #8f5400; --p-error: #b0281b; --p-idle: #5f6566; --p-offline: #6b6b6b; --pill-fg: #fff; }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--fg); font-family: 'Segoe UI', Roboto, -apple-system, sans-serif; font-size: 14px; }
+body { overflow-y: auto; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+#banner { display: none; margin: 12px 16px 0; padding: 8px 12px; border-radius: 6px; background: var(--err-bg); color: var(--err-fg); }
+main { padding: 16px; max-width: 1100px; margin: 0 auto; }
+.empty { color: var(--mute); padding: 24px 4px; line-height: 1.5; max-width: 640px; }
+/* The printer */
+.dpage { display: flex; flex-direction: column; gap: 14px; }
+.dhead { display: flex; align-items: center; gap: 14px; background: var(--card); border: 1px solid var(--border); border-left: 5px solid var(--p-idle); border-radius: 10px; padding: 14px 16px; }
+.st-printing .dhead { border-left-color: var(--p-printing); }
+.st-paused .dhead { border-left-color: var(--p-paused); }
+.st-error .dhead { border-left-color: var(--p-error); }
+.st-offline .dhead { border-left-color: var(--p-offline); background: var(--card-off); }
+.dpic { flex: none; width: 72px; height: 72px; object-fit: contain; border-radius: 8px; background: #fff; padding: 4px; }
+.dtitles { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.dname { font-size: 20px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dmodel { color: var(--mute); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dfresh { font-size: 12px; color: var(--mute); }
+.dfresh.ok { color: var(--ok-fg); }
+.dfresh.warn { color: var(--warn-fg); }
+.dfresh.off { color: var(--err-fg); }
+.ppill { flex: none; padding: 3px 11px; border-radius: 12px; font-size: 13px; font-weight: 600; color: var(--pill-fg); background: var(--p-idle); }
+.st-printing .ppill { background: var(--p-printing); }
+.st-paused .ppill { background: var(--p-paused); }
+.st-error .ppill { background: var(--p-error); }
+.st-offline .ppill { background: var(--p-offline); }
+/* Two columns: the job on the left, the readings on the right; one column when narrow. */
+.dgrid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; align-items: start; }
+.dcol { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.dsec { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.dsec-title { font-size: 13px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: 0.4px; }
+.djobrow { display: flex; gap: 14px; align-items: flex-start; }
+.dthumb { flex: none; width: 120px; height: 120px; object-fit: contain; border-radius: 8px; background: var(--track); border: 1px solid var(--border); }
+.djobinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.dtask { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dtask.none { color: var(--mute); font-weight: 400; }
+.pbar { height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
+.pfill { height: 100%; background: var(--fill); }
+.dfacts { display: flex; flex-wrap: wrap; gap: 4px 18px; list-style: none; }
+.dkv { display: flex; gap: 8px; align-items: baseline; }
+.dkv .k { color: var(--mute); font-size: 12px; }
+.dkv .v { font-variant-numeric: tabular-nums; }
+.dfacts .v { font-size: 15px; font-weight: 600; }
+.pstage { color: var(--mute); font-size: 13px; }
+.dlist { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.dlist .dkv { justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 5px; }
+.dlist .dkv:last-child { border-bottom: 0; padding-bottom: 0; }
+.dlist .k { font-size: 13px; }
+.dnote { color: var(--mute); font-size: 12px; }
+.dunit { display: flex; flex-direction: column; gap: 6px; }
+.dunit-name { color: var(--mute); font-size: 12px; }
+.dslots { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 8px; }
+.dslot { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-off); min-width: 0; }
+.dslot.active { outline: 2px solid var(--fg2); outline-offset: 1px; }
+.dswatch { width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(127,127,127,0.55); background: var(--chip); }
+.dslot.vacant .dswatch { background: transparent; border-style: dashed; }
+.dslot-n { font-size: 11px; color: var(--mute); }
+.dslot-t { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dslot-r { font-size: 11px; color: var(--mute); }
+.perr { color: var(--err-fg); background: var(--err-bg); border-radius: 6px; padding: 8px 10px; font-size: 13px; line-height: 1.35; }
+.pacts { display: flex; flex-wrap: wrap; gap: 8px; }
+.pbtn { font: inherit; font-size: 14px; padding: 7px 16px; border-radius: 6px; border: 1px solid var(--border); background: var(--ctl); color: var(--fg); cursor: pointer; }
+.pbtn:hover { background: var(--ctl-hover); }
+.pbtn.stop { border-color: var(--stop); color: var(--err-fg); }
+.pbtn.off { opacity: 0.5; cursor: default; }
+.pbtn.off:hover { background: var(--ctl); }
+.pbtn.danger { background: var(--stop); color: #fff; border-color: var(--stop); }
+.pjobline { font-size: 13px; color: var(--mute); }
+.pjobline.ok { color: var(--ok-fg); }
+.pjobline.err { color: var(--err-fg); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+#scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 10; padding: 16px; }
+#scrim.open { display: flex; }
+#dialog { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 10px; max-width: 440px; width: 100%; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+#dialog h2 { font-size: 16px; }
+#dialog p { line-height: 1.45; color: var(--fg2); }
+#dialog .row { display: flex; justify-content: flex-end; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+@media (max-width: 760px) { .dgrid { grid-template-columns: 1fr; } main { padding: 10px; } .dthumb { width: 80px; height: 80px; } }
+</style>
+</head>
+<body>
+<div id="banner" role="alert"></div>
+<main>
+    <div id="device"></div>
+    <div id="empty" class="empty" hidden></div>
+</main>
+<div id="announce" class="sr" role="status" aria-live="polite"></div>
+<div id="scrim">
+    <div id="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgtitle" aria-describedby="dlgtext">
+        <h2 id="dlgtitle">Stop the print</h2>
+        <p id="dlgtext"></p>
+        <div class="row">
+            <button type="button" class="pbtn danger" id="dlgstop">Stop print</button>
+            <button type="button" class="pbtn" id="dlgkeep">Keep printing</button>
+        </div>
+    </div>
+</div>
+<script src="printer_cards.js"></script>
+<script>
+(function() {
+    'use strict';
+    var REFRESH_MS = 5000;       // a page about one printer: a little quicker than the Printers tab
+    var READ_TIMEOUT_MS = 30000;
+    var q = null;
+    try { q = new URLSearchParams(location.search); } catch (e) {}
+    var ID = q ? (q.get('id') || '') : '';
+
+    var row = null, loaded = false, active = true, timer = 0, readingSince = 0;
+    var jobs = {}, jobOf = {}, thumbs = {};
+
+    function $(id) { return document.getElementById(id); }
+    function post(msg) {
+        try { window.wx.postMessage(msg); return true; } catch (e) {}
+        return false;
+    }
+    var announceTimer = 0;
+    function announce(text) {
+        var n = $('announce');
+        n.textContent = '';
+        if (announceTimer) clearTimeout(announceTimer);
+        announceTimer = setTimeout(function() { n.textContent = text; }, 60);
+    }
+    function showBanner(text) {
+        var b = $('banner');
+        b.textContent = text || '';
+        b.style.display = text ? 'block' : 'none';
+    }
+
+    function requestPrinters() {
+        if (readingSince && Date.now() - readingSince < READ_TIMEOUT_MS) return;
+        readingSince = Date.now();
+        if (!post('printers_get')) {
+            readingSince = 0;
+            showBanner('This page talks to EdgeSlicer only inside the slicer.');
+        }
+    }
+    function schedule() {
+        if (timer) { clearInterval(timer); timer = 0; }
+        if (active) timer = setInterval(requestPrinters, REFRESH_MS);
+    }
+    window.__printersActive = function(on) {
+        var was = active;
+        active = !!on;
+        schedule();
+        if (active && !was) requestPrinters();
+    };
+
+    window.__printers = function(payload) {
+        readingSince = 0;
+        payload = payload || {};
+        if (!payload.ok) {
+            showBanner('Could not read the printer: ' + (payload.error || 'no answer') + (row ? '. Showing the last known state.' : '.'));
+            if (!loaded) render();
+            return;
+        }
+        showBanner('');
+        loaded = true;
+        var list = Array.isArray(payload.printers) ? payload.printers : [];
+        row = list.filter(function(p) { return p && String(p.id) === ID; })[0] || null;
+        render();
+    };
+
+    function render() {
+        var empty = $('empty');
+        PrinterCards.renderDevice($('device'), row, { jobs: jobs, onAction: onAction, thumbFor: thumbFor });
+        if (row) { empty.hidden = true; document.title = (row.name || row.id) + ' - Device'; return; }
+        empty.hidden = false;
+        if (!ID) empty.textContent = 'No printer was named for this page.';
+        else if (!loaded) empty.textContent = 'Reading the printer…';
+        else empty.textContent = 'This printer is not in the slicer\'s list right now. Check its address and access code under the printer\'s connection settings.';
+    }
+
+    // ---- Pause / Resume / Stop (the Printers tab's own flow) ----
+    function word(action, done) {
+        if (action === 'pause') return done ? 'Paused.' : 'Pausing…';
+        if (action === 'resume') return done ? 'Resumed.' : 'Resuming…';
+        return done ? 'Stopped.' : 'Stopping…';
+    }
+    function onAction(p, action) {
+        var cur = jobs[p.id];
+        if (cur && cur.phase === 'running') return;
+        if (action === 'stop') { askStop(p); return; }
+        run(p, action, false);
+    }
+    function run(p, action, confirm) {
+        jobs[p.id] = { action: action, phase: 'running', text: word(action, false), error: '', job: 0 };
+        render();
+        post('printers_control:' + action + ':' + (confirm ? '1' : '0') + ':' + p.id);
+    }
+    window.__printerControl = function(r) {
+        if (!r || !jobs[r.id]) return;
+        var s = jobs[r.id];
+        if (!r.ok) { finish(r.id, 'error', r.error || 'The command was refused.'); return; }
+        s.job = r.job; s.dry_run = !!r.dry_run;
+        jobOf[r.job] = r.id;
+        setTimeout(function() { post('printers_job:' + r.job); }, 800);
+    };
+    window.__printerJob = function(r) {
+        if (!r) return;
+        var id = jobOf[r.id], s = id !== undefined ? jobs[id] : null;
+        if (!s || s.job !== r.id) return;
+        if (r.state === 'running') {
+            if (r.text) s.text = r.text;
+            render();
+            setTimeout(function() { post('printers_job:' + r.id); }, 1000);
+            return;
+        }
+        delete jobOf[r.id];
+        if (r.state === 'done') finish(id, 'done', s.dry_run ? 'Dry run: nothing was sent.' : word(s.action, true));
+        else finish(id, 'error', r.error || ('The ' + s.action + ' ' + (r.state || 'failed')));
+    };
+    function finish(id, phase, text) {
+        var s = jobs[id];
+        if (!s) return;
+        s.phase = phase;
+        if (phase === 'error') s.error = text; else s.text = text;
+        announce((phase === 'error' ? 'Error: ' : '') + text);
+        render();
+        if (active) { readingSince = 0; requestPrinters(); }
+        setTimeout(function() { if (jobs[id] === s) { delete jobs[id]; render(); } }, phase === 'error' ? 20000 : 8000);
+    }
+
+    var askFor = null, askReturn = '';
+    function askStop(p) {
+        askFor = p;
+        askReturn = 'act:' + p.id + ':stop';
+        $('dlgtext').textContent = 'Stop the print on ' + (p.name || p.id) + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.';
+        $('scrim').classList.add('open');
+        $('dlgkeep').focus();
+    }
+    function closeAsk() {
+        askFor = null;
+        $('scrim').classList.remove('open');
+        var nodes = document.querySelectorAll('#device [data-fk]');
+        for (var i = 0; i < nodes.length; i++)
+            if (nodes[i].getAttribute('data-fk') === askReturn) { try { nodes[i].focus(); } catch (e) {} break; }
+    }
+    $('dlgkeep').addEventListener('click', closeAsk);
+    $('dlgstop').addEventListener('click', function() { var p = askFor; closeAsk(); if (p) run(p, 'stop', true); });
+    $('scrim').addEventListener('click', function(e) { if (e.target === $('scrim')) closeAsk(); });
+    document.addEventListener('keydown', function(e) {
+        if (!askFor) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeAsk(); return; }
+        if (e.key === 'Tab') {
+            var a = $('dlgstop'), b = $('dlgkeep');
+            if (e.shiftKey && document.activeElement === a) { e.preventDefault(); b.focus(); }
+            else if (!e.shiftKey && document.activeElement === b) { e.preventDefault(); a.focus(); }
+        }
+    });
+
+    // ---- the job's plate picture ----
+    function thumbFor(p) {
+        if (p.cover_url && /^https:\/\//.test(p.cover_url)) return p.cover_url;
+        var id = p.thumb_id;
+        if (!id) return '';
+        if (!(id in thumbs)) { thumbs[id] = 'pending'; post('printers_thumb:' + id); }
+        var t = thumbs[id];
+        return t && t !== 'pending' ? t : '';
+    }
+    window.__printerThumb = function(r) {
+        if (!r || !r.id) return;
+        thumbs[r.id] = /^data:image\/png;base64,/.test(r.data || '') ? r.data : '';
+        if (thumbs[r.id]) render();
+    };
+
+    render();
+    requestPrinters();
+    schedule();
+})();
+</script>
+</body>
+</html>

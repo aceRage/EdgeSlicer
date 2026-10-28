@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the idea! If it's still loose, [Discussions](https://github.com/aceRage/EdgeSlicer/discussions) or [Discord](https://discord.gg/tb5GFGuz7Q) are good places to shape it first.
+        Thanks for the idea! If it's still loose, [Discussions](https://github.com/aceRage/EdgeSlicer/discussions) or [Discord](https://discord.gg/vn763fC79M) are good places to shape it first.
 
         If the feature already exists in OrcaSlicer or Bambu Studio, please say so and link it; that makes it much easier to bring over.
   - type: checkboxes

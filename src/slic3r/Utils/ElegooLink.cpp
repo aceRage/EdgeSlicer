@@ -11,6 +11,8 @@
 #include <boost/asio.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <cctype>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
@@ -28,6 +30,7 @@
 #include "Bonjour.hpp"
 #include "ElegooStartPrint.hpp"
 #include "ElegooCanvas.hpp"
+#include "ElegooCc2.hpp"
 #include "ElegooSdcpMonitor.hpp"
 #include "slic3r/GUI/BonjourDialog.hpp"
 
@@ -223,12 +226,47 @@ namespace Slic3r {
             return ret_val;
         }
 
+        // A Centauri Carbon 2 / Centauri 2 speaks ElegooCc2.hpp's protocol. The preset's printer_model
+        // decides; a physical printer's own config has none, so its preset names do there.
+        bool config_is_cc2(const DynamicPrintConfig* config)
+        {
+            if (config == nullptr)
+                return false;
+            if (const auto* model = config->option<ConfigOptionString>("printer_model"); model != nullptr && !model->value.empty())
+                return ElegooCc2::is_cc2_model(model->value);
+            auto named_cc2 = [](const std::string& name) {
+                const std::string n = boost::algorithm::to_lower_copy(name);
+                return n.find("centauri carbon 2") != std::string::npos || n.find("centauri 2") != std::string::npos;
+            };
+            if (const auto* p = config->option<ConfigOptionString>("preset_name"); p != nullptr && named_cc2(p->value))
+                return true;
+            if (const auto* ps = config->option<ConfigOptionStrings>("preset_names"))
+                for (const std::string& n : ps->values)
+                    if (named_cc2(n))
+                        return true;
+            return false;
+        }
+
     } //namespace
 
 
     ElegooLink::ElegooLink(DynamicPrintConfig *config):
-    OctoPrint(config) {
+    OctoPrint(config), m_cc2(config_is_cc2(config)) {
 
+    }
+
+    // The CC2 answers GET /system/info with its serial number when the access code (the preset's API
+    // key, else the factory "123456") is right. No OctoPrint probe first: it has no such API.
+    bool ElegooLink::cc2_test(wxString& msg) const
+    {
+        std::string serial, error;
+        if (ElegooCc2::fetch_serial(m_host, ElegooCc2::token_or_default(m_apikey), serial, error)) {
+            msg.Clear();
+            return true;
+        }
+        BOOST_LOG_TRIVIAL(error) << get_name() << ": Centauri Carbon 2 test failed: " << error;
+        msg = wxString::FromUTF8(error);
+        return false;
     }
 
     const char* ElegooLink::get_name() const { return "ElegooLink"; }
@@ -272,6 +310,8 @@ namespace Slic3r {
         return res;
     }
     bool ElegooLink::test(wxString &curl_msg) const{
+        if (m_cc2)
+            return cc2_test(curl_msg);
         if(OctoPrint::test(curl_msg)){
             return true;
         }
@@ -325,6 +365,8 @@ namespace Slic3r {
     }
     bool ElegooLink::test_with_resolved_ip(wxString& msg) const
     {
+        if (m_cc2)
+            return cc2_test(msg);
         // Elegoo supports both otcoprint and Elegoo link
         if (OctoPrint::test_with_resolved_ip(msg)) {
             return true;
@@ -586,8 +628,118 @@ namespace Slic3r {
         return res;
     }
 
+    // The Centauri Carbon 2: PUT /upload in 1 MiB chunks (Content-Range, X-File-Name, X-File-MD5 in
+    // lower-case hex, X-Token), each answered {"error_code":0}; then, for Upload and Print, the MQTT
+    // start command (ElegooCc2::start_print) with the dialog's options and CANVAS slot_map.
+    // The chunked PUT follows upstream OrcaSlicer's ElegooLink (loopUploadCC2).
+    bool ElegooLink::cc2_upload(const std::string& url, PrintHostUpload upload_data, ProgressFn progress_fn, ErrorFn error_fn, InfoFn info_fn) const
+    {
+        const char*       name            = get_name();
+        const std::string upload_filename = upload_data.upload_path.filename().string();
+        const std::string source_path     = upload_data.source_path.string();
+        const std::string token           = ElegooCc2::token_or_default(m_apikey);
+
+        std::string md5;
+        if (!bbl_calc_md5(source_path, md5) || md5.empty()) {
+            BOOST_LOG_TRIVIAL(error) << name << ": Failed to calculate upload file MD5: " << source_path;
+            error_fn(_L("Failed to calculate the upload file checksum."));
+            return false;
+        }
+        std::transform(md5.begin(), md5.end(), md5.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        boost::nowide::ifstream file(source_path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            error_fn(_L("Failed to open file for upload."));
+            return false;
+        }
+        const std::streamsize size = file.tellg();
+        if (size <= 0) {
+            error_fn(_L("The file is empty or could not be read."));
+            return false;
+        }
+
+        const size_t total        = static_cast<size_t>(size);
+        const size_t packageCount = (total + MAX_UPLOAD_PACKAGE_LENGTH - 1) / MAX_UPLOAD_PACKAGE_LENGTH;
+        bool         res          = false;
+        for (size_t i = 0; i < packageCount; ++i) {
+            const size_t offset = MAX_UPLOAD_PACKAGE_LENGTH * i;
+            const size_t length = std::min<size_t>(MAX_UPLOAD_PACKAGE_LENGTH, total - offset);
+            std::string  chunk(length, '\0');
+            file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+            file.read(&chunk[0], static_cast<std::streamsize>(length));
+            if (static_cast<size_t>(file.gcount()) != length) {
+                error_fn(_L("Failed to read file chunk for upload."));
+                return false;
+            }
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Uploading file %2%/%3% (Centauri Carbon 2)") % name % (i + 1) % packageCount;
+
+            res       = false;
+            auto http = Http::put2(url);
+            http.timeout_connect(30).timeout_max(180);
+            http.header("Accept", "application/json")
+                .header("Content-Type", "application/octet-stream")
+                .header("Content-Range", ElegooCc2::content_range(offset, length, total))
+                .header("X-File-Name", upload_filename)
+                .header("X-File-MD5", md5)
+                .header("X-Token", token)
+                .set_post_body(chunk)
+                .on_complete([&](std::string body, unsigned status) {
+                    std::string why;
+                    if (ElegooCc2::parse_upload_reply(body, why))
+                        res = true;
+                    else
+                        error_fn(format_error(body, why, status));
+                })
+                .on_error([&](std::string body, std::string error, unsigned status) {
+                    BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error uploading CC2 chunk: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
+                    if (status == 401 || status == 403)
+                        error_fn(format_error(body, "the printer refused the access code", status));
+                    else
+                        error_fn(format_error(body, error, status));
+                })
+                .on_progress([&](Http::Progress progress, bool& cancel) {
+                    if (progress.ultotal == progress.ulnow)
+                        return;
+                    Http::Progress merged(0, 0, total, std::min(total, offset + progress.ulnow), progress.buffer);
+                    progress_fn(merged, cancel);
+                })
+#ifdef WIN32
+                .ssl_revoke_best_effort(m_ssl_revoke_best_effort)
+#endif
+                .perform_sync();
+            if (!res)
+                return false;
+        }
+
+        if (upload_data.post_action != PrintHostPostUploadAction::StartPrint)
+            return true;
+
+        const ElegooCc2::StartResult started = ElegooCc2::start_print(m_host, token, upload_data.extended_info,
+                                                                      static_cast<int>(BedType::btPC), upload_filename);
+        BOOST_LOG_TRIVIAL(info) << name << ": Centauri Carbon 2 start print, params: " << started.payload << " -> "
+                                << (started.ok ? std::string("started") : started.error)
+                                << (started.auto_refill_set < 0 ? std::string() :
+                                                                  std::string(", CANVAS auto-refill ") + (started.auto_refill_set == 1 ? "on" : "off"));
+        if (!started.ok) {
+            error_fn(GUI::format_wxstr(_L("The file has been transferred, but the print did not start: %1%"),
+                                       wxString::FromUTF8(started.error)));
+            return false;
+        }
+        (void) info_fn;
+        return true;
+    }
+
     bool ElegooLink::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn error_fn, InfoFn info_fn) const
     {
+        if (m_cc2) {
+            // No SDCP hub connection for this model (it has no :3030), and no OctoPrint probe.
+            wxString msg;
+            if (!cc2_test(msg)) {
+                error_fn(std::move(msg));
+                return false;
+            }
+            return cc2_upload(make_url("upload"), std::move(upload_data), prorgess_fn, error_fn, info_fn);
+        }
         // An upload (and the start-print after it) is a request for the hub's connection to this
         // printer: it opens now, so the phone and the Printers tab see the print begin.
         SdcpMonitor::demand(sdcp_host_of(m_host));

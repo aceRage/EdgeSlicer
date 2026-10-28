@@ -224,7 +224,8 @@ bool Lighting::operator==(const Lighting &o) const
            shadow_intensity == o.shadow_intensity && ssao == o.ssao && key_intensity == o.key_intensity &&
            key_temperature == o.key_temperature && fill == o.fill && fill_intensity == o.fill_intensity && rim == o.rim &&
            rim_intensity == o.rim_intensity && environment == o.environment && env_intensity == o.env_intensity &&
-           env_rotation_deg == o.env_rotation_deg && exposure == o.exposure && shadow_softness == o.shadow_softness;
+           env_rotation_deg == o.env_rotation_deg && exposure == o.exposure && shadow_softness == o.shadow_softness &&
+           tone == o.tone;
 }
 
 bool CameraView::operator==(const CameraView &o) const
@@ -778,6 +779,7 @@ json scene_to_json_object(const Scene &s)
     li["env_rotation"]     = s.lighting.env_rotation_deg;
     li["exposure"]         = s.lighting.exposure;
     li["shadow_softness"]  = s.lighting.shadow_softness;
+    li["tone"]             = to_string(s.lighting.tone);
     j["lighting"] = merged(raw, "lighting", li);
 
     if (s.camera.valid)
@@ -877,6 +879,7 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.lighting.env_rotation_deg = clamp_or(get_or<float>(li, "env_rotation", s.lighting.env_rotation_deg), -360.f, 720.f, 0.f);
     s.lighting.exposure         = clamp_or(get_or<float>(li, "exposure", s.lighting.exposure), -3.f, 3.f, 0.f);
     s.lighting.shadow_softness  = clamp_or(get_or<float>(li, "shadow_softness", s.lighting.shadow_softness), 0.5f, 4.f, 1.f);
+    s.lighting.tone             = enum_or(li, "tone", s.lighting.tone);
 
     if (j.contains("camera"))
         s.camera = camera_from_json(j["camera"]);
@@ -1193,9 +1196,9 @@ int clamp_export_side(int v) { return std::clamp(v, MIN_EXPORT_SIDE, MAX_EXPORT_
 size_t export_memory_estimate(int internal_w, int internal_h, int msaa)
 {
     const double px = double(internal_w) * double(internal_h);
-    // MSAA colour (RGBA8) + depth (D24S8) per sample, a resolved colour + depth, two SSAO copies
-    // and the CPU-side read back.
-    const double per_px = (msaa > 0 ? 8. * double(msaa) : 0.) + 8. + 8. + 4.;
+    // MSAA colour (RGBA8) + depth (D24S8) + the objects' HDR layer (RGBA16F, 1a) per sample, a
+    // resolved colour + depth + HDR layer, two SSAO copies and the CPU-side read back.
+    const double per_px = (msaa > 0 ? 16. * double(msaa) : 0.) + 16. + 8. + 4.;
     return size_t(px * per_px);
 }
 
