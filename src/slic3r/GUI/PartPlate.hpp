@@ -86,6 +86,13 @@ bool wipe_tower_rotation_supported();
 // Safe in the CLI.
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config);
 
+// Orca #16728: what estimate_wipe_tower_polygon did to a saved tower position that no longer fits.
+struct WipeTowerRelocation
+{
+    bool moved            = false; // re-placed, not just snapped onto the bound it was dropped past
+    bool overlaps_objects = false; // no spot on the plate was clear of the objects, so it sits on one
+};
+
 class PartPlate : public ObjectBase
 {
 public:
@@ -190,6 +197,9 @@ private:
 
     void init();
     bool valid_instance(int obj_id, int instance_id) const;
+    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
+    // by its brim and the tower margin, in plate coordinates.
+    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     void generate_print_polygon(ExPolygon &print_polygon);
     void generate_exclude_polygon(ExPolygon &exclude_polygon);
     void generate_logo_polygon(ExPolygon &logo_polygon);
@@ -377,7 +387,10 @@ public:
     // assigned to plates - the layer height is then the project's thinnest, which over-reserves.
     WipeTowerFootprint estimate_wipe_tower_footprint(const DynamicPrintConfig & config, int plate_extruder_size = 0, bool use_global_objects = false) const;
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, int plate_extruder_size = 0, bool use_global_objects = false) const;
-    arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false) const;
+    // relocation (Orca #16728): callers that store the returned position pass it, so a re-placed tower
+    // is moved clear of the plate's objects where there is room, and they are told it moved.
+    arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false,
+                                                            WipeTowerRelocation *relocation = nullptr) const;
     // Orca #15146: move (mm) that pulls a prime tower footprint (world coordinates, mm) onto this plate's real
     // printable outline (cut to the part every nozzle reaches on a dual-nozzle printer), `margin` mm inside it.
     // Zero on a bed that fills its bounding box: the drag's bounding-box clamp already covers those.

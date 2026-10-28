@@ -3179,6 +3179,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_rib_width", "multimaterial_settings_prime_tower#rib-width");
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
+        optgroup->append_single_option_line("wipe_tower_sparse_layers_combination", "multimaterial_settings_prime_tower#combine-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
@@ -7460,6 +7461,10 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
                     oldFlushVolumesVector = flushVector->values;
 
+                // Multi-colour P1: update_selections() re-sizes the slots to the target printer's count,
+                // so the visual-only keys (split / angle / twist) are kept like filament_multi_colors.
+                const DynamicPrintConfig oldVisualOnly = visual_only_snapshot(projectConfig);
+
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
@@ -7467,6 +7472,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
                 projectConfig.option<ConfigOptionInts>("filament_colour_mode", true)->values = oldFilamentColourModes;
+                visual_only_restore(projectConfig, oldVisualOnly, oldFilamentCount);
 
                 if (ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
                     flushMatrix->values = oldFlushVolumesMatrix;
