@@ -22,6 +22,7 @@
 #include "BoundingBox.hpp"
 #include "PaintDepth.hpp"
 #include <algorithm>
+#include <set>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -53,6 +54,19 @@ enum class FuzzySkinMode {
     Combined,
 };
 
+// ORCA: direction in which top_surface_expansion grows the top surfaces.
+enum class TopSurfaceExpansionDirection {
+    InwardAndOutward,
+    Inward,
+    Outward,
+};
+
+enum class CenterOfSurfacePattern {
+    Each_Surface,
+    Each_Model,
+    Each_Assembly,
+};
+
 enum class NoiseType {
     Classic,
     Perlin,
@@ -78,10 +92,70 @@ enum InfillPattern : int {
     ipCubic, ipAdaptiveCubic, ipQuarterCubic, ipSupportCubic, ipLightning,
     ipHoneycomb, ip3DHoneycomb, ipLateralHoneycomb, ipLateralLattice,
     ipCrossHatch, ipTpmsD, ipTpmsFK, ipGyroid,
-    ipConcentric, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
+    ipConcentric, ipSpiralInset, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
     ipSupportBase, ipConcentricInternal,
     ipCount,
 };
+
+// Orca: Infill patterns that the "separated_infills" option can center on each connected body.
+inline bool is_separable_infill_pattern(InfillPattern pattern)
+{
+    switch (pattern) {
+    case ipMonotonic:
+    case ipMonotonicLine:
+    case ipRectilinear:
+    case ipAlignedRectilinear:
+    case ipZigZag:
+    case ipCrossZag:
+    case ipLockedZag:
+    case ipLine:
+    case ipGrid:
+    case ipTriangles:
+    case ipStars:          // tri-hexagon
+    case ipCubic:
+    case ipQuarterCubic:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipLateralHoneycomb:
+    case ipLateralLattice:
+    case ipCrossHatch:
+    case ipTpmsD:
+    case ipTpmsFK:
+    case ipGyroid:
+    case ipHilbertCurve:
+    case ipArchimedeanChords:
+    case ipOctagramSpiral:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Orca: Infill patterns laid out by an octree, which each connected body always gets of its own.
+inline bool is_octree_infill_pattern(InfillPattern pattern) { return pattern == ipAdaptiveCubic || pattern == ipSupportCubic; }
+
+// Orca: Infill patterns graded by the "adaptive_infill_mode" option.
+inline bool is_adaptive_infill_pattern(InfillPattern pattern) { return pattern == ipGyroid || pattern == ipTpmsD || pattern == ipTpmsFK; }
+
+// Orca: Infill patterns that round their corners by the "sparse_infill_smooth_factor" option.
+// EdgeSlicer: upstream also lists Grid, Triangles and Tri-hexagon with more than one line per infill
+// wall, which smooth in their trapezoidal form (FillRectilinear::fill_surface_trapezoidal, from the
+// Clipper2 multiline infill #11435). We do not carry that form, so they are not smoothable here.
+inline bool is_smoothable_infill_pattern(InfillPattern pattern, int /* multiline */ = 1)
+{
+    switch (pattern) {
+    case ipHilbertCurve:
+    case ipOctagramSpiral:
+    case ipLightning:
+    case ipHoneycomb:
+    case ip3DHoneycomb:
+    case ipConcentric:
+    case ipCrossHatch:
+        return true;
+    default:
+        return false;
+    }
+}
 
 enum class IroningType {
     NoIroning,
@@ -94,6 +168,18 @@ enum class IroningType {
 // Smallest usable ironing line spacing. Anything tighter yields an unprintable number of lines,
 // and zero stops the fillers from making progress.
 constexpr double IRONING_SPACING_MIN = 0.05;
+
+// Orca #11194: the filament_ironing_* override for a 1-based filament id, or process_value when
+// the override is nil. Edge: an id outside the vector (a mixed / virtual filament id, or a
+// config carrying fewer filament slots than the print) also falls back to the process value,
+// instead of borrowing filament 1's override the way ConfigOptionVector::get_at() would.
+template<class TVectorOption>
+double ironing_filament_override(const TVectorOption &opt, int filament_id, double process_value)
+{
+    if (filament_id < 1 || size_t(filament_id) > opt.values.size() || opt.is_nil(size_t(filament_id - 1)))
+        return process_value;
+    return double(opt.get_at(size_t(filament_id - 1)));
+}
 
 //BBS
 enum class WallInfillOrder {
@@ -122,6 +208,15 @@ enum class WallDirection
     Count,
 };
 
+// Orca: print order of surface fill loops/fragments for center-based fill patterns
+// (Concentric, Spiral Inset, Archimedean Chords, Octagram Spiral).
+enum class SurfaceFillOrder {
+    Default,
+    Outward,
+    Inward,
+    Count,
+};
+
 // Orca #11582 / #11616: what the slicer does about the printer's power loss recovery.
 // PrinterConfiguration writes nothing and leaves the printer's own setting; Enable / Disable write
 // M1003 S1 / S0 (Bambu Lab) or M413 S1 / S0 (Marlin 2) at the start of the second layer.
@@ -129,6 +224,26 @@ enum class PowerLossRecoveryMode {
     PrinterConfiguration,
     Enable,
     Disable,
+};
+
+// Orca: what the adaptive TPMS density follows: the 3D shape of the object, or its 2D sections normal to an axis.
+enum class AdaptiveInfillMode {
+    Disabled,
+    DistanceWarp,
+    SmoothBlend,
+    SteppedShells,
+    Lobes,
+    NormalZ,
+    NormalY,
+    NormalX,
+    Count,
+};
+
+// Orca: how the adaptive TPMS density changes from the object surface to its deepest point.
+enum class AdaptiveInfillGradient {
+    Linear,
+    Quadratic,
+    Exponential,
 };
 
 //BBS
@@ -175,7 +290,7 @@ enum LongRectrationLevel
 };
 
 enum SupportMaterialInterfacePattern {
-    smipAuto, smipRectilinear, smipConcentric, smipRectilinearInterlaced, smipGrid
+    smipAuto, smipRectilinear, smipConcentric, smipSpiralInset, smipRectilinearInterlaced, smipGrid
 };
 
 // BBS
@@ -877,6 +992,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrinterTechnology)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CenterOfSurfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
@@ -916,6 +1033,9 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AdaptiveInfillGradient)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SurfaceFillOrder)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
@@ -1010,6 +1130,36 @@ extern const PrintConfigDef print_config_def;
 // include Print.hpp.
 // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.5.
 const std::vector<std::string>& part_support_keys();
+
+// Keys the slicer must never see: visual only (Showcase, Preview look, swatches). Every one is a
+// per-filament-slot project option (s_project_options) kept in step with filament_multi_colors.
+// Print::apply() erases them before it compares or stores anything, and GCode::append_full_config()
+// bans them from the config block as a second guard, so they can never change G-code or invalidate
+// a slice. Not in the static PrintConfig. tests/design_multicolour_filament_view.md 4.2 / 6.1.
+// A later visual-only key (glow G1, the gradient cycle length of P6) joins this list and is then
+// stripped, banned, resized, erased and moved with the others without further code.
+const std::set<std::string>& visual_only_option_keys();
+inline bool is_visual_only_option(const std::string &key) { return visual_only_option_keys().count(key) != 0; }
+
+// The slot helpers for the visual-only keys (PresetBundle calls them next to filament_multi_colors).
+// Each works on every vector key of visual_only_option_keys(), whatever its type.
+// Size every visual-only key to n slots, creating a missing key and filling new slots with the default.
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n);
+// Remove slot index from every visual-only key that has it.
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index);
+// Move slot from to position to (the others shift), in every visual-only key that has both.
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to);
+// Erase every visual-only key (what Print::apply() does to the config it is handed).
+void strip_visual_only_options(DynamicPrintConfig &config);
+// Copy every visual-only key the config holds (a printer switch saves them before update_selections()
+// re-sizes the slots, as it saves filament_multi_colors).
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config);
+// Put a snapshot back (keys it lacks are erased) and size the keys to n slots.
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n);
+// A slot whose colours were replaced (AMS sync, the colour picker, a recommended palette) starts again
+// with an equal split; its angle and twist stay, as they belong to the feed path (design 4.5). Compares
+// filament_multi_colors now with old_multi_colors, slot by slot.
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors);
 
 class StaticPrintConfig;
 
@@ -1355,10 +1505,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                print_extruder_id))
     ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               brim_object_gap))
+    ((ConfigOptionFloat,               brim_flow_ratio))
+    ((ConfigOptionBool,                brim_use_efc_outline))
     ((ConfigOptionEnum<BrimType>,      brim_type))
     ((ConfigOptionFloat,               brim_width))
     ((ConfigOptionFloat,               brim_ears_detection_length))
     ((ConfigOptionFloat,               brim_ears_max_angle))
+    ((ConfigOptionBool,                brim_ears_outer_only))
     ((ConfigOptionFloat,               skirt_start_angle))
     ((ConfigOptionBool,                bridge_no_support))
     ((ConfigOptionFloat,               elefant_foot_compensation))
@@ -1456,6 +1609,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
     ((ConfigOptionFloats,               support_speed))
+    // OrcaSlicer #13459
+    ((ConfigOptionFloatsOrPercents,     small_support_perimeter_speed))
+    ((ConfigOptionFloats,               small_support_perimeter_threshold))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
     // BBS
     //((ConfigOptionBool,                independent_support_layer_height))
@@ -1527,6 +1683,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,            min_bead_width))
 
     // Orca
+    ((ConfigOptionFloat,              wall_maximum_resolution))
+    ((ConfigOptionFloat,              wall_maximum_deviation))
     ((ConfigOptionFloat,              make_overhang_printable_angle))
     ((ConfigOptionFloat,              make_overhang_printable_hole_size))
     ((ConfigOptionFloat,              tree_support_branch_distance_organic))
@@ -1583,8 +1741,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  bottom_color_penetration_layers))
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
+    ((ConfigOptionBool,                 relative_bridge_angle)) // ORCA: Relative bridge angle flag
     ((ConfigOptionFloat,                bridge_expansion_extra))
     ((ConfigOptionFloat,                bridge_flow))
+    ((ConfigOptionFloatOrPercent,       bridge_line_width))
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloats,                bridge_speed))
     ((ConfigOptionFloatsOrPercents,       internal_bridge_speed))
@@ -1606,21 +1766,32 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  top_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  undertop_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>,  bottom_surface_pattern))
+    ((ConfigOptionEnum<SurfaceFillOrder>, top_surface_fill_order))
+    ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
+    ((ConfigOptionFloat,                top_layer_direction))
+    ((ConfigOptionFloat,                bottom_layer_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
     ((ConfigOptionBool,                 symmetric_infill_y_axis))
+    ((ConfigOptionBool,                 infill_complete_top))
     ((ConfigOptionFloat,                infill_shift_step))
     ((ConfigOptionString,               sparse_infill_rotate_template))
     ((ConfigOptionPercent,              sparse_infill_density))
     ((ConfigOptionEnum<InfillPattern>,  sparse_infill_pattern))
+    ((ConfigOptionPercent,              sparse_infill_smooth_factor))
     ((ConfigOptionFloat,                lateral_lattice_angle_1))
     ((ConfigOptionFloat,                lateral_lattice_angle_2))
     ((ConfigOptionFloat,                infill_overhang_angle))
+    ((ConfigOptionFloat,                lightning_overhang_angle))
+    ((ConfigOptionFloat,                lightning_prune_angle))
+    ((ConfigOptionFloat,                lightning_straightening_angle))
     ((ConfigOptionBool,                 align_infill_direction_to_model))
+    ((ConfigOptionEnum<CenterOfSurfacePattern>, center_of_surface_pattern))
+    ((ConfigOptionBool,                 separated_infills))
     // FDM hollowing (FDMHollowing.hpp). Region settings, so a part can override the object.
     ((ConfigOptionBool,                 hollow_interior))
     ((ConfigOptionFloat,                hollow_shell_thickness))
@@ -1662,6 +1833,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Orca:
     ((ConfigOptionFloatOrPercent,                infill_combination_max_layer_height))
     ((ConfigOptionInt,                  fill_multiline))
+    ((ConfigOptionEnum<AdaptiveInfillMode>, adaptive_infill_mode))
+    ((ConfigOptionPercent,              adaptive_infill_interior_density))
+    ((ConfigOptionEnum<AdaptiveInfillGradient>, adaptive_infill_gradient))
+    ((ConfigOptionBool,                 gyroid_optimized))
     // Ironing options
     ((ConfigOptionEnum<IroningType>, ironing_type))
     ((ConfigOptionEnum<InfillPattern>, ironing_pattern))
@@ -1671,6 +1846,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_direction))
     ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
+    ((ConfigOptionBool, ironing_angle_fixed))
+    // Orca #11194: filament ironing overrides (per filament, nil = use the process value)
+    ((ConfigOptionPercentsNullable, filament_ironing_flow))
+    ((ConfigOptionFloatsNullable, filament_ironing_spacing))
+    ((ConfigOptionFloatsNullable, filament_ironing_inset))
+    ((ConfigOptionFloatsNullable, filament_ironing_speed))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
     ((ConfigOptionBool, unsupported_wall_last))
@@ -1693,6 +1874,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
+    ((ConfigOptionFloat, top_surface_expansion))
+    ((ConfigOptionFloat, top_surface_expansion_margin))
+    ((ConfigOptionEnum<TopSurfaceExpansionDirection>, top_surface_expansion_direction))
     ((ConfigOptionInt, top_color_penetration_layers))
     ((ConfigOptionFloats, top_surface_speed))
     //BBS
@@ -1735,6 +1919,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 hole_to_polyhole))
     ((ConfigOptionFloatOrPercent,       hole_to_polyhole_threshold))
     ((ConfigOptionBool,                 hole_to_polyhole_twisted))
+    ((ConfigOptionInt,                  hole_to_polyhole_max_edges))
     ((ConfigOptionBool,                 overhang_reverse))
     ((ConfigOptionBool,                 overhang_reverse_internal_only))
     ((ConfigOptionFloatOrPercent,       overhang_reverse_threshold))
@@ -1876,6 +2061,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                gcode_add_line_number))
     ((ConfigOptionBool,                bbl_bed_temperature_gcode))
     ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
+    ((ConfigOptionBool,                gcode_skip_config_block))
 
     ((ConfigOptionFloat,               time_cost)) 
     ((ConfigOptionString,              layer_change_gcode))
@@ -1895,6 +2081,8 @@ PRINT_CONFIG_CLASS_DEFINE(
 
     
     ((ConfigOptionPercents,            retract_before_wipe))
+    // Orca
+    ((ConfigOptionPercents,            retract_after_wipe))
     ((ConfigOptionFloats,              retraction_length))
     ((ConfigOptionFloats,              retract_length_toolchange))
     ((ConfigOptionInt,                 enable_long_retraction_when_cut))
@@ -1915,6 +2103,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              retract_restart_extra))
     ((ConfigOptionFloats,              retract_restart_extra_toolchange))
     ((ConfigOptionFloats,              retraction_speed))
+    ((ConfigOptionString,              file_start_gcode))
     ((ConfigOptionString,              machine_start_gcode))
     ((ConfigOptionStrings,             filament_start_gcode))
     ((ConfigOptionBool,                single_extruder_multi_material))
@@ -1924,8 +2113,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,              toolchange_cyclic_order))
     ((ConfigOptionBool,                toolchange_cyclic_first_layer))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
+    ((ConfigOptionBool,                wipe_tower_sparse_layers_combination))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
+    ((ConfigOptionString,              process_change_extrusion_role_gcode))
+    ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))
     ((ConfigOptionFloats,               travel_speed))
     ((ConfigOptionFloat,               travel_speed_z))
     ((ConfigOptionBool,                silent_mode))
@@ -1982,6 +2174,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                purge_in_prime_tower))
     ((ConfigOptionBool,                enable_filament_ramming))
     ((ConfigOptionBool,                tool_change_on_wipe_tower))
+    ((ConfigOptionBool,                wait_for_temp_on_wipe_tower))
     ((ConfigOptionFloat,                ramming_line_width_ratio))
     ((ConfigOptionBool,                enable_change_pressure_when_wiping))
     ((ConfigOptionFloat,                ramming_pressure_advance_value))
@@ -2233,6 +2426,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,             thumbnails))
     // BBS: move from PrintObjectConfig
     ((ConfigOptionBool, independent_support_layer_height))
+    ((ConfigOptionBool,               combine_brims))
     // BBS port: Z overrides X/Y support distance
     ((ConfigOptionBool, top_z_overrides_xy_distance))
     // SoftFever
@@ -2240,6 +2434,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPercents,            filament_shrinkage_compensation_z))
     ((ConfigOptionBool,                gcode_label_objects))
     ((ConfigOptionBool,                exclude_object))
+    ((ConfigOptionFloat,               exclude_object_tolerance))
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionInts,                 slow_down_layers))
     ((ConfigOptionInts,                support_material_interface_fan_speed))

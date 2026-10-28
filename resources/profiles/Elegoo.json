@@ -1,6 +1,6 @@
 {
     "name": "Elegoo",
-    "version": "02.04.00.16",
+    "version": "02.04.00.18",
     "force_update": "0",
     "description": "Elegoo configurations",
     "machine_model_list": [
@@ -995,6 +995,18 @@
             "sub_path": "process/fdm_process_elegoo_02010.json"
         },
         {
+            "name": "fdm_process_elegoo_04020_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_04020_cc2.json"
+        },
+        {
+            "name": "fdm_process_elegoo_06030_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_06030_cc2.json"
+        },
+        {
+            "name": "fdm_process_elegoo_08040_cc2",
+            "sub_path": "process/CC2BASE/fdm_process_elegoo_08040_cc2.json"
+        },
+        {
             "name": "0.10mm Standard @Elegoo C2 0.2 nozzle",
             "sub_path": "process/EC2/0.10mm Standard @Elegoo C2 0.2 nozzle.json"
         },
@@ -1793,8 +1805,8 @@
             "sub_path": "filament/EC2/Elegoo PLA Translucent2 @EC2.json"
         },
         {
-            "name": "Elegoo PLA Translucent2 @ECC2",
-            "sub_path": "filament/ECC2/Elegoo PLA Translucent2 @ECC2.json"
+            "name": "Elegoo PLA Translucent @ECC2",
+            "sub_path": "filament/ECC2/Elegoo PLA Translucent @ECC2.json"
         },
         {
             "name": "Elegoo PLA Wood @base",

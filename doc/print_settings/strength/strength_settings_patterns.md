@@ -410,6 +410,30 @@ Mathematical, isotropic surface providing equal strength in all directions. Exce
 
 ![infill-top-gyroid](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/fill/infill-top-gyroid.png?raw=true)
 
+<a name="gyroid-optimized"></a>
+
+### Z-buckling bias optimization
+
+Experimental option for the Gyroid sparse infill (off by default). It draws the gyroid from its implicit surface and tightens the wave along the Z (vertical) axis at low infill densities, so the vertical columns of the pattern are shorter and resist buckling better under Z-axis compression. Filament use stays about the same as plain Gyroid at the same density. The effect fades out as the density rises and stops at about 30% sparse infill density and above. It is ignored when [Adaptive density](#adaptive-density) is on.
+
+## Adaptive density
+
+Experimental, for the Gyroid, TPMS-D and TPMS-FK sparse infill (Disabled by default). Grades the infill inside the object: the sparse infill density is used at the surface and the [interior density](#interior-density) at the center, with the cells growing from the surface inwards.
+
+- **Distance warp:** one continuous pattern, stretched and sheared where the distance to the surface changes.
+- **Smooth blend:** the patterns of neighbouring densities blended into each other, with small loops where they meet.
+- **Stepped shells:** shells of the regular pattern at densities about 1.5 times apart, their lines joined along the shell boundaries.
+- **Lobes:** follows the 3D shape of the object; every lobe (a part joined to the rest by a narrower neck) is graded towards its own center.
+- **Normal Z, Y or X:** follows the sections of the object normal to that axis, so the density does not change along it.
+
+### Interior density
+
+Density of the adaptive infill at the center of the object (default 5%).
+
+### Adaptive gradient
+
+How the density changes from the surface to the center: **Linear** at a constant rate, **Quadratic** staying close to the surface density longer and changing faster towards the center, **Exponential** changing quickly just below the surface and levelling off towards the center.
+
 ## Concentric
 
 Fills the area with progressively smaller versions of the outer contour, creating a concentric pattern. Ideal for 100% infill or flexible prints.

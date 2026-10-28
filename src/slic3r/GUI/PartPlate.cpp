@@ -1754,7 +1754,7 @@ std::vector<int> PartPlate::get_extruders_without_support(bool conside_custom_gc
 	const DynamicPrintConfig& glb_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
 
 	for (int obj_idx = 0; obj_idx < m_model->objects.size(); obj_idx++) {
-		if (!contain_instance_totally(obj_idx, 0))
+		if (!contain_any_instance_totally(obj_idx))
 			continue;
 
 		ModelObject* mo = m_model->objects[obj_idx];
@@ -1872,6 +1872,20 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
     return estimate_wipe_tower_polygon(config, plate_index, wt_pos, wt_size, plate_extruder_size, use_global_objects);
 }
 
+bool wipe_tower_rotation_supported()
+{
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    return bundle != nullptr && !bundle->is_bbl_vendor();
+}
+
+double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
+{
+    // Config only: PartPlate also runs in the CLI, where there is no GUI_App to ask
+    // (printer_model names Bambu Lab printers, which is what the CLI's Print keys on too).
+    return wipe_tower_rotation_deg(config);
+}
+
 // Plate-local box the prime tower may occupy: the whole plate, or on a dual-nozzle printer (H2D / H2C / X2D)
 // the part both nozzles reach, since every nozzle purges into the tower. Bambu Studio limits the tower to that
 // shared part as well, which is why its default tower sits at X 40 and not in the strip one nozzle owns.
@@ -1879,6 +1893,15 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 static BoundingBoxf prime_tower_placement_box(const DynamicPrintConfig &config, int plate_width, int plate_depth)
 {
 	BoundingBoxf box(Vec2d(0., 0.), Vec2d(double(plate_width), double(plate_depth)));
+	// Orca #15146: plate-local coordinates are printable_area's, so a bed that does not start at 0/0 (the
+	// delta profiles, centred on the origin) has its box there. Every bed starting at 0/0 keeps the box above.
+	if (const auto *area = config.option<ConfigOptionPoints>("printable_area"); area != nullptr && area->values.size() >= 3) {
+		const BoundingBoxf bed(area->values);
+		if (bed.defined && (std::abs(bed.min.x()) > EPSILON || std::abs(bed.min.y()) > EPSILON)) {
+			box.min += bed.min;
+			box.max += bed.min;
+		}
+	}
 	const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
 	if (nozzles == nullptr || nozzles->values.size() < 2)
 		return box;
@@ -1893,7 +1916,97 @@ static BoundingBoxf prime_tower_placement_box(const DynamicPrintConfig &config, 
 	return box;
 }
 
-arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects) const
+// Orca #15146: the real outline behind prime_tower_placement_box(), scaled. `bed` is the printable outline and
+// `areas` the extruder areas, both in one frame; on a dual-nozzle printer the outline is cut to the shared part.
+static Polygons prime_tower_placement_outline(const Polygon &bed, const ExtruderAreas &areas, const Point &areas_shift)
+{
+	Polygons outline;
+	if (bed.size() < 3)
+		return outline;
+	outline.push_back(bed);
+	if (areas.multi() && areas.has_exclusive_regions() && !areas.shared.empty()) {
+		Polygons shared = areas.shared;
+		for (Polygon &p : shared)
+			p.translate(areas_shift);
+		Polygons cut = intersection(outline, shared);
+		if (!cut.empty())
+			outline = std::move(cut);
+	}
+	return outline;
+}
+
+static Polygons prime_tower_placement_outline(const DynamicPrintConfig &config)
+{
+	const auto *area = config.option<ConfigOptionPoints>("printable_area");
+	if (area == nullptr || area->values.size() < 3)
+		return {};
+	const auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+	const ExtruderAreas areas = (nozzles != nullptr && nozzles->values.size() >= 2) ? extruder_areas_from_config(config) : ExtruderAreas();
+	return prime_tower_placement_outline(Polygon::new_scale(area->values), areas, Point(0, 0));
+}
+
+// Orca #15146: after the bounding-box clamps, pull a tower anchored at (x, y) onto a bed that does not fill its
+// bounding box (delta, circular or custom), where the box still allows corners the bed does not have. The box
+// tested is the turned footprint with its brim (wipe_tower_rotated_extents), `margin` mm inside the outline.
+// Rectangular beds return untouched, so their placement stays byte-identical.
+static void fit_prime_tower_onto_bed(const DynamicPrintConfig &config, float &x, float &y, float w, float depth, float brim, double angle, double margin)
+{
+	const Polygons bed = prime_tower_placement_outline(config);
+	if (bed.empty() || WipeTower::outline_fills_bounding_box(bed))
+		return;
+	const BoundingBoxf ext = wipe_tower_rotated_extents(w, depth, brim, angle);
+	const BoundingBox  tower(Point::new_scale(x + ext.min.x(), y + ext.min.y()), Point::new_scale(x + ext.max.x(), y + ext.max.y()));
+	const Vec2f        move = WipeTower::move_box_inside_polygon(tower, bed, scaled<coord_t>(margin));
+	x += move.x();
+	y += move.y();
+}
+
+Vec2d PartPlate::wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const
+{
+	if (m_partplate_list == nullptr)
+		return Vec2d::Zero();
+	// m_shape is in world coordinates (the plate's position added); the extruder areas are plate-local.
+	const Polygons bed = prime_tower_placement_outline(Polygon::new_scale(m_shape), m_partplate_list->get_extruder_areas(),
+	                                                   Point::new_scale(m_origin.x(), m_origin.y()));
+	if (bed.empty() || WipeTower::outline_fills_bounding_box(bed))
+		return Vec2d::Zero();
+	const BoundingBox tower(Point::new_scale(tower_world.min.x(), tower_world.min.y()), Point::new_scale(tower_world.max.x(), tower_world.max.y()));
+	return WipeTower::move_box_inside_polygon(tower, bed, scaled<coord_t>(margin)).cast<double>();
+}
+
+Polygons PartPlate::wipe_tower_obstacles(const DynamicPrintConfig &config) const
+{
+	Polygons obstacles;
+	if (m_model == nullptr)
+		return obstacles;
+	for (const auto &[obj_id, instance_id] : obj_to_instance_set) {
+		if (!valid_instance(obj_id, instance_id))
+			continue;
+		const ModelObject   *object   = m_model->objects[obj_id];
+		const ModelInstance *instance = object->instances[instance_id];
+		if (!instance->printable)
+			continue;
+		// A sinking object counts its whole outline, the part below the bed included.
+		Polygon hull = object->convex_hull_2d(instance->get_matrix());
+		if (hull.size() < 3)
+			continue;
+		hull.translate(-scaled(m_origin.x()), -scaled(m_origin.y()));
+		// An object's own setting wins over the print preset's.
+		auto option_of = [&object, &config](const char *key) {
+			const ConfigOption *opt = object->config.option(key);
+			return opt != nullptr ? opt : config.option(key);
+		};
+		// An auto brim is only sized while slicing, so it is taken at the brim width option too.
+		const ConfigOption *brim_type  = option_of("brim_type");
+		const ConfigOption *brim_width = option_of("brim_width");
+		const double brim = brim_type != nullptr && brim_width != nullptr && brim_type->getInt() != static_cast<int>(btNoBrim) ? brim_width->getFloat() : 0.;
+		append(obstacles, offset(hull, static_cast<float>(scaled(brim + WIPE_TOWER_MARGIN))));
+	}
+	return obstacles;
+}
+
+arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects,
+                                                            WipeTowerRelocation *relocation) const
 {
 	float x = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_x"))->get_at(plate_index);
 	float y = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_y"))->get_at(plate_index);
@@ -1918,25 +2031,72 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		const BoundingBoxf box = prime_tower_placement_box(config, plate_width, plate_depth);
 		const float bx0 = (float) box.min.x(), bx1 = (float) box.max.x();
 		const float by0 = (float) box.min.y(), by1 = (float) box.max.y();
-		const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
-		const float x_lo   = bx0 + margin;
-		const float y_lo   = by0 + margin;
-		const float x_hi   = std::max(x_lo, bx1 - w - margin);
-		const float y_hi   = std::max(y_lo, by1 - depth - margin);
-		const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
-		float x_lo_c = bx0 + margin_c, x_hi_c = bx1 - w - margin_c;
+		const double angle = gui_wipe_tower_rotation_deg(config);
+		float x_lo, y_lo, x_hi, y_hi, x_lo_c, x_hi_c, y_lo_c, y_hi_c;
+		if (std::abs(angle) <= EPSILON) {
+			const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
+			x_lo   = bx0 + margin;
+			y_lo   = by0 + margin;
+			x_hi   = std::max(x_lo, bx1 - w - margin);
+			y_hi   = std::max(y_lo, by1 - depth - margin);
+			const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
+			x_lo_c = bx0 + margin_c; x_hi_c = bx1 - w - margin_c;
+			y_lo_c = by0 + margin_c; y_hi_c = by1 - depth - margin_c;
+		} else {
+			// The tower turns about its anchor (x, y), so the room it needs on each side is the
+			// turned box's extent around the anchor, not the width/depth box.
+			const BoundingBoxf ext = wipe_tower_rotated_extents(w, depth, wp_brim_width, angle);
+			x_lo   = bx0 + float(WIPE_TOWER_MARGIN - ext.min.x());
+			y_lo   = by0 + float(WIPE_TOWER_MARGIN - ext.min.y());
+			x_hi   = std::max(x_lo, bx1 - float(WIPE_TOWER_MARGIN + ext.max.x()));
+			y_hi   = std::max(y_lo, by1 - float(WIPE_TOWER_MARGIN + ext.max.y()));
+			x_lo_c = bx0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.x()); x_hi_c = bx1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.x());
+			y_lo_c = by0 + float(WIPE_TOWER_AUTO_MARGIN - ext.min.y()); y_hi_c = by1 - float(WIPE_TOWER_AUTO_MARGIN + ext.max.y());
+		}
 		if (x_lo_c > x_hi_c) { x_lo_c = x_lo; x_hi_c = x_hi; }
-		float y_lo_c = by0 + margin_c, y_hi_c = by1 - depth - margin_c;
 		if (y_lo_c > y_hi_c) { y_lo_c = y_lo; y_hi_c = y_hi; }
 		// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
 		// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
 		// of bounds - snap it onto the bound; only far-out positions get the comfort re-place.
 		const float tol = 5.f;
-		if (x < x_lo - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
-		else                                  x = std::clamp(x, x_lo, x_hi);
-		if (y < y_lo - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
-		else                                  y = std::clamp(y, y_lo, y_hi);
+		const float saved_x = x, saved_y = y;
+		const bool  replace_x = x < x_lo - tol || x > x_hi + tol;
+		const bool  replace_y = y < y_lo - tol || y > y_hi + tol;
+		x = replace_x ? std::clamp(x, x_lo_c, x_hi_c) : std::clamp(x, x_lo, x_hi);
+		y = replace_y ? std::clamp(y, y_lo_c, y_hi_c) : std::clamp(y, y_lo, y_hi);
+		// Orca #16728: a re-placed tower keeps clear of every object and its brim where the plate has
+		// room. The re-placed spot stands when it is clear; otherwise the clear spot nearest the saved
+		// position, keeping the comfort margin where the plate leaves room for it. A tower snapped
+		// back onto the bound it was dropped past is the user's own placement and is not moved.
+		if (relocation != nullptr && (replace_x || replace_y)) {
+			relocation->moved = true;
+			// The footprint turns about its anchor as the tower does.
+			Polygon tower({ {scaled(-wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(depth + wp_brim_width)},
+			                {scaled(-wp_brim_width), scaled(depth + wp_brim_width)} });
+			if (std::abs(angle) > EPSILON)
+				tower.rotate(Geometry::deg2rad(angle));
+			const Polygons objects = wipe_tower_obstacles(config);
+			const Point    placed(scaled(x), scaled(y));
+			if (!nearest_clear_wipe_tower_anchor(BoundingBox(placed, placed), tower, objects, placed)) {
+				const Point saved(scaled(saved_x), scaled(saved_y));
+				std::optional<Point> clear = nearest_clear_wipe_tower_anchor(
+					BoundingBox(Point(scaled(x_lo_c), scaled(y_lo_c)), Point(scaled(x_hi_c), scaled(y_hi_c))), tower, objects, saved);
+				if (!clear)
+					clear = nearest_clear_wipe_tower_anchor(BoundingBox(Point(scaled(x_lo), scaled(y_lo)), Point(scaled(x_hi), scaled(y_hi))),
+					                                        tower, objects, saved);
+				if (clear) {
+					x = float(unscaled(clear->x()));
+					y = float(unscaled(clear->y()));
+				} else {
+					relocation->overlaps_objects = true;
+				}
+			}
+		}
+		// Orca #15146: the box clamps above still allow a corner a delta or hexagonal bed does not have.
+		fit_prime_tower_onto_bed(config, x, y, w, depth, wp_brim_width, angle, WIPE_TOWER_MARGIN);
     wt_pos(0) = x;
     wt_pos(1) = y;
     wt_pos(2) = 0.f;
@@ -1948,6 +2108,9 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		{scaled(x + w + wp_brim_width), scaled(y + depth + wp_brim_width)},
 		{scaled(x - wp_brim_width), scaled(y + depth + wp_brim_width)}
 		});
+	// Arrange and the object/tower overlap checks see the turned footprint, as Print::validate does.
+	if (std::abs(angle) > EPSILON)
+		ap.rotate(Geometry::deg2rad(angle), Point(scaled(x), scaled(y)));
 	wipe_tower_ap.bed_idx = plate_index;
 	wipe_tower_ap.setter = NULL; // do not move wipe tower
 
@@ -3972,6 +4135,9 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx)
         const float x_lo = float(box.min.x()) + margin, y_lo = float(box.min.y()) + margin;
         x = std::clamp(x, x_lo, std::max(x_lo, float(box.max.x()) - w - margin));
         y = std::clamp(y, y_lo, std::max(y_lo, float(box.max.y()) - d - margin));
+        // Orca #15146: the box still allows a corner a delta or hexagonal bed does not have, and the prime
+        // tower is validated against the real outline - pull it onto the bed before storing.
+        fit_prime_tower_onto_bed(full_config, x, y, w, d, brim_width, 0., WIPE_TOWER_AUTO_MARGIN);
     }
 
     ConfigOptionFloat wt_x_opt(x);

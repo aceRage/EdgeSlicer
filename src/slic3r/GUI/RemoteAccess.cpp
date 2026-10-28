@@ -16,6 +16,9 @@
 #include "RemoteEvents.hpp"
 #include "RemoteHub.hpp"
 #include "RemoteSend.hpp"
+#include "RemoteSliceV1.hpp"
+#include "libslic3r/CostOverrides.hpp"
+#include "libslic3r/CostPricing.hpp"
 #include "RemoteSnapmaker.hpp"
 #include "RemoteTimelapse.hpp"
 #include "PrinterTimelapse.hpp"
@@ -34,10 +37,12 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
+#include "slic3r/Utils/ElegooCc2Monitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
@@ -128,10 +133,13 @@ static void respond(tcp::socket& s, const char* status, const std::string& type,
                     const std::string& extra_headers = "")
 {
     std::ostringstream o;
+    // Every answer is no-store unless the route chose its own caching (slice_v1: the plate images
+    // and the plate result carry Cache-Control + ETag).
+    const bool own_cache = extra_headers.find("Cache-Control:") != std::string::npos;
     o << "HTTP/1.1 " << status << "\r\n"
       << "Content-Type: " << type << "\r\n"
       << "Content-Length: " << body.size() << "\r\n"
-      << "Cache-Control: no-store\r\n"
+      << (own_cache ? "" : "Cache-Control: no-store\r\n")
       << extra_headers
       << "Connection: close\r\n\r\n"
       << body;
@@ -307,6 +315,12 @@ public:
             } catch (...) {}
             // And a cloud printer that has never reported its AMS / spools is asked to, so the
             // phone's printer screen has a filament list for it (DeviceManager::full_report_tick).
+            // And every online cloud printer is subscribed, so it reports at all: the plug-in only
+            // listens to the selected one by itself (DeviceManager::cloud_watch_tick). Before
+            // full_report_tick, whose pushall is only heard once the printer is subscribed.
+            try {
+                dm->cloud_watch_tick();
+            } catch (...) {}
             try {
                 dm->full_report_tick();
             } catch (...) {}
@@ -574,6 +588,7 @@ void RemoteAccess::stop()
         RemoteEvents::stop();
         RemoteTimelapse::shutdown();
         SdcpMonitor::shutdown(); // the Elegoo printers' connections
+        ElegooCc2Monitor::shutdown(); // ... and the Centauri Carbon 2s'
         if (s_heartbeat) s_heartbeat->Stop();
         boost::system::error_code ig;
         fs::remove(fs::path(RemoteHub::instances_dir()) / (std::to_string(wxGetProcessId()) + ".json"), ig);
@@ -672,6 +687,10 @@ void RemoteAccess::note_slice_progress(int plate, int percent, const std::string
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_slicing = true;
+    if (plate != m_slicing_plate) m_slicing_percent = 0; // slice all moved on to the next plate
+    m_slicing_plate = plate;
+    if (plate >= 0) m_current_plate = plate;
+    if (percent >= 0) m_slicing_percent = std::max(m_slicing_percent, std::min(percent, 100));
     for (Job& j : m_jobs)
         if (j.kind == "slice" && j.state == "running" && (j.plate == -1 || j.plate == plate)) {
             if (percent >= 0) j.percent = std::max(j.percent, std::min(percent, 99));
@@ -683,6 +702,8 @@ void RemoteAccess::note_slice_done(bool finished_all, bool ok, const std::string
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_slicing = false;
+    m_slicing_percent = 0;
+    m_slicing_plate   = -1;
     for (Job& j : m_jobs)
         if (j.kind == "slice" && j.state == "running") {
             if (!ok) {
@@ -706,6 +727,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
         j["project"]       = plater->get_project_filename().ToUTF8().data();
         j["printer"]       = bundle->printers.get_selected_preset_name();
         j["current_plate"] = plates.get_curr_plate_index();
+        RemoteAccess::get().m_current_plate = plates.get_curr_plate_index();
         j["slicing"]       = plater->is_background_process_slicing();
         j["filaments"]     = nlohmann::json::array();
         std::vector<double> density;
@@ -1140,8 +1162,21 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
             }
             p["online"]       = m->is_online();
             p["connected"]    = m->is_connected();
-            p["status"]       = m->print_status;
-            p["printing"]     = m->is_in_printing();
+            // The status word and `printing` from one decision (BambuCloudWatch::row_status): a
+            // cloud printer that has not reported yet used to say printing: true (the cloud list's
+            // task_status, through is_in_printing's fallback) next to an empty status. Now the row
+            // says what the list says, and `status_source` and `report_age_s` say how much is behind
+            // it - the hub marks a row whose report is missing or old as stale (printers_json).
+            {
+                const BambuCloudWatch::RowStatus rs = BambuCloudWatch::row_status(m->print_status, m->iot_print_status);
+                p["status"]        = rs.status;
+                p["printing"]      = rs.printing;
+                p["status_source"] = rs.source;
+                p["report_age_s"]  = m->m_push_count > 0 ?
+                                         (long long) std::chrono::duration_cast<std::chrono::seconds>(
+                                             std::chrono::system_clock::now() - m->last_push_time).count() :
+                                         (long long) -1;
+            }
             p["percent"]      = m->mc_print_percent;
             p["left_time_s"]  = m->mc_left_time;
             p["layer"]        = m->curr_layer;
@@ -1265,6 +1300,131 @@ RemoteAccess::ApiResponse RemoteAccess::api_jobs(int id)
         if (job.id == id) { r.body = to_json(job).dump(); return r; }
     r.status = 404;
     r.body   = json_error("no such job");
+    return r;
+}
+
+// filament_type of a filament preset by name (PLA, PETG-HF, ...), "" when there is no such preset.
+// The edited copy wins for the selected one, so an unsaved type change shows as the sidebar has it.
+static std::string filament_type_of(PresetBundle& bundle, const std::string& name)
+{
+    const Preset* p = bundle.filaments.find_preset(name, false);
+    if (p == nullptr) return "";
+    if (bundle.filaments.get_selected_preset_name() == name) p = &bundle.filaments.get_edited_preset();
+    const auto* t = p->config.option<ConfigOptionStrings>("filament_type");
+    return t != nullptr && !t->values.empty() ? t->values.front() : std::string();
+}
+
+// slice_v1: cancel a running slice job exactly as the desktop's slicing notification's Cancel does
+// (Plater::cancel_slicing -> BackgroundSlicingProcess::stop). Slicing "all" stops there as well:
+// a cancelled plate ends the run on the desktop too. Send and control jobs are not cancellable here.
+RemoteAccess::ApiResponse RemoteAccess::api_job_cancel(int id)
+{
+    ApiResponse r;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const Job* found = nullptr;
+        for (const Job& job : m_jobs)
+            if (job.id == id) found = &job;
+        if (found == nullptr) { r.status = 404; r.body = json_error("no such job"); return r; }
+        if (found->kind != "slice") { r.status = 409; r.body = json_error("only a slice job can be cancelled"); return r; }
+        if (found->state != "running") { r.status = 409; r.body = json_error("the slice is no longer running"); return r; }
+    }
+    auto outcome = std::make_shared<int>(0); // 1 stopped, 2 nothing running, 3 between plates
+    bool ok      = run_on_main([outcome]() {
+        Plater* plater = wxGetApp().plater();
+        if (!plater->is_background_process_slicing()) { *outcome = 2; return; }
+        *outcome = plater->cancel_slicing() ? 1 : 3;
+    }, 30000, "cancelling a slice");
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (*outcome == 3) { r.status = 409; r.body = json_error("the slicer is between two plates; try again"); return r; }
+    std::string state;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (Job& job : m_jobs)
+            if (job.kind == "slice" && job.state == "running" && (*outcome == 1 || job.id == id)) {
+                // The completion event that follows (note_slice_done) only touches running jobs,
+                // so this is final. With nothing slicing any more the job was stale: end it too.
+                job.state = "cancelled";
+                job.text  = "cancelled";
+            }
+        for (const Job& job : m_jobs)
+            if (job.id == id) state = job.state;
+    }
+    nlohmann::json j;
+    j["ok"]    = true;
+    j["job"]   = id;
+    j["state"] = state;
+    r.body     = j.dump();
+    return r;
+}
+
+// slice_v1: what the native results screen shows for a sliced plate (EdgeSlicerApp
+// docs/design_native_slice.md 3.3). The numbers are the desktop's: the cost is compute_cost() of the
+// plate's own processor result, as the preview's cost panel and the plate's total_cost use, so user
+// price / machine-rate overrides (CostOverrides, applied to the config the plate was sliced with)
+// are already in it; fees and markup are the cost panel's price_plate() for this plate.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_result(int plate)
+{
+    auto out = std::make_shared<nlohmann::json>();
+    auto err = std::make_shared<int>(0);
+    bool ok  = run_on_main([out, err, plate]() {
+        Plater*        plater = wxGetApp().plater();
+        PresetBundle*  bundle = wxGetApp().preset_bundle;
+        PartPlateList& plates = plater->get_partplate_list();
+        if (plate < 0 || plate >= plates.get_plate_count()) { *err = 1; return; }
+        PartPlate* p = plates.get_plate(plate);
+        const GCodeProcessorResult* res = p->get_slice_result();
+        if (!p->is_slice_result_valid() || res == nullptr) { *err = 2; return; }
+
+        SliceV1::ResultInput in;
+        in.index     = plate;
+        in.result_id = res->id;
+        if (!res->filename.empty()) {
+            boost::system::error_code ec;
+            const auto size = boost::filesystem::file_size(boost::filesystem::path(res->filename), ec);
+            if (!ec) in.gcode_bytes = (long long) size;
+        }
+        const ConfigOptionStrings* colors = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+        for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
+            SliceV1::SlotInfo s;
+            s.preset = bundle->filament_presets[i];
+            s.type   = filament_type_of(*bundle, s.preset);
+            s.color  = (colors && i < colors->values.size()) ? colors->values[i] : "";
+            in.slots.push_back(s);
+        }
+        // The warnings the desktop's notifications showed for this plate's slice: the current
+        // warnings of the plate's Print steps and of every object's steps (Plater::priv::
+        // on_slicing_update pushes exactly these).
+        if (Print* print = p->fff_print()) {
+            auto add = [&in](const PrintStateBase::StateWithWarnings& st, const std::string& object) {
+                for (const auto& w : st.warnings) {
+                    if (!w.current) continue;
+                    SliceV1::PlateWarning pw;
+                    pw.code     = "slicing";
+                    pw.severity = w.level == PrintStateBase::WarningLevel::CRITICAL ? "error" : "warning";
+                    pw.text     = w.message;
+                    pw.object   = object;
+                    in.warnings.push_back(pw);
+                }
+            };
+            for (int s = 0; s < int(psCount); ++s)
+                add(print->step_state_with_warnings(PrintStep(s)), std::string());
+            for (const PrintObject* po : print->objects()) {
+                const std::string name = po->model_object() ? po->model_object()->name : std::string();
+                for (int s = 0; s < int(posCount); ++s)
+                    add(po->step_state_with_warnings(PrintObjectStep(s)), name);
+            }
+        }
+        const PlateCounts     counts  = count_plate_items(plater->model(), [p](int o, int i) { return p->contain_instance(o, i); });
+        const PricingSettings pricing = plater->model().pricing.resolve(CostOverrides::global()->pricing());
+        *out = SliceV1::result_json(*res, in, counts, pricing);
+    }, 15000, "reading a plate's result");
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (*err == 1) { r.status = 404; r.body = json_error("no such plate"); return r; }
+    if (*err == 2) { r.status = 404; r.body = json_error("plate is not sliced"); return r; }
+    r.body    = out->dump();
+    r.headers = SliceV1::result_cache_headers(SliceV1::etag_of(r.body));
     return r;
 }
 
@@ -1505,6 +1665,56 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_preview(const std::string& i
     return r;
 }
 
+// slice_v1: a plate send's mapping sheet, nothing sent (RemoteSend::preview_plate). Form
+// printer={id}[&mode=print|upload][&live=1][&ams_mapping=][&mapping=][&use_ams=&bed_leveling=&flow_cali=
+// &timelapse=&nozzle_offset_cali=][&force=1]. One preview or send at a time. A Bambu preview
+// selects (connects) the printer only with live=1; otherwise it uses the PC's current state of it.
+RemoteAccess::ApiResponse RemoteAccess::api_send_preview(int plate, const std::string& form_body)
+{
+    ApiResponse r;
+    auto get = [&](const char* k) { return query_param(form_body, k); };
+    auto tri = [&](const char* k) { const std::string v = get(k); return v.empty() ? -1 : ((v == "1" || v == "true") ? 1 : 0); };
+    RemoteSend::Request req;
+    req.plate              = plate;
+    req.printer            = get("printer");
+    req.mode               = get("mode");
+    req.force              = get("force") == "1";
+    req.ams_mapping        = get("ams_mapping");
+    req.mapping            = get("mapping");
+    req.unload_at_end      = get("unload_at_end");
+    req.bed_leveling       = tri("bed_leveling");
+    req.flow_cali          = tri("flow_cali");
+    req.timelapse          = tri("timelapse");
+    req.use_ams            = tri("use_ams");
+    req.nozzle_offset_cali = tri("nozzle_offset_cali");
+    // Only live=1 selects and connects a Bambu printer; otherwise the PC's current state of it is used.
+    req.live               = get("live") == "1" || get("live") == "true";
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
+        m_send_running = true;
+    }
+    nlohmann::json              out;
+    std::pair<int, std::string> result(500, "not run");
+    take_error();
+    try {
+        result = RemoteSend::preview_plate(req, out);
+    } catch (const std::exception& e) {
+        result = { 500, std::string("preparing the preview failed: ") + e.what() };
+    } catch (...) {
+        result = { 500, "preparing the preview failed" };
+    }
+    { std::lock_guard<std::mutex> lock(m_mutex); m_send_running = false; }
+    if (result.first != 200) {
+        const std::string shown = take_error();
+        r.status = result.first;
+        r.body   = json_error(result.second + (shown.empty() ? "" : ": " + shown));
+        return r;
+    }
+    r.body = out.dump();
+    return r;
+}
+
 // Send the sliced plate to a printer the way the desktop's Print / Send dialogs would, without
 // showing them (RemoteSend). Form: printer=<id>&mode=upload|print[&confirm=1][&force=1][&dry_run=1]
 // [&bed_leveling=&flow_cali=&timelapse=&vibration_cali=&use_ams=][&name=][&mapping=0:1,1:2]
@@ -1531,6 +1741,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_send(int plate, const std::string& f
     req.name           = get("name");
     req.mapping        = get("mapping");
     req.unload_at_end  = get("unload_at_end");
+    // slice_v1: a Bambu plate print with the trays the phone picked on /send/preview
+    // ("<filament>:<ams_id>-<slot_id>,..."); empty = the automatic mapping, as before.
+    req.ams_mapping        = get("ams_mapping");
+    req.nozzle_offset_cali = tri("nozzle_offset_cali");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
@@ -1863,6 +2077,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_presets()
             f["index"] = i;
             f["value"] = bundle->filament_presets[i];
             f["color"] = (colors && i < colors->values.size()) ? colors->values[i] : "";
+            f["type"]  = filament_type_of(*bundle, bundle->filament_presets[i]); // slice_v1
             j["filaments"].push_back(f);
         }
         // The sidebar's nozzle notebook: the visible variants of this printer model, and the
@@ -2257,6 +2472,12 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_save()
 // Cheap (no GUI thread): what the hub lists for this instance.
 RemoteAccess::ApiResponse RemoteAccess::api_info()
 {
+    // Refresh the cached current plate for the next read (the hub probes every few seconds);
+    // never wait for the GUI thread here, a busy slicer must still answer /api/info.
+    post_to_main([]() {
+        if (Plater* plater = wxGetApp().plater())
+            RemoteAccess::get().m_current_plate = plater->get_partplate_list().get_curr_plate_index();
+    });
     ApiResponse r;
     nlohmann::json j;
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -2265,6 +2486,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_info()
     j["title"]   = m_title;
     j["path"]    = m_path;
     j["slicing"] = m_slicing;
+    // slice_v1: what the hub's instance list shows for a slicer that is slicing (the plate's own
+    // slicing_percent, as /api/plates reports it; -1 / 0 while idle).
+    j["slicing_plate"]   = m_slicing ? m_slicing_plate : -1;
+    j["slicing_percent"] = m_slicing ? m_slicing_percent : 0;
+    j["current_plate"]   = m_current_plate.load();
     j["hidden"]  = m_hidden;
     j["version"] = std::string(SLIC3R_VERSION);
     // Where this PC keeps the G-code archive. The hub reads it so that a running job's
@@ -2542,7 +2768,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     if (path.empty() || path == "/") {
         nlohmann::json j;
         j["name"]    = "EdgeSlicer remote API";
-        j["version"] = 2;
+        j["version"] = 3; // 3: slice_v1 (plates/{index}/result, jobs/{id}/cancel, presets type, image ETags)
         j["routes"]  = nlohmann::json::array({
             { {"method", "GET"},  {"path", "/api"},                        {"description", "this manifest"} },
             { {"method", "GET"},  {"path", "/api/info"},                   {"description", "this instance: pid, project title and path, slicing flag, hidden flag, archive_dir (where the G-code archive keeps its sidecars)"} },
@@ -2557,6 +2783,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview/status"}, {"description", "sliced / slicing / slicing_percent / result_id for that plate, without changing what the PC shows"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/result"},  {"description", "a sliced plate's results (404 when it is not sliced): {index, result_id, time_s, time_silent_s?, prepare_time_s, layers? (layer count), gcode_bytes?, filaments [{index, preset, type, color, grams, meters, cost, price_per_kg, model_g, support_g, flush_g, tower_g}] (slots that extruded anything), total {grams, meters, cost (filament + machine time), material_cost, machine_cost, flush_grams, filament_changes}, cost {prices_known, machine_rate_known, machine_rate_per_h, material, machine, fees, total_cost, markup, selling_price, has_markup}, warnings [{code, severity info|warning|error, text, object?, z?}]}. The desktop's own figures: the preview's cost panel (your price and rate overrides included, fees and markup as it shows them). Cache-Control: private, no-cache + ETag (If-None-Match answers 304). Plate images (thumbnail.png, preview.png) also carry an ETag, and with ?v={result_id} (non-zero) Cache-Control: private, max-age=86400"} },
             { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1]: move / rotate / scale one instance like the sidebar (undoable)"} },
             { {"method", "GET"},  {"path", "/api/printers[?plate={index}]"}, {"description", "known printers with live status and what a send needs: kind bambu|printhost|connect|snapmaker, online, lan_mode, access_code_set, sdcard, has_ams, model_matches, can_upload, can_print, options (the desktop's remembered defaults), upload_name (the file name the desktop's export would give plate {index}, the current plate without it - print hosts, the connected Snapmaker and a Snapmaker over the LAN); a Snapmaker over the LAN adds ip, port, added_by, toolheads, layer, total_layers and left_time_s, so one card can show everything /api/snapmaker/devices reports; and what a control needs: can_pause, can_resume, can_stop, print_status, stage, print_error {code, message, job_id, actions[]} (null when there is none; each action is {id, verb, label, needs_job_id, remote_safe} - the same buttons the desktop error dialog draws for that code) and the hms summary; a print host or connected Snapmaker that answers as a Moonraker printer adds bed_temp, bed_target and nozzles too (absent when it does not); and what the phone's native printer screen draws: controls {heaters[] {id bed|chamber|nozzle{N}, label, temp, target, min, max, settable, active}, speed {kind level|factor, value, min, max, settable, levels[]}, light {on} (absent without one), fans[] {id, label, percent}} on a Bambu printer, a LAN Snapmaker and a Moonraker print host, and ams[] {id, nozzle, side L|R|'', humidity_level, humidity_pct, temp, trays[] {id, exists, type, sub_type, color, remain, can_load, can_unload, filament_why}} plus ext_spools[] {ams_id 254|255, side, exists, type, color, can_load, can_unload} on a Bambu printer; controls.filament {load, unload, assumed} where load / unload is offered, and can_load / can_unload on each U1 toolhead; an Elegoo Centauri Carbon (a ph: device on elegoolink, listed whatever preset is selected) fills the same fields from the hub's own SDCP connection (print_status printing|paused|complete|cancelled|error|standby, offline while it does not answer), with the chamber in controls.heaters and chamber_temp, its light and part / aux / chamber fans settable, temperatures and speed read-only, the CANVAS as ams[] {id, type canvas, name, trays[] {..., active}}, camera_hint {available, max_streams, rkind elegoo, route /elegoo?id= (the Stream tab tile, #599), ip} and sdcp {live, age_s, firmware, machine_status, print_status, phase, canvas_attached}; the printer's connection is on demand: a request (this route unless ?watching=0, a control, a CANVAS read, an upload) opens it for 60 s, nobody asking means a check-in every 5 min, and a print is held to its end while ?notify=1 (the hub: somebody is subscribed); between connections the row shows the last status with sdcp.live false and no buttons"} },
             { {"method", "POST"}, {"path", "/api/printers/{id}/control"},  {"description", "form action=pause|resume|stop[&confirm=1][&dry_run=1]: pause, resume or stop the print on that printer, exactly as the desktop's own buttons do (stop = cancel the print and needs confirm=1; pause and resume do not). Returns a job id; the job's result says what the printer then reported. 409 when the printer's own state does not allow it (see can_pause / can_resume / can_stop). {id} is any id /api/printers lists, sm:{id} for a Snapmaker over the LAN included. The same route answers a Bambu printer error with the buttons its own dialog would draw: action=resume_error|stop_error|ignore_error|idle_ignore_error|ack_close&err={code} (stop_error needs confirm=1). Which of them a given error offers is print_error.actions on GET /api/printers, where each entry is {id, verb, label, needs_job_id, remote_safe}; a verb the error does not offer, one whose code is no longer the one the printer reports, or one that needs a job_id the printer has not got, is 409, and a verb this phase keeps desktop-only (the AMS controls, drying, nozzle recheck, buzzer, purification) is 403. The same route also changes the settings the desktop Device tab changes, as that printer's `controls` on GET /api/printers lists them: action=set_temp&heater=bed|chamber|nozzle{N}&target={C} (0 = off; confirm=1 is required above 50 C while the printer is not printing; 400 above the heater's max, 409 for a read-only heater), action=set_speed&value={level 1..4 on a Bambu, only while printing | speed factor % on a Klipper printer}, action=set_light&on=1|0, action=set_fan&fan={id}&percent=0..100 - a Bambu printer through the same MachineObject calls the Device tab makes, a Moonraker printer as one /printer/gcode/script. And filament: action=load_filament|unload_filament&ams={AMS id, 128+ AMS HT, 254/255 external spool}&slot={0..3} on a Bambu printer (command_ams_change_filament, as the Device tab's Load / Unload), slot={toolhead 0..3} on a Snapmaker U1 whose G-code help lists the macros (controls.filament.assumed: INNER_FILAMENT_UNLOAD / SM_PRINT_AUTO_FEED, unverified); 409 while printing or paused, or when that slot's can_load / can_unload is false"} },
@@ -2564,16 +2791,18 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/thumbnail?name={file}"}, {"description", "one video's preview picture (image/jpeg or image/png); 404 no_thumbnail when it has none"} },
             { {"method", "GET"},  {"path", "/api/printers/{id}/timelapses/video?name={file}[&download=1]"}, {"description", "the video itself. A single-range Range header is honoured (206 + Content-Range; 416 when it is not in the file), Accept-Ranges: bytes is always sent, Content-Type follows the extension, download=1 adds Content-Disposition: attachment. A Moonraker printer's file is proxied with the Range passed on; a Bambu printer's is copied to this PC's temp folder on the first request (that request is answered from the part that has arrived, so playback starts at once) and every later request for it is answered from that copy. Errors before the first byte are JSON as for the list"} },
             { {"method", "POST"}, {"path", "/api/slice?plate={index}|all"}, {"description", "start slicing one plate (selects it) or all; returns a job id; 409 while slicing"} },
-            { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; returns a job id; 409 unless the plate is sliced and no other send is running"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; an Elegoo CANVAS takes `mapping` = filament:tray position (or as_sliced); a Bambu print takes `ams_mapping` = the AMS slot per filament (<filament>:<ams_id>-<slot_id>, what /send/preview proposes; empty = the automatic mapping) and is then refused (409) when a picked tray cannot print that filament; returns a job id; 409 unless the plate is sliced and no other send is running"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/send/preview"}, {"description", "form printer={id}[&mode=print|upload][&live=1][&ams_mapping=][&mapping=][&use_ams=&bed_leveling=&flow_cali=&timelapse=&nozzle_offset_cali=][&force=1]: the send's mapping sheet, nothing sent: {plate, mode, printer {id, name, kind, ...}, mapping_kind ams|toolheads|canvas|none, editable, filaments [{index, type, color, grams, target (a targets id or null), auto, problems []}], targets [{id (the label, A1 / T1 / 1A), label, type|null, color|null, ready, side, wire (the target in the mapping's wire form: <ams>-<slot>, or the toolhead / tray position)}], mapping (the wire form to send back: ams_mapping for ams, mapping for toolheads / canvas), policy (the slot send policy for a CANVAS or a QIDI Box; a QIDI Box is mapping_kind none, editable false: the send always maps it material-first), problems [{filament, code, text}], options, unload_at_end {supported, value} | null, warnings [], can_send}. Every sheet has source live|cached|none, needs_live and ams_age_s (seconds since the printer's last push, null unknown). A Bambu printer adds the reprint sheet's fields (job, trays, colour / tray / side per filament; nozzle_mapping with live=1). Without live=1 a Bambu printer is never selected or connected: the sheet comes from what the PC already holds for it (source cached, when it is online, connected and pushed within 120 s), or is source none with needs_live true, editable false, no targets, can_send false and a plate-level problem printer_unknown|printer_offline|printer_not_connected|printer_state_stale; live=1 selects (connects) it on the PC as a send does. The plate's file is exported either way; a CANVAS or QIDI Box printer is read (never written). 4xx with the reason when the printer cannot take the plate at all"} },
             { {"method", "GET"},  {"path", "/api/events?since={id}"},      {"description", "what this instance's printer watcher has seen, newest last: {events, last_id, watcher}. Each event is {local_id, time, instance, printer {id, name, kind}, kind started|finished|failed|cancelled|paused|resumed|runout|error, severity info|warning|error, title, text, code?, job?}. The hub keeps the merged history of every instance at /events on the phone link. `watcher` says what the live poll has seen: {poll_ms, last_poll, last_poll_ms, printers[{id, kind, online, watched, state, seen_at?}]}, where seen_at is the poll that seeded that printer - until it has one, and until last_poll has moved past it, a change on that printer seeds the watcher instead of making an event"} },
             { {"method", "GET"},  {"path", "/api/jobs"},                   {"description", "recent jobs"} },
             { {"method", "GET"},  {"path", "/api/jobs/{id}"},              {"description", "job state: kind slice|send, running | done | error | cancelled, percent, text; send jobs add printer, mode and result (what was sent, or the composed parameters of a dry run)"} },
+            { {"method", "POST"}, {"path", "/api/jobs/{id}/cancel"},       {"description", "cancel a running slice job the way the desktop's slicing Cancel does (slicing all stops too): {ok, job, state cancelled}; 404 for an unknown job, 409 for a job that is not a running slice (or, rarely, while slice-all moves to its next plate: try again)"} },
             { {"method", "GET"},  {"path", "/api/snapmaker/devices"},      {"description", "the Snapmaker printers on the LAN (from this PC's paired devices, an mDNS pass, the Stream tab's cameras and what was added by hand) with live state, temperatures and what each toolhead holds; plus `connect`, the optional MQTT connection the PC's Device tab makes"} },
             { {"method", "POST"}, {"path", "/api/snapmaker/add?ip={address}"}, {"description", "remember a printer at that address (it has to answer as a Snapmaker first)"} },
             { {"method", "POST"}, {"path", "/api/snapmaker/remove?id={device}"}, {"description", "forget a printer from the list"} },
             { {"method", "POST"}, {"path", "/api/snapmaker/connect?id={device}"}, {"description", "optional: connect that paired Snapmaker over MQTT the way picking it on the PC's Device page does; sending does not need it"} },
             { {"method", "POST"}, {"path", "/api/snapmaker/disconnect"},     {"description", "disconnect the MQTT-connected Snapmaker"} },
-            { {"method", "GET"},  {"path", "/api/presets"},                {"description", "printer / process choices as the sidebar shows them, the nozzle choices of the printer model, filament choices and the current filament slots with colours"} },
+            { {"method", "GET"},  {"path", "/api/presets"},                {"description", "printer / process choices as the sidebar shows them, the nozzle choices of the printer model, filament choices and the current filament slots with colours and filament type"} },
             { {"method", "POST"}, {"path", "/api/presets/select?type=printer|nozzle|process|filament&name={value}[&index={slot}]"}, {"description", "select a preset the way the sidebar does (nozzle = the same printer with another nozzle variant); 409 when that preset has unsaved changes on the PC"} },
             { {"method", "POST"}, {"path", "/api/presets/filament_color?index={slot}&color=%23RRGGBB"}, {"description", "set a filament slot colour"} },
             { {"method", "POST"}, {"path", "/api/presets/filament_add"},   {"description", "add a filament slot"} },
@@ -2639,16 +2868,24 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     if (path.compare(0, 8, "/plates/") == 0 && method == "GET") {
         const std::string rest = path.substr(8);
         const size_t      slash = rest.find('/');
+        // slice_v1: the plate images carry an ETag (a 304 is answered in serve()), and ?v=<result_id>
+        // lets the app keep one rendering for a day.
+        auto cached = [&query](ApiResponse a) {
+            if (a.status == 200) a.headers += SliceV1::image_cache_headers(query_param(query, "v"), SliceV1::etag_of(a.body));
+            return a;
+        };
+        if (slash != std::string::npos && rest.substr(slash) == "/result")
+            return api_plate_result(num(rest.substr(0, slash), -1));
         if (slash != std::string::npos && rest.substr(slash) == "/thumbnail.png")
-            return api_plate_thumbnail(num(rest.substr(0, slash), -1));
+            return cached(api_plate_thumbnail(num(rest.substr(0, slash), -1)));
         if (slash != std::string::npos && rest.substr(slash) == "/layout")
             return api_plate_layout(num(rest.substr(0, slash), -1));
         if (slash != std::string::npos && rest.substr(slash) == "/preview")
             return api_plate_preview(num(rest.substr(0, slash), -1));
         if (slash != std::string::npos && rest.substr(slash) == "/preview.png")
-            return api_plate_preview_png(num(rest.substr(0, slash), -1), query_param(query, "view"), num(query_param(query, "layer"), -1),
+            return cached(api_plate_preview_png(num(rest.substr(0, slash), -1), query_param(query, "view"), num(query_param(query, "layer"), -1),
                                          num(query_param(query, "w"), 800), num(query_param(query, "h"), 800),
-                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5));
+                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5)));
         if (slash != std::string::npos && rest.substr(slash) == "/preview/status")
             return api_plate_preview_status(num(rest.substr(0, slash), -1));
     }
@@ -2657,6 +2894,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         const size_t      slash = rest.find('/');
         if (slash != std::string::npos && rest.substr(slash) == "/send")
             return api_send(num(rest.substr(0, slash), -1), body.empty() ? query : body);
+        if (slash != std::string::npos && rest.substr(slash) == "/send/preview")
+            return api_send_preview(num(rest.substr(0, slash), -1), body.empty() ? query : body);
     }
     if (path == "/objects/transform" && method == "POST")
         return api_object_transform(body.empty() ? query : body);
@@ -2664,7 +2903,10 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         // The hub's own poll says whether anybody is subscribed to notifications (notify=1|0), which
         // decides whether an Elegoo printer's print is watched to its end (ElegooSdcpMonitor).
         const std::string notify = query_param(query, "notify");
-        if (!notify.empty()) SdcpMonitor::note_subscribers(notify == "1");
+        if (!notify.empty()) {
+            SdcpMonitor::note_subscribers(notify == "1");
+            ElegooCc2Monitor::note_subscribers(notify == "1");
+        }
         return api_printers(num(query_param(query, "plate"), -1), query_param(query, "watching") != "0");
     }
     // The timelapse list and pictures (the video itself is streamed by serve(), see there). The id
@@ -2717,6 +2959,12 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         return api_jobs(-1);
     if (path.compare(0, 6, "/jobs/") == 0 && method == "GET")
         return api_jobs(num(path.substr(6), -1));
+    if (path.compare(0, 6, "/jobs/") == 0 && method == "POST") {
+        const std::string rest  = path.substr(6);
+        const size_t      slash = rest.find('/');
+        if (slash != std::string::npos && rest.substr(slash) == "/cancel")
+            return api_job_cancel(num(rest.substr(0, slash), -1));
+    }
     // The G-code archive. The id is a name this PC made (letters, digits, . - _), so it needs no
     // decoding; GcodeArchive checks it against that alphabet again before touching the folder.
     if (path == "/archive" && method == "GET")
@@ -2773,6 +3021,7 @@ void RemoteAccess::serve(void* socket_ptr)
         first >> method >> target >> version;
         size_t      content_length = 0;
         std::string range; // the Range header, for the timelapse video route
+        std::string if_none_match; // slice_v1: a cached plate image / result revalidating
         {
             size_t pos = head.find("\r\n") + 2;
             while (pos < head_end - 2) {
@@ -2784,6 +3033,8 @@ void RemoteAccess::serve(void* socket_ptr)
                     content_length = (size_t) std::max(0, std::atoi(line.c_str() + 15));
                 else if (key.compare(0, 6, "range:") == 0)
                     range = line.substr(6);
+                else if (key.compare(0, 14, "if-none-match:") == 0)
+                    if_none_match = line.substr(14);
                 pos = nl + 2;
             }
         }
@@ -2820,6 +3071,20 @@ void RemoteAccess::serve(void* socket_ptr)
         ApiResponse ar = handle_api(method, path.substr(4), query, body);
         if (ar.status == 503 && gui_closing()) // it began before the close; its GUI step was dropped
             ar.body = json_error("the slicer is closing");
+        // A route that sent an ETag the client already holds: 304 with the same validators, no body.
+        if (ar.status == 200 && method == "GET" && !if_none_match.empty()) {
+            const size_t at = ar.headers.find("ETag: ");
+            if (at != std::string::npos) {
+                const size_t      eol  = ar.headers.find("\r\n", at);
+                const std::string etag = ar.headers.substr(at + 6, eol == std::string::npos ? std::string::npos : eol - at - 6);
+                if (SliceV1::etag_matches(if_none_match, etag)) {
+                    std::ostringstream o;
+                    o << "HTTP/1.1 304 Not Modified\r\n" << ar.headers << "Connection: close\r\n\r\n";
+                    write_all(client, o.str());
+                    return;
+                }
+            }
+        }
         const char* status = ar.status == 200 ? "200 OK" : ar.status == 400 ? "400 Bad Request" : ar.status == 404 ? "404 Not Found"
                            : ar.status == 409 ? "409 Conflict" : ar.status == 413 ? "413 Payload Too Large"
                            : ar.status == 501 ? "501 Not Implemented"

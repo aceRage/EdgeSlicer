@@ -4,6 +4,7 @@
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "PrintBase.hpp"
+#include "Fill/AdaptiveInfillField.hpp"
 
 #include "BoundingBox.hpp"
 #include "Polygon.hpp"
@@ -19,6 +20,7 @@
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
 #include "libslic3r.h"
@@ -394,6 +396,8 @@ public:
     Transform3d                  trafo_centered() const
         { Transform3d t = this->trafo(); t.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()), - unscale<double>(m_center_offset.y()), 0)); return t; }
     const PrintInstances&        instances() const      { return m_instances; }
+    // Orca: Bounding box of each connected body, indexed by Layer::lslices_separated_component_ids.
+    const std::vector<BoundingBox>& separated_body_bboxes() const { return m_separated_body_bboxes; }
     PrintInstances &instances() { return m_instances; }
 
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
@@ -418,6 +422,7 @@ public:
     double                      max_z() const         { return m_max_z; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
+    const AdaptiveInfillField*       adaptive_infill_field(AdaptiveInfillMode mode) const { return m_adaptive_infill_fields[size_t(mode)].get(); }
 
     // BBS
     void generate_support_preview();
@@ -763,9 +768,10 @@ private:
     void discover_horizontal_shells();
     void combine_infill();
     void _generate_support_material();
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
-        const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> prepare_adaptive_infill_data(
+        const std::vector<std::pair<const Surface*, const Layer*>>& surfaces_w_layer) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
+    AdaptiveInfillFields prepare_adaptive_infill_fields() const;
 
     // BBS
     SupportNecessaryType is_support_necessary();
@@ -804,8 +810,10 @@ private:
     std::vector<Polygons>                   m_over_support_below;
     coord_t                                 m_over_support_bridgeable = 0;
 
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> m_adaptive_fill_octrees;
+    std::vector<BoundingBox>                m_separated_body_bboxes;
     FillLightning::GeneratorPtr m_lightning_generator;
+    AdaptiveInfillFields m_adaptive_infill_fields;
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
     std::vector<groupedVolumeSlices>        firstLayerObjSliceByGroups;
@@ -1247,7 +1255,7 @@ public:
     }
 
     // Returns an empty string if valid, otherwise returns an error message.
-    StringObjectException validate(StringObjectException *warning = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const override;
+    StringObjectException validate(std::vector<StringObjectException> *warnings = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const override;
     double              skirt_first_layer_height() const;
     Flow                brim_flow() const;
     Flow                skirt_flow() const;
@@ -1284,7 +1292,7 @@ public:
             [object_id](const PrintObject *obj) { return obj->id() == object_id; });
         return (it == m_objects.end()) ? nullptr : *it;
     }
-    //BBS: Function to get m_brimMap;
+    // Orca: Old callers still expect object-keyed brim paths.
     std::map<ObjectID, ExtrusionEntityCollection>&
         get_brimMap() { return m_brimMap; }
     // Chameleon brim: brim runs whose nearest wall belongs to a different
@@ -1301,7 +1309,21 @@ public:
     PrintObjectPtrs&            objects_mutable() { return m_objects; }
     PrintRegionPtrs&            print_regions_mutable() { return m_print_regions; }
     std::vector<size_t>         layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, VecOfPoints& objects_instances_shift);
+    struct SkirtBrimGroup {
+        struct Brim {
+            ExtrusionEntityCollection brim;
+            std::vector<ObjectInstanceID> instances;
+        };
+
+        ExtrusionEntityCollection skirt;
+        std::vector<ObjectInstanceID> instances;
+        // Brims stay separate unless Combine brims merges colliding brims inside this group.
+        std::vector<Brim>         brims;
+    };
+
     const ExtrusionEntityCollection& skirt() const { return m_skirt; }
+    const std::vector<SkirtBrimGroup>& skirt_brim_groups() const { return m_skirt_brim_groups; }
+    bool has_shared_per_object_skirt() const { return m_has_shared_per_object_skirt; }
     // Convex hull of the 1st layer extrusions, for bed leveling and placing the initial purge line.
     // It encompasses the object extrusions, support extrusions, skirt, brim, wipe tower.
     // It does NOT encompass user extrusions generated by custom G-code,
@@ -1314,6 +1336,9 @@ public:
 
     // Wipe tower support.
     bool                        has_wipe_tower() const;
+    // Orca #15146: the error validate() reports, last, for a prime tower whose estimated body leaves the
+    // bed shape (a delta or custom bed's missing corner); empty when it fits or there is no tower.
+    std::string                 prime_tower_off_bed_error() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
@@ -1477,9 +1502,16 @@ private:
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;
-    // BBS: collecting extrusion paths to build brim by objs
+    std::vector<SkirtBrimGroup>             m_skirt_brim_groups;
+    bool                                    m_has_shared_per_object_skirt { false };
+    // Orca: Object-keyed brim paths kept for existing code.
     std::map<ObjectID, ExtrusionEntityCollection>         m_brimMap;
-    std::map<ObjectID, ExtrusionEntityCollection>         m_supportBrimMap;
+    // Orca: Actual brim paths keyed by object instance.
+    std::map<ObjectInstanceID, ExtrusionEntityCollection> m_brimMapByInstance;
+    // Edge: objects whose brim was merged onto instance 0 (nearest-wall fallback), shared by all their instances.
+    std::set<ObjectID>                                    m_brimMergedObjects;
+    // Orca: Translated brim areas keyed by instance, used to find touching brims.
+    std::map<ObjectInstanceID, ExPolygons>                m_objectBrimAreasByInstance;
     // Chameleon brim: foreign-extruder brim runs partitioned out of m_brimMap,
     // keyed by object then by the extruder that should print them.
     std::map<ObjectID, std::map<unsigned int, ExtrusionEntityCollection>> m_brimMapByExtruder;

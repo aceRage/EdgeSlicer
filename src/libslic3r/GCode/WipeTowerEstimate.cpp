@@ -6,11 +6,15 @@
 #include "../BoundingBox.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Config.hpp"
+#include "../ExPolygon.hpp"
+#include "../Geometry/ConvexHull.hpp"
+#include "../Line.hpp"
 #include "../PrintConfig.hpp"
 #include "../libslic3r.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 
 namespace Slic3r {
@@ -38,6 +42,26 @@ WipeTowerType resolve_wipe_tower_type(const ConfigBase &config)
     // DynamicConfig built from presets holds ConfigOptionEnumGeneric, and both answer getInt().
     const ConfigOption *type = option_of(config, "wipe_tower_type");
     return type != nullptr ? WipeTowerType(type->getInt()) : WipeTowerType::Type2;
+}
+
+double wipe_tower_rotation_deg(const ConfigBase &config)
+{
+    if (resolve_wipe_tower_type(config) == WipeTowerType::Type1)
+        return 0.;
+    const ConfigOption *angle = option_of(config, "wipe_tower_rotation_angle");
+    return angle != nullptr ? angle->getFloat() : 0.;
+}
+
+BoundingBoxf wipe_tower_rotated_extents(double width, double depth, double margin, double angle_deg)
+{
+    const Vec2d corners[] = { { -margin, -margin }, { width + margin, -margin }, { width + margin, depth + margin }, { -margin, depth + margin } };
+    if (std::abs(angle_deg) <= EPSILON)
+        return BoundingBoxf(corners[0], corners[2]);
+    const Eigen::Rotation2Dd rot(angle_deg * PI / 180.);
+    BoundingBoxf             box;
+    for (const Vec2d &corner : corners)
+        box.merge(Vec2d(rot * corner));
+    return box;
 }
 
 Polygon estimate_wipe_tower_first_layer_outline(const ConfigBase &config, WipeTowerType tower_type, double width, double depth, double height)
@@ -218,9 +242,8 @@ Polygon placed_wipe_tower_footprint(const ConfigBase &config, const WipeTowerFoo
         if (!brimmed.empty())
             outline = brimmed.front();
     }
-    const ConfigOption *angle = option_of(config, "wipe_tower_rotation_angle");
-    if (angle != nullptr && std::abs(angle->getFloat()) > EPSILON)
-        outline.rotate(angle->getFloat() * PI / 180.);
+    if (const double angle = wipe_tower_rotation_deg(config); std::abs(angle) > EPSILON)
+        outline.rotate(angle * PI / 180.);
     outline.translate(Point(scale_(pos.x()), scale_(pos.y())));
     return outline;
 }
@@ -264,6 +287,46 @@ std::optional<Vec2d> wipe_tower_position_clear_of_exclusion(const ConfigBase    
         if (clear_at(candidate))
             return candidate;
     return std::nullopt;
+}
+
+std::optional<Point> nearest_clear_wipe_tower_anchor(const BoundingBox &anchor_bounds, const Polygon &footprint,
+                                                     const Polygons &obstacles, const Point &target)
+{
+    // The anchors that put the footprint on a convex obstacle form the obstacle grown by the
+    // reflected footprint. For two convex shapes that Minkowski sum is the hull of the
+    // differences of their vertices.
+    const Polygon tower = Geometry::convex_hull(footprint.points);
+    Polygons      blocked;
+    blocked.reserve(obstacles.size());
+    for (const Polygon &obstacle : obstacles) {
+        Points differences;
+        differences.reserve(obstacle.size() * tower.size());
+        for (const Point &o : obstacle.points)
+            for (const Point &f : tower.points)
+                differences.emplace_back(o - f);
+        blocked.emplace_back(Geometry::convex_hull(std::move(differences)));
+    }
+
+    // Grown by a hair so bounds pinned to one coordinate on a cramped plate still have an area.
+    BoundingBox bounds = anchor_bounds;
+    bounds.offset(SCALED_EPSILON);
+    const ExPolygons clear = diff_ex(Polygons{ bounds.polygon() }, blocked);
+
+    std::optional<Point> nearest;
+    double               nearest_distance = std::numeric_limits<double>::max();
+    for (const ExPolygon &region : clear) {
+        if (region.contains(target))
+            return target;
+        for (const Line &edge : to_lines(region)) {
+            Point        closest;
+            const double distance = edge.distance_to_squared(target, &closest);
+            if (distance < nearest_distance) {
+                nearest_distance = distance;
+                nearest          = closest;
+            }
+        }
+    }
+    return nearest;
 }
 
 } // namespace Slic3r

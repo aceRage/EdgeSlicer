@@ -6,7 +6,10 @@
 #include "Model.hpp"
 #include "CurvedCut.hpp"
 #include "DrawCut.hpp"
+#include "TriangleSelector.hpp"
 
+#include <map>
+#include <optional>
 #include <vector>
 
 namespace Slic3r {
@@ -22,7 +25,53 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
 // True when this object carries at least one unprocessed flexi joint connector.
 bool has_flexi_joint(const ModelObject* mo);
 
-enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo };
+// Append the NEGATIVE_VOLUME that carries a push-fit Pin into `mo` before the cut runs. Its mesh
+// is the pin itself in mm (pushfit_preview_body), its transform the connector frame (pos,
+// rotation_m, z_angle; no scale). The cut builds the pin object and both holes from
+// cut_info.pushfit, so the mesh is only for previews and overlap checks.
+ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
+// A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
+// from its object frame to the frame the halves' meshes are built in (the source object's frame
+// with the instance's rotation and scale applied, no offset). The assembled pose (C1) and the pin
+// row are made from it.
+struct CutSeparatePart
+{
+    ModelObject* object{ nullptr };
+    Transform3d  part_to_cut_frame{ Transform3d::Identity() };
+    bool         is_pin{ false };
+    bool         pin_slot_failed{ false };
+};
+
+// OD11 PR D (owner D2 = a, 2026-10-24): "Edit cut" rebuilds the uncut part from the recipe's bare
+// mesh, so without this a re-cut painted part came back unpainted. Carries the support / seam /
+// colour / fuzzy-skin painting of the halves - as they are now, so paint added after the cut
+// comes too - back onto `uncut`.
+//
+// THE FRAMES. A half's model part, through its own volume matrix, is in the cut frame: the cut
+// instance's linear transform (`instance_linear`, recorded in the recipe) times the object frame
+// the recipe's mesh is in. That survives a project save and reload (the volume matrix is stored),
+// moving or turning the half on the bed (that is the instance), Flip and Place on cut (also the
+// instance). It does not survive moving a part inside a half, or an unrecorded instance_linear
+// on a cut made from a rotated or scaled instance - so the carry checks before it paints: the
+// painted points must land on the uncut surface. If they do not, nothing is painted and
+// `carried` is false (the caller says so: fallback (c), "dropped").
+struct CutPaintCarry
+{
+    bool had_paint{ false }; // some half had painting to carry
+    bool carried{ false };   // ... and it was put on `uncut`
+};
+CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>& halves, const Transform3d& instance_linear,
+                                          ModelVolume& uncut);
+// Records `half`'s model-part volume matrices into its own cut recipe (CutRecipe::half_part_matrices),
+// right after the cut, while they still ARE the cut frame. No-op without a recipe.
+void cut_recipe_record_half_frame(ModelObject& half);
+
+enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
+    // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
+    // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
+    // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
+    KeepPaint };
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
 
@@ -39,9 +88,35 @@ class Cut {
     // point, which is the no-kerf behaviour.
     double                      m_kerf{ 0.0 };
 
+    // C1, ASSEMBLED POSES (owner D8, tests/design_showcase_assembly_buildup.md). Taken from the
+    // source object when the Cut is made: per instance, its assembled pose (or its plain
+    // transformation when the assembled pose was never set - which is what the plater would
+    // have initialised it to), and the inverse of the cut instance's offset-free matrix, which
+    // takes the halves' mesh frame back to the source object's frame.
+    std::vector<Transform3d>    m_src_assembly;
+    Transform3d                 m_src_frame_inv{ Transform3d::Identity() };
+    // Per instance, the source object's bounding box: the pin row starts beside it.
+    std::vector<BoundingBoxf3>  m_src_bboxes;
+    // The frame map of the objects that are not halves (dowels, pins), and the one used for the
+    // halves (Identity, except perform_by_contour whose halves are not baked with the instance).
+    std::map<const ModelObject*, Transform3d> m_part_to_cut_frame;
+    Transform3d                 m_halves_to_cut_frame{ Transform3d::Identity() };
+    int                         m_pin_slot_failures{ 0 };
+
+    // Appends the dowels and pins to `objects`: dowels as before (instance reset), pins laid out
+    // in a row beside the source object, lying in their print pose.
+    void add_separate_parts(std::vector<CutSeparatePart>& parts, ModelObjectPtrs& objects);
+    // Sets every instance's assembled pose so the part sits where it was in the source object's
+    // assembled pose.
+    void set_assembled_pose(ModelObject* object, const Transform3d& part_to_cut_frame) const;
+
     void post_process(ModelObject* object, ModelObjectPtrs& objects, bool keep, bool place_on_cut, bool flip);
     void post_process(ModelObject* upper_object, ModelObject* lower_object, ModelObjectPtrs& objects);
-    void finalize(const ModelObjectPtrs& objects);
+    using SavedPaintings = std::vector<std::optional<TriangleSelector::SavedPainting>>;
+    // The painting of every model part of `object`, its mesh taken into the frame the halves' meshes
+    // are built in (instance without offset, times the volume matrix). Empty without KeepPaint.
+    SavedPaintings save_paintings(const ModelObject* object) const;
+    void finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings = {});
 
 public:
 
@@ -50,6 +125,17 @@ public:
                                               ModelObjectCutAttribute::KeepLower |
                                               ModelObjectCutAttribute::KeepAsParts );
     ~Cut() { m_model.clear_objects(); }
+
+    // perform_by_contour runs a second Cut on a working copy of the object; it takes the
+    // source's assembled poses and boxes from the outer one, since the copy has lost both.
+    void inherit_source(const Cut& outer)
+    {
+        m_src_assembly  = outer.m_src_assembly;
+        m_src_frame_inv = outer.m_src_frame_inv;
+        m_src_bboxes    = outer.m_src_bboxes;
+    }
+    // How many pins came out without their slit because the boolean failed (the panel says so).
+    int pin_slot_failures() const { return m_pin_slot_failures; }
 
     struct Groove
     {
@@ -101,8 +187,20 @@ public:
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();
-    const ModelObjectPtrs& perform_by_contour(std::vector<Part> parts, int dowels_count);
-    const ModelObjectPtrs& perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts = false);
+    // `src_object` is the object as it was before PartSelection split it: its painting is what the
+    // halves get back with KeepPaint (the split pieces carry none). May be null.
+    const ModelObjectPtrs& perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count);
+    // OrcaSlicer #12318: `groove_count` dovetails side by side along the plane's X, `groove_gap` mm
+    // apart; `plane_radius` is the gizmo radius the dovetail's outer width (and so the spacing) is
+    // computed from - see calculate_groove_width(). Count 1 is the single dovetail of old.
+    const ModelObjectPtrs& perform_with_groove(const Groove&      groove,
+                                               const Transform3d& rotation_m,
+                                               const int          groove_count,
+                                               const float        groove_gap,
+                                               const float        plane_radius,
+                                               bool               keep_as_parts = false);
+
+    static float calculate_groove_width(const Cut::Groove& groove, const float plane_radius);
 
 }; // namespace Cut
 

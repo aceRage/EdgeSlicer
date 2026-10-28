@@ -27,6 +27,7 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/FilamentSyncMatch.hpp"
 #include "libslic3r/Color.hpp"
 
 #include "GUI.hpp"
@@ -475,6 +476,61 @@ void PresetComboBox::update_selection()
     // Only the list of cells must be freed, the renderer isn't ours to free
     g_list_free(cells);
 #endif
+}
+
+// "0.4", "0.40", "0.4mm" and " 0.4 mm" all as "0.4", for comparing a toolhead's reported nozzle with
+// the printer preset's.
+static std::string normalized_nozzle(std::string nozzle)
+{
+    boost::algorithm::trim(nozzle);
+    if (boost::iends_with(nozzle, "mm")) {
+        nozzle.resize(nozzle.size() - 2);
+        boost::algorithm::trim(nozzle);
+    }
+    if (nozzle.find('.') != std::string::npos) {
+        while (!nozzle.empty() && nozzle.back() == '0')
+            nozzle.pop_back();
+        if (!nozzle.empty() && nozzle.back() == '.')
+            nozzle.pop_back();
+    }
+    return nozzle;
+}
+
+// The preset a U1 toolhead's filament shows as in the dropdown's "Machine Filament" section: the
+// Snapmaker naming first ("<name> @U1 0.4 nozzle", "<name> @U1"...), then the same rules the Sync
+// button uses (FilamentSyncMatch::match_preset): a user preset of that name or vendor, then the
+// "Generic <type>" preset. Before, a spool with no preset of exactly the Snapmaker name - any
+// third-party tag - was left out of the section altogether.
+static const Preset* machine_filament_preset(const PresetCollection& collection, const ConnectMachineInfo& info)
+{
+    const std::string& filament_name   = info.filament_info;
+    const std::string& machine_nozzles = info.nozzle_info;
+    const auto&        presets         = collection.get_presets();
+    for (const std::string& candidate : { filament_name + " @U1 " + machine_nozzles + " nozzle", filament_name + " @U1 " + machine_nozzles,
+                                          filament_name + " @U1", filament_name }) {
+        auto it = std::find_if(presets.begin(), presets.end(), [&candidate](const Preset& f) { return f.is_compatible && f.name == candidate; });
+        if (it != presets.end())
+            return &*it;
+    }
+
+    std::vector<const Preset*>                index;
+    std::vector<FilamentSyncMatch::Candidate> candidates;
+    for (const Preset& preset : presets) {
+        if (preset.is_default || preset.is_project_embedded || !preset.is_compatible)
+            continue;
+        FilamentSyncMatch::Candidate c;
+        c.name      = preset.name;
+        c.vendor    = preset.config.opt_string("filament_vendor", 0u);
+        c.type      = preset.config.opt_string("filament_type", 0u);
+        c.colour    = preset.config.opt_string("default_filament_colour", 0u);
+        c.is_system = preset.is_system;
+        c.is_base   = collection.get_preset_base(preset) == &preset;
+        index.push_back(&preset);
+        candidates.push_back(std::move(c));
+    }
+    const FilamentSyncMatch::Match m = FilamentSyncMatch::match_preset(candidates, filament_name, info.filament_type, info.filament_vendor,
+                                                                       info.color_info);
+    return m.index >= 0 ? index[size_t(m.index)] : nullptr;
 }
 
 int PresetComboBox::update_ams_color()
@@ -1357,12 +1413,18 @@ void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
             filament_extruder_map.erase(m_filament_idx);
     }
 
+    // Multi-colour P1: a slot given new colours starts with an equal split (design 4.5).
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = config->option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
+
     DynamicPrintConfig new_config = *config;
     new_config.set_key_value("filament_colour", filament_colors);
     new_config.set_key_value("filament_multi_colors", filament_multi_colors);
     new_config.set_key_value("filament_colour_mode", filament_colour_modes);
 
     config->apply(new_config);
+    reset_colour_split_where_colours_changed(*config, old_multi_colors);
     wxGetApp().plater()->update_project_dirty_from_presets();
     if (wxGetApp().app_config != nullptr)
         wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
@@ -1611,7 +1673,6 @@ void PlaterPresetComboBox::update()
 
     if (m_type == Preset::TYPE_FILAMENT && wxGetApp().preset_bundle->machine_filaments.size() > 0) {
         set_label_marker(Append(separator(L("Machine Filament")), wxNullBitmap));
-        auto& filaments         = m_collection->get_presets();
         auto  machine_nozzles_list = wxGetApp().preset_bundle->m_connect_machine_info_list;
         m_first_ams_filament    = GetCount();
 
@@ -1626,35 +1687,12 @@ void PlaterPresetComboBox::update()
         }
         
         for (int i = 0; i < machine_nozzles_list.size(); i++) {
-            std::string filament_name   = machine_nozzles_list[i].filament_info;
-            std::string machine_nozzles = machine_nozzles_list[i].nozzle_info;
-
             // Filter by nozzle for display only; machine_filaments / m_connect_machine_info_list stay from sync (SSWCP).
-            if (currentNozzleInfo != machine_nozzles)
+            if (normalized_nozzle(currentNozzleInfo) != normalized_nozzle(machine_nozzles_list[i].nozzle_info))
                 continue;
 
-            auto item_iter = std::find_if(filaments.begin(), filaments.end(),
-            [&filament_name, &machine_nozzles, &currentNozzleInfo](auto& f) {
-                if (f.name == filament_name + " @U1 " + machine_nozzles + " nozzle")
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1 " + machine_nozzles)
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name + " @U1")
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name)
-                    if (f.is_compatible)
-                        return true;
-
-                return false;
-            });
-
-            if (item_iter != filaments.end()) {
+            const Preset* item_iter = machine_filament_preset(*m_collection, machine_nozzles_list[i]);
+            if (item_iter != nullptr) {
                 const_cast<Preset&>(*item_iter).is_visible = true;
                 const ConnectMachineInfo& machineInfo = machine_nozzles_list[i];
                 std::vector<std::string> colors = machineInfo.multiColors;
@@ -2193,7 +2231,6 @@ void TabPresetComboBox::update()
     
     if (m_type == Preset::TYPE_FILAMENT && wxGetApp().preset_bundle->m_connect_machine_info_list.size() > 0) {
         set_label_marker(Append(separator(L("Machine Filament")), wxNullBitmap));
-        auto& filaments            = m_collection->get_presets();
         auto  machine_nozzles_list = wxGetApp().preset_bundle->m_connect_machine_info_list;
         m_first_ams_filament       = GetCount();
 
@@ -2208,34 +2245,12 @@ void TabPresetComboBox::update()
         }
 
         for (int i = 0; i < machine_nozzles_list.size(); i++) {
-            std::string filament_name   = machine_nozzles_list[i].filament_info;
-            std::string machine_nozzles = machine_nozzles_list[i].nozzle_info;
-
-            if (currentNozzleInfo != machine_nozzles)
+            // Filter by nozzle for display only; machine_filaments / m_connect_machine_info_list stay from sync (SSWCP).
+            if (normalized_nozzle(currentNozzleInfo) != normalized_nozzle(machine_nozzles_list[i].nozzle_info))
                 continue;
 
-            auto item_iter = std::find_if(filaments.begin(), filaments.end(),[&filament_name, &machine_nozzles, &currentNozzleInfo](auto& f) {               
-
-                if (f.name == filament_name + " @U1 " + machine_nozzles + " nozzle")
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1 " + machine_nozzles)
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1")
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name)
-                    if (f.is_compatible)
-                        return true;
-
-                return false;                
-                });
-
-            if (item_iter != filaments.end()) {
+            const Preset* item_iter = machine_filament_preset(*m_collection, machine_nozzles_list[i]);
+            if (item_iter != nullptr) {
                 const_cast<Preset&>(*item_iter).is_visible = true;
                 const ConnectMachineInfo& machineInfo = machine_nozzles_list[i];
                 std::vector<std::string> colors = machineInfo.multiColors;

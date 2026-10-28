@@ -32,13 +32,18 @@ add_executable(${_TEST_NAME}_tests
     http_body_redirect_tests.cpp
     snapmaker_silent_login_tests.cpp
     bambu_sync_policy_tests.cpp
+    bambu_cloud_watch_tests.cpp
+    hub_job_thumbnail_tests.cpp
     preset_sync_policy_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     elegoo_start_print_tests.cpp
     elegoo_canvas_mapping_tests.cpp
+    elegoo_cc2_tests.cpp
+    elegoo_cc2_monitor_tests.cpp
     third_party_filament_map_tests.cpp
     elegoo_sdcp_tests.cpp
+    emulator_e2e_tests.cpp
     elegoo_camera_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
@@ -56,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
     mqtt_reconnect_tests.cpp
     mqtt_log_redact_tests.cpp
     mqtt_teardown_tests.cpp
+    mqtt_connect_refused_tests.cpp
     first_request_gate_tests.cpp
     bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
@@ -77,6 +83,7 @@ add_executable(${_TEST_NAME}_tests
     plate_print_slots_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
+    vendor_install_stamp_tests.cpp
     plate_recentre_tests.cpp
     bed_texture_pool_tests.cpp
     bambu_config_compat_tests.cpp
@@ -120,9 +127,13 @@ add_executable(${_TEST_NAME}_tests
     ff_printer_sources_tests.cpp
     ff_device_pid_tests.cpp
     emboss_font_search_tests.cpp
+    imgui_font_ranges_tests.cpp
+    imgui_tooltip_utf8_tests.cpp
+    emboss_style_preview_tests.cpp
     printers_monitor_tests.cpp
     moonraker_progress_tests.cpp
     printer_storage_tests.cpp
+    elegoo_sdcp_files_tests.cpp
     u1_local_first_tests.cpp
     u1_moonraker_probe_tests.cpp
     u1_ws_route_tests.cpp
@@ -135,6 +146,7 @@ add_executable(${_TEST_NAME}_tests
     ams_filament_order_tests.cpp
     favorite_filaments_tests.cpp
     teardown_join_tests.cpp
+    slice_v1_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
@@ -185,6 +197,8 @@ if (wxWidgets_FOUND)
 endif ()
 # chamber_lights_tests.cpp reads the shipped resources/printers/*.json for each model's printer_series.
 target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLIC3R_TEST_RESOURCES_DIR="${PROJECT_SOURCE_DIR}/resources")
+# slice_v1_tests.cpp compares the /result producer with the JSON fixtures next to it.
+target_compile_definitions(${_TEST_NAME}_tests PRIVATE SLICE_V1_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/slice_v1")
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 if (WIN32)

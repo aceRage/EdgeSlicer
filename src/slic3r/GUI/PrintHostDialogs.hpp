@@ -113,7 +113,10 @@ protected:
     // wxChoice rows overrides this with false. No slots: no rows at all, as before.
     virtual bool use_third_party_map_panel() const { return true; }
     // Creality K3 holders: show the two colours, no popup.
-    virtual bool third_party_map_read_only() const { return false; }
+    // Happy Hare / AFC: the tiles show the gates or lanes and what is in them, nothing more. The
+    // probe reads them, but no gate or lane mapping is sent at start (the printer's own tool-to-gate
+    // map decides), so no picker is offered.
+    virtual bool third_party_map_read_only() const { return m_device_status.happy_hare || m_device_status.afc; }
     void rebuild_third_party_map_rows();
     // The picked QIDI printer said it is printing or paused: Upload only, no start.
     bool print_blocked() const;
@@ -121,6 +124,9 @@ protected:
     void update_print_button();
     // The QIDI options for the picked device, from what it said. Called with the mapping rows.
     void rebuild_qidi_options();
+    // A vendor dialog's options for the picked device, into m_vendor_panel. Called with the mapping
+    // rows; the plain dialog has none.
+    virtual void rebuild_vendor_options() {}
     // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
     void update_mapping_enabled();
     // What PrintHostDevices::qidi_send_policy needs, from the picked device and the rows.
@@ -181,6 +187,10 @@ protected:
     wxCheckBox*                           m_qidi_polar_cooler { nullptr };
     // The QIDI options are shown from the profile because the printer did not answer.
     bool                                  m_qidi_blind { false };
+    // A vendor dialog's own options for the picked device (the Centauri Carbon 2's CANVAS
+    // auto-refill), rebuilt with the mapping rows by rebuild_vendor_options().
+    wxWindow*                             m_vendor_panel { nullptr };
+    wxBoxSizer*                           m_vendor_sizer { nullptr };
     wxStaticText*                         m_mapping_note { nullptr };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
@@ -307,6 +317,8 @@ public:
 protected:
     int      preselect_slot(const SendPlateFilament& f) const override;
     wxString mapping_warning() const override;
+    // The Centauri Carbon 2 with a CANVAS: the auto-refill checkbox (owner D7).
+    void     rebuild_vendor_options() override;
 
 private:
     // The plate's used filaments in the shape the CANVAS mapping code takes.
@@ -316,6 +328,11 @@ private:
     bool confirm_slot_map_still_valid();
     mutable bool                                                  m_memory_loaded { false };
     mutable std::map<std::string, ElegooCanvasMapping::Remembered> m_memory;
+    // The CANVAS auto-refill (Centauri Carbon 2, method 2004 before the start): shown only while the
+    // picked printer reports a CANVAS; remembered per printer under m_auto_refill_key.
+    wxCheckBox* m_auto_refill { nullptr };
+    std::string m_auto_refill_key;
+    bool        picked_is_cc2() const;
 
     BedType appBedType() const;
     void    refresh();
@@ -324,6 +341,8 @@ private:
     const char* CONFIG_KEY_TIMELAPSE         = "elegoolink_timelapse";
     const char* CONFIG_KEY_HEATEDBEDLEVELING = "elegoolink_heated_bed_leveling";
     const char* CONFIG_KEY_BEDTYPE           = "elegoolink_bed_type";
+    // AppConfig section holding the auto-refill choice per printer (ElegooCc2::auto_refill_memory_key).
+    const char* CONFIG_SECTION_AUTO_REFILL   = "elegoo_cc2_auto_refill";
 
 private:
     wxStaticText* warning_text{nullptr};

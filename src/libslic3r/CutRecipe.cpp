@@ -22,7 +22,8 @@ bool CutRecipeGroove::operator==(const CutRecipeGroove& o) const
     return depth == o.depth && width == o.width && flaps_angle == o.flaps_angle && angle == o.angle &&
            depth_init == o.depth_init && width_init == o.width_init &&
            flaps_angle_init == o.flaps_angle_init && angle_init == o.angle_init &&
-           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance;
+           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance &&
+           count == o.count && gap == o.gap && plane_radius == o.plane_radius;
 }
 
 bool CutRecipeConnector::operator==(const CutRecipeConnector& o) const
@@ -31,7 +32,7 @@ bool CutRecipeConnector::operator==(const CutRecipeConnector& o) const
            radius == o.radius && height == o.height &&
            radius_tolerance == o.radius_tolerance && height_tolerance == o.height_tolerance &&
            z_angle == o.z_angle && type == o.type && style == o.style && shape == o.shape &&
-           flexi == o.flexi;
+           flexi == o.flexi && pushfit == o.pushfit;
 }
 
 bool CutRecipeStroke::operator==(const CutRecipeStroke& o) const
@@ -76,6 +77,9 @@ bool CutRecipe::operator==(const CutRecipe& o) const
     if (upper_visibility != o.upper_visibility || lower_visibility != o.lower_visibility)
         return false;
     if (connectors != o.connectors)
+        return false;
+    if (instance_linear_set != o.instance_linear_set ||
+        (instance_linear_set && instance_linear.matrix() != o.instance_linear.matrix()))
         return false;
     // The mesh is compared by its content hash, which is what the 3MF stores and
     // what makes two halves share one blob.
@@ -204,6 +208,7 @@ void cut_recipe_connectors_from_model(const std::vector<CutConnector>& in, std::
         r.style            = int(c.attribs.style);
         r.shape            = int(c.attribs.shape);
         r.flexi            = c.flexi;
+        r.pushfit          = c.pushfit;
         out.emplace_back(r);
     }
 }
@@ -215,12 +220,13 @@ void cut_recipe_connectors_to_model(const std::vector<CutRecipeConnector>& in, s
     for (const CutRecipeConnector& r : in) {
         // The recipe may have come from a file: clamp every enum before casting,
         // the same discipline the cut_information.xml reader follows.
-        const int type  = (r.type  >= 0 && r.type  <= int(CutConnectorType::FlexiJoint)) ? r.type  : int(CutConnectorType::Plug);
+        const int type  = (r.type  >= 0 && r.type  <= int(CutConnectorType::PushFit)) ? r.type  : int(CutConnectorType::Plug);
         const int style = (r.style >= 0 && r.style <= int(CutConnectorStyle::Undef))     ? r.style : int(CutConnectorStyle::Prism);
         const int shape = (r.shape >= 0 && r.shape <= int(CutConnectorShape::Undef))     ? r.shape : int(CutConnectorShape::Circle);
         CutConnector c(r.pos, r.rotation_m, r.radius, r.height, r.radius_tolerance, r.height_tolerance, r.z_angle,
                        CutConnectorAttributes(CutConnectorType(type), CutConnectorStyle(style), CutConnectorShape(shape)));
-        c.flexi = r.flexi;
+        c.flexi   = r.flexi;
+        c.pushfit = pushfit_sanitize(r.pushfit);
         out.emplace_back(c);
     }
 }
@@ -585,6 +591,9 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
     // and their _init / _tolerance partners). None of them encodes a direction in
     // the plane, so a mirror passes through them unchanged and only the frame they
     // sit on moves. Nothing to do - r.groove is already the copy.
+    // Version 5's count, gap and plane_radius are scalars too, and the dovetails are
+    // laid out symmetrically about the plane centre along its X, so a mirrored set is
+    // the same set.
 
     // --- connectors -------------------------------------------------------
     for (size_t i = 0; i < r.connectors.size(); ++ i) {
@@ -599,7 +608,8 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
         // orientation the angle negates; for a Circle it means nothing and negating
         // it would only make "mirror twice" fail to be a bit-exact identity for no
         // benefit.
-        if (o.shape != int(CutConnectorShape::Circle))
+        // A Pin is round but its flats are not, so it turns the other way too.
+        if (o.shape != int(CutConnectorShape::Circle) || o.type == int(CutConnectorType::PushFit))
             o.z_angle = -c.z_angle;
         // type, style, shape, the radii, the tolerances and the flexi parameters are
         // all untouched. type especially: Plug / Dowel / Snap / FlexiJoint is a

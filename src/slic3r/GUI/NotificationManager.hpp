@@ -35,6 +35,10 @@ using CancelFn = std::function<void()>;
 
 class GLCanvas3D;
 class ImGuiWrapper;
+
+// ORCA #12122: select model instances (object id, instance id pairs) in the object list. Returns
+// false when none of them has a list item, so the caller can fall back to selecting the object.
+bool select_model_instances(const std::vector<std::pair<ObjectID, ObjectID>>& obj_inst_ids);
 enum class InfoItemType;
 
 #define BBL_NOTICE_PLATEINFO_OBJID      1024+1
@@ -224,6 +228,8 @@ public:
 	void upload_job_notification_show_canceled(int id, const std::string& filename, const std::string& host);
 	void upload_job_notification_show_error(int id, const std::string& filename, const std::string& host);
     void push_slicing_serious_warning_notification(const std::string &text, std::vector<ModelObject const *> objs);
+    // ORCA #12122: same, but the jump selects the named instances.
+    void push_slicing_serious_warning_notification(const std::string &text, std::vector<ModelInstance const *> insts);
     void close_slicing_serious_warning_notification(const std::string &text);
 	// Creates Slicing Error notification with a custom text and no fade out.
     void push_slicing_error_notification(const std::string &text, std::vector<ModelObject const *> objs);

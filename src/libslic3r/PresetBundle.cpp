@@ -118,6 +118,8 @@ void EnsureFilamentColorFieldsAligned(DynamicPrintConfig &config)
     const size_t oldMultiCount = multiColors->values.size();
     multiColors->resize(targetCount);
     modes->resize(targetCount);
+    // The visual-only multi-colour keys (split, angle, twist) follow the same slots.
+    visual_only_resize_slots(config, targetCount);
 
     for (size_t i = 0; i < targetCount; ++i)
     {
@@ -179,6 +181,7 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
 {
     EraseStringOptionAt(config, "filament_multi_colors", index);
     EraseIntOptionAt(config, "filament_colour_mode", index);
+    visual_only_erase_slot(config, index);
     EnsureFilamentColorFieldsAligned(config);
 }
 
@@ -217,9 +220,12 @@ static std::vector<std::string> s_project_options {
     "filament_colour",
     "filament_multi_colors",
     "filament_colour_mode",
+    // Multi-colour filaments: visual only, stripped at Print::apply (visual_only_option_keys()).
+    "filament_colour_split",
+    "filament_colour_angle",
+    "filament_colour_twist",
     "wipe_tower_x",
     "wipe_tower_y",
-    "wipe_tower_rotation_angle",
     "curr_bed_type",
     // Bambu two-extruder printers: the printer state synced before slicing (BambuStudio keeps it
     // outside the presets too, PresetBundle::extruder_ams_counts / extruder_nozzle_stat).
@@ -473,6 +479,49 @@ void PresetBundle::copy_files(const std::string& from)
     for (const boost::filesystem::path& from_dir : from_dirs) {
         copy_dir(from_dir, data_dir /"old"/from_dir.filename());
     }
+}
+
+namespace {
+// -1 = follow the environment, 0 = off, 1 = on. See PresetBundle::set_sequential_load_override().
+std::atomic<int> s_sequential_load_override{-1};
+std::atomic<int> s_parse_cache_override{-1};
+
+bool env_flag(const char *name, bool default_value)
+{
+    const char *v = std::getenv(name);
+    if (v == nullptr)
+        return default_value;
+    const std::string s(v);
+    if (s == "1" || s == "true")
+        return true;
+    if (s == "0" || s == "false")
+        return false;
+    return default_value;
+}
+} // namespace
+
+void PresetBundle::set_sequential_load_override(std::optional<bool> sequential)
+{
+    s_sequential_load_override.store(sequential ? int(*sequential) : -1);
+}
+
+void PresetBundle::set_parse_cache_override(std::optional<bool> enabled)
+{
+    s_parse_cache_override.store(enabled ? int(*enabled) : -1);
+}
+
+bool PresetBundle::sequential_load()
+{
+    static const bool from_env = env_flag("ORCA_PRESET_LOAD_SEQUENTIAL", false);
+    const int o = s_sequential_load_override.load();
+    return o < 0 ? from_env : o != 0;
+}
+
+bool PresetBundle::parse_cache_enabled()
+{
+    static const bool from_env = env_flag("ORCA_PRESET_CACHE", true);
+    const int o = s_parse_cache_override.load();
+    return o < 0 ? from_env : o != 0;
 }
 
 void PresetBundle::set_progress_callback(ProgressCallback cb)
@@ -1028,24 +1077,31 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(std::string user, For
 
     // BBS do not load sla_print
     // BBS: change directoties by design
+    StartupPhase profile("PresetBundle::load_user_presets");
     try {
         std::string print_selected_preset_name = prints.get_selected_preset().name;
         this->prints.load_presets(dir_user_presets, PRESET_PRINT_NAME, substitutions, substitution_rule);
+        profile.mark("process load_presets");
         prints.select_preset_by_name(print_selected_preset_name, false);
+        profile.mark("process select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }
     try {
         std::string filament_selected_preset_name = filaments.get_selected_preset().name;
         this->filaments.load_presets(dir_user_presets, PRESET_FILAMENT_NAME, substitutions, substitution_rule);
+        profile.mark("filament load_presets");
         filaments.select_preset_by_name(filament_selected_preset_name, false);
+        profile.mark("filament select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }
     try {
         std::string printer_selected_preset_name = printers.get_selected_preset().name;
         this->printers.load_presets(dir_user_presets, PRESET_PRINTER_NAME, substitutions, substitution_rule);
+        profile.mark("machine load_presets");
         printers.select_preset_by_name(printer_selected_preset_name, false);
+        profile.mark("machine select_preset_by_name");
     } catch (const std::runtime_error &err) {
         errors_cummulative += err.what();
     }
@@ -1777,11 +1833,9 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         // exists so the parallel and sequential loads can be measured from the same
         // binary, and as an escape hatch if a vendor tree ever turns out to misbehave
         // under concurrency in the field. The two paths produce identical results by
-        // construction - stage C is the same either way.
-        static const bool force_sequential = [] {
-            const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
-            return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
-        }();
+        // construction - stage C is the same either way. Tests switch it with
+        // set_sequential_load_override().
+        const bool force_sequential = PresetBundle::sequential_load();
 
         if (parallel_count == 1 || force_sequential) {
             for (size_t i = 0; i < parallel_count; ++i)
@@ -2828,10 +2882,15 @@ unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
     if (filament_presets.empty())
         return 0;
     this->filament_presets = filament_presets;
+    // The slots' colours as they were, so a slot whose colours the sync replaced starts with an equal split.
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = project_config.option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
     ConfigOptionStrings *filament_color = project_config.option<ConfigOptionStrings>("filament_colour");
     filament_color->resize(filament_presets.size());
     filament_color->values = filament_colors;
     EnsureFilamentColorFieldsAligned(project_config);
+    reset_colour_split_where_colours_changed(project_config, old_multi_colors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets();
     return filament_presets.size();
@@ -3073,6 +3132,24 @@ const std::set<std::string> ignore_settings_list ={
     "inherits",
     "print_settings_id", "filament_settings_id", "printer_settings_id"
 };
+
+std::string PresetBundle::current_printer_system_name() const
+{
+    const Preset &printer = this->printers.get_edited_preset();
+    if (printer.is_system)
+        return printer.name;
+    return printer.inherits();
+}
+
+void PresetBundle::fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const
+{
+    auto *list = config.option<ConfigOptionStrings>("print_compatible_printers", true);
+    if (!list->values.empty())
+        return;
+    const std::string name = current_printer_system_name();
+    if (!name.empty())
+        list->values.push_back(name);
+}
 
 DynamicPrintConfig PresetBundle::full_fff_config() const
 {
@@ -3605,6 +3682,14 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         //}
         //else
             print_different_keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.end());
+        // An export fills the list with the printer's system name when the preset has none (Bambu
+        // Connect needs the key). That is not a restriction the user set, so do not apply it.
+        if (print_compatible_printers.size() == 1) {
+            const std::string printer_system = !inherits_values[num_filaments + 1].empty() ?
+                inherits_values[num_filaments + 1] : config.opt_string("printer_settings_id");
+            if (print_compatible_printers.front() == printer_system)
+                print_compatible_printers.clear();
+        }
         if (!print_compatible_printers.empty()) {
             ConfigOptionStrings* compatible_printers = config.option<ConfigOptionStrings>("compatible_printers", true);
             compatible_printers->values = print_compatible_printers;
@@ -3758,6 +3843,11 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         }
 
         // 4) Load the project config values (the per extruder wipe matrix etc).
+        // A file without the visual-only multi-colour keys (an older project, a Bambu 3MF) loads their
+        // defaults, not what the previous project had: apply_only() keeps a key the file lacks.
+        for (const std::string &key : visual_only_option_keys())
+            if (!config.has(key))
+                this->project_config.erase(key);
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
@@ -4398,14 +4488,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // is closed inside parse_json_document - and each document is released as soon as
     // its preset has been built. A section's worth of parsed BBL filaments is a few tens
     // of MB, transient.
-    static const bool force_sequential_parse = [] {
-        const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
-        return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
-    }();
-    static const bool preset_cache_enabled = [] {
-        const char *v = std::getenv("ORCA_PRESET_CACHE");
-        return !(v != nullptr && (std::string(v) == "0" || std::string(v) == "false"));
-    }();
+    const bool force_sequential_parse = PresetBundle::sequential_load();
+    const bool preset_cache_enabled   = PresetBundle::parse_cache_enabled();
 
     // ---- per-vendor CBOR cache -------------------------------------------------
     //
@@ -5150,7 +5234,7 @@ static const std::set<std::string> s_print_carry_printer_coupled_keys {
     "toolchange_ordering", "toolchange_cyclic_order", "toolchange_cyclic_first_layer",
     // Firmware / G-code output features.
     "timelapse_type",                        // camera timelapse moves differ per machine
-    "exclude_object", "gcode_label_objects", // object labelling for the firmware's exclude-object
+    "exclude_object", "exclude_object_tolerance", "gcode_label_objects", // object labelling for the firmware's exclude-object
     "enable_arc_fitting",                    // G2/G3 support
     "gcode_add_line_number", "gcode_comments",
     "filename_format", "post_process",       // output naming and machine-specific scripts

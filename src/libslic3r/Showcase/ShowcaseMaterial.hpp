@@ -22,6 +22,10 @@ enum class Finish : int { Standard = 0, Matte, Silk, Gloss, Transparent, Metalli
 
 const char *to_string(Finish v);
 bool        from_string(const std::string &s, Finish &v);
+// Realism 1c: JSON names kept back for finishes still to come, so nothing else takes them and an
+// older build reads them as unknown (the inferred finish): "multicolour_silk", the dual / tri-colour
+// coextruded silk (tests/design_multicolour_filament_view.md).
+const std::vector<std::string> &reserved_finish_names();
 std::vector<Finish> all_finishes();
 
 // D4: the finish a filament preset most likely has, from its name (e.g. "Snapmaker PLA Silk @U1",
@@ -124,6 +128,8 @@ public:
     // The layer containing z (binary search over the tops; mirrored in GLSL). Below 0 it is the
     // first layer, above the last the last one continued.
     LayerSpan layer_at(float z) const;
+    // 1c: the index of that layer, 0 = the first (mirrored in GLSL as layer_index_at()).
+    int       index_at(float z) const;
 
 private:
     std::vector<float> m_tops;
@@ -132,8 +138,68 @@ private:
 
 // Uniform layers without a table: the first layer, then `layer_height` steps (mirrored in GLSL).
 LayerSpan uniform_layer_at(float z, float first_layer_height, float layer_height);
+// 1c: the index of uniform_layer_at()'s layer, 0 = the first.
+int       uniform_layer_index_at(float z, float first_layer_height, float layer_height);
 // 0 at the bottom of the layer, 1 at its top.
 float     layer_phase(const LayerSpan &span, float z);
+
+// --- top and bottom skin direction (realism 1c, design 2.3) -------------------------------------
+//
+// Which way the lines of a top (or bottom) skin run, worked out from the print settings as
+// Fill.cpp lays them, without a slice: the silk sheen's tangent on the mesh's flat faces (1c), and
+// the top stripes of the multi-colour filament view (tests/design_multicolour_filament_view.md,
+// P4). Angles are in degrees from +X towards +Y in the plate's frame; a line and its reverse are
+// the same direction, so they are kept in [0, 180).
+
+enum class SkinPattern : int {
+    Isotropic = 0,   // no single direction the shader can model (Hilbert, Archimedean chords, ...)
+    Lines,           // straight lines: rectilinear, monotonic, monotonic line, aligned rectilinear
+    Concentric,      // rings around the face (concentric, spiral inset)
+};
+
+struct SkinTangent
+{
+    SkinPattern        pattern = SkinPattern::Isotropic;
+    // Lines: layer i of the object (0 = its first layer) runs at angles_deg[i % size()].
+    std::vector<float> angles_deg;
+    // Lines: neighbouring lines run opposite ways (a zig-zag, rectilinear); false when every line
+    // runs the same way (monotonic, monotonic line). The sheen does not care; P4's stripes do.
+    bool               zigzag = true;
+
+    // Lines: the direction of layer `layer` in degrees, [0, 180); 0 for the other patterns.
+    float angle_at(int layer) const;
+    // Lines: the unit direction (x, y) of layer `layer`; (0, 0) for the other patterns.
+    std::array<float, 2> direction_at(int layer) const;
+    // Concentric: the unit direction along the ring through (x, y) around (cx, cy), anticlockwise;
+    // (0, 0) at the centre.
+    static std::array<float, 2> ring_direction(float x, float y, float cx, float cy);
+};
+
+// The settings skin_tangent_mode() reads (the config's values for one surface).
+struct SkinSettings
+{
+    std::string pattern                = "monotonicline";   // top_surface_pattern / bottom_surface_pattern, serialized
+    double      solid_infill_direction = 45.;               // solid_infill_direction
+    double      surface_direction      = -1.;               // top_layer_direction / bottom_layer_direction; < 0 = not set
+    std::string rotate_template;                            // solid_infill_rotate_template
+    bool        align_to_model         = false;             // align_infill_direction_to_model
+    double      model_rotation_deg     = 0.;                // the object's rotation about Z (used when aligned)
+};
+
+// How the skin's lines run (Fill.cpp: a set top/bottom_layer_direction fixes the angle; else a plain
+// rotate template ("0,90") gives each layer its absolute angle; else the solid infill direction,
+// turned 90 degrees on odd layers for every line pattern but aligned rectilinear). A template in the
+// rotate metalanguage ("+30", "45%", ...) is not modelled: Isotropic.
+SkinTangent skin_tangent_mode(const SkinSettings &settings);
+
+} // namespace Showcase
+
+class DynamicPrintConfig;
+
+namespace Showcase {
+
+// The top (`top` true) or bottom skin's settings from an object's full print config.
+SkinSettings skin_settings(const DynamicPrintConfig &config, bool top, double model_rotation_deg);
 
 } // namespace Showcase
 } // namespace Slic3r

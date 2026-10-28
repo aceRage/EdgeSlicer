@@ -836,6 +836,40 @@ TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit
     }
 }
 
+// Orca #15033: --allow-rotations is opt-in, as its name implies. The CLI reads the option's default when the flag is
+// absent, so the def's default decides whether a headless arrange may rotate objects.
+TEST_CASE("CLI --allow-rotations defaults off and is opt-in", "[Config][CLI][AllowRotations]")
+{
+    const ConfigOptionDef *def = cli_misc_config_def.get("allow_rotations");
+    REQUIRE(def != nullptr);
+    const ConfigOptionBool *dflt = def->get_default_value<ConfigOptionBool>();
+    REQUIRE(dflt != nullptr);
+    CHECK_FALSE(dflt->value);
+
+    auto parse = [](std::initializer_list<const char *> args) {
+        DynamicPrintAndCLIConfig config;
+        t_config_option_keys extra;
+        t_config_option_keys keys;
+        std::vector<const char *> argv(args);
+        REQUIRE(config.read_cli(int(argv.size()), argv.data(), &extra, &keys));
+        return std::make_pair(std::move(config), std::move(keys));
+    };
+    {
+        auto [config, keys] = parse({"prog"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") == keys.end());
+        // The CLI's own read: the option filled from its default is false.
+        const ConfigOptionBool *opt = config.option<ConfigOptionBool>("allow_rotations", true);
+        REQUIRE(opt != nullptr);
+        CHECK_FALSE(opt->value);
+    }
+    {
+        auto [config, keys] = parse({"prog", "--allow-rotations"});
+        CHECK(std::find(keys.begin(), keys.end(), "allow_rotations") != keys.end());
+        REQUIRE(config.has("allow_rotations"));
+        CHECK(config.opt_bool("allow_rotations"));
+    }
+}
+
 // The settings combo box of a plain enum option shows the option's NUMERIC value as the list index and saves the
 // picked index back as the value (Choice::set_value / Choice::get_value in src/slic3r/GUI/Field.cpp). So
 // enum_values[i] must be the key of enum value i: a key inserted in the middle of the list (seam_position
@@ -1048,10 +1082,10 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     options.insert(options.end(),
                    {"mixed_filament_definitions", "filament_volume_type", "nozzle_volume_type", "filament_map",
                     "filament_map_mode", "printer_extruder_id", "enable_filament_mapping", "device_tool_count",
-                    "device_changer", "dithering_local_z_mode", "wipe_tower_rotation_angle",
+                    "device_changer", "dithering_local_z_mode",
                     "mixed_filament_pointillism_pixel_size", "inherits"});
 
-    REQUIRE(fill_missing_project_keys(project, system, options) == 1);
+    REQUIRE(fill_missing_project_keys(project, system, options) == 2); // sparse_infill_density + wipe_tower_rotation_angle (an ordinary print key since Orca #15227; already in print_options())
     REQUIRE(project.has("sparse_infill_density"));
     REQUIRE_FALSE(project.has("mixed_filament_definitions"));
     REQUIRE_FALSE(project.has("filament_volume_type"));
@@ -1063,7 +1097,7 @@ TEST_CASE("fill_missing_project_keys leaves mixed, flow-variant and mapping keys
     REQUIRE_FALSE(project.has("device_tool_count"));
     REQUIRE_FALSE(project.has("device_changer"));
     REQUIRE_FALSE(project.has("dithering_local_z_mode"));
-    REQUIRE_FALSE(project.has("wipe_tower_rotation_angle"));
+    REQUIRE(project.has("wipe_tower_rotation_angle"));
     REQUIRE_FALSE(project.has("mixed_filament_pointillism_pixel_size"));
     REQUIRE_FALSE(project.has("inherits"));
     REQUIRE(project_config_fill_skip_keys().count("mixed_filament_definitions") == 1);
@@ -1759,4 +1793,121 @@ TEST_CASE("Orca's initial_layer_travel_acceleration / _jerk names are not proces
         CHECK(opt->value == 0.);
         CHECK_FALSE(opt->percent);
     }
+}
+
+TEST_CASE("A scalar option keeps its value when deserializing fails", "[Config]") {
+    using Catch::Matchers::WithinAbs;
+
+    SECTION("float") {
+        ConfigOptionFloat opt(7.5);
+        REQUIRE_FALSE(opt.deserialize("abc"));
+        CHECK_THAT(opt.value, (WithinAbs(7.5, 1e-9)));
+    }
+    SECTION("int") {
+        ConfigOptionInt opt(3);
+        REQUIRE_FALSE(opt.deserialize("abc"));
+        CHECK(opt.value == 3);
+    }
+    SECTION("percent") {
+        ConfigOptionPercent opt(40.);
+        REQUIRE_FALSE(opt.deserialize("abc%"));
+        CHECK_THAT(opt.value, (WithinAbs(40., 1e-9)));
+    }
+    SECTION("float or percent") {
+        ConfigOptionFloatOrPercent opt(0.4, false);
+        REQUIRE_FALSE(opt.deserialize("abc%"));
+        CHECK_THAT(opt.value, (WithinAbs(0.4, 1e-9)));
+        CHECK_FALSE(opt.percent);
+    }
+    SECTION("point") {
+        ConfigOptionPoint opt(Vec2d(1., 2.));
+        REQUIRE_FALSE(opt.deserialize("5,abc"));
+        CHECK((opt.value == Vec2d(1., 2.)));
+    }
+    SECTION("point3") {
+        ConfigOptionPoint3 opt(Vec3d(1., 2., 3.));
+        REQUIRE_FALSE(opt.deserialize("5,6,abc"));
+        CHECK((opt.value == Vec3d(1., 2., 3.)));
+    }
+}
+
+TEST_CASE("A scalar option still takes a valid value", "[Config]") {
+    using Catch::Matchers::WithinAbs;
+
+    ConfigOptionFloatOrPercent opt(0.4, false);
+    REQUIRE(opt.deserialize("50%"));
+    CHECK_THAT(opt.value, (WithinAbs(50., 1e-9)));
+    CHECK(opt.percent);
+
+    ConfigOptionPoint point;
+    REQUIRE(point.deserialize("3x4"));
+    CHECK((point.value == Vec2d(3., 4.)));
+}
+
+TEST_CASE("support interface pattern registry includes spiral inset", "[Config][SpiralInset]")
+{
+    const auto &values = ConfigOptionEnum<SupportMaterialInterfacePattern>::get_enum_values();
+    REQUIRE(values.at("spiralinset") == SupportMaterialInterfacePattern::smipSpiralInset);
+}
+
+TEST_CASE("spiral inset is offered for the solid surface patterns and round-trips", "[Config][SpiralInset]")
+{
+    REQUIRE(ConfigOptionEnum<InfillPattern>::get_enum_values().at("spiralinset") == ipSpiralInset);
+    for (const char *key : {"top_surface_pattern", "bottom_surface_pattern", "internal_solid_infill_pattern", "support_interface_pattern"}) {
+        CAPTURE(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->has_enum_value("spiralinset"));
+    }
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("top_surface_pattern", "spiralinset");
+    CHECK(config.opt_enum<InfillPattern>("top_surface_pattern") == ipSpiralInset);
+    CHECK(config.opt_serialize("top_surface_pattern") == "spiralinset");
+    // Opt-in: no default changed.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<InfillPattern>("top_surface_pattern") == ipMonotonicLine);
+}
+
+TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config][TpmsAdaptive]") {
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::Enable);
+    DynamicPrintConfig config;
+    config.set_deserialize("tpms_adaptive", "stepped_shells", ctxt);
+    config.set_deserialize("tpms_interior_density", "12%", ctxt);
+    config.set_deserialize("tpms_adaptive_gradient", "quadratic", ctxt);
+
+    CHECK(config.opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::SteppedShells);
+    CHECK(config.option<ConfigOptionPercent>("adaptive_infill_interior_density")->value == Approx(12.));
+    CHECK(config.opt_enum<AdaptiveInfillGradient>("adaptive_infill_gradient") == AdaptiveInfillGradient::Quadratic);
+    CHECK(ctxt.substitutions.empty());
+    // Opt-in: off by default.
+    CHECK(DynamicPrintConfig::full_print_config().opt_enum<AdaptiveInfillMode>("adaptive_infill_mode") == AdaptiveInfillMode::Disabled);
+}
+
+// Orca #16680: the editor and the placeholder check look the per-template placeholders up by the option key
+// (time_lapse_gcode, not timelapse_gcode), so every key must be one, and every custom G-code option needs a list.
+TEST_CASE("Custom G-code placeholder lists are keyed by option keys", "[Config][Orca16680]")
+{
+    const auto &placeholders = custom_gcode_specific_placeholders();
+    REQUIRE_FALSE(placeholders.empty());
+    for (const auto &[gcode_key, keys] : placeholders) {
+        INFO(gcode_key);
+        CHECK(print_config_def.has(gcode_key));
+        for (const std::string &key : keys) {
+            INFO(key);
+            CHECK(custom_gcode_specific_config_def.has(key));
+        }
+    }
+
+    // Multiline text options that aren't custom G-code; add any new one that isn't G-code here.
+    const std::set<std::string> not_gcode = { "notes", "filament_notes", "printer_notes", "post_process",
+                                              "adaptive_pressure_advance_model", "small_area_infill_flow_compensation_model" };
+    size_t gcode_options = 0;
+    for (const auto &[key, def] : print_config_def.options) {
+        if (!def.multiline || not_gcode.count(key) > 0)
+            continue;
+        INFO(key);
+        CHECK(placeholders.count(key) == 1);
+        ++gcode_options;
+    }
+    CHECK(gcode_options == placeholders.size());
 }
