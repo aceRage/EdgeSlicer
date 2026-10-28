@@ -2431,8 +2431,8 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
         }
     }
     if (is_first_layer()) {
-        // Edge: prime_tower_brim_width is the brim itself (no auto brim on WipeTower2); the run-in
-        // reserve (#119) widens the first-layer envelope the same way get_brim_width() reports it.
+        // Edge: the brim (an auto -1 is resolved in plan_tower(), Orca #11831); the run-in reserve
+        // (#119) widens the first-layer envelope the same way get_brim_width() reports it.
         const float brim = std::max(std::max(0.f, m_wipe_tower_brim_width), m_run_in_reserve);
         min_x -= brim;
         max_x += brim;
@@ -3295,6 +3295,13 @@ void WipeTower2::plan_tower()
                 m_plan[i].depth = this_layer_depth;
         }
     }
+
+    // Orca #11831: prime_tower_brim_width -1 is the "auto" brim, sized from the tower height as
+    // WipeTower (Type1) and estimate_wipe_tower_footprint() do. Resolved here, once the height is
+    // known and before the first layer lays the brim; this generator used to read -1 as no brim at
+    // all while the plate preview and the clearance checks reserved the auto brim.
+    if (m_wipe_tower_brim_width < 0.f)
+        m_wipe_tower_brim_width = WipeTower::get_auto_brim_by_height(m_wipe_tower_height);
 }
 
 void WipeTower2::save_on_last_wipe()

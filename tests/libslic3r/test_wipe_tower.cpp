@@ -1246,3 +1246,31 @@ TEST_CASE("A rectangle WipeTower2 tower is not shifted", "[WipeTower][RibOffset]
     CHECK(local.min.x() < -wtd.brim_width + 0.35);
     CHECK(wtd.width == Approx(30.)); // the body, prime_tower_width
 }
+
+// Orca #11831: prime_tower_brim_width -1 ("auto", shipped by the FlashForge Creator 5 and some Qidi
+// processes) gives a WipeTower2 tower the brim the plate preview and the clearance checks reserve
+// for it, sized from the tower height. It used to print no brim at all.
+TEST_CASE("A WipeTower2 tower with the auto brim prints a brim", "[WipeTower][AutoBrim][GCode]")
+{
+    Print              print;
+    DynamicPrintConfig cfg = stagger_slice_config(false);
+    cfg.set_deserialize_strict({ { "prime_tower_brim_width", -1 } });
+    const std::string gcode = slice_stagger_project(cfg, print);
+    const auto       &wtd   = print.wipe_tower_data();
+
+    CHECK(gcode.find("; WIPE_TOWER_BRIM_START") != std::string::npos);
+    // A 6 mm tall tower: 6 / 100 * 8 = 0.48 mm of auto brim, laid as one loop of about 0.44 mm.
+    const float auto_brim = WipeTower::get_auto_brim_by_height(float(wtd.height));
+    CHECK(auto_brim > 0.4f);
+    CHECK(auto_brim < 0.6f);
+    CHECK(wtd.brim_width > 0.3);
+    CHECK(wtd.brim_width < 0.6);
+
+    // An explicit 0 still means no brim.
+    Print              print_none;
+    DynamicPrintConfig cfg_none = stagger_slice_config(false);
+    cfg_none.set_deserialize_strict({ { "prime_tower_brim_width", 0 } });
+    const std::string gcode_none = slice_stagger_project(cfg_none, print_none);
+    CHECK(gcode_none.find("; WIPE_TOWER_BRIM_START") == std::string::npos);
+    CHECK(print_none.wipe_tower_data().brim_width == Approx(0.));
+}

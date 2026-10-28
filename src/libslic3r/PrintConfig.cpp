@@ -8804,7 +8804,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: on Bambu Lab printers the brim then grows with the tower height (8 mm from 100 mm up), on other printers the prime tower gets no brim.");
+    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: the brim then grows with the tower height (8 mm from 100 mm up).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
