@@ -12,13 +12,29 @@
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
+#include "slic3r/Utils/CrealityPrintModel.hpp"
 
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/websocket.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <ctime>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -1392,4 +1408,296 @@ TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "127.0.0.22", "", "Elegoo Centauri Carbon"));
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("octoprint", "127.0.0.22", "", preset));
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "", "", preset));
+}
+
+TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
+{
+    using namespace Slic3r::CrealityPrintModel;
+
+    SECTION("K1-family uses /usr/data") {
+        CHECK(is_k1_family("K1"));
+        CHECK(is_k1_family("K1 SE"));
+        CHECK(is_k1_family("K1C"));
+        CHECK(is_k1_family("K1_CFS-C"));
+        CHECK(gcode_root("K1") == "/usr/data");
+        CHECK(gcode_path("K1C", "cube.gcode") == "/usr/data/printer_data/gcodes/cube.gcode");
+        CHECK(omit_upload_path("K1"));
+        CHECK(omit_upload_path("K1_CFS-C"));
+    }
+
+    SECTION("K2-platform uses /mnt/UDISK") {
+        CHECK_FALSE(is_k1_family("F008"));
+        CHECK_FALSE(is_k1_family("F012"));
+        CHECK_FALSE(is_k1_family("F021"));
+        CHECK_FALSE(is_k1_family("F022"));
+        CHECK_FALSE(is_k1_family("K2"));
+        CHECK(gcode_root("F008") == "/mnt/UDISK");
+        CHECK(gcode_root("F012") == "/mnt/UDISK");
+        CHECK(gcode_root("F021") == "/mnt/UDISK");
+        CHECK(gcode_root("F022") == "/mnt/UDISK");
+        CHECK(gcode_path("F021", "benchy.gcode") == "/mnt/UDISK/printer_data/gcodes/benchy.gcode");
+        CHECK(omit_upload_path("F008"));
+        CHECK(omit_upload_path("F012"));
+        CHECK(omit_upload_path("F021"));
+        CHECK(omit_upload_path("F022"));
+        CHECK(model_display_name("F008") == "K2 Plus");
+        CHECK(model_display_name("F012") == "K2 Pro");
+        CHECK(model_display_name("F021") == "K2");
+        CHECK(model_display_name("F022") == "SPARKX i7");
+    }
+
+    SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
+        CHECK_FALSE(is_k1_family(""));
+        CHECK_FALSE(is_k1_family("Ender-3"));
+        CHECK(gcode_root("") == "/mnt/UDISK");
+        CHECK_FALSE(omit_upload_path(""));
+        CHECK_FALSE(model_supports_multi_color("Ender-3"));
+    }
+
+    SECTION("empty or unknown /info falls back to the preset printer_model") {
+        CHECK(resolve_model("K1C", "Creality K2 Plus") == "K1C");
+        CHECK(resolve_model("F021", "Creality K1C") == "F021");
+        CHECK(resolve_model("", "Creality K1C") == "K1C");
+        CHECK(resolve_model("unknown", "Creality K1") == "K1");
+        CHECK(resolve_model("", "Creality K2 Plus") == "F008");
+        CHECK(gcode_root_for("", "Creality K1C") == "/usr/data");
+        CHECK(gcode_root_for("garbage", "Creality K1 SE") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K1") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K2 Plus") == "/mnt/UDISK");
+        CHECK(gcode_root_for("K1C", "Creality K2 Plus") == "/usr/data");
+        CHECK(gcode_root_for("F021", "Creality K1C") == "/mnt/UDISK");
+        CHECK(looks_like_k1_family("Creality K1 Max"));
+        CHECK(gcode_root_for("", "Creality K1 Max") == "/usr/data");
+    }
+
+    SECTION("ws_host strips scheme and port (Http::url_host)") {
+        CHECK(ws_host("192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50/") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50:80") == "192.168.1.50");
+        CHECK(ws_host("https://k2.local:443/path") == "k2.local");
+        CHECK(ws_host("http://Printer.Local:7125") == "printer.local");
+        CHECK(ws_host("").empty());
+    }
+
+    SECTION("parse_model_from_info is hostile-JSON safe") {
+        CHECK(parse_model_from_info(R"({"model":"K1C"})") == "K1C");
+        CHECK(parse_model_from_info(R"({"model":"F021","mac":"aa"})") == "F021");
+        CHECK(parse_model_from_info("").empty());
+        CHECK(parse_model_from_info("<html>").empty());
+        CHECK(parse_model_from_info("[]").empty());
+        CHECK(parse_model_from_info(R"({"model":1})").empty());
+        CHECK(parse_model_from_info(R"({"name":"K1"})").empty());
+        REQUIRE_NOTHROW(parse_model_from_info(std::string(64, '{')));
+    }
+}
+
+TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "[CrealityPrint]")
+{
+    SECTION("expired total budget fails before any I/O") {
+        CrealityWsClient ws(200, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+        CHECK(ws.remaining_ms() == 0);
+    }
+
+    SECTION("local acceptor that never accepts times out and drains") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(150, 150);
+        std::string      err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("cancel from another thread before open") {
+        CrealityWsClient ws(200, 200);
+        std::thread t([&] { ws.cancel(); });
+        t.join();
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("cancel from another thread during a never-accepting connect") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(2000, 2000);
+        std::string      err;
+        std::thread      t([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            ws.cancel();
+        });
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        t.join();
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+}
+
+// OrcaSlicer #16772 timeout cases, ported onto CrealityWsClient (this fork's
+// AsioUtils/run_until_done equivalent). query_boxes_info stays on the #616 stack.
+namespace {
+
+namespace beast     = boost::beast;
+namespace http      = beast::http;
+namespace websocket = beast::websocket;
+namespace net       = boost::asio;
+using tcp           = net::ip::tcp;
+
+enum class SilentWs {
+    BeforeHandshake, // Accepts TCP, reads the upgrade, never answers
+    AfterHandshake,  // Completes the upgrade, then never reads or sends
+};
+
+class FakeSilentCrealityWs
+{
+public:
+    explicit FakeSilentCrealityWs(SilentWs behavior) : m_behavior(behavior)
+    {
+        m_accept_thread = std::thread([this] { accept_loop(); });
+    }
+
+    ~FakeSilentCrealityWs()
+    {
+        release();
+        m_stopping = true;
+        tcp::socket       wake{m_accept_ioc};
+        beast::error_code ec;
+        wake.connect(m_acceptor.local_endpoint(), ec);
+        if (m_accept_thread.joinable())
+            m_accept_thread.join();
+        for (std::thread& connection : m_connections)
+            if (connection.joinable())
+                connection.join();
+    }
+
+    std::string port() const { return std::to_string(m_acceptor.local_endpoint().port()); }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_released = true;
+        m_changed.notify_all();
+    }
+
+private:
+    void accept_loop()
+    {
+        for (;;) {
+            auto              ioc = std::make_unique<net::io_context>();
+            tcp::socket       socket{*ioc};
+            beast::error_code ec;
+            m_acceptor.accept(socket, ec);
+            if (ec || m_stopping)
+                return;
+            m_connections.emplace_back([this, ioc = std::move(ioc), socket = std::move(socket)]() mutable { serve(std::move(socket)); });
+        }
+    }
+
+    void serve(tcp::socket socket)
+    {
+        beast::flat_buffer               buffer;
+        http::request<http::string_body> request;
+        beast::error_code                ec;
+        http::read(socket, buffer, request, ec);
+        if (ec)
+            return;
+        if (!websocket::is_upgrade(request) || m_behavior == SilentWs::BeforeHandshake) {
+            wait_for_release();
+            return;
+        }
+
+        websocket::stream<tcp::socket> ws{std::move(socket)};
+        ws.accept(request, ec);
+        if (ec)
+            return;
+        wait_for_release();
+    }
+
+    void wait_for_release()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_changed.wait(lock, [this] { return m_released; });
+    }
+
+    const SilentWs           m_behavior;
+    net::io_context          m_accept_ioc;
+    tcp::acceptor            m_acceptor{m_accept_ioc, {net::ip::make_address("127.0.0.1"), 0}};
+    std::atomic<bool>        m_stopping{false};
+    std::thread              m_accept_thread;
+    std::vector<std::thread> m_connections;
+    std::mutex               m_mutex;
+    std::condition_variable  m_changed;
+    bool                     m_released = false;
+};
+
+// Runs `call`, giving it `limit` to return before the printer hangs up on it.
+template<class Call> bool finishes_within(FakeSilentCrealityWs& printer, std::chrono::milliseconds limit, Call&& call)
+{
+    auto       done    = std::async(std::launch::async, std::forward<Call>(call));
+    const bool in_time = done.wait_for(limit) == std::future_status::ready;
+    printer.release();
+    // The future destructor would wait forever for a call the hang-up cannot unblock.
+    if (done.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        std::cerr << "CrealityWsClient call still running 10 s after the printer hung up" << std::endl;
+        std::_Exit(EXIT_FAILURE);
+    }
+    return in_time;
+}
+
+} // namespace
+
+TEST_CASE("CrealityPrint: silent printer WebSocket steps stay inside their deadlines", "[CrealityPrint]")
+{
+    // start_print is open + write + best-effort read + close. A printer that
+    // never answers the upgrade fails open (the start command is never sent).
+    // One that upgrades and then goes silent still delivers the write; the
+    // read times out and is not a start failure.
+    SECTION("handshake never completes") {
+        FakeSilentCrealityWs printer(SilentWs::BeforeHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        bool                 opened = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(2), [&] { opened = ws.open("127.0.0.1", printer.port(), err); }));
+        CHECK_FALSE(opened);
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("upgrade completes then the printer goes silent") {
+        FakeSilentCrealityWs printer(SilentWs::AfterHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        std::string          frame;
+        bool                 opened  = false;
+        bool                 wrote   = false;
+        bool                 read_ok = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(3), [&] {
+            opened = ws.open("127.0.0.1", printer.port(), err);
+            if (!opened)
+                return;
+            wrote   = ws.write(R"({"method":"set","params":{"opGcodeFile":"printprt:/mnt/UDISK/printer_data/gcodes/test.gcode"}})", err);
+            read_ok = ws.read_once(frame, err);
+            ws.close();
+        }));
+        CHECK(opened);
+        CHECK(wrote);
+        CHECK_FALSE(read_ok);
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
 }
