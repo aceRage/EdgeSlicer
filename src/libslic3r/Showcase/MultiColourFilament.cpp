@@ -128,7 +128,22 @@ RGB Filament::average() const
     return sum;
 }
 
+BeadParams bead_params(bool wall)
+{
+    BeadParams p;
+    p.blend_turns    = wall ? BLEND_TURNS_WALL : BLEND_TURNS_TOP;
+    p.stack_up_k     = STACK_UP_K;
+    p.visible_height = wall ? WALL_VISIBLE_HEIGHT : 1.f;
+    p.flatten        = wall ? 1.f : TOP_FLATTEN;
+    return p;
+}
+
 RGB Filament::colour_at(float phi) const
+{
+    return colour_at(phi, BLEND_TURNS);
+}
+
+RGB Filament::colour_at(float phi, float blend) const
 {
     if (n <= 1)
         return colour[0];
@@ -136,7 +151,10 @@ RGB Filament::colour_at(float phi) const
     int i = n - 1;
     while (i > 0 && phi < boundary(i))
         --i;
-    const float h  = 0.5f * blend_turns();
+    float narrowest = 1.f;
+    for (int k = 0; k < n; ++k)
+        narrowest = std::min(narrowest, proportion[k]);
+    const float h  = 0.5f * std::min(blend, narrowest);
     const float ds = phi - boundary(i);     // past the start of slice i
     const float de = boundary(i + 1) - phi; // before its end
     if (h > 0.f && ds < h)
@@ -155,12 +173,23 @@ float Filament::filament_angle(float dir_turns, float filament_length_m) const
 
 RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, float dy, float filament_length_m) const
 {
+    return bead_colour(sx, sy, rx, ry, dx, dy, filament_length_m, BeadParams());
+}
+
+RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, float dy, float filament_length_m,
+                          const BeadParams &bead) const
+{
     if (n <= 1)
         return colour[0];
     // The source direction in the printer's XY plane (design 2.2): sideways across the bead, tilted
     // towards the travel at the bottom (leading material) and against it at the top (trailing).
-    float vx = sx * rx - STACK_UP_K * sy * dx;
-    float vy = sx * ry - STACK_UP_K * sy * dy;
+    if (bead.flatten != 1.f) {
+        const float a = 1.f - std::pow(std::max(1.f - std::abs(sy), 0.f), bead.flatten);
+        sy = sy < 0.f ? -a : a;
+    }
+    sy *= bead.visible_height;
+    float vx = sx * rx - bead.stack_up_k * sy * dx;
+    float vy = sx * ry - bead.stack_up_k * sy * dy;
     if (vx * vx + vy * vy < 1e-12f) {
         // The bead's centre line: never visible, take the right side.
         vx = rx;
@@ -168,7 +197,7 @@ RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, floa
         if (vx * vx + vy * vy < 1e-12f)
             return average();
     }
-    return colour_at(filament_angle(direction_turns(vx, vy), filament_length_m));
+    return colour_at(filament_angle(direction_turns(vx, vy), filament_length_m), bead.blend_turns);
 }
 
 const std::vector<NamedColour> &basic_palette()
