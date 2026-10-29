@@ -1686,6 +1686,49 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }
 
+    SECTION("preset_model_may_have_cfs: Creality K1/K2/SPARKX presets only, by model word") {
+        // Every K-series / SPARKX printer_model the Creality profiles ship.
+        for (const char* m : {"Creality K1", "Creality K1C", "Creality K1 SE", "Creality K1 Max", "Creality K1_CFS-C",
+                              "Creality K1C_CFS-C", "Creality K1 SE_CFS-C", "Creality K1 Max_CFS-C", "Creality K2",
+                              "Creality K2 Plus", "Creality K2 Pro", "Creality SPARKX i7", "Creality SPARKX i8"}) {
+            INFO(m);
+            CHECK(preset_model_may_have_cfs(m));
+        }
+        // /info codes the capability table knows.
+        CHECK(preset_model_may_have_cfs("F008"));
+        CHECK(preset_model_may_have_cfs("K1C"));
+        // Not a K-series Creality, or not a Creality at all: the old "starts with K2" guess matched some.
+        for (const char* m : {"Creality Ender-3 V3", "Creality Hi", "Creality CR-10 SE", "Creality K20", "Creality K2X",
+                              "K2", "K2 Plus", "Kingroon KP3S", "Elegoo Centauri Carbon", "Snapmaker U1", "", "Creality "}) {
+            INFO(m);
+            CHECK_FALSE(preset_model_may_have_cfs(m));
+        }
+    }
+
+    SECTION("normalize_filament_type strips subtypes") {
+        CHECK(normalize_filament_type("PLA Silk") == "PLA");
+        CHECK(normalize_filament_type("PLA+") == "PLA");
+        CHECK(normalize_filament_type("PLA-CF") == "PLA");
+        CHECK(normalize_filament_type("PCTG") == "PC");
+        CHECK(normalize_filament_type("PETG") == "PETG");
+        CHECK(normalize_filament_type("ABS Pro") == "ABS");
+        CHECK(normalize_filament_type("Nylon") == "Nylon");
+    }
+
+    SECTION("match_filament_preset scores brand then vendor, type-gated") {
+        const std::vector<FilamentPresetRef> presets = {
+            {"Generic PLA @K2", "GPLA", "PLA", "Creality", true, true, true},
+            {"Hyper PLA @K2", "HPLA", "PLA", "Creality", true, true, true},
+            {"Generic PLA Matte @K2", "GPLAM", "PLA", "Creality", true, true, true},
+            {"Generic PETG @K2", "GPETG", "PETG", "Creality", true, true, true},
+        };
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PLA") == "HPLA");
+        // Spool only said PLA: extra "matte" costs points, Generic PLA wins.
+        CHECK(match_filament_preset(presets, "Creality", "", "PLA") == "GPLA");
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PETG") == "GPETG");
+        CHECK(match_filament_preset(presets, "", "", "TPU").empty());
+    }
+
     SECTION("color_match_from_positions is byte-identical to the old wxChoice loop") {
         const Status st = status_from_cfs(k2_boxs);
         std::vector<ColorMatchTarget> slots;
