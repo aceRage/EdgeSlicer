@@ -548,7 +548,7 @@ static void collect_filament_slots_from_config(
 }
 
 static void collect_filament_slots_from_model_config(
-    const ModelConfigObject& config,
+    const ModelConfig& config,
     int num_filaments, std::set<int>& used_slots_0_based)
 {
     // Primary filament (extruder)
@@ -579,10 +579,23 @@ static void collect_filament_slots_from_model_config(
     }
 }
 
+// Height-range modifiers override extruder / feature filaments for a z band.
+// Those overrides live in ModelObject::layer_config_ranges as ModelConfig
+// (not ModelConfigObject), which is why collect_filament_slots_from_model_config
+// takes ModelConfig — object/volume configs still bind through the base.
+static void collect_filament_slots_from_layer_config_ranges(
+    const t_layer_config_ranges& ranges,
+    int num_filaments, std::set<int>& used_slots_0_based)
+{
+    for (const auto& layer_range : ranges)
+        collect_filament_slots_from_model_config(layer_range.second, num_filaments, used_slots_0_based);
+}
+
 /// \brief Collect the 0-based filament slots actually used by objects on the given plate.
 /// \details Mirrors the slot-collection block of Plater::check_filament_temp_mixing so that
 ///          cold-plate incompatibility checking uses the same definition of "used filament".
-///          Includes: plate config, per-object/volume configs, plus Plater working config
+///          Includes: plate config, per-object/volume configs, height-range modifier configs
+///          (layer_config_ranges), plus Plater working config
 ///          (wipe_tower / support / wall / infill defaults when any object uses extruder=0).
 /// \param[in]  plate                 Non-null target plate.
 /// \param[in]  num_filaments         Total number of filaments in the current configuration.
@@ -609,6 +622,7 @@ static void collect_used_filament_slots_on_plate(
         if (!model_object_is_on_plate(plate, obj_idx, model_object))
             continue;
         collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+        collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
         if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
             uses_default_extruder = true;
@@ -25945,6 +25959,7 @@ bool Plater::check_filament_temp_mixing(int plate_index, FilamentTempMixingDetai
             if (!model_object_is_on_plate(plate, obj_idx, model_object))
                 continue;
             collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+            collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
             if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
                 uses_default_extruder = true;
@@ -26221,6 +26236,14 @@ bool Plater::sync_filament_temp_mixing_notification()
     p->filament_temp_mixing_notification_plate = curr_plate_index;
     p->filament_temp_mixing_notification_state = mixing_state;
 
+    // Flipping the mixing preference changes the verdict without touching
+    // the print config, so the invalidation-driven reset of
+    // process_completed_with_error (priv::update_background_process) never
+    // runs and reslice() keeps early-returning as if the plate were still
+    // failing. Clear the stranded marker once this plate is allowed again.
+    if (slicing_allowed && p->process_completed_with_error == curr_plate_index)
+        p->process_completed_with_error = -1;
+
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
     if (p->main_frame != nullptr)
         p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
@@ -26271,6 +26294,7 @@ bool Plater::check_flow_ratio_zero(int plate_index, FlowRatioZeroDetail& detail)
             if (!model_object_is_on_plate(plate, obj_idx, model_object))
                 continue;
             collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+            collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
             if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
                 uses_default_extruder = true;
