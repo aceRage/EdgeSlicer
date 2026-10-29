@@ -21341,6 +21341,9 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     // Orca #11178: keep the filament's own pressure advance when it is on.
     calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
+    // A 100% factor sends Klipper MINIMUM_CRUISE_RATIO=0 with every acceleration change, for the whole test.
+    print_config->set_key_value("accel_to_decel_enable", new ConfigOptionBools { true });
+    print_config->set_key_value("accel_to_decel_factor", new ConfigOptionPercents { 100 });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
@@ -21399,6 +21402,9 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     // Orca #11178: keep the filament's own pressure advance when it is on.
     calib_enable_pressure_advance_if_off(*filament_config, plater_calib_filament_volume_type());
     print_config->set_key_value("enable_overhang_speed", new ConfigOptionBools { false });
+    // A 100% factor sends Klipper MINIMUM_CRUISE_RATIO=0 with every acceleration change, for the whole test.
+    print_config->set_key_value("accel_to_decel_enable", new ConfigOptionBools { true });
+    print_config->set_key_value("accel_to_decel_factor", new ConfigOptionPercents { 100 });
     print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));

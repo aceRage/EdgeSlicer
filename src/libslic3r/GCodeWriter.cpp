@@ -377,9 +377,8 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
         gcode += value;
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
         if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
             if (GCodeWriter::full_gcode_comment)
                 gcode += " ; adjust ACCEL_TO_DECEL";
         }
@@ -392,6 +391,14 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
     gcode += "\n";
 
     return gcode;
+}
+
+void GCodeWriter::append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor)
+{
+    gcode += " ACCEL_TO_DECEL=";
+    gcode += float_to_string_decimal_point(acceleration * accel_to_decel_factor / 100);
+    gcode += " MINIMUM_CRUISE_RATIO=";
+    gcode += float_to_string_decimal_point(1. - accel_to_decel_factor / 100);
 }
 
 std::string GCodeWriter::set_jerk_xy(double jerk)
@@ -474,11 +481,9 @@ std::string GCodeWriter::set_accel_and_jerk(unsigned int acceleration, double je
         gcode += " ACCEL=";
         gcode += std::to_string(acceleration);
         unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
-        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
-            gcode += " ACCEL_TO_DECEL=";
-            gcode += float_to_string_decimal_point(
-                acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100);
-        }
+        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id))
+            append_klipper_accel_to_decel(gcode, acceleration,
+                                          get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id));
         m_last_acceleration = acceleration;
     }
     if (set_jerk) {
