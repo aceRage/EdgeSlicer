@@ -3667,7 +3667,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     print.throw_if_canceled();
 
     // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
-    // Bed stays the max of used filaments (Edge always heats to the highest bed temp).
+    // Bed stays the max of the first layer's filaments (Orca #16770).
     // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
     int compat_first_layer_bed_temp    = 0;
     int compat_first_layer_nozzle_temp = 0;
@@ -3900,10 +3900,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("bbl_bed_temperature_gcode", new ConfigOptionBool(false));
         this->placeholder_parser().set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("bed_temperature", new ConfigOptionInts(*bed_temp_opt));
-        // BBS: the single bed temperature value accommodates the highest-temperature filament of the print
-        // (max over all used extruders instead of the initial extruder only).
+        // BBS: the single bed temperature value accommodates the highest-temperature filament of the first layer
+        // (Orca #16770: the same first-layer filaments as M140/M190, not the initial extruder only).
         int bed_temp_single = 0;
-        for (const unsigned int extruder_id : print.extruders())
+        for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
             bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
         this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
@@ -4341,8 +4341,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatible image. Bed stays the max of used filaments
-            // (Edge always heats to the highest bed temp). Nozzle is the first printing
+            // SoftFever: write compatible image. Bed stays the max of the first layer's
+            // filaments (get_bed_temperature_max). Nozzle is the first printing
             // filament when tool ordering already exists. On a single-filament plate
             // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
             // / unsigned(-1), so fall back to the first used filament. The U1 trailer
@@ -5855,13 +5855,15 @@ int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer,
 }
 
 // BBS
-// Max bed temperature over all used extruders (object/support/wipe tower/brim-introduced extruders),
-// so a compatible mixed print (e.g. PLA 65C + TPU 35C) always runs the highest bed temperature.
+// Max bed temperature over the filaments printed on the first layer, so a compatible mixed first layer
+// (e.g. PLA 65C + TPU 35C) runs the highest bed temperature.
 // A value of 0 means the filament does not support the current bed type, and is naturally skipped by max().
 int GCode::get_bed_temperature_max(const Print& print, const bool is_first_layer) const
 {
     int max_bed_temp = 0;
-    for (const unsigned int extruder_id : print.extruders())
+    // Orca #16770: only the filaments printed on the first layer touch the bed, so a filament that starts higher up,
+    // such as a support interface, must not raise the bed temperature for the rest of the print.
+    for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
         max_bed_temp = std::max(
             max_bed_temp, get_bed_temperature(extruder_id, is_first_layer, print.config().curr_bed_type));
     return max_bed_temp;
