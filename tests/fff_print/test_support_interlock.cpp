@@ -385,10 +385,10 @@ TEST_CASE("Support interface interlock with the owner's tree hybrid settings", "
 
 TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped underside)", "[SupportInterlock]")
 {
-    // Two caps side by side, undersides at 10.0 and 10.2 mm, on one stem under cap B. On the layer that
+    // Two caps side by side, undersides at 10.0 and 10.2 mm, on one stem across both. On the layer that
     // is cap A's top roof, cap B's roof is one layer down (woven): the weave must stay over cap B.
-    TriangleMesh model = make_cube(6, 6, 10);
-    model.translate(22., 7., 0.); // under cap B: cap A is a 15 mm cantilever
+    TriangleMesh model = make_cube(10, 10, 11); // as capped_stem(): the stem reaches into both caps
+    model.translate(10., 5., 0.);
     TriangleMesh cap_a = make_cube(15, 20, 2);
     cap_a.translate(0., 0., 10.);
     model.merge(cap_a);
@@ -423,7 +423,7 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
     };
     const std::vector<Seg> off = segments(config(false));
     const std::vector<Seg> on  = segments(config(true));
-    // Cap A's footprint: the model on the layer between 10.0 and 10.2 mm is cap A alone.
+    // Cap A's footprint: the model on the layer between 10.0 and 10.2 mm (cap A and the stem).
     double ax0 = 1e9, ax1 = -1e9, ay0 = 1e9, ay1 = -1e9;
     for (const Seg &s : off)
         if (! s.support && s.z > 10.05 && s.z < 10.25) {
@@ -431,6 +431,8 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
             ay0 = std::min({ ay0, s.y0, s.y1 }); ay1 = std::max({ ay1, s.y0, s.y1 });
         }
     REQUIRE(ax1 > ax0);
+    // The stem shows on that layer too; cap A itself is the 15 mm from its left edge.
+    ax1 = std::min(ax1, ax0 + 15.);
     CAPTURE(ax0, ax1, ay0, ay1);
     auto under_a = [&](const std::vector<Seg> &segs, double z, bool iface) {
         double len = 0.;
