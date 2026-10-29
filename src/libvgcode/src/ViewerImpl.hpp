@@ -107,6 +107,8 @@ public:
     bool set_base_color_prelude(const std::string& prelude, std::string* error);
     unsigned int get_base_color_program() const { return m_base_color_prelude.empty() ? 0 : m_segments_shader_id; }
     void set_extruded_volume_enabled(bool enabled);
+    void set_multicolour_preview(bool enabled) { m_multicolour_preview = enabled; }
+    bool is_multicolour_preview_active() const { return m_multicolour_preview && !m_base_color_prelude.empty() && m_roles_tex_id != 0 && !m_smooth_look; }
     // ORCA: section view, see Viewer::set_clipping_plane()
     void set_clipping_plane(const std::array<float, 4>& plane) { m_clipping_plane = plane; }
     void set_light_top_dir(const Vec3& direction) { m_light_top_dir = direction; }
@@ -424,6 +426,7 @@ private:
         int light_top_dir{ -1 };
         // EDGE (Showcase S5): the smooth bead look
         int smooth_mode{ -1 };
+        int mc_mode{ -1 };   // EDGE (multi-colour P5)
         int role_tex{ -1 };
         int look_a{ -1 };
         int look_b{ -1 };
@@ -448,6 +451,8 @@ private:
     // whether the extruded volumes are wanted.
     std::string m_base_color_prelude;
     bool m_use_volume{ false };
+    // EDGE (multi-colour P5): Preview draws coextruded colours (needs the base colour prelude).
+    bool m_multicolour_preview{ false };
     // EDGE (multi-colour P3): the built-in segments program's uniforms and sampler units, after it
     // is (re)built.
     void init_segments_uniforms();

@@ -1,5 +1,7 @@
 #include "MultiColourGlsl.hpp"
 
+#include "../PrintConfig.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -52,6 +54,45 @@ UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector
     t.global  = { BLEND_TURNS_WALL, BLEND_TURNS_TOP, STACK_UP_K, WALL_VISIBLE_HEIGHT };
     t.global2 = { TOP_FLATTEN, 0.f, 0.f, 0.f };
     return t;
+}
+
+bool uses_split(const UniformTable &table, const std::vector<unsigned char> &slots)
+{
+    if (!table.any_multi)
+        return false;
+    for (const unsigned char s : slots)
+        if (s < GLSL_SLOTS && table.bounds[size_t(s) * 4 + 3] > 1.5f)
+            return true;
+    return false;
+}
+
+bool uses_twist(const UniformTable &table, const std::vector<unsigned char> &slots)
+{
+    if (!table.any_twist)
+        return false;
+    for (const unsigned char s : slots)
+        if (s < GLSL_SLOTS && table.bounds[size_t(s) * 4 + 3] > 1.5f && table.params[size_t(s) * 4 + 1] != 0.f)
+            return true;
+    return false;
+}
+
+std::string config_signature(const ConfigBase &config)
+{
+    std::string sig;
+    auto add = [&config, &sig](const std::string &key) {
+        if (const ConfigOption *opt = config.option(key); opt != nullptr) {
+            sig += key;
+            sig += '=';
+            sig += opt->serialize();
+            sig += ';';
+        }
+    };
+    add("filament_colour");
+    add("filament_multi_colors");
+    add("filament_colour_mode");
+    for (const std::string &key : visual_only_option_keys())
+        add(key);
+    return sig;
 }
 
 const char *glsl_functions()

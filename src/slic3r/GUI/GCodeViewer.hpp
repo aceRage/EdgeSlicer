@@ -311,6 +311,22 @@ private:
     unsigned int m_showcase_mc_program = 0;
     bool         m_showcase_mc_failed  = false;
     // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
+    // Multi-colour P5 (tests/design_multicolour_filament_view.md 7.4): the Preview toggle "Show
+    // coextruded colours", kept in the app config ("preview_multicolour"), off by default. It colours
+    // the Tool and Color Print views' toolpaths by the split slots' make-up, through the same shader
+    // functions as Showcase. The slot table is rebuilt only when the project's values change.
+    bool                      m_preview_multicolour = false;
+    bool                      m_preview_multicolour_read = false;
+    bool                      m_preview_mc_volume = false;     // the extruded-volume buffer is ours (twist)
+    std::string               m_preview_mc_signature;
+    std::vector<float>        m_preview_mc_diameters;
+    MultiColour::UniformTable m_preview_mc_table;
+    bool                      m_preview_mc_has_split = false;  // a slot the G-code uses is a split one
+    bool                      m_preview_mc_has_twist = false;
+    bool preview_multicolour_enabled();
+    void refresh_preview_multicolour_table();
+    void apply_preview_multicolour();
+    bool preview_multicolour_view() const;
 
 public:
     GCodeViewer();
@@ -435,6 +451,15 @@ public:
     void set_view_type(libvgcode::EViewType type) {
         m_viewer.set_view_type(type);
     }
+    // Multi-colour P5: the benchmark behind EDGESLICER_PREVIEW_MC_BENCH (GLCanvas3D::bench_preview_multicolour)
+    // turns the toggle and the Tool view on or off without touching the app config.
+    void bench_preview_multicolour(bool on) {
+        m_viewer.set_view_type(libvgcode::EViewType::Tool);
+        m_preview_multicolour_read = true;
+        m_preview_multicolour      = on;
+    }
+    size_t bench_vertices_count() const { return m_viewer.get_vertices_count(); }
+    bool   bench_multicolour_active() const { return m_viewer.is_multicolour_preview_active(); }
     // ORCA (#15769): select a view type in the preview combo box and apply it
     void select_view_type(libvgcode::EViewType type);
     // ORCA: apply the "preview_default_view_type" preference, see the definition for the supported values
