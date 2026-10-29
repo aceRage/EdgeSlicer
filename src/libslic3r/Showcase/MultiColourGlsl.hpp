@@ -107,9 +107,12 @@ vec3 mc_to_srgb3(vec3 c) { return vec3(mc_to_srgb(max(c.x, 0.0)), mc_to_srgb(max
 // common subset of GLSL and C++), on top of SLIC3R_MC_SHARED_GLSL. Every surface is mapped to the bead
 // the toolpaths would draw there, then coloured by mc_bead_colour() with the toolpaths' parameters, so
 // a mesh point and the toolpath fragment at the same place agree:
-//  * a wall: the outside of an outer-wall bead (s.x = 1) whose right is the horizontal normal and whose
-//    travel runs anticlockwise seen from above (wall_dir +1, Orca's default) or clockwise (-1); s.y is
-//    the height within the layer (0 without layer lines);
+//  * a wall: an outer-wall bead whose right is the horizontal normal and whose travel runs
+//    anticlockwise seen from above (wall_dir +1, Orca's default) or clockwise (-1). The point seen is
+//    where the bead's round section faces the same way as the surface: s.x = the normal's horizontal
+//    length, s.y = its height n.z, plus the height within the layer on steep walls (0 without layer
+//    lines). A vertical wall shows the bead's side; an upward slope shows the upper side of each
+//    stacked bead, where the trailing material sits, as the toolpaths show it;
 //  * a top (side +1) or bottom (side -1) face: the skin line through the point, lines `spacing` mm
 //    apart across the skin direction (tx, ty); with zigzag, every other line runs the other way. The
 //    point's place across its line gives s.x, and s.y follows the drawn diamond, 1 - |s.x|;
@@ -120,12 +123,14 @@ vec3 mc_to_srgb3(vec3 c) { return vec3(mc_to_srgb(max(c.x, 0.0)), mc_to_srgb(max
 //    bunny's back) show wall bands, as the toolpaths do, and only near-flat tops show skin stripes.
 //  * skin 0 (concentric or other patterns without one direction) shows the slot's average on the faces.
 #define SLIC3R_MC_MESH_GLSL \
-vec3 mc_mesh_wall(int slot, float nx, float ny, float sy, float wall_dir, float twist_turns) { \
+vec3 mc_mesh_wall(int slot, float nx, float ny, float nz, float sy, float wall_dir, float twist_turns) { \
     float l = sqrt(nx * nx + ny * ny); \
     if (l < 1e-4) return mc_average(slot); \
     vec3 R = vec3(nx / l, ny / l, 0.0); \
     vec3 D = vec3(-R.y * wall_dir, R.x * wall_dir, 0.0); \
-    return mc_bead_colour(slot, 1.0, sy, R, D, twist_turns, mc_global.x, mc_global.z, mc_global.w, 1.0); \
+    float a = min(abs(nz), 1.0); \
+    float sy_face = max(-1.0, min(1.0, nz + sy * (1.0 - a))); \
+    return mc_bead_colour(slot, min(l, 1.0), sy_face, R, D, twist_turns, mc_global.x, mc_global.z, mc_global.w, 1.0); \
 } \
 vec3 mc_mesh_skin(int slot, float px, float py, float tx, float ty, bool zigzag, float spacing, float side, float twist_turns) { \
     float tl = sqrt(tx * tx + ty * ty); \
@@ -152,7 +157,7 @@ float mc_skin_weight(float nz, float layer_h, float wall_band) { \
 vec3 mc_mesh_colour(int slot, float nx, float ny, float nz, float px, float py, float sy, float wall_dir, int skin, \
                     float tx, float ty, bool zigzag, float spacing, float twist_turns, float w) { \
     if (mc_count(slot) <= 1) return mc_colour(slot, 0); \
-    vec3 side_colour = w < 1.0 ? mc_mesh_wall(slot, nx, ny, sy, wall_dir, twist_turns) : vec3(0.0); \
+    vec3 side_colour = w < 1.0 ? mc_mesh_wall(slot, nx, ny, nz, sy, wall_dir, twist_turns) : vec3(0.0); \
     if (w <= 0.0) return side_colour; \
     vec3 face = skin == 1 ? mc_mesh_skin(slot, px, py, tx, ty, zigzag, spacing, nz > 0.0 ? 1.0 : -1.0, twist_turns) : \
                             mc_average(slot); \

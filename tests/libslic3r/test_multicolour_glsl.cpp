@@ -403,10 +403,11 @@ TEST_CASE("A mesh wall is the outer-wall bead the toolpaths draw there", "[Multi
         const float volume   = u01(rng) < 0.5f ? 0.f : 3000.f * u01(rng);
 
         // The toolpath: an outer wall (role 2) whose right is the horizontal normal, run anticlockwise
-        // (right = outside) or clockwise; its outside is s.x = 1.
+        // (right = outside) or clockwise. The point seen faces the same way as the surface: s.x is the
+        // normal's horizontal length, s.y its height plus the layer position scaled by what is left.
         const float    rx = std::cos(a), ry = std::sin(a);
         const sh::vec3 R(rx, ry, 0.), D(-ry * wall_dir, rx * wall_dir, 0.);
-        const sh::vec3 want = sh::mc_fragment_colour(slot, 2, 1.f, sy, R, D, volume);
+        const sh::vec3 want = sh::mc_fragment_colour(slot, 2, h, std::clamp(nz + sy * (1.f - std::abs(nz)), -1.f, 1.f), R, D, volume);
         const float    twist = volume * sh::mc_params[slot].y;
         const sh::vec3 got  = sh::mc_mesh_colour(slot, nx, ny, nz, 0.f, 0.f, sy, wall_dir, 1, 1.f, 0.f, true, 0.4f, twist, 0.f);
         worst = std::max({ worst, std::abs(got.x - want.x), std::abs(got.y - want.y), std::abs(got.z - want.z) });
@@ -493,7 +494,7 @@ TEST_CASE("Mesh mode shows the P0 prints' look", "[MultiColour][Glsl][Mesh]")
         CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 0, 0.f, 0.f, false, 0.4f, 0.f, 1.f), f.average()));
         CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 1, 0.f, 0.f, true, 0.4f, 0.f, 1.f), f.average()));   // no direction
         const float    nz = 0.7f, nh = std::sqrt(1.f - nz * nz);
-        const sh::vec3 wall  = sh::mc_mesh_wall(0, nh, 0.f, 0.2f, 1.f, 0.f);
+        const sh::vec3 wall  = sh::mc_mesh_wall(0, nh, 0.f, nz, 0.2f, 1.f, 0.f);
         const sh::vec3 face  = sh::mc_mesh_skin(0, 3.f, -0.2f, 1.f, 0.f, true, 0.4f, 1.f, 0.f);
         const sh::vec3 slope = sh::mc_mesh_colour(0, nh, 0.f, nz, 3.f, -0.2f, 0.2f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.5f);
         const sh::vec3 mid   = sh::mix(wall, face, 0.5);   // w = 0.5 halfway
