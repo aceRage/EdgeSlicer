@@ -693,3 +693,17 @@ TEST_CASE("Height colour pattern: Bambu export keeps plain ranges with the extru
     CHECK(back.model.objects[0]->height_colour_patterns.empty());
     boost::filesystem::remove(path);
 }
+
+// Hidden: writes the owner's hand-check file. Run with HEIGHTPAT_SAMPLE=<path> libslic3r_tests "[.heightpat_sample]".
+TEST_CASE("Height colour pattern: write the sample project", "[.heightpat_sample]")
+{
+    const char *out = std::getenv("HEIGHTPAT_SAMPLE");
+    REQUIRE(out != nullptr);
+    Model        model;
+    ModelObject *object = cube_object(model, 80.);
+    HeightColourPattern p = example_pattern();
+    p.repeat   = 0; // to the top
+    p.sequence = { 1, 2, 3 };
+    REQUIRE(apply_height_colour_pattern(*object, p, grid(80., 0.2, 0.2), 0.2, false).ok);
+    REQUIRE(store(out, model, false));
+}
