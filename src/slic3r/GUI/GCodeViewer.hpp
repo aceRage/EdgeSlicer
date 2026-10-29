@@ -312,10 +312,10 @@ private:
     bool         m_showcase_mc_failed  = false;
     // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
     // Multi-colour P5 (tests/design_multicolour_filament_view.md 7.4): the Preview toggle "Show
-    // coextruded colours", kept in the app config ("preview_multicolour"), off by default. It colours
+    // coextruded colours", kept in the app config ("preview_multicolour"), on by default (a saved untick keeps it off). It colours
     // the Tool and Color Print views' toolpaths by the split slots' make-up, through the same shader
     // functions as Showcase. The slot table is rebuilt only when the project's values change.
-    bool                      m_preview_multicolour = false;
+    bool                      m_preview_multicolour = true;
     bool                      m_preview_multicolour_read = false;
     bool                      m_preview_mc_volume = false;     // the extruded-volume buffer is ours (twist)
     std::string               m_preview_mc_signature;

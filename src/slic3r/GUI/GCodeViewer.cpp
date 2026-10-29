@@ -2066,7 +2066,7 @@ bool GCodeViewer::preview_multicolour_enabled()
     if (!m_preview_multicolour_read) {
         m_preview_multicolour_read = true;
         if (AppConfig *cfg = wxGetApp().app_config; cfg != nullptr)
-            m_preview_multicolour = cfg->get_bool("preview_multicolour");
+            m_preview_multicolour = cfg->has("preview_multicolour") ? cfg->get_bool("preview_multicolour") : true;   // on unless unticked
     }
     return m_preview_multicolour;
 }
@@ -2861,7 +2861,7 @@ void GCodeViewer::render_toolpaths()
     m_viewer.set_cog_marker_scale_factor(m_cog_marker_fixed_screen_size ? 10.0f * m_cog_marker_size * camera.get_inv_zoom() : m_cog_marker_size);
     m_viewer.set_tool_marker_scale_factor(m_tool_marker_fixed_screen_size ? 10.0f * m_tool_marker_size * camera.get_inv_zoom() : m_tool_marker_size);
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-    apply_preview_multicolour();   // multi-colour P5: nothing unless the toggle is on
+    apply_preview_multicolour();   // multi-colour P5: nothing unless the toggle is on and a split slot is used
     m_viewer.render(converted_view_matrix, converted_projetion_matrix);
 
 #if ENABLE_NEW_GCODE_VIEWER_DEBUG
@@ -4371,7 +4371,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     }
 
     // Multi-colour P5: "Show coextruded colours" in the filament views, only when a slot the G-code
-    // uses is a split one (tests/design_multicolour_filament_view.md 5.3). Off by default, kept in the
+    // uses is a split one (tests/design_multicolour_filament_view.md 5.3). On by default (owner, overriding D5), kept in the
     // app config. Hidden otherwise, so a print without coextruded filaments sees no new row.
     auto append_multicolour_item = [this, append_item, &imgui, predictable_icon_pos](float label_offset) {
         if (!preview_multicolour_view() || m_only_gcode_in_preview)
