@@ -488,7 +488,10 @@ TEST_CASE("A U1 0.4+0.6 offers 0.6 processes for its 0.6 tools and fills them at
     const DynamicPrintConfig filled = b.full_config();
     const Preset            *p06_preset = b.prints.find_preset(p06, false);
     REQUIRE(p06_preset != nullptr);
-    CHECK(filled.option<ConfigOptionInts>("print_extruder_id")->values.size() == 8);
+    // One slot per tool and declared flow mode of the plate's process.
+    const auto  *modes      = plain.option<ConfigOptionStrings>("process_flow_support");
+    const size_t mode_count = modes != nullptr && !modes->values.empty() ? modes->values.size() : 1;
+    CHECK(filled.option<ConfigOptionInts>("print_extruder_id")->values.size() == 4 * mode_count);
     for (const char *key : { "outer_wall_speed", "inner_wall_speed", "sparse_infill_speed", "travel_speed", "default_acceleration" }) {
         INFO("option " << key);
         CHECK(nozzle_process_value(filled, key, 2, false) == static_cast<const ConfigOptionVectorBase *>(p06_preset->config.option(key))->vserialize()[0]);

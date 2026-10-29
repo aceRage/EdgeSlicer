@@ -44,6 +44,8 @@ DynamicPrintConfig two_tool_config()
         { "enable_prime_tower", "0" },
         { "enable_arc_fitting", "0" },
         { "slow_down_for_layer_cooling", "0,0" },
+        // No volumetric cap: the role speeds are what the G-code shows.
+        { "filament_max_volumetric_speed", "200,200" },
         { "outer_wall_speed", "41" },
         { "inner_wall_speed", "57" },
         { "sparse_infill_speed", "73" },
