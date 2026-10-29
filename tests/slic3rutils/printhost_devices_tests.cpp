@@ -1686,6 +1686,15 @@ TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPri
         CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
     }
 
+    SECTION("only a CrealityPrint probe leaves the UI thread; every other host keeps main's synchronous probe") {
+        CHECK(Slic3r::PrintHostDevices::probe_on_worker("crealityprint"));
+        for (const char* h : {"prusalink", "prusaconnect", "octoprint", "moonraker", "moonraker_mqtt", "duet", "flashair",
+                              "astrobox", "repetier", "mks", "esp3d", "obico", "flashforge", "simplyprint", "elegoolink", ""}) {
+            INFO(h);
+            CHECK_FALSE(Slic3r::PrintHostDevices::probe_on_worker(h));
+        }
+    }
+
     SECTION("preset_model_may_have_cfs: Creality K1/K2/SPARKX presets only, by model word") {
         // Every K-series / SPARKX printer_model the Creality profiles ship.
         for (const char* m : {"Creality K1", "Creality K1C", "Creality K1 SE", "Creality K1 Max", "Creality K1_CFS-C",

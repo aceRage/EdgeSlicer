@@ -655,6 +655,7 @@ void PrintHostSendDialog::build_device_ui()
     m_creality_panel = new wxPanel(this, wxID_ANY);
     m_creality_sizer = new wxBoxSizer(wxVERTICAL);
     m_creality_panel->SetSizer(m_creality_sizer);
+    m_creality_panel->Hide();
     content_sizer->Add(m_creality_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
 
     m_qidi_panel = new wxPanel(this, wxID_ANY);
@@ -749,8 +750,12 @@ void PrintHostSendDialog::apply_device_status()
     rebuild_qidi_options();
     rebuild_vendor_options();
     update_mapping_enabled();
-    m_probe_pending = false;
-    set_send_enabled(true);
+    // Only a Creality probe (on its worker) ever disabled the buttons; every other host never
+    // touches them here, exactly as before.
+    if (m_probe_pending) {
+        m_probe_pending = false;
+        set_send_enabled(true);
+    }
     update_print_button();
     content_sizer->Layout();
     Layout();
@@ -1008,11 +1013,6 @@ bool PrintHostSendDialog::confirm_qidi_start()
     return false;
 }
 
-bool PrintHostSendDialog::creality_device_selected() const
-{
-    return m_device_sel >= 0 && m_device_sel < (int) m_devices.size() && m_devices[m_device_sel].host_type == "crealityprint";
-}
-
 // Every host but CrealityPrint: blocking with a busy cursor, exactly as the devices dialog's Test
 // does - a modal send dialog can afford one short request. This is main's behaviour, unchanged, for
 // U1 / Moonraker / QIDI / Elegoo / PrusaLink / Flashforge and every host that is not probed.
@@ -1046,7 +1046,7 @@ void PrintHostSendDialog::refresh_device_status()
     if (d.printer_model.empty())
         d.printer_model = !m_printer_model.empty() ? m_printer_model : m_model_key;
 
-    if (d.host_type != "crealityprint") {
+    if (!PrintHostDevices::probe_on_worker(d.host_type)) {
         {
             wxBusyCursor wait;
             // A QIDI Box printer's Moonraker can take longer than 3 s (a real one timed out at 3 s),

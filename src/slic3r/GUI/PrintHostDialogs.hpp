@@ -127,8 +127,6 @@ protected:
     void update_creality_mapping_enabled();
     // Upload / Upload and Print, both off while a Creality probe is still on its worker.
     void set_send_enabled(bool on);
-    // The picked device is a CrealityPrint host: its probe runs on a worker (refresh_device_status).
-    bool creality_device_selected() const;
     // Creality K3 holders: show the two colours, no popup.
     // Happy Hare / AFC: the tiles show the gates or lanes and what is in them, nothing more. The
     // probe reads them, but no gate or lane mapping is sent at start (the printer's own tool-to-gate

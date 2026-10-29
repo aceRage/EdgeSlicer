@@ -375,6 +375,10 @@ int cfs_auto_match(const std::string& type, const std::string& colour, const std
 
 // What can be said before asking: false for every host type this fork has no status client for.
 bool   can_probe(const std::string& host_type_key);
+// The send dialog runs probe() on a worker thread only for these host types (CrealityPrint: /info
+// plus a port-9999 WebSocket, two deadlines). Every other host is probed on the UI thread with a
+// busy cursor, as it always was, so its dialog behaves exactly as before.
+bool   probe_on_worker(const std::string& host_type_key);
 // The sentence the dialog shows when `probe()` came back with nothing to map.
 std::string no_filament_note(const std::string& host_type_key);
 

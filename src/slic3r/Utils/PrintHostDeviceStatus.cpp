@@ -259,6 +259,8 @@ static std::string arr_str(const json& a, size_t i)
 
 // ------------------------------------------------------------ what we can ask ----
 
+bool probe_on_worker(const std::string& host_type_key) { return host_type_key == "crealityprint"; }
+
 bool can_probe(const std::string& host_type_key)
 {
     // The host types this fork has a status client for. Adding one here means writing that client;
