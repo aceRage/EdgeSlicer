@@ -5,6 +5,7 @@
 
 #include <cereal/archives/binary.hpp>
 
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
