@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
 	test_printobject.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp
+	test_airbrush_p0_bench.cpp
 	test_support_overhang_highlight.cpp
 	test_support_groups.cpp
 	test_support_interlock.cpp
