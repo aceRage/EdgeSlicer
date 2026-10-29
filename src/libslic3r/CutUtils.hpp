@@ -68,8 +68,10 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
 void cut_recipe_record_half_frame(ModelObject& half);
 
 enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
-    // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
-    // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
+    // OrcaSlicer #13472 / NeotkoCM 8f5eae374: carry the support / seam / colour / fuzzy-skin painting
+    // of every model part onto the halves. Plane cuts use PaintTransfer (exact copy of uncut facets,
+    // resample of the plane, cap unpainted). Curved / drawn / flexi / groove / contour still use
+    // spatial remap (ModelVolume::restore_painting()). The gizmo always sets it
     // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
     KeepPaint };
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
