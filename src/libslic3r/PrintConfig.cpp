@@ -10889,7 +10889,7 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
             out.process_layout_size = config.option<ConfigOptionInts>("print_extruder_id")->values.size();
             out.process_extruder_idx.reserve(count);
             for (size_t i = 0; i < count; ++i)
-                out.process_extruder_idx.push_back(process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+                out.process_extruder_idx.push_back(Slic3r::process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
         }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
