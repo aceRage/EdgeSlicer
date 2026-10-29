@@ -338,7 +338,8 @@ private:
     // grouping compute can store its result. Null in the ByObject/PrintObject path (grouping is skipped
     // there anyway). See reorder_extruders_for_minimum_flush_volume().
     Print*                     m_print = nullptr;
-    bool                       m_is_BBL_printer = false;
+    // Orca #12781: Print::wipe_tower_type() == Type1 (always so on Bambu Lab printers).
+    bool                       m_wipe_tower_type1 = false;
     // Mixed filament support: pointer to manager (owned by Print) and
     // number of physical extruders.
     const MixedFilamentManager* m_mixed_mgr    = nullptr;

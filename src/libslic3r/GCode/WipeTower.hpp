@@ -211,6 +211,11 @@ public:
 	// Set the extruder properties.
     void set_extruder(size_t idx, const PrintConfig& config);
 
+    // Edge: G-code tag dialect (GCodeProcessor::reserved_tag) of the tower's output. True (the
+    // Bambu tags) for Bambu Lab printers; false for a non-Bambu printer set to wipe_tower_type
+    // Type 1, whose export reads the compatible tags.
+    void set_bbl_gcode_tags(bool bbl) { m_bbl_gcode_tags = bbl; }
+
 	// Appends into internal structure m_plan containing info about the future wipe tower
 	// to be used before building begins. The entries must be added ordered in z.
 	void plan_toolchange(float z_par, float layer_height_par, unsigned int old_tool, unsigned int new_tool, float wipe_volume = 0.f, float prime_volume = 0.f);
@@ -415,6 +420,7 @@ private:
     GCodeFlavor     m_gcode_flavor;
     // Ultra (H2C rack): machine has a swappable nozzle rack (extruder_max_nozzle_count > 1).
     bool            m_has_nozzle_rack           = false;
+    bool            m_bbl_gcode_tags            = true;
 
     // Rib wall, ported from Bambu Studio (prime_tower_rib_wall and friends). A cone wall is a
     // WipeTower2 feature; this generator prints it as a rectangle.
