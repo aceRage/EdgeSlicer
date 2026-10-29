@@ -221,7 +221,8 @@ static void emit_progress(int percent, const std::string& message, bool warning 
     j["plate_count"]   = g_progress_plate_count;
     j["plate_percent"] = percent;
     if (warning) j["warning"] = message; else j["message"] = message;
-    boost::nowide::cout << j.dump() << std::endl;
+    // Status text can carry an object name from an STL/OBJ path (arbitrary bytes on Linux).
+    boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
 
 typedef struct _sliced_info {
@@ -302,7 +303,9 @@ typedef struct _cli_callback_mgr {
         else
             j["message"] = m_message;
 
-        std::string notify_message = j.dump();
+        // m_message can carry an object name, which may be invalid UTF-8 on Linux.
+        // This runs on the callback thread with no handler, so a throw would abort.
+        std::string notify_message = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         //notify_message = "Plate "+ std::to_string(m_plate_index) + "/" +std::to_string(m_plate_count)+  ": Percent " + std::to_string(m_progress) + ": "+m_message;
 
         char pipe_message[PIPE_BUFFER_SIZE] = {0};
@@ -537,9 +540,13 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         j["warnings"]    = sliced_info.warnings;
         j["strict_mode"] = sliced_info.strict_mode;
 
+        // Names can be invalid UTF-8 on Linux; write U+FFFD instead of throwing type_error.316.
+        // The catch-all below would otherwise swallow the throw and leave no result.json.
+        const std::string result_json = j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+
         boost::nowide::ofstream c;
         c.open(result_file, std::ios::out | std::ios::trunc);
-        c << std::setw(4) << j << std::endl;
+        c << result_json << std::endl;
         c.close();
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%result_file;
@@ -547,7 +554,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         if (g_progress_json) {
             std::lock_guard<std::mutex> lock(g_progress_mutex);
             j["event"] = "result";
-            boost::nowide::cout << j.dump() << std::endl;
+            boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
         }
     }
     catch (...) {}
@@ -707,7 +714,7 @@ struct NamedPresets
         boost::filesystem::create_directories(out_dir);
         const std::string file = out_dir + "/" + type_dir(t) + "_" + std::to_string(ordinal) + ".json";
         boost::nowide::ofstream ofs(file, std::ios::out | std::ios::trunc);
-        ofs << j.dump(2);
+        ofs << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         return file;
     }
 };
