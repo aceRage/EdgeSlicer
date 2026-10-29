@@ -1444,8 +1444,8 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
     // and GCodeConfig through PRINT_CONFIG_CLASS_DERIVED_DEFINE. Both generate hash(), operator==,
     // operator< and the option registration from the same option list. The hash inequalities use fixed
     // inputs, so they are deterministic; they check that hash() covers the changed option.
-    // Edge's PrintObjectConfig lists Ultra's print_extruder_id / print_extruder_variant first;
-    // brim_object_gap is third (Orca's first). Ordering checks use Edge's first member.
+    // Edge's PrintObjectConfig lists brim_object_gap first, as Orca does (print_extruder_id /
+    // print_extruder_variant moved to GCodeConfig with per-nozzle process P1). Ordering checks use it.
     SECTION("default-constructed configs are equal and find their options by key")
     {
         PrintObjectConfig a, b;
@@ -1454,7 +1454,6 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
         REQUIRE_FALSE(a < b);
         REQUIRE_FALSE(b < a);
         REQUIRE(a.optptr("layer_height") == &a.layer_height);
-        REQUIRE(a.optptr("print_extruder_id") == &a.print_extruder_id);
         REQUIRE(a.optptr("brim_object_gap") == &a.brim_object_gap);
     }
 
@@ -1471,9 +1470,8 @@ TEST_CASE("Static print configs compare, order and hash by their option values",
     SECTION("ordering is decided by the first option in declaration order that differs")
     {
         PrintObjectConfig a, b;
-        // print_extruder_id is declared first on Edge (ConfigOptionInts).
-        a.print_extruder_id.values = {2};
-        b.print_extruder_id.values = {1};
+        // brim_object_gap is declared first (ConfigOptionFloat).
+        a.brim_object_gap.value    = b.brim_object_gap.value + 0.1;
         a.layer_height.value       = b.layer_height.value - 0.05; // declared later, points the other way
         REQUIRE(b < a);
         REQUIRE_FALSE(a < b);
@@ -1545,8 +1543,7 @@ TEST_CASE("A static config applies itself onto a config of its type as a lookup 
         object.wall_generator.value        = PerimeterGeneratorType::Arachne;
         object.support_speed.values        = {33.};
         object.enable_support.value        = true;
-        object.print_extruder_id.values    = {1, 2};
-        object.print_extruder_variant.values = {"Direct Drive Standard", "Direct Drive High Flow"};
+        object.brim_object_gap.value       = 0.3;
         FullPrintConfig full;
         REQUIRE(object.apply_to(full));
         check_member_apply_matches_key_apply(object);
