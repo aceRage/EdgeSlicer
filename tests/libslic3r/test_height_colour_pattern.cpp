@@ -94,7 +94,8 @@ std::string temp_file(const std::string &name)
     return (tmp_root / name).string();
 }
 
-DynamicPrintConfig project_config()
+// The U1-style project the owner opens: `filaments` tools, one distinct colour and preset name each.
+DynamicPrintConfig sample_project_config(size_t filaments)
 {
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
     for (const std::string &key : cfg.keys())
@@ -102,13 +103,30 @@ DynamicPrintConfig project_config()
             cfg.erase(key);
             cfg.option(key, true);
         }
-    cfg.set_num_extruders(2);
-    cfg.set_num_filaments(3);
-    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.4, 0.4 };
-    cfg.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00", "#0000FF" };
-    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab P1S"));
+    // Up to three filaments keep the two-extruder P1S-style layout the Bambu export tests use; four
+    // or more is the U1 (one filament per tool).
+    const bool u1 = filaments > 3;
+    const size_t extruders = u1 ? filaments : 2;
+    cfg.set_num_extruders(unsigned(extruders));
+    cfg.set_num_filaments(unsigned(filaments));
+    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values = std::vector<double>(extruders, 0.4);
+    const char *palette[] = { "#E53935", "#1E88E5", "#43A047", "#FDD835", "#8E24AA", "#FB8C00" };
+    std::vector<std::string> colours, ids, types;
+    for (size_t i = 0; i < filaments; ++i) {
+        colours.push_back(palette[i % 6]);
+        ids.push_back("Generic PLA");
+        types.push_back("PLA");
+    }
+    cfg.option<ConfigOptionStrings>("filament_colour")->values       = colours;
+    cfg.option<ConfigOptionStrings>("filament_settings_id", true)->values  = ids;
+    cfg.option<ConfigOptionStrings>("filament_type", true)->values         = types;
+    cfg.set_key_value("printer_model", new ConfigOptionString(u1 ? "Snapmaker U1" : "Bambu Lab P1S"));
+    if (u1)
+        cfg.set_key_value("printer_settings_id", new ConfigOptionString("Snapmaker U1 (0.4 nozzle)"));
     return cfg;
 }
+
+DynamicPrintConfig project_config() { return sample_project_config(3); }
 
 PlateDataPtrs one_plate()
 {
@@ -118,9 +136,8 @@ PlateDataPtrs one_plate()
     return { a };
 }
 
-bool store(const std::string &path, Model &model, bool bambu)
+bool store(const std::string &path, Model &model, bool bambu, DynamicPrintConfig cfg = project_config())
 {
-    DynamicPrintConfig cfg = project_config();
     BambuExport::Report report;
     StoreParams         sp;
     sp.path            = path.c_str();
@@ -704,7 +721,77 @@ TEST_CASE("Height colour pattern: write the sample project", "[.heightpat_sample
     ModelObject *object = cube_object(model, 80.);
     HeightColourPattern p = example_pattern();
     p.repeat   = 0; // to the top
-    p.sequence = { 1, 2, 3 };
-    REQUIRE(apply_height_colour_pattern(*object, p, grid(80., 0.2, 0.2), 0.2, false).ok);
-    REQUIRE(store(out, model, false));
+    p.sequence = { 1, 2, 3, 4 };
+    REQUIRE(apply_height_colour_pattern(*object, p, grid(80., 0.2, 0.2), 0.2, false, 0., 4).ok);
+    REQUIRE(store(out, model, false, sample_project_config(4)));
+}
+
+TEST_CASE("Height colour pattern: a four-filament project loads with its filaments and the ranges reference them", "[HeightColourPattern][3mf]")
+{
+    Model        model;
+    ModelObject *object = cube_object(model, 80.);
+    HeightColourPattern p = example_pattern();
+    p.repeat   = 0;
+    p.sequence = { 1, 2, 3, 4 };
+    REQUIRE(apply_height_colour_pattern(*object, p, grid(80., 0.2, 0.2), 0.2, false, 0., 4).ok);
+
+    const std::string path = temp_file("heightpat_four.3mf");
+    REQUIRE(store(path, model, false, sample_project_config(4)));
+    Loaded back;
+    load(path, back);
+    REQUIRE(back.ok);
+    const auto *colours = back.config.option<ConfigOptionStrings>("filament_colour");
+    REQUIRE(colours != nullptr);
+    REQUIRE(colours->values.size() == 4);
+    CHECK(colours->values[0] != colours->values[3]);
+    REQUIRE(back.model.objects.size() == 1);
+    const ModelObject *loaded = back.model.objects[0];
+    std::vector<int> extruders;
+    for (const auto &kv : loaded->layer_config_ranges)
+        extruders.push_back(kv.second.get().opt_int("extruder"));
+    CHECK(extruders == std::vector<int>({ 1, 2, 3, 4 }));
+    CHECK(height_colour_pattern_missing_filaments(*loaded, int(colours->values.size())).empty());
+    // The same file seen by a 2-filament project: the pattern names filaments 3 and 4 that are not there.
+    CHECK(height_colour_pattern_missing_filaments(*loaded, 2) == std::vector<int>({ 3, 4 }));
+    boost::filesystem::remove(path);
+}
+
+TEST_CASE("Height colour pattern: a layer height other than the object's is reported", "[HeightColourPattern][Apply]")
+{
+    Model        model;
+    ModelObject *object = cube_object(model);
+    REQUIRE(apply_height_colour_pattern(*object, example_pattern(), grid(60., 0.2, 0.2), 0.2, false).ok);
+    CHECK_FALSE(height_colour_pattern_layer_height_mismatch(*object, 0.2));
+    // The print preset moved to 0.12 mm after the pattern was made: the bands would still print at 0.2.
+    CHECK(height_colour_pattern_layer_height_mismatch(*object, 0.12));
+}
+
+TEST_CASE("Height colour pattern: a filament the project does not have is refused", "[HeightColourPattern][Apply]")
+{
+    Model        model;
+    ModelObject *object = cube_object(model);
+    const auto   tops   = grid(60., 0.2, 0.2);
+
+    SECTION("in the sequence") {
+        // example_pattern() uses filaments 1-3; the project has 2.
+        const HeightPatternApplyResult r = apply_height_colour_pattern(*object, example_pattern(), tops, 0.2, false, 0., 2);
+        CHECK_FALSE(r.ok);
+        CHECK(r.error.find("Filament 3") != std::string::npos);
+        CHECK(object->layer_config_ranges.empty());
+        CHECK(object->height_colour_patterns.empty());
+    }
+    SECTION("as the fixed gap filament") {
+        HeightColourPattern p = example_pattern();
+        p.sequence     = { 1, 2 };
+        p.gap_mode     = int(HeightPatternGapMode::Fixed);
+        p.gap_filament = 5;
+        CHECK_FALSE(apply_height_colour_pattern(*object, p, tops, 0.2, false, 0., 2).ok);
+        CHECK(object->layer_config_ranges.empty());
+    }
+    SECTION("within the count, and with no count given, it applies") {
+        HeightColourPattern p = example_pattern();
+        CHECK(apply_height_colour_pattern(*object, p, tops, 0.2, false, 0., 3).ok);
+        CHECK(remove_height_colour_pattern(*object, 1));
+        CHECK(apply_height_colour_pattern(*object, p, tops, 0.2, false, 0., 0).ok);
+    }
 }

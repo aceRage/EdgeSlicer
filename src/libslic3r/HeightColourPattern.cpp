@@ -46,18 +46,28 @@ std::vector<double> height_pattern_layer_tops(const std::vector<double> &object_
 HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p,
                                                     const std::vector<double> &layer_tops,
                                                     double                     layer_height,
-                                                    double                     object_height)
+                                                    double                     object_height,
+                                                    int                        max_filament)
 {
     HeightPatternExpansion out;
     if (p.sequence.empty()) {
         out.error = "The filament sequence is empty.";
         return out;
     }
-    for (int f : p.sequence)
+    for (int f : p.sequence) {
         if (f < 1) {
             out.error = "Filament ids start at 1.";
             return out;
         }
+        if (max_filament > 0 && f > max_filament) {
+            out.error = "Filament " + std::to_string(f) + " is not in the project (" + std::to_string(max_filament) + " filaments).";
+            return out;
+        }
+    }
+    if (max_filament > 0 && p.gap_mode == int(HeightPatternGapMode::Fixed) && p.gap_filament > max_filament) {
+        out.error = "Filament " + std::to_string(p.gap_filament) + " is not in the project (" + std::to_string(max_filament) + " filaments).";
+        return out;
+    }
     if (!(p.band_h > 0.)) {
         out.error = "The band height must be above zero.";
         return out;
@@ -194,10 +204,11 @@ HeightPatternApplyResult apply_height_colour_pattern(ModelObject               &
                                                      const std::vector<double> &layer_tops,
                                                      double                     layer_height,
                                                      bool                       replace_overlaps,
-                                                     double                     object_height)
+                                                     double                     object_height,
+                                                     int                        max_filament)
 {
     HeightPatternApplyResult result;
-    result.expansion = expand_height_colour_pattern(pattern, layer_tops, layer_height, object_height);
+    result.expansion = expand_height_colour_pattern(pattern, layer_tops, layer_height, object_height, max_filament);
     if (!result.expansion.ok()) {
         result.error = result.expansion.error;
         return result;
@@ -266,6 +277,27 @@ HeightPatternApplyResult apply_height_colour_pattern(ModelObject               &
     }
     result.ok = true;
     return result;
+}
+
+std::vector<int> height_colour_pattern_missing_filaments(const ModelObject &object, int filament_count)
+{
+    std::vector<int> out;
+    for (const HeightColourPattern &p : object.height_colour_patterns)
+        for (const HeightPatternRange &g : p.generated)
+            if (g.extruder > filament_count)
+                out.push_back(g.extruder);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+bool height_colour_pattern_layer_height_mismatch(const ModelObject &object, double layer_height)
+{
+    for (const HeightColourPattern &p : object.height_colour_patterns)
+        for (const HeightPatternRange &g : p.generated)
+            if (std::abs(g.layer_height - layer_height) > 1e-4)
+                return true;
+    return false;
 }
 
 bool remove_height_colour_pattern(ModelObject &object, int pattern_id)

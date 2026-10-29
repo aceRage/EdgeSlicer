@@ -99,11 +99,15 @@ std::vector<double> height_pattern_layer_tops(const std::vector<double> &object_
 //  layer_tops    the object's real layer grid (see above); the last entry is the object top.
 //                May be empty, then `object_height` is the top and nothing snaps.
 //  layer_height  written into every range's "layer_height" key.
+//  max_filament  the project's filament count (physical + mixed); 0 = do not check. A band or gap
+//                that names a higher filament is refused (an ordinary range with such an extruder
+//                silently prints filament 1, which is exactly what a pattern must not do).
 // The pattern's `generated` is ignored and not modified.
 HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &pattern,
                                                     const std::vector<double> &layer_tops,
                                                     double                     layer_height,
-                                                    double                     object_height = 0.);
+                                                    double                     object_height = 0.,
+                                                    int                        max_filament = 0);
 
 // ---- applying to an object -------------------------------------------------
 
@@ -126,7 +130,18 @@ HeightPatternApplyResult apply_height_colour_pattern(ModelObject                
                                                      const std::vector<double>  &layer_tops,
                                                      double                      layer_height,
                                                      bool                        replace_overlaps,
-                                                     double                      object_height = 0.);
+                                                     double                      object_height = 0.,
+                                                     int                         max_filament = 0);
+
+// Filament ids used by the object's patterns (bands and gaps as generated) that are above
+// `filament_count`, e.g. after a project was loaded with fewer filaments. Sorted, unique.
+std::vector<int> height_colour_pattern_missing_filaments(const ModelObject &object, int filament_count);
+
+// A band prints at the layer height written into its range, so a pattern generated for one layer
+// height changes the surface (and the layer count) of its bands once the object's real layer height
+// is something else. True when any generated range carries a layer height other than `layer_height`:
+// the cue to regenerate (Reset) rather than slice.
+bool height_colour_pattern_layer_height_mismatch(const ModelObject &object, double layer_height);
 
 // Erase the ranges the pattern owns that are still there, and the record. Hand-made
 // ranges are never touched. Returns false if the id is unknown.

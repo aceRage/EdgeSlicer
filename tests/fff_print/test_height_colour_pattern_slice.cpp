@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -131,6 +132,45 @@ std::vector<ToolChange> tool_changes(const std::string &gcode)
     return out;
 }
 
+// Per layer: the printed layer height, how many sections of each feature type, and the extruded
+// length of the outer walls. Tool changes and infill amounts are left out on purpose: those are
+// allowed to differ between a band and a gap.
+struct LayerSig
+{
+    double                height = 0.;
+    std::map<std::string, int> types;
+    double                outer_wall_e = 0.;
+};
+
+std::vector<LayerSig> layer_sigs(const std::string &gcode)
+{
+    std::vector<LayerSig> out;
+    std::istringstream    in(gcode);
+    std::string           line, type;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '')
+            line.pop_back();
+        if (line.rfind(";LAYER_CHANGE", 0) == 0)
+            out.emplace_back();
+        else if (out.empty())
+            continue;
+        else if (line.rfind(";HEIGHT:", 0) == 0)
+            out.back().height = std::atof(line.c_str() + 8);
+        else if (line.rfind(";TYPE:", 0) == 0) {
+            type = line.substr(6);
+            ++out.back().types[type];
+        } else if (type == "Outer wall" && line.rfind("G1 ", 0) == 0 && line.find(" X") != std::string::npos) {
+            const size_t e = line.find(" E");
+            if (e != std::string::npos) {
+                const double v = std::atof(line.c_str() + e + 2);
+                if (v > 0.)
+                    out.back().outer_wall_e += v;
+            }
+        }
+    }
+    return out;
+}
+
 size_t layer_count(const std::string &gcode)
 {
     size_t n = 0;
@@ -234,6 +274,88 @@ TEST_CASE("Height colour pattern: the layer grid is untouched, and an unused pat
     recorded.objects.front()->height_colour_patterns.push_back(two_band_pattern());
     recorded.objects.front()->height_colour_patterns.back().id = 1;
     CHECK(without_timestamp(slice(recorded, config)) == without_timestamp(without_ranges));
+}
+
+TEST_CASE("Height colour pattern: a range naming a filament the project lacks warns and slices without it", "[HeightColourPattern][GCode]")
+{
+    const DynamicPrintConfig config = two_filaments(); // 2 filaments
+    Model model;
+    one_cube(model);
+    DynamicPrintConfig range;
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    range.set_key_value("extruder", new ConfigOptionInt(3)); // there is no filament 3
+    model.objects.front()->layer_config_ranges[{ 4., 8. }].assign_config(range);
+
+    Print print;
+    print.apply(model, config);
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    bool found = false;
+    for (const StringObjectException &w : warnings)
+        found = found || (w.is_warning && w.string.find("filament 3") != std::string::npos);
+    CHECK(found);
+
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = slice(model, config));
+    CHECK(gcode.size() > 1000);
+    // No third tool exists, so no change to it is ever written.
+    CHECK(gcode.find("
+T2
+") == std::string::npos);
+
+    // A range inside the project's filaments warns about nothing.
+    model.objects.front()->layer_config_ranges.clear();
+    range.set_key_value("extruder", new ConfigOptionInt(2));
+    model.objects.front()->layer_config_ranges[{ 4., 8. }].assign_config(range);
+    Print ok;
+    ok.apply(model, config);
+    std::vector<StringObjectException> none;
+    ok.validate(&none);
+    for (const StringObjectException &w : none)
+        CHECK(w.string.find("uses filament") == std::string::npos);
+}
+
+TEST_CASE("Height colour pattern: a band changes only the tool, not the walls, features or layer height", "[HeightColourPattern][GCode]")
+{
+    // 0.12 mm layers: the pattern must take the object's REAL layer height, not a 0.2 mm default.
+    DynamicPrintConfig config = two_filaments();
+    config.set_deserialize_strict({ { "layer_height", "0.12" }, { "initial_layer_print_height", "0.2" } });
+    Model plain;
+    one_cube(plain);
+    double layer_height = 0.;
+    const std::vector<double> tops = layer_tops_of(plain, config, &layer_height);
+    REQUIRE(layer_height == Approx(0.12));
+
+    Model patterned;
+    one_cube(patterned);
+    REQUIRE(apply_height_colour_pattern(*patterned.objects.front(), two_band_pattern(), tops, layer_height, false).ok);
+    CHECK_FALSE(height_colour_pattern_layer_height_mismatch(*patterned.objects.front(), layer_height));
+
+    const std::vector<LayerSig> a = layer_sigs(slice(plain, config));
+    const std::vector<LayerSig> b = layer_sigs(slice(patterned, config));
+    REQUIRE(a.size() > 100);
+    REQUIRE(a.size() == b.size());
+    size_t differing = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const bool same = std::abs(a[i].height - b[i].height) < 1e-3 && a[i].types == b[i].types &&
+                          std::abs(a[i].outer_wall_e - b[i].outer_wall_e) < 0.05;
+        if (!same) {
+            ++differing;
+            INFO("layer " << i + 1 << " height " << a[i].height << " vs " << b[i].height << ", outer wall E " << a[i].outer_wall_e
+                          << " vs " << b[i].outer_wall_e);
+            CHECK(same);
+        }
+    }
+    CHECK(differing == 0);
+
+    // Control, the mechanism behind a rough band surface: bands written with a 0.2 mm layer height
+    // into a 0.12 mm print change the layer heights inside the bands.
+    Model stale;
+    one_cube(stale);
+    REQUIRE(apply_height_colour_pattern(*stale.objects.front(), two_band_pattern(), tops, 0.2, false).ok);
+    CHECK(height_colour_pattern_layer_height_mismatch(*stale.objects.front(), layer_height));
+    const std::vector<LayerSig> c = layer_sigs(slice(stale, config));
+    CHECK(c.size() != a.size());
 }
 
 TEST_CASE("Height colour pattern: the real layer grid of a 0.3 mm first layer is snapped to", "[HeightColourPattern][Expansion]")
