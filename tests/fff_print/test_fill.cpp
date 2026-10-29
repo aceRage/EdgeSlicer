@@ -2700,3 +2700,49 @@ TEST_CASE("Monotonic line top surfaces print their gap fill next to their lines 
     REQUIRE(gap_fills > 0);
     CHECK(gap_fills_before_a_line > 0);
 }
+
+// EdgeSlicer: insert_gap_fill() turns each gap fill into extrusions on its own, so it must drop the near-duplicate
+// closed gap fill loops (#375) itself, which variable_width() only does for more than one polyline at a time.
+TEST_CASE("Gap fill inserted into an ordered fill prints a near-duplicate closed loop once", "[Fill][GapFill][Regression]")
+{
+    auto square_loop = [](double x, double y, size_t start) {
+        Points corners{ Point::new_scale(x, y), Point::new_scale(x + 0.4, y), Point::new_scale(x + 0.4, y + 0.4),
+                        Point::new_scale(x, y + 0.4) };
+        std::rotate(corners.begin(), corners.begin() + start, corners.end());
+        ThickPolyline loop;
+        loop.points = corners;
+        loop.points.push_back(corners.front());
+        loop.width.assign((loop.points.size() - 1) * 2, scaled<double>(0.2));
+        return loop;
+    };
+    // The same loop twice, the second one shifted by 0.01 mm and starting at another corner.
+    const ThickPolylines gaps{ square_loop(5., 0.8, 0), square_loop(5.01, 0.81, 2) };
+    const Flow           flow(0.45f, 0.2f, 0.4f);
+
+    auto top_line = [&flow](double y, bool leftwards) {
+        Polyline line{ Point::new_scale(0., y), Point::new_scale(10., y) };
+        if (leftwards)
+            line.reverse();
+        auto *path = new ExtrusionPath(erTopSolidInfill, flow.mm3_per_mm(), flow.width(), flow.height());
+        path->polyline = std::move(line);
+        return path;
+    };
+    ExtrusionEntitiesPtr entities{ top_line(0., false), top_line(0.45, true), top_line(1.8, false) };
+    const Points line_starts{ entities[0]->first_point(), entities[1]->first_point(), entities[2]->first_point() };
+
+    insert_gap_fill(gaps, flow, entities);
+
+    double gap_fill_length = 0.;
+    Points lines_in_order;
+    for (const ExtrusionEntity *ee : entities) {
+        if (ee->role() == erGapFill)
+            gap_fill_length += unscale<double>(ee->length());
+        else
+            lines_in_order.push_back(ee->first_point());
+    }
+    // One 0.4 mm square loop, not two.
+    CHECK(gap_fill_length == Approx(1.6).margin(0.05));
+    CHECK(lines_in_order == line_starts);
+    for (ExtrusionEntity *ee : entities)
+        delete ee;
+}

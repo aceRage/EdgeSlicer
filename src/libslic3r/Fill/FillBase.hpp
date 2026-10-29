@@ -296,6 +296,8 @@ public:
 };
    //Fill  Multiline 
    void multiline_fill(Polylines& polylines, const FillParams& params, float spacing);
+// Orca: appends the gap fills of a fill whose extrusions keep their order, each where it adds the least travel.
+void insert_gap_fill(const ThickPolylines &gaps, const Flow &flow, ExtrusionEntitiesPtr &entities);
 } // namespace Slic3r
 
 #endif // slic3r_FillBase_hpp_

@@ -208,18 +208,23 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
 // Orca: inserts the gap fills of a fill whose extrusions keep their order (monotonic surfaces, a forced fill
 // order) where they add the least travel, ported from Bambu Studio. The fill's own extrusions keep their order
 // and direction. The result is kept only if it travels less than printing the gap fills after the fill.
-static void insert_gap_fill(const ThickPolylines &gaps, const Flow &flow, ExtrusionEntitiesPtr &entities)
+void insert_gap_fill(const ThickPolylines &all_gaps, const Flow &flow, ExtrusionEntitiesPtr &entities)
 {
     if (entities.empty()) {
-        variable_width(gaps, erGapFill, flow, entities);
+        variable_width(all_gaps, erGapFill, flow, entities);
         return;
     }
+    // EdgeSlicer: each gap fill goes through variable_width() on its own below, which skips the near-duplicate
+    // closed loop removal (#375) for a single polyline. Remove them here, or such loops would print twice.
+    const ThickPolylines gaps = remove_near_duplicate_gap_fill_loops(all_gaps);
     static constexpr size_t npos = size_t(-1);
     // An extrusion of the fill, or gaps[gap], with the points where the nozzle enters and leaves it.
     struct Item { Point in, out; size_t gap; bool reversed; };
     auto distance = [](const Point &a, const Point &b) { return (b - a).cast<double>().norm(); };
     auto closed   = [&gaps](size_t gap) { return gaps[gap].first_point() == gaps[gap].last_point(); };
-    // GCode::extrude_loop starts a loop at its point nearest the nozzle.
+    // GCode::extrude_loop starts a loop at its point nearest the nozzle. This relies on variable_width() emitting
+    // a closed gap fill as an ExtrusionLoop (its paths start and end on the same point); an open one is an
+    // ExtrusionPath per width step, printed from the end the slot chose.
     auto travel = [&](const std::vector<Item> &seq) {
         double sum = 0.;
         Point  at  = seq.front().out;
