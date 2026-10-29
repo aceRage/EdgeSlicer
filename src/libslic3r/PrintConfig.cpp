@@ -3768,13 +3768,17 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically. "
+                     "The value is sent both as ACCEL_TO_DECEL and as the equivalent MINIMUM_CRUISE_RATIO "
+                     "(1 - accel_to_decel factor), which replaced it in newer Klipper and overrides minimum_cruise_ratio in printer.cfg.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
     
     def = this->add("accel_to_decel_factor", coPercents);
     def->label = L("accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration. "
+                     "Newer Klipper gets it as minimum_cruise_ratio = 1 - this value (50%% sends ACCEL_TO_DECEL = half the acceleration "
+                     "and MINIMUM_CRUISE_RATIO=0.5).");
     def->sidetext = "%";
     def->min = 1;
     def->max = 100;
@@ -12835,7 +12839,7 @@ TemperaturesConfigDef::TemperaturesConfigDef()
 
     new_def("bed_temperature", coInts, "Bed temperature", "Vector of bed temperatures for each extruder/filament.")
     new_def("bed_temperature_initial_layer", coInts, "Initial layer bed temperature", "Vector of initial layer bed temperatures for each extruder/filament. Provides the same value as first_layer_bed_temperature.")
-    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of used filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over all used extruders/filaments.")
+    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of first-layer filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over the filaments printed on the first layer.")
     new_def("chamber_temperature", coInts, "Chamber temperature", "Vector of chamber temperatures for each extruder/filament.")
     new_def("overall_chamber_temperature", coInt, "Overall chamber temperature", "Overall chamber temperature. This value is the maximum chamber temperature of any extruder/filament used.")
     new_def("first_layer_bed_temperature", coInts, "First layer bed temperature", "Vector of first layer bed temperatures for each extruder/filament. Provides the same value as bed_temperature_initial_layer.")

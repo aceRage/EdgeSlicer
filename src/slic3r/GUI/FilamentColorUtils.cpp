@@ -1,7 +1,17 @@
 #include "FilamentColorUtils.hpp"
 
 #include "MixedFilamentBadge.hpp"
+#include "BitmapCache.hpp"
+#include "Widgets/Label.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Showcase/MultiColourFilament.hpp"
+
+#include <wx/dcmemory.h>
+#include <wx/image.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
 
 namespace Slic3r
 {
@@ -50,8 +60,12 @@ wxColour WxColorFromHex(const std::string& color)
 
 wxBitmap* GetFilamentColorIconFromNormalized(const std::vector<std::string>& normalizedColors, FilamentColorMode mode,
                                              const std::string& label, int iconWidth, int iconHeight,
-                                             const wxColour& lightBorderColor)
+                                             const wxColour& lightBorderColor,
+                                             const std::string* split = nullptr, double angleDeg = 0.0)
 {
+    if (split != nullptr && normalizedColors.size() > 1 && mode != FilamentColorMode::Gradient)
+        return GetSplitFilamentColorIcon(normalizedColors, *split, angleDeg, label, iconWidth, iconHeight, lightBorderColor);
+
     std::vector<wxColour> wxColors;
     wxColors.reserve(normalizedColors.size());
     for (const std::string& color : normalizedColors)
@@ -157,11 +171,128 @@ wxBitmap* GetFilamentColorIcon(const std::vector<std::string>& colors, FilamentC
 }
 
 wxBitmap* GetFilamentColorIcon(const std::string& multiColors, FilamentColorMode mode, const std::string& fallbackColor,
-                               const std::string& label, int iconWidth, int iconHeight, const wxColour& lightBorderColor)
+                               const std::string& label, int iconWidth, int iconHeight, const wxColour& lightBorderColor,
+                               const std::string* split, double angleDeg)
 {
     std::vector<std::string> normalized = SplitMultiColors(multiColors);
     AddFallbackToNormalizedColors(normalized, fallbackColor);
-    return GetFilamentColorIconFromNormalized(normalized, mode, label, iconWidth, iconHeight, lightBorderColor);
+    return GetFilamentColorIconFromNormalized(normalized, mode, label, iconWidth, iconHeight, lightBorderColor, split, angleDeg);
+}
+
+wxBitmap* GetSplitFilamentColorIcon(const std::vector<std::string>& colors, const std::string& split, double angleDeg,
+                                    const std::string& label, int iconWidth, int iconHeight,
+                                    const wxColour& lightBorderColor)
+{
+    wxASSERT(wxIsMainThread());
+    static BitmapCache cache;
+
+    const std::vector<std::string> normalized = NormalizedColorsOrFallback(colors, "#26A69A");
+    const int count = std::min<int>(int(normalized.size()), MultiColour::MAX_COLOURS);
+    iconWidth  = std::max(1, iconWidth);
+    iconHeight = std::max(1, iconHeight);
+
+    MultiColour::Filament filament;
+    filament.n          = count;
+    filament.proportion = MultiColour::parse_split(split, count);
+    filament.rotation_deg = float(angleDeg);
+
+    std::string key = "split:h" + std::to_string(iconHeight) + ":w" + std::to_string(iconWidth) + ":" + label +
+                      ":a" + std::to_string(int(std::lround(angleDeg))) + ":s" + MultiColour::format_split(filament.proportion, count);
+    for (int i = 0; i < count; ++i)
+        key += ":" + normalized[size_t(i)];
+    if (lightBorderColor.IsOk())
+        key += ":border:" + lightBorderColor.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+    if (wxBitmap* cached = cache.find(key))
+        return cached;
+
+    std::array<wxColour, MultiColour::MAX_COLOURS> swatchColours;
+    for (int i = 0; i < count; ++i)
+        swatchColours[size_t(i)] = WxColorFromHex(normalized[size_t(i)]);
+
+    // 2x2 supersampling keeps the divider and the pie edges smooth at icon size.
+    wxImage image(iconWidth, iconHeight, false);
+    unsigned char* data = image.GetData();
+    const float hw = 0.5f * float(iconWidth), hh = 0.5f * float(iconHeight);
+    for (int y = 0; y < iconHeight; ++y)
+        for (int x = 0; x < iconWidth; ++x)
+        {
+            int r = 0, g = 0, b = 0;
+            for (int sy = 0; sy < 2; ++sy)
+                for (int sx = 0; sx < 2; ++sx)
+                {
+                    const float px = float(x) + 0.25f + 0.5f * float(sx) - hw;
+                    const float py = float(y) + 0.25f + 0.5f * float(sy) - hh;
+                    const wxColour& c = swatchColours[size_t(MultiColour::swatch_slice(filament, px, py, hw, hh))];
+                    r += c.Red(); g += c.Green(); b += c.Blue();
+                }
+            unsigned char* p = data + 3 * (size_t(y) * size_t(iconWidth) + size_t(x));
+            p[0] = (unsigned char) (r / 4);
+            p[1] = (unsigned char) (g / 4);
+            p[2] = (unsigned char) (b / 4);
+        }
+
+    wxBitmap bmp(image);
+    wxMemoryDC dc;
+    dc.SelectObject(bmp);
+    bool veryLight = false;
+    double luminance = 0.0;
+    for (int i = 0; i < count; ++i)
+    {
+        const wxColour& c = swatchColours[size_t(i)];
+        if (c.Red() > 224 && c.Green() > 224 && c.Blue() > 224)
+            veryLight = true;
+        luminance += c.GetLuminance();
+    }
+    luminance /= double(count);
+    if (veryLight)
+    {
+        dc.SetPen(lightBorderColor.IsOk() ? wxPen(lightBorderColor, 1) : *wxGREY_PEN);
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawRectangle(0, 0, iconWidth, iconHeight);
+    }
+    if (!label.empty())
+    {
+        dc.SetFont(std::min(iconWidth, iconHeight) < 20 ? ::Label::Body_8 : ::Label::Body_12);
+        dc.SetTextForeground(luminance < 0.51 ? *wxWHITE : *wxBLACK);
+        dc.DrawLabel(wxString::FromUTF8(label.c_str()), wxRect(0, 0, iconWidth, iconHeight),
+                     wxALIGN_CENTER_HORIZONTAL | wxALIGN_CENTER_VERTICAL);
+    }
+    dc.SelectObject(wxNullBitmap);
+    return cache.insert(key, bmp);
+}
+
+ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot)
+{
+    ColourMakeUp out;
+    if (config == nullptr)
+        return out;
+    if (const ConfigOptionStrings* split = config->option<ConfigOptionStrings>("filament_colour_split"))
+        if (slot < split->values.size())
+            out.split = split->values[slot];
+    if (const ConfigOptionFloats* angle = config->option<ConfigOptionFloats>("filament_colour_angle"))
+        if (slot < angle->values.size())
+            out.angle = angle->values[slot];
+    if (const ConfigOptionFloats* twist = config->option<ConfigOptionFloats>("filament_colour_twist"))
+        if (slot < twist->values.size())
+            out.twist = twist->values[slot];
+    return out;
+}
+
+void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp& makeUp)
+{
+    const size_t size = slot + 1;
+    auto* split = config.option<ConfigOptionStrings>("filament_colour_split", true);
+    auto* angle = config.option<ConfigOptionFloats>("filament_colour_angle", true);
+    auto* twist = config.option<ConfigOptionFloats>("filament_colour_twist", true);
+    if (split->values.size() < size)
+        split->values.resize(size);
+    if (angle->values.size() < size)
+        angle->values.resize(size, 0.);
+    if (twist->values.size() < size)
+        twist->values.resize(size, 0.);
+    split->values[slot] = makeUp.split;
+    angle->values[slot] = makeUp.angle;
+    twist->values[slot] = makeUp.twist;
 }
 
 } // namespace FilamentColorUtils

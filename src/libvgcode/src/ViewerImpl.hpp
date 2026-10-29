@@ -103,6 +103,10 @@ public:
                               std::string* error);
     unsigned int get_fragment_prelude_program() const { return m_prelude_shader_id; }
     void set_use_fragment_prelude(bool use) { m_use_prelude = use; }
+    // EDGE (multi-colour filaments, P3): see Viewer::set_base_color_prelude().
+    bool set_base_color_prelude(const std::string& prelude, std::string* error);
+    unsigned int get_base_color_program() const { return m_base_color_prelude.empty() ? 0 : m_segments_shader_id; }
+    void set_extruded_volume_enabled(bool enabled);
     // ORCA: section view, see Viewer::set_clipping_plane()
     void set_clipping_plane(const std::array<float, 4>& plane) { m_clipping_plane = plane; }
     void set_light_top_dir(const Vec3& direction) { m_light_top_dir = direction; }
@@ -423,6 +427,9 @@ private:
         int role_tex{ -1 };
         int look_a{ -1 };
         int look_b{ -1 };
+        // EDGE (multi-colour P3): the per-vertex extruded volume
+        int volume_tex{ -1 };
+        int use_volume{ -1 };
         LayerColorsUniforms layer_colors;
 
         void init(unsigned int shader_id);
@@ -433,6 +440,20 @@ private:
     SegmentsUniforms m_uni_prelude;
     ShadedSegmentsUniforms m_uni_prelude_shaded;
     bool m_use_prelude{ false };
+    // EDGE (multi-colour P3): what the fragment prelude's program was last asked for, so that
+    // set_base_color_prelude() can rebuild it with the base-colour prelude in it as well.
+    std::string m_fragment_prelude;
+    std::vector<std::pair<std::string, int>> m_fragment_prelude_units;
+    // EDGE (multi-colour P3): the base-colour prelude both programs are built with ("" = none), and
+    // whether the extruded volumes are wanted.
+    std::string m_base_color_prelude;
+    bool m_use_volume{ false };
+    // EDGE (multi-colour P3): the built-in segments program's uniforms and sampler units, after it
+    // is (re)built.
+    void init_segments_uniforms();
+    // EDGE (multi-colour P3): the segments fragment shader with the base-colour prelude (if any) and,
+    // for the fragment prelude's program, EXTERNAL_LIGHTING and its prelude.
+    std::string segments_fragment_text(const std::string* lighting_prelude) const;
     //
     // Caches for OpenGL uniforms id for options shader
     //
@@ -567,6 +588,12 @@ private:
     // smooth bead look; drawn from a texture unit of its own.
     unsigned int m_roles_buf_id{ 0 };
     unsigned int m_roles_tex_id{ 0 };
+    // EDGE (multi-colour P3): per vertex, the volume its extruder has laid so far (R32F, mm3), built
+    // only on request (set_extruded_volume_enabled); the one-float stand-in otherwise.
+    unsigned int m_volumes_buf_id{ 0 };
+    unsigned int m_volumes_tex_id{ 0 };
+    unsigned int m_volume_fallback_buf_id{ 0 };
+    unsigned int m_volume_fallback_tex_id{ 0 };
     size_t m_enabled_options_count{ 0 };
     //
     // Caches for size of data sent to gpu, in bytes

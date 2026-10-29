@@ -492,6 +492,21 @@ TEST_CASE("Callout label text", "[Showcase][Callouts]")
         f.weight_g = f.price = -1.;
         CHECK(build_callout_label(c, f, fields, words).details == "PLA \xC2\xB7 Silk");
     }
+    SECTION("a coextruded filament's swatch becomes a split disc (multi-colour P2)") {
+        f.colors     = { "#ff0000", "#0000ff" };
+        const CalloutLabel plain = build_callout_label(c, f, fields, words);
+        CHECK_FALSE(plain.swatch_disc);
+        f.coextruded = true;
+        f.split      = "30|70";
+        f.angle_deg  = 90.;
+        const CalloutLabel disc = build_callout_label(c, f, fields, words);
+        CHECK(disc.swatch_disc);
+        CHECK(disc.swatch_split == "30|70");
+        CHECK(disc.swatch_angle_deg == 90.);
+        CHECK(disc.swatches.size() == 2);
+        fields.swatch = false;
+        CHECK_FALSE(build_callout_label(c, f, fields, words).swatch_disc);
+    }
     SECTION("fields off") {
         fields.brand = fields.hex = fields.swatch = fields.type = false;
         const CalloutLabel l = build_callout_label(c, f, fields, words);

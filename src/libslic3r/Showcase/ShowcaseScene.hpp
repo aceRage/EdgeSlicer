@@ -245,6 +245,10 @@ struct Materials
     // S5 (D13): the toolpath source's Smoothness, 0 = the crisp extrusions of Preview .. 1 = fully
     // smoothed beads and blended skins; < 0 = by each filament's finish (toolpath_look()).
     float                         toolpath_smoothness = -1.f;
+    // Multi-colour P2 (design 4.4): the coextruded look of split filaments (their make-up in the
+    // Materials chips, the callout swatch discs and, in P3/P4, the toolpaths and the model). Off =
+    // split slots show as plain colours. Written only when off.
+    bool                          coextruded_look = true;
 
     // The override for a filament, or null when its finish is inferred.
     const Finish *override_for(int filament) const;
@@ -255,7 +259,8 @@ struct Materials
 
     bool operator==(const Materials &o) const
     {
-        return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness;
+        return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
+               coextruded_look == o.coextruded_look;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };

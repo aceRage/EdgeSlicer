@@ -1,6 +1,9 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <regex>
+#include <vector>
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -9,6 +12,8 @@
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/calib.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "test_data.hpp"
 
 #include <cmath>
@@ -730,4 +735,158 @@ TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
     REQUIRE(full > 0.);
     const double ratio = extruded_length(0.9) / full;
     CHECK(std::abs(ratio - 0.9) < 0.9e-3);
+}
+
+// Orca #16898: a temperature tower re-targets the hotend at every layer. On a multi-tool
+// printer that command has to name the tool printing the tower: a bare M104 goes to
+// whichever tool the firmware considers active. Edge maps the filament through
+// temperature_tool_for_filament (physical hotend on U1 / Bambu). A single-tool printer
+// and SEMM keep the bare form — the writer already drops T for those.
+TEST_CASE("The temperature tower steps the temperature of the tool printing it", "[GCode][Calib]")
+{
+    const bool multi_tool = GENERATE(false, true);
+    DYNAMIC_SECTION((multi_tool ? "two tools, the tower on the second one (filament 2 -> T1)" : "one tool")) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        if (multi_tool) {
+            config.set_num_extruders(2);
+            config.set_num_filaments(2);
+            config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+            config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+        }
+        config.set_deserialize_strict({
+            {"skirt_loops",                      0},
+            {"brim_type",                        "no_brim"},
+            {"single_extruder_multi_material",   0},
+            {"enable_prime_tower",               0},
+            {"nozzle_temperature_initial_layer", multi_tool ? "230,230" : "230"},
+            {"nozzle_temperature",               multi_tool ? "230,230" : "230"},
+            // Without the end G-code's heater-off M104 S0, every temperature command after the
+            // first layer change is the tower's. Edge steps 5 °C every 10.001 mm of Z
+            // (start - floor(z / 10.001) * 5), so a 20 mm cube is the 230 and 225 bands.
+            {"machine_end_gcode",                ""},
+        });
+
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        if (multi_tool) {
+            REQUIRE(model.objects.size() == 1);
+            model.objects.front()->config.set("extruder", 2);
+            print.apply(model, config);
+        }
+        Calib_Params params;
+        params.mode  = CalibMode::Calib_Temp_Tower;
+        params.start = 230;
+        params.end   = 190;
+        params.step  = 5;
+        print.set_calib_params(params);
+        const std::string gcode = Test::gcode(print);
+
+        const size_t layers_begin = gcode.find(";LAYER_CHANGE");
+        REQUIRE(layers_begin != std::string::npos);
+        const std::regex      temperature_command(R"(^M10[49] S(\d+)(?: T(\d+))?)");
+        std::set<int>         temperatures;
+        std::set<std::string> tools;
+        std::istringstream    stream(gcode.substr(layers_begin));
+        for (std::string line; std::getline(stream, line);) {
+            std::smatch m;
+            if (!std::regex_search(line, m, temperature_command))
+                continue;
+            temperatures.insert(std::stoi(m[1]));
+            tools.insert(m[2].matched ? m[2].str() : "none");
+        }
+        CHECK(temperatures == std::set<int>{225, 230});
+        CHECK(tools == std::set<std::string>{multi_tool ? "1" : "none"});
+    }
+}
+
+static DynamicPrintConfig two_filament_bed_temp_config(const std::string &first_layer_temps, const std::string &later_temps)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"nozzle_diameter",                        "0.4,0.4"},
+        {"filament_diameter",                      "1.75,1.75"},
+        {"enable_prime_tower",                     "0"},
+        {"single_extruder_multi_material",         "1"},
+        {"curr_bed_type",                          "High Temp Plate"},
+        {"supertack_plate_temp_initial_layer",     first_layer_temps},
+        {"cool_plate_temp_initial_layer",          first_layer_temps},
+        {"textured_cool_plate_temp_initial_layer", first_layer_temps},
+        {"eng_plate_temp_initial_layer",           first_layer_temps},
+        {"hot_plate_temp_initial_layer",           first_layer_temps},
+        {"textured_plate_temp_initial_layer",      first_layer_temps},
+        {"supertack_plate_temp",                   later_temps},
+        {"cool_plate_temp",                        later_temps},
+        {"textured_cool_plate_temp",               later_temps},
+        {"eng_plate_temp",                         later_temps},
+        {"hot_plate_temp",                         later_temps},
+        {"textured_plate_temp",                    later_temps},
+        {"skirt_loops",                            "0"},
+        {"brim_type",                              "no_brim"},
+        {"layer_height",                           "0.2"},
+        {"initial_layer_print_height",             "0.2"},
+        {"layer_change_gcode",                     "G92 E0\n"},
+        {"machine_start_gcode",                    "M190 S{bed_temperature_initial_layer_single}\n"},
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#0000FF"};
+    return config;
+}
+
+static std::vector<int> bed_command_temps(const std::string &gcode)
+{
+    std::vector<int> temps;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.compare(0, 6, "M140 S") == 0 || line.compare(0, 6, "M190 S") == 0)
+            temps.push_back(std::stoi(line.substr(6)));
+    }
+    return temps;
+}
+
+static std::string join_ints(const std::vector<int> &values)
+{
+    std::ostringstream out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i)
+            out << ',';
+        out << values[i];
+    }
+    return out.str();
+}
+
+// Orca #16770: a filament that starts above the first layer, such as a support interface,
+// never touches the bed. Heating the bed to its temperature would soften the filament the
+// part stands on, so only first-layer filaments count.
+TEST_CASE("The highest temperature bed policy ignores filaments that start above the first layer", "[GCode][BedTemperature]")
+{
+    // Filament 1: bed 65 on the first layer, 60 after it. Filament 2: bed 100. A 30 mm cap on
+    // a 10 mm tall stem prints with filament 1 and is supported from the bed, the support with
+    // filament 1 and its interface under the cap with filament 2.
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+
+    DynamicPrintConfig config = two_filament_bed_temp_config("65,100", "60,100");
+    config.set_deserialize_strict({
+        {"enable_support",             "1"},
+        {"support_type",               "normal(auto)"},
+        {"support_threshold_angle",    "30"},
+        {"support_filament",           "1"},
+        {"support_interface_filament", "2"},
+    });
+
+    const std::string gcode = Test::slice({mesh}, config);
+    REQUIRE(gcode.find("\nT1") != std::string::npos);
+
+    const std::vector<int> bed_temps = bed_command_temps(gcode);
+    INFO("bed temperatures: " << join_ints(bed_temps));
+    REQUIRE_FALSE(bed_temps.empty());
+    CHECK(bed_temps.front() == 65);
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
 }

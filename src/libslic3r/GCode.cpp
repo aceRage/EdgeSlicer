@@ -3667,7 +3667,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     print.throw_if_canceled();
 
     // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
-    // Bed stays the max of used filaments (Edge always heats to the highest bed temp).
+    // Bed stays the max of the first layer's filaments (Orca #16770).
     // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
     int compat_first_layer_bed_temp    = 0;
     int compat_first_layer_nozzle_temp = 0;
@@ -3900,10 +3900,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("bbl_bed_temperature_gcode", new ConfigOptionBool(false));
         this->placeholder_parser().set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("bed_temperature", new ConfigOptionInts(*bed_temp_opt));
-        // BBS: the single bed temperature value accommodates the highest-temperature filament of the print
-        // (max over all used extruders instead of the initial extruder only).
+        // BBS: the single bed temperature value accommodates the highest-temperature filament of the first layer
+        // (Orca #16770: the same first-layer filaments as M140/M190, not the initial extruder only).
         int bed_temp_single = 0;
-        for (const unsigned int extruder_id : print.extruders())
+        for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
             bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
         this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
@@ -4341,8 +4341,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatible image. Bed stays the max of used filaments
-            // (Edge always heats to the highest bed temp). Nozzle is the first printing
+            // SoftFever: write compatible image. Bed stays the max of the first layer's
+            // filaments (get_bed_temperature_max). Nozzle is the first printing
             // filament when tool ordering already exists. On a single-filament plate
             // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
             // / unsigned(-1), so fall back to the first used filament. The U1 trailer
@@ -5855,13 +5855,15 @@ int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer,
 }
 
 // BBS
-// Max bed temperature over all used extruders (object/support/wipe tower/brim-introduced extruders),
-// so a compatible mixed print (e.g. PLA 65C + TPU 35C) always runs the highest bed temperature.
+// Max bed temperature over the filaments printed on the first layer, so a compatible mixed first layer
+// (e.g. PLA 65C + TPU 35C) runs the highest bed temperature.
 // A value of 0 means the filament does not support the current bed type, and is naturally skipped by max().
 int GCode::get_bed_temperature_max(const Print& print, const bool is_first_layer) const
 {
     int max_bed_temp = 0;
-    for (const unsigned int extruder_id : print.extruders())
+    // Orca #16770: only the filaments printed on the first layer touch the bed, so a filament that starts higher up,
+    // such as a support interface, must not raise the bed temperature for the rest of the print.
+    for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
         max_bed_temp = std::max(
             max_bed_temp, get_bed_temperature(extruder_id, is_first_layer, print.config().curr_bed_type));
     return max_bed_temp;
@@ -7363,8 +7365,15 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_Temp_Tower: {
+        // Orca #16898: name the tool printing the tower. A bare M104 goes to whichever
+        // tool the firmware considers active. Map the filament through the physical
+        // hotend (U1 / Bambu) — not a raw filament index — as the other Edge
+        // nozzle-temp writers do.
+        int tool = -1;
+        if (m_writer.extruder() != nullptr)
+            tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
         auto offset = static_cast<unsigned int>(print_z / 10.001) * 5;
-        gcode += writer().set_temperature(print.calib_params().start - offset);
+        gcode += writer().set_temperature(print.calib_params().start - offset, false, tool);
         break;
     }
     case CalibMode::Calib_VFA_Tower: {
@@ -7394,10 +7403,6 @@ LayerResult GCode::process_layer(const Print& print,
     case CalibMode::Calib_Input_shaping_freq: {
         if (m_layer_index == 1) {
             gcode += writer().set_input_shaping('A', print.calib_params().start, 0.f, print.calib_params().shaper_type);
-            if (m_writer.get_gcode_flavor() == gcfKlipper) {
-                // Disable minimum cruise ratio to ensure consistent motion for calibration
-                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
-            }
         } else {
             if (print.calib_params().freqStartX == print.calib_params().freqStartY &&
                 print.calib_params().freqEndX == print.calib_params().freqEndY) {
@@ -7411,10 +7416,6 @@ LayerResult GCode::process_layer(const Print& print,
     }
     case CalibMode::Calib_Input_shaping_damp: {
         if (m_layer_index == 1) {
-            if (m_writer.get_gcode_flavor() == gcfKlipper) {
-                // Disable minimum cruise ratio to ensure consistent motion for calibration
-                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
-            }
             gcode += writer().set_input_shaping('X', 0.f, print.calib_params().freqStartX, print.calib_params().shaper_type);
             gcode += writer().set_input_shaping('Y', 0.f, print.calib_params().freqStartY, print.calib_params().shaper_type);
         } else {

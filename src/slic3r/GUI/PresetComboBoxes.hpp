@@ -7,6 +7,7 @@
 #include <wx/clrpicker.h>
 
 #include "libslic3r/FilamentColorLibrary.hpp"
+#include "FilamentColorUtils.hpp"
 #include "libslic3r/Preset.hpp"
 #include "wxExtensions.hpp"
 #include "BitmapComboBox.hpp"
@@ -288,7 +289,7 @@ private:
     std::string CurrentFilamentId() const;
 public:
     // Ultra: also used by the phone API (RemoteAccess) to set a slot colour the way the sidebar does.
-    void ApplyFilamentColor(const FilamentColor& colorData);
+    void ApplyFilamentColor(const FilamentColor& colorData, const FilamentColorUtils::ColourMakeUp* makeUp = nullptr);
 };
 
 

@@ -243,6 +243,14 @@ std::string wait_command(GCodeFlavor flavor, float seconds)
     return "G4 S" + Slic3r::float_to_string_decimal_point(seconds, 3) + "\n";
 }
 
+// HEIGHT/WIDTH tag values. std::to_string is sprintf("%f") and follows LC_NUMERIC, so a
+// comma-decimal language emitted "0,300000" and GCodeProcessor (C locale) dropped the tag.
+// Six decimals match %f, so the C-locale text is byte-identical to std::to_string.
+static std::string analyzer_tag_value(double value)
+{
+    return Slic3r::float_to_string_decimal_point(value, 6);
+}
+
 class WipeTowerWriter
 {
 public:
@@ -268,7 +276,7 @@ public:
             GCodeProcessor::s_IsBBLPrinter = bbl_gcode_tags;
             // adds tag for analyzer:
             std::ostringstream str;
-            str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << std::to_string(m_layer_height) << "\n"; // don't rely on GCodeAnalyzer knowing the layer height - it knows nothing at priming
+            str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << analyzer_tag_value(m_layer_height) << "\n"; // don't rely on GCodeAnalyzer knowing the layer height - it knows nothing at priming
             str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << ExtrusionEntity::role_to_string(erWipeTower) << "\n";
             m_gcode += str.str();
             change_analyzer_line_width(line_width);
@@ -277,7 +285,7 @@ public:
     WipeTowerWriter& change_analyzer_line_width(float line_width) {
         // adds tag for analyzer:
         std::stringstream str;
-        str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) << std::to_string(line_width) << "\n";
+        str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) << analyzer_tag_value(line_width) << "\n";
         m_gcode += str.str();
         return *this;
     }
@@ -604,11 +612,11 @@ public:
                 if (i == 1) {
                     // using bridge flow in bridge area, and add notes for gcode-check when flow changed
                     set_extrusion_flow(wipe_tower->extrusion_flow(0.2));
-                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(0.2) + "\n");
+                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
                     flow_changed = true;
                 } else if (i == 2 && flow_changed) {
                     set_extrusion_flow(wipe_tower->get_extrusion_flow());
-                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(m_layer_height) + "\n");
+                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
                 }
             }
             extrude(corners[i], f);
@@ -1882,7 +1890,7 @@ void WipeTower::toolchange_Wipe(
 
     // BBS: add the note for gcode-check, when the flow changed, the width should follow the change
     if (is_first_layer()) {
-        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + std::to_string(1.15 * m_perimeter_width) + "\n");
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(1.15 * m_perimeter_width) + "\n");
     }
 
 	const float& xl = cleaning_box.ld.x();
@@ -1931,7 +1939,7 @@ void WipeTower::toolchange_Wipe(
         // BBS: check the bridging area and use the bridge flow
         if (need_change_flow || need_thick_bridge_flow(writer.y())) {
             writer.set_extrusion_flow(extrusion_flow(0.2));
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(0.2) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
             need_change_flow = true;
         }
 
@@ -1943,7 +1951,7 @@ void WipeTower::toolchange_Wipe(
         // BBS: recover the flow in non-bridging area
         if (need_change_flow) {
             writer.set_extrusion_flow(m_extrusion_flow);
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(m_layer_height) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
         }
 
         if (writer.y() - float(EPSILON) > cleaning_box.lu.y())
@@ -1977,7 +1985,7 @@ void WipeTower::toolchange_Wipe(
     writer.set_extrusion_flow(m_extrusion_flow); // Reset the extrusion flow.
     // BBS: add the note for gcode-check when the flow changed
     if (is_first_layer()) {
-        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + std::to_string(m_perimeter_width) + "\n");
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_perimeter_width) + "\n");
     }
 }
 

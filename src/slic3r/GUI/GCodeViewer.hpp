@@ -10,6 +10,7 @@
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "IMSlider.hpp"
 #include "GLModel.hpp"
 #include "I18N.hpp"
@@ -305,6 +306,11 @@ private:
     std::string   m_showcase_prelude_error;
     // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
     void restore_from_showcase(bool ranges);
+    // Multi-colour P3: libvgcode's segments program with the coextruded-colour prelude (0 = not
+    // built), and whether building it failed (not retried).
+    unsigned int m_showcase_mc_program = 0;
+    bool         m_showcase_mc_failed  = false;
+    // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
 
 public:
     GCodeViewer();
@@ -359,6 +365,14 @@ public:
         // Realism 1b: light the smooth look with the prelude program (showcase_material_program()),
         // whose uniforms the caller has set; false keeps libvgcode's own lighting.
         bool   material        = false;
+
+        // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
+        // The slot table for Showcase/MultiColourGlsl.hpp's uniforms (MultiColour::pack_uniforms()),
+        // drawn only with the smooth look. coextruded_look = false (the scene's "Coextruded colours"
+        // switch, P2) draws every slot in its plain colour.
+        bool                         coextruded_look = true;
+        MultiColour::UniformTable    multicolour;
+        // ---- end multi-colour ----
     };
     void render_for_showcase(const ShowcaseLook &look);
     // Realism 1b: libvgcode's segments program with Showcase's material lighting put in front of its
@@ -366,6 +380,10 @@ public:
     // not retried after a failure (`error` then says why). 0 = none.
     unsigned int showcase_material_program(const std::string &prelude, const std::vector<std::pair<std::string, int>> &sampler_units,
                                            std::string &error);
+    // Multi-colour P3: builds the coextruded-colour prelude into libvgcode's programs (the built-in
+    // one and 1b's material one) and loads the slot table into both. render_for_showcase() calls it;
+    // call it also before showcase_material_program() so that program is built with it first.
+    void apply_showcase_multicolour(const ShowcaseLook &look);
     void end_showcase();
     bool showcase_active() const { return m_showcase.active; }
     size_t layers_count() const { return m_viewer.get_layers_count(); }
