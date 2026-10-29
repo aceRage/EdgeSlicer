@@ -8,7 +8,7 @@ objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk,
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
 
     python -I make_multicolour_fixtures.py <template.3mf> <out dir> [--angle DEG] [--colors "#RRGGBB|#RRGGBB"]
-                                           [--source toolpaths|model]
+                                           [--source toolpaths|model] [--dark]
 
 Writes <out dir>/<shape>_<view>.3mf and lists them on stdout, one per line.
 
@@ -17,7 +17,7 @@ anticlockwise from the printer's front seen from above). The default, -45, puts 
 front-right corner, as on the P0 cube (front face red, right face yellow); set it from the pen mark.
 
 --source is the scene's source: "toolpaths" (P3, the default) or "model" (P4, Showcase mesh mode: the
-coextruded look without a slice).
+coextruded look without a slice). --dark uses the dark studio backdrop and floor instead of Studio white.
 """
 import argparse
 import json
@@ -181,6 +181,7 @@ def main(argv):
     ap.add_argument("--colors", default="#D7261E|#F5BE1B")
     ap.add_argument("--twist", type=float, default=0.0)
     ap.add_argument("--source", choices=["toolpaths", "model"], default="toolpaths")
+    ap.add_argument("--dark", action="store_true")
     a = ap.parse_args(argv[1:])
 
     with zipfile.ZipFile(a.template) as z:
@@ -220,6 +221,10 @@ def main(argv):
                      "floor": {"type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45},
                      "materials": {"filaments": [{"slot": 1, "finish": "silk"}]},
                      "export": {"width": 1920, "height": 1080, "quality": "high", "format": "png"}}
+            if a.dark:
+                scene["preset_base"] = "dark_gradient"
+                scene["background"] = {"type": "vertical_gradient", "color1": "#3A3D42", "color2": "#0B0C0E"}
+                scene["floor"] = {"type": "shadow_catcher", "color": "#1A1B1E", "shadow_strength": 0.6}
             cam = camera(view, (cx, cy), extent, height)
             if cam is not None:
                 scene["camera"] = cam

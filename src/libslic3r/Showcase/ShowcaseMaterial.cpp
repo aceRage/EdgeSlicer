@@ -411,7 +411,9 @@ SkinTangent skin_tangent_mode(const SkinSettings &s)
     const bool aligned = p == "alignedrectilinear";
     if (!(aligned || p == "rectilinear" || p == "monotonic" || p == "monotonicline"))
         return t;   // Isotropic
-    t.zigzag = !(p == "monotonic" || p == "monotonicline");
+    // Monotonic still joins its lines into a zig-zag (only their order is monotonic); monotonic
+    // line lays every line the same way (P3's toolpath stills of the cube top show the difference).
+    t.zigzag = p != "monotonicline";
 
     std::vector<double> angles;
     if (s.surface_direction >= 0.)

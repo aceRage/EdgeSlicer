@@ -6,7 +6,7 @@
 # 7.2, 7.3 and 8.2.
 #
 #   sh tests/showcase/multicolour_stills.sh <install dir> <template.3mf> <out dir> [--size px] [--angle deg]
-#                                           [--photos dir] [--golden dir] [--mesh] [--compare dir]
+#                                           [--photos dir] [--golden dir] [--mesh] [--compare dir] [--dark]
 #     <template.3mf>  a project 3MF with project settings (its printer and process are used), e.g. the
 #                     U1 project tests/data/support_corpus/onepart_group.3mf, as golden.sh uses (an H2C
 #                     project slices on the command line but not in the hidden render instance)
@@ -17,6 +17,7 @@
 #     --mesh          P4: the model in mesh mode, not sliced (the scenes' source is "model")
 #     --compare       stills of the same names to show beside these in index.html (e.g. P3's
 #                     tests/p0_multicolour_cc1/p3_stills next to --mesh stills)
+#     --dark          the dark studio backdrop (the stills are otherwise on Studio white)
 #
 # Writes <out>/<shape>_<view>.png (+ .log, .report.json) and <out>/index.html.
 
@@ -29,6 +30,7 @@ PHOTOS=$REPO/tests/p0_multicolour_cc1
 GOLDEN=
 MESH=
 COMPARE=
+DARK=
 ARGS=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -38,7 +40,8 @@ while [ $# -gt 0 ]; do
     --golden) GOLDEN=$2; shift 2 ;;
     --mesh) MESH=1; shift ;;
     --compare) COMPARE=$2; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --dark) DARK=--dark; shift ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) ARGS="$ARGS $1"; shift ;;
     esac
 done
@@ -69,7 +72,7 @@ if [ -n "$MESH" ]; then
     SLICE=
     LABEL=P4
 fi
-"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" > "$OUT/fixtures.txt" || exit 2
+"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" $DARK > "$OUT/fixtures.txt" || exit 2
 
 STATUS=0
 render() {   # exe datadir fixture out
