@@ -336,7 +336,7 @@ boost::filesystem::path nozzle_process_tmp_dir()
     return dir;
 }
 
-bool round_trip_project(const DynamicPrintConfig &store_config, DynamicPrintConfig &dst_config)
+bool round_trip_project(DynamicPrintConfig store_config, DynamicPrintConfig &dst_config)
 {
     Model        src_model;
     ModelObject *object = src_model.add_object();
@@ -491,8 +491,8 @@ TEST_CASE("A U1 0.4+0.6 offers 0.6 processes for its 0.6 tools and fills them at
     CHECK(filled.option<ConfigOptionInts>("print_extruder_id")->values.size() == 8);
     for (const char *key : { "outer_wall_speed", "inner_wall_speed", "sparse_infill_speed", "travel_speed", "default_acceleration" }) {
         INFO("option " << key);
-        CHECK(nozzle_process_value(filled, key, 2, false) == p06_preset->config.option(key)->vserialize()[0]);
-        CHECK(nozzle_process_value(filled, key, 0, false) == plain.option(key)->vserialize()[0]);
+        CHECK(nozzle_process_value(filled, key, 2, false) == static_cast<const ConfigOptionVectorBase *>(p06_preset->config.option(key))->vserialize()[0]);
+        CHECK(nozzle_process_value(filled, key, 0, false) == static_cast<const ConfigOptionVectorBase *>(plain.option(key))->vserialize()[0]);
     }
     // Geometry stays the plate's.
     CHECK(filled.opt_float("layer_height") == plain.opt_float("layer_height"));
