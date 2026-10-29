@@ -3762,13 +3762,17 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically. "
+                     "The value is sent both as ACCEL_TO_DECEL and as the equivalent MINIMUM_CRUISE_RATIO "
+                     "(1 - accel_to_decel factor), which replaced it in newer Klipper and overrides minimum_cruise_ratio in printer.cfg.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
     
     def = this->add("accel_to_decel_factor", coPercents);
     def->label = L("accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration. "
+                     "Newer Klipper gets it as minimum_cruise_ratio = 1 - this value (50%% sends ACCEL_TO_DECEL = half the acceleration "
+                     "and MINIMUM_CRUISE_RATIO=0.5).");
     def->sidetext = "%";
     def->min = 1;
     def->max = 100;
