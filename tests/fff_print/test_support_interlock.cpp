@@ -5,7 +5,9 @@
 
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <map>
 #include <sstream>
 #include <string>
@@ -15,6 +17,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -382,9 +385,8 @@ TEST_CASE("Support interface interlock with the owner's tree hybrid settings", "
 
 TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped underside)", "[SupportInterlock]")
 {
-    // Two caps side by side, undersides at 10.0 and 10.2 mm, on one stem. The object is centred on its
-    // bounding box, so cap A (the lower one) lies at x < 0 in object coordinates. On the layer that is
-    // cap A's top roof, cap B's roof is one layer down (woven): the weave must stay over cap B.
+    // Two caps side by side, undersides at 10.0 and 10.2 mm, on one stem under cap B. On the layer that
+    // is cap A's top roof, cap B's roof is one layer down (woven): the weave must stay over cap B.
     TriangleMesh model = make_cube(6, 6, 10);
     model.translate(22., 7., 0.); // under cap B: cap A is a 15 mm cantilever
     TriangleMesh cap_a = make_cube(15, 20, 2);
@@ -399,68 +401,66 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
         c.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.2));
         return c;
     };
-    Print print_off, print_on;
-    init_and_process_print({ model }, print_off, config(false));
-    init_and_process_print({ model }, print_on,  config(true));
-    const auto off = print_off.objects().front()->support_layers();
-    const auto on  = print_on .objects().front()->support_layers();
-    REQUIRE(off.size() == on.size());
-    // Cap A's footprint in object coordinates: the object layer between 10.0 and 10.2 mm holds cap A only.
-    ExPolygons cap_a_region;
-    for (const Layer *layer : print_on.objects().front()->layers())
-        if (layer->print_z > 10.05 && layer->print_z < 10.25 && cap_a_region.empty())
-            cap_a_region = offset_ex(layer->lslices, - float(scale_(1.)));
-    REQUIRE(! cap_a_region.empty());
-    {
-        // Diagnostics for a failure below: where the support layers and cap A lie.
-        std::ostringstream diag;
-        diag << "capA bbox " << get_extents(cap_a_region).min.transpose() << " .. " << get_extents(cap_a_region).max.transpose() << std::endl;
-        for (size_t i = 0; i < off.size(); ++ i)
-            if (off[i]->print_z > 9. && off[i]->print_z < 10.3) {
-                std::vector<const ExtrusionPath*> paths;
-                collect_paths(off[i]->support_fills, paths);
-                BoundingBox bb;
-                for (const ExtrusionPath *p : paths)
-                    for (const Point &pt : p->polyline.points)
-                        bb.merge(pt);
-                diag << "z " << off[i]->print_z << " paths " << paths.size() << " bbox " << bb.min.transpose() << " .. " << bb.max.transpose() << std::endl;
-            }
-        UNSCOPED_INFO(diag.str());
-    }
-    auto over_cap_a = [&cap_a_region](const SupportLayer &layer, ExtrusionRole role) {
-        std::vector<const ExtrusionPath*> paths;
-        collect_paths(layer.support_fills, paths);
+    // Measured on the G-code, in bed coordinates, so the model and the support share one frame.
+    struct Seg { double z, x0, y0, x1, y1; bool support, iface; };
+    auto segments = [&model](const DynamicPrintConfig &c) {
+        DynamicPrintConfig cc = c;
+        cc.set_key_value("gcode_comments", new ConfigOptionBool(true));
+        const std::string gcode = Slic3r::Test::slice({ model }, cc);
+        std::vector<Seg> out;
+        GCodeReader parser;
+        parser.parse_buffer(gcode, [&out](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            if (! line.extruding(self))
+                return;
+            const std::string_view comment = line.comment();
+            Seg s;
+            s.z = self.z(); s.x0 = self.x(); s.y0 = self.y(); s.x1 = line.new_X(self); s.y1 = line.new_Y(self);
+            s.support = comment.find("support") != std::string_view::npos;
+            s.iface   = s.support && comment.find("interface") != std::string_view::npos;
+            out.push_back(s);
+        });
+        return out;
+    };
+    const std::vector<Seg> off = segments(config(false));
+    const std::vector<Seg> on  = segments(config(true));
+    // Cap A's footprint: the model on the layer between 10.0 and 10.2 mm is cap A alone.
+    double ax0 = 1e9, ax1 = -1e9, ay0 = 1e9, ay1 = -1e9;
+    for (const Seg &s : off)
+        if (! s.support && s.z > 10.05 && s.z < 10.25) {
+            ax0 = std::min({ ax0, s.x0, s.x1 }); ax1 = std::max({ ax1, s.x0, s.x1 });
+            ay0 = std::min({ ay0, s.y0, s.y1 }); ay1 = std::max({ ay1, s.y0, s.y1 });
+        }
+    REQUIRE(ax1 > ax0);
+    CAPTURE(ax0, ax1, ay0, ay1);
+    auto under_a = [&](const std::vector<Seg> &segs, double z, bool iface) {
         double len = 0.;
-        for (const ExtrusionPath *path : paths)
-            if (path->role() == role)
-                for (size_t i = 1; i < path->polyline.points.size(); ++ i) {
-                    const Point &a = path->polyline.points[i - 1], &b = path->polyline.points[i];
-                    bool in_a = false, in_b = false;
-                    for (const ExPolygon &ex : cap_a_region) {
-                        in_a |= ex.contains(a);
-                        in_b |= ex.contains(b);
-                    }
-                    if (in_a && in_b)
-                        len += unscale<double>((b - a).cast<double>().norm());
-                }
+        for (const Seg &s : segs)
+            if (s.support && s.iface == iface && std::abs(s.z - z) < 0.01 &&
+                std::min(s.x0, s.x1) > ax0 + 1. && std::max(s.x0, s.x1) < ax1 - 1. &&
+                std::min(s.y0, s.y1) > ay0 + 1. && std::max(s.y0, s.y1) < ay1 - 1.)
+                len += std::hypot(s.x1 - s.x0, s.y1 - s.y0);
         return len;
     };
-    // Cap A's top roof layer: the highest support layer under z = 10 with interface over cap A.
-    size_t contact = size_t(-1);
-    for (size_t i = 0; i < off.size(); ++ i)
-        if (off[i]->print_z < 10. - 0.05 && over_cap_a(*off[i], erSupportMaterialInterface) > 10.)
-            contact = i;
-    REQUIRE(contact != size_t(-1));
+    // Cap A's top roof layer: the highest layer under z = 10 with interface under cap A.
+    double z_contact = -1.;
+    for (const Seg &s : off)
+        if (s.support && s.iface && s.z < 10. - 0.05 && s.z > z_contact && under_a(off, s.z, true) > 10.)
+            z_contact = s.z;
+    REQUIRE(z_contact > 0.);
+    CAPTURE(z_contact);
     // No body stripes against cap A's underside ...
-    CHECK(over_cap_a(*on[contact], erSupportMaterial) < 1.);
+    CHECK(under_a(on, z_contact, false) < 1.);
     // ... and cap A's top roof is printed as with the weave off.
-    const double iface_off = over_cap_a(*off[contact], erSupportMaterialInterface);
-    const double iface_on  = over_cap_a(*on[contact],  erSupportMaterialInterface);
-    REQUIRE(iface_off > 10.);
+    const double iface_off = under_a(off, z_contact, true);
+    const double iface_on  = under_a(on,  z_contact, true);
+    CAPTURE(iface_off, iface_on);
     CHECK(iface_on > 0.95 * iface_off);
     CHECK(iface_on < 1.05 * iface_off);
-    // The weave did happen (over cap B, one layer under its top roof).
-    CHECK(on[contact]->interlock_woven);
+    // The weave did happen somewhere (over cap B).
+    double body_on = 0., body_off = 0.;
+    for (const Seg &s : on)  if (s.support && ! s.iface && std::abs(s.z - z_contact) < 0.01) body_on  += std::hypot(s.x1 - s.x0, s.y1 - s.y0);
+    for (const Seg &s : off) if (s.support && ! s.iface && std::abs(s.z - z_contact) < 0.01) body_off += std::hypot(s.x1 - s.x0, s.y1 - s.y0);
+    CHECK(body_on > body_off + 10.);
 }
 
 TEST_CASE("Woven body stripes with a don't-care support filament get a body filament scheduled", "[SupportInterlock]")
