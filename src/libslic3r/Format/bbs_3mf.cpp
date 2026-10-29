@@ -205,6 +205,8 @@ const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
 // halves - exactly the contract Metadata/cut_information.xml and Metadata/image_fill/ already
 // keep. The mesh is stored ONCE per cut and shared by both halves through its hash.
 const std::string CUT_RECIPE_FILE = "Metadata/cut_recipe.xml";
+// Height colour pattern records (HeightColourPattern.hpp). EdgeSlicer-only; written only when an object has one.
+const std::string HEIGHT_PATTERNS_FILE = "Metadata/edgeslicer_height_patterns.json";
 const std::string CUT_RECIPE_MESH_DIR = "Metadata/cut_recipe/";
 
 const unsigned int AUXILIARY_STR_LEN = 12;
@@ -1294,6 +1296,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // their own SHA-256, so two halves of one cut find the same entry and the mesh is held
         // once no matter how many objects refer to it.
         IdToCutRecipeInfoMap       m_cut_recipe_infos;
+        // 1 based model object index -> height colour pattern records
+        std::map<int, std::vector<HeightColourPattern>> m_height_patterns;
         std::map<std::string, TriangleMesh> m_cut_recipe_meshes;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
@@ -1374,6 +1378,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // RE-EDITABLE CUTS: Metadata/cut_recipe.xml, and one Metadata/cut_recipe/<sha256>.bin
         // pre-cut mesh blob per distinct mesh.
         void _extract_cut_recipe_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
+        void _extract_height_patterns_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_cut_recipe_mesh_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
@@ -1590,6 +1595,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_objects_metadata.clear();
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
+        m_height_patterns.clear();
         m_brim_ear_points.clear();
         //m_sla_support_points.clear();
         m_curr_metadata_name.clear();
@@ -2142,6 +2148,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 else if (boost::algorithm::iequals(name, CUT_RECIPE_FILE)) {
                     _extract_cut_recipe_from_archive(archive, stat);
                 }
+                else if (boost::algorithm::iequals(name, HEIGHT_PATTERNS_FILE)) {
+                    _extract_height_patterns_from_archive(archive, stat);
+                }
                 else if (boost::algorithm::istarts_with(name, CUT_RECIPE_MESH_DIR)) {
                     _extract_cut_recipe_mesh_from_archive(archive, stat);
                 }
@@ -2340,6 +2349,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             IdToLayerConfigRangesMap::iterator obj_layer_config_ranges = m_layer_config_ranges.find(object.second + 1);
             if (obj_layer_config_ranges != m_layer_config_ranges.end())
                 model_object->layer_config_ranges = std::move(obj_layer_config_ranges->second);
+
+            // Height colour patterns are indexed the same way. A record whose ranges are not in
+            // the object any more is still kept: the state check reports it as modified.
+            if (auto pat = m_height_patterns.find(object.second + 1); pat != m_height_patterns.end())
+                model_object->height_colour_patterns = std::move(pat->second);
 
             IdToBrimPointsMap::iterator obj_brim_points = m_brim_ear_points.find(object.second + 1);
             if (obj_brim_points != m_brim_ear_points.end())
@@ -3380,6 +3394,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             info.recipe    = std::move(r);
             m_cut_recipe_infos.insert({ obj_idx, std::move(info) });
         }
+    }
+
+    // Metadata/edgeslicer_height_patterns.json. Untrusted file content: the parser drops what it
+    // cannot make sense of, and a missing or broken file leaves the plain ranges as they are.
+    void _BBS_3MF_Importer::_extract_height_patterns_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
+    {
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull)
+            return;
+        std::string buffer((size_t) stat.m_uncomp_size, 0);
+        if (mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void *) buffer.data(), (size_t) stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading height colour pattern data to buffer");
+            return;
+        }
+        for (auto &entry : height_patterns_from_json(buffer))
+            m_height_patterns.emplace(entry.first, std::move(entry.second));
     }
 
     // RE-EDITABLE CUTS: one Metadata/cut_recipe/<sha256>.bin pre-cut mesh blob.
@@ -6991,6 +7020,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // per distinct pre-cut mesh. The mesh is written ONCE however many objects refer to it,
         // which is what keeps the two halves of one cut to a single copy.
         bool _add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model);
+        // "Metadata/edgeslicer_height_patterns.json": only when an object has a height colour
+        // pattern, and never in "Export Bambu 3MF" (the plain ranges are what Bambu reads).
+        bool _add_height_patterns_file_to_archive(mz_zip_archive &archive, Model &model);
         // Showcase tab: "Metadata/showcase/scenes.json" plus the images the scenes use.
         bool _add_showcase_to_archive(mz_zip_archive &archive, const Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
@@ -7554,6 +7586,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // that carry one, so a project with no editable cut gains nothing at all.
         if (!_add_cut_recipe_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_recipe_file_to_archive failed\n");
+            return false;
+        }
+
+        if (!m_bambu_compat && !_add_height_patterns_file_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_height_patterns_file_to_archive failed";
             return false;
         }
 
@@ -9594,6 +9631,26 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 add_error("Unable to add a showcase image to archive");
                 return false;
             }
+        }
+        return true;
+    }
+
+    bool _BBS_3MF_Exporter::_add_height_patterns_file_to_archive(mz_zip_archive &archive, Model &model)
+    {
+        bool any = false;
+        std::vector<const std::vector<HeightColourPattern> *> per_object;
+        per_object.reserve(model.objects.size());
+        for (const ModelObject *object : model.objects) {
+            per_object.push_back(&object->height_colour_patterns);
+            any = any || !object->height_colour_patterns.empty();
+        }
+        // Nothing to say: write nothing, so a project that never used a pattern is unchanged.
+        if (!any)
+            return true;
+        const std::string out = height_patterns_to_json(per_object);
+        if (!mz_zip_writer_add_mem(&archive, HEIGHT_PATTERNS_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add height colour patterns file to archive");
+            return false;
         }
         return true;
     }
