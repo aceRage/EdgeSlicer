@@ -91,8 +91,10 @@ def camera(view, centre, extent, height):
     if view == "threequarter":
         return None   # Showcase frames the model from the front right, a little above
     if view == "top":
-        return {"projection": "ortho", "eye": [cx, cy, height + 150.0], "target": [cx, cy, height],
-                "up": [0.0, 1.0, 0.0], "zoom": 0.7 * FRAME_HEIGHT / extent}
+        # Straight down, the printer's front at the bottom of the image (a hair off vertical, with Z
+        # up, so the camera keeps +Y up: a view exactly along its up vector is ill-defined).
+        return {"projection": "ortho", "eye": [cx, cy - 0.5, height + 150.0], "target": [cx, cy, height],
+                "up": [0.0, 0.0, 1.0], "zoom": 0.7 * FRAME_HEIGHT / extent}
     if view == "backleft":
         d = 4.0 * extent + 60.0
         e = [cx - 0.55 * d, cy + 0.75 * d, height * 0.5 + 0.45 * d]
