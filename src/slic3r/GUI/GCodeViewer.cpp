@@ -2920,9 +2920,17 @@ void GCodeViewer::load_support_overhang_overlay()
         per_object.emplace_back(support_overhang_overlay(*object));
         for (const SupportOverhangOverlayLayer &layer : per_object.back()) {
             // The vgcode layer of this object layer: the closest z, with or without the printer's z offset.
-            size_t id = m_viewer.get_layer_id_at(float(layer.print_z));
+            // get_layer_id_at() counts the layers at or below z (Orca #16588), so the closest layer is that
+            // count minus one or the layer just above it.
+            auto closest_layer = [this](float z) {
+                const size_t count = m_viewer.get_layers_count();
+                const size_t above = std::min(m_viewer.get_layer_id_at(z), count > 0 ? count - 1 : size_t(0));
+                const size_t below = above > 0 ? above - 1 : above;
+                return std::abs(m_viewer.get_layer_z(below) - z) <= std::abs(m_viewer.get_layer_z(above) - z) ? below : above;
+            };
+            size_t id = closest_layer(float(layer.print_z));
             if (m_z_offset != 0.f) {
-                const size_t id_off = m_viewer.get_layer_id_at(float(layer.print_z) + m_z_offset);
+                const size_t id_off = closest_layer(float(layer.print_z) + m_z_offset);
                 if (std::abs(m_viewer.get_layer_z(id_off) - (float(layer.print_z) + m_z_offset)) < std::abs(m_viewer.get_layer_z(id) - float(layer.print_z)))
                     id = id_off;
             }

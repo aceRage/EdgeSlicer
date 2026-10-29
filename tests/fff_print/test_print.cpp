@@ -2127,6 +2127,8 @@ void validate_build_cubes(Slic3r::Model& model, Slic3r::Print& print, DynamicPri
 }
 
 // Build cubes and run validate(), collecting warnings; returns the blocking error.
+// The Model dies on return, so callers must not touch a warning's `object` pointer;
+// use validate_build_cubes() with a test-scope Model/Print for that.
 StringObjectException validate_cubes(const DynamicPrintConfig& config,
                                      std::vector<StringObjectException>& warnings,
                                      int n = 1, bool overlap = false)
@@ -2206,6 +2208,88 @@ TEST_CASE("Print::validate coalesces motion-ability warnings into one", "[Print]
     CHECK(w_both.size() == w_accel.size());  // the extra motion trigger collapses into the same warning
 }
 
+namespace {
+// Two filaments, one 20 mm cube printed with filament `cube_filament` (1-based), and the given flow ratios.
+// tool_change_filament (1-based, 0 = none) adds a "Change filament" custom G-code at z 5 mm on the plate.
+StringObjectException validate_flow_ratios(const std::vector<double> &flow_ratios, int cube_filament, int tool_change_filament = 0)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = false;
+    config.option<ConfigOptionFloats>("filament_flow_ratio")->values = flow_ratios;
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n")); // validate() relative-E reset
+
+    Slic3r::Model model;
+    Slic3r::Print print;
+    ModelObject  *object = model.add_object();
+    object->add_volume(Slic3r::Test::mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    object->ensure_on_bed();
+    object->config.set("extruder", cube_filament);
+    if (tool_change_filament > 0)
+        model.plates_custom_gcodes[model.curr_plate_index].gcodes.push_back(
+            CustomGCode::Item{ 5., CustomGCode::ToolChange, tool_change_filament, "", "" });
+    print.apply(model, config);
+    std::vector<StringObjectException> warnings;
+    return print.validate(&warnings);
+}
+} // namespace
+
+// ORCA #16719: a flow ratio of 0 used to write NaN extrusion lengths; validation now refuses it.
+TEST_CASE("Print::validate refuses a used filament with a flow ratio of 0", "[Print][validate][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionFloats>("filament_flow_ratio")->values = {0.};
+
+    std::vector<StringObjectException> warnings;
+    StringObjectException err = validate_cubes(config, warnings);
+
+    CHECK_FALSE(err.string.empty());
+    CHECK_FALSE(err.is_warning);
+    CHECK(err.opt_key == "filament_flow_ratio");
+}
+
+TEST_CASE("Print::validate ignores a flow ratio of 0 on an unused filament", "[Print][validate]")
+{
+    // The cube prints with filament 1, so filament 2's ratio is never used.
+    StringObjectException err = validate_flow_ratios({1., 0.}, 1);
+    CHECK(err.string.empty());
+}
+
+TEST_CASE("Print::validate refuses a flow ratio of 0 on the filament the plate prints", "[Print][validate][Regression]")
+{
+    StringObjectException err = validate_flow_ratios({1., 0.}, 2);
+    CHECK(err.opt_key == "filament_flow_ratio");
+    CHECK(err.string.find("filament 2") != std::string::npos);
+}
+
+// Edge: without flow variants, GCode::_extrude scales and divides every extrusion by filament 1's ratio
+// (ResolvedFilamentFlow::uncached_flow_ratio keeps get_at(0)), so a 0 there still writes NaN for a plate
+// that prints only filament 2.
+TEST_CASE("Print::validate refuses filament 1's flow ratio of 0 while flow variants are off", "[Print][validate][Regression]")
+{
+    StringObjectException err = validate_flow_ratios({0., 1.}, 2);
+    CHECK(err.opt_key == "filament_flow_ratio");
+    CHECK(err.string.find("filament 1") != std::string::npos);
+}
+
+// Edge (Fable review of #759): a filament reached only by a "Change filament" custom G-code extrudes too.
+TEST_CASE("Print::validate refuses a flow ratio of 0 on a filament only a custom tool change uses", "[Print][validate][Regression]")
+{
+    StringObjectException err = validate_flow_ratios({1., 0.}, 1, 2);
+    CHECK(err.opt_key == "filament_flow_ratio");
+    CHECK(err.string.find("filament 2") != std::string::npos);
+}
+
+TEST_CASE("Print::validate accepts non-zero flow ratios", "[Print][validate]")
+{
+    CHECK(validate_flow_ratios({0.95, 1.05}, 2).string.empty());
+}
+
 TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate]")
 {
     // Callers may pass no warnings sink: a warning-producing config must not crash
@@ -2229,8 +2313,13 @@ TEST_CASE("Print::validate concatenates layered-clearance collisions into one wa
     // that entry by type so unrelated default-config warnings don't affect the assertion.
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
 
+    // Model/Print live in the test scope: the warning's `object` points into the Model.
+    Slic3r::Model model;
+    Slic3r::Print print;
+    validate_build_cubes(model, print, config, /*n=*/3, /*overlap=*/true);
+
     std::vector<StringObjectException> warnings;
-    StringObjectException err = validate_cubes(config, warnings, /*n=*/3, /*overlap=*/true);
+    StringObjectException err = print.validate(&warnings);
 
     CHECK(err.string.empty());
     auto is_layered = [](const StringObjectException& w) {

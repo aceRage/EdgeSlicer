@@ -304,43 +304,12 @@ void Field::PostInitialize()
 
 	BUILD();
 
-	// For the mode, when settings are in non-modal dialog, neither dialog nor tabpanel doesn't receive wxEVT_KEY_UP event, when some field is selected.
-	// So, like a workaround check wxEVT_KEY_UP event for the Filed and switch between tabs if Ctrl+(1-4) was pressed
     if (getWindow()) {
         if (m_opt.readonly) { 
             this->disable();
         } else {
             this->enable();
         }
-		getWindow()->Bind(wxEVT_KEY_UP, [](wxKeyEvent& evt) {
-		    if ((evt.GetModifiers() & wxMOD_CONTROL) != 0) {
-			    int tab_id = -1;
-			    switch (evt.GetKeyCode()) {
-			    // Home, Prepare, Preview, Device: the tabs these keys always opened (MainTabs.hpp).
-			    case '1':
-			    case '2':
-				case '3':
-				case '4': { tab_id = MainTabs::tab_for_field_shortcut(char(evt.GetKeyCode())); break; }
-#ifdef __APPLE__
-				case 'f':
-#else /* __APPLE__ */
-				case WXK_CONTROL_F:
-#endif /* __APPLE__ */
-                case 'F': {
-                    //wxGetApp().plater()->search(false, Preset::TYPE_MODEL, nullptr, nullptr);
-                    break;
-                }
-			    default: break;
-			    }
-			    if (tab_id >= 0)
-					wxGetApp().mainframe->select_tab(tab_id);
-				if (tab_id > 0)
-					// tab panel should be focused for correct navigation between tabs
-				    wxGetApp().tab_panel()->SetFocus();
-		    }
-
-		    evt.Skip();
-	    }, getWindow()->GetId());
     }
 }
 

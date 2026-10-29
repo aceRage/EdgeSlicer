@@ -43,6 +43,7 @@ add_executable(${_TEST_NAME}_tests
 	test_overlap_carving.cpp
 	test_perimeters.cpp
 	test_seam_position.cpp
+	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
 	test_slice_bake.cpp
@@ -67,6 +68,7 @@ add_executable(${_TEST_NAME}_tests
 	test_wipe.cpp
 	test_wipe_tower.cpp
 	test_adaptive_pa.cpp
+	test_adaptive_pressure_advance.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
 	test_core_guards.cpp

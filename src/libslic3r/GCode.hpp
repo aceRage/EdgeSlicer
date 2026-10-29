@@ -331,6 +331,8 @@ public:
     // Returns G-code to append right after that PA command (empty outside the layer pipeline).
     std::string     reset_adaptive_pa(double pa);
     bool is_BBL_Printer();
+    // Orca #12781: Print::wipe_tower_type(), Type2 without a print.
+    WipeTowerType wipe_tower_type() const;
 
     // SoftFever
     static void assign_object_and_instance_ids(Print& print);

@@ -16,6 +16,7 @@
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "MsgDialog.hpp"
 #include "Plater.hpp"
 #include "GUI_App.hpp"
@@ -5809,7 +5810,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 void MachineObject::set_ctt_dlg( wxString text){
     if (!m_set_ctt_dlg) {
         m_set_ctt_dlg = true;
-        auto print_error_dlg = new GUI::SecondaryCheckDialog(nullptr, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
+        // Parented so it is destroyed with the main frame: a parentless top-level window,
+        // even hidden, keeps wx from leaving the event loop on exit.
+        auto print_error_dlg = new GUI::SecondaryCheckDialog(GUI::wxGetApp().mainframe, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
         print_error_dlg->update_text(text);
         print_error_dlg->Bind(wxEVT_SHOW, [this](auto& e) {
             if (!e.IsShown()) {
