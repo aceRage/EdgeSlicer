@@ -821,6 +821,19 @@ TEST_CASE("Toolpath smoothness mapping (D13)", "[Showcase][Path][Toolpaths]")
         REQUIRE(scenes_from_json(j.dump(), back2));
         CHECK(back2.scenes[0].materials.toolpath_smoothness < 0.f);
     }
+    SECTION("the coextruded look is on by default and written only when off (multi-colour P2)")
+    {
+        Project plain;
+        plain.ensure_scene_for_plate(0);
+        CHECK(plain.scenes[0].materials.coextruded_look);
+        const json j = json::parse(scenes_to_json(plain));
+        CHECK_FALSE(j["scenes"][0]["materials"].contains("coextruded_look"));
+        Project off;
+        off.ensure_scene_for_plate(0).materials.coextruded_look = false;
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(off), back));
+        CHECK_FALSE(back.scenes[0].materials.coextruded_look);
+    }
 }
 
 TEST_CASE("S5 video settings in the scene; a video exported as a path", "[Showcase][Path]")

@@ -576,3 +576,69 @@ TEST_CASE("Export Bambu 3MF drops the visual-only keys (D8)", "[MultiColour][Bam
     // The colours themselves still go, under Bambu's name.
     CHECK(out.find("filament_multi_colour") != out.end());
 }
+
+TEST_CASE("Colour palette and HSV helpers (P2 picker)", "[MultiColour][Palette]")
+{
+    const std::vector<NamedColour> &palette = basic_palette();
+    CHECK(palette.size() == 56);
+    std::set<std::string> seen;
+    for (const NamedColour &c : palette) {
+        std::array<int, 3> rgb;
+        INFO(c.name);
+        CHECK(parse_rgb8(c.hex, rgb));
+        CHECK(format_hex8(rgb[0], rgb[1], rgb[2]) == std::string(c.hex));
+        CHECK(seen.insert(c.hex).second);
+    }
+    SECTION("HSV round trip") {
+        for (int r = 0; r < 256; r += 51)
+            for (int g = 0; g < 256; g += 51)
+                for (int b = 0; b < 256; b += 51) {
+                    const auto hsv = rgb8_to_hsv(r, g, b);
+                    const auto rgb = hsv_to_rgb8(hsv[0], hsv[1], hsv[2]);
+                    CHECK(rgb[0] == r);
+                    CHECK(rgb[1] == g);
+                    CHECK(rgb[2] == b);
+                }
+        CHECK(hsv_to_rgb8(0., 1., 1.) == std::array<int, 3>{ 255, 0, 0 });
+        CHECK(hsv_to_rgb8(120., 1., 1.) == std::array<int, 3>{ 0, 255, 0 });
+        CHECK(hsv_to_rgb8(240., 1., 0.5) == std::array<int, 3>{ 0, 0, 128 });
+        CHECK(hsv_to_rgb8(-120., 1., 1.) == std::array<int, 3>{ 0, 0, 255 });
+    }
+    SECTION("hex parsing") {
+        std::array<int, 3> rgb;
+        CHECK(parse_rgb8("  #1e90ff ", rgb));
+        CHECK(rgb == std::array<int, 3>{ 30, 144, 255 });
+        CHECK(parse_rgb8("FF00ff", rgb));
+        CHECK_FALSE(parse_rgb8("#12345", rgb));
+        CHECK_FALSE(parse_rgb8("#12345G", rgb));
+        CHECK_FALSE(parse_rgb8("", rgb));
+    }
+}
+
+TEST_CASE("Swatch slices follow the proportions and the rotation (P2)", "[MultiColour][Swatch]")
+{
+    Filament f;
+    f.n = 2;
+    f.proportion = { 0.5f, 0.5f, 0.f, 0.f };
+    // Rotation 0: colour 1 faces the front, which is the bottom of the swatch (y down).
+    CHECK(swatch_slice(f, 0.f, 6.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, 0.f, -6.f, 18.f, 8.f) == 1);
+    // Rotation 90: colour 1 faces the right.
+    f.rotation_deg = 90.f;
+    CHECK(swatch_slice(f, 10.f, 0.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, -10.f, 0.f, 18.f, 8.f) == 1);
+    // 30/70: colour 1 covers the first 30% of the width along its axis.
+    f.proportion = { 0.3f, 0.7f, 0.f, 0.f };
+    CHECK(swatch_slice(f, 16.f, 0.f, 18.f, 8.f) == 0);
+    CHECK(swatch_slice(f, 5.f, 0.f, 18.f, 8.f) == 1);
+
+    // A pie for three colours: colour 1 centred on the front at rotation 0.
+    Filament g;
+    g.n = 3;
+    g.proportion = { 0.5f, 0.25f, 0.25f, 0.f };
+    CHECK(swatch_slice(g, 0.f, 6.f, 18.f, 8.f) == 0);   // front
+    CHECK(swatch_slice(g, 10.f, 0.f, 18.f, 8.f) == 1);  // right
+    CHECK(swatch_slice(g, -10.f, -1.f, 18.f, 8.f) == 2); // left
+    Filament one;
+    CHECK(swatch_slice(one, 3.f, 3.f, 18.f, 8.f) == 0);
+}

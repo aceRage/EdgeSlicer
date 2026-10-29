@@ -3,7 +3,9 @@
 #include "../Config.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -196,6 +198,104 @@ RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, floa
             return average();
     }
     return colour_at(filament_angle(direction_turns(vx, vy), filament_length_m), bead.blend_turns);
+}
+
+const std::vector<NamedColour> &basic_palette()
+{
+    static const std::vector<NamedColour> palette = {
+        { "Black", "#000000" }, { "Dark Slate Gray", "#2F4F4F" }, { "Dim Gray", "#696969" }, { "Gray", "#808080" },
+        { "Dark Gray", "#A9A9A9" }, { "Silver", "#C0C0C0" }, { "Gainsboro", "#DCDCDC" }, { "White", "#FFFFFF" },
+        { "Maroon", "#800000" }, { "Dark Red", "#8B0000" }, { "Firebrick", "#B22222" }, { "Crimson", "#DC143C" },
+        { "Red", "#FF0000" }, { "Orange Red", "#FF4500" }, { "Tomato", "#FF6347" }, { "Salmon", "#FA8072" },
+        { "Dark Orange", "#FF8C00" }, { "Orange", "#FFA500" }, { "Gold", "#FFD700" }, { "Yellow", "#FFFF00" },
+        { "Olive", "#808000" }, { "Olive Drab", "#6B8E23" }, { "Yellow Green", "#9ACD32" }, { "Chartreuse", "#7FFF00" },
+        { "Lime", "#00FF00" }, { "Lime Green", "#32CD32" }, { "Light Green", "#90EE90" }, { "Forest Green", "#228B22" },
+        { "Green", "#008000" }, { "Dark Green", "#006400" }, { "Sea Green", "#2E8B57" }, { "Aquamarine", "#7FFFD4" },
+        { "Turquoise", "#40E0D0" }, { "Teal", "#008080" }, { "Dark Cyan", "#008B8B" }, { "Cyan", "#00FFFF" },
+        { "Sky Blue", "#87CEEB" }, { "Deep Sky Blue", "#00BFFF" }, { "Dodger Blue", "#1E90FF" }, { "Royal Blue", "#4169E1" },
+        { "Blue", "#0000FF" }, { "Dark Blue", "#00008B" }, { "Navy", "#000080" }, { "Indigo", "#4B0082" },
+        { "Blue Violet", "#8A2BE2" }, { "Medium Purple", "#9370DB" }, { "Purple", "#800080" }, { "Orchid", "#DA70D6" },
+        { "Magenta", "#FF00FF" }, { "Deep Pink", "#FF1493" }, { "Hot Pink", "#FF69B4" }, { "Pink", "#FFC0CB" },
+        { "Saddle Brown", "#8B4513" }, { "Sienna", "#A0522D" }, { "Chocolate", "#D2691E" }, { "Peru", "#CD853F" },
+    };
+    return palette;
+}
+
+std::array<int, 3> hsv_to_rgb8(double hue_deg, double saturation, double value)
+{
+    double h = std::fmod(hue_deg, 360.);
+    if (h < 0.)
+        h += 360.;
+    const double s = std::clamp(saturation, 0., 1.), v = std::clamp(value, 0., 1.);
+    const double c = v * s, hp = h / 60., x = c * (1. - std::abs(std::fmod(hp, 2.) - 1.)), m = v - c;
+    double r = 0., g = 0., b = 0.;
+    if (hp < 1.)      { r = c; g = x; }
+    else if (hp < 2.) { r = x; g = c; }
+    else if (hp < 3.) { g = c; b = x; }
+    else if (hp < 4.) { g = x; b = c; }
+    else if (hp < 5.) { r = x; b = c; }
+    else              { r = c; b = x; }
+    return { int(std::lround((r + m) * 255.)), int(std::lround((g + m) * 255.)), int(std::lround((b + m) * 255.)) };
+}
+
+std::array<double, 3> rgb8_to_hsv(int r, int g, int b)
+{
+    const double rf = std::clamp(r, 0, 255) / 255., gf = std::clamp(g, 0, 255) / 255., bf = std::clamp(b, 0, 255) / 255.;
+    const double mx = std::max({ rf, gf, bf }), mn = std::min({ rf, gf, bf }), d = mx - mn;
+    double       h = 0.;
+    if (d > 0.) {
+        if (mx == rf)      h = 60. * std::fmod((gf - bf) / d, 6.);
+        else if (mx == gf) h = 60. * ((bf - rf) / d + 2.);
+        else               h = 60. * ((rf - gf) / d + 4.);
+        if (h < 0.)
+            h += 360.;
+    }
+    return { h, mx > 0. ? d / mx : 0., mx };
+}
+
+std::string format_hex8(int r, int g, int b)
+{
+    char buf[8];
+    std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
+    return buf;
+}
+
+bool parse_rgb8(const std::string &text, std::array<int, 3> &out)
+{
+    std::string t = text;
+    while (!t.empty() && std::isspace((unsigned char) t.front()))
+        t.erase(t.begin());
+    while (!t.empty() && std::isspace((unsigned char) t.back()))
+        t.pop_back();
+    if (!t.empty() && t.front() == '#')
+        t.erase(t.begin());
+    if (t.size() != 6)
+        return false;
+    for (char ch : t)
+        if (!std::isxdigit((unsigned char) ch))
+            return false;
+    out = { int(std::strtol(t.substr(0, 2).c_str(), nullptr, 16)), int(std::strtol(t.substr(2, 2).c_str(), nullptr, 16)),
+            int(std::strtol(t.substr(4, 2).c_str(), nullptr, 16)) };
+    return true;
+}
+
+int swatch_slice(const Filament &f, float px, float py, float hw, float hh)
+{
+    if (f.n <= 1)
+        return 0;
+    if (f.n == 2) {
+        const float th = f.rotation_deg * float(PI / 180.);
+        // Screen direction of colour 1 (front at the bottom, anticlockwise from above).
+        const float dx = std::sin(th), dy = std::cos(th);
+        const float h  = std::abs(dx) * hw + std::abs(dy) * hh;
+        const float t  = px * dx + py * dy;
+        return t >= h - 2.f * h * f.proportion[0] ? 0 : 1;
+    }
+    const float phi = f.filament_angle(direction_turns(px, -py), 0.f);
+    for (int i = 0; i < f.n; ++i)
+        if (phi < f.boundary(i + 1))
+            return i;
+    return f.n - 1;
 }
 
 float direction_turns(float x, float y)

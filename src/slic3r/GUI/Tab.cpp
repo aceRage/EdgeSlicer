@@ -37,6 +37,8 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FilamentColorUtils.hpp"
+#include "libslic3r/Showcase/MultiColourFilament.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
@@ -4896,6 +4898,12 @@ void TabFilament::build()
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
+        {
+            Line makeup_line = Line{ L("Colour make-up"), L("The colours, proportions and rotation of the filament slot being edited. "
+                                                            "Visual only: it changes how the print looks in Showcase and Preview, not the G-code.") };
+            makeup_line.widget = [this](wxWindow* parent) { return makeup_create_widget(parent); };
+            optgroup->append_line(makeup_line);
+        }
         optgroup->append_single_option_line("filament_diameter");
 
         optgroup->append_single_option_line("filament_density");
@@ -5280,6 +5288,7 @@ void TabFilament::reload_config()
     this->compatible_widget_reload(m_compatible_prints);
     Tab::reload_config();
     update_price_note();
+    update_makeup_note();
 }
 
 wxSizer* TabFilament::price_note_create_widget(wxWindow* parent)
@@ -5307,6 +5316,64 @@ wxSizer* TabFilament::price_note_create_widget(wxWindow* parent)
     vsizer->Add(hsizer, 0);
     update_price_note();
     return vsizer;
+}
+
+wxSizer* TabFilament::makeup_create_widget(wxWindow* parent)
+{
+    const int em = em_unit(parent);
+    auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    m_makeup_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    m_makeup_note->SetFont(wxGetApp().normal_font());
+    hsizer->Add(m_makeup_note, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+    auto* btn = new Button(parent, _L("Edit") + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(_L("Open the colour dialog of this filament slot, with the colour make-up editor"));
+    btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        Sidebar& sidebar = wxGetApp().sidebar();
+        const int slot = sidebar.editing_filament_index();
+        auto& combos = sidebar.combos_filament();
+        if (slot >= 0 && size_t(slot) < combos.size())
+            combos[size_t(slot)]->ChangeExtruderColor();
+        update_makeup_note();
+    });
+    hsizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+    update_makeup_note();
+    return hsizer;
+}
+
+void TabFilament::update_makeup_note()
+{
+    if (m_makeup_note == nullptr)
+        return;
+    wxString text;
+    const int slot = wxGetApp().sidebar().editing_filament_index();
+    const DynamicPrintConfig& project = m_preset_bundle->project_config;
+    if (slot < 0)
+        text = _L("Choose a filament in the sidebar to see its colour make-up.");
+    else {
+        const FilamentColor color = FilamentColorUtils::GetFilamentColorFromConfig(&project, size_t(slot), "#26A69A");
+        const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&project, size_t(slot));
+        if (color.colors.size() < 2 || color.NormalizedMode() == FilamentColorMode::Gradient)
+            text = wxString::Format(_L("Filament %d: one colour"), slot + 1);
+        else {
+            const int count = std::min<int>(int(color.colors.size()), MultiColour::MAX_COLOURS);
+            const auto share = MultiColour::parse_split(makeUp.split, count);
+            const auto percent = MultiColour::quantize_percent(share, count);
+            wxString parts;
+            for (int i = 0; i < count; ++i)
+                parts += (i == 0 ? wxString() : wxString("/")) + wxString::Format("%d%%", percent[size_t(i)]);
+            text = wxString::Format(_L("Filament %d: %d colours, %s, rotation %d\xC2\xB0"), slot + 1, count, parts,
+                                    int(std::lround(makeUp.angle)));
+            if (makeUp.twist != 0.)
+                text += wxString::Format(_L(", twist %d\xC2\xB0/m"), int(std::lround(makeUp.twist)));
+        }
+    }
+    if (m_makeup_note->GetLabel() == text)
+        return;
+    m_makeup_note->SetLabel(text);
+    m_makeup_note->SetToolTip(text);
+    if (wxWindow* parent = m_makeup_note->GetParent())
+        parent->Layout();
 }
 
 void TabFilament::update_price_note()
@@ -5531,6 +5598,7 @@ void TabFilament::update()
 
     update_description_lines();
     update_price_note();
+    update_makeup_note();
     //BBS: GUI refactor
     //Layout();
     m_parent->Layout();
@@ -5550,6 +5618,7 @@ void TabFilament::clear_pages()
     m_volumetric_speed_description_line = nullptr;
 	m_cooling_description_line = nullptr;
     m_price_note = nullptr;
+    m_makeup_note = nullptr;
 
     //BBS: GUI refactor
     m_overrides_options.clear();

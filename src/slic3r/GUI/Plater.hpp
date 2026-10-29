@@ -173,6 +173,8 @@ public:
     void add_custom_filament(wxColour new_col);
     void scroll_filament_area_to_bottom();
     void edit_filament();
+    // The filament slot the Filament tab edits (0-based), -1 when none was chosen yet.
+    int  editing_filament_index() const;
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
