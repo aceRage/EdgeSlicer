@@ -24,7 +24,7 @@ endif()
 option(BUILD_SHARED_LIBS "Build shared libs" OFF)
 
 # SolveSpace constraint solver (2D sketch solver backbone), built in deps/SLVS.
-# P0: find and link it when SLIC3R_CAD is ON. CAD sources themselves are P1.
+# Linked only when SLIC3R_CAD is ON; CAD sources are appended to lisbslic3r_sources below.
 if (SLIC3R_CAD)
     find_package(SLVS REQUIRED)
 endif ()
@@ -729,6 +729,30 @@ set(lisbslic3r_sources
     Zipper.hpp
 )
 
+# Parametric Design/CAD kernel. Needs the vendored SolveSpace solver (P0) and OCCT
+# ModelingAlgorithms (already ON for Edge B-rep #163/#218). Compiled only when SLIC3R_CAD
+# is ON so an OFF build is unchanged: no extra sources, no extra link deps.
+if (SLIC3R_CAD)
+    list(APPEND lisbslic3r_sources
+            CAD/GeometryEngine.cpp
+            CAD/GeometryEngine.hpp
+            CAD/SketchEngine.cpp
+            CAD/SketchEngine.hpp
+            CAD/SketchConstraints.cpp
+            CAD/SketchConstraints.hpp
+            CAD/SketchSolver.cpp
+            CAD/SketchSolver.hpp
+            CAD/SketchInference.cpp
+            CAD/SketchInference.hpp
+            CAD/SketchImport.cpp
+            CAD/SketchImport.hpp
+            CAD/CadDocument.cpp
+            CAD/CadDocument.hpp
+            CAD/ThreadStandards.cpp
+            CAD/ThreadStandards.hpp
+        )
+endif ()
+
 if (APPLE)
     list(APPEND lisbslic3r_sources
             MacUtils.mm
@@ -740,6 +764,18 @@ endif ()
 add_library(libslic3r STATIC ${lisbslic3r_sources} 
     ${OpenVDBUtils_SOURCES})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${lisbslic3r_sources})
+# CAD .cpp files that pull OCCT's Handle() macro (or nanosvg / slvs.h) must stay out of unity
+# batches, same as Format/STEP.cpp. Listed only when compiled.
+set(_cad_unity_skip)
+if (SLIC3R_CAD)
+    set(_cad_unity_skip
+        CAD/GeometryEngine.cpp
+        CAD/SketchEngine.cpp
+        CAD/CadDocument.cpp
+        CAD/SketchImport.cpp
+        CAD/SketchSolver.cpp
+    )
+endif ()
 # -DSLIC3R_UNITY_BUILD=ON: these sources do not survive being merged with their batch neighbours
 # (duplicate file-local names or leaking macros), so they keep their own translation unit.
 slic3r_unity_build(libslic3r SKIP
@@ -788,6 +824,7 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
     Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
     Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
+    ${_cad_unity_skip}
 )
 
 if (SLIC3R_STATIC)
