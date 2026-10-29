@@ -452,7 +452,7 @@ TEST_CASE("Height colour pattern: regenerate and remove act on the pattern as on
         CHECK(object->height_colour_patterns.size() == 1);
         CHECK(object->layer_config_ranges.size() == 3); // 2 bands + the hand-made one
         CHECK(object->layer_config_ranges.count({ 2., 7. }) == 1);
-        CHECK(object->layer_config_ranges.count({ 22., 27. }) == 1);
+        CHECK(object->layer_config_ranges.count({ 17., 22. }) == 1);
         CHECK(object->layer_config_ranges.count({ 2., 12. }) == 0);
     }
     SECTION("remove erases exactly the owned ranges") {

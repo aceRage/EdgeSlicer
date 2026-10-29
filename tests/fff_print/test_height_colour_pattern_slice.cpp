@@ -246,7 +246,7 @@ TEST_CASE("Height colour pattern: the real layer grid of a 0.3 mm first layer is
     const std::vector<double> tops = layer_tops_of(model, config, &layer_height);
     REQUIRE(tops.size() > 10);
     CHECK(tops.front() == Approx(0.3));
-    CHECK(tops.back() == Approx(20.));
+    CHECK(tops.back() == Approx(20.1).margin(1e-6)); // 0.3 + 0.2 k overshoots the 20 mm top by one tenth
 
     HeightColourPattern p = two_band_pattern();
     const HeightPatternApplyResult r = apply_height_colour_pattern(*model.objects.front(), p, tops, layer_height, false);
