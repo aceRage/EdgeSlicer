@@ -2677,9 +2677,13 @@ void PresetBundle::export_selections(AppConfig &config)
     config.set_printer_setting(printer_name, PRESET_FILAMENT_NAME, first_filament_name);
     config.set_printer_setting(printer_name, "curr_bed_type", config.get("curr_bed_type"));
     // Per-nozzle process P1: remembered per printer, like its filaments.
-    if (const auto *nozzle_processes = project_config.option<ConfigOptionStrings>("nozzle_process_presets");
-        nozzle_processes != nullptr && has_nozzle_process_presets(project_config))
-        config.set_printer_setting(printer_name, "nozzle_process_presets", escape_strings_cstyle(nozzle_processes->values));
+    // Written empty too, so going back to the plate's process on every nozzle is remembered as well.
+    if (supports_nozzle_processes(printers.get_edited_preset().config)) {
+        const auto *nozzle_processes = project_config.option<ConfigOptionStrings>("nozzle_process_presets");
+        config.set_printer_setting(printer_name, "nozzle_process_presets",
+                                   nozzle_processes != nullptr && has_nozzle_process_presets(project_config) ?
+                                       escape_strings_cstyle(nozzle_processes->values) : std::string());
+    }
     for (unsigned i = 1; i < filament_presets.size(); ++i) {
         char name[64];
         assert(!filament_presets[i].empty());

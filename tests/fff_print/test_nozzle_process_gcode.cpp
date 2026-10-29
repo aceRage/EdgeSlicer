@@ -144,6 +144,7 @@ TEST_CASE("A per-nozzle process equal to the plate's slices exactly as without i
     DynamicPrintConfig filled = plate;
     REQUIRE(fill_nozzle_process_slots(filled, { nullptr, &same }));
     REQUIRE_FALSE(process_extruder_slots_differ(filled));
+    REQUIRE_FALSE(filled.opt_bool("process_extruder_values"));
     // The slots are identical, so every reader keeps the plate's column: the moves are byte-identical.
     CHECK(without_config_block(slice(filled)) == without_config_block(base));
 }

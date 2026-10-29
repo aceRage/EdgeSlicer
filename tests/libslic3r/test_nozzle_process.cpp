@@ -225,6 +225,7 @@ TEST_CASE("A U1 0.4+0.6 takes the 0.6 process's speeds on its 0.6 tools", "[Nozz
     CHECK(nozzle_process_value(cfg, "outer_wall_speed", 2, false) == "120");
     CHECK(nozzle_process_value(cfg, "outer_wall_speed", 1, true) == "300");
     CHECK(process_extruder_slots_differ(cfg));
+    CHECK(cfg.opt_bool("process_extruder_values"));
 
     // What a filament on T3 reads once Print::apply sets the flag.
     cfg.option<ConfigOptionBool>("process_extruder_values", true)->value = true;
@@ -273,6 +274,34 @@ TEST_CASE("A per-nozzle process fills only that nozzle's slots of an H2D process
         flat.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 60 }));
         REQUIRE(fill_nozzle_process_slots(plate, { nullptr, &flat }));
         CHECK(plate.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 33, 44, 44, 60, 60, 60, 60 });
+    }
+}
+
+TEST_CASE("A nozzle without its own process keeps printing what it printed before", "[NozzleProcess][Fill]")
+{
+    // The X2D's system processes hold different Bowden slots that nothing ever read; an older user preset
+    // edited only the first column. Neither may start printing differently because the other nozzle got a
+    // process of its own.
+    DynamicPrintConfig cfg = h2d_like({ 1, 2 }, { STD, STD }, false);
+    cfg.option<ConfigOptionInts>("print_extruder_id")->values = { 1, 1, 1, 2, 2, 2 };
+    cfg.option<ConfigOptionStrings>("print_extruder_variant")->values = { "Direct Drive Standard", "Direct Drive High Flow",
+                                                                          "Direct Drive E3D High Flow", "Bowden Standard",
+                                                                          "Bowden High Flow", "Bowden E3D High Flow" };
+    cfg.option<ConfigOptionFloats>("outer_wall_speed")->values = { 60, 61, 62, 50, 51, 52 };
+    DynamicPrintConfig left;
+    left.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 40 }));
+    REQUIRE(fill_nozzle_process_slots(cfg, { &left, nullptr }));
+    CHECK(cfg.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 40, 40, 40, 60, 61, 61 });
+    CHECK(cfg.opt_bool("process_extruder_values"));
+
+    SECTION("unless the process was split per nozzle")
+    {
+        DynamicPrintConfig split = h2d_like({ 1, 2 }, { STD, STD }, true);
+        split.option<ConfigOptionFloats>("outer_wall_speed")->values = { 200, 500, 510, 150, 450, 502, 503 };
+        DynamicPrintConfig left7;
+        left7.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 40 }));
+        REQUIRE(fill_nozzle_process_slots(split, { &left7, nullptr }));
+        CHECK(split.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 40, 40, 40, 150, 450, 502, 503 });
     }
 }
 
@@ -474,6 +503,22 @@ TEST_CASE("A U1 0.4+0.6 offers 0.6 processes for its 0.6 tools and fills them at
     REQUIRE(b.set_nozzle_process(3, ""));
     CHECK(b.project_config.option<ConfigOptionStrings>("nozzle_process_presets")->values.empty());
     CHECK(b.full_config().diff(plain).empty());
+}
+
+TEST_CASE("No shipped dual-extruder process asks for per-extruder values", "[NozzleProcess][PresetBundle]")
+{
+    // Stock jobs stay byte-identical: the slicer reads extruder slots only for a process that asks.
+    PresetBundle &b = vendor_bundle("BBL");
+    size_t        layouts = 0;
+    for (const Preset &preset : b.prints.get_presets()) {
+        if (!preset.is_system || process_extruder_variant_slots(preset.config).empty())
+            continue;
+        ++layouts;
+        INFO("process " << preset.name);
+        const auto *flag = preset.config.option<ConfigOptionBool>("process_extruder_values");
+        CHECK((flag == nullptr || !flag->value));
+    }
+    CHECK(layouts >= 30); // H2D, H2D Pro, H2C and X2D processes
 }
 
 TEST_CASE("An H2D offers processes per side and drops a choice that no longer fits", "[NozzleProcess][PresetBundle]")

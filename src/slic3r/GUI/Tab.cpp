@@ -1214,10 +1214,28 @@ std::vector<wxString> Tab::nozzle_switch_labels() const
     return labels;
 }
 
+bool Tab::nozzle_layout_splittable() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_config == nullptr)
+        return false;
+    const auto* ids = m_config->option<ConfigOptionInts>("print_extruder_id");
+    const auto* opt = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option("outer_wall_speed"));
+    return ids != nullptr && opt != nullptr && opt->size() == ids->values.size() &&
+           process_extruder_variant_slots(*m_config).size() == m_flow_variant_view->nozzle_labels.size();
+}
+
+bool Tab::nozzle_values_split() const
+{
+    const auto* opt = m_config != nullptr ? m_config->option<ConfigOptionBool>("process_extruder_values") : nullptr;
+    return opt != nullptr && opt->value;
+}
+
 int Tab::nozzle_slot_index(const std::string& key) const
 {
+    // Only a process the user split per nozzle is read per extruder; any other one prints every nozzle
+    // from the flow-mode column, which is what the fields show then.
     if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_config == nullptr ||
-        !is_per_nozzle_process_option(key))
+        !is_per_nozzle_process_option(key) || !nozzle_values_split())
         return -1;
     const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(*m_config);
     const size_t e = m_flow_variant_view->selected_extruder;
@@ -1285,13 +1303,42 @@ void Tab::on_nozzle_process_chosen(int row)
 
 void Tab::on_apply_nozzle_to_all()
 {
-    if (!m_flow_variant_view || m_config == nullptr)
+    if (!m_flow_variant_view || m_config == nullptr || !nozzle_layout_splittable())
         return;
     const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(*m_config);
     const auto* variants = m_config->option<ConfigOptionStrings>("print_extruder_variant");
     const size_t e = m_flow_variant_view->selected_extruder;
     if (variants == nullptr || e >= slots.size())
         return;
+    if (!nozzle_values_split()) {
+        // "Edit nozzles separately": every nozzle starts from what it prints today (the flow-mode column),
+        // and from now on the slicer reads each nozzle's own slots.
+        std::vector<std::string> modes;
+        if (const auto* support = m_config->option<ConfigOptionStrings>(flow_support_key(ConfigFlowDomain::Process)))
+            modes = support->values;
+        for (const std::string& key : per_nozzle_process_options()) {
+            auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(key));
+            if (opt == nullptr || opt->size() != variants->values.size())
+                continue;
+            std::unique_ptr<ConfigOption> source(opt->clone());
+            for (size_t other = 1; other < slots.size(); ++other)
+                for (size_t dst : slots[other]) {
+                    const int mode = process_variant_flow_mode(variants->values[dst]);
+                    if (mode < 0)
+                        continue;
+                    const size_t column = flow_variant_index(modes, to_string(FilamentVolumeType(mode)));
+                    opt->set_at(source.get(), dst, column < opt->size() ? column : 0);
+                }
+        }
+        m_config->set_key_value("process_extruder_values", new ConfigOptionBool(true));
+        refresh_flow_variant_view();
+        Tab::reload_config();
+        update_dirty();
+        toggle_options();
+        update_visibility();
+        m_parent->Layout();
+        return;
+    }
     bool changed = false;
     for (const std::string& key : per_nozzle_process_options()) {
         auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(key));
@@ -1351,12 +1398,13 @@ void Tab::refresh_nozzle_controls()
     }
     view->nozzle_process_combo->SetSelection(int(it - view->nozzle_combo_names.begin()));
 
-    const bool side_bound = nozzle_slot_index("outer_wall_speed") >= 0;
+    const bool splittable = nozzle_layout_splittable();
+    const bool split      = splittable && nozzle_values_split();
     wxString note;
     if (!current.empty())
-        note = format_wxstr(_L("%1% prints its speeds, accelerations and jerk from "%2%". Layer height, walls, infill and line widths come from this process."),
+        note = format_wxstr(_L("%1% prints its speeds, accelerations and jerk from \"%2%\". Layer height, walls, infill and line widths come from this process."),
                             nozzle, from_u8(current));
-    else if (side_bound)
+    else if (split)
         note = format_wxstr(_L("Edits below apply to %1%."), nozzle);
     else if (e > 0)
         note = _L("Shared by every nozzle without a process of its own.");
@@ -1364,10 +1412,25 @@ void Tab::refresh_nozzle_controls()
         view->nozzle_note->SetLabel(note);
         view->nozzle_note->Show(!note.empty());
     }
-    if (view->nozzle_apply_btn != nullptr)
-        view->nozzle_apply_btn->Show(current.empty() && side_bound);
+    if (view->nozzle_apply_btn != nullptr) {
+        view->nozzle_apply_btn->SetLabel(split ? _L("Apply to all nozzles") : _L("Edit nozzles separately"));
+        view->nozzle_apply_btn->SetToolTip(split ? _L("Copy this nozzle's speeds, accelerations and jerk to every other nozzle of this process") :
+                                                   _L("Give each nozzle its own speeds, accelerations and jerk in this process. "
+                                                      "Every nozzle starts from the values it prints with now."));
+        view->nozzle_apply_btn->Show(current.empty() && splittable);
+    }
     if (view->host != nullptr)
         view->host->Layout();
+}
+
+void Tab::enable_fields_of_nozzle_process()
+{
+    // Undo disable_fields_of_nozzle_process() of a previously selected nozzle; ConfigManipulation's own
+    // rules run after this and still win.
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty())
+        return;
+    for (const std::string& key : per_nozzle_process_options())
+        toggle_option(key, true);
 }
 
 void Tab::disable_fields_of_nozzle_process()
@@ -1456,7 +1519,7 @@ void Tab::refresh_flow_variant_view()
             m_flow_variant_view->nozzle_selector->SetToolTip(_L("The nozzle whose speed settings this page shows"));
             host_sizer->Add(m_flow_variant_view->nozzle_selector, 0, wxALIGN_CENTER_VERTICAL);
 
-            auto* combo = new ::ComboBox(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), -1), 0,
+            auto* combo = new ::ComboBox(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(340), -1), 0,
                                          nullptr, wxCB_READONLY);
             combo->SetToolTip(_L("The process this nozzle takes its speeds, accelerations and jerk from. Layer height, "
                                  "walls, infill, line widths and supports always come from this (the plate's) process."));
@@ -1574,6 +1637,8 @@ void Tab::update_flow_variant_view_visibility()
                     sibling->Hide();
         }
         host->Show(show);
+        if (show && m_flow_variant_view->selector != nullptr)
+            m_flow_variant_view->selector->Show(m_flow_variant_view->modes.size() > 1);
         if (m_flow_variant_view && m_flow_variant_view->copy_btn) {
             const bool show_copy = show
                 && flow_variant_both_allowed()
@@ -4075,6 +4140,8 @@ void TabPrint::toggle_options()
         m_config_manipulation.set_is_BBL_Printer(is_BBL_printer);
     }
 
+    // Per-nozzle process P1: fields a nozzle's own process greyed out come back first.
+    enable_fields_of_nozzle_process();
     m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
 
     if (m_type == Preset::TYPE_PLATE) {

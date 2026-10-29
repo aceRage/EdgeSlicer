@@ -504,6 +504,11 @@ protected:
     void on_apply_nozzle_to_all();
     void refresh_nozzle_controls();
     void disable_fields_of_nozzle_process();
+    void enable_fields_of_nozzle_process();
+    // The edited process holds per-extruder slots for every nozzle (an H2D / H2C / X2D process), so its
+    // nozzles can be edited separately, and whether they are (process_extruder_values).
+    bool nozzle_layout_splittable() const;
+    bool nozzle_values_split() const;
 
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);

@@ -87,7 +87,13 @@ struct SlotLayout
             if (first >= 0)
                 return size_t(first);
         }
-        // A flow-mode vector: the column of the mode (process_flow_support), Standard when not declared.
+        return column(size, mode);
+    }
+
+    // The flow-mode column of `mode` (process_flow_support), Standard when not declared: what
+    // get_config_idx(Process) reads, so what every extruder printed before per-extruder values.
+    size_t column(size_t size, FilamentVolumeType mode) const
+    {
         const size_t idx = flow_variant_index(flow_support, to_string(mode));
         return idx < size ? idx : 0;
     }
@@ -119,6 +125,13 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 
     const SlotLayout plate = SlotLayout::of(config);
     const bool       keep  = plate.extruder_count() == extruders;
+    // A process the user split per nozzle (left / right edits) keeps every extruder's slots. Any other
+    // process - every system profile, every preset saved before per-nozzle processes - printed all
+    // extruders from the flow-mode column, whatever its other slots hold (the X2D's Bowden slots differ,
+    // an older user preset edited only the first column): a nozzle without a process of its own keeps
+    // printing exactly that.
+    const auto *explicit_opt = dynamic_cast<const ConfigOptionBool *>(config.option("process_extruder_values"));
+    const bool  explicit_values = explicit_opt != nullptr && explicit_opt->value;
     std::vector<int>         ids      = plate.ids;
     std::vector<std::string> variants = plate.variants;
     if (!keep) {
@@ -161,7 +174,10 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
                     continue;
                 }
             }
-            opt->set_at(plate_vec, s, plate_in_place ? s : plate.index(plate_vec->size(), e, mode));
+            const size_t plate_idx = !plate_in_place                ? plate.index(plate_vec->size(), e, mode) :
+                                     (explicit_values || e == 0) ? s :
+                                                                   plate.column(plate_vec->size(), mode);
+            opt->set_at(plate_vec, s, plate_idx);
         }
     }
 
@@ -169,6 +185,9 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("print_extruder_id", new ConfigOptionInts(ids));
         config.set_key_value("print_extruder_variant", new ConfigOptionStrings(variants));
     }
+    // The slicer reads the extruder slots only when asked to; a per-nozzle process whose values equal the
+    // plate's changes nothing, so it does not ask.
+    config.set_key_value("process_extruder_values", new ConfigOptionBool(explicit_values || process_extruder_slots_differ(config)));
     return true;
 }
 

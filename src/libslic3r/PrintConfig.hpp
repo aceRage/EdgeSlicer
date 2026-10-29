@@ -727,10 +727,11 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
 // process: E1 Standard, E1 High Flow, E1 E3D High Flow, E2 Standard, ...). A vector of any other length
 // is a flow-mode vector read through get_config_idx(Process), as before.
 //
-// The slicer reads a filament's extruder slot only when process_extruder_values is set, which
-// Print::apply() does when the slots of some extruder differ from extruder 1's (a per-nozzle process
-// or a left/right edit). With identical slots every reader takes get_config_idx(Process) exactly as
-// before, so stock jobs and per-object overrides slice unchanged.
+// The slicer reads a filament's extruder slot only when process_extruder_values is set: by the user on
+// a process split per nozzle (left / right edits), or by fill_nozzle_process_slots() for a per-nozzle
+// process with values of its own. Without it every reader takes get_config_idx(Process) exactly as
+// before - whatever the other slots hold (the X2D's system Bowden slots differ) - so stock jobs, older
+// presets and per-object overrides slice unchanged.
 
 // The keys a per-nozzle process supplies: process_flow_variant_options() without the four the slicer
 // reads once for the whole print (slow_down_layers and the extrusion-rate smoothing keys, read at
@@ -761,7 +762,7 @@ size_t process_extruder_for_filament(const ConfigBase &config, unsigned int fila
 size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx);
 
 // Whether some extruder's Standard / High Flow slot of a per_nozzle_process_options() key differs from
-// extruder 1's. What Print::apply() stores in process_extruder_values.
+// extruder 1's.
 bool process_extruder_slots_differ(const ConfigBase &config);
 
 // Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
@@ -2284,7 +2285,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                print_extruder_id))
     ((ConfigOptionStrings,             print_extruder_variant))
     // Per-nozzle process P1: the process preset chosen for each physical extruder ("" = the plate's
-    // process) and whether the process keys' extruder slots differ (set by Print::apply).
+    // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
     ((ConfigOptionStrings,             nozzle_process_presets))
     ((ConfigOptionBool,                process_extruder_values))
     ((ConfigOptionInt,                 master_extruder_id))

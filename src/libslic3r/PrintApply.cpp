@@ -1501,10 +1501,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
-    // Per-nozzle process P1: the readers take a filament's extruder slot of the process keys only when the
-    // slots really differ between extruders (a per-nozzle process, a left/right edit). Identical slots -
-    // every stock profile - keep reading get_config_idx(Process) as before.
-    new_full_config.set_key_value("process_extruder_values", new ConfigOptionBool(process_extruder_slots_differ(new_full_config)));
     // Only WipeTower2 rotates; the Bambu Lab (Type1) tower is always printed unrotated, as the
     // greyed-out Process field and the inert Rotate tool show. The CLI sets is_BBL_printer() after
     // apply(), so printer_model decides too (resolve_wipe_tower_type).

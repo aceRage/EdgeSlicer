@@ -35,8 +35,11 @@ bool supports_nozzle_processes(const ConfigBase &printer_config);
 // - A slot is filled from its source's value for the slot's flow mode (process_variant_fill_mode, D6):
 //   the source's own slot of that extruder when the source has the same kind of layout, else its
 //   process_flow_support column of that mode, else its first value.
-// - Extruders without a chosen process keep the plate's values; a plate vector already in the layout
-//   keeps its slot values as they are, so filling twice changes nothing.
+// - Extruders without a chosen process keep printing what they printed before: the plate's flow-mode
+//   column, unless the plate process was split per nozzle (process_extruder_values), whose slots are
+//   kept as they are. Extruder 1's slots are kept either way, so filling twice changes nothing.
+// - Sets process_extruder_values when the result really differs per extruder (so the slicer reads the
+//   slots), leaves it as the plate had it otherwise.
 // Returns false (config untouched) when no extruder has a source or the printer has fewer than two
 // extruders.
 bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);

@@ -4466,9 +4466,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionStrings {});
 
+    // A process preset key: true once the user split the process's speeds per nozzle (left / right on the
+    // Speed page). fill_nozzle_process_slots() also sets it in the slicing config when a per-nozzle process
+    // brings values of its own. False - every system profile, every older preset - means every extruder
+    // reads the flow-mode column, exactly as before per-extruder values existed.
     def = this->add("process_extruder_values", coBool);
     def->label = "Process values per extruder";
-    def->tooltip = "Set by the slicer when the process keys carry different values per extruder.";
+    def->tooltip = "The process keeps separate speeds, accelerations and jerk for each nozzle.";
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
