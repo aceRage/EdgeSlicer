@@ -2,8 +2,8 @@
 #define slic3r_Showcase_MultiColourGlsl_hpp_
 
 // Multi-colour (coextruded) filaments, phase P3: the GLSL every view shares
-// (tests/design_multicolour_filament_view.md 7.1). Showcase toolpath mode uses it now; mesh mode
-// (P4) and the Preview toggle (P5) are meant to reuse the same functions.
+// (tests/design_multicolour_filament_view.md 7.1). Showcase toolpath mode uses it; mesh mode (P4,
+// SLIC3R_MC_MESH_GLSL below) builds on it, and the Preview toggle (P5) is meant to reuse it.
 //
 // One source for GLSL and C++: the functions are written once in SLIC3R_MC_SHARED_GLSL, in the
 // common subset of GLSL 1.50 and C++ (no swizzles, no // comments, no preprocessor). glsl_functions()
@@ -103,7 +103,55 @@ vec3 mc_fragment_colour(int slot, int role, float sx, float sy, vec3 R, vec3 D, 
 float mc_to_srgb(float c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; } \
 vec3 mc_to_srgb3(vec3 c) { return vec3(mc_to_srgb(max(c.x, 0.0)), mc_to_srgb(max(c.y, 0.0)), mc_to_srgb(max(c.z, 0.0))); }
 
+// Phase P4: Showcase mesh mode (design 7.3), the model without a slice. Same rules as above (the
+// common subset of GLSL and C++), on top of SLIC3R_MC_SHARED_GLSL. Every surface is mapped to the bead
+// the toolpaths would draw there, then coloured by mc_bead_colour() with the toolpaths' parameters, so
+// a mesh point and the toolpath fragment at the same place agree:
+//  * a wall: the outside of an outer-wall bead (s.x = 1) whose right is the horizontal normal and whose
+//    travel runs anticlockwise seen from above (wall_dir +1, Orca's default) or clockwise (-1); s.y is
+//    the height within the layer (0 without layer lines);
+//  * a top (side +1) or bottom (side -1) face: the skin line through the point, lines `spacing` mm
+//    apart across the skin direction (tx, ty); with zigzag, every other line runs the other way. The
+//    point's place across its line gives s.x, and s.y follows the drawn diamond, 1 - |s.x|;
+//  * slopes between |n.z| 0.5 and 0.9 blend the two; skin 0 (concentric or patterns without one
+//    direction) shows the slot's average colour on the faces.
+#define SLIC3R_MC_MESH_GLSL \
+vec3 mc_mesh_wall(int slot, float nx, float ny, float sy, float wall_dir, float twist_turns) { \
+    float l = sqrt(nx * nx + ny * ny); \
+    if (l < 1e-4) return mc_average(slot); \
+    vec3 R = vec3(nx / l, ny / l, 0.0); \
+    vec3 D = vec3(-R.y * wall_dir, R.x * wall_dir, 0.0); \
+    return mc_bead_colour(slot, 1.0, sy, R, D, twist_turns, mc_global.x, mc_global.z, mc_global.w, 1.0); \
+} \
+vec3 mc_mesh_skin(int slot, float px, float py, float tx, float ty, bool zigzag, float spacing, float side, float twist_turns) { \
+    float tl = sqrt(tx * tx + ty * ty); \
+    if (tl < 1e-4 || spacing <= 0.0) return mc_average(slot); \
+    tx = tx / tl; \
+    ty = ty / tl; \
+    float q = (px * ty - py * tx) / spacing; \
+    float m = floor(q); \
+    float f = q - m; \
+    float d = 1.0; \
+    if (zigzag && m - 2.0 * floor(0.5 * m) > 0.5) d = -1.0; \
+    float sx = d * (2.0 * f - 1.0); \
+    float sy = side * (1.0 - abs(sx)); \
+    return mc_bead_colour(slot, sx, sy, vec3(d * ty, -d * tx, 0.0), vec3(d * tx, d * ty, 0.0), twist_turns, mc_global.y, \
+                          mc_global.z, 1.0, mc_global2.x); \
+} \
+vec3 mc_mesh_colour(int slot, float nx, float ny, float nz, float px, float py, float sy, float wall_dir, int skin, \
+                    float tx, float ty, bool zigzag, float spacing, float twist_turns) { \
+    if (mc_count(slot) <= 1) return mc_colour(slot, 0); \
+    float w = smoothstep(0.5, 0.9, abs(nz)); \
+    vec3 side_colour = w < 1.0 ? mc_mesh_wall(slot, nx, ny, sy, wall_dir, twist_turns) : vec3(0.0); \
+    if (w <= 0.0) return side_colour; \
+    vec3 face = skin == 1 ? mc_mesh_skin(slot, px, py, tx, ty, zigzag, spacing, nz > 0.0 ? 1.0 : -1.0, twist_turns) : \
+                            mc_average(slot); \
+    return w >= 1.0 ? face : mix(side_colour, face, w); \
+}
+
 namespace Slic3r {
+
+class ConfigBase;
 namespace MultiColour {
 
 constexpr int GLSL_SLOTS = 16;   // libvgcode's extruder cap (the role buffer keeps min(extruder, 15))
@@ -131,6 +179,31 @@ const char *glsl_functions();
 // The prelude for libvgcode::Viewer::set_base_color_prelude(): the uniforms, the shared functions
 // and external_base_color(), which hands a multi-colour slot's colour back in the viewer's sRGB.
 const std::string &glsl_prelude();
+
+// ---- P4: Showcase mesh mode (design 7.3) ----
+
+// SLIC3R_MC_MESH_GLSL as text.
+const char *glsl_mesh_functions();
+// What showcase_material.fs gets for mesh mode, right after its #version line: "#define
+// SHOWCASE_MULTICOLOUR 1" (the file's own mesh-mode block is under #ifdef SHOWCASE_MULTICOLOUR, so the
+// file alone still compiles as the plain material), the uniforms, the shared and the mesh functions.
+const std::string &glsl_mesh_prelude();
+// The fragment source `fs` with glsl_mesh_prelude() put after its first line, which must be the
+// #version directive; empty when it is not.
+std::string mesh_fragment_source(const std::string &fs);
+
+// What a mesh needs from the print settings to stand in for the toolpaths.
+struct MeshSkin
+{
+    float top_spacing    = 0.4f;   // mm between neighbouring top-skin lines
+    float bottom_spacing = 0.4f;   // the same for bottom faces (the first layer's lines)
+    float wall_dir       = 1.f;    // +1: walls run anticlockwise seen from above (auto, ccw); -1: clockwise
+};
+// From a full config with the object's own settings applied; extruder is 1-based (its nozzle).
+// The line width of the surface (top_surface_line_width, initial_layer_line_width; 0 = line_width, then
+// the slicer's automatic width; percentages of the nozzle), less the overlap of rounded beads at that
+// layer height, as Flow::spacing() works it out.
+MeshSkin mesh_skin(const ConfigBase &config, int extruder);
 
 } // namespace MultiColour
 } // namespace Slic3r

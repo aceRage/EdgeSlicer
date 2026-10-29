@@ -540,6 +540,21 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
         info.skin_top    = Showcase::skin_settings(object_config, true, 0.);
         info.skin_bottom = Showcase::skin_settings(object_config, false, 0.);
         info.skin        = true;
+        // Multi-colour P4: what mesh mode needs to stand in for the toolpaths.
+        {
+            const ConfigOptionInt *e = object_config.option<ConfigOptionInt>("extruder");
+            info.mc_skin = MultiColour::mesh_skin(object_config, e != nullptr && e->value > 0 ? e->value : 1);
+            double volume = 0.;
+            if (!mo->instances.empty()) {
+                const double instance_det = std::abs(mo->instances.front()->get_matrix().matrix().block<3, 3>(0, 0).determinant());
+                for (const ModelVolume *mv : mo->volumes)
+                    if (mv != nullptr && mv->is_model_part())
+                        volume += std::abs(mv->mesh().volume()) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
+                const double height = mo->instance_bounding_box(0).size().z();
+                if (height > 1e-3 && std::isfinite(volume))
+                    info.volume_per_mm = float(volume / height);
+            }
+        }
         const SlicingParameters  sp   = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
         std::vector<coordf_t>    profile;
         PrintObject::update_layer_height_profile(*mo, sp, profile);
@@ -1024,6 +1039,39 @@ void ShowcaseRenderer::draw_objects()
     shader->stop_using();
 }
 
+// Multi-colour (coextruded) filaments: each slot's colours, split, rotation and twist from the
+// project (the visual-only keys), as the shaders' uniform table (P3 toolpaths, P4 mesh).
+static MultiColour::UniformTable showcase_multicolour_table(const std::vector<ShowcaseFilament> &filaments)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return MultiColour::UniformTable();
+    std::vector<MultiColour::Filament> slots;
+    std::vector<float>                 diameters;
+    for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
+        slots.push_back(MultiColour::from_config(bundle->project_config, e));
+        float d = 1.75f;
+        if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
+            p != nullptr && p->config.has("filament_diameter"))
+            d = float(p->config.opt_float("filament_diameter", 0u));
+        diameters.push_back(d);
+    }
+    return MultiColour::pack_uniforms(slots, diameters);
+}
+
+static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const MultiColour::UniformTable &t)
+{
+    auto vec4s = [&shader](const char *name, const float *data, int count) {
+        if (const int at = shader.get_uniform_location(name); at >= 0)
+            glsafe(::glUniform4fv(at, count, data));
+    };
+    vec4s("mc_colors", t.colors.data(), int(t.colors.size() / 4));
+    vec4s("mc_bounds", t.bounds.data(), int(t.bounds.size() / 4));
+    vec4s("mc_params", t.params.data(), int(t.params.size() / 4));
+    vec4s("mc_global", t.global.data(), 1);
+    vec4s("mc_global2", t.global2.data(), 1);
+}
+
 // S2: the objects with the filament materials. Draws each visible volume itself (rather than through
 // GLVolumeCollection::render) so every filament - also every painted colour of a multi-material
 // volume - gets its own finish. Opaque first; translucent filaments after, sorted back to front per
@@ -1031,8 +1079,26 @@ void ShowcaseRenderer::draw_objects()
 // (Z = 0) for the glossy floor.
 bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
 {
-    GLShaderProgram *shader = wxGetApp().get_shader("showcase_material");
-    if (shader == nullptr || m_scene == nullptr)
+    if (m_scene == nullptr)
+        return false;
+    // Every filament's colour (painted and mixed ones too) and finish.
+    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+
+    // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): coextruded slots without a
+    // slice, through the material program built with the shared functions. With no such slot (or
+    // the scene's "Coextruded colours" off) the plain program draws, exactly as before.
+    MultiColour::UniformTable multicolour;
+    GLShaderProgram          *shader = nullptr;
+    if (m_scene->materials.coextruded_look) {
+        multicolour = showcase_multicolour_table(filaments);
+        if (multicolour.any_multi)
+            shader = wxGetApp().get_shader("showcase_material_mc");
+    }
+    const bool mc = shader != nullptr;
+    if (shader == nullptr)
+        shader = wxGetApp().get_shader("showcase_material");
+    if (shader == nullptr)
         return false;
     GLVolumeCollection &volumes = m_canvas.m_volumes;
     if (volumes.empty())
@@ -1050,9 +1116,6 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     const Transform3d &projection = camera.get_projection_matrix();
     const RealisticRenderSettings rs = m_canvas._render_settings();
 
-    // Every filament's colour (painted and mixed ones too) and finish.
-    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
-    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
     auto finish_of = [this, &filaments](int filament) {
         if (filament >= 1 && size_t(filament) <= filaments.size())
             return m_scene->materials.finish_for(filament, filaments[size_t(filament - 1)].preset_name, filaments[size_t(filament - 1)].type);
@@ -1070,6 +1133,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         ColorRGBA        color;
         Showcase::Finish finish = Showcase::Finish::Standard;
         double           depth  = 0.;
+        int              filament = 0;  // 1-based, 0 = none (the wipe tower)
     };
     std::vector<Item> opaque, translucent;
     const ModelObjectPtrs &objects = wxGetApp().model().objects;
@@ -1091,8 +1155,9 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         if (extruder <= 0)
             extruder = 1;
         auto push = [&](Item item, int filament) {
-            item.color  = color_of(filament, v->color);
-            item.finish = finish_of(filament);
+            item.color    = color_of(filament, v->color);
+            item.finish   = finish_of(filament);
+            item.filament = filament;
             (Showcase::material_params(item.finish).alpha < 1.f || item.color.a() < 1.f ? translucent : opaque).push_back(item);
         };
         if (mv != nullptr && v->printable && !mv->mmu_segmentation_facets.empty()) {
@@ -1113,6 +1178,8 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
 
     // Frame uniforms.
     shader->start_using();
+    if (mc)
+        showcase_set_multicolour_uniforms(*shader, multicolour);
     const bool sample_shadows = m_canvas.m_shadow_map_valid && m_canvas.m_shadow_map_texture_id != 0;
     if (sample_shadows) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_SHADOW_MAP_UNIT));
@@ -1176,7 +1243,12 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
 
         // 1c: an anisotropic finish needs the layers too, for the skin's turn per layer.
         const bool       aniso  = mp.anisotropy > 0.f && !v->is_wipe_tower;
-        const LayerInfo *layers = (line_depth > 0.f || aniso) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
+        // P4: so does a coextruded slot (its stripes follow the skin's lines).
+        const int        mc_slot = mc && !v->is_wipe_tower && it.filament >= 1 && size_t(it.filament) <= filaments.size() &&
+                                           it.filament <= MultiColour::GLSL_SLOTS &&
+                                           multicolour.bounds[size_t(it.filament - 1) * 4 + 3] > 1.5f ?
+                                       it.filament - 1 : -1;
+        const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;
         shader->set_uniform("layer_mode", mode);
         if (layers != nullptr) {
@@ -1198,13 +1270,15 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         int   skin_count[2] = { 0, 0 };
         float skin_angles[16] = {};
         Vec2f skin_center     = Vec2f::Zero();
-        if (aniso && layers != nullptr && layers->skin) {
+        bool  zigzag[2]       = { true, true };
+        if ((aniso || mc_slot >= 0) && layers != nullptr && layers->skin) {
             const double rotation = std::atan2(world.matrix()(1, 0), world.matrix()(0, 0)) * 180. / PI;
             for (int s = 0; s < 2; ++s) {
                 Showcase::SkinSettings settings = s == 0 ? layers->skin_top : layers->skin_bottom;
                 settings.model_rotation_deg     = rotation;
                 const Showcase::SkinTangent st  = Showcase::skin_tangent_mode(settings);
                 skin_mode[s] = int(st.pattern);
+                zigzag[s]    = st.zigzag;
                 if (st.pattern == Showcase::SkinPattern::Lines) {
                     if (st.angles_deg.size() > 8)
                         skin_mode[s] = int(Showcase::SkinPattern::Isotropic);   // more than the shader holds
@@ -1225,6 +1299,18 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         if (const int at = shader->get_uniform_location("skin_angles"); at >= 0)
             glsafe(::glUniform1fv(at, 16, skin_angles));
         shader->set_uniform("skin_center", skin_center);
+        if (mc) {
+            // P4: the slot drawn (-1 = its plain colour) and how its toolpaths would run.
+            const MultiColour::MeshSkin skin = layers != nullptr ? layers->mc_skin : MultiColour::MeshSkin();
+            shader->set_uniform("mc_slot", mc_slot);
+            // The slicer turns walls in the plate's frame, so a mirrored instance keeps the direction.
+            shader->set_uniform("mc_wall_dir", skin.wall_dir);
+            shader->set_uniform("mc_spacing_top", skin.top_spacing);
+            shader->set_uniform("mc_spacing_bottom", skin.bottom_spacing);
+            shader->set_uniform("mc_zigzag_top", zigzag[0]);
+            shader->set_uniform("mc_zigzag_bottom", zigzag[1]);
+            shader->set_uniform("mc_volume_per_mm", layers != nullptr ? layers->volume_per_mm : 0.f);
+        }
 
         shader->set_uniform("view_model_matrix", view * world);
         shader->set_uniform("projection_matrix", projection);
@@ -2317,20 +2403,10 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
 
     // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
     // Each slot's colours, split, rotation and twist from the project (the visual-only keys), into
-    // the toolpath shader's uniform table. Drawn with the smooth look only.
-    if (PresetBundle *bundle = wxGetApp().preset_bundle; bundle != nullptr) {
-        std::vector<MultiColour::Filament> slots;
-        std::vector<float>                 diameters;
-        for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
-            slots.push_back(MultiColour::from_config(bundle->project_config, e));
-            float d = 1.75f;
-            if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
-                p != nullptr && p->config.has("filament_diameter"))
-                d = float(p->config.opt_float("filament_diameter", 0u));
-            diameters.push_back(d);
-        }
-        look.multicolour = MultiColour::pack_uniforms(slots, diameters);
-    }
+    // the toolpath shader's uniform table. Drawn with the smooth look only. The scene's "Coextruded
+    // colours" switch (P2) turns it off, as it does for the model (P4).
+    look.multicolour     = showcase_multicolour_table(filaments);
+    look.coextruded_look = m_scene->materials.coextruded_look;
     // Before the 1b material program below, so it is built with the coextruded-colour prelude.
     gv.apply_showcase_multicolour(look);
     // ---- end multi-colour ----

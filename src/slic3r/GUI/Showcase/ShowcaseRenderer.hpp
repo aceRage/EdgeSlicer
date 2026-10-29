@@ -25,6 +25,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/RealisticRenderSettings.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
@@ -250,6 +251,10 @@ private:
         bool                   skin = false;
         Showcase::SkinSettings skin_top;
         Showcase::SkinSettings skin_bottom;
+        // Multi-colour P4: the skin's line spacing and the wall direction (mesh mode), and the
+        // object's solid volume per mm of height (its twist's stand-in for the filament length).
+        MultiColour::MeshSkin  mc_skin;
+        float                  volume_per_mm = 0.f;
     };
     const LayerInfo *layers_for(int object_idx);
     void            release_layers();

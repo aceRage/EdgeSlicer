@@ -8,12 +8,16 @@ objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk,
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
 
     python -I make_multicolour_fixtures.py <template.3mf> <out dir> [--angle DEG] [--colors "#RRGGBB|#RRGGBB"]
+                                           [--source toolpaths|model]
 
 Writes <out dir>/<shape>_<view>.3mf and lists them on stdout, one per line.
 
 --angle is the slot's rotation (filament_colour_angle, D3: where the middle of colour 1 faces,
 anticlockwise from the printer's front seen from above). The default, -45, puts the boundary at the
 front-right corner, as on the P0 cube (front face red, right face yellow); set it from the pen mark.
+
+--source is the scene's source: "toolpaths" (P3, the default) or "model" (P4, Showcase mesh mode: the
+coextruded look without a slice).
 """
 import argparse
 import json
@@ -176,6 +180,7 @@ def main(argv):
     ap.add_argument("--angle", type=float, default=-45.0)
     ap.add_argument("--colors", default="#D7261E|#F5BE1B")
     ap.add_argument("--twist", type=float, default=0.0)
+    ap.add_argument("--source", choices=["toolpaths", "model"], default="toolpaths")
     a = ap.parse_args(argv[1:])
 
     with zipfile.ZipFile(a.template) as z:
@@ -209,7 +214,7 @@ def main(argv):
         set_slot0(settings, "filament_colour_twist", ("%g" % a.twist))
         for view in VIEWS[shape]:
             name = "%s_%s" % (shape, view)
-            scene = {"id": "plate1", "name": "P3 multi-colour: " + name, "plate_index": 0, "source": "toolpaths",
+            scene = {"id": "plate1", "name": ("P3" if a.source == "toolpaths" else "P4") + " multi-colour: " + name, "plate_index": 0, "source": a.source,
                      "preset_base": "studio_white", "view_frame_height": FRAME_HEIGHT,
                      "background": {"type": "radial_gradient", "color1": "#FFFFFF", "color2": "#D9DCE1"},
                      "floor": {"type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45},
