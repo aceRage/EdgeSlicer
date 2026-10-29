@@ -76,7 +76,8 @@ struct Density
 TEST_CASE("Airbrush P0 benchmark: paint density vs serialisation, 3MF, render data and segmentation", "[.][Benchmark][AirbrushBench]")
 {
     const int depth = 2;
-    const Density densities[] = { { "10k", 625 }, { "100k", 6250 }, { "1M", 62500 } };
+    // ~5 painted of 16 leaves per facet with 1 mm specks at 30%, so these land near 10k / 100k / 1M painted.
+    const Density densities[] = { { "10k", 2100 }, { "100k", 21000 }, { "1M", 210000 } };
 
     const boost::filesystem::path tmp = boost::filesystem::temp_directory_path() / ("airbrush_bench_" + std::to_string(get_current_pid()));
     boost::filesystem::create_directories(tmp);
