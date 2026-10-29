@@ -5537,13 +5537,16 @@ DynamicConfig GCode::build_placeholder_process_config(unsigned int current_extru
                                                        const DynamicConfig *config_override) const
 {
     DynamicConfig process_config_override;
-    const size_t process_config_idx = get_config_idx(m_config, ConfigFlowDomain::Process, current_extruder_id);
     for (const std::string &key : process_flow_variant_options()) {
         const ConfigOption *option = m_config.optptr(key);
         if (option == nullptr) {
             BOOST_LOG_TRIVIAL(error) << "Missing process flow option: " << key;
             continue;
         }
+        // Per-nozzle process P1: the extruder slot for an option of the slot layout's length.
+        const auto  *vec                = dynamic_cast<const ConfigOptionVectorBase *>(option);
+        const size_t process_config_idx = Slic3r::process_config_idx(m_config, vec != nullptr ? vec->size() : 0,
+                                                                     current_extruder_id);
 
         switch (option->type()) {
         case coFloats:
@@ -9811,9 +9814,16 @@ void GCode::append_full_config(const Print& print, std::string& str)
     // nothing reads them back but our own cost views, which fall back to the project's values or say
     // "not in file".
     const bool dump_filament_prices = print.gcode_filament_prices();
+    // Per-nozzle process P1: the per-nozzle keys only when a nozzle has its own process values, so every
+    // other job's config block stays as it was before they existed.
+    const bool dump_per_nozzle_process_keys = print.config().process_extruder_values.value ||
+        std::any_of(print.config().nozzle_process_presets.values.begin(), print.config().nozzle_process_presets.values.end(),
+                    [](const std::string &name) { return !name.empty(); });
     std::ostringstream                      ss;
     for (const std::string& key : cfg.keys()) {
         if (!dump_filament_prices && (key == "filament_cost" || key == "time_cost"))
+            continue;
+        if (!dump_per_nozzle_process_keys && (key == "nozzle_process_presets" || key == "process_extruder_values"))
             continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
             continue;

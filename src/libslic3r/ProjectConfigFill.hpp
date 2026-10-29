@@ -63,6 +63,9 @@ inline const std::set<std::string> &project_config_fill_skip_keys()
         "extruder_variant_list",
         "filament_extruder_variant",
         "physical_extruder_map",
+        // per-nozzle process P1: project-owned selection, and a flag Print::apply() computes
+        "nozzle_process_presets",
+        "process_extruder_values",
         // flow-variant / nozzle volume (project-owned or derived; Edge #169 uses filament_volume_type)
         "nozzle_volume_type",
         "filament_volume_type",

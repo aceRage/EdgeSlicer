@@ -235,6 +235,21 @@ static void keep_flow_support_in_differential_save(const Preset &preset, std::ve
     const auto *flow_support = preset.config.option<ConfigOptionStrings>(support_key);
     if (flow_support != nullptr && flow_support->values.size() > 1)
         dirty_options.emplace_back(support_key);
+
+    // Per-nozzle process P1: a saved process vector of per-extruder slots (a left/right edit) is only
+    // readable with the layout it was written for, so the layout is saved with it.
+    if (preset.type == Preset::TYPE_PRINT) {
+        const auto *ids = preset.config.option<ConfigOptionInts>("print_extruder_id");
+        if (ids != nullptr && !process_extruder_variant_slots(preset.config).empty() &&
+            std::any_of(dirty_options.begin(), dirty_options.end(), [&preset, ids](const std::string &key) {
+                const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(preset.config.option(key));
+                return is_per_nozzle_process_option(key) && opt != nullptr && opt->size() == ids->values.size();
+            })) {
+            for (const char *key : { "print_extruder_id", "print_extruder_variant" })
+                if (std::find(dirty_options.begin(), dirty_options.end(), key) == dirty_options.end())
+                    dirty_options.emplace_back(key);
+        }
+    }
 }
 
 VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem::path &path, bool load_all)

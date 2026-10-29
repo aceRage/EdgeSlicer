@@ -9,6 +9,7 @@
 #include "Format/BambuKeyAliases.hpp"
 #include <algorithm>
 #include <set>
+#include <string_view>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -4452,6 +4453,24 @@ void PrintConfigDef::init_fff_params()
     def->label = "Print's extruder variant";
     def->tooltip = "Print's extruder variant";
     def->set_default_value(new ConfigOptionStrings { "Direct Drive Standard" });
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P1 (tests/design_per_nozzle_process.md). Project-level: the plate's process
+    // stays the process; these name, per physical extruder, the process whose speeds, accelerations and
+    // jerk that extruder prints with. PresetBundle::full_fff_config / the CLI copy them into the
+    // extruder's slots of the process keys (fill_nozzle_process_slots).
+    def = this->add("nozzle_process_presets", coStrings);
+    def->label = L("Process per nozzle");
+    def->tooltip = L("The process preset each nozzle takes its speeds, accelerations and jerk from. "
+                     "Empty for a nozzle that uses the plate's process.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+
+    def = this->add("process_extruder_values", coBool);
+    def->label = "Process values per extruder";
+    def->tooltip = "Set by the slicer when the process keys carry different values per extruder.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
 
     def = this->add("filament_extruder_variant", coStrings);
@@ -10601,6 +10620,209 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     return 0;
 }
 
+// ---- Per-nozzle process values (per-nozzle process P1) -------------------------------------------
+
+const std::vector<std::string>& per_nozzle_process_options()
+{
+    static const std::vector<std::string> options = [] {
+        // Read once for the whole print at values.front() (GCode.cpp slow-down, PressureEqualizer,
+        // LayerTimeSpeedSmoothingFilter): a per-extruder value could never take effect.
+        static const std::set<std::string> print_wide { "slow_down_layers", "max_volumetric_extrusion_rate_slope",
+                                                        "max_volumetric_extrusion_rate_slope_segment_length",
+                                                        "extrusion_rate_smoothing_external_perimeter_only" };
+        std::vector<std::string> out;
+        for (const std::string &key : process_flow_variant_options())
+            if (print_wide.count(key) == 0)
+                out.push_back(key);
+        return out;
+    }();
+    return options;
+}
+
+bool is_per_nozzle_process_option(const std::string &key)
+{
+    const auto &options = per_nozzle_process_options();
+    return std::find(options.begin(), options.end(), key) != options.end();
+}
+
+// "Standard" / "High Flow" / "TPU High Flow" ... after the extruder-type prefix, or empty.
+static std::string_view process_variant_nozzle_part(const std::string &variant)
+{
+    const std::string_view v(variant);
+    for (const std::string_view prefix : { std::string_view("Direct Drive "), std::string_view("Bowden ") })
+        if (v.size() > prefix.size() && v.substr(0, prefix.size()) == prefix)
+            return v.substr(prefix.size());
+    return {};
+}
+
+int process_variant_flow_mode(const std::string &variant)
+{
+    const std::string_view nozzle = process_variant_nozzle_part(variant);
+    if (nozzle == "Standard")
+        return int(fvtStandard);
+    if (nozzle == "High Flow")
+        return int(fvtHighFlow);
+    return -1;
+}
+
+FilamentVolumeType process_variant_fill_mode(const std::string &variant)
+{
+    const int mode = process_variant_flow_mode(variant);
+    if (mode >= 0)
+        return FilamentVolumeType(mode);
+    const std::string_view nozzle = process_variant_nozzle_part(variant);
+    if (nozzle.find("TPU") != std::string_view::npos)
+        return fvtStandard;
+    return nozzle.find("High Flow") != std::string_view::npos ? fvtHighFlow : fvtStandard;
+}
+
+std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase &config)
+{
+    const ConfigOptionInts    *ids      = ints_option(config, "print_extruder_id");
+    const ConfigOptionStrings *variants = strings_option(config, "print_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.empty() || ids->values.size() != variants->values.size())
+        return {};
+    std::vector<std::vector<size_t>> slots;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        const int id = ids->values[i];
+        if (id == int(slots.size()) + 1)
+            slots.emplace_back();
+        else if (slots.empty() || id != int(slots.size()))
+            return {};
+        slots.back().push_back(i);
+    }
+    if (slots.size() < 2)
+        return {};
+    return slots;
+}
+
+// DynamicPrintConfig::support_different_extruders() on any ConfigBase, without allocating: at most two
+// extruders whose extruder_variant_list entries name more than one variant between them.
+static bool process_grouping_machine(const ConfigBase &config, size_t extruder_count)
+{
+    if (extruder_count > 2)
+        return false;
+    const ConfigOptionStrings *list = strings_option(config, "extruder_variant_list");
+    if (list == nullptr)
+        return false;
+    std::string_view first;
+    bool             have_first = false;
+    for (size_t e = 0; e < std::min(extruder_count, list->values.size()); ++e) {
+        const std::string_view entry(list->values[e]);
+        size_t start = 0;
+        while (start <= entry.size()) {
+            size_t comma = entry.find(',', start);
+            if (comma == std::string_view::npos)
+                comma = entry.size();
+            const std::string_view token = entry.substr(start, comma - start);
+            if (!token.empty()) {
+                if (!have_first) {
+                    first      = token;
+                    have_first = true;
+                } else if (token != first)
+                    return true;
+            }
+            start = comma + 1;
+        }
+    }
+    return false;
+}
+
+size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count)
+{
+    if (extruder_count < 2)
+        return 0;
+    const size_t filaments = flow_variant_filament_count(config);
+    if (filaments > extruder_count || process_grouping_machine(config, extruder_count)) {
+        const ConfigOptionInts *fmap = ints_option(config, "filament_map");
+        if (fmap != nullptr && filament_idx < fmap->values.size()) {
+            const int e = fmap->values[filament_idx];
+            if (e >= 1 && size_t(e) <= extruder_count)
+                return size_t(e - 1);
+        }
+    }
+    return filament_idx < extruder_count ? filament_idx : 0;
+}
+
+size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx)
+{
+    const size_t legacy = get_config_idx(config, ConfigFlowDomain::Process, filament_idx);
+    if (opt_size < 2 || filament_idx == (unsigned int) -1)
+        return legacy;
+    const ConfigOption *flag = config.option("process_extruder_values");
+    if (flag == nullptr || flag->type() != coBool || !static_cast<const ConfigOptionBool *>(flag)->value)
+        return legacy;
+    const ConfigOptionInts    *ids      = ints_option(config, "print_extruder_id");
+    const ConfigOptionStrings *variants = strings_option(config, "print_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.size() != opt_size || variants->values.size() != opt_size)
+        return legacy;
+    // process_extruder_variant_slots() without the allocation: the ids must run 1, 1, .., 2, .., n.
+    size_t extruders = 0;
+    for (size_t i = 0; i < opt_size; ++i) {
+        const int id = ids->values[i];
+        if (id == int(extruders) + 1)
+            ++extruders;
+        else if (extruders == 0 || id != int(extruders))
+            return legacy;
+    }
+    if (extruders < 2)
+        return legacy;
+    const size_t extruder = process_extruder_for_filament(config, filament_idx, extruders);
+    // Extruder 1 keeps the slot it always read.
+    if (legacy < opt_size && size_t(ids->values[legacy]) == extruder + 1)
+        return legacy;
+    // Another extruder: its slot of the flow mode the legacy slot stands for (Standard / High Flow; the
+    // X2D's second extruder names them "Bowden ..."), else its slot of the same variant name, else its
+    // first slot.
+    const int mode  = legacy < opt_size ? process_variant_flow_mode(variants->values[legacy]) : int(fvtStandard);
+    int       first = -1, named = -1;
+    for (size_t i = 0; i < opt_size; ++i) {
+        if (size_t(ids->values[i]) != extruder + 1)
+            continue;
+        if (first < 0)
+            first = int(i);
+        if (mode >= 0 && process_variant_flow_mode(variants->values[i]) == mode)
+            return i;
+        if (named < 0 && legacy < opt_size && variants->values[i] == variants->values[legacy])
+            named = int(i);
+    }
+    return named >= 0 ? size_t(named) : first >= 0 ? size_t(first) : legacy;
+}
+
+bool process_extruder_slots_differ(const ConfigBase &config)
+{
+    const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(config);
+    if (slots.empty())
+        return false;
+    const auto  &variants = strings_option(config, "print_extruder_variant")->values;
+    const size_t layout   = variants.size();
+    // Pairs (slot of extruder e, slot of extruder 1) of the same Standard / High Flow mode.
+    std::vector<std::pair<size_t, size_t>> pairs;
+    for (size_t e = 1; e < slots.size(); ++e)
+        for (size_t s : slots[e]) {
+            const int mode = process_variant_flow_mode(variants[s]);
+            if (mode < 0)
+                continue;
+            for (size_t r : slots.front())
+                if (process_variant_flow_mode(variants[r]) == mode) {
+                    pairs.emplace_back(s, r);
+                    break;
+                }
+        }
+    if (pairs.empty())
+        return false;
+    for (const std::string &key : per_nozzle_process_options()) {
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+        if (opt == nullptr || opt->size() != layout)
+            continue;
+        const std::vector<std::string> values = opt->vserialize();
+        for (const auto &[s, r] : pairs)
+            if (values[s] != values[r])
+                return true;
+    }
+    return false;
+}
+
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra)
 {
     double      cooling = 0.;
@@ -10656,6 +10878,15 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
         out.process_config_idx.reserve(count);
         for (size_t i = 0; i < count; ++i)
             out.process_config_idx.push_back(get_config_idx(config, ConfigFlowDomain::Process, static_cast<unsigned int>(i)));
+        // Per-nozzle process P1: the extruder slots, when the process carries different values per extruder.
+        const ConfigOption *flag = config.option("process_extruder_values");
+        if (flag != nullptr && flag->type() == coBool && static_cast<const ConfigOptionBool *>(flag)->value &&
+            !process_extruder_variant_slots(config).empty()) {
+            out.process_layout_size = config.option<ConfigOptionInts>("print_extruder_id")->values.size();
+            out.process_extruder_idx.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+                out.process_extruder_idx.push_back(process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+        }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
     const auto *mvs     = config.option<ConfigOptionFloats>("filament_max_volumetric_speed");

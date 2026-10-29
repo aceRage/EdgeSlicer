@@ -656,7 +656,35 @@ public:
     // the current printer's system name. A non-empty list is kept.
     void                        fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const;
 
+    // ---- Per-nozzle process P1 (tests/design_per_nozzle_process.md) ----
+    // The selection lives in project_config "nozzle_process_presets", one name per physical extruder
+    // ("" = the plate's process). It is remembered per printer in the app config, saved in 3MF projects,
+    // and full_config() copies each chosen process's speeds / accelerations / jerk into that extruder's
+    // slots of the process keys (fill_nozzle_process_slots).
+    //
+    // Whether `process` may be chosen for extruder `extruder` of the edited printer: a process cut for a
+    // printer of the same printer_model whose nozzle (printer_variant) is that extruder's diameter, or a
+    // process compatible with the edited printer that claims no other nozzle size.
+    bool                        nozzle_process_fits(const Preset &process, size_t extruder) const;
+    // The visible process presets that fit extruder `extruder`, sorted by name.
+    std::vector<std::string>    nozzle_process_candidates(size_t extruder) const;
+    // The selection, one entry per physical extruder of the edited printer.
+    std::vector<std::string>    nozzle_process_selection() const;
+    // Choose `name` ("" = the plate's process) for extruder `extruder`. Returns true when it changed.
+    bool                        set_nozzle_process(size_t extruder, const std::string &name);
+    // Drop names that no longer exist or no longer fit their extruder (printer switched, nozzle changed).
+    // Returns true when something was dropped.
+    bool                        prune_nozzle_processes();
+    // After a printer switch or a printer settings change: a different printer brings its own remembered
+    // selection (none: the plate's process everywhere); the same printer keeps its selection, pruned.
+    void                        update_nozzle_processes_for_printer(AppConfig &config);
+
 private:
+    void                        restore_nozzle_processes(AppConfig &config, const std::string &printer_name);
+    // The printer the per-nozzle selection was last restored for or loaded with (a project).
+    std::string                 m_nozzle_process_printer;
+    void                        fill_nozzle_processes(DynamicPrintConfig &out) const;
+
     //std::pair<PresetsConfigSubstitutions, std::string> load_system_presets(ForwardCompatibilitySubstitutionRule compatibility_rule);
     //BBS: add json related logic
     std::pair<PresetsConfigSubstitutions, std::string> load_system_presets_from_json(ForwardCompatibilitySubstitutionRule compatibility_rule);

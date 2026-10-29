@@ -721,6 +721,49 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// ---- Per-nozzle process values (per-nozzle process P1, tests/design_per_nozzle_process.md D1) -------
+// The process keys of per_nozzle_process_options() may hold one value per (extruder, variant) slot in
+// Bambu's layout: print_extruder_id / print_extruder_variant name the slots, extruder-major (an H2D
+// process: E1 Standard, E1 High Flow, E1 E3D High Flow, E2 Standard, ...). A vector of any other length
+// is a flow-mode vector read through get_config_idx(Process), as before.
+//
+// The slicer reads a filament's extruder slot only when process_extruder_values is set, which
+// Print::apply() does when the slots of some extruder differ from extruder 1's (a per-nozzle process
+// or a left/right edit). With identical slots every reader takes get_config_idx(Process) exactly as
+// before, so stock jobs and per-object overrides slice unchanged.
+
+// The keys a per-nozzle process supplies: process_flow_variant_options() without the four the slicer
+// reads once for the whole print (slow_down_layers and the extrusion-rate smoothing keys, read at
+// values.front()); those always come from the plate's process.
+const std::vector<std::string>& per_nozzle_process_options();
+bool is_per_nozzle_process_option(const std::string &key);
+
+// fvtStandard / fvtHighFlow for "<Direct Drive|Bowden> Standard|High Flow", -1 for any other variant
+// (E3D High Flow, TPU High Flow, TPU285...).
+int process_variant_flow_mode(const std::string &variant);
+// The flow mode a slot is filled from (D6): the variant's own mode, TPU High Flow -> Standard, any other
+// "... High Flow" -> High Flow, anything else -> Standard.
+FilamentVolumeType process_variant_fill_mode(const std::string &variant);
+
+// The slots of each extruder (extruder e's at [e]) of the print_extruder_id / print_extruder_variant
+// layout, or empty unless both have the same length, the ids run 1, 1, .., 2, .., n and n >= 2.
+std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase &config);
+
+// The physical extruder (0-based) printing filament `filament_idx` (0-based) on a machine with
+// `extruder_count` extruders: filament_map on a Bambu grouping machine (two extruders that offer
+// several nozzle variants, DynamicPrintConfig::support_different_extruders) or when filaments outnumber
+// extruders, else the filament's own tool (a toolchanger such as the U1).
+size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count);
+
+// The index of a process option holding `opt_size` values that filament `filament_idx` (0-based) reads:
+// its extruder's slot for the flow mode get_config_idx(Process) picks when process_extruder_values is
+// set and opt_size is the layout's length, else get_config_idx(Process).
+size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx);
+
+// Whether some extruder's Standard / High Flow slot of a per_nozzle_process_options() key differs from
+// extruder 1's. What Print::apply() stores in process_extruder_values.
+bool process_extruder_slots_differ(const ConfigBase &config);
+
 // Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
 // name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
 // value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
@@ -773,6 +816,8 @@ template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
 {
+    if (domain == ConfigFlowDomain::Process)
+        return opt.get_at(process_config_idx(config, opt.values.size(), filament_id));
     return opt.get_at(get_config_idx(config, domain, filament_id));
 }
 
@@ -837,6 +882,10 @@ struct ResolvedFilamentFlow
 {
     bool                       variants_active{false};
     std::vector<size_t>        process_config_idx;
+    // Per-nozzle process P1: the extruder slot process_config_idx(config, process_layout_size, id) picks,
+    // read for an option of process_layout_size values (0 when process_extruder_values is off).
+    std::vector<size_t>        process_extruder_idx;
+    size_t                     process_layout_size{0};
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
@@ -853,6 +902,14 @@ struct ResolvedFilamentFlow
     {
         return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
                                                          get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
+    // The slot of an option holding opt_size values: what process_config_idx(config, opt_size, id) gives.
+    size_t process_config_idx_for(const ConfigBase &config, size_t opt_size, unsigned int filament_id) const
+    {
+        if (process_layout_size == 0 || opt_size != process_layout_size)
+            return process_config_idx_for(config, filament_id);
+        return filament_id < process_extruder_idx.size() ? process_extruder_idx[filament_id] :
+                                                           Slic3r::process_config_idx(config, opt_size, filament_id);
     }
     double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
     {
@@ -1510,9 +1567,6 @@ protected: \
 PRINT_CONFIG_CLASS_DEFINE(
     PrintObjectConfig,
 
-    // Ultra (dual-nozzle): process-scope extruder-variant expansion keys.
-    ((ConfigOptionInts,                print_extruder_id))
-    ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               brim_object_gap))
     ((ConfigOptionFloat,               brim_flow_ratio))
     ((ConfigOptionBool,                brim_use_efc_outline))
@@ -2224,6 +2278,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                extruder_max_nozzle_count))
     ((ConfigOptionInts,                printer_extruder_id))
     ((ConfigOptionStrings,             printer_extruder_variant))
+    // Ultra (dual-nozzle): the process-scope extruder-variant layout (Bambu's print_extruder_id /
+    // print_extruder_variant). Per-nozzle process P1: a print-level key (it was in PrintObjectConfig, where
+    // nothing read it), so the G-code writer, Fill and the wipe towers resolve per-extruder process slots.
+    ((ConfigOptionInts,                print_extruder_id))
+    ((ConfigOptionStrings,             print_extruder_variant))
+    // Per-nozzle process P1: the process preset chosen for each physical extruder ("" = the plate's
+    // process) and whether the process keys' extruder slots differ (set by Print::apply).
+    ((ConfigOptionStrings,             nozzle_process_presets))
+    ((ConfigOptionBool,                process_extruder_values))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))
     ((ConfigOptionPointsGroups,        extruder_printable_area))
