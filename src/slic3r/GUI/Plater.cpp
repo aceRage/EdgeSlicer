@@ -27112,6 +27112,17 @@ void Plater::arrange()
     }
 }
 
+// EdgeSlicer: the remote hub's "Place loose objects" - an ArrangeJob that arranges only the
+// instances on no plate or over a plate's edge, around everything else as fixed items.
+void Plater::arrange_loose()
+{
+    auto &w = get_ui_job_worker();
+    if (w.is_idle()) {
+        p->take_snapshot(_u8L("Place loose objects"));
+        replace_job(w, std::make_unique<ArrangeJob>(true));
+    }
+}
+
 void Plater::set_current_canvas_as_dirty()
 {
     p->set_current_canvas_as_dirty();
