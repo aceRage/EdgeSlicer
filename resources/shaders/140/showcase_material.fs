@@ -464,12 +464,13 @@ vec3 mc_mesh_albedo(vec3 n, bool cap)
     float z_px  = max(fwidth(z), 1e-6);
     float xy_px = max(length(fwidth(world_pos.xy)), 1e-6);
 
-    // The height within the layer (s.y), with the layer lines; faded out with them far away.
+    // The height within the layer (s.y), with the layer lines. The colour bands it makes in the
+    // transition zones alias sooner than the groove shading, so they fade out below 8 px a layer.
     float sy = 0.0;
     if (layer_mode != 0 && line_depth > 0.0) {
         vec2  layer = layer_at(z);
         float h     = max(layer.y - layer.x, 1e-4);
-        sy = (2.0 * clamp((z - layer.x) / h, 0.0, 1.0) - 1.0) * layer_fade(h / z_px);
+        sy = (2.0 * clamp((z - layer.x) / h, 0.0, 1.0) - 1.0) * smoothstep(3.0, 8.0, h / z_px);
     }
 
     // The skin's lines on a top or bottom face (skin_tangent() above, without the sheen's projection).
