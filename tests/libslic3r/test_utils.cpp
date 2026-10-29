@@ -1036,6 +1036,40 @@ TEST_CASE("Floats print with a decimal point in a locale whose decimal separator
     CHECK(float_to_string_decimal_point(25. / 3., 3) == "8.333");
 }
 
+// Orca #16967 / #11534: camera_orbit_mult is saved with FromCDouble (always '.').
+// string_to_double_decimal_point must keep the fractional part under a comma locale;
+// std::stod stops at '.' so "1.5" becomes 1 and "0.99" becomes 0.
+TEST_CASE("string_to_double_decimal_point keeps a point-separated preference under a comma locale", "[LocalesUtils]")
+{
+    struct RestoreNumericLocale
+    {
+        std::string previous;
+        RestoreNumericLocale()
+        {
+            const char *cur = std::setlocale(LC_NUMERIC, nullptr);
+            previous        = cur ? cur : "C";
+        }
+        ~RestoreNumericLocale() { std::setlocale(LC_NUMERIC, previous.c_str()); }
+    } restore_numeric_locale;
+    const char *candidates[] = {"de_DE.UTF-8", "de_DE", "fr_FR.UTF-8", "fr_FR"};
+    bool applied_comma = false;
+    for (const char *name : candidates) {
+        if (std::setlocale(LC_NUMERIC, name) != nullptr) {
+            applied_comma = true;
+            break;
+        }
+    }
+    if (!applied_comma) {
+        WARN("no locale with a comma decimal separator is installed");
+        return;
+    }
+    CHECK(std::abs(string_to_double_decimal_point("1.5") - 1.5) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("0.99") - 0.99) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("1.99") - 1.99) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("2.00") - 2.00) < 1e-12);
+    CHECK(std::abs(string_to_double_decimal_point("0.05") - 0.05) < 1e-12);
+}
+
 TEST_CASE("atof_decimal_point and string_to_double_decimal_point return 0 for text with no number", "[LocalesUtils]")
 {
     // fast_float leaves the output untouched on failure; the result must not be indeterminate.

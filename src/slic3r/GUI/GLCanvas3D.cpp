@@ -6626,7 +6626,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if ((any_gizmo_active || swap_mouse_buttons || m_hover_volume_idxs.empty()) && m_mouse.is_start_position_3D_defined()) {
                 Camera& camera = wxGetApp().plater()->get_camera();
                 auto mult_pref = wxGetApp().app_config->get("camera_orbit_mult");
-                const double mult = mult_pref.empty() ? 1.0 : std::stod(mult_pref);
+                // Preferences stores this with FromCDouble (always '.'). std::stod follows
+                // LC_NUMERIC, so under de_DE/fr_FR "1.5" becomes 1. Parse with the same
+                // locale-independent helper used for arrange distances above.
+                const double mult = mult_pref.empty() ? 1.0 : string_to_double_decimal_point(mult_pref);
                 const Vec3d rot = (Vec3d(pos.x(), pos.y(), 0.) - m_mouse.drag.start_position_3D) * (PI * TRACKBALLSIZE / 180.) * mult;
                 if (this->m_canvas_type == ECanvasType::CanvasAssembleView || m_gizmos.get_current_type() == GLGizmosManager::FdmSupports ||
                     m_gizmos.get_current_type() == GLGizmosManager::Seam || m_gizmos.get_current_type() == GLGizmosManager::MmSegmentation ||
