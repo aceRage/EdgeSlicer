@@ -2621,6 +2621,21 @@ static nlohmann::json filament_state_json(int slot)
     nlohmann::json j = settings_state_json(Preset::TYPE_FILAMENT);
     j["index"]       = slot;
     j["shared_by"]   = SliceV1::slots_sharing(wxGetApp().preset_bundle->filament_presets, slot);
+    // The current plate's bed type (its own, else the project's) and the filament keys that hold
+    // its first-layer and other-layer bed temperatures, so the phone's quick settings show the
+    // plate in use. Absent when the printer has no bed types.
+    if (Plater* plater = wxGetApp().plater()) {
+        const BedType bed = plater->get_partplate_list().get_curr_plate()->get_bed_type(true);
+        const std::string first = get_bed_temp_1st_layer_key(bed), other = get_bed_temp_key(bed);
+        if (bed != btDefault && !first.empty() && !other.empty()) {
+            const ConfigOptionDef* def   = print_config_def.get("curr_bed_type");
+            std::string            label = ConfigOptionEnum<BedType>(bed).serialize();
+            for (size_t i = 0; def && i < def->enum_values.size() && i < def->enum_labels.size(); ++i)
+                if (def->enum_values[i] == label) { label = _(def->enum_labels[i]).ToUTF8().data(); break; }
+            j["bed_type"]      = label;
+            j["bed_temp_keys"] = {first, other};
+        }
+    }
     return j;
 }
 
@@ -3352,7 +3367,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/settings/process/revert"}, {"description", "reset all settings to the last saved preset"} },
             { {"method", "POST"}, {"path", "/api/settings/process/save"},  {"description", "save modifications under the same name (system presets save to '<name> - Custom')"} },
             // PR F (slice_filament_settings): the Filament tab, one slot at a time
-            { {"method", "GET"},  {"path", "/api/settings/filament?index={slot}"}, {"description", "the Filament tab for that slot's preset, in the Process tab's shape, plus index and shared_by (every slot using the same preset: one edited copy changes them all); 409 while another preset has unsaved changes there"} },
+            { {"method", "GET"},  {"path", "/api/settings/filament?index={slot}"}, {"description", "the Filament tab for that slot's preset, in the Process tab's shape, plus index, shared_by (every slot using the same preset: one edited copy changes them all) and, when the printer has bed types, bed_type (the current plate's) and bed_temp_keys [first layer, other layers]; 409 while another preset has unsaved changes there"} },
             { {"method", "POST"}, {"path", "/api/settings/filament?index={slot}"}, {"description", "form body key=value[&key=value…] of that preset's own settings; applies like typing into the Filament tab, returns the state"} },
             { {"method", "POST"}, {"path", "/api/settings/filament/revert?index={slot}"}, {"description", "reset that slot's preset to its last saved values"} },
             { {"method", "POST"}, {"path", "/api/settings/filament/save?index={slot}[&name={new}]"}, {"description", "save under the same name (a system preset to '<name> - Custom'; the slots using it follow), or with name as a new preset for this slot only; 409 when that name is taken"} },
