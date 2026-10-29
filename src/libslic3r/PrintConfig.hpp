@@ -1601,6 +1601,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 support_filament))
     ((ConfigOptionFloatOrPercent,      support_line_width))
     ((ConfigOptionBool,                support_interface_not_for_body))
+    // EdgeSlicer: support interface interlock (woven band under the top contact layer).
+    ((ConfigOptionBool,                support_interface_interlock))
+    ((ConfigOptionInt,                 support_interface_interlock_layers))
+    ((ConfigOptionInt,                 support_interface_interlock_beam_lines))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
     // Chameleon: when enabled, support material matches the filament of the model
