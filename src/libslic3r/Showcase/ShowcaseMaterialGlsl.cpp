@@ -111,6 +111,8 @@ const std::vector<std::string> &libvgcode_fragment_globals()
         "s_light_top_diffuse", "s_light_top_specular", "s_light_top_shininess", "s_light_front_dir", "s_light_front_diffuse",
         "s_ambient", "s_emission", "UP", "LUMA", "color", "color_direct", "world_position", "shadow_normal", "segment_id",
         "cut_color_direct", "fragment_color", "shadow_shade", "find_cut", "smooth_normal", "smooth_lit", "main",
+        // EDGE multi-colour P3: the base colour hook's varyings and the colour the smooth path lights.
+        "seg_role", "extruded_volume", "bead_base",
     };
     return names;
 }

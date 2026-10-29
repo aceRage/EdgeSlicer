@@ -115,6 +115,31 @@ public:
     // prelude built). Off by default; Preview never sets it.
     void set_use_fragment_prelude(bool use);
     //
+    // EDGE (multi-colour filaments, P3): a host's per-fragment base colour for the smooth look.
+    // `prelude` is GLSL put ahead of the segments fragment shader (after its #version line, with
+    // EXTERNAL_BASE_COLOR defined); the segments program, and the fragment prelude's program when
+    // there is one, are rebuilt with it (both then light its colour). It must define
+    //   vec3 external_base_color(vec3 base_color, vec2 section, vec3 right, vec3 dir,
+    //                            float extruded_volume, int look, int role);
+    // (section: +1 right of travel / +1 top of the bead; right, dir: the segment's directions; look:
+    // the extruder, as in set_smooth_look(); role: the EGCodeExtrusionRole) and must not declare a
+    // name the segments shaders declare. It is called only on the smooth look's path, so with the
+    // smooth look off (Preview) the program draws exactly as before. An empty prelude rebuilds the
+    // plain program. Returns false, with the compiler's message in `error`, when it does not build;
+    // the program in use is then kept. Needs the GL context current. Desktop GL only.
+    //
+    bool set_base_color_prelude(const std::string& prelude, std::string* error = nullptr);
+    // The segments program while a prelude is in it (for the host to set the prelude's uniforms, on
+    // this program and on get_fragment_prelude_program(); they are lost when a program is rebuilt),
+    // else 0.
+    unsigned int get_base_color_program() const;
+    //
+    // EDGE (multi-colour P3): give the smooth look's vertices the volume their extruder has extruded
+    // so far in G-code order (mm3, the prelude's extruded_volume). Built on the first call after a
+    // load (4 bytes per vertex), freed by false or the next load; 0 while off.
+    //
+    void set_extruded_volume_enabled(bool enabled);
+    //
     // ORCA: section view. Cuts away where dot(plane, (x, y, z, 1)) < 0; { 0, 0, 0, 1 } keeps all.
     //
     void set_clipping_plane(const std::array<float, 4>& plane);
