@@ -535,3 +535,47 @@ TEST_CASE("A tower slides off a slanted side of an object", "[WipeTowerEstimate]
     CHECK(clear_of(square_footprint(10.), *anchor, obstacles));
     CHECK_THAT(unscaled((*anchor - target).cast<double>().norm()), WithinAbs(13.75 / std::sqrt(1. + 1. / 16.), 1e-3));
 }
+
+// Orca #12781: wipe_tower_type is a real printer option now. Bambu Lab printers stay Type1 whatever it
+// says; everyone else follows it, Type2 when unset.
+TEST_CASE("wipe_tower_type is honoured off Bambu Lab printers", "[WipeTowerEstimate][WipeTowerType]") {
+    DynamicPrintConfig config = make_config();
+    config.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    CHECK(config.opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2);
+    CHECK(resolve_wipe_tower_type(config) == WipeTowerType::Type2);
+    config.set_deserialize_strict("wipe_tower_type", "type1");
+    CHECK(resolve_wipe_tower_type(config) == WipeTowerType::Type1);
+    // Type1 never rotates, so the configured angle is ignored.
+    config.set_deserialize_strict("wipe_tower_rotation_angle", "30");
+    CHECK(wipe_tower_rotation_deg(config) == 0.);
+    config.set_deserialize_strict("wipe_tower_type", "type2");
+    CHECK(wipe_tower_rotation_deg(config) == 30.);
+
+    config.set_key_value("printer_model", new ConfigOptionString("Bambu Lab H2D"));
+    CHECK(resolve_wipe_tower_type(config) == WipeTowerType::Type1);
+}
+
+TEST_CASE("wipe_tower_type round-trips through serialization", "[WipeTowerType][Config]") {
+    const ConfigOptionDef *def = print_config_def.get("wipe_tower_type");
+    REQUIRE(def != nullptr);
+    CHECK(def->mode == comAdvanced);
+    CHECK(def->default_value->getInt() == int(WipeTowerType::Type2));
+
+    for (const char *value : {"type1", "type2"}) {
+        DYNAMIC_SECTION(value) {
+            DynamicPrintConfig config = preset_shaped_defaults();
+            config.set_deserialize_strict("wipe_tower_type", value);
+            const std::string serialized = config.opt_serialize("wipe_tower_type");
+            CHECK(serialized == value);
+
+            DynamicPrintConfig reloaded = preset_shaped_defaults();
+            reloaded.set_deserialize_strict("wipe_tower_type", serialized);
+            CHECK(reloaded.opt_enum<WipeTowerType>("wipe_tower_type") == config.opt_enum<WipeTowerType>("wipe_tower_type"));
+
+            // And into the static config Print keeps.
+            PrintConfig print_config;
+            print_config.apply(reloaded, true);
+            CHECK(print_config.wipe_tower_type.serialize() == value);
+        }
+    }
+}

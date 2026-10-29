@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <vector>
 #include <string>
 #include <regex>
@@ -1874,9 +1875,11 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 
 bool wipe_tower_rotation_supported()
 {
-    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), plus the printer's
+    // wipe_tower_type (Orca #12781): only WipeTower2 (Type 2) rotates.
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    return bundle != nullptr && !bundle->is_bbl_vendor();
+    return bundle != nullptr && !bundle->is_bbl_vendor() &&
+           resolve_wipe_tower_type(bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
 }
 
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
@@ -5130,6 +5133,19 @@ int PartPlateList::notify_instance_removed(int obj_id, int instance_id)
 	}
 
 	if (instance_id == -1) {
+		// The object's other instances go with it, and may sit on other plates: left in place,
+		// update_object_index below would renumber them onto the previous object.
+		std::set<int> other_instances;
+		for (PartPlate* p : m_plate_list)
+			for (const std::pair<int, int>& obj_inst : p->obj_to_instance_set)
+				if (obj_inst.first == obj_id)
+					other_instances.insert(obj_inst.second);
+		for (const std::pair<int, int>& obj_inst : unprintable_plate.obj_to_instance_set)
+			if (obj_inst.first == obj_id)
+				other_instances.insert(obj_inst.second);
+		for (int other_instance : other_instances)
+			notify_instance_removed(obj_id, other_instance);
+
 		//update all the obj_ids which is bigger
 		for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 		{

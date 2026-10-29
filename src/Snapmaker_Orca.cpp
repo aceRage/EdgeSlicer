@@ -93,6 +93,7 @@ using namespace nlohmann;
 #endif
 #include "slic3r/Utils/MeshInspect.hpp"
 #include "slic3r/Utils/PaintCLI.hpp"
+#include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
@@ -1265,6 +1266,20 @@ int CLI::run(int argc, char **argv)
     // Also on Linux, we need to tell Xlib that we will be using threads,
     // lest we crash when we fire up GStreamer.
     XInitThreads();
+#endif
+
+#if defined(_WIN32) && defined(SLIC3R_GUI)
+    // WebView2 152+ hides the pointer while typing and only restores it on a mouse event inside
+    // the webview, so closing one from the keyboard (Enter in a dialog, the hub, Stream, ...)
+    // leaves it hidden app-wide (WebView2Feedback#5687, Orca #16880). Must be set before the
+    // first webview is created. Append the flag when the env is already set; leave it alone
+    // when HideCursorWhileTyping is already listed.
+    {
+        const char *      cur  = boost::nowide::getenv(WebView2Args::ENV_NAME);
+        const std::string next = WebView2Args::with_hide_cursor_while_typing(cur);
+        if (cur == nullptr || next != cur)
+            boost::nowide::setenv(WebView2Args::ENV_NAME, next.c_str(), /* replace */ true);
+    }
 #endif
 
 	// Switch boost::filesystem to utf8.
