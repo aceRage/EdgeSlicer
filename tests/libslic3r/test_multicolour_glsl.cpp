@@ -41,6 +41,7 @@ inline float floor(float v) { return std::floor(v); }
 inline float min(float a, float b) { return std::min(a, b); }
 inline float max(float a, float b) { return std::max(a, b); }
 inline float sqrt(float v) { return std::sqrt(v); }
+inline float abs(float v) { return std::abs(v); }
 inline float pow(float a, float b) { return std::pow(a, b); }
 inline float atan(float y, float x) { return std::atan2(y, x); }
 inline float smoothstep(float e0, float e1, float v)
@@ -55,6 +56,7 @@ vec4 mc_colors[64];
 vec4 mc_bounds[16];
 vec4 mc_params[16];
 vec4 mc_global;
+vec4 mc_global2;
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -73,7 +75,8 @@ void load(const UniformTable &t)
         mc_bounds[i] = { t.bounds[i * 4], t.bounds[i * 4 + 1], t.bounds[i * 4 + 2], t.bounds[i * 4 + 3] };
         mc_params[i] = { t.params[i * 4], t.params[i * 4 + 1], t.params[i * 4 + 2], t.params[i * 4 + 3] };
     }
-    mc_global = { t.global[0], t.global[1], t.global[2], t.global[3] };
+    mc_global  = { t.global[0], t.global[1], t.global[2], t.global[3] };
+    mc_global2 = { t.global2[0], t.global2[1], t.global2[2], t.global2[3] };
 }
 
 } // namespace mc_glsl_shim
@@ -125,7 +128,7 @@ TEST_CASE("The shared GLSL is one text for the shader and the C++ check", "[Mult
 TEST_CASE("The coextruded-colour prelude shares no name with libvgcode's shader or realism 1b's prelude", "[MultiColour][Glsl]")
 {
     // Both preludes go into the same program (libvgcode::Viewer::set_base_color_prelude/set_fragment_prelude).
-    const std::vector<std::string> mine = { "mc_colors", "mc_bounds", "mc_params", "mc_global", "external_base_color" };
+    const std::vector<std::string> mine = { "mc_colors", "mc_bounds", "mc_params", "mc_global", "mc_global2", "external_base_color" };
     for (const std::string &n : Slic3r::Showcase::libvgcode_fragment_globals()) {
         INFO(n);
         CHECK(n.rfind("mc_", 0) != 0);
@@ -173,7 +176,7 @@ TEST_CASE("The shader's bead colour matches the reference model at random inputs
         // The bead function, with the twist the shader works out from the extruded volume.
         const float twist_turns = f.twist_deg_per_m * length_m / 360.f;
         const sh::vec3 g = sh::mc_bead_colour(slot, sx, sy, sh::vec3(rx, ry, 0.), sh::vec3(dx, dy, 0.), twist_turns, bp.blend_turns,
-                                              bp.stack_up_k, bp.visible_height);
+                                              bp.stack_up_k, bp.visible_height, bp.flatten);
         const RGB      c = f.bead_colour(sx, sy, rx, ry, dx, dy, length_m, bp);
         worst = std::max(worst, max_diff(g, c));
 
@@ -279,5 +282,27 @@ TEST_CASE("Walls blend wide and show their face colour; tops blend narrow (P0 tu
         const RGB minus = g.bead_colour(0.f, 1.f, 0.f, 1.f, -1.f, 0.f, 0.f, bead_params(false));   // -X travel: trailing +X
         CHECK(near(plus, yellow));
         CHECK(near(minus, red));
+    }
+    SECTION("a monotonic top seen from above is its trailing colour with a thin edge of the other")
+    {
+        // +X travel, trailing -X; the boundary 45 degrees from the trailing side (red centred at
+        // 315 degrees). Across the drawn diamond (s.y = 1 - |s.x|), count the samples that read yellow.
+        Filament g     = f;
+        g.rotation_deg = 315.f;
+        auto yellow_share = [&](const BeadParams &bp) {
+            int yellow_n = 0, n = 0;
+            for (float sx = -1.f; sx <= 1.f; sx += 0.01f, ++n) {
+                const RGB c = g.bead_colour(sx, 1.f - std::abs(sx), 0.f, -1.f, 1.f, 0.f, 0.f, bp);
+                yellow_n += c[1] > 0.5f * (red[1] + yellow[1]) ? 1 : 0;
+            }
+            return float(yellow_n) / float(n);
+        };
+        BeadParams unflattened = bead_params(false);
+        unflattened.flatten    = 1.f;
+        const float flat = yellow_share(bead_params(false));
+        INFO("yellow share, flattened " << flat << ", as drawn " << yellow_share(unflattened));
+        CHECK(flat > 0.f);       // the edge is there
+        CHECK(flat < 0.18f);     // and thin
+        CHECK(yellow_share(unflattened) > 0.2f);
     }
 }

@@ -17,6 +17,7 @@
 //   uniform vec4 mc_params[16];   rotation (turns), twist (turns per mm3 of extruded volume),
 //                                 narrowest slice (turns, caps the blend), ironing pull to the average
 //   uniform vec4 mc_global;       wall blend, top blend (turns), k, wall visible height
+//   uniform vec4 mc_global2;      top flatten (BeadParams::flatten of the other beads), unused x3
 // pack_uniforms() fills them. A slot with n <= 1 takes the plain path (its own base colour).
 //
 // Twist and, later, gradient filaments (P6) run on the cumulative extruded volume of the slot, in
@@ -69,8 +70,12 @@ vec3 mc_colour_at(int slot, float phi, float blend) { \
     return mc_colour(slot, i); \
 } \
 float mc_direction_turns(float x, float y) { return mc_wrap(atan(y, x) * 0.15915494309189535 + 0.25); } \
-vec3 mc_bead_colour(int slot, float sx, float sy, vec3 R, vec3 D, float twist_turns, float blend, float k, float visible) { \
+vec3 mc_bead_colour(int slot, float sx, float sy, vec3 R, vec3 D, float twist_turns, float blend, float k, float visible, float flatten) { \
     if (mc_count(slot) <= 1) return mc_colour(slot, 0); \
+    if (flatten != 1.0) { \
+        float a = 1.0 - pow(max(1.0 - abs(sy), 0.0), flatten); \
+        sy = sy < 0.0 ? -a : a; \
+    } \
     sy = sy * visible; \
     float vx = sx * R.x - k * sy * D.x; \
     float vy = sx * R.y - k * sy * D.y; \
@@ -91,7 +96,7 @@ vec3 mc_fragment_colour(int slot, int role, float sx, float sy, vec3 R, vec3 D, 
     float dl = sqrt(D.x * D.x + D.y * D.y); \
     vec3 Dh = dl > 0.1 ? vec3(D.x / dl, D.y / dl, 0.0) : vec3(0.0, 0.0, 0.0); \
     vec3 c = mc_bead_colour(slot, sx, sy, Rh, Dh, volume * mc_params[slot].y, wall ? mc_global.x : mc_global.y, \
-                            mc_global.z, wall ? mc_global.w : 1.0); \
+                            mc_global.z, wall ? mc_global.w : 1.0, wall ? 1.0 : mc_global2.x); \
     if (role == 7) c = mix(c, mc_average(slot), mc_params[slot].w); \
     return c; \
 } \
@@ -109,6 +114,7 @@ struct UniformTable
     std::array<float, GLSL_SLOTS * 4>               bounds{};  // mc_bounds
     std::array<float, GLSL_SLOTS * 4>               params{};  // mc_params
     std::array<float, 4>                            global{};  // mc_global
+    std::array<float, 4>                            global2{}; // mc_global2
     bool any_multi = false;   // some slot has 2 or more colours
     bool any_twist = false;   // some multi-colour slot twists (the volume buffer is needed)
 };

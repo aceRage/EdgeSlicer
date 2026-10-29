@@ -2049,6 +2049,7 @@ void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global"), 1, t.global.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global2"), 1, t.global2.data()));
     }
     glsafe(::glUseProgram(GLuint(curr_program)));
 }

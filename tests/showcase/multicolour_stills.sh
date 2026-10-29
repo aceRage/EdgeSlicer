@@ -6,7 +6,9 @@
 #
 #   sh tests/showcase/multicolour_stills.sh <install dir> <template.3mf> <out dir> [--size px] [--angle deg]
 #                                           [--photos dir] [--golden dir]
-#     <template.3mf>  any project 3MF with project settings (its printer and process are used)
+#     <template.3mf>  a project 3MF with project settings (its printer and process are used), e.g. the
+#                     U1 project tests/data/support_corpus/onepart_group.3mf, as golden.sh uses (an H2C
+#                     project slices on the command line but not in the hidden render instance)
 #     --size          the stills' shorter side (default 1080)
 #     --angle         slot 1's rotation, filament_colour_angle (default -45: front red, right yellow)
 #     --photos        the P0 photo folder, linked from index.html (default tests/p0_multicolour_cc1)
@@ -28,7 +30,7 @@ while [ $# -gt 0 ]; do
     --angle) ANGLE=$2; shift 2 ;;
     --photos) PHOTOS=$2; shift 2 ;;
     --golden) GOLDEN=$2; shift 2 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) ARGS="$ARGS $1"; shift ;;
     esac
 done

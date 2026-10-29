@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Multi-colour filaments (P3): the P0 calibration shapes as Showcase fixture projects.
 
-Builds one project 3MF per shape and view from a template project (any EdgeSlicer project 3MF with
-Metadata/project_settings.config, e.g. one saved with a single-nozzle printer). The template's
+Builds one project 3MF per shape and view from a template project (an EdgeSlicer project 3MF with
+Metadata/project_settings.config, e.g. the U1 project tests/data/support_corpus/onepart_group.3mf). The template's
 objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk, and a Showcase scene
 (toolpaths, Studio white, silk) is added. tests/design_multicolour_filament_view.md 7.2 and 8.2;
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
@@ -192,6 +192,13 @@ def main(argv):
         settings = json.loads(json.dumps(base_settings))
         for k, v in overrides.items():
             settings[k] = v
+        # The loader rebuilds the process from its system preset plus the keys listed as changed:
+        # list ours, or they fall back to the preset's values.
+        diffs = settings.get("different_settings_to_system")
+        if isinstance(diffs, list) and diffs:
+            keys = [k for k in diffs[0].split(";") if k]
+            keys += [k for k in overrides if k not in keys]
+            diffs[0] = ";".join(sorted(keys))
         set_slot0(settings, "filament_colour", first)
         set_slot0(settings, "filament_multi_colors", a.colors)
         set_slot0(settings, "filament_colour_mode", "0")

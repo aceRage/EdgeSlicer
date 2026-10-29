@@ -132,6 +132,7 @@ BeadParams bead_params(bool wall)
     p.blend_turns    = wall ? BLEND_TURNS_WALL : BLEND_TURNS_TOP;
     p.stack_up_k     = STACK_UP_K;
     p.visible_height = wall ? WALL_VISIBLE_HEIGHT : 1.f;
+    p.flatten        = wall ? 1.f : TOP_FLATTEN;
     return p;
 }
 
@@ -180,6 +181,10 @@ RGB Filament::bead_colour(float sx, float sy, float rx, float ry, float dx, floa
         return colour[0];
     // The source direction in the printer's XY plane (design 2.2): sideways across the bead, tilted
     // towards the travel at the bottom (leading material) and against it at the top (trailing).
+    if (bead.flatten != 1.f) {
+        const float a = 1.f - std::pow(std::max(1.f - std::abs(sy), 0.f), bead.flatten);
+        sy = sy < 0.f ? -a : a;
+    }
     sy *= bead.visible_height;
     float vx = sx * rx - bead.stack_up_k * sy * dx;
     float vy = sx * ry - bead.stack_up_k * sy * dy;

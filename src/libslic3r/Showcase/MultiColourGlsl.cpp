@@ -49,7 +49,8 @@ UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector
         t.any_multi |= n > 1;
         t.any_twist |= n > 1 && p[1] != 0.f;
     }
-    t.global = { BLEND_TURNS_WALL, BLEND_TURNS_TOP, STACK_UP_K, WALL_VISIBLE_HEIGHT };
+    t.global  = { BLEND_TURNS_WALL, BLEND_TURNS_TOP, STACK_UP_K, WALL_VISIBLE_HEIGHT };
+    t.global2 = { TOP_FLATTEN, 0.f, 0.f, 0.f };
     return t;
 }
 
@@ -64,7 +65,8 @@ const std::string &glsl_prelude()
         "uniform vec4 mc_colors[64];\n"
         "uniform vec4 mc_bounds[16];\n"
         "uniform vec4 mc_params[16];\n"
-        "uniform vec4 mc_global;\n") +
+        "uniform vec4 mc_global;\n"
+        "uniform vec4 mc_global2;\n") +
         glsl_functions() +
         "\n"
         // libvgcode's hook (Viewer::set_base_color_prelude): section is (+1 right of travel, +1 top),

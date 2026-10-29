@@ -56,6 +56,12 @@ constexpr int STEP_PERCENT = 5;
 constexpr float BLEND_TURNS_WALL    = 0.10f;
 constexpr float BLEND_TURNS_TOP     = 0.03f;
 constexpr float WALL_VISIBLE_HEIGHT = 0.5f;
+//  * a top bead is flat across most of its width, while the viewer draws it as a diamond whose
+//    height falls linearly to the edges. Seen from above, s.y is therefore lifted to the flat top,
+//    1 - (1 - |s.y|)^TOP_FLATTEN, so the trailing slice covers the bead and the side slices show
+//    only at its rounded edges: the 0 degree monotonic plaque reads one colour with a thin edge of
+//    the other (P0 photo 07), not as stripes.
+constexpr float TOP_FLATTEN         = 4.f;
 // Ironing re-melts the top a little: its beads are pulled this far towards the slot's average.
 constexpr float IRONING_TO_AVERAGE  = 0.3f;
 
@@ -65,6 +71,7 @@ struct BeadParams
     float blend_turns    = BLEND_TURNS;  // the boundary blend, never more than the narrowest slice
     float stack_up_k     = STACK_UP_K;
     float visible_height = 1.f;          // s.y is scaled by this before the stack-up
+    float flatten        = 1.f;          // s.y -> 1 - (1 - |s.y|)^flatten (sign kept); 1 = as drawn
 };
 // Walls (inner, outer and overhang perimeters) or every other bead (tops, infill, supports...).
 BeadParams bead_params(bool wall);
