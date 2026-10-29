@@ -1,9 +1,13 @@
 #include "PrintHostDialogs.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <iomanip>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <wx/frame.h>
@@ -39,6 +43,7 @@
 #include "Widgets/StateColor.hpp"
 #include "WebPreprintDialog.hpp"
 #include "../Utils/PrintHostDevices.hpp"
+#include "../Utils/CrealityPrintModel.hpp"
 #include "../Utils/PrintHostDeviceStatus.hpp"
 #include "../Utils/ElegooCc2.hpp"
 #include <wx/choice.h>
@@ -452,6 +457,17 @@ static wxString third_party_slot_tile_label(const PrintHostDevices::Status& st, 
     return wxString::Format("%d", protocol_index + 1);
 }
 
+// 1-based wxChoice selection, 0 = "As sliced". CFS keeps type+colour over external; a QIDI Box
+// never matches on colour alone; everyone else is closest loaded colour.
+static int mapping_auto_match_choice(const PrintHostDevices::Status& st, const SendPlateFilament& f)
+{
+    if (st.cfs) {
+        const int idx = PrintHostDevices::cfs_auto_match(f.type, f.colour, st.slots, true);
+        return idx >= 0 ? idx + 1 : 0;
+    }
+    return PrintHostDevices::auto_match_slot(st.slots, f.colour, f.type, st.qidi_box);
+}
+
 static void append_unique_mapping_lines(wxString& out, const wxString& block)
 {
     size_t start = 0;
@@ -485,6 +501,8 @@ static void append_unique_mapping_lines(wxString& out, const wxString& block)
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 static const char* CONFIG_KEY_STORAGE = "printhost_storage";
+static const char* CONFIG_KEY_CREALITY_CFS       = "creality_send_use_cfs";
+static const char* CONFIG_KEY_CREALITY_CALIBRATE = "creality_send_calibrate";
 // The QIDI print options, remembered between sends like QIDIStudio's own switches. The Box switch
 // is not: it starts on whenever a Box slot is loaded, so a mapping is never skipped by accident
 // (PrintHostDevices::qidi_option_defaults).
@@ -531,6 +549,8 @@ std::string PrintHostSendDialog::device_id() const
 
 std::string PrintHostSendDialog::filament_mapping() const
 {
+    if (m_creality_use_cfs && !m_creality_use_cfs->GetValue())
+        return {};
     // The QIDI Box switched off: the print runs from the extruder's own spool, nothing is mapped.
     if (m_qidi_use_box && !m_qidi_use_box->GetValue())
         return {};
@@ -632,6 +652,11 @@ void PrintHostSendDialog::build_device_ui()
     m_mapping_note->Hide();
     content_sizer->Add(m_mapping_note, 0, wxBOTTOM, VERT_SPACING);
 
+    m_creality_panel = new wxPanel(this, wxID_ANY);
+    m_creality_sizer = new wxBoxSizer(wxVERTICAL);
+    m_creality_panel->SetSizer(m_creality_sizer);
+    content_sizer->Add(m_creality_panel, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+
     m_qidi_panel = new wxPanel(this, wxID_ANY);
     m_qidi_sizer = new wxBoxSizer(wxVERTICAL);
     m_qidi_panel->SetSizer(m_qidi_sizer);
@@ -650,24 +675,20 @@ void PrintHostSendDialog::build_device_ui()
     refresh_device_status();
 }
 
-// Blocking with a busy cursor, exactly as the devices dialog's Test does: a modal send dialog can
-// afford one short request, and a worker thread would have to outlive a dialog the user can close.
-void PrintHostSendDialog::refresh_device_status()
+PrintHostSendDialog::~PrintHostSendDialog()
 {
-    m_device_status = PrintHostDevices::Status();
-    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
-        wxBusyCursor wait;
-        // A device saved before the store kept the model: the dialog knows it (the model key is the
-        // preset's printer_model), and the Elegoo probe asks a CANVAS only of a Centauri Carbon 1.
-        PrintHostDevices::Device d = m_devices[m_device_sel];
-        if (d.printer_model.empty())
-            d.printer_model = !m_printer_model.empty() ? m_printer_model : m_model_key;
-        // A QIDI Box printer's Moonraker can take longer than 3 s (a real one timed out at 3 s),
-        // and a probe that times out means no Box rows and no mapping.
-        const int timeout = std::max(PrintHostDevices::probe_timeout_for(d.printer_model),
-                                     PrintHostDevices::probe_timeout_for(m_printer_model));
-        m_device_status = PrintHostDevices::probe(d, timeout);
+    if (m_probe_token) {
+        std::lock_guard<std::mutex> lock(m_probe_token->mtx);
+        m_probe_token->alive = false;
     }
+    if (m_probe_thread.joinable()) {
+        wxBusyCursor busy;
+        m_probe_thread.join();
+    }
+}
+
+void PrintHostSendDialog::apply_device_status()
+{
     if (m_device_note) {
         wxString text;
         if (m_device_status.probed && m_device_status.online && !m_device_status.state.empty())
@@ -684,8 +705,13 @@ void PrintHostSendDialog::refresh_device_status()
         } else if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
             if (!text.IsEmpty())
                 text += "  ";
-            // The honest sentence: this protocol has no filament data, so there is nothing to map.
             text += _(from_u8(m_device_status.note));
+        } else if (m_device_status.cfs && m_device_status.slots_have_filaments) {
+            if (!text.IsEmpty())
+                text += "  ";
+            const std::string variant = m_device_status.cfs_variant.empty() ? std::string("CFS") : m_device_status.cfs_variant;
+            text += format_wxstr(_L("%1%: each filament is fed from the slot picked below. \"As sliced\" leaves the printer on the external spool."),
+                                 from_u8(variant));
         } else if (m_device_status.qidi_box && m_device_status.slots_have_filaments) {
             if (!text.IsEmpty())
                 text += "  ";
@@ -719,13 +745,24 @@ void PrintHostSendDialog::refresh_device_status()
         m_device_note->Show(!text.IsEmpty());
     }
     rebuild_mapping_rows();
+    rebuild_creality_options();
     rebuild_qidi_options();
     rebuild_vendor_options();
     update_mapping_enabled();
+    m_probe_pending = false;
+    set_send_enabled(true);
     update_print_button();
     content_sizer->Layout();
     Layout();
     Fit();
+}
+
+void PrintHostSendDialog::set_send_enabled(bool on)
+{
+    if (Button *b = get_button(wxID_OK))
+        b->Enable(on);
+    if (Button *b = get_button(wxID_YES))
+        b->Enable(on);
 }
 
 bool PrintHostSendDialog::print_blocked() const
@@ -738,6 +775,8 @@ bool PrintHostSendDialog::print_blocked() const
 // just before it sends anything (PrintHostJobQueue::priv::perform_job). Upload stays available.
 void PrintHostSendDialog::update_print_button()
 {
+    if (m_probe_pending)
+        return;
     if (Button* btn = get_button(wxID_YES))
         btn->Enable(!print_blocked());
 }
@@ -969,6 +1008,123 @@ bool PrintHostSendDialog::confirm_qidi_start()
     return false;
 }
 
+bool PrintHostSendDialog::creality_device_selected() const
+{
+    return m_device_sel >= 0 && m_device_sel < (int) m_devices.size() && m_devices[m_device_sel].host_type == "crealityprint";
+}
+
+// Every host but CrealityPrint: blocking with a busy cursor, exactly as the devices dialog's Test
+// does - a modal send dialog can afford one short request. This is main's behaviour, unchanged, for
+// U1 / Moonraker / QIDI / Elegoo / PrusaLink / Flashforge and every host that is not probed.
+//
+// CrealityPrint only: /info and then a port-9999 boxsInfo WebSocket, each with a 1 s deadline, on a
+// joinable worker owned by the dialog. Upload / Upload and Print stay disabled while "Checking
+// printer..." is up so an early press cannot send an empty filament_mapping(). The worker never
+// touches `this`: its result is posted to the UI thread and dropped there when the dialog closed
+// (token->alive) or the person picked another device meanwhile (token->gen).
+void PrintHostSendDialog::refresh_device_status()
+{
+    m_device_status = PrintHostDevices::Status();
+    // A Creality probe still out for the previous pick: drop its result, then wait for it (bounded
+    // by its two 1 s deadlines) so only one worker is ever alive.
+    if (m_probe_token) {
+        std::lock_guard<std::mutex> lock(m_probe_token->mtx);
+        ++m_probe_token->gen;
+    }
+    if (m_probe_thread.joinable()) {
+        wxBusyCursor busy;
+        m_probe_thread.join();
+    }
+
+    if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size()) {
+        apply_device_status();
+        return;
+    }
+    // A device saved before the store kept the model: the dialog knows it (the model key is the
+    // preset's printer_model), and the Elegoo probe asks a CANVAS only of a Centauri Carbon 1.
+    PrintHostDevices::Device d = m_devices[m_device_sel];
+    if (d.printer_model.empty())
+        d.printer_model = !m_printer_model.empty() ? m_printer_model : m_model_key;
+
+    if (d.host_type != "crealityprint") {
+        {
+            wxBusyCursor wait;
+            // A QIDI Box printer's Moonraker can take longer than 3 s (a real one timed out at 3 s),
+            // and a probe that times out means no Box rows and no mapping.
+            const int timeout = std::max(PrintHostDevices::probe_timeout_for(d.printer_model),
+                                         PrintHostDevices::probe_timeout_for(m_printer_model));
+            m_device_status = PrintHostDevices::probe(d, timeout);
+        }
+        apply_device_status();
+        return;
+    }
+
+    if (!m_probe_token)
+        m_probe_token = std::make_shared<ProbeToken>();
+    int gen = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_probe_token->mtx);
+        gen = ++m_probe_token->gen;
+    }
+    if (m_device_note) {
+        m_device_note->SetLabel(_L("Checking printer..."));
+        m_device_note->Wrap(note_wrap_width());
+        m_device_note->Show(true);
+    }
+    rebuild_mapping_rows();
+    rebuild_creality_options();
+    rebuild_qidi_options();
+    rebuild_vendor_options();
+    update_mapping_enabled();
+    content_sizer->Layout();
+    Layout();
+    Fit();
+
+    m_probe_pending = true;
+    set_send_enabled(false);
+
+    auto token     = m_probe_token;
+    m_probe_thread = std::thread([token, gen, d]() {
+        PrintHostDevices::Status st;
+        try {
+            st = PrintHostDevices::probe(d, 1);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostSendDialog: Creality probe failed: " << e.what();
+            st.probed = true;
+            st.error  = e.what();
+            st.note   = "this printer did not answer";
+        } catch (...) {
+            st.probed = true;
+            st.note   = "this printer did not answer";
+        }
+        {
+            std::lock_guard<std::mutex> lock(token->mtx);
+            if (!token->alive || token->gen != gen)
+                return;
+        }
+        if (!wxTheApp)
+            return;
+        wxGetApp().CallAfter([token, gen, st]() {
+            {
+                std::lock_guard<std::mutex> lock(token->mtx);
+                if (!token->alive || token->gen != gen)
+                    return;
+            }
+            // Find the still-open send dialog that owns this token rather than capturing `this`
+            // across a possible close. The token lock is released before apply_device_status()
+            // (same UI thread as the destructor, which clears alive first).
+            for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext()) {
+                auto* dlg = dynamic_cast<PrintHostSendDialog*>(node->GetData());
+                if (!dlg || dlg->m_probe_token != token)
+                    continue;
+                dlg->m_device_status = st;
+                dlg->apply_device_status();
+                break;
+            }
+        });
+    });
+}
+
 // One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
 // the printer named what is in its slots - a bare list of tools tells nobody anything.
 void PrintHostSendDialog::rebuild_mapping_rows()
@@ -1028,9 +1184,7 @@ void PrintHostSendDialog::rebuild_mapping_rows()
         // A QIDI Box matches by material first and never by colour alone (auto_match_slot).
         const int  preset_pos = preselect_slot(f);
         const bool preset_ok  = preset_pos >= 0 && preset_pos < (int) m_device_status.slots.size();
-        const int  best       = preset_ok ? preset_pos + 1 :
-                                            PrintHostDevices::auto_match_slot(m_device_status.slots, f.colour, f.type,
-                                                                              m_device_status.qidi_box);
+        const int  best       = preset_ok ? preset_pos + 1 : mapping_auto_match_choice(m_device_status, f);
         choice->SetSelection(best);
         choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { update_mapping_note(); });
         grid->Add(choice, 1, wxEXPAND);
@@ -1071,6 +1225,13 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
         // filament's own material first and never colour alone. Same rule as the wxChoice rows.
         model.mapping[i] = initial_slot_position(m_device_status.slots, preselect_slot(*f), f->colour, f->type,
                                                  m_device_status.qidi_box);
+        // A Creality CFS: the remembered slot, else Creality's own material-first rank (CFS
+        // type+colour, CFS type, then the external spool holder), as Creality Print picks.
+        if (m_device_status.cfs) {
+            const int pre = preselect_slot(*f);
+            model.mapping[i] = (pre >= 0 && pre < (int) m_device_status.slots.size()) ? pre
+                                                                                     : mapping_auto_match_choice(m_device_status, *f) - 1;
+        }
         // Happy Hare / AFC: nothing is sent, so show what the printer does without being told:
         // tool T<n> feeds from gate/lane n (its default tool-to-gate map), not a colour match.
         if (m_device_status.happy_hare || m_device_status.afc) {
@@ -1087,6 +1248,93 @@ void PrintHostSendDialog::rebuild_third_party_map_rows()
     m_mapping_panel->Show(!m_mapping_filament.empty());
     m_mapping_panel->Layout();
     update_mapping_note();
+}
+
+void PrintHostSendDialog::rebuild_creality_options()
+{
+    if (!m_creality_panel || !m_creality_sizer)
+        return;
+    m_creality_sizer->Clear(true);
+    m_creality_use_cfs = m_creality_calibrate = nullptr;
+
+    const bool creality_host = (m_device_sel >= 0 && m_device_sel < (int) m_devices.size() &&
+                                m_devices[m_device_sel].host_type == "crealityprint") ||
+                               m_device_status.cfs;
+    if (!creality_host) {
+        m_creality_panel->Show(false);
+        m_creality_panel->Layout();
+        return;
+    }
+
+    const AppConfig* app_config = wxGetApp().app_config;
+    auto remembered = [app_config](const char* key, bool fallback) {
+        const std::string v = app_config ? app_config->get("recent", key) : std::string();
+        return v.empty() ? fallback : v == "1";
+    };
+    auto add = [this](const wxString& label, const wxString& tip, bool value) {
+        auto* box = new wxCheckBox(m_creality_panel, wxID_ANY, label);
+        box->SetValue(value);
+        box->SetToolTip(tip);
+        m_creality_sizer->Add(box, 0, wxBOTTOM, FromDIP(4));
+        return box;
+    };
+
+    m_creality_sizer->Add(new wxStaticText(m_creality_panel, wxID_ANY, _L("Print options") + ":"), 0, wxBOTTOM, FromDIP(4));
+    if (m_device_status.cfs) {
+        m_creality_use_cfs = add(_L("Use CFS"),
+                                 _L("Feed the filaments from the CFS slots picked above. Untick it to print from the "
+                                    "external spool instead."),
+                                 remembered(CONFIG_KEY_CREALITY_CFS, true));
+        m_creality_use_cfs->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { update_creality_mapping_enabled(); });
+    }
+    m_creality_calibrate = add(_L("Calibrate before printing"),
+                               _L("Run the printer's self-test (enableSelfTest) before this print."),
+                               remembered(CONFIG_KEY_CREALITY_CALIBRATE, false));
+    m_creality_panel->Show(true);
+    m_creality_panel->Layout();
+}
+
+void PrintHostSendDialog::update_creality_mapping_enabled()
+{
+    update_mapping_enabled();
+}
+
+std::map<std::string, std::string> PrintHostSendDialog::extendedInfo() const
+{
+    std::map<std::string, std::string> out;
+    const bool creality = m_creality_use_cfs || m_creality_calibrate || m_device_status.cfs;
+    if (!creality)
+        return out;
+    const bool use_cfs = m_creality_use_cfs && m_creality_use_cfs->GetValue();
+    out["useCFS"]         = use_cfs ? "1" : "0";
+    out["enableSelfTest"] = (m_creality_calibrate && m_creality_calibrate->GetValue()) ? "1" : "0";
+    if (!use_cfs)
+        return out;
+    std::vector<Slic3r::CrealityPrintModel::ColorMatchFilament> filaments;
+    filaments.reserve(m_mapping_filament.size());
+    for (int idx : m_mapping_filament) {
+        const SendPlateFilament* f = plate_filament(idx);
+        Slic3r::CrealityPrintModel::ColorMatchFilament row;
+        row.index = idx;
+        if (f) {
+            row.type  = f->type;
+            row.color = f->colour;
+        }
+        filaments.push_back(std::move(row));
+    }
+    std::vector<Slic3r::CrealityPrintModel::ColorMatchTarget> slots;
+    slots.reserve(m_device_status.slots.size());
+    for (const PrintHostDevices::Slot& s : m_device_status.slots) {
+        Slic3r::CrealityPrintModel::ColorMatchTarget t;
+        t.box_id      = s.cfs_box;
+        t.material_id = s.cfs_material;
+        t.type        = s.type;
+        t.color       = s.color;
+        slots.push_back(std::move(t));
+    }
+    auto matches = Slic3r::CrealityPrintModel::color_match_from_positions(mapping_choice_positions(), filaments, slots);
+    out.insert(matches.begin(), matches.end());
+    return out;
 }
 
 std::vector<int> PrintHostSendDialog::mapping_choice_positions() const
@@ -1232,12 +1480,13 @@ void PrintHostSendDialog::rebuild_qidi_options()
 
 void PrintHostSendDialog::update_mapping_enabled()
 {
-    const bool box_on = !m_qidi_use_box || m_qidi_use_box->GetValue();
+    const bool on = (!m_qidi_use_box || m_qidi_use_box->GetValue()) &&
+                    (!m_creality_use_cfs || m_creality_use_cfs->GetValue());
     if (m_filament_map)
-        m_filament_map->set_mapping_enabled(box_on);
+        m_filament_map->set_mapping_enabled(on);
     for (wxChoice* choice : m_mapping_choices)
-        choice->Enable(box_on);
-    update_mapping_note(); // the QIDI Box lines follow the switch
+        choice->Enable(on);
+    update_mapping_note(); // the QIDI Box / Use CFS lines follow the switch
 }
 
 void PrintHostSendDialog::init()
@@ -1382,6 +1631,8 @@ void PrintHostSendDialog::init()
             }
         });
     }
+    if (m_probe_pending)
+        set_send_enabled(false);
 
     // if (post_actions.has(PrintHostPostUploadAction::StartSimulation)) {
     //     // Using wxID_MORE as a button identifier to be different from the other buttons, wxID_MORE has no other meaning here.
@@ -1470,6 +1721,10 @@ void PrintHostSendDialog::EndModal(int ret)
             wxString storage = combo_storage->GetValue();
             app_config->set("recent", CONFIG_KEY_STORAGE, into_u8(storage));
         }
+        if (m_creality_use_cfs)
+            app_config->set("recent", CONFIG_KEY_CREALITY_CFS, m_creality_use_cfs->GetValue() ? "1" : "0");
+        if (m_creality_calibrate)
+            app_config->set("recent", CONFIG_KEY_CREALITY_CALIBRATE, m_creality_calibrate->GetValue() ? "1" : "0");
         if (m_qidi_leveling)
             app_config->set("recent", CONFIG_KEY_QIDI_LEVELING, m_qidi_leveling->GetValue() ? "1" : "0");
         if (m_qidi_timelapse)
@@ -2665,6 +2920,8 @@ void ElegooPrintHostSendDialog::init() {
     txt_filename->SetFocus();
 
     add_button(wxID_CANCEL, false, _L("Cancel"));
+    if (m_probe_pending)
+        set_send_enabled(false);
     finalize();
 
 #ifdef __linux__
