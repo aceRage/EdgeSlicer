@@ -360,7 +360,6 @@
         "2",
         "2"
     ],
-    "wipe_tower_type": "type1",
     "wrapping_detection_gcode": "",
     "wrapping_detection_layers": "20",
     "wrapping_exclude_area": [],

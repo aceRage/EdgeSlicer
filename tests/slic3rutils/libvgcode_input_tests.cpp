@@ -18,6 +18,7 @@
 #include "slic3r/GUI/LibVGCode/LibVGCodeWrapper.hpp"
 #include "libvgcode/include/PathVertex.hpp"
 #include "libvgcode/include/Viewer.hpp"
+#include "libvgcode/src/Layers.hpp"
 
 using namespace Slic3r;
 
@@ -243,4 +244,36 @@ TEST_CASE("libvgcode input: conversion cost on a large synthetic result", "[.][l
                     << su.vertices.size() << " vertices in " << summary_ms << " ms; sizeof(MoveVertex)="
                     << sizeof(GCodeProcessorResult::MoveVertex) << " sizeof(PathVertex)=" << sizeof(libvgcode::PathVertex));
     CHECK(in.vertices.size() >= n - 1);
+}
+
+// OrcaSlicer #16588: Layers::get_layer_id_at() searched with a reversed comparison, so the G-code
+// conflict warning named the wrong layer. The id it returns is the number of layers at or below z
+// (the 1-based layer number of the layer printed at z), which is what the warning prints.
+TEST_CASE("libvgcode layer lookup counts the layers at or below z", "[libvgcode][Regression]")
+{
+    libvgcode::Layers layers;
+    const float       zs[] = { 0.2f, 0.4f, 0.6f, 0.8f, 1.0f };
+    uint32_t          vertex_id = 0;
+    for (uint32_t layer = 0; layer < 5; ++layer) {
+        for (int i = 0; i < 2; ++i) {
+            libvgcode::PathVertex v;
+            v.type     = libvgcode::EMoveType::Extrude;
+            v.role     = libvgcode::EGCodeExtrusionRole::ExternalPerimeter;
+            v.position = { float(i), 0.f, zs[layer] };
+            v.layer_id = layer;
+            layers.update(v, vertex_id++);
+        }
+    }
+    REQUIRE(layers.count() == 5);
+
+    CHECK(layers.get_layer_id_at(0.1f) == 0);
+    // On a layer boundary: that layer is counted.
+    CHECK(layers.get_layer_id_at(0.2f) == 1);
+    CHECK(layers.get_layer_id_at(0.6f) == 3);
+    CHECK(layers.get_layer_id_at(1.0f) == 5);
+    // Between layers.
+    CHECK(layers.get_layer_id_at(0.5f) == 2);
+    CHECK(layers.get_layer_id_at(5.0f) == 5);
+    // The layer whose z is z: one less, as the preview's support overlay reads it.
+    CHECK(layers.get_layer_z(layers.get_layer_id_at(0.6f) - 1) == 0.6f);
 }

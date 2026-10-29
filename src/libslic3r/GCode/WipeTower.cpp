@@ -246,7 +246,7 @@ std::string wait_command(GCodeFlavor flavor, float seconds)
 class WipeTowerWriter
 {
 public:
-	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters, bool has_nozzle_rack = false) :
+	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters, bool has_nozzle_rack = false, bool bbl_gcode_tags = true) :
 		m_current_pos(std::numeric_limits<float>::max(), std::numeric_limits<float>::max()),
 		m_current_z(0.f),
 		m_current_feedrate(0.f),
@@ -263,7 +263,9 @@ public:
         {
             // ORCA: This class is only used by BBL printers, so set the parameter appropriately.
             // This fixes an issue where the wipe tower was using BBL tags resulting in statistics for purging in the purge tower not being displayed.
-            GCodeProcessor::s_IsBBLPrinter = true;
+            // Edge: since Orca #12781 a non-Bambu printer can pick this tower too (wipe_tower_type = Type 1);
+            // it gets the tags its G-code export reads (WipeTower::set_bbl_gcode_tags).
+            GCodeProcessor::s_IsBBLPrinter = bbl_gcode_tags;
             // adds tag for analyzer:
             std::ostringstream str;
             str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << std::to_string(m_layer_height) << "\n"; // don't rely on GCodeAnalyzer knowing the layer height - it knows nothing at priming
@@ -1535,7 +1537,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
         (tool != (unsigned int)(-1) ? wipe_depth + m_depth_traversed - m_perimeter_width
                                     : m_wipe_tower_depth - m_perimeter_width));
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -2010,7 +2012,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 
     size_t old_tool = m_current_tool;
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -2662,7 +2664,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
 {
     size_t old_tool = m_current_tool;
 
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
