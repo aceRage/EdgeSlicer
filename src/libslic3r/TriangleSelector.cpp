@@ -3,12 +3,15 @@
 #include "AABBTreeIndirect.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bitset>
 #include <boost/container/small_vector.hpp>
 #include <boost/log/trivial.hpp>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_invoke.h>
 
 #ifndef NDEBUG
 //    #define EXPENSIVE_DEBUG_CHECKS
@@ -280,6 +283,145 @@ int TriangleSelector::select_unsplit_triangle(const Vec3f &hit, int facet_idx) c
     Vec3i32 neighbors = m_neighbors[facet_idx];
     assert(this->verify_triangle_neighbors(m_triangles[facet_idx], neighbors));
     return this->select_unsplit_triangle(hit, facet_idx, neighbors);
+}
+
+// Smallest barycentric coordinate of `pt` in triangle abc. Positive inside, used to pick the
+// child that best contains a point that sits on a split edge.
+static float min_barycentric(const Vec3f &pt, const Vec3f &a, const Vec3f &b, const Vec3f &c)
+{
+    const Vec3f v0 = b - a, v1 = c - a, v2 = pt - a;
+    const float d00 = v0.dot(v0), d01 = v0.dot(v1), d11 = v1.dot(v1), d20 = v2.dot(v0), d21 = v2.dot(v1);
+    const float denom = d00 * d11 - d01 * d01;
+    if (std::abs(denom) < 1e-20f)
+        return -std::numeric_limits<float>::max();
+    const float v = (d11 * d20 - d01 * d21) / denom;
+    const float w = (d00 * d21 - d01 * d20) / denom;
+    return std::min({ 1.f - v - w, v, w });
+}
+
+EnforcerBlockerType TriangleSelector::leaf_state_at(int facet_idx, const Vec3f &pt, float *leaf_area) const
+{
+    if (leaf_area)
+        *leaf_area = 0.f;
+    if (facet_idx < 0 || facet_idx >= m_orig_size_indices || ! m_triangles[facet_idx].valid())
+        return EnforcerBlockerType::NONE;
+    int idx = facet_idx;
+    while (m_triangles[idx].is_split()) {
+        const Triangle &tr         = m_triangles[idx];
+        int             best       = tr.children[0];
+        float           best_score = -std::numeric_limits<float>::max();
+        for (int i = 0; i <= tr.number_of_split_sides(); ++i) {
+            const Triangle &ch = m_triangles[tr.children[i]];
+            const float score = min_barycentric(pt, m_vertices[ch.verts_idxs[0]].v, m_vertices[ch.verts_idxs[1]].v,
+                                                m_vertices[ch.verts_idxs[2]].v);
+            if (score > best_score) {
+                best_score = score;
+                best       = tr.children[i];
+            }
+        }
+        idx = best;
+    }
+    // Only a facet split by a stroke limits the resolution; a whole facet has no border inside it.
+    if (leaf_area && idx != facet_idx) {
+        const std::array<int, 3> &v = m_triangles[idx].verts_idxs;
+        *leaf_area = 0.5f * (m_vertices[v[1]].v - m_vertices[v[0]].v).cross(m_vertices[v[2]].v - m_vertices[v[0]].v).norm();
+    }
+    return m_triangles[idx].get_state();
+}
+
+// Plan of one facet, computed without touching the selector so every facet can run in parallel.
+// -1 = split (four children follow), otherwise the state of a leaf.
+namespace {
+struct ResamplePlanner
+{
+    const std::function<TriangleSelector::SampledState(const Vec3f &)> &sampler;
+    float                                                               edge_limit_sqr;
+    std::vector<int16_t>                                               &plan;
+
+    using S = TriangleSelector::SampledState;
+
+    void run(const Vec3f &a, const Vec3f &b, const Vec3f &c, const S &sa, const S &sb, const S &sc, int depth)
+    {
+        const Vec3f mab = (a + b) * 0.5f, mbc = (b + c) * 0.5f, mca = (c + a) * 0.5f;
+        const S     centre = sampler((a + b + c) / 3.f);
+        const S     sab = sampler(mab), sbc = sampler(mbc), sca = sampler(mca);
+        const float area = 0.5f * (b - a).cross(c - a).norm();
+
+        bool  uniform  = true;
+        float min_leaf = 0.f;
+        for (const S *s : { &centre, &sa, &sb, &sc, &sab, &sbc, &sca }) {
+            uniform = uniform && s->state == centre.state && (s->leaf_area <= 0.f || area <= s->leaf_area);
+            if (s->leaf_area > 0.f && (min_leaf <= 0.f || s->leaf_area < min_leaf))
+                min_leaf = s->leaf_area;
+        }
+        if (! uniform && min_leaf > 0.f && area <= 0.5f * min_leaf)
+            uniform = true;
+        const float longest_sqr = std::max({ (b - a).squaredNorm(), (c - b).squaredNorm(), (a - c).squaredNorm() });
+        if (uniform || depth > 30 || longest_sqr <= edge_limit_sqr) {
+            plan.push_back(int16_t(centre.state));
+            return;
+        }
+        plan.push_back(-1);
+        if (depth < 6) {
+            std::array<std::vector<int16_t>, 4> sub;
+            ResamplePlanner p0{ sampler, edge_limit_sqr, sub[0] }, p1{ sampler, edge_limit_sqr, sub[1] },
+                            p2{ sampler, edge_limit_sqr, sub[2] }, p3{ sampler, edge_limit_sqr, sub[3] };
+            tbb::parallel_invoke([&] { p0.run(a, mab, mca, sa, sab, sca, depth + 1); },
+                                 [&] { p1.run(mab, b, mbc, sab, sb, sbc, depth + 1); },
+                                 [&] { p2.run(mbc, c, mca, sbc, sc, sca, depth + 1); },
+                                 [&] { p3.run(mab, mbc, mca, sab, sbc, sca, depth + 1); });
+            for (const std::vector<int16_t> &v : sub)
+                plan.insert(plan.end(), v.begin(), v.end());
+            return;
+        }
+        run(a, mab, mca, sa, sab, sca, depth + 1);
+        run(mab, b, mbc, sab, sb, sbc, depth + 1);
+        run(mbc, c, mca, sbc, sc, sca, depth + 1);
+        run(mab, mbc, mca, sab, sbc, sca, depth + 1);
+    }
+};
+} // namespace
+
+void TriangleSelector::resample(const std::function<SampledState(const Vec3f &)> &sampler, float edge_limit)
+{
+    reset();
+    set_edge_limit(edge_limit);
+
+    std::vector<std::vector<int16_t>> plans(m_orig_size_indices);
+    tbb::parallel_for(tbb::blocked_range<int>(0, m_orig_size_indices), [&](const tbb::blocked_range<int> &range) {
+        for (int facet_idx = range.begin(); facet_idx < range.end(); ++facet_idx) {
+            const std::array<int, 3> &vi = m_triangles[facet_idx].verts_idxs;
+            const Vec3f a = m_vertices[vi[0]].v, b = m_vertices[vi[1]].v, c = m_vertices[vi[2]].v;
+            ResamplePlanner planner{ sampler, m_edge_limit_sqr, plans[facet_idx] };
+            planner.run(a, b, c, sampler(a), sampler(b), sampler(c), 0);
+        }
+    });
+
+    for (int facet_idx = 0; facet_idx < m_orig_size_indices; ++facet_idx) {
+        size_t pos = 0;
+        apply_resample_plan(facet_idx, m_neighbors[facet_idx], plans[facet_idx], pos);
+        if (m_triangles[facet_idx].is_split())
+            remove_useless_children(facet_idx);
+    }
+    if (m_invalid_triangles > 0)
+        garbage_collect();
+}
+
+void TriangleSelector::apply_resample_plan(int facet_idx, const Vec3i32 &neighbors, const std::vector<int16_t> &plan, size_t &pos)
+{
+    const int16_t node = plan[pos++];
+    if (node >= 0) {
+        m_triangles[facet_idx].set_state(EnforcerBlockerType(node));
+        return;
+    }
+    const EnforcerBlockerType state = m_triangles[facet_idx].get_state();
+    m_triangles[facet_idx].set_division(3, 0);
+    perform_split(facet_idx, neighbors, state);
+    for (int i = 0; i < 4; ++i) {
+        const Triangle &tr    = m_triangles[facet_idx];
+        const int       child = tr.children[i];
+        apply_resample_plan(child, this->child_neighbors(tr, neighbors, i), plan, pos);
+    }
 }
 
 void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&cursor, EnforcerBlockerType new_state, const Transform3d& trafo_no_translate, bool triangle_splitting, float highlight_by_angle_deg, const bool select_partially)
