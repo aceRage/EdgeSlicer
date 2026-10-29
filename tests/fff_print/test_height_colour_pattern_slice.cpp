@@ -299,9 +299,7 @@ TEST_CASE("Height colour pattern: a range naming a filament the project lacks wa
     REQUIRE_NOTHROW(gcode = slice(model, config));
     CHECK(gcode.size() > 1000);
     // No third tool exists, so no change to it is ever written.
-    CHECK(gcode.find("
-T2
-") == std::string::npos);
+    CHECK(gcode.find("\nT2\n") == std::string::npos);
 
     // A range inside the project's filaments warns about nothing.
     model.objects.front()->layer_config_ranges.clear();
