@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <regex>
 #include <vector>
 #include <algorithm>
 #include <memory>
@@ -11,6 +12,7 @@
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/calib.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "test_data.hpp"
 
@@ -733,6 +735,70 @@ TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
     REQUIRE(full > 0.);
     const double ratio = extruded_length(0.9) / full;
     CHECK(std::abs(ratio - 0.9) < 0.9e-3);
+}
+
+// Orca #16898: a temperature tower re-targets the hotend at every layer. On a multi-tool
+// printer that command has to name the tool printing the tower: a bare M104 goes to
+// whichever tool the firmware considers active. Edge maps the filament through
+// temperature_tool_for_filament (physical hotend on U1 / Bambu). A single-tool printer
+// and SEMM keep the bare form — the writer already drops T for those.
+TEST_CASE("The temperature tower steps the temperature of the tool printing it", "[GCode][Calib]")
+{
+    const bool multi_tool = GENERATE(false, true);
+    DYNAMIC_SECTION((multi_tool ? "two tools, the tower on the second one (filament 2 -> T1)" : "one tool")) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        if (multi_tool) {
+            config.set_num_extruders(2);
+            config.set_num_filaments(2);
+            config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+            config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+        }
+        config.set_deserialize_strict({
+            {"skirt_loops",                      0},
+            {"brim_type",                        "no_brim"},
+            {"single_extruder_multi_material",   0},
+            {"enable_prime_tower",               0},
+            {"nozzle_temperature_initial_layer", multi_tool ? "230,230" : "230"},
+            {"nozzle_temperature",               multi_tool ? "230,230" : "230"},
+            // Without the end G-code's heater-off M104 S0, every temperature command after the
+            // first layer change is the tower's. Edge steps 5 °C every 10.001 mm of Z
+            // (start - floor(z / 10.001) * 5), so a 20 mm cube is the 230 and 225 bands.
+            {"machine_end_gcode",                ""},
+        });
+
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        if (multi_tool) {
+            REQUIRE(model.objects.size() == 1);
+            model.objects.front()->config.set("extruder", 2);
+            print.apply(model, config);
+        }
+        Calib_Params params;
+        params.mode  = CalibMode::Calib_Temp_Tower;
+        params.start = 230;
+        params.end   = 190;
+        params.step  = 5;
+        print.set_calib_params(params);
+        const std::string gcode = Test::gcode(print);
+
+        const size_t layers_begin = gcode.find(";LAYER_CHANGE");
+        REQUIRE(layers_begin != std::string::npos);
+        const std::regex      temperature_command(R"(^M10[49] S(\d+)(?: T(\d+))?)");
+        std::set<int>         temperatures;
+        std::set<std::string> tools;
+        std::istringstream    stream(gcode.substr(layers_begin));
+        for (std::string line; std::getline(stream, line);) {
+            std::smatch m;
+            if (!std::regex_search(line, m, temperature_command))
+                continue;
+            temperatures.insert(std::stoi(m[1]));
+            tools.insert(m[2].matched ? m[2].str() : "none");
+        }
+        CHECK(temperatures == std::set<int>{225, 230});
+        CHECK(tools == std::set<std::string>{multi_tool ? "1" : "none"});
+    }
 }
 
 static DynamicPrintConfig two_filament_bed_temp_config(const std::string &first_layer_temps, const std::string &later_temps)

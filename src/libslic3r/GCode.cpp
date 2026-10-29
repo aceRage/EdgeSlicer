@@ -7365,8 +7365,15 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_Temp_Tower: {
+        // Orca #16898: name the tool printing the tower. A bare M104 goes to whichever
+        // tool the firmware considers active. Map the filament through the physical
+        // hotend (U1 / Bambu) — not a raw filament index — as the other Edge
+        // nozzle-temp writers do.
+        int tool = -1;
+        if (m_writer.extruder() != nullptr)
+            tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
         auto offset = static_cast<unsigned int>(print_z / 10.001) * 5;
-        gcode += writer().set_temperature(print.calib_params().start - offset);
+        gcode += writer().set_temperature(print.calib_params().start - offset, false, tool);
         break;
     }
     case CalibMode::Calib_VFA_Tower: {
