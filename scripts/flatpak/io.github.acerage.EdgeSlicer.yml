@@ -229,6 +229,14 @@ modules:
         dest: external-packages/OCCT
         sha256: 7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
 
+      # SolveSpace libslvs (2D sketch constraint solver, Design tab). Built only when
+      # SLIC3R_CAD=ON; the archive is staged either way so a CAD-on Flatpak rebuild
+      # does not need a yml edit.
+      - type: file
+        url: https://github.com/JacobStoren/SolveSpaceLib/archive/4d8704523e4bf212fadf5189f92484244f670fea.zip
+        dest: external-packages/SLVS
+        sha256: 1c4bdde9c3c6ef20ea4b50b73601de56769f2eb131b36927d7c6489f102e6c30
+
       # OpenCSG
       - type: file
         url: https://github.com/floriankirsch/OpenCSG/archive/refs/tags/opencsg-1-4-2-release.zip

@@ -23,6 +23,12 @@ endif()
 
 option(BUILD_SHARED_LIBS "Build shared libs" OFF)
 
+# SolveSpace constraint solver (2D sketch solver backbone), built in deps/SLVS.
+# P0: find and link it when SLIC3R_CAD is ON. CAD sources themselves are P1.
+if (SLIC3R_CAD)
+    find_package(SLVS REQUIRED)
+endif ()
+
 set(lisbslic3r_sources
     AABBMesh.cpp
     AABBMesh.hpp
@@ -961,6 +967,10 @@ endif()
 if (SLIC3R_QUAD_REMESH AND TARGET QuadriFlow::quadriflow)
     target_link_libraries(libslic3r PRIVATE QuadriFlow::quadriflow)
     target_compile_definitions(libslic3r PUBLIC SLIC3R_QUAD_REMESH)
+endif ()
+
+if (SLIC3R_CAD)
+    target_link_libraries(libslic3r PUBLIC SLVS::slvs)
 endif ()
 
 if(WIN32)
