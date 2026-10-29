@@ -1244,6 +1244,22 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
+    // EdgeSlicer: support interface interlock. The weave needs an interface filament that differs from
+    // the support body filament (design D4); its two knobs only matter while it is on, and none of it
+    // applies with support filament matching on (D6).
+    {
+        const int  iface_filament    = config->opt_int("support_interface_filament");
+        const bool separate_iface    = iface_filament != 0 && iface_filament != config->opt_int("support_filament");
+        const bool interlock_visible = separate_iface && have_support_interface;
+        toggle_line("support_interface_interlock", interlock_visible);
+        const bool interlock_on = interlock_visible && config->opt_bool("support_interface_interlock");
+        toggle_line("support_interface_interlock_layers", interlock_on);
+        toggle_line("support_interface_interlock_beam_lines", interlock_on);
+        const bool interlock_editable = have_support_material && ! config->opt_bool("support_filament_matching");
+        for (auto el : { "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines" })
+            toggle_field(el, interlock_editable);
+    }
+
     // Orca #10312: the fuzzy skin rows show unless fuzzy skin is Disabled. "None (allow paint)"
     // keeps them: it still gets fuzzy skin wherever it is painted on.
     const bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy;

@@ -34,6 +34,9 @@ class ArrangeJob : public Job
     // BBS: add flag for whether on current part plate
     bool only_on_partplate{false};
 
+    // EdgeSlicer: place only the loose instances (prepare_loose), everything else fixed.
+    bool m_loose_only{false};
+
     // clear m_selected and m_unselected, reserve space for next usage
     void clear_input();
 
@@ -42,6 +45,10 @@ class ArrangeJob : public Job
     void prepare_selected();
 
     void prepare_all();
+
+    // EdgeSlicer: the instances on no plate, or over the edge of their (unlocked) plate, are the
+    // ones to place; every instance wholly on a plate is a fixed item and stays where it is.
+    void prepare_loose();
 
     //BBS:prepare the items from current selected partplate
     void prepare_partplate();
@@ -59,7 +66,10 @@ public:
 
     void process(Ctl &ctl) override;
 
-    ArrangeJob();
+    // loose_only: place the loose instances into free space (new plates when none has room) and
+    // move nothing else - the remote hub's "Place loose objects". Otherwise the prepare state
+    // decides, as before (Arrange all, or the current plate).
+    explicit ArrangeJob(bool loose_only = false);
 
     int status_range() const
     {

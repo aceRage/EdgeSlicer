@@ -822,6 +822,19 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
             layer_tools.extruders.push_back(extruder_interface);
+        // EdgeSlicer (support interface interlock): woven body stripes with a "don't care" support
+        // filament print with the first non-interface extruder on the layer (GCode.cpp). On a support
+        // layer that holds nothing else, that would be the interface filament itself, and the weave
+        // would be all interface. Schedule the object's own (body-coloured) filament there.
+        if (support_layer->interlock_woven && object.config().support_filament.value == 0) {
+            const unsigned int iface = unsigned(object.config().support_interface_filament.value);
+            // object_extruders() is 0-based; this collection phase is 1-based.
+            for (unsigned int e : object.object_extruders())
+                if (e + 1 != iface && ! object.print()->config().filament_soluble.get_at(e)) {
+                    layer_tools.extruders.push_back(e + 1);
+                    break;
+                }
+        }
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);
@@ -2526,6 +2539,10 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         break;
 
                     auto &entities = this_support_layer->support_fills.entities;
+                    // EdgeSlicer (support interface interlock, design D5): no purge into the support
+                    // body of a layer with woven stripes. Always false with the feature off.
+                    if (this_support_layer->interlock_woven)
+                        support_overriddable = false;
                     if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {

@@ -3100,6 +3100,11 @@ void TabPrint::build()
         // GUI widget the option's coType calls for.
         optgroup->append_single_option_line("support_filament_matching");
         optgroup->append_single_option_line("support_interface_not_for_body", "support_settings_filament#avoid-interface-filament-for-base");
+        // EdgeSlicer: support interface interlock (woven band). Shown only with a separate interface
+        // filament, see ConfigManipulation::toggle_print_fff_options.
+        optgroup->append_single_option_line("support_interface_interlock");
+        optgroup->append_single_option_line("support_interface_interlock_layers");
+        optgroup->append_single_option_line("support_interface_interlock_beam_lines");
 
         optgroup = page->new_optgroup(L("Support ironing"), L"param_ironing");
         optgroup->append_single_option_line("support_ironing", "support_settings_ironing");

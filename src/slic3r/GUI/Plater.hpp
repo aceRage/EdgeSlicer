@@ -787,6 +787,7 @@ public:
     void show_uv_editor(bool show);
 
     void arrange();
+    void arrange_loose(); // EdgeSlicer: place only loose instances (remote hub)
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions
