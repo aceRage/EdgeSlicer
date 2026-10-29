@@ -57,10 +57,18 @@ bool is_step_path(const std::string &path)
     return boost::iends_with(path, ".step") || boost::iends_with(path, ".stp");
 }
 
+const char *occt_failure_message(const Standard_Failure &e)
+{
+    const char *msg = e.GetMessageString();
+    if (msg == nullptr || *msg == 0)
+        msg = e.what();
+    return (msg && *msg) ? msg : "unknown error";
+}
+
 BoundingBoxf3 tight_bbox(const TopoDS_Shape &shape)
 {
     Bnd_Box box;
-    BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+    BRepBndLib::AddOptimal(shape, box, false, false);
     if (box.IsVoid())
         return {};
     double x0, y0, z0, x1, y1, z1;
@@ -218,7 +226,7 @@ TopoDS_Shape find_source_brep(const std::string &path, const std::string &volume
             if (mesh_matches_shape(ns->solid, mesh, offset, why)) {
                 gp_Trsf to_mesh;
                 to_mesh.SetTranslation(gp_Vec(-offset.x(), -offset.y(), -offset.z()));
-                return BRepBuilderAPI_Transform(ns->solid, to_mesh, Standard_True).Shape();
+                return BRepBuilderAPI_Transform(ns->solid, to_mesh, true).Shape();
             }
         } catch (const Standard_Failure &) {
             why = "OCCT failed while comparing the part with the source STEP";
@@ -244,12 +252,12 @@ TopoDS_Shape transform_shape(const TopoDS_Shape &shape, const Transform3d &m)
     if (similar) {
         gp_Trsf t;
         t.SetValues(m(0, 0), m(0, 1), m(0, 2), m(0, 3), m(1, 0), m(1, 1), m(1, 2), m(1, 3), m(2, 0), m(2, 1), m(2, 2), m(2, 3));
-        out = BRepBuilderAPI_Transform(shape, t, Standard_True).Shape();
+        out = BRepBuilderAPI_Transform(shape, t, true).Shape();
     } else {
         gp_GTrsf g;
         g.SetVectorialPart(gp_Mat(m(0, 0), m(0, 1), m(0, 2), m(1, 0), m(1, 1), m(1, 2), m(2, 0), m(2, 1), m(2, 2)));
         g.SetTranslationPart(gp_XYZ(m(0, 3), m(1, 3), m(2, 3)));
-        out = BRepBuilderAPI_GTransform(shape, g, Standard_True).Shape();
+        out = BRepBuilderAPI_GTransform(shape, g, true).Shape();
         if (det < 0.) {
             // A mirroring non-uniform scale can leave solids inside out.
             for (TopExp_Explorer ex(out, TopAbs_SOLID); ex.More(); ex.Next()) {
@@ -305,8 +313,8 @@ bool write_step_objects(const std::string &path, const std::vector<std::pair<std
         Handle(XCAFDoc_ShapeTool) shapes  = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
         Handle(XCAFDoc_ColorTool) colours = XCAFDoc_DocumentTool::ColorTool(doc->Main());
         auto add_part = [&](const Part &part, const std::string &name) {
-            const TDF_Label label = shapes->AddShape(part.shape, Standard_False);
-            TDataStd_Name::Set(label, TCollection_ExtendedString(name.c_str(), Standard_True));
+            const TDF_Label label = shapes->AddShape(part.shape, false);
+            TDataStd_Name::Set(label, TCollection_ExtendedString(name.c_str(), true));
             if (part.has_colour)
                 colours->SetColor(label, part.colour, XCAFDoc_ColorSurf);
             return label;
@@ -314,7 +322,7 @@ bool write_step_objects(const std::string &path, const std::vector<std::pair<std
         TDF_Label root;
         if (objects.size() > 1) {
             root = shapes->NewShape();
-            TDataStd_Name::Set(root, TCollection_ExtendedString(params.product_name.c_str(), Standard_True));
+            TDataStd_Name::Set(root, TCollection_ExtendedString(params.product_name.c_str(), true));
         }
         for (const auto &[object_name, parts] : objects) {
             TDF_Label object_label;
@@ -322,22 +330,22 @@ bool write_step_objects(const std::string &path, const std::vector<std::pair<std
                 object_label = add_part(parts.front(), object_name);
             else {
                 object_label = shapes->NewShape();
-                TDataStd_Name::Set(object_label, TCollection_ExtendedString(object_name.c_str(), Standard_True));
+                TDataStd_Name::Set(object_label, TCollection_ExtendedString(object_name.c_str(), true));
                 for (const Part &part : parts) {
                     const TDF_Label comp = shapes->AddComponent(object_label, add_part(part, part.name), TopLoc_Location());
-                    TDataStd_Name::Set(comp, TCollection_ExtendedString(part.name.c_str(), Standard_True));
+                    TDataStd_Name::Set(comp, TCollection_ExtendedString(part.name.c_str(), true));
                 }
             }
             if (!root.IsNull()) {
                 const TDF_Label comp = shapes->AddComponent(root, object_label, TopLoc_Location());
-                TDataStd_Name::Set(comp, TCollection_ExtendedString(object_name.c_str(), Standard_True));
+                TDataStd_Name::Set(comp, TCollection_ExtendedString(object_name.c_str(), true));
             }
         }
         shapes->UpdateAssemblies();
 
         STEPCAFControl_Writer writer;
-        writer.SetColorMode(Standard_True);
-        writer.SetNameMode(Standard_True);
+        writer.SetColorMode(true);
+        writer.SetNameMode(true);
         Interface_Static::SetCVal("write.step.unit", "MM");
         Interface_Static::SetCVal("write.step.schema", "AP214IS");
         // No p-curves: CAD systems rebuild them, and for a faceted B-rep they would double the
@@ -361,7 +369,7 @@ bool write_step_objects(const std::string &path, const std::vector<std::pair<std
                                     << std::chrono::duration<double>(t_end - t_write).count() << " s";
         }
     } catch (const Standard_Failure &e) {
-        report.error = std::string("OCCT failed while writing STEP: ") + (e.GetMessageString() ? e.GetMessageString() : "unknown error");
+        report.error = std::string("OCCT failed while writing STEP: ") + occt_failure_message(e);
     }
     app->Close(doc);
     return ok;
@@ -484,7 +492,7 @@ bool store_step(const std::string &path, const std::vector<StepExportItem> &item
             }
         }
     } catch (const Standard_Failure &e) {
-        report.error = std::string("OCCT failed while building the shapes: ") + (e.GetMessageString() ? e.GetMessageString() : "unknown error");
+        report.error = std::string("OCCT failed while building the shapes: ") + occt_failure_message(e);
         return done(false);
     } catch (const std::exception &e) {
         report.error = e.what();
@@ -555,7 +563,7 @@ bool store_step_part(const std::string &path, const ModelVolume &volume, const S
                 report.warnings.emplace_back(part.name + ": " + w);
         }
     } catch (const Standard_Failure &e) {
-        report.error = std::string("OCCT failed while building the shape: ") + (e.GetMessageString() ? e.GetMessageString() : "unknown error");
+        report.error = std::string("OCCT failed while building the shape: ") + occt_failure_message(e);
         return done(false);
     } catch (const std::exception &e) {
         report.error = e.what();
@@ -607,7 +615,7 @@ bool load_step_part(const std::string &path, double linear_deflection, double an
         if (TopExp_Explorer(shape, TopAbs_SOLID).More())
             body = BRep::make_cad_body(shape, mesh, BRep::CadBodyOrigin::StepFile, 0);
     } catch (const Standard_Failure &e) {
-        return fail(std::string("OCCT failed while reading STEP: ") + (e.GetMessageString() ? e.GetMessageString() : "unknown error"));
+        return fail(std::string("OCCT failed while reading STEP: ") + occt_failure_message(e));
     } catch (const std::exception &e) {
         return fail(e.what());
     }

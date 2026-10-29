@@ -957,11 +957,12 @@ set(OCCT_PREFIX "${CMAKE_PREFIX_PATH}" CACHE PATH "Prefix holding OCCT (bin/occt
 
 # OCCT toolkits the app loads at run time on Windows (OCCT is shared there). TKBool, TKFillet,
 # TKOffset and TKFeat come from OCCT's ModelingAlgorithms module (B-rep booleans, fillets,
-# offsets, features).
+# offsets, features). OCCT 7.8 merged the five STEP toolkits into TKDESTEP, which also needs TKDE.
+# The Windows self-hosted CI parses this list against bin/occt; keep it in step with OCCT_LIBS.
 set(OCCT_RUNTIME_TOOLKITS
     TKBO TKBool TKBRep TKCAF TKCDF TKernel TKFeat TKFillet TKG2d TKG3d TKGeomAlgo TKGeomBase
-    TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKSTEP TKSTEP209
-    TKSTEPAttr TKSTEPBase TKTopAlgo TKV3d TKVCAF TKXCAF TKXDESTEP TKXSBase)
+    TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKDESTEP TKDE
+    TKTopAlgo TKV3d TKVCAF TKXCAF TKXSBase)
 
 function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
@@ -999,12 +1000,33 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
         )
     endif()
 
+    # Stage the OCCT toolkits libslic3r links. RelWithDebInfo / Debug installs live in
+    # bin/occti and bin/occtd; the directory is published per build type from TKernel.
+    string(TOUPPER "${config}" _config_upper)
+    set(_occt_bin "${OCCT_BIN_DIR_${_config_upper}}")
+    if (NOT _occt_bin)
+        set(_occt_bin "${OCCT_PREFIX}/bin/occt")
+    endif ()
+    set(_occt_toolkits ${OCCT_LIBS})
+    if (NOT _occt_toolkits)
+        set(_occt_toolkits ${OCCT_RUNTIME_TOOLKITS})
+    endif ()
     set(_occt_dlls_src "")
     set(_occt_dlls_out "")
-    foreach (_tk IN LISTS OCCT_RUNTIME_TOOLKITS)
-        list(APPEND _occt_dlls_src ${OCCT_PREFIX}/bin/occt/${_tk}.dll)
-        list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
+    set(_missing_occt "")
+    foreach (_tk IN LISTS _occt_toolkits)
+        if (EXISTS "${_occt_bin}/${_tk}.dll")
+            list(APPEND _occt_dlls_src ${_occt_bin}/${_tk}.dll)
+            list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
+        else ()
+            list(APPEND _missing_occt "${_tk}.dll")
+        endif ()
     endforeach ()
+    if (_missing_occt)
+        message(FATAL_ERROR
+            "OCCT DLLs missing from ${_occt_bin}/: ${_missing_occt}\n"
+            "Rebuild the dependencies (build_release_vs2022.bat deps) so the OCCT 8.0.1 toolkit set is installed.")
+    endif ()
     file(COPY ${_occt_dlls_src}
             ${CMAKE_PREFIX_PATH}/bin/freetype.dll
          DESTINATION ${_out_dir})

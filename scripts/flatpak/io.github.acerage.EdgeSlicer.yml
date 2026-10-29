@@ -223,11 +223,11 @@ modules:
         dest: external-packages/NLopt
         sha256: c6dd7a5701fff8ad5ebb45a3dc8e757e61d52658de3918e38bab233e7fd3b4ae
 
-      # OCCT
+      # OCCT (OpenCASCADE) V8_0_1
       - type: file
-        url: https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V7_6_0.zip
+        url: https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V8_0_1.zip
         dest: external-packages/OCCT
-        sha256: 28334f0e98f1b1629799783e9b4d21e05349d89e695809d7e6dfa45ea43e1dbc
+        sha256: 7c033d917ee8f040c0512d289dcc5f02c148889d5bac17c3e25639accb44f0da
 
       # OpenCSG
       - type: file
