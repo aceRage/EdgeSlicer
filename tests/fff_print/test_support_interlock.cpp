@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <string_view>
 #include <map>
 #include <sstream>
@@ -407,6 +409,11 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
         DynamicPrintConfig cc = c;
         cc.set_key_value("gcode_comments", new ConfigOptionBool(true));
         const std::string gcode = Slic3r::Test::slice({ model }, cc);
+        if (const char *dump = std::getenv("INTERLOCK_TEST_DUMP")) {
+            // Debug aid: write the G-code of this case next to the given path.
+            static int n = 0;
+            std::ofstream(std::string(dump) + std::to_string(n ++) + ".gcode") << gcode;
+        }
         std::vector<Seg> out;
         GCodeReader parser;
         parser.parse_buffer(gcode, [&out](GCodeReader &self, const GCodeReader::GCodeLine &line) {
