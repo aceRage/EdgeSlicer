@@ -82,6 +82,7 @@ add_executable(${_TEST_NAME}_tests
     gizmo_volume_refs_tests.cpp
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
+    plate_cut_membership_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp
