@@ -54,8 +54,9 @@ TEST_CASE("main tabs: web pages switch tabs by name", "[MainTabs]")
     CHECK(MainTabs::tab_from_name("monitor") == -1);
 }
 
-TEST_CASE("main tabs: Ctrl+1..4 on a settings field open the same tabs as before", "[MainTabs]")
+TEST_CASE("main tabs: former Field Ctrl+1..4 map skipped Showcase and Stream", "[MainTabs]")
 {
+    // Field.cpp no longer binds Ctrl+1..4. This is the old 1-4 map only; Stream was never in it.
     CHECK(MainTabs::tab_for_field_shortcut('1') == MainTabs::Home);
     CHECK(MainTabs::tab_for_field_shortcut('2') == MainTabs::Editor3D);
     CHECK(MainTabs::tab_for_field_shortcut('3') == MainTabs::Preview);
