@@ -204,6 +204,11 @@ std::string plate_blocked(const std::vector<PlateInstance>& instances, bool lock
 // "" as JSON null, anything else as the string.
 nlohmann::json blocked_json(const std::string& reason);
 
+// "Place loose objects" (POST /api/plates/{i}/arrange?loose=1, /api/plates place_count): how many
+// instances it places - the printable ones not wholly on their unlocked plate, and the printable ones
+// on no plate (loose_printable). Everything else stays where it is, so 0 means there is nothing to do.
+int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std::vector<bool>& locked, int loose_printable);
+
 // POST /api/undo?expect=: whether the PC's next undo step may be taken. An empty `expect` takes
 // whatever it is; otherwise it must name the topmost undo snapshot exactly, so a phone's Undo after
 // an Arrange never undoes something a person did at the PC in the meantime.

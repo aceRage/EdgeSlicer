@@ -725,6 +725,8 @@ struct PlateMembership
     std::vector<std::vector<SliceV1::PlateInstance>> plates; // by plate index
     std::vector<int>                                 outside; // per plate: instances hanging over its edge
     int                                              loose { 0 };
+    int                                              loose_printable { 0 };
+    int                                              place { 0 }; // what Place loose objects moves (SliceV1::place_count)
 };
 static PlateMembership plate_membership(Plater* plater)
 {
@@ -736,7 +738,11 @@ static PlateMembership plate_membership(Plater* plater)
     for (size_t oi = 0; oi < model.objects.size(); ++oi)
         for (size_t ii = 0; ii < model.objects[oi]->instances.size(); ++ii) {
             const int pi = plates.find_instance((int) oi, (int) ii); // registered, not necessarily contained
-            if (pi < 0 || pi >= (int) m.plates.size()) { ++m.loose; continue; }
+            if (pi < 0 || pi >= (int) m.plates.size()) {
+                ++m.loose;
+                if (model.objects[oi]->instances[ii]->printable) ++m.loose_printable;
+                continue;
+            }
             PartPlate*             p = plates.get_plate(pi);
             SliceV1::PlateInstance st;
             st.outside   = !p->contain_instance_totally((int) oi, (int) ii);
@@ -745,6 +751,9 @@ static PlateMembership plate_membership(Plater* plater)
             m.plates[pi].push_back(st);
             if (st.outside) ++m.outside[pi];
         }
+    std::vector<bool> locked;
+    for (int i = 0; i < plates.get_plate_count(); ++i) locked.push_back(plates.get_plate(i)->is_locked());
+    m.place = SliceV1::place_count(m.plates, locked, m.loose_printable);
     return m;
 }
 
@@ -756,6 +765,7 @@ static nlohmann::json plate_membership_json(Plater* plater)
     nlohmann::json        j;
     j["plates"]      = plates.get_plate_count();
     j["loose_count"] = m.loose;
+    j["place_count"] = m.place;
     j["blocked"]     = nlohmann::json::array();
     for (int i = 0; i < plates.get_plate_count(); ++i)
         j["blocked"].push_back(SliceV1::blocked_json(SliceV1::plate_blocked(m.plates[i], plates.get_plate(i)->is_locked())));
@@ -792,6 +802,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plates()
         j["plates"] = nlohmann::json::array();
         const PlateMembership members = plate_membership(plater);
         j["loose_count"] = members.loose; // PR D: instances on no plate (GET /api/plates/loose)
+        j["place_count"] = members.place; // what Place loose objects (arrange?loose=1) would move
         for (int i = 0; i < plates.get_plate_count(); ++i) {
             PartPlate*     p = plates.get_plate(i);
             nlohmann::json jp;
@@ -1107,7 +1118,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
 
 // PR D: the instances registered on no plate - pushed fully off every bed (a printer change to a
 // smaller bed, a move off the plate) - in the layout's shape (world mm, the plate list's frame),
-// each `outside: true`. Arrange all plates picks them up; transform plate={i} centres one on a plate.
+// each `outside: true`. Place loose objects (arrange?loose=1) picks them up; transform plate={i}
+// centres one on a plate.
 RemoteAccess::ApiResponse RemoteAccess::api_plates_loose()
 {
     auto out = std::make_shared<nlohmann::json>();
@@ -1250,16 +1262,19 @@ struct PlateJobEnd
     }
 };
 
-// Arrange (or orient) plate `plate`, or every plate, exactly as the desktop's own buttons do: the
-// plate's Arrange / Orient icon (select the plate, PREPARE_STATE_MENU: only that plate) or the
-// toolbar's Arrange all (PREPARE_STATE_DEFAULT: every unlocked plate, the instances on no plate, and
-// new plates when they do not fit). Plater::arrange / orient take the undo snapshot and queue the
-// job on the UI worker; this answers at once with the job, which /api/jobs/{id} follows.
-RemoteAccess::ApiResponse RemoteAccess::api_plate_arrange(int plate, bool all, bool orient)
+// Arrange (or orient) plate `plate` exactly as its Arrange / Orient icon does (select the plate,
+// PREPARE_STATE_MENU: only that plate), or with `loose` place the loose instances - on no plate, or
+// over the edge of an unlocked plate - into free space without moving anything else
+// (Plater::arrange_loose; plates are added when nothing has room). The toolbar's Arrange all, which
+// re-arranges every plate, is not offered: from a phone it moved objects people had placed. The
+// Plater takes the undo snapshot and queues the job on the UI worker; this answers at once with the
+// job, which /api/jobs/{id} follows.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_arrange(int plate, bool loose, bool orient)
 {
     // Orient all is the toolbar's Orient over the selection (or everything without one): which
     // objects it turns depends on what the PC has selected, so the phone orients one plate only.
-    if (orient && all) { ApiResponse r; r.status = 400; r.body = json_error("orient takes one plate"); return r; }
+    if (orient && loose) { ApiResponse r; r.status = 400; r.body = json_error("orient takes one plate"); return r; }
+    const bool all = loose; // past the checks that only concern one plate
     auto result = std::make_shared<std::pair<int, std::string>>(500, "");
     auto out    = std::make_shared<nlohmann::json>();
     bool ok     = run_on_main([this, result, out, plate, all, orient]() {
@@ -1275,11 +1290,15 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_arrange(int plate, bool all, b
         if (!all && p->empty()) { *result = { 409, "plate is empty" }; return; }
         // The job itself only shows a notification for a locked plate and does nothing.
         if (!all && p->is_locked()) { *result = { 409, "plate is locked" }; return; }
+        if (all && plate_membership(plater).place == 0) { *result = { 409, "no object is off a plate" }; return; }
         plater->select_view_3D("3D");
         if (!all && plates.get_curr_plate_index() != plate && plater->select_plate(plate) != 0) { *result = { 500, "could not select the plate" }; return; }
-        plater->set_prepare_state(all ? GUI::Job::PREPARE_STATE_DEFAULT : GUI::Job::PREPARE_STATE_MENU);
         take_error();
-        if (orient) plater->orient(); else plater->arrange();
+        if (all) plater->arrange_loose();
+        else {
+            plater->set_prepare_state(GUI::Job::PREPARE_STATE_MENU);
+            if (orient) plater->orient(); else plater->arrange();
+        }
         if (worker.is_idle()) { *result = { 409, "the PC did not start it; try again" }; return; }
         Job job;
         {
@@ -3071,11 +3090,11 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/quit[?discard=1]"},       {"description", "close this instance; without discard the unsaved project is saved first (an unnamed one under <datadir>/hub/saves)"} },
             { {"method", "POST"}, {"path", "/api/attention/clear"},        {"description", "dismiss the needs-attention flag (see /api/info: needs_attention, attention_reason, attention[])"} },
             { {"method", "POST"}, {"path", "/api/project/open"},           {"description", "form body path={file uploaded through the hub}&mode=load|import; load (.3mf) saves the current project first, import adds the model to the plate"} },
-            { {"method", "GET"},  {"path", "/api/plates"},                 {"description", "project, printer preset, filaments and every plate with objects, slice state, time and filament estimates; loose_count = instances on no plate; per plate blocked = why the PC will not slice it (null | empty | outside (a printable object hangs over the edge: Arrange fixes it) | locked (the same on a locked plate) | not_printable (every object set not to print)) and outside_count"} },
+            { {"method", "GET"},  {"path", "/api/plates"},                 {"description", "project, printer preset, filaments and every plate with objects, slice state, time and filament estimates; loose_count = instances on no plate; place_count = objects Place loose objects (arrange?loose=1) would move; per plate blocked = why the PC will not slice it (null | empty | outside (a printable object hangs over the edge: Arrange fixes it) | locked (the same on a locked plate) | not_printable (every object set not to print)) and outside_count"} },
             { {"method", "GET"},  {"path", "/api/plates/loose"},           {"description", "the instances on no plate (pushed fully off the bed, e.g. by a printer change): {count, objects [the layout's per-instance fields, outside true]}"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/thumbnail.png"}, {"description", "rendered plate preview"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area)"} },
-            { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?all=1]"}, {"description", "arrange that plate like its Arrange icon, or with all=1 every plate like the toolbar's Arrange (objects on no plate included; plates are added when they do not fit); returns {job, plate (-1 = all), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?loose=1]"}, {"description", "arrange that plate like its Arrange icon, or with loose=1 place loose objects: only the printable objects on no plate or over the edge of an unlocked plate move, into free space on the plates there are (a new plate when none has room); every object already on a plate stays where it is and no plate is removed; returns {job, plate (-1 = loose), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, place_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate, or with loose=1 when place_count is 0; all=1 (re-arrange every plate) is refused with 400"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/orient"},  {"description", "auto-orient the objects on that plate like its Orient icon; the same job shape as arrange (kind orient)"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
@@ -3198,9 +3217,11 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         if (slash != std::string::npos && rest.substr(slash) == "/send/preview")
             return api_send_preview(num(rest.substr(0, slash), -1), body.empty() ? query : body);
         if (slash != std::string::npos && (rest.substr(slash) == "/arrange" || rest.substr(slash) == "/orient")) {
-            std::string all = query_param(query, "all");
-            if (all.empty()) all = query_param(body, "all");
-            return api_plate_arrange(num(rest.substr(0, slash), -1), all == "1", rest.substr(slash) == "/orient");
+            auto param = [&](const char* name) { std::string v = query_param(query, name); return v.empty() ? query_param(body, name) : v; };
+            // all=1 re-arranged every plate, moving objects people had placed; it is gone rather
+            // than quietly meaning something else, so a client built for it learns at once.
+            if (!param("all").empty()) { ApiResponse r; r.status = 400; r.body = json_error("all=1 is no longer offered: use loose=1 (place loose objects)"); return r; }
+            return api_plate_arrange(num(rest.substr(0, slash), -1), param("loose") == "1", rest.substr(slash) == "/orient");
         }
     }
     if (path == "/objects/transform" && method == "POST")

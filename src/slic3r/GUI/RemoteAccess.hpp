@@ -158,7 +158,7 @@ private:
     // no plate, arranging (or orienting) one plate or all as the desktop's own buttons do, the object
     // list's Printable toggle and one guarded undo step.
     ApiResponse api_plates_loose();
-    ApiResponse api_plate_arrange(int plate, bool all, bool orient);
+    ApiResponse api_plate_arrange(int plate, bool loose, bool orient);
     ApiResponse api_object_printable(const std::string& form_body);
     ApiResponse api_undo(const std::string& expect);
     // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).

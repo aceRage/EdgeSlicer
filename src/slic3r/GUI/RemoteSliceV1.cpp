@@ -462,6 +462,16 @@ nlohmann::json blocked_json(const std::string& reason)
     return reason.empty() ? nlohmann::json(nullptr) : nlohmann::json(reason);
 }
 
+int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std::vector<bool>& locked, int loose_printable)
+{
+    int n = loose_printable;
+    for (size_t i = 0; i < plates.size(); ++i)
+        if (i >= locked.size() || !locked[i])
+            for (const PlateInstance& p : plates[i])
+                if (p.printable && p.outside) ++n;
+    return n;
+}
+
 bool undo_matches(const std::string& expect, const std::string& top)
 {
     return expect.empty() || expect == top;

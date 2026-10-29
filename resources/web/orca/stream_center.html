@@ -3078,9 +3078,11 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // ---- Plate layout editor: accurate top-down footprints from /api/plates/{i}/layout; a tap
     // selects, a drag moves, the bar below rotates / scales / centres via /api/objects/transform ----
     var plateData = null, plateSel = null, plateIndex = -1, plateBusy = false;
-    // Objects on no plate (pushed off every bed, e.g. by a smaller printer) from /api/plates/loose;
-    // Arrange (one plate or all, through /api/plates/{i}/arrange and its job) puts things back.
-    var plateLoose = [], plateArranging = false;
+    // Objects on no plate (pushed off every bed, e.g. by a smaller printer) from /api/plates/loose,
+    // and how many objects anywhere are off a plate or over an edge (/api/plates place_count).
+    // Arrange this plate, or Place loose objects (/api/plates/{i}/arrange[?loose=1] and its job,
+    // which moves only those and leaves every placed object where it is), puts things back.
+    var plateLoose = [], platePlace = 0, plateArranging = false;
     // The sheet has two modes: Prepare (arrange the objects) and Preview (scrub the sliced layers).
     var plateMode = 'prepare';
     try { plateMode = localStorage.getItem('snorca_plate_mode') === 'preview' ? 'preview' : 'prepare'; } catch (e) {}
@@ -3124,7 +3126,8 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
     function loadPlate() {
         var loose = api('/plates/loose').then(function(l) { return l.objects || []; }).catch(function() { return []; });
-        api('/plates/' + plateIndex + '/layout').then(function(d) { return loose.then(function(l) { plateLoose = l; return d; }); }).then(function(d) {
+        var place = api('/plates').then(function(p) { return p.place_count || 0; }).catch(function() { return 0; });
+        api('/plates/' + plateIndex + '/layout').then(function(d) { return Promise.all([loose, place]).then(function(r) { plateLoose = r[0]; platePlace = r[1]; return d; }); }).then(function(d) {
             plateData = d;
             if (plateSel && !d.objects.some(function(o) { return o.obj === plateSel.obj && o.inst === plateSel.inst; })) plateSel = null;
             if (plateSel) plateSel = d.objects.filter(function(o) { return o.obj === plateSel.obj && o.inst === plateSel.inst; })[0];
@@ -3139,17 +3142,18 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             .then(function() { plateBusy = false; loadPlate(); if (then) then(); })
             .catch(function(e) { plateBusy = false; fail(e); loadPlate(); });
     }
-    // Arrange this plate (all: every plate, objects on no plate included) the way the PC's own
-    // Arrange buttons do; the job ends once the PC has moved the objects, then the plate reloads.
-    function arrangePlate(all) {
+    // Arrange this plate the way its Arrange icon on the PC does, or (loose) place the objects that
+    // are off a plate or over an edge into free space, leaving every placed object where it is; the
+    // job ends once the PC has moved the objects, then the plate reloads.
+    function arrangePlate(loose) {
         if (plateArranging || plateBusy) return;
-        plateArranging = true; plateSel = null; renderPlateCtl();
-        api('/plates/' + plateIndex + '/arrange' + (all ? '?all=1' : ''), { method: 'POST' }).then(function(j) {
+        plateArranging = loose ? 'loose' : 'plate'; plateSel = null; renderPlateCtl();
+        api('/plates/' + plateIndex + '/arrange' + (loose ? '?loose=1' : ''), { method: 'POST' }).then(function(j) {
             var poll = function() {
                 api('/jobs/' + j.job).then(function(s) {
                     if (s.state === 'running') { setTimeout(poll, 700); return; }
                     plateArranging = false; thumbStamp = Date.now(); lastPresetsJson = '';
-                    if (s.state === 'error') fail(new Error('Arrange failed: ' + s.error));
+                    if (s.state === 'error') fail(new Error((loose ? 'Placing loose objects failed: ' : 'Arrange failed: ') + s.error));
                     loadPlate();
                 }).catch(function() { setTimeout(poll, 1500); });
             };
@@ -3576,16 +3580,22 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     function renderPlateCtl() {
         var ctl = document.querySelector('#plate .ctl'); ctl.innerHTML = '';
         if (!plateSel) {
-            if (plateArranging) { ctl.appendChild(el('div', 'hint', 'Arranging on the PC…')); return; }
+            if (plateArranging) { ctl.appendChild(el('div', 'hint', plateArranging === 'loose' ? 'Placing loose objects on the PC…' : 'Arranging on the PC…')); return; }
             var out = plateData ? plateData.objects.filter(function(o) { return o.outside; }).length : 0;
-            ctl.appendChild(el('div', 'hint', out ? (out + (out === 1 ? ' object hangs' : ' objects hang') + ' over the edge of the plate: Arrange moves ' + (out === 1 ? 'it' : 'them') + ' back.') :
+            ctl.appendChild(el('div', 'hint', out ? (out + (out === 1 ? ' object hangs' : ' objects hang') + ' over the edge of the plate: Place loose objects moves only ' + (out === 1 ? 'it' : 'them') + '; This plate re-arranges the whole plate.') :
                 plateData && plateData.objects.length ? 'Tap an object to select it, drag to move it. Pinch to zoom, drag the bed to pan.' : 'This plate is empty.'));
             var ra = el('div', 'row');
             ra.appendChild(el('span', 'k', 'Arrange'));
             if (plateData && plateData.objects.length && !plateData.locked) { var ap = el('span', 'btn small', 'This plate'); ap.onclick = function() { arrangePlate(false); }; ra.appendChild(ap); }
-            var aa = el('span', 'btn small', 'All plates'); aa.onclick = function() { arrangePlate(true); }; ra.appendChild(aa);
             if (plateData && plateData.locked) ra.appendChild(el('span', 'hint', 'This plate is locked on the PC'));
             ctl.appendChild(ra);
+            if (platePlace) {
+                // Only what is off a plate or over an edge moves; placed objects stay put.
+                var rp = el('div', 'row');
+                var pl = el('span', 'btn small', 'Place loose objects (' + platePlace + ')'); pl.onclick = function() { arrangePlate(true); }; rp.appendChild(pl);
+                rp.appendChild(el('span', 'hint', 'Moves only objects off a plate or over an edge, into free space; everything else stays where it is.'));
+                ctl.appendChild(rp);
+            }
             if (plateLoose.length) {
                 var rl = el('div', 'row');
                 rl.appendChild(el('span', 'k', 'No plate'));
@@ -3595,7 +3605,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                     b.onclick = function() { bringToPlate(o); };
                     rl.appendChild(b);
                 });
-                if (plateLoose.length > 4) rl.appendChild(el('span', 'hint', '+' + (plateLoose.length - 4) + ' more: Arrange all plates'));
+                if (plateLoose.length > 4) rl.appendChild(el('span', 'hint', '+' + (plateLoose.length - 4) + ' more: Place loose objects'));
                 ctl.appendChild(rl);
             }
             return;

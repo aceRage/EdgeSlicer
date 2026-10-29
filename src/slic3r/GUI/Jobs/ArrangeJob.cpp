@@ -251,6 +251,60 @@ void ArrangeJob::prepare_all() {
     plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
 }
 
+// EdgeSlicer: prepare_all's plates and wipe towers, but only the loose instances are arranged -
+// those on no plate, and those not wholly on the unlocked plate they are registered to (hanging
+// over the edge, or pushed off it by a smaller printer). Every other instance, printable or not, is
+// a fixed item, so the loose ones go into the free space around it, or onto new plates. Loose
+// instances set not to print stay where they are. The object list keeps its order: rebuilding the
+// plates sorts the objects by arrange_order, which apply() sets from the placement order.
+void ArrangeJob::prepare_loose()
+{
+    clear_input();
+
+    PartPlateList& plate_list = m_plater->get_partplate_list();
+    for (size_t i = 0; i < plate_list.get_plate_count(); i++) {
+        PartPlate* plate = plate_list.get_plate(i);
+        bool same_as_global_print_seq = true;
+        plate->get_real_print_seq(&same_as_global_print_seq);
+        if (plate->is_locked() == false && !same_as_global_print_seq) {
+            plate->lock(true);
+            m_uncompatible_plates.push_back(i);
+        }
+    }
+
+    Model& model = m_plater->model();
+    int    order = 0;
+    for (size_t oidx = 0; oidx < model.objects.size(); ++oidx) {
+        ModelObject* mo = model.objects[oidx];
+        for (size_t i = 0; i < mo->instances.size(); ++i) {
+            ModelInstance* mi = mo->instances[i];
+            mi->arrange_order = ++order;
+            const int  pi    = plate_list.find_instance(int(oidx), int(i));
+            const bool loose = pi < 0 || !plate_list.get_plate(pi)->contain_instance_totally(int(oidx), int(i));
+            if (loose && !mi->printable)
+                continue;
+            ArrangePolygon&& ap = prepare_arrange_polygon(mi);
+            ap.setter = [set = ap.setter, order](const ArrangePolygon& p) {
+                ArrangePolygon keep = p;
+                keep.itemid         = order;
+                set(keep);
+            };
+            if (plate_list.preprocess_arrange_polygon(int(oidx), int(i), ap, loose)) {
+                ap.itemid = m_locked.size();
+                m_locked.emplace_back(std::move(ap));
+                continue;
+            }
+            ArrangePolygons& cont = loose ? m_selected : m_unselected;
+            ap.itemid = cont.size();
+            cont.emplace_back(std::move(ap));
+        }
+    }
+
+    prepare_wipe_tower();
+
+    plate_list.preprocess_exclude_areas(m_unselected, MAX_NUM_PLATES);
+}
+
 arrangement::ArrangePolygon estimate_wipe_tower_info(int plate_index, std::set<int>& extruder_ids)
 {
     PartPlateList& ppl = wxGetApp().plater()->get_partplate_list();
@@ -452,7 +506,11 @@ void ArrangeJob::prepare()
     Model::setPrintSpeedTable(config, print_config);
 
     int state = m_plater->get_prepare_state();
-    if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
+    if (m_loose_only) {
+        only_on_partplate = false;
+        prepare_loose();
+    }
+    else if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
         only_on_partplate = false;
         prepare_all();
     }
@@ -596,7 +654,7 @@ void ArrangeJob::process(Ctl &ctl)
         we_have_unpackable_items ? _u8L("Arranging is done but there are unpacked items. Reduce spacing and try again.") : _u8L("Arranging done."));
 }
 
-ArrangeJob::ArrangeJob() : m_plater{wxGetApp().plater()} { }
+ArrangeJob::ArrangeJob(bool loose_only) : m_plater{wxGetApp().plater()}, m_loose_only{loose_only} { }
 
 static std::string concat_strings(const std::set<std::string> &strings,
                                   const std::string &delim = "\n")
@@ -720,7 +778,8 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
         plate_list.rebuild_plates_after_arrangement(!only_on_partplate, true, current_plate_index);
     }
     else {
-        plate_list.rebuild_plates_after_arrangement(!only_on_partplate, true);
+        // Placing loose objects keeps the plates there are, empty ones included: it adds, never removes.
+        plate_list.rebuild_plates_after_arrangement(!only_on_partplate && !m_loose_only, true);
     }
 
     // unlock the plates we just locked

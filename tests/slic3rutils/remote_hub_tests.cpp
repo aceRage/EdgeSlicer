@@ -994,7 +994,7 @@ TEST_CASE("a P1/A1 live-view camera (b<hash>) is registered once and kept across
 TEST_CASE("arrange: the hub proxies the new instance routes and nothing around them", "[RemoteHub][arrange]")
 {
     using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
-    // arrange / orient one plate (all=1 is a query value, so the path stays this closed set)
+    // arrange / orient one plate (loose=1 is a query value, so the path stays this closed set)
     CHECK(instance_api_allowed("POST", "/api/plates/0/arrange"));
     CHECK(instance_api_allowed("POST", "/api/plates/12/arrange"));
     CHECK(instance_api_allowed("POST", "/api/plates/3/orient"));
@@ -1100,6 +1100,32 @@ TEST_CASE("arrange: blocked is null or one of the documented strings", "[RemoteH
                 const std::string r = Slic3r::GUI::SliceV1::plate_blocked(v, locked);
                 CHECK((r.empty() || allowed.count(r) == 1));
             }
+}
+
+TEST_CASE("arrange: place loose objects counts only what it moves", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::place_count;
+    // { outside, printable, off_plate }
+    const PlateInstance inside { false, true }, over { true, true }, away { true, true, true };
+    const PlateInstance off_inside { false, false }, off_over { true, false };
+
+    // nothing off a plate: nothing to place, however full the plates are
+    CHECK(place_count({}, {}, 0) == 0);
+    CHECK(place_count({ { inside, inside }, { inside }, {} }, { false, false, false }, 0) == 0);
+    CHECK(place_count({ { inside, off_inside } }, { false }, 0) == 0);
+    // over the edge or wholly off the plate it is registered to, and on no plate at all
+    CHECK(place_count({ { inside, over } }, { false }, 0) == 1);
+    CHECK(place_count({ { away }, { over, over } }, { false, false }, 0) == 3);
+    CHECK(place_count({ { inside } }, { false }, 2) == 2);
+    CHECK(place_count({ { over }, {} }, { false, false }, 1) == 2);
+    // objects set not to print stay where they are
+    CHECK(place_count({ { off_over, inside } }, { false }, 0) == 0);
+    // a locked plate is left alone, its overhanging objects included
+    CHECK(place_count({ { over }, { over } }, { true, false }, 0) == 1);
+    CHECK(place_count({ { over, away } }, { true }, 1) == 1);
+    // a plate the lock list does not cover counts as unlocked
+    CHECK(place_count({ { over }, { over } }, { false }, 0) == 2);
 }
 
 TEST_CASE("arrange: a guarded undo only takes back the step it was told about", "[RemoteHub][arrange]")
