@@ -4,7 +4,6 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/I18N.hpp"
 
-#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepLProp_SLProps.hxx>
@@ -14,8 +13,6 @@
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <Standard_Handle.hxx>
-#include <cstdint>
-#include <Poly_Triangle.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <gp_Cylinder.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -33,7 +30,6 @@
 #include <NCollection_IndexedDataMap.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <NCollection_List.hxx>
-#include <Poly_Triangulation.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <BRepGProp.hxx>
