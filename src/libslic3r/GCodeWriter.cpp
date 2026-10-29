@@ -395,6 +395,11 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
 
 void GCodeWriter::append_klipper_accel_to_decel(std::string &gcode, unsigned int acceleration, double accel_to_decel_factor)
 {
+    // Edge: a 3MF or CLI config can carry a factor outside the option's 1-100% range. Nothing for 0 or less
+    // (a negative ACCEL_TO_DECEL, or a cruise ratio of 1 or more, would be rejected by Klipper); above 100% is 100%.
+    if (!(accel_to_decel_factor > 0.))
+        return;
+    accel_to_decel_factor = std::min(accel_to_decel_factor, 100.);
     gcode += " ACCEL_TO_DECEL=";
     gcode += float_to_string_decimal_point(acceleration * accel_to_decel_factor / 100);
     gcode += " MINIMUM_CRUISE_RATIO=";

@@ -331,6 +331,15 @@ TEST_CASE("Klipper acceleration commands send accel_to_decel both as ACCEL_TO_DE
         auto writer = make_writer(true, 100.);
         CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
     }
+    SECTION("Edge: a factor of 0 from a 3MF or the CLI sends neither") {
+        auto writer = make_writer(true, 0.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000\n");
+        CHECK(writer->set_accel_and_jerk(5000, 0.) == "SET_VELOCITY_LIMIT ACCEL=5000\n");
+    }
+    SECTION("Edge: a factor above 100% is clamped to 100%, a cruise ratio of 0") {
+        auto writer = make_writer(true, 150.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
+    }
     SECTION("Off sends neither") {
         auto writer = make_writer(false, 50.);
         const std::string print  = writer->set_print_acceleration(2000);

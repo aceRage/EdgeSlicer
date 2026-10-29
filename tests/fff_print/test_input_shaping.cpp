@@ -3,6 +3,7 @@
 // (default off: nothing is written until a user turns it on), and the calibration towers.
 #include <catch2/catch.hpp>
 
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -212,13 +213,12 @@ TEST_CASE("Input shaping frequency calibration steps the frequency across layers
     const std::string g = slice_cube(printer_config("klipper", {{"accel_to_decel_enable", "1"}, {"accel_to_decel_factor", "100%"}}),
                                      false, &params);
     CHECK(lines_starting_with(g, "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=").empty());
-    size_t accel_lines = 0;
+    const std::regex ratio_zero(" MINIMUM_CRUISE_RATIO=0(\\s|$)");
+    size_t           accel_lines = 0;
     for (const std::string &line : lines_starting_with(g, "SET_VELOCITY_LIMIT ACCEL=")) {
         INFO(line);
         ++accel_lines;
-        const bool ratio_zero = line.find(" MINIMUM_CRUISE_RATIO=0 ") != std::string::npos ||
-                                (line.size() >= 23 && line.compare(line.size() - 23, 23, " MINIMUM_CRUISE_RATIO=0") == 0);
-        CHECK(ratio_zero);
+        CHECK(std::regex_search(line, ratio_zero));
     }
     CHECK(accel_lines > 0);
     const std::vector<std::string> lines = lines_starting_with(g, "SET_INPUT_SHAPER");
