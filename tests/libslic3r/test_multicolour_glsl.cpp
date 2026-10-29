@@ -408,7 +408,7 @@ TEST_CASE("A mesh wall is the outer-wall bead the toolpaths draw there", "[Multi
         const sh::vec3 R(rx, ry, 0.), D(-ry * wall_dir, rx * wall_dir, 0.);
         const sh::vec3 want = sh::mc_fragment_colour(slot, 2, 1.f, sy, R, D, volume);
         const float    twist = volume * sh::mc_params[slot].y;
-        const sh::vec3 got  = sh::mc_mesh_colour(slot, nx, ny, nz, 0.f, 0.f, sy, wall_dir, 1, 1.f, 0.f, true, 0.4f, twist);
+        const sh::vec3 got  = sh::mc_mesh_colour(slot, nx, ny, nz, 0.f, 0.f, sy, wall_dir, 1, 1.f, 0.f, true, 0.4f, twist, 0.f);
         worst = std::max({ worst, std::abs(got.x - want.x), std::abs(got.y - want.y), std::abs(got.z - want.z) });
     }
     INFO("largest channel difference: " << worst);
@@ -447,7 +447,7 @@ TEST_CASE("A mesh top or bottom face is the skin bead the toolpaths draw there",
         const float    sx   = d * (2.f * t - 1.f);
         const float    sy   = (top ? 1.f : -1.f) * (1.f - std::abs(sx));
         const sh::vec3 want = sh::mc_fragment_colour(slot, top ? 6 : 5, sx, sy, sh::vec3(d * ty, -d * tx, 0.), sh::vec3(d * tx, d * ty, 0.), 0.f);
-        const sh::vec3 got  = sh::mc_mesh_colour(slot, 0.f, 0.f, top ? 1.f : -1.f, px, py, 0.3f, 1.f, 1, tx * 3.f, ty * 3.f, zigzag, spacing, 0.f);
+        const sh::vec3 got  = sh::mc_mesh_colour(slot, 0.f, 0.f, top ? 1.f : -1.f, px, py, 0.3f, 1.f, 1, tx * 3.f, ty * 3.f, zigzag, spacing, 0.f, 1.f);
         worst = std::max({ worst, std::abs(got.x - want.x), std::abs(got.y - want.y), std::abs(got.z - want.z) });
     }
     INFO("largest channel difference: " << worst);
@@ -463,12 +463,12 @@ TEST_CASE("Mesh mode shows the P0 prints' look", "[MultiColour][Glsl][Mesh]")
         const Filament f = p0_dual(-45.f);
         sh::load(pack_uniforms({ f }, {}));
         const RGB red = f.colour[0], yellow = f.colour[1];
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), red));      // front
-        CHECK(near(sh::mc_mesh_colour(0, -1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), red));      // left
-        CHECK(near(sh::mc_mesh_colour(0, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), yellow));    // right
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), yellow));    // back
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), red));      // front
+        CHECK(near(sh::mc_mesh_colour(0, -1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), red));      // left
+        CHECK(near(sh::mc_mesh_colour(0, 1.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), yellow));    // right
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), yellow));    // back
         // Turning the cube 45 degrees on the plate puts its front-right face on the boundary: a blend.
-        CHECK(near(sh::mc_mesh_colour(0, 0.70710678f, -0.70710678f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), red) == false);
+        CHECK(near(sh::mc_mesh_colour(0, 0.70710678f, -0.70710678f, 0.f, 0.f, 0.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), red) == false);
     }
     SECTION("tops: zig-zag lines alternate, monotonic lines do not (photos 07, 08)")
     {
@@ -477,26 +477,26 @@ TEST_CASE("Mesh mode shows the P0 prints' look", "[MultiColour][Glsl][Mesh]")
         sh::load(pack_uniforms({ f }, {}));
         const RGB red = f.colour[0], yellow = f.colour[1];
         const float s = 0.4f;
-        auto top_at = [&](int m, bool zigzag) { return sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, -(float(m) + 0.5f) * s, 0.f, 1.f, 1, 1.f, 0.f, zigzag, s, 0.f); };
+        auto top_at = [&](int m, bool zigzag) { return sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, -(float(m) + 0.5f) * s, 0.f, 1.f, 1, 1.f, 0.f, zigzag, s, 0.f, 1.f); };
         CHECK(near(top_at(0, true), yellow));   // +X travel: the trailing -X side on top
         CHECK(near(top_at(1, true), red));      // -X travel
         CHECK(near(top_at(2, true), yellow));
         CHECK(near(top_at(0, false), yellow));
         CHECK(near(top_at(1, false), yellow));
         // Seen from below the leading side shows instead.
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, -1.f, 3.f, -0.5f * s, 0.f, 1.f, 1, 1.f, 0.f, true, s, 0.f), red));
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, -1.f, 3.f, -0.5f * s, 0.f, 1.f, 1, 1.f, 0.f, true, s, 0.f, 1.f), red));
     }
     SECTION("faces without one line direction show the average; slopes blend the wall and the face")
     {
         const Filament f = p0_dual(90.f);
         sh::load(pack_uniforms({ f }, {}));
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 0, 0.f, 0.f, false, 0.4f, 0.f), f.average()));
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 1, 0.f, 0.f, true, 0.4f, 0.f), f.average()));   // no direction
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 0, 0.f, 0.f, false, 0.4f, 0.f, 1.f), f.average()));
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 1, 0.f, 0.f, true, 0.4f, 0.f, 1.f), f.average()));   // no direction
         const float    nz = 0.7f, nh = std::sqrt(1.f - nz * nz);
         const sh::vec3 wall  = sh::mc_mesh_wall(0, nh, 0.f, 0.2f, 1.f, 0.f);
         const sh::vec3 face  = sh::mc_mesh_skin(0, 3.f, -0.2f, 1.f, 0.f, true, 0.4f, 1.f, 0.f);
-        const sh::vec3 slope = sh::mc_mesh_colour(0, nh, 0.f, nz, 3.f, -0.2f, 0.2f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f);
-        const sh::vec3 mid   = sh::mix(wall, face, 0.5);   // smoothstep(0.5, 0.9, 0.7)
+        const sh::vec3 slope = sh::mc_mesh_colour(0, nh, 0.f, nz, 3.f, -0.2f, 0.2f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.5f);
+        const sh::vec3 mid   = sh::mix(wall, face, 0.5);   // w = 0.5 halfway
         CHECK_THAT(slope.x, WithinAbs(mid.x, 1e-5));
         CHECK_THAT(slope.y, WithinAbs(mid.y, 1e-5));
         CHECK_THAT(slope.z, WithinAbs(mid.z, 1e-5));
@@ -506,9 +506,33 @@ TEST_CASE("Mesh mode shows the P0 prints' look", "[MultiColour][Glsl][Mesh]")
         Filament plain;
         plain.colour[0] = srgb_to_linear(RGB{ 0.2f, 0.4f, 0.6f });
         sh::load(pack_uniforms({ plain }, {}));
-        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), plain.colour[0]));
-        CHECK(near(sh::mc_mesh_colour(0, 1.f, 0.f, 0.f, 3.f, 1.f, 0.5f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f), plain.colour[0]));
+        CHECK(near(sh::mc_mesh_colour(0, 0.f, 0.f, 1.f, 3.f, 1.f, 0.f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 1.f), plain.colour[0]));
+        CHECK(near(sh::mc_mesh_colour(0, 1.f, 0.f, 0.f, 3.f, 1.f, 0.5f, 1.f, 1, 1.f, 0.f, true, 0.4f, 0.f, 0.f), plain.colour[0]));
     }
+}
+
+TEST_CASE("Slopes are walls until a layer steps past the band of walls", "[MultiColour][Glsl][Mesh]")
+{
+    // 0.2 mm layers, two walls of 0.42 mm: skin shows once a layer steps in by more than 0.84 mm.
+    const float h = 0.2f, band = 0.84f;
+    auto weight_at_deg = [&](float slope_deg) {   // slope from horizontal
+        const float a = slope_deg * 3.14159265f / 180.f;
+        return sh::mc_skin_weight(std::cos(a), h, band);
+    };
+    CHECK(sh::mc_skin_weight(0.f, h, band) == 0.f);            // a vertical wall
+    CHECK(sh::mc_skin_weight(1.f, h, band) == 1.f);            // a flat top
+    CHECK(sh::mc_skin_weight(-1.f, h, band) == 1.f);           // a flat bottom
+    CHECK(weight_at_deg(45.f) == 0.f);                         // 0.2 mm a layer: walls (a bunny's back)
+    CHECK(weight_at_deg(25.f) == 0.f);                         // 0.43 mm a layer: still walls
+    CHECK(weight_at_deg(5.f) == 1.f);                          // 2.3 mm a layer: skin
+    // The switch is where the step equals the band, atan(0.2 / 0.84) = 13.4 degrees, and narrow.
+    CHECK_THAT(weight_at_deg(13.393f), WithinAbs(0.5, 0.02));
+    CHECK(weight_at_deg(16.f) == 0.f);
+    CHECK(weight_at_deg(11.f) == 1.f);
+    // Thinner layers step less: the same slope stays a wall longer.
+    CHECK(sh::mc_skin_weight(std::cos(12.f * 3.14159265f / 180.f), 0.1f, band) == 0.f);
+    // Without the settings: the old normal-based blend.
+    CHECK_THAT(sh::mc_skin_weight(0.7f, 0.f, band), WithinAbs(0.5, 1e-5));
 }
 
 TEST_CASE("Mesh mode reads the skin's line spacing and the wall direction from the config", "[MultiColour][Mesh]")
@@ -536,6 +560,14 @@ TEST_CASE("Mesh mode reads the skin's line spacing and the wall direction from t
     CHECK_THAT(mesh_skin(cfg, 1).top_spacing, WithinAbs(0.45 - 0.2 * overlap, 1e-5));
     cfg.set_key_value("line_width", new ConfigOptionFloatOrPercent(0., false));
     CHECK_THAT(mesh_skin(cfg, 1).top_spacing, WithinAbs(0.4 - 0.2 * overlap, 1e-5));   // top: the nozzle width
+
+    // The band of walls: the outer wall's spacing plus the inner walls'.
+    cfg.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(0.42, false));
+    cfg.set_key_value("inner_wall_line_width", new ConfigOptionFloatOrPercent(0.45, false));
+    cfg.set_key_value("wall_loops", new ConfigOptionInt(3));
+    s = mesh_skin(cfg, 1);
+    CHECK_THAT(s.wall_band, WithinAbs((0.42 - 0.2 * overlap) + 2. * (0.45 - 0.2 * overlap), 1e-5));
+    CHECK_THAT(s.layer_height, WithinAbs(0.2, 1e-6));
 
     cfg.set_key_value("wall_direction", new ConfigOptionEnum<WallDirection>(WallDirection::Clockwise));
     CHECK(mesh_skin(cfg, 1).wall_dir == -1.f);

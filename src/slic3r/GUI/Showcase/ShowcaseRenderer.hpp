@@ -39,6 +39,9 @@
 class wxMouseEvent;
 
 namespace Slic3r {
+
+class ModelVolume;
+
 namespace GUI {
 
 struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
@@ -258,6 +261,10 @@ private:
     };
     const LayerInfo *layers_for(int object_idx);
     void            release_layers();
+    // Multi-colour P4: the volume's mesh with per-corner smooth normals (faces under 30 degrees apart
+    // share them), so a coextruded colour follows a curved surface instead of each triangle. Cached
+    // with the layers; null for an empty mesh.
+    GLModel        *mc_smooth_model(const ModelVolume &mv);
     // The scene's environment as a cube map; null when there is none (no manifest, no file).
     const Showcase::EnvironmentInfo *ensure_environment();
     bool            ensure_floor_texture(float &tile_mm, float &roughness);
@@ -287,6 +294,8 @@ private:
     // S2
     std::map<int, LayerInfo>   m_layers;
     bool                       m_layers_valid = false;
+    // P4: mc_smooth_model()'s cache, by (ModelVolume id, its mesh).
+    std::map<std::pair<size_t, const void *>, std::shared_ptr<GLModel>> m_mc_smooth;
     unsigned int               m_env_texture = 0;
     // 1b: a black 1x1 cube on the toolpaths' environment unit when the scene has no environment
     // (libvgcode's program keeps a samplerCube there; macOS wants a complete texture on it).

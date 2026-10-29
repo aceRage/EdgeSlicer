@@ -455,23 +455,32 @@ uniform float mc_spacing_first;      // the same on the first layer, the face on
 uniform bool  mc_zigzag_top;         // neighbouring skin lines run opposite ways (rectilinear)
 uniform bool  mc_zigzag_bottom;
 uniform float mc_volume_per_mm;      // twist: mm3 of filament per mm of height, from the bed (a guess)
+uniform float mc_layer_height;       // mm, when there is no layer table (mc_skin_weight())
+uniform float mc_wall_band;          // mm across the walls (outer + inner), mc_skin_weight()
 
 // cap: the inside seen through the build-up's cut, lit as a flat face (no skin lines there).
+// n is the interpolated (smooth) normal: ShowcaseRenderer draws coextruded volumes with per-corner
+// normals, so the colour follows the surface instead of jumping triangle by triangle.
 vec3 mc_mesh_albedo(vec3 n, bool cap)
 {
     // Derivatives first, while the whole quad still runs the same code.
     float z     = world_pos.z;
     float z_px  = max(fwidth(z), 1e-6);
-    float xy_px = max(length(fwidth(world_pos.xy)), 1e-6);
+    vec2  xy_px = max(fwidth(world_pos.xy), vec2(1e-6));
 
-    // The height within the layer (s.y), with the layer lines. The colour bands it makes in the
-    // transition zones alias sooner than the groove shading, so they fade out below 8 px a layer.
+    // The layer here, and the height within it (s.y) with the layer lines. The colour bands s.y makes
+    // in the transition zones alias sooner than the groove shading: they fade out below 8 px a layer.
+    float h  = mc_layer_height;
     float sy = 0.0;
-    if (layer_mode != 0 && line_depth > 0.0) {
-        vec2  layer = layer_at(z);
-        float h     = max(layer.y - layer.x, 1e-4);
-        sy = (2.0 * clamp((z - layer.x) / h, 0.0, 1.0) - 1.0) * smoothstep(3.0, 8.0, h / z_px);
+    if (layer_mode != 0) {
+        vec2 layer = layer_at(z);
+        h = max(layer.y - layer.x, 1e-4);
+        if (line_depth > 0.0)
+            sy = (2.0 * clamp((z - layer.x) / h, 0.0, 1.0) - 1.0) * smoothstep(3.0, 8.0, h / z_px);
     }
+    // Walls or skin: on the slicer's terms, a slope is stacked walls until each layer steps in by
+    // more than the band of walls (mc_skin_weight() in MultiColourGlsl.hpp).
+    float w = cap ? 1.0 : mc_skin_weight(n.z, h, mc_wall_band);
 
     // The skin's lines on a top or bottom face (skin_tangent() above, without the sheen's projection).
     bool  top     = n.z > 0.0;
@@ -489,14 +498,21 @@ vec3 mc_mesh_albedo(vec3 n, bool cap)
     }
     // Concentric and other patterns without one direction: the slot's average (design 7.3).
     int skin = mode == 1 && !cap ? 1 : 0;
+    // Stripes closer than a few pixels on screen would alias into a crosshatch: fade them to the
+    // face's average. The pitch is measured across the lines, from the screen-space derivatives.
+    if (skin == 1) {
+        float across = abs(dir.y) * xy_px.x + abs(dir.x) * xy_px.y;
+        if (smoothstep(2.0, 4.0, spacing / max(across, 1e-6)) <= 0.0)
+            skin = 0;
+    }
 
     float twist = mc_params[mc_slot].y * max(z, 0.0) * mc_volume_per_mm;
-    vec3  c = mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, skin, dir.x, dir.y, zigzag, spacing, twist);
-    // Lines thinner than a couple of pixels would shimmer: fade to the face's average colour.
-    if (skin == 1 && abs(n.z) > 0.5) {
-        float fade = smoothstep(1.5, 3.0, spacing / xy_px);
+    vec3  c = mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, skin, dir.x, dir.y, zigzag, spacing, twist, w);
+    if (skin == 1 && w > 0.0) {
+        float across = abs(dir.y) * xy_px.x + abs(dir.x) * xy_px.y;
+        float fade   = smoothstep(2.0, 4.0, spacing / max(across, 1e-6));
         if (fade < 1.0)
-            c = mix(mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, 0, 0.0, 0.0, false, spacing, twist), c, fade);
+            c = mix(mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, 0, 0.0, 0.0, false, spacing, twist, w), c, fade);
     }
     return c;
 }

@@ -25,6 +25,7 @@
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
 
+#include <igl/per_corner_normals.h>
 #include <imgui/imgui.h>
 
 #include <wx/glcanvas.h>
@@ -371,6 +372,45 @@ void ShowcaseRenderer::release_layers()
             glsafe(::glDeleteTextures(1, &it.second.texture));
     m_layers.clear();
     m_layers_valid = false;
+    m_mc_smooth.clear();
+}
+
+GLModel *ShowcaseRenderer::mc_smooth_model(const ModelVolume &mv)
+{
+    const auto key = std::make_pair(size_t(mv.id().id), static_cast<const void *>(mv.mesh_ptr().get()));
+    if (auto it = m_mc_smooth.find(key); it != m_mc_smooth.end())
+        return it->second.get();
+    std::shared_ptr<GLModel> &slot = m_mc_smooth[key];
+    const indexed_triangle_set &its = mv.mesh().its;
+    if (its.vertices.empty() || its.indices.empty())
+        return nullptr;
+    using MapVertices = Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
+    using MapIndices  = Eigen::Map<const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
+    const Eigen::MatrixXd vertices = MapVertices(its.vertices.front().data(), Eigen::Index(its.vertices.size()), 3).cast<double>();
+    const Eigen::MatrixXi indices  = MapIndices(its.indices.front().data(), Eigen::Index(its.indices.size()), 3);
+    Eigen::MatrixXd       corner_normals;
+    // 30 degrees: a cube keeps its sharp faces, a tessellated curve (a bunny, a cylinder) goes smooth.
+    igl::per_corner_normals(vertices, indices, 30.0, corner_normals);
+
+    GLModel::Geometry geo;
+    geo.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    geo.reserve_vertices(3 * its.indices.size());
+    geo.reserve_indices(3 * its.indices.size());
+    unsigned int n = 0;
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const stl_triangle_vertex_indices &face = its.indices[i];
+        for (int j = 0; j < 3; ++j) {
+            Vec3f normal = corner_normals.row(Eigen::Index(i * 3 + size_t(j))).cast<float>();
+            if (!normal.allFinite() || normal.squaredNorm() < 1e-12f)
+                normal = its_face_normal(its, int(i));
+            geo.add_vertex(its.vertices[size_t(face[j])], normal);
+        }
+        geo.add_triangle(n, n + 1, n + 2);
+        n += 3;
+    }
+    slot = std::make_shared<GLModel>();
+    slot->init_from(std::move(geo));
+    return slot.get();
 }
 
 bool ShowcaseRenderer::is_supported()
@@ -1134,6 +1174,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         Showcase::Finish finish = Showcase::Finish::Standard;
         double           depth  = 0.;
         int              filament = 0;  // 1-based, 0 = none (the wipe tower)
+        const ModelVolume *mv   = nullptr;  // P4: its mesh, for the smooth-normal copy
     };
     std::vector<Item> opaque, translucent;
     const ModelObjectPtrs &objects = wxGetApp().model().objects;
@@ -1152,6 +1193,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         const ModelVolume *mv = mo != nullptr && v->volume_idx() >= 0 && size_t(v->volume_idx()) < mo->volumes.size() ?
                                     mo->volumes[size_t(v->volume_idx())] : nullptr;
         int extruder = mv != nullptr ? mv->extruder_id() : v->extruder_id;
+        it.mv        = mv;
         if (extruder <= 0)
             extruder = 1;
         auto push = [&](Item item, int filament) {
@@ -1311,6 +1353,8 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             shader->set_uniform("mc_zigzag_top", zigzag[0]);
             shader->set_uniform("mc_zigzag_bottom", zigzag[1]);
             shader->set_uniform("mc_volume_per_mm", layers != nullptr ? layers->volume_per_mm : 0.f);
+            shader->set_uniform("mc_layer_height", skin.layer_height);
+            shader->set_uniform("mc_wall_band", skin.wall_band);
         }
 
         shader->set_uniform("view_model_matrix", view * world);
@@ -1326,8 +1370,11 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             m.set_color(it.color);
             m.render();
         } else {
-            v->model.set_color(it.color);
-            v->model.render();
+            // P4: a coextruded volume with smooth normals, so its colours follow the surface.
+            GLModel *smooth = mc_slot >= 0 && it.mv != nullptr ? mc_smooth_model(*it.mv) : nullptr;
+            GLModel &model  = smooth != nullptr ? *smooth : v->model;
+            model.set_color(it.color);
+            model.render();
         }
         if (v->is_left_handed())
             glsafe(::glFrontFace(GL_CCW));

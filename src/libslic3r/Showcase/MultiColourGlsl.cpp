@@ -150,6 +150,13 @@ MeshSkin mesh_skin(const ConfigBase &config, int extruder)
     out.first_spacing  = spacing("initial_layer_line_width", frPerimeter, height("initial_layer_print_height", layer_height));
     if (const ConfigOption *o = config.option("wall_direction"); o != nullptr && o->serialize() == "cw")
         out.wall_dir = -1.f;
+    out.layer_height = float(layer_height);
+    // The band of walls a slope's layer has to step past before its skin shows.
+    int loops = 2;
+    if (const auto *o = config.option<ConfigOptionInt>("wall_loops"); o != nullptr)
+        loops = std::max(1, o->value);
+    out.wall_band = spacing("outer_wall_line_width", frExternalPerimeter, layer_height) +
+                    float(loops - 1) * spacing("inner_wall_line_width", frPerimeter, layer_height);
     return out;
 }
 

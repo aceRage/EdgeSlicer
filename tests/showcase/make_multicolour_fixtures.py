@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import zipfile
 
@@ -63,6 +64,23 @@ def cylinder(r, h, segments=180):
     return v, t
 
 
+BUNNY_3MF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handy_models",
+                         "Stanford_Bunny.3mf")
+
+
+def bunny(scale=0.5):
+    """The Stanford bunny from resources/handy_models, scaled (60 mm long at 0.5), z from 0, centred."""
+    with zipfile.ZipFile(BUNNY_3MF) as z:
+        text = z.read("3D/3dmodel.model").decode("utf-8")
+    v = [(float(x) * scale, float(y) * scale, float(zz) * scale)
+         for x, y, zz in re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', text)]
+    t = [(int(a), int(b), int(c)) for a, b, c in re.findall(r'<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"', text)]
+    cx = (min(p[0] for p in v) + max(p[0] for p in v)) / 2.0
+    cy = (min(p[1] for p in v) + max(p[1] for p in v)) / 2.0
+    z0 = min(p[2] for p in v)
+    return [(p[0] - cx, p[1] - cy, p[2] - z0) for p in v], t
+
+
 # ---- the shapes of the P0 print (tests/p0_multicolour_cc1/NOTES.md) and their settings ----
 
 SHAPES = {
@@ -77,6 +95,9 @@ SHAPES = {
     "vase30": (lambda: cylinder(15.0, 40.0), {"spiral_mode": "1", "wall_loops": "1", "top_shell_layers": "0",
                                                "top_shell_thickness": "0", "sparse_infill_density": "0%",
                                                "enable_support": "0"}),
+    # The owner's #783 hand test: curved tops are stacked walls in the toolpaths, not skin stripes.
+    # Red / green / blue tri-colour. Supports off: the stills compare the bunny's own surfaces.
+    "bunny": (bunny, {"enable_support": "0"}, "#D7261E|#2BA84A|#1F5FD1"),
 }
 
 # Views: three-quarter (Showcase's own default framing), straight down, and from the back left.
@@ -86,6 +107,7 @@ VIEWS = {
     "plaque_monotonic_0": ["top", "threequarter"],
     "plaque_rectilinear_45": ["top", "threequarter"],
     "vase30": ["threequarter", "top", "backleft"],
+    "bunny": ["threequarter", "backleft"],
 }
 FRAME_HEIGHT = 1080
 
@@ -189,9 +211,10 @@ def main(argv):
     base_settings = json.loads(template[SETTINGS_ENTRY].decode("utf-8"))
     os.makedirs(a.out, exist_ok=True)
     cx, cy = bed_centre(base_settings)
-    first = a.colors.split("|")[0]
 
-    for shape, (make_mesh, overrides) in SHAPES.items():
+    for shape, entry in SHAPES.items():
+        make_mesh, overrides = entry[0], entry[1]
+        colors = entry[2] if len(entry) > 2 else a.colors
         mesh = make_mesh()
         xs = [p[0] for p in mesh[0]]
         zs = [p[2] for p in mesh[0]]
@@ -207,8 +230,8 @@ def main(argv):
             keys = [k for k in diffs[0].split(";") if k]
             keys += [k for k in overrides if k not in keys]
             diffs[0] = ";".join(sorted(keys))
-        set_slot0(settings, "filament_colour", first)
-        set_slot0(settings, "filament_multi_colors", a.colors)
+        set_slot0(settings, "filament_colour", colors.split("|")[0])
+        set_slot0(settings, "filament_multi_colors", colors)
         set_slot0(settings, "filament_colour_mode", "0")
         set_slot0(settings, "filament_colour_split", "")
         set_slot0(settings, "filament_colour_angle", ("%g" % a.angle))

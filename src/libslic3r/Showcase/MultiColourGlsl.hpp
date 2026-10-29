@@ -113,8 +113,12 @@ vec3 mc_to_srgb3(vec3 c) { return vec3(mc_to_srgb(max(c.x, 0.0)), mc_to_srgb(max
 //  * a top (side +1) or bottom (side -1) face: the skin line through the point, lines `spacing` mm
 //    apart across the skin direction (tx, ty); with zigzag, every other line runs the other way. The
 //    point's place across its line gives s.x, and s.y follows the drawn diamond, 1 - |s.x|;
-//  * slopes between |n.z| 0.5 and 0.9 blend the two; skin 0 (concentric or other patterns without one
-//    direction) shows the slot's average colour on the faces.
+//  * which of the two a sloped surface shows (w, 0 wall .. 1 skin) is mc_skin_weight(): a slope is
+//    stacked wall beads, each layer stepping in by layer_h / tan(slope) mm. Top (or bottom) skin reaches
+//    the surface only where that step is wider than the band of walls (wall_band mm: the outer wall
+//    plus the inner ones); the blend between is narrow (+-15% of the band). So curved upward faces (a
+//    bunny's back) show wall bands, as the toolpaths do, and only near-flat tops show skin stripes.
+//  * skin 0 (concentric or other patterns without one direction) shows the slot's average on the faces.
 #define SLIC3R_MC_MESH_GLSL \
 vec3 mc_mesh_wall(int slot, float nx, float ny, float sy, float wall_dir, float twist_turns) { \
     float l = sqrt(nx * nx + ny * ny); \
@@ -138,10 +142,16 @@ vec3 mc_mesh_skin(int slot, float px, float py, float tx, float ty, bool zigzag,
     return mc_bead_colour(slot, sx, sy, vec3(d * ty, -d * tx, 0.0), vec3(d * tx, d * ty, 0.0), twist_turns, mc_global.y, \
                           mc_global.z, 1.0, mc_global2.x); \
 } \
+float mc_skin_weight(float nz, float layer_h, float wall_band) { \
+    float a = min(abs(nz), 1.0); \
+    if (a >= 0.99999) return 1.0; \
+    if (layer_h <= 0.0 || wall_band <= 0.0) return smoothstep(0.5, 0.9, a); \
+    float layer_step = layer_h * a / sqrt(max(1.0 - a * a, 1e-10)); \
+    return smoothstep(0.85, 1.15, layer_step / wall_band); \
+} \
 vec3 mc_mesh_colour(int slot, float nx, float ny, float nz, float px, float py, float sy, float wall_dir, int skin, \
-                    float tx, float ty, bool zigzag, float spacing, float twist_turns) { \
+                    float tx, float ty, bool zigzag, float spacing, float twist_turns, float w) { \
     if (mc_count(slot) <= 1) return mc_colour(slot, 0); \
-    float w = smoothstep(0.5, 0.9, abs(nz)); \
     vec3 side_colour = w < 1.0 ? mc_mesh_wall(slot, nx, ny, sy, wall_dir, twist_turns) : vec3(0.0); \
     if (w <= 0.0) return side_colour; \
     vec3 face = skin == 1 ? mc_mesh_skin(slot, px, py, tx, ty, zigzag, spacing, nz > 0.0 ? 1.0 : -1.0, twist_turns) : \
@@ -199,6 +209,8 @@ struct MeshSkin
     float bottom_spacing = 0.4f;   // the same for bottom faces above the bed (solid infill lines)
     float first_spacing  = 0.4f;   // the same for the face on the bed (the first layer's lines)
     float wall_dir       = 1.f;    // +1: walls run anticlockwise seen from above (auto, ccw); -1: clockwise
+    float layer_height   = 0.2f;   // mm, for mc_skin_weight() without a layer table
+    float wall_band      = 0.85f;  // mm across the walls: the outer wall's spacing plus the inner walls'
 };
 // From a full config with the object's own settings applied; extruder is 1-based (its nozzle).
 // The line width of the surface (top_surface_line_width, internal_solid_infill_line_width,
