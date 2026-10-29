@@ -26,6 +26,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace Slic3r {
 
@@ -101,6 +102,23 @@ std::string format_split(const std::array<float, MAX_COLOURS> &proportion, int n
 // Snap proportions to the editor's limits (D10): STEP_PERCENT steps, at least MIN_PERCENT each,
 // summing to 100. n * MIN_PERCENT <= 100 for every n <= MAX_COLOURS.
 std::array<int, MAX_COLOURS> quantize_percent(const std::array<float, MAX_COLOURS> &proportion, int n);
+
+// ---- Colour picking helpers (the colour dialog's palette and inline picker) ----
+struct NamedColour
+{
+    const char *name;
+    const char *hex;   // "#RRGGBB"
+};
+// The built-in palette: 8 greys then 48 named colours (CSS colour names), 56 in all, in the order
+// the dialog shows them (14 columns x 4 rows).
+const std::vector<NamedColour> &basic_palette();
+// HSV <-> RGB. Hue in degrees [0, 360), saturation and value in [0, 1], RGB 0..255.
+std::array<int, 3>    hsv_to_rgb8(double hue_deg, double saturation, double value);
+std::array<double, 3> rgb8_to_hsv(int r, int g, int b);
+// "#RRGGBB" from 0..255 channels (clamped), and back; parse_rgb8 is false for anything that is not
+// "#RRGGBB" / "RRGGBB".
+std::string           format_hex8(int r, int g, int b);
+bool                  parse_rgb8(const std::string &text, std::array<int, 3> &out);
 
 // Which colour a swatch shows at the point (px, py), measured from the swatch centre in screen
 // pixels (y down), for a swatch that looks down on the strand with the printer's front at the

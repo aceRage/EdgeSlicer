@@ -1,6 +1,7 @@
 #include "FilamentColorDialog.hpp"
 
 #include "FilamentColorUtils.hpp"
+#include "FilamentColourPicker.hpp"
 #include "GUI_App.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/Label.hpp"
@@ -322,9 +323,10 @@ MultiColour::Filament MakeFilamentModel(const std::vector<std::string>& colors, 
 class MakeUpChip : public wxPanel
 {
 public:
-    MakeUpChip(wxWindow* parent, const wxSize& size, std::function<void()> onClick)
+    MakeUpChip(wxWindow* parent, const wxSize& size, std::function<void()> onClick, std::function<void()> onDoubleClick)
         : wxPanel(parent, wxID_ANY, wxDefaultPosition, size)
         , _onClick(std::move(onClick))
+        , _onDoubleClick(std::move(onDoubleClick))
     {
         SetMinSize(size);
         SetMaxSize(size);
@@ -336,11 +338,25 @@ public:
             if (_onClick)
                 _onClick();
         });
+        Bind(wxEVT_LEFT_DCLICK, [this](wxMouseEvent&)
+        {
+            if (_onDoubleClick)
+                _onDoubleClick();
+        });
     }
 
     void SetChipColour(const wxColour& colour)
     {
         _colour = colour;
+        Refresh();
+    }
+
+    /** The chip the palette and the picker change. */
+    void SetActive(bool active)
+    {
+        if (_active == active)
+            return;
+        _active = active;
         Refresh();
     }
 
@@ -354,9 +370,17 @@ private:
         dc.SetPen(wxPen(FilamentColorLightBorderColor(), 1));
         dc.SetBrush(wxBrush(_colour.IsOk() ? _colour : wxColour("#26A69A")));
         dc.DrawRoundedRectangle(0, 0, size.GetWidth(), size.GetHeight(), FromDIP(4));
+        if (_active)
+        {
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+            dc.SetPen(wxPen(wxColour("#019687"), 2));
+            dc.DrawRoundedRectangle(1, 1, size.GetWidth() - 2, size.GetHeight() - 2, FromDIP(4));
+        }
     }
 
     std::function<void()> _onClick;
+    std::function<void()> _onDoubleClick;
+    bool _active { false };
     wxColour _colour;
 };
 
@@ -868,6 +892,7 @@ void FilamentColorDialog::BuildUi()
                 proportion[size_t(i)] = float(_percent[size_t(i)]) / 100.f;
             _makeUp.split = MultiColour::format_split(proportion, count);
         }
+        RememberFilamentColours(_selection.colors);
         EndModal(wxID_OK);
     });
 
@@ -967,13 +992,33 @@ void FilamentColorDialog::BuildMakeUpUi(wxWindow* parent, wxSizer* sizer, int ma
     countRow->Add(_countSpin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
     for (int i = 0; i < MultiColour::MAX_COLOURS; ++i)
     {
-        MakeUpChip* chip = new MakeUpChip(parent, wxSize(FromDIP(34), FromDIP(26)), [this, i]() { PickChipColour(i); });
-        chip->SetToolTip(_L("Click to change this colour"));
+        MakeUpChip* chip = new MakeUpChip(parent, wxSize(FromDIP(34), FromDIP(26)), [this, i]() { SelectChip(i); },
+                                          [this, i]() { PickChipColour(i); });
+        chip->SetToolTip(_L("Click to choose this colour from the palette below, double-click for the colour picker"));
         _chips[size_t(i)] = chip;
         countRow->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
     }
     sizer->AddSpacer(FromDIP(8));
     sizer->Add(countRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // The palette and the recent colours change the chip that is marked.
+    std::vector<SwatchEntry> paletteEntries;
+    for (const MultiColour::NamedColour& colour : MultiColour::basic_palette())
+        paletteEntries.push_back({ colour.hex, colour.name });
+    _palette = new ColourSwatchGrid(parent, 14, 4, 18, 3, [this](const std::string& hex) { SetChipColour(_activeChip, hex); });
+    _palette->SetEntries(paletteEntries);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(_palette, 0, wxLEFT | wxRIGHT, margin);
+    wxBoxSizer* recentRow = new wxBoxSizer(wxHORIZONTAL);
+    recentRow->Add(makeLabel(_L("Recent"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _recent = new ColourSwatchGrid(parent, 8, 1, 18, 3, [this](const std::string& hex) { SetChipColour(_activeChip, hex); });
+    std::vector<SwatchEntry> recentEntries;
+    for (const std::string& hex : RecentFilamentColours())
+        recentEntries.push_back({ hex, std::string() });
+    _recent->SetEntries(recentEntries);
+    recentRow->Add(_recent, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(6));
+    sizer->Add(recentRow, 0, wxLEFT | wxRIGHT, margin);
 
     // Proportions in 5% steps, at least 5% each.
     wxBoxSizer* percentRow = new wxBoxSizer(wxHORIZONTAL);
@@ -1136,22 +1181,39 @@ void FilamentColorDialog::PickChipColour(int index)
 {
     if (index < 0 || index >= static_cast<int>(_selection.colors.size()))
         return;
-    wxColourData data;
-    data.SetChooseFull(true);
-    data.SetChooseAlpha(false);
-    data.SetColour(wxColour(_selection.colors[size_t(index)]));
-    wxColourDialog dialog(this, &data);
-    dialog.SetTitle(_L("Please choose the filament color"));
+    SelectChip(index);
+    FilamentColourPickerDialog dialog(this, _selection.colors[size_t(index)]);
     if (dialog.ShowModal() != wxID_OK)
         return;
-    const wxColour color = dialog.GetColourData().GetColour();
-    if (!color.IsOk())
+    SetChipColour(index, dialog.Colour());
+}
+
+void FilamentColorDialog::SelectChip(int index)
+{
+    if (index < 0 || index >= static_cast<int>(_selection.colors.size()))
+        return;
+    _activeChip = index;
+    RefreshMakeUp();
+}
+
+void FilamentColorDialog::SetChipColour(int index, const std::string& hex)
+{
+    const std::string normalized = FilamentColorUtils::NormalizeHexColor(hex, "");
+    if (normalized.empty())
         return;
     std::vector<std::string> colors = _selection.colors;
-    colors[size_t(index)] = color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+    if (colors.empty())
+        colors.emplace_back(normalized);
+    if (index < 0 || index >= static_cast<int>(colors.size()))
+        index = 0;
+    const bool changed = colors[size_t(index)] != normalized || _selection.NormalizedMode() == FilamentColorMode::Gradient;
+    colors[size_t(index)] = normalized;
     _selection = FilamentColor::FromColors(colors, FilamentColorMode::Segment);
-    _selectedSku.clear();
-    _highlightSku.clear();
+    if (changed)
+    {
+        _selectedSku.clear();
+        _highlightSku.clear();
+    }
     RefreshMakeUp();
     UpdateSwatchSelection();
 }
@@ -1161,6 +1223,7 @@ void FilamentColorDialog::RefreshMakeUp()
 {
     _syncingMakeUp = true;
     const int count = std::clamp<int>(int(_selection.colors.size()), 1, MultiColour::MAX_COLOURS);
+    _activeChip = std::clamp(_activeChip, 0, count - 1);
     if (_countSpin != nullptr)
         _countSpin->SetValue(count);
     for (int i = 0; i < MultiColour::MAX_COLOURS; ++i)
@@ -1176,9 +1239,16 @@ void FilamentColorDialog::RefreshMakeUp()
         {
             chip->Show(used);
             if (used)
+            {
                 static_cast<MakeUpChip*>(chip)->SetChipColour(wxColour(_selection.colors[size_t(i)]));
+                static_cast<MakeUpChip*>(chip)->SetActive(i == _activeChip);
+            }
         }
     }
+    if (_palette != nullptr && !_selection.colors.empty())
+        _palette->SetSelected(_selection.colors[size_t(_activeChip)]);
+    if (_recent != nullptr && !_selection.colors.empty())
+        _recent->SetSelected(_selection.colors[size_t(_activeChip)]);
     if (_angleSpin != nullptr)
         _angleSpin->SetValue(static_cast<int>(std::lround(_makeUp.angle / 5.0)) % 72 * 5);
     if (_twistSpin != nullptr)
@@ -1341,35 +1411,13 @@ void FilamentColorDialog::PlaceNearFilamentPanel()
 
 void FilamentColorDialog::OpenMoreColorDialog()
 {
-    wxColourData data;
-    data.SetChooseFull(true);
-    data.SetChooseAlpha(false);
-    data.SetColour(wxColour(_selection.PrimaryColor("#26A69A")));
-
-    std::vector<std::string> custom_colors;
-    if (wxGetApp().app_config != nullptr)
-        custom_colors = wxGetApp().app_config->get_custom_color_from_config();
-
-    const int custom_count = std::min(static_cast<int>(custom_colors.size()), CUSTOM_COLOR_COUNT);
-    for (int index = 0; index < custom_count; ++index)
-        data.SetCustomColour(index, string_to_wxColor(custom_colors[index]));
-
-    wxColourDialog dialog(this, &data);
-    dialog.SetTitle(_L("Please choose the filament color"));
+    // The colour picker for the marked chip (or the only colour).
+    const int chip = std::clamp(_activeChip, 0, std::max(0, int(_selection.colors.size()) - 1));
+    const std::string start = _selection.colors.empty() ? std::string("#26A69A") : _selection.colors[size_t(chip)];
+    FilamentColourPickerDialog dialog(this, start);
     if (dialog.ShowModal() != wxID_OK)
         return;
-
-    const wxColourData result = dialog.GetColourData();
-    if (custom_colors.size() != CUSTOM_COLOR_COUNT)
-        custom_colors.resize(CUSTOM_COLOR_COUNT);
-    for (int index = 0; index < CUSTOM_COLOR_COUNT; ++index)
-        custom_colors[index] = color_to_string(result.GetCustomColour(index));
-    if (wxGetApp().app_config != nullptr)
-        wxGetApp().app_config->save_custom_color_to_config(custom_colors);
-
-    const wxColour color = result.GetColour();
-    if (color.IsOk())
-        SelectCustomColor(color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString());
+    SetChipColour(chip, dialog.Colour());
 }
 
 } // namespace GUI

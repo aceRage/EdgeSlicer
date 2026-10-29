@@ -577,6 +577,44 @@ TEST_CASE("Export Bambu 3MF drops the visual-only keys (D8)", "[MultiColour][Bam
     CHECK(out.find("filament_multi_colour") != out.end());
 }
 
+TEST_CASE("Colour palette and HSV helpers (P2 picker)", "[MultiColour][Palette]")
+{
+    const std::vector<NamedColour> &palette = basic_palette();
+    CHECK(palette.size() == 56);
+    std::set<std::string> seen;
+    for (const NamedColour &c : palette) {
+        std::array<int, 3> rgb;
+        INFO(c.name);
+        CHECK(parse_rgb8(c.hex, rgb));
+        CHECK(format_hex8(rgb[0], rgb[1], rgb[2]) == std::string(c.hex));
+        CHECK(seen.insert(c.hex).second);
+    }
+    SECTION("HSV round trip") {
+        for (int r = 0; r < 256; r += 51)
+            for (int g = 0; g < 256; g += 51)
+                for (int b = 0; b < 256; b += 51) {
+                    const auto hsv = rgb8_to_hsv(r, g, b);
+                    const auto rgb = hsv_to_rgb8(hsv[0], hsv[1], hsv[2]);
+                    CHECK(rgb[0] == r);
+                    CHECK(rgb[1] == g);
+                    CHECK(rgb[2] == b);
+                }
+        CHECK(hsv_to_rgb8(0., 1., 1.) == std::array<int, 3>{ 255, 0, 0 });
+        CHECK(hsv_to_rgb8(120., 1., 1.) == std::array<int, 3>{ 0, 255, 0 });
+        CHECK(hsv_to_rgb8(240., 1., 0.5) == std::array<int, 3>{ 0, 0, 128 });
+        CHECK(hsv_to_rgb8(-120., 1., 1.) == std::array<int, 3>{ 0, 0, 255 });
+    }
+    SECTION("hex parsing") {
+        std::array<int, 3> rgb;
+        CHECK(parse_rgb8("  #1e90ff ", rgb));
+        CHECK(rgb == std::array<int, 3>{ 30, 144, 255 });
+        CHECK(parse_rgb8("FF00ff", rgb));
+        CHECK_FALSE(parse_rgb8("#12345", rgb));
+        CHECK_FALSE(parse_rgb8("#12345G", rgb));
+        CHECK_FALSE(parse_rgb8("", rgb));
+    }
+}
+
 TEST_CASE("Swatch slices follow the proportions and the rotation (P2)", "[MultiColour][Swatch]")
 {
     Filament f;

@@ -18,6 +18,8 @@ namespace Slic3r
 namespace GUI
 {
 
+class ColourSwatchGrid;
+
 /**
  * @brief Dialog for choosing a built-in filament color or a custom color.
  */
@@ -58,6 +60,8 @@ private:
     void SetPercent(int index, int value);
     void SetAngle(double angleDeg);
     void PickChipColour(int index);
+    void SelectChip(int index);
+    void SetChipColour(int index, const std::string& hex);
     void RefreshMakeUp();
     void OpenMoreColorDialog();
     void PlaceNearFilamentPanel();
@@ -86,6 +90,9 @@ private:
     std::array<wxWindow*, 4> _chips { nullptr, nullptr, nullptr, nullptr };
     SpinInput* _angleSpin { nullptr };
     SpinInput* _twistSpin { nullptr };
+    ColourSwatchGrid* _palette { nullptr };
+    ColourSwatchGrid* _recent { nullptr };
+    int _activeChip { 0 };
     wxWindow* _disc { nullptr };
     wxWindow* _wall { nullptr };
     bool _syncingMakeUp { false };
