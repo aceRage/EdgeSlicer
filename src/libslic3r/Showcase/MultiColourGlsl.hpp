@@ -113,7 +113,7 @@ vec3 mc_to_srgb3(vec3 c) { return vec3(mc_to_srgb(max(c.x, 0.0)), mc_to_srgb(max
 //  * a top (side +1) or bottom (side -1) face: the skin line through the point, lines `spacing` mm
 //    apart across the skin direction (tx, ty); with zigzag, every other line runs the other way. The
 //    point's place across its line gives s.x, and s.y follows the drawn diamond, 1 - |s.x|;
-//  * slopes between |n.z| 0.5 and 0.9 blend the two; skin 0 (concentric or patterns without one
+//  * slopes between |n.z| 0.5 and 0.9 blend the two; skin 0 (concentric or other patterns without one
 //    direction) shows the slot's average colour on the faces.
 #define SLIC3R_MC_MESH_GLSL \
 vec3 mc_mesh_wall(int slot, float nx, float ny, float sy, float wall_dir, float twist_turns) { \
@@ -196,11 +196,13 @@ std::string mesh_fragment_source(const std::string &fs);
 struct MeshSkin
 {
     float top_spacing    = 0.4f;   // mm between neighbouring top-skin lines
-    float bottom_spacing = 0.4f;   // the same for bottom faces (the first layer's lines)
+    float bottom_spacing = 0.4f;   // the same for bottom faces above the bed (solid infill lines)
+    float first_spacing  = 0.4f;   // the same for the face on the bed (the first layer's lines)
     float wall_dir       = 1.f;    // +1: walls run anticlockwise seen from above (auto, ccw); -1: clockwise
 };
 // From a full config with the object's own settings applied; extruder is 1-based (its nozzle).
-// The line width of the surface (top_surface_line_width, initial_layer_line_width; 0 = line_width, then
+// The line width of the surface (top_surface_line_width, internal_solid_infill_line_width,
+// initial_layer_line_width; 0 = line_width, then
 // the slicer's automatic width; percentages of the nozzle), less the overlap of rounded beads at that
 // layer height, as Flow::spacing() works it out.
 MeshSkin mesh_skin(const ConfigBase &config, int extruder);

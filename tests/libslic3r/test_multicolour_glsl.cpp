@@ -440,7 +440,9 @@ TEST_CASE("A mesh top or bottom face is the skin bead the toolpaths draw there",
         const float py    = -(float(m) + t) * spacing * tx + along * ty;
 
         // The bead: odd lines of a zig-zag run against T. s.x is +1 on the right of travel, s.y the
-        // drawn diamond's height seen from above (top) or below (bottom).
+        // drawn diamond's height seen from above (top) or below (bottom). The diamond is the same
+        // profile on both sides, so this pins the line, its direction and s.x, not the s.y model
+        // (P3's flatten test covers that).
         const float    d    = zigzag && (m % 2 != 0) ? -1.f : 1.f;
         const float    sx   = d * (2.f * t - 1.f);
         const float    sy   = (top ? 1.f : -1.f) * (1.f - std::abs(sx));
@@ -518,11 +520,13 @@ TEST_CASE("Mesh mode reads the skin's line spacing and the wall direction from t
     cfg.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.45, false));
     cfg.set_key_value("top_surface_line_width", new ConfigOptionFloatOrPercent(0.42, false));
     cfg.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.5, false));
+    cfg.set_key_value("internal_solid_infill_line_width", new ConfigOptionFloatOrPercent(0.44, false));
     const double overlap = 1. - 0.25 * 3.14159265358979323846;
 
     MeshSkin s = mesh_skin(cfg, 1);
     CHECK_THAT(s.top_spacing, WithinAbs(0.42 - 0.2 * overlap, 1e-5));
-    CHECK_THAT(s.bottom_spacing, WithinAbs(0.5 - 0.3 * overlap, 1e-5));
+    CHECK_THAT(s.bottom_spacing, WithinAbs(0.44 - 0.2 * overlap, 1e-5));
+    CHECK_THAT(s.first_spacing, WithinAbs(0.5 - 0.3 * overlap, 1e-5));
     CHECK(s.wall_dir == 1.f);
 
     // Percentages are of the extruder's nozzle; 0 falls back to line_width, then the automatic width.
@@ -542,5 +546,6 @@ TEST_CASE("Mesh mode reads the skin's line spacing and the wall direction from t
     const MeshSkin d = mesh_skin(DynamicPrintConfig(), 1);
     CHECK(d.top_spacing > 0.3f);
     CHECK(d.bottom_spacing > 0.3f);
+    CHECK(d.first_spacing > 0.3f);
     CHECK(d.wall_dir == 1.f);
 }

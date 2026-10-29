@@ -146,7 +146,8 @@ MeshSkin mesh_skin(const ConfigBase &config, int extruder)
     };
     const double layer_height = height("layer_height", 0.2);
     out.top_spacing    = spacing("top_surface_line_width", frTopSolidInfill, layer_height);
-    out.bottom_spacing = spacing("initial_layer_line_width", frPerimeter, height("initial_layer_print_height", layer_height));
+    out.bottom_spacing = spacing("internal_solid_infill_line_width", frSolidInfill, layer_height);
+    out.first_spacing  = spacing("initial_layer_line_width", frPerimeter, height("initial_layer_print_height", layer_height));
     if (const ConfigOption *o = config.option("wall_direction"); o != nullptr && o->serialize() == "cw")
         out.wall_dir = -1.f;
     return out;

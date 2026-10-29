@@ -549,7 +549,7 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
                 const double instance_det = std::abs(mo->instances.front()->get_matrix().matrix().block<3, 3>(0, 0).determinant());
                 for (const ModelVolume *mv : mo->volumes)
                     if (mv != nullptr && mv->is_model_part())
-                        volume += std::abs(mv->mesh().volume()) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
+                        volume += std::abs(double(its_volume(mv->mesh().its))) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
                 const double height = mo->instance_bounding_box(0).size().z();
                 if (height > 1e-3 && std::isfinite(volume))
                     info.volume_per_mm = float(volume / height);
@@ -1307,6 +1307,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             shader->set_uniform("mc_wall_dir", skin.wall_dir);
             shader->set_uniform("mc_spacing_top", skin.top_spacing);
             shader->set_uniform("mc_spacing_bottom", skin.bottom_spacing);
+            shader->set_uniform("mc_spacing_first", skin.first_spacing);
             shader->set_uniform("mc_zigzag_top", zigzag[0]);
             shader->set_uniform("mc_zigzag_bottom", zigzag[1]);
             shader->set_uniform("mc_volume_per_mm", layers != nullptr ? layers->volume_per_mm : 0.f);

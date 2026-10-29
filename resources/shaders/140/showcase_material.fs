@@ -450,12 +450,14 @@ float layer_fade(float layer_px) { return smoothstep(1.0, 2.0, layer_px); }
 uniform int   mc_slot;               // the filament slot drawn (0-based); -1 = its plain colour
 uniform float mc_wall_dir;           // +1 walls anticlockwise seen from above (Orca's default), -1 clockwise
 uniform float mc_spacing_top;        // mm between neighbouring top-skin lines
-uniform float mc_spacing_bottom;
+uniform float mc_spacing_bottom;     // the same under overhangs and bridges (solid infill)
+uniform float mc_spacing_first;      // the same on the first layer, the face on the bed
 uniform bool  mc_zigzag_top;         // neighbouring skin lines run opposite ways (rectilinear)
 uniform bool  mc_zigzag_bottom;
 uniform float mc_volume_per_mm;      // twist: mm3 of filament per mm of height, from the bed (a guess)
 
-vec3 mc_mesh_albedo(vec3 n)
+// cap: the inside seen through the build-up's cut, lit as a flat face (no skin lines there).
+vec3 mc_mesh_albedo(vec3 n, bool cap)
 {
     // Derivatives first, while the whole quad still runs the same code.
     float z     = world_pos.z;
@@ -473,7 +475,7 @@ vec3 mc_mesh_albedo(vec3 n)
     // The skin's lines on a top or bottom face (skin_tangent() above, without the sheen's projection).
     bool  top     = n.z > 0.0;
     int   mode    = top ? skin_mode_top : skin_mode_bottom;
-    float spacing = top ? mc_spacing_top : mc_spacing_bottom;
+    float spacing = top ? mc_spacing_top : (z < 0.05 ? mc_spacing_first : mc_spacing_bottom);
     bool  zigzag  = top ? mc_zigzag_top : mc_zigzag_bottom;
     vec2  p       = world_pos.xy;
     vec2  dir     = vec2(0.0);
@@ -483,14 +485,9 @@ vec3 mc_mesh_albedo(vec3 n)
         int k = count > 0 ? i - (i / count) * count : 0;
         float a = skin_angles[(top ? 0 : 8) + k];
         dir = vec2(cos(a), sin(a));
-    } else if (mode == 2) {
-        // Concentric: rings run anticlockwise round the centre, one line every spacing outwards.
-        p = world_pos.xy - skin_center;
-        if (length(p) > 1e-4)
-            dir = vec2(-p.y, p.x) / length(p);
-        zigzag = false;
     }
-    int skin = mode == 1 || mode == 2 ? 1 : 0;
+    // Concentric and other patterns without one direction: the slot's average (design 7.3).
+    int skin = mode == 1 && !cap ? 1 : 0;
 
     float twist = mc_params[mc_slot].y * max(z, 0.0) * mc_volume_per_mm;
     vec3  c = mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, skin, dir.x, dir.y, zigzag, spacing, twist);
@@ -519,7 +516,7 @@ void main()
 #ifdef SHOWCASE_MULTICOLOUR
     // P4: a coextruded slot's colours, from the geometric normal (before the layer lines tilt it).
     if (mc_slot >= 0 && mc_slot < 16 && mc_count(mc_slot) > 1)
-        albedo = mc_mesh_albedo(n);
+        albedo = mc_mesh_albedo(n, !gl_FrontFacing && build_clip_z < 1e9);
 #endif
 
     // Layer lines: tilt the normal with the slope of a rounded bead and darken the groove between
