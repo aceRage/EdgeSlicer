@@ -1,12 +1,12 @@
 #include <catch2/catch.hpp>
 
-#include <algorithm>
 #include <cctype>
+#include <vector>
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <string>
-#include <vector>
 
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -586,6 +586,153 @@ TEST_CASE("The G-code header names the first object's filament when printing by 
 
     CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
     CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
+
+// Orca #12781: wipe_tower_type. Bambu Lab printers always get the Type1 tower; every other printer
+// follows the option, Type2 by default, and a Type1 override slices with the Bambu-style tower.
+namespace {
+
+DynamicPrintConfig two_filament_tower_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+        {"wipe_tower_wall_type",       "rectangle"},
+        {"layer_height",               "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+    return config;
+}
+
+void two_cube_model(Model &model)
+{
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+}
+
+} // namespace
+
+TEST_CASE("Print::wipe_tower_type is Type1 on Bambu Lab printers and follows the option elsewhere", "[GCode][WipeTower][WipeTowerType]")
+{
+    for (const char *value : {"type1", "type2"}) {
+        DYNAMIC_SECTION(value) {
+            DynamicPrintConfig config = two_filament_tower_config();
+            config.set_deserialize_strict("wipe_tower_type", value);
+            Print print;
+            Model model;
+            two_cube_model(model);
+            print.apply(model, config);
+
+            print.is_BBL_printer() = true;
+            CHECK(print.wipe_tower_type() == WipeTowerType::Type1);
+
+            print.is_BBL_printer() = false;
+            CHECK(print.wipe_tower_type() == (std::string(value) == "type1" ? WipeTowerType::Type1 : WipeTowerType::Type2));
+        }
+    }
+
+    SECTION("default") {
+        DynamicPrintConfig config = two_filament_tower_config();
+        Print print;
+        Model model;
+        two_cube_model(model);
+        print.apply(model, config);
+        CHECK(print.wipe_tower_type() == WipeTowerType::Type2);
+    }
+}
+
+TEST_CASE("A Type1 override on a non-Bambu printer slices with compatible G-code tags", "[GCode][WipeTower][WipeTowerType]")
+{
+    auto slice = [](const char *type, bool bbl) {
+        DynamicPrintConfig config = two_filament_tower_config();
+        config.set_deserialize_strict("wipe_tower_type", type);
+        Print print;
+        Model model;
+        two_cube_model(model);
+        print.apply(model, config);
+        print.is_BBL_printer() = bbl;
+        print.set_status_silent();
+        REQUIRE(print.has_wipe_tower());
+        return Test::gcode(print);
+    };
+
+    // The tower G-code of the whole print: every line between a toolchange start and its end. The
+    // header (time stamp) and the config block (which names the option) are left out.
+    auto tower = [](const std::string &gcode) {
+        std::string out;
+        for (size_t start = gcode.find("; CP TOOLCHANGE START"); start != std::string::npos;
+             start = gcode.find("; CP TOOLCHANGE START", start + 1)) {
+            const size_t end = gcode.find("; CP TOOLCHANGE END", start);
+            if (end == std::string::npos)
+                break;
+            out += gcode.substr(start, end - start);
+        }
+        return out;
+    };
+
+    const std::string type1 = slice("type1", false);
+    const std::string type2 = slice("type2", false);
+    REQUIRE(! tower(type1).empty());
+    REQUIRE(! tower(type2).empty());
+    // The override changes the tower.
+    CHECK(tower(type1) != tower(type2));
+    // Edge: the Type1 tower writes the tags the non-Bambu export reads, so the preview and the
+    // statistics see it as a prime tower.
+    CHECK(type1.find(";TYPE:Prime tower") != std::string::npos);
+    CHECK(type1.find("; FEATURE: Prime tower") == std::string::npos);
+
+    // A Bambu Lab printer ignores the option and keeps its own tags.
+    const std::string bbl_type2 = slice("type2", true);
+    CHECK(bbl_type2.find("; FEATURE: Prime tower") != std::string::npos);
+    CHECK(bbl_type2.find(";TYPE:Prime tower") == std::string::npos);
+    CHECK(tower(bbl_type2) == tower(slice("type1", true)));
+}
+
+// ORCA #16719: upstream also rewrote the E conversion in _extrude; Edge keeps its division by the
+// resolved flow ratio (per-filament flow, U1 high-flow design) and only adds the validation. The ratio
+// must still scale the extruded length exactly once.
+TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
+{
+    // Retraction off, so every positive relative E move is extrusion and scales with the ratio.
+    auto extruded_length = [](double flow_ratio) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { "use_relative_e_distances", "1" }, { "retraction_length", "0" }, { "wipe", "0" } });
+        config.option<ConfigOptionFloats>("filament_flow_ratio")->values = { flow_ratio };
+        double total = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(slice({ TestMesh::cube_20x20x20 }, config),
+                            [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+                                if ((line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) && line.has_e() && line.e() > 0.f)
+                                    total += line.e();
+                            });
+        return total;
+    };
+
+    const double full = extruded_length(1.);
+    REQUIRE(full > 0.);
+    const double ratio = extruded_length(0.9) / full;
+    CHECK(std::abs(ratio - 0.9) < 0.9e-3);
 }
 
 static DynamicPrintConfig two_filament_bed_temp_config(const std::string &first_layer_temps, const std::string &later_temps)

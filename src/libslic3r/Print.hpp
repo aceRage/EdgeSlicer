@@ -1413,6 +1413,10 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    // Orca #12781: the wipe tower generator this print uses. Bambu Lab printers always get Type1;
+    // the rest follow wipe_tower_type (default Type2). Same rule as resolve_wipe_tower_type(), plus
+    // the GUI's vendor flag.
+    WipeTowerType wipe_tower_type() const;
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);
