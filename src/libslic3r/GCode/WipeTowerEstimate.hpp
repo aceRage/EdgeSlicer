@@ -6,17 +6,11 @@
 #include "../BoundingBox.hpp"
 #include "../Point.hpp"
 #include "../Polygon.hpp"
+#include "../PrintConfig.hpp" // WipeTowerType
 
 namespace Slic3r {
 
 class ConfigBase;
-
-// EdgeSlicer has no wipe_tower_type option: Type1 is the Bambu planner (is_BBL_printer),
-// Type2 is WipeTower2 for everyone else. Resolved from printer_model so GUI/CLI agree.
-enum class WipeTowerType {
-    Type1 = 0,
-    Type2 = 1,
-};
 
 // Pre-slice footprint of the wipe tower, shared by validation (Print), the GUI's placement
 // clamp/preview/arrange and the CLI placement. The arithmetic is shared; the inputs below are
@@ -82,5 +76,12 @@ std::optional<Vec2d> wipe_tower_position_clear_of_exclusion(const ConfigBase    
                                                             const Vec2d              &bed_size,
                                                             const Vec2d              &preferred,
                                                             const Vec2d              &current);
+
+// Orca #16728: where to put a tower whose saved position no longer fits: of the anchors (the tower's
+// position) inside `anchor_bounds`, the one nearest `target` whose `footprint` touches none of
+// the `obstacles`. `footprint` is relative to the anchor, brim included; an obstacle is taken
+// as its convex hull. Empty when every anchor in bounds meets an obstacle. All coordinates scaled.
+std::optional<Point> nearest_clear_wipe_tower_anchor(const BoundingBox &anchor_bounds, const Polygon &footprint,
+                                                     const Polygons &obstacles, const Point &target);
 
 } // namespace Slic3r

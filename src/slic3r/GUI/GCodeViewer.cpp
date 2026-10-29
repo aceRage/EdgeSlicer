@@ -1986,6 +1986,7 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     }
 
     m_viewer.set_smooth_look(look.smooth, look.looks);
+    apply_showcase_multicolour(look);
     m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
                                                 libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(look.exposure, 1.f);
@@ -2013,6 +2014,46 @@ unsigned int GCodeViewer::showcase_material_program(const std::string &prelude, 
     return m_viewer.get_fragment_prelude_program();
 }
 
+// Multi-colour P3 (tests/design_multicolour_filament_view.md 7.2): coextruded filaments in the smooth
+// look. libvgcode's programs are rebuilt once with Showcase/MultiColourGlsl.hpp's prelude (the built-in
+// one and realism 1b's material one, which lights the same base colour); the prelude only runs on the
+// smooth path, so Preview draws as before. The slot table goes into their uniforms every frame (a
+// plain table when the look is off, which hands every slot its own colour).
+void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
+{
+    const bool want = look.smooth && look.coextruded_look && look.multicolour.any_multi;
+    unsigned int program = m_viewer.get_base_color_program();
+    if (want && program == 0 && !m_showcase_mc_failed) {
+        std::string error;
+        if (m_viewer.set_base_color_prelude(MultiColour::glsl_prelude(), &error))
+            program = m_viewer.get_base_color_program();
+        else {
+            m_showcase_mc_failed = true;
+            BOOST_LOG_TRIVIAL(error) << "Showcase: the coextruded-colour shader did not build, split filaments show their plain colour: " << error;
+        }
+    }
+    m_showcase_mc_program = program;
+    m_viewer.set_extruded_volume_enabled(want && look.multicolour.any_twist && program != 0);
+    if (program == 0)
+        return;
+    const MultiColour::UniformTable plain = MultiColour::pack_uniforms({}, {});
+    const MultiColour::UniformTable &t    = want ? look.multicolour : plain;
+    GLint curr_program = 0;
+    glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &curr_program));
+    for (const unsigned int p : { program, m_viewer.get_fragment_prelude_program() }) {
+        if (p == 0)
+            continue;
+        glsafe(::glUseProgram(p));
+        // -1 (glUniform ignores it) in a program built before the prelude was set.
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global"), 1, t.global.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global2"), 1, t.global2.data()));
+    }
+    glsafe(::glUseProgram(GLuint(curr_program)));
+}
+
 void GCodeViewer::end_showcase()
 {
     if (m_showcase.active)
@@ -2027,6 +2068,7 @@ void GCodeViewer::restore_from_showcase(bool ranges)
     sv.active = false;
     m_viewer.set_smooth_look(false, {});
     m_viewer.set_use_fragment_prelude(false);
+    m_viewer.set_extruded_volume_enabled(false);   // multi-colour P3: frees the volumes
     m_viewer.set_light_top_dir({ -0.4574957f, 0.4574957f, 0.7624929f });
     m_viewer.set_tone(1.f, 1.f);
     m_viewer.set_view_type(sv.view_type);
@@ -2920,9 +2962,17 @@ void GCodeViewer::load_support_overhang_overlay()
         per_object.emplace_back(support_overhang_overlay(*object));
         for (const SupportOverhangOverlayLayer &layer : per_object.back()) {
             // The vgcode layer of this object layer: the closest z, with or without the printer's z offset.
-            size_t id = m_viewer.get_layer_id_at(float(layer.print_z));
+            // get_layer_id_at() counts the layers at or below z (Orca #16588), so the closest layer is that
+            // count minus one or the layer just above it.
+            auto closest_layer = [this](float z) {
+                const size_t count = m_viewer.get_layers_count();
+                const size_t above = std::min(m_viewer.get_layer_id_at(z), count > 0 ? count - 1 : size_t(0));
+                const size_t below = above > 0 ? above - 1 : above;
+                return std::abs(m_viewer.get_layer_z(below) - z) <= std::abs(m_viewer.get_layer_z(above) - z) ? below : above;
+            };
+            size_t id = closest_layer(float(layer.print_z));
             if (m_z_offset != 0.f) {
-                const size_t id_off = m_viewer.get_layer_id_at(float(layer.print_z) + m_z_offset);
+                const size_t id_off = closest_layer(float(layer.print_z) + m_z_offset);
                 if (std::abs(m_viewer.get_layer_z(id_off) - (float(layer.print_z) + m_z_offset)) < std::abs(m_viewer.get_layer_z(id) - float(layer.print_z)))
                     id = id_off;
             }

@@ -10,6 +10,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
 
@@ -2313,6 +2314,27 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
         any_smooth |= l.smoothness > 0.f;
     }
     look.smooth = any_smooth;
+
+    // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
+    // Each slot's colours, split, rotation and twist from the project (the visual-only keys), into
+    // the toolpath shader's uniform table. Drawn with the smooth look only.
+    if (PresetBundle *bundle = wxGetApp().preset_bundle; bundle != nullptr) {
+        std::vector<MultiColour::Filament> slots;
+        std::vector<float>                 diameters;
+        for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
+            slots.push_back(MultiColour::from_config(bundle->project_config, e));
+            float d = 1.75f;
+            if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
+                p != nullptr && p->config.has("filament_diameter"))
+                d = float(p->config.opt_float("filament_diameter", 0u));
+            diameters.push_back(d);
+        }
+        look.multicolour = MultiColour::pack_uniforms(slots, diameters);
+    }
+    // Before the 1b material program below, so it is built with the coextruded-colour prelude.
+    gv.apply_showcase_multicolour(look);
+    // ---- end multi-colour ----
+
     // The key light where the scene puts it (D14), in eye space as libvgcode lights.
     const Camera &camera = plater->get_camera();
     const std::vector<Showcase::LightSource> lights = scene_lights(camera);

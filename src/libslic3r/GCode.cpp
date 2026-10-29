@@ -978,6 +978,27 @@ static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
     return moved;
 }
 
+// Orca #15841: a folded tower layer is thicker than the object layer it sits on, so the height process_layer
+// emitted is not the tower's. Both writers declare one, but each in its own printer's tag dialect and the
+// processor reads only its printer's. Declare it here, where the printer is known, unless the tower
+// already wrote the right tag ahead of its first extrusion (Edge, OD16 review: the Type1 writer's
+// bridge-flow tags on a narrowing tower come mid-block and do not cover the paths before them).
+// _extrude puts the object's height back on the next object path, since the last role is then
+// erWipeTower.
+std::string WipeTowerIntegration::tower_height_tag(GCode &gcodegen, const WipeTower::ToolChangeResult &tcr,
+                                                   const std::string &tcr_gcode) const
+{
+    const std::string tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height);
+    if (! m_sparse_layers_combined || std::abs(gcodegen.m_last_height - tcr.layer_height) <= EPSILON ||
+        wipe_tower_gcode_declares_height_first(tcr_gcode, tag))
+        return {};
+    // Keep m_last_height what the G-code last declared, so a second visit does not repeat it.
+    gcodegen.m_last_height = tcr.layer_height;
+    char buf[64];
+    sprintf(buf, "%s%g\n", tag.c_str(), tcr.layer_height);
+    return buf;
+}
+
 std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_extruder_id, double z) const
 {
     if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
@@ -1399,6 +1420,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
+    gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
@@ -1621,6 +1643,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
+    gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
     check_add_eol(toolchange_gcode_str);
 
@@ -1749,7 +1772,7 @@ Vec2d WipeTowerIntegration::extruder_offset_at(size_t extruder_id) const
 std::string WipeTowerIntegration::prime(GCode& gcodegen)
 {
     std::string gcode;
-    if (!gcodegen.is_BBL_Printer()) {
+    if (gcodegen.wipe_tower_type() == WipeTowerType::Type2) {
         for (const WipeTower::ToolChangeResult& tcr : m_priming) {
             if (!tcr.extrusions.empty())
                 gcode += append_tcr2(gcodegen, tcr, tcr.new_tool);
@@ -1831,8 +1854,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                              << " layer_idx=" << m_layer_idx
                                              << " extruder_id=" << extruder_id
                                              << " local_z_tool_change_idx=" << (local_z_tool_change_idx - 1);
-                    return gcodegen.is_BBL_Printer() ? append_tcr(gcodegen, local_z_tcr, extruder_id, tower_z) :
-                                                       append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
+                    return gcodegen.wipe_tower_type() == WipeTowerType::Type1 ? append_tcr(gcodegen, local_z_tcr, extruder_id, tower_z) :
+                                                                                append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
                 }
 
                 BOOST_LOG_TRIVIAL(warning) << "Local-Z preplanned wipe tower sequence mismatch, falling back"
@@ -1899,8 +1922,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                      << " layer_idx=" << m_layer_idx
                                      << " extruder_id=" << extruder_id
                                      << " reserve_slot=" << (slot_idx - 1);
-            return gcodegen.is_BBL_Printer() ? append_tcr(gcodegen, local_z_tcr, extruder_id, tower_z) :
-                                               append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
+            return gcodegen.wipe_tower_type() == WipeTowerType::Type1 ? append_tcr(gcodegen, local_z_tcr, extruder_id, tower_z) :
+                                                                        append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
         }
 
         const float nozzle_diameter = float(gcodegen.config().nozzle_diameter.get_at(size_t(extruder_id)));
@@ -2043,7 +2066,7 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
     assert(m_layer_idx >= 0);
     if (m_layer_idx >= (int) m_tool_changes.size())
         return gcode;
-    if (!gcodegen.is_BBL_Printer()) {
+    if (gcodegen.wipe_tower_type() == WipeTowerType::Type2) {
         if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
             if (m_layer_idx < (int) m_tool_changes.size()) {
                 if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
@@ -2052,7 +2075,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                 // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
                 // resulting in a wipe tower with sparse layers.
                 double wipe_tower_z  = -1;
-                bool   ignore_sparse = false;
+                // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+                bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
                 if (m_sparse_layers_skipped) {
                     wipe_tower_z  = m_last_wipe_tower_print_z;
                     ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;
@@ -2071,7 +2095,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         // Calculate where the wipe tower layer will be printed. -1 means that print z will not change,
         // resulting in a wipe tower with sparse layers.
         double wipe_tower_z  = -1;
-        bool   ignore_sparse = false;
+        // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+        bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
         if (m_sparse_layers_skipped) {
             ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
             if (size_t(m_layer_idx) < m_compacted_tower_z.size())
@@ -2106,7 +2131,8 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
     if (m_layer_idx >= (int) m_tool_changes.size())
         return true;
 
-    bool ignore_sparse = false;
+    // Orca #15841: folded into a later, thicker layer that prints at its own z: nothing to emit.
+    bool   ignore_sparse = wipe_tower_layer_is_combined_away(m_tool_changes[m_layer_idx]);
     if (m_sparse_layers_skipped)
         ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
 
@@ -2130,7 +2156,7 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
 std::string WipeTowerIntegration::finalize(GCode& gcodegen)
 {
     std::string gcode;
-    if (gcodegen.is_BBL_Printer() || m_final_purge.gcode.empty())
+    if (gcodegen.wipe_tower_type() == WipeTowerType::Type1 || m_final_purge.gcode.empty())
         return gcode;
 
     // Edge's change_layer is lazy: it rewrites the writer's Z (and m_nominal_z) without
@@ -2774,6 +2800,13 @@ bool GCode::is_BBL_Printer()
     return false;
 }
 
+WipeTowerType GCode::wipe_tower_type() const
+{
+    if (m_curr_print)
+        return m_curr_print->wipe_tower_type();
+    return WipeTowerType::Type2;
+}
+
 void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     PROFILE_CLEAR();
@@ -3335,6 +3368,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
     set_mass_locator(m_processor, print);
     const bool is_bbl_printers = print.is_BBL_printer();
+    // Orca #12781: the tower generator, which decides priming and the start-up extruder. Bambu
+    // firmware and metadata choices below stay on is_bbl_printers.
+    const bool wipe_tower_type2 = print.wipe_tower_type() == WipeTowerType::Type2;
     const bool skip_config_block = print.config().gcode_skip_config_block;
     m_calib_config.clear();
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
@@ -3577,7 +3613,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             throw Slic3r::SlicingError(_(L("No object can be printed. Maybe too small")));
         has_wipe_tower = print.has_wipe_tower() && tool_ordering.has_wipe_tower();
         // Orca: support all extruder priming
-        initial_extruder_id = (!is_bbl_printers && has_wipe_tower && !print.config().single_extruder_multi_material_priming) ?
+        initial_extruder_id = (wipe_tower_type2 && has_wipe_tower && !print.config().single_extruder_multi_material_priming) ?
                                   // The priming towers will be skipped.
                                   tool_ordering.all_extruders().back() :
                                   // Don't skip the priming towers.
@@ -3631,7 +3667,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     print.throw_if_canceled();
 
     // Taken before the object loop, which reassigns initial_extruder_id when printing by object.
-    // Bed stays the max of used filaments (Edge always heats to the highest bed temp).
+    // Bed stays the max of the first layer's filaments (Orca #16770).
     // U1 / non-BBL writes these at the end of the file; BBL already wrote its CONFIG_BLOCK.
     int compat_first_layer_bed_temp    = 0;
     int compat_first_layer_nozzle_temp = 0;
@@ -3713,7 +3749,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // For the start / end G-code to do the priming and final filament pull in case there is no wipe tower provided.
     this->placeholder_parser().set("has_wipe_tower", has_wipe_tower);
     this->placeholder_parser().set("has_single_extruder_multi_material_priming",
-                                   !is_bbl_printers && has_wipe_tower && print.config().single_extruder_multi_material_priming);
+                                   wipe_tower_type2 && has_wipe_tower && print.config().single_extruder_multi_material_priming);
     // Wipe-tower count when a tower exists, else the tool changes of the tool ordering (OrcaSlicer #13895).
     this->placeholder_parser().set("total_toolchanges", DoExport::resolve_total_toolchanges(print.wipe_tower_data(), print.tool_ordering()));
     this->placeholder_parser().set("num_extruders", int(print.config().nozzle_diameter.values.size()));
@@ -3864,10 +3900,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         this->placeholder_parser().set("bbl_bed_temperature_gcode", new ConfigOptionBool(false));
         this->placeholder_parser().set("bed_temperature_initial_layer", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("bed_temperature", new ConfigOptionInts(*bed_temp_opt));
-        // BBS: the single bed temperature value accommodates the highest-temperature filament of the print
-        // (max over all used extruders instead of the initial extruder only).
+        // BBS: the single bed temperature value accommodates the highest-temperature filament of the first layer
+        // (Orca #16770: the same first-layer filaments as M140/M190, not the initial extruder only).
         int bed_temp_single = 0;
-        for (const unsigned int extruder_id : print.extruders())
+        for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
             bed_temp_single = std::max(bed_temp_single, first_bed_temp_opt->get_at(extruder_id));
         this->placeholder_parser().set("bed_temperature_initial_layer_single", new ConfigOptionInt(bed_temp_single));
         this->placeholder_parser().set("bed_temperature_initial_layer_vector", new ConfigOptionString());
@@ -4305,8 +4341,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             if (!full_config.empty())
                 file.write(full_config);
 
-            // SoftFever: write compatible image. Bed stays the max of used filaments
-            // (Edge always heats to the highest bed temp). Nozzle is the first printing
+            // SoftFever: write compatible image. Bed stays the max of the first layer's
+            // filaments (get_bed_temperature_max). Nozzle is the first printing
             // filament when tool ordering already exists. On a single-filament plate
             // (no wipe tower; by-object skips ToolOrdering) first_extruder() is empty
             // / unsigned(-1), so fall back to the first used filament. The U1 trailer
@@ -4510,7 +4546,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     }
 
     // Orca: support extruder priming
-    if (is_bbl_printers || !(has_wipe_tower && print.config().single_extruder_multi_material_priming)) {
+    if (!wipe_tower_type2 || !(has_wipe_tower && print.config().single_extruder_multi_material_priming)) {
         // Set initial extruder only after custom start G-code.
         // Ugly hack: Do not set the initial extruder if the extruder is primed using the MMU priming towers at the edge of the print bed.
         file.write(this->set_extruder(initial_extruder_id, 0.));
@@ -4663,7 +4699,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                             print.wipe_tower_data().final_purge_drop));
                 // Orca #15035: the WipeTower2 tower's first-layer envelope (brim, ribs and cone included),
                 // tower-local, for the skip-point entry routing in append_tcr2.
-                if (!is_bbl_printers && print.wipe_tower_data().wipe_tower_mesh_data.has_value() &&
+                if (wipe_tower_type2 && print.wipe_tower_data().wipe_tower_mesh_data.has_value() &&
                     !print.wipe_tower_data().wipe_tower_mesh_data->bottom.empty()) {
                     const BoundingBox envelope = get_extents(print.wipe_tower_data().wipe_tower_mesh_data->bottom);
                     m_wipe_tower->set_wipe_tower_bbx(BoundingBoxf(unscale(envelope.min), unscale(envelope.max)));
@@ -4671,7 +4707,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 
-                if (!is_bbl_printers && print.config().single_extruder_multi_material_priming) {
+                if (wipe_tower_type2 && print.config().single_extruder_multi_material_priming) {
                     file.write(m_wipe_tower->prime(*this));
                     // Verify, whether the print overaps the priming extrusions.
                     BoundingBoxf bbox_print(get_print_extrusions_extents(print));
@@ -5819,13 +5855,15 @@ int GCode::get_bed_temperature(const int extruder_id, const bool is_first_layer,
 }
 
 // BBS
-// Max bed temperature over all used extruders (object/support/wipe tower/brim-introduced extruders),
-// so a compatible mixed print (e.g. PLA 65C + TPU 35C) always runs the highest bed temperature.
+// Max bed temperature over the filaments printed on the first layer, so a compatible mixed first layer
+// (e.g. PLA 65C + TPU 35C) runs the highest bed temperature.
 // A value of 0 means the filament does not support the current bed type, and is naturally skipped by max().
 int GCode::get_bed_temperature_max(const Print& print, const bool is_first_layer) const
 {
     int max_bed_temp = 0;
-    for (const unsigned int extruder_id : print.extruders())
+    // Orca #16770: only the filaments printed on the first layer touch the bed, so a filament that starts higher up,
+    // such as a support interface, must not raise the bed temperature for the rest of the print.
+    for (const unsigned int extruder_id : print.get_slice_used_filaments(true))
         max_bed_temp = std::max(
             max_bed_temp, get_bed_temperature(extruder_id, is_first_layer, print.config().curr_bed_type));
     return max_bed_temp;
@@ -7327,8 +7365,15 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_Temp_Tower: {
+        // Orca #16898: name the tool printing the tower. A bare M104 goes to whichever
+        // tool the firmware considers active. Map the filament through the physical
+        // hotend (U1 / Bambu) — not a raw filament index — as the other Edge
+        // nozzle-temp writers do.
+        int tool = -1;
+        if (m_writer.extruder() != nullptr)
+            tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
         auto offset = static_cast<unsigned int>(print_z / 10.001) * 5;
-        gcode += writer().set_temperature(print.calib_params().start - offset);
+        gcode += writer().set_temperature(print.calib_params().start - offset, false, tool);
         break;
     }
     case CalibMode::Calib_VFA_Tower: {
@@ -7358,10 +7403,6 @@ LayerResult GCode::process_layer(const Print& print,
     case CalibMode::Calib_Input_shaping_freq: {
         if (m_layer_index == 1) {
             gcode += writer().set_input_shaping('A', print.calib_params().start, 0.f, print.calib_params().shaper_type);
-            if (m_writer.get_gcode_flavor() == gcfKlipper) {
-                // Disable minimum cruise ratio to ensure consistent motion for calibration
-                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
-            }
         } else {
             if (print.calib_params().freqStartX == print.calib_params().freqStartY &&
                 print.calib_params().freqEndX == print.calib_params().freqEndY) {
@@ -7375,10 +7416,6 @@ LayerResult GCode::process_layer(const Print& print,
     }
     case CalibMode::Calib_Input_shaping_damp: {
         if (m_layer_index == 1) {
-            if (m_writer.get_gcode_flavor() == gcfKlipper) {
-                // Disable minimum cruise ratio to ensure consistent motion for calibration
-                gcode += "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0\n";
-            }
             gcode += writer().set_input_shaping('X', 0.f, print.calib_params().freqStartX, print.calib_params().shaper_type);
             gcode += writer().set_input_shaping('Y', 0.f, print.calib_params().freqStartY, print.calib_params().shaper_type);
         } else {

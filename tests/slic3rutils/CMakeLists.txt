@@ -18,6 +18,7 @@ add_executable(${_TEST_NAME}_tests
     hub_handover_tests.cpp
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
+    webview2_args_tests.cpp
     device_page_load_tests.cpp
     flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
@@ -81,6 +82,7 @@ add_executable(${_TEST_NAME}_tests
     gizmo_volume_refs_tests.cpp
     camera_projection_type_tests.cpp
     plate_print_slots_tests.cpp
+    plate_cut_membership_tests.cpp
     preset_mirror_tests.cpp
     preset_mirror_skip_tests.cpp
     vendor_install_stamp_tests.cpp

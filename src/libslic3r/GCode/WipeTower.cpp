@@ -58,6 +58,77 @@ float last_emitted_wipe_tower_z_nonbbl(const std::vector<std::vector<WipeTower::
     return last;
 }
 
+bool wipe_tower_sparse_layers_combined(const PrintConfig &config)
+{
+    // Edge: no wrapping (clumping) detection option in this tree, so smooth timelapse is the only
+    // other feature that needs a tower on every layer.
+    return config.wipe_tower_sparse_layers_combination.value && ! wipe_tower_sparse_layers_skipped(config) &&
+           config.timelapse_type.value != TimelapseType::tlSmooth;
+}
+
+bool wipe_tower_gcode_declares_height_first(const std::string &gcode, const std::string &tag)
+{
+    size_t start = 0;
+    while (start < gcode.size()) {
+        size_t end = gcode.find('\n', start);
+        if (end == std::string::npos)
+            end = gcode.size();
+        size_t b = gcode.find_first_not_of(" \t", start);
+        if (b < end) {
+            if (gcode.compare(b, tag.size(), tag) == 0)
+                return true;
+            // An extruding move (G1/G2/G3 with a positive E) ends the search; travels and retracts do not.
+            if (gcode[b] == 'G' && b + 1 < end && (gcode[b + 1] == '1' || gcode[b + 1] == '2' || gcode[b + 1] == '3') &&
+                (b + 2 >= end || gcode[b + 2] == ' ')) {
+                const size_t comment = gcode.find(';', b);
+                const size_t code_end = std::min(end, comment);
+                for (size_t e = gcode.find('E', b); e < code_end; e = gcode.find('E', e + 1))
+                    if (e + 1 < code_end && gcode[e - 1] == ' ' && gcode[e + 1] != '-')
+                        return false;
+            }
+        }
+        start = end + 1;
+    }
+    return false;
+}
+
+bool wipe_tower_layer_is_combined_away(const std::vector<WipeTower::ToolChangeResult> &layer_tool_changes)
+{
+    return ! layer_tool_changes.empty() && layer_tool_changes.front().combined_away;
+}
+
+std::vector<char> combine_sparse_wipe_tower_layers(std::vector<float>       &layer_height,
+                                                   const std::vector<char>  &layer_is_sparse,
+                                                   const std::vector<float> &max_layer_height,
+                                                   size_t                    first_layer_idx)
+{
+    assert(layer_is_sparse.size() == layer_height.size() && max_layer_height.size() == layer_height.size());
+    std::vector<char> combined_away(layer_height.size(), 0);
+    float             pending_height = 0.f; // what the layers folded away so far add up to
+    for (size_t i = 0; i < layer_height.size(); ++i) {
+        // A toolchange has to purge at its own z, so it neither folds away nor takes over the run
+        // below it - and a run always flushes on its own last layer, so nothing is ever pending here.
+        // Edge: first_layer_idx is size_t(-1) when no layer was marked first, and nothing combines then.
+        if (! layer_is_sparse[i] || first_layer_idx == size_t(-1) || i <= first_layer_idx) {
+            pending_height = 0.f;
+            continue;
+        }
+        const float merged = pending_height + layer_height[i];
+        // Hand the run on only if the next layer can swallow the whole thing; a layer already past
+        // the cap is left alone rather than shrunk.
+        const bool next_takes_it = i + 1 < layer_height.size() && layer_is_sparse[i + 1] &&
+                                   merged + layer_height[i + 1] <= max_layer_height[i + 1] + float(EPSILON);
+        if (next_takes_it) {
+            combined_away[i] = 1;
+            pending_height   = merged;
+        } else {
+            layer_height[i] = merged;
+            pending_height  = 0.f;
+        }
+    }
+    return combined_away;
+}
+
 static const double wipe_tower_wall_infill_overlap = 0.0;
 // Rib wall path resolution and fillet sampling, as in Bambu Studio's WipeTower.cpp.
 static constexpr double WIPE_TOWER_RESOLUTION         = 0.1;
@@ -172,10 +243,18 @@ std::string wait_command(GCodeFlavor flavor, float seconds)
     return "G4 S" + Slic3r::float_to_string_decimal_point(seconds, 3) + "\n";
 }
 
+// HEIGHT/WIDTH tag values. std::to_string is sprintf("%f") and follows LC_NUMERIC, so a
+// comma-decimal language emitted "0,300000" and GCodeProcessor (C locale) dropped the tag.
+// Six decimals match %f, so the C-locale text is byte-identical to std::to_string.
+static std::string analyzer_tag_value(double value)
+{
+    return Slic3r::float_to_string_decimal_point(value, 6);
+}
+
 class WipeTowerWriter
 {
 public:
-	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters, bool has_nozzle_rack = false) :
+	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters, bool has_nozzle_rack = false, bool bbl_gcode_tags = true) :
 		m_current_pos(std::numeric_limits<float>::max(), std::numeric_limits<float>::max()),
 		m_current_z(0.f),
 		m_current_feedrate(0.f),
@@ -192,10 +271,12 @@ public:
         {
             // ORCA: This class is only used by BBL printers, so set the parameter appropriately.
             // This fixes an issue where the wipe tower was using BBL tags resulting in statistics for purging in the purge tower not being displayed.
-            GCodeProcessor::s_IsBBLPrinter = true;
+            // Edge: since Orca #12781 a non-Bambu printer can pick this tower too (wipe_tower_type = Type 1);
+            // it gets the tags its G-code export reads (WipeTower::set_bbl_gcode_tags).
+            GCodeProcessor::s_IsBBLPrinter = bbl_gcode_tags;
             // adds tag for analyzer:
             std::ostringstream str;
-            str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << std::to_string(m_layer_height) << "\n"; // don't rely on GCodeAnalyzer knowing the layer height - it knows nothing at priming
+            str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) << analyzer_tag_value(m_layer_height) << "\n"; // don't rely on GCodeAnalyzer knowing the layer height - it knows nothing at priming
             str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role) << ExtrusionEntity::role_to_string(erWipeTower) << "\n";
             m_gcode += str.str();
             change_analyzer_line_width(line_width);
@@ -204,7 +285,7 @@ public:
     WipeTowerWriter& change_analyzer_line_width(float line_width) {
         // adds tag for analyzer:
         std::stringstream str;
-        str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) << std::to_string(line_width) << "\n";
+        str << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) << analyzer_tag_value(line_width) << "\n";
         m_gcode += str.str();
         return *this;
     }
@@ -531,11 +612,11 @@ public:
                 if (i == 1) {
                     // using bridge flow in bridge area, and add notes for gcode-check when flow changed
                     set_extrusion_flow(wipe_tower->extrusion_flow(0.2));
-                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(0.2) + "\n");
+                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
                     flow_changed = true;
                 } else if (i == 2 && flow_changed) {
                     set_extrusion_flow(wipe_tower->get_extrusion_flow());
-                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(m_layer_height) + "\n");
+                    append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
                 }
             }
             extrude(corners[i], f);
@@ -1017,6 +1098,16 @@ float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diamete
     return loops_num * spacing + (type2 ? 0.f : spacing / 2.f);
 }
 
+float WipeTower::filament_max_layer_height(const PrintConfig &config, size_t idx)
+{
+    // Edge: physical_extruder_for_filament() is the filament->nozzle map Slicing.cpp reads these
+    // limits through (a toolchanger such as the U1 maps filament i to nozzle i without filament_map).
+    const size_t nozzle           = physical_extruder_for_filament(config, (unsigned int) idx + 1);
+    const float  max_layer_height = config.max_layer_height.values.empty() ? 0.f : float(config.max_layer_height.get_at(nozzle));
+    const float  nozzle_diameter  = config.nozzle_diameter.values.empty() ? 0.4f : float(config.nozzle_diameter.get_at(nozzle));
+    return max_layer_height > 0.f ? max_layer_height : 0.75f * nozzle_diameter;
+}
+
 float WipeTower::get_wrapping_detection_depth()
 {
     return float(wrapping_wipe_tower_depth);
@@ -1226,6 +1317,10 @@ Polygon WipeTower::rib_wall_polygon(const box_coordinates &wt_box) const
 
 void WipeTower::record_outer_wall(const Polygon &wall)
 {
+    // Edge (OD16 review): a layer folded into a later one prints nothing, so the conflict checker and
+    // the object brim must not see a wall at its z.
+    if (m_layer_info != m_plan.end() && m_layer_info->combined_away)
+        return;
     // To the frame the writer emits in: the layer's y shift, then the rib offset.
     Polyline pl = to_polyline(wall);
     pl.translate(scaled(m_rib_offset.x()), scaled(m_rib_offset.y() + m_y_shift));
@@ -1252,6 +1347,7 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     //m_bridging(float(config.wipe_tower_bridging)),
     m_bridging(10.f),
     m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config)),
+    m_sparse_layers_combined(wipe_tower_sparse_layers_combined(config)),
     m_gcode_flavor(config.gcode_flavor),
     m_has_nozzle_rack(Slic3r::has_nozzle_rack(config)),
     m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool))),
@@ -1358,6 +1454,7 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].filament_area = float((M_PI/4.f) * pow(config.filament_diameter.get_at(idx), 2)); // all extruders are assumed to have the same filament diameter at this point
     float nozzle_diameter = float(config.nozzle_diameter.get_at(idx));
     m_filpar[idx].nozzle_diameter = nozzle_diameter; // to be used in future with (non-single) multiextruder MM
+    m_filpar[idx].max_layer_height = filament_max_layer_height(config, idx);
 
     float max_vol_speed = float(get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, idx));
     if (max_vol_speed!= 0.f)
@@ -1448,7 +1545,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
         (tool != (unsigned int)(-1) ? wipe_depth + m_depth_traversed - m_perimeter_width
                                     : m_wipe_tower_depth - m_perimeter_width));
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -1793,7 +1890,7 @@ void WipeTower::toolchange_Wipe(
 
     // BBS: add the note for gcode-check, when the flow changed, the width should follow the change
     if (is_first_layer()) {
-        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + std::to_string(1.15 * m_perimeter_width) + "\n");
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(1.15 * m_perimeter_width) + "\n");
     }
 
 	const float& xl = cleaning_box.ld.x();
@@ -1842,7 +1939,7 @@ void WipeTower::toolchange_Wipe(
         // BBS: check the bridging area and use the bridge flow
         if (need_change_flow || need_thick_bridge_flow(writer.y())) {
             writer.set_extrusion_flow(extrusion_flow(0.2));
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(0.2) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
             need_change_flow = true;
         }
 
@@ -1854,7 +1951,7 @@ void WipeTower::toolchange_Wipe(
         // BBS: recover the flow in non-bridging area
         if (need_change_flow) {
             writer.set_extrusion_flow(m_extrusion_flow);
-            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + std::to_string(m_layer_height) + "\n");
+            writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
         }
 
         if (writer.y() - float(EPSILON) > cleaning_box.lu.y())
@@ -1888,7 +1985,7 @@ void WipeTower::toolchange_Wipe(
     writer.set_extrusion_flow(m_extrusion_flow); // Reset the extrusion flow.
     // BBS: add the note for gcode-check when the flow changed
     if (is_first_layer()) {
-        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + std::to_string(m_perimeter_width) + "\n");
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_perimeter_width) + "\n");
     }
 }
 
@@ -1923,7 +2020,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 
     size_t old_tool = m_current_tool;
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -2059,7 +2156,8 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         else {
             // limit max chamfer width to 3 mm
             int chamfer_loops_num = (int)(max_chamfer_width / spacing);
-            int dist_to_1st = m_layer_info - m_plan.begin() - m_first_layer_idx;
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
+            int dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, size_t(m_layer_info - m_plan.begin()));
             // A layer below the tower's first real layer gets no chamfer. With "no sparse layers"
             // the first real layer is the first tool change, which can sit far up the print; the
             // layers below it are sparse and never printed, but their walls still go into
@@ -2125,7 +2223,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 
     // Ask our writer about how much material was consumed.
     // Skip this in case the layer is sparse and config option to not print sparse layers is enabled.
-    if (! m_sparse_layers_skipped || toolchanges_on_layer)
+    if (layer_is_printed(toolchanges_on_layer))
         if (m_current_tool < m_used_filament_length.size())
             m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
@@ -2202,6 +2300,15 @@ void WipeTower::make_rib_tower_square()
     for (auto &info : m_plan)
         for (auto &toolchange : info.tool_changes)
             toolchange.required_depth = std::ceil(volume_to_length(toolchange.wipe_volume, m_perimeter_width, info.height) / line_len) * m_perimeter_width;
+}
+
+// Orca #15841: a folded layer is generated like any other but thrown away by the emitter, so its
+// extrusions must not be charged to the filament used.
+bool WipeTower::layer_is_printed(bool toolchanges_on_layer) const
+{
+    if (m_layer_info != m_plan.end() && m_layer_info->combined_away)
+        return false;
+    return ! m_sparse_layers_skipped || toolchanges_on_layer;
 }
 
 void WipeTower::plan_tower()
@@ -2444,6 +2551,20 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     if (m_use_rib_wall)
         m_wipe_tower_height = m_plan.back().z;
 
+    // Orca #15841: before planning, since the layer heights this rewrites feed the extrusion flow of
+    // every later pass. A layer with no toolchange prints with the filament the layer below left loaded.
+    if (m_sparse_layers_combined) {
+        size_t start_tool = m_current_tool;
+        for (const WipeTowerInfo &layer : m_plan)
+            if (! layer.tool_changes.empty()) {
+                start_tool = layer.tool_changes.front().old_tool;
+                break;
+            }
+        combine_sparse_wipe_tower_plan(
+            m_plan, m_filpar, m_first_layer_idx, start_tool, [](const WipeTowerInfo &layer) { return layer.tool_changes.empty(); },
+            [](const WipeTowerInfo &layer, size_t tool) { return layer.tool_changes.empty() ? tool : layer.tool_changes.back().new_tool; });
+    }
+
 	plan_tower();
     // BBS
 #if 0
@@ -2539,6 +2660,10 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
             layer_result.insert(layer_result.begin(), std::move(timelapse_wall));
         }
 
+        if (layer.combined_away)
+            for (WipeTower::ToolChangeResult &tcr : layer_result)
+                tcr.combined_away = true;
+
 		result.emplace_back(std::move(layer_result));
 	}
 }
@@ -2547,7 +2672,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
 {
     size_t old_tool = m_current_tool;
 
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
+    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack, m_bbl_gcode_tags);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
@@ -2596,7 +2721,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
 
     // Ask our writer about how much material was consumed.
     // Skip this in case the layer is sparse and config option to not print sparse layers is enabled.
-    if (!m_sparse_layers_skipped || toolchanges_on_layer)
+    if (layer_is_printed(toolchanges_on_layer))
         if (m_current_tool < m_used_filament_length.size()) m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
     return construct_tcr(writer, false, old_tool, true, 0.f);

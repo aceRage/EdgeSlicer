@@ -9,6 +9,7 @@
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
 
@@ -563,9 +564,15 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     // A cone wall is a WipeTower2 feature: the Bambu Lab tower generator (like Bambu Studio's) only
     // knows rectangle and rib walls and would print a cone as a rectangle. Say so instead of letting
     // the choice look honoured.
-    if (is_BBL_Printer && is_global_config && config->has("wipe_tower_wall_type") &&
+    // Orca #12781: the same holds for a non-Bambu printer set to the Type 1 tower.
+    const bool wipe_tower_type1 = is_BBL_Printer ||
+        (wxGetApp().preset_bundle != nullptr &&
+         resolve_wipe_tower_type(wxGetApp().preset_bundle->printers.get_edited_preset().config) == WipeTowerType::Type1);
+    if (wipe_tower_type1 && is_global_config && config->has("wipe_tower_wall_type") &&
         config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type") == WipeTowerWallType::wtwCone) {
-        const wxString msg_text = _(L("Bambu Lab printers do not support a cone prime tower wall.\nReset to Rectangle."));
+        const wxString msg_text = is_BBL_Printer ?
+            _(L("Bambu Lab printers do not support a cone prime tower wall.\nReset to Rectangle.")) :
+            _(L("The Type 1 wipe tower does not support a cone prime tower wall.\nReset to Rectangle."));
         MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
         DynamicPrintConfig new_conf = *config;
         is_msg_dlg_already_exist = true;
@@ -1128,6 +1135,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("preheat_steps", have_ooze_prevention && (preheat_steps > 0));
 
     bool have_prime_tower = config->opt_bool("enable_prime_tower");
+    // Orca #12781: the WipeTower2-only options follow the printer's wipe tower type, not the vendor
+    // alone. A Bambu Lab printer is always Type 1.
+    const bool supports_wipe_tower_2 = !is_BBL_Printer && preset_bundle != nullptr &&
+        resolve_wipe_tower_type(preset_bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
     for (auto el : { "prime_tower_width", "prime_tower_brim_width"})
         toggle_line(el, have_prime_tower);
 
@@ -1153,15 +1164,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
                     "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall"})
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
-      toggle_line(el, have_prime_tower && !is_BBL_Printer);
+      toggle_line(el, have_prime_tower && supports_wipe_tower_2);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
-    // tower is always printed unrotated (Print::apply clears the angle), so the line stays
+    // (Type 1) tower is always printed unrotated (Print::apply clears the angle), so the line stays
     // visible but greyed out there; its tooltip says why.
     toggle_line("wipe_tower_rotation_angle", have_prime_tower);
-    toggle_field("wipe_tower_rotation_angle", have_prime_tower && !is_BBL_Printer);
+    toggle_field("wipe_tower_rotation_angle", have_prime_tower && supports_wipe_tower_2);
 
     // Orca: both tower generators skip sparse layers, so this is not a wipe tower 2 exclusive.
     toggle_line("wipe_tower_no_sparse_layers", have_prime_tower);
+    // Orca #15841: dropping the sparse layers outright leaves nothing to combine, so the two are exclusive.
+    toggle_line("wipe_tower_sparse_layers_combination", have_prime_tower && !config->opt_bool("wipe_tower_no_sparse_layers"));
 
     // Tower interface options: both generators, every printer. The run-in only ever enters the tower
     // through a wall gap, so it is greyed out (and ignored by the generators) without them.
@@ -1181,15 +1194,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("dithering_local_z_direct_multicolor", local_z_dithering_enabled);
 
     WipeTowerWallType wipe_tower_wall_type = config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type");
-    toggle_line("wipe_tower_cone_angle", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwCone);
+    toggle_line("wipe_tower_cone_angle", have_prime_tower && supports_wipe_tower_2 && wipe_tower_wall_type == WipeTowerWallType::wtwCone);
     toggle_line("wipe_tower_extra_rib_length", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     toggle_line("wipe_tower_rib_width", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     toggle_line("wipe_tower_fillet_wall", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     
     toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 
-    toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
-    toggle_line("wipe_tower_stagger_toolchange_start", have_prime_tower && !is_BBL_Printer);
+    toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && supports_wipe_tower_2);
+    toggle_line("wipe_tower_stagger_toolchange_start", have_prime_tower && supports_wipe_tower_2);
 
     bool use_cyclic_ordering = config->has("toolchange_ordering") &&
         config->opt_enum<ToolChangeOrderingType>("toolchange_ordering") == ToolChangeOrderingType::Cyclic;

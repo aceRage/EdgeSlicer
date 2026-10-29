@@ -6279,3 +6279,108 @@ TEST_CASE("Rebuild filament multi-color fields from plain colours when a 3MF omi
         CHECK(modes[1] == segment);
     }
 }
+
+// Snapmaker OrcaSlicer #1104: update_multi_material_filament_presets resized filament_colour
+// then regenerated mixed filaments, but left filament_multi_colors / filament_colour_mode
+// stale or oversized. Swatches read those two fields first.
+TEST_CASE("update_multi_material_filament_presets aligns multi_colors and colour_mode to the physical count",
+          "[Preset][FilamentColor]")
+{
+    const int segment  = FilamentColorModeToConfig(FilamentColorMode::Segment);
+    const int gradient = FilamentColorModeToConfig(FilamentColorMode::Gradient);
+
+    SECTION("same-count path trims an oversized leftover auto-palette")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#111111", "#222222", "#333333", "#444444"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0, 0};
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000");
+        CHECK(multi->values[1] == "#00FF00");
+        CHECK(modes->values[0] == segment);
+        CHECK(modes->values[1] == segment);
+    }
+
+    SECTION("shrink after a filament-count drop trims the multi-color tail")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2", "F3"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0};
+        bundle.update_multi_material_filament_presets();
+
+        bundle.filament_presets.pop_back();
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
+        // Simulate a path that resized filament_colour but left the multi-color arrays alone
+        // (the same-count 3MF / leftover-tail case, not set_num_filaments).
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0};
+        // Multi-colour P1's visual-only keys carry the same stale three-slot tail.
+        bundle.project_config.set_key_value("filament_colour_split", new ConfigOptionStrings{"30|70", "", "50|50"});
+        bundle.project_config.set_key_value("filament_colour_angle", new ConfigOptionFloats{45., 0., 90.});
+        bundle.project_config.set_key_value("filament_colour_twist", new ConfigOptionFloats{90., 0., 180.});
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000");
+        CHECK(multi->values[1] == "#00FF00");
+
+        // The visual-only keys follow the physical count too, and the kept slots keep their values.
+        const auto *split = bundle.project_config.option<ConfigOptionStrings>("filament_colour_split");
+        const auto *angle = bundle.project_config.option<ConfigOptionFloats>("filament_colour_angle");
+        const auto *twist = bundle.project_config.option<ConfigOptionFloats>("filament_colour_twist");
+        REQUIRE(split != nullptr);
+        REQUIRE(angle != nullptr);
+        REQUIRE(twist != nullptr);
+        REQUIRE(split->values.size() == 2);
+        REQUIRE(angle->values.size() == 2);
+        REQUIRE(twist->values.size() == 2);
+        CHECK(split->values[0] == "30|70");
+        CHECK(angle->values[0] == 45.);
+        CHECK(twist->values[0] == 90.);
+    }
+
+    SECTION("real multi-colour and gradient slots survive alignment")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#111111", "#222222"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000|#00FF00|#0000FF|#FFFFFF", "#AAAAAA|#BBBBBB"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {gradient, gradient};
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000|#00FF00|#0000FF|#FFFFFF");
+        CHECK(multi->values[1] == "#AAAAAA|#BBBBBB");
+        CHECK(modes->values[0] == gradient);
+        CHECK(modes->values[1] == gradient);
+    }
+}

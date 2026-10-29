@@ -895,6 +895,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_bridging"
             || opt_key == "wipe_tower_extra_flow"
             || opt_key == "wipe_tower_no_sparse_layers"
+            || opt_key == "wipe_tower_sparse_layers_combination"
             || opt_key == "flush_volumes_matrix"
             || opt_key == "prime_volume"
             || opt_key == "prime_tower_brim_chamfer"
@@ -935,6 +936,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "tool_change_on_wipe_tower"
             || opt_key == "wait_for_temp_on_wipe_tower"
             || opt_key == "purge_in_prime_tower"
+            || opt_key == "wipe_tower_type"
             || opt_key == "z_offset"
             || opt_key == "support_multi_bed_types"
             // Chameleon brim: changes which extruder each brim run prints under
@@ -2491,6 +2493,32 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    // ORCA #16719: a filament flow ratio of 0 makes GCode::_extrude divide 0 by 0 and write NaN (or a huge E)
+    // into the G-code. Refuse it for every filament the plate prints, plus filament 1 when no flow variants
+    // are active, because _extrude then scales and divides every extrusion by filament 1's ratio
+    // (ResolvedFilamentFlow::uncached_flow_ratio). The division itself is unchanged for non-zero ratios.
+    {
+        const ConfigOptionFloats &flow_ratios    = m_config.filament_flow_ratio;
+        const size_t              filament_count = flow_variant_filament_count(m_config);
+        auto refuse_flow_ratio = [](unsigned int filament_id) {
+            StringObjectException err;
+            // TRN %1% is the filament number as shown in the filament list, starting from 1.
+            err.string  = (boost::format(L("The flow ratio of filament %1% must be greater than 0.")) % (filament_id + 1)).str();
+            err.opt_key = "filament_flow_ratio";
+            return err;
+        };
+        if (!flow_ratios.values.empty()) {
+            if (!filament_flow_variants_active(m_config) && !(flow_ratios.get_at(0) > 0.))
+                return refuse_flow_ratio(0);
+            // extruders(true): a filament reached only by a "Change filament" custom G-code also extrudes
+            // (Fable review of #759; the other validate checks use the same list).
+            for (unsigned int filament_id : this->extruders(true))
+                if (filament_id < filament_count &&
+                    !(get_value_at(m_config, flow_ratios, ConfigFlowDomain::Filament, filament_id) > 0.))
+                    return refuse_flow_ratio(filament_id);
+        }
+    }
 
     if (m_config.print_sequence == PrintSequence::ByObject) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)
@@ -5810,16 +5838,35 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             print_object_instances_ordering = sort_object_instances_by_model_order(*this);
             //        print_object_instances_ordering = sort_object_instances_by_max_z(print);
             print_object_instance_sequential_active = print_object_instances_ordering.begin();
+            std::vector<unsigned int> first_layer_used_filaments;
+            std::vector<unsigned int> used_filaments;
             for (; print_object_instance_sequential_active != print_object_instances_ordering.end(); ++print_object_instance_sequential_active) {
                 tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
+                if (!tool_ordering.empty())
+                    append(first_layer_used_filaments, tool_ordering.front().extruders);
+                append(used_filaments, tool_ordering.all_extruders());
                 if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                     append(printExtruders, tool_ordering.tools_for_layer(layers_to_print.front().first).extruders);
                 }
             }
+            // A mixed (virtual) slot only reaches the nozzle as its physical components.
+            const size_t num_physical = m_config.filament_diameter.size();
+            m_mixed_filament_mgr.expand_0based_extruder_ids(first_layer_used_filaments, num_physical);
+            m_mixed_filament_mgr.expand_0based_extruder_ids(used_filaments, num_physical);
+            this->set_slice_used_filaments(first_layer_used_filaments, used_filaments);
         }
         else {
             tool_ordering = this->tool_ordering();
             tool_ordering.assign_custom_gcodes(*this);
+
+            std::vector<unsigned int> first_layer_used_filaments;
+            if (!tool_ordering.empty())
+                first_layer_used_filaments = tool_ordering.front().extruders;
+            std::vector<unsigned int> used_filaments = tool_ordering.all_extruders();
+            const size_t num_physical = m_config.filament_diameter.size();
+            m_mixed_filament_mgr.expand_0based_extruder_ids(first_layer_used_filaments, num_physical);
+            m_mixed_filament_mgr.expand_0based_extruder_ids(used_filaments, num_physical);
+            this->set_slice_used_filaments(first_layer_used_filaments, used_filaments);
             has_wipe_tower = this->has_wipe_tower() && tool_ordering.has_wipe_tower();
             initial_extruder_id = tool_ordering.first_extruder();
             print_object_instances_ordering = chain_print_object_instances(*this);
@@ -6521,6 +6568,15 @@ Polygons Print::first_layer_islands() const
     return islands;
 }
 
+WipeTowerType Print::wipe_tower_type() const
+{
+    // As upstream: the vendor flag (set by the GUI and the CLI before slicing) makes it Type1 on a
+    // Bambu Lab printer; otherwise the printer's wipe_tower_type, Type2 by default. Not
+    // resolve_wipe_tower_type(): its printer_model test would also catch a non-Bambu-vendor preset
+    // with a Bambu Lab model, which sliced with WipeTower2 before this option existed.
+    return is_BBL_printer() ? WipeTowerType::Type1 : m_config.wipe_tower_type.value;
+}
+
 Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) const
 {
     Points corners;
@@ -6553,7 +6609,7 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
         // first-layer footprint. The Bambu rib path above already uses the generated
         // outline; this fallback is the non-Bambu WipeTower2 path.
         Vec2d center = (pts[0] + pts[2])/2.;
-        const bool   has_cone   = !is_BBL_printer() && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone;
+        const bool   has_cone   = this->wipe_tower_type() == WipeTowerType::Type2 && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone;
         const double cone_angle = has_cone ? m_config.wipe_tower_cone_angle.value : 0.;
         const auto [cone_R, cone_x_scale] = WipeTower2::get_wipe_tower_cone_base(m_config.prime_tower_width, m_wipe_tower_data.height,
                                                                                 m_wipe_tower_data.depth, cone_angle);
@@ -6736,9 +6792,10 @@ void Print::_make_wipe_tower()
     for (unsigned int i = 0; i<number_of_extruders; ++i)
         wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
 
-    const auto bUseWipeTower2 = is_BBL_printer() ? false : true;
+    // Orca #12781: the tower generator follows wipe_tower_type (always Type1 on Bambu Lab printers).
+    const bool bUseWipeTower2 = this->wipe_tower_type() == WipeTowerType::Type2;
     // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
-    if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && !is_BBL_printer()) {
+    if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && bUseWipeTower2) {
         for (unsigned int i = 0; i < number_of_extruders; ++i) {
             for (unsigned int j = 0; j < number_of_extruders; ++j) {
                 if (wipe_volumes[i][j] > 0) {
@@ -6749,7 +6806,7 @@ void Print::_make_wipe_tower()
     }
 
     // Let the ToolOrdering class know there will be initial priming extrusions at the start of the print.
-    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2 ? true : false);
+    m_wipe_tower_data.tool_ordering = ToolOrdering(*this, (unsigned int) -1, bUseWipeTower2);
 
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
@@ -6796,6 +6853,10 @@ void Print::_make_wipe_tower()
         // in BBL machine, wipe tower is only use to prime extruder. So just use a global wipe volume.
         WipeTower wipe_tower(m_config, m_plate_index, m_origin, m_config.prime_volume, m_wipe_tower_data.tool_ordering.first_extruder(),
                              m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z);
+        // Edge: a Type1 tower on a non-Bambu printer (wipe_tower_type override) must tag its G-code
+        // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
+        // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
+        wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
