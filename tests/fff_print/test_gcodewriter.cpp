@@ -239,13 +239,14 @@ TEST_CASE("Acceleration and velocity limit commands print their values in genera
         std::vector<std::string> present;
         std::vector<std::string> absent;
     };
-    // accel_to_decel_factor is 50%, so ACCEL_TO_DECEL is half the acceleration.
+    // accel_to_decel_factor is 50%, so ACCEL_TO_DECEL is half the acceleration and MINIMUM_CRUISE_RATIO is 0.5.
     const Case cases[] = {
         {gcfKlipper, Command::KlipperLimits, 2000000, 25. / 3., false,
-         {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
-        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
-        {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL"}},
-        {gcfKlipper, Command::Print, 3001, 0., true, {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
+         {"SET_VELOCITY_LIMIT ACCEL=2000000 ", "ACCEL_TO_DECEL=1e+06 ", "MINIMUM_CRUISE_RATIO=0.5 ", "SQUARE_CORNER_VELOCITY=8.33333\n"}, {}},
+        {gcfKlipper, Command::KlipperLimits, 12345, 0., false, {"ACCEL=12345 ", "ACCEL_TO_DECEL=6172.5 ", "MINIMUM_CRUISE_RATIO=0.5\n"}, {"SQUARE_CORNER_VELOCITY"}},
+        {gcfKlipper, Command::KlipperLimits, 0, 0.25, true, {"SQUARE_CORNER_VELOCITY=0.25 ", "; adjust VELOCITY_LIMIT"}, {"ACCEL", "MINIMUM_CRUISE_RATIO"}},
+        {gcfKlipper, Command::Print, 3001, 0., true,
+         {"ACCEL=3001 ", "ACCEL_TO_DECEL=1500.5 ", "MINIMUM_CRUISE_RATIO=0.5 ", "; adjust ACCEL_TO_DECEL", "; adjust acceleration"}, {}},
         {gcfMarlinFirmware, Command::Print, 2500, 0., false, {"M204 P2500\n"}, {}},
         {gcfMarlinFirmware, Command::Travel, 7000, 0., false, {"M204 T7000\n"}, {}},
         {gcfRepRapFirmware, Command::Travel, 7000, 0., true, {"M204 T7000 ", "; adjust acceleration"}, {}},
@@ -285,6 +286,69 @@ TEST_CASE("Acceleration and velocity limit commands print their values in genera
                 CHECK(line.find(token) != std::string::npos);
             for (const std::string &token : c.absent)
                 CHECK(line.find(token) == std::string::npos);
+        }
+    }
+}
+
+// Port OrcaSlicer #15545: Klipper removed ACCEL_TO_DECEL on 2025-08-11 (deprecated 2024-03-13) in favour of
+// minimum_cruise_ratio = 1 - ACCEL_TO_DECEL / ACCEL, so accel_to_decel is sent in both forms on one line.
+TEST_CASE("Klipper acceleration commands send accel_to_decel both as ACCEL_TO_DECEL and as the cruise ratio", "[GCodeWriter][Klipper][CruiseRatio]")
+{
+    auto make_writer = [](bool enable, double factor) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfKlipper));
+        config.option<ConfigOptionBools>("accel_to_decel_enable")->values.assign(1, enable);
+        config.option<ConfigOptionPercents>("accel_to_decel_factor")->values.assign(1, factor);
+        for (const char *limit : {"machine_max_acceleration_extruding", "machine_max_acceleration_travel", "machine_max_acceleration_x",
+                                  "machine_max_acceleration_y", "machine_max_jerk_x", "machine_max_jerk_y"}) {
+            std::vector<double> &values = config.option<ConfigOptionFloats>(limit)->values;
+            std::fill(values.begin(), values.end(), 0.);
+        }
+        PrintConfig print_config;
+        print_config.apply(config, true);
+        auto writer = std::make_unique<GCodeWriter>();
+        writer->apply_print_config(print_config);
+        return writer;
+    };
+    struct CommentGuard
+    {
+        bool saved = GCodeWriter::full_gcode_comment;
+        ~CommentGuard() { GCodeWriter::full_gcode_comment = saved; }
+    } comment_guard;
+    GCodeWriter::full_gcode_comment = false;
+
+    SECTION("50% sends half the acceleration and a cruise ratio of 0.5") {
+        auto writer = make_writer(true, 50.);
+        CHECK(writer->set_print_acceleration(4000) == "SET_VELOCITY_LIMIT ACCEL=4000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0.5\n");
+        CHECK(writer->set_accel_and_jerk(6000, 0.) == "SET_VELOCITY_LIMIT ACCEL=6000 ACCEL_TO_DECEL=3000 MINIMUM_CRUISE_RATIO=0.5\n");
+    }
+    SECTION("25% gives a cruise ratio of 0.75 for every acceleration") {
+        auto writer = make_writer(true, 25.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=500 MINIMUM_CRUISE_RATIO=0.75\n");
+        CHECK(writer->set_travel_acceleration(3000) == "SET_VELOCITY_LIMIT ACCEL=3000 ACCEL_TO_DECEL=750 MINIMUM_CRUISE_RATIO=0.75\n");
+    }
+    SECTION("100% gives a cruise ratio of 0, as the input shaping calibration uses") {
+        auto writer = make_writer(true, 100.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
+    }
+    SECTION("Edge: a factor of 0 from a 3MF or the CLI sends neither") {
+        auto writer = make_writer(true, 0.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000\n");
+        CHECK(writer->set_accel_and_jerk(5000, 0.) == "SET_VELOCITY_LIMIT ACCEL=5000\n");
+    }
+    SECTION("Edge: a factor above 100% is clamped to 100%, a cruise ratio of 0") {
+        auto writer = make_writer(true, 150.);
+        CHECK(writer->set_print_acceleration(2000) == "SET_VELOCITY_LIMIT ACCEL=2000 ACCEL_TO_DECEL=2000 MINIMUM_CRUISE_RATIO=0\n");
+    }
+    SECTION("Off sends neither") {
+        auto writer = make_writer(false, 50.);
+        const std::string print  = writer->set_print_acceleration(2000);
+        const std::string limits = writer->set_accel_and_jerk(5000, 8.);
+        CHECK(print == "SET_VELOCITY_LIMIT ACCEL=2000\n");
+        for (const std::string &line : {print, limits}) {
+            INFO(line);
+            CHECK(line.find("ACCEL_TO_DECEL") == std::string::npos);
+            CHECK(line.find("MINIMUM_CRUISE_RATIO") == std::string::npos);
         }
     }
 }
