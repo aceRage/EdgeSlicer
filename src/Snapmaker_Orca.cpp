@@ -3498,7 +3498,16 @@ int CLI::run(int argc, char **argv)
             }
 
             //computing
-            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support", true);
+            // Standalone filament presets may leave out the per-filament options read here, and option defaults are
+            // only applied further down: fill in the default for each filament.
+            for (const char *key : {"filament_diameter", "filament_is_support"}) {
+                if (!m_print_config.has(key)) {
+                    ConfigOption *option = print_config_def.get(key)->create_default_option();
+                    static_cast<ConfigOptionVectorBase *>(option)->resize(project_filament_count);
+                    m_print_config.set_key_value(key, option);
+                }
+            }
+            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support");
             std::vector<double>& flush_vol_matrix = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values;
             //std::vector<float>& flush_vol_vector = m_print_config.option<ConfigOptionFloats>("flush_volumes_vector", true)->values;
             flush_vol_matrix.resize(project_filament_count*project_filament_count, 0.f);
