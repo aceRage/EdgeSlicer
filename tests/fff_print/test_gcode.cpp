@@ -584,3 +584,29 @@ TEST_CASE("The G-code header names the first object's filament when printing by 
     CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
     CHECK(header_int(gcode, "first_layer_temperature") == 250);
 }
+
+// ORCA #16719: upstream also rewrote the E conversion in _extrude; Edge keeps its division by the
+// resolved flow ratio (per-filament flow, U1 high-flow design) and only adds the validation. The ratio
+// must still scale the extruded length exactly once.
+TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
+{
+    // Retraction off, so every positive relative E move is extrusion and scales with the ratio.
+    auto extruded_length = [](double flow_ratio) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { "use_relative_e_distances", "1" }, { "retraction_length", "0" }, { "wipe", "0" } });
+        config.option<ConfigOptionFloats>("filament_flow_ratio")->values = { flow_ratio };
+        double total = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(slice({ TestMesh::cube_20x20x20 }, config),
+                            [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+                                if ((line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) && line.has_e() && line.e() > 0.f)
+                                    total += line.e();
+                            });
+        return total;
+    };
+
+    const double full = extruded_length(1.);
+    REQUIRE(full > 0.);
+    const double ratio = extruded_length(0.9) / full;
+    CHECK(std::abs(ratio - 0.9) < 0.9e-3);
+}
