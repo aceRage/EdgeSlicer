@@ -426,7 +426,7 @@ private:
         int light_top_dir{ -1 };
         // EDGE (Showcase S5): the smooth bead look
         int smooth_mode{ -1 };
-        int mc_mode{ -1 };   // EDGE (multi-colour P5)
+        int pm_mode{ -1 };   // EDGE (multi-colour P5)
         int role_tex{ -1 };
         int look_a{ -1 };
         int look_b{ -1 };

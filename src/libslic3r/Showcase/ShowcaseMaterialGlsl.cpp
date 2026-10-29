@@ -114,7 +114,7 @@ const std::vector<std::string> &libvgcode_fragment_globals()
         // EDGE multi-colour P3: the base colour hook's varyings and the colour the smooth path lights.
         "seg_role", "extruded_volume", "bead_base",
         // EDGE multi-colour P5: Preview's coextruded colour mode and the lighting it needs per fragment.
-        "mc_mode", "mc_direct", "mc_plain",
+        "pm_mode", "pm_direct", "pm_plain",
     };
     return names;
 }

@@ -781,7 +781,7 @@ void ViewerImpl::ShadedSegmentsUniforms::init(unsigned int shader_id)
     light_top_dir    = glGetUniformLocation(shader_id, "light_top_dir");
     // EDGE (Showcase S5): -1 in the ES shaders, which have no smooth look (glUniform ignores -1).
     smooth_mode      = glGetUniformLocation(shader_id, "smooth_mode");
-    mc_mode          = glGetUniformLocation(shader_id, "mc_mode");   // EDGE (multi-colour P5)
+    pm_mode          = glGetUniformLocation(shader_id, "pm_mode");   // EDGE (multi-colour P5)
     role_tex         = glGetUniformLocation(shader_id, "role_tex");
     look_a           = glGetUniformLocation(shader_id, "look_a");
     look_b           = glGetUniformLocation(shader_id, "look_b");
@@ -2422,7 +2422,7 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
         // EDGE (multi-colour P3)
         // EDGE (multi-colour P5): Preview's coextruded colours (smooth look off, the prelude built).
         const bool preview_mc = !prelude && is_multicolour_preview_active();
-        glsafe(glUniform1i(shaded.mc_mode, preview_mc ? 1 : 0));
+        glsafe(glUniform1i(shaded.pm_mode, preview_mc ? 1 : 0));
         glsafe(glUniform1i(shaded.use_volume, (smooth || preview_mc) && m_use_volume && m_volumes_tex_id != 0 ? 1 : 0));
 #endif // ENABLE_OPENGL_ES
     }

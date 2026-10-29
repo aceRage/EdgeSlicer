@@ -59,7 +59,7 @@ static const char* Segments_Vertex_Shader =
 "uniform int smooth_mode;\n"
 // EDGE (multi-colour P5): Preview's coextruded colours, off (0) unless the host asked for them with
 // Viewer::set_multicolour_preview(). With 0 every output below is what it was.
-"uniform int mc_mode;\n"
+"uniform int pm_mode;\n"
 "uniform usamplerBuffer role_tex;\n"
 "uniform vec4 look_a[16];\n"
 "out vec2 section;\n"
@@ -76,9 +76,9 @@ static const char* Segments_Vertex_Shader =
 "out float extruded_volume;\n"
 // EDGE (multi-colour P5): Preview lights per vertex, so the fragment shader needs the direct light
 // factor, the colour before the layer dimming (rgb) and the dimming (w; -1 = greyed) to light a colour
-// of its own. Zero unless mc_mode.
-"out float mc_direct;\n"
-"out vec4 mc_plain;\n"
+// of its own. Zero unless pm_mode.
+"out float pm_direct;\n"
+"out vec4 pm_plain;\n"
 "vec3 decode_color(float color, int id, int layer) {\n"
 "  int c = int(round(color));\n"
 "  vec3 rgb = vec3((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);\n"
@@ -171,7 +171,7 @@ static const char* Segments_Vertex_Shader =
 "  float skin = 0.0;\n"
 "  int look = 0;\n"
 "  int role_id = 0;\n"
-"  if (smooth_mode != 0 || mc_mode != 0) {\n"
+"  if (smooth_mode != 0 || pm_mode != 0) {\n"
 "    uint rv = texelFetch(role_tex, id_b).r;\n"
 "    uint role = rv & 255u;\n"
 "    role_id = int(role);\n"
@@ -217,16 +217,16 @@ static const char* Segments_Vertex_Shader =
 "  seg_dir = line_dir;\n"
 "  base_color = color_base;\n"
 "  seg_role = role_id;\n"
-"  extruded_volume = ((smooth_mode != 0 || mc_mode != 0) && use_volume != 0) ? texelFetch(volume_tex, id).r : 0.0;\n"
-"  mc_direct = 0.0;\n"
-"  mc_plain = vec4(0.0);\n"
-"  if (mc_mode != 0) {\n"
+"  extruded_volume = ((smooth_mode != 0 || pm_mode != 0) && use_volume != 0) ? texelFetch(volume_tex, id).r : 0.0;\n"
+"  pm_direct = 0.0;\n"
+"  pm_plain = vec4(0.0);\n"
+"  if (pm_mode != 0) {\n"
 "    int layer_id = int(texelFetch(position_tex, id).w);\n"
 "    float dim = 1.0;\n"
 "    if (id != kept_vertex && layer_id != lit_layers.x && layer_id != lit_layers.y)\n"
 "      dim = dim_brightness >= 0.0 ? dim_brightness : (layer_id < grey_below_layer ? -1.0 : 1.0);\n"
-"    mc_direct = direct_lighting(eye_position, eye_normal);\n"
-"    mc_plain = vec4(decode_color(texelFetch(color_tex, id).r, kept_vertex, lit_layers.x), dim);\n"
+"    pm_direct = direct_lighting(eye_position, eye_normal);\n"
+"    pm_plain = vec4(decode_color(texelFetch(color_tex, id).r, kept_vertex, lit_layers.x), dim);\n"
 "  }\n"
 "  cut_color_direct = clipping_plane.xyz == vec3(0.0) ? vec3(0.0) :\n"
 "    color_base * direct_lighting(eye_position, mat3(view_matrix) * -clipping_plane.xyz);\n"
@@ -308,7 +308,7 @@ static const char* Segments_Fragment_Shader =
 // lit per vertex as before. look_a: smoothness, skin overlap, skin flatten, bulge; look_b: groove,
 // SSAO skin weight (not used here), anisotropy; one of each per extruder.
 "uniform int smooth_mode;\n"
-"uniform int mc_mode;\n"
+"uniform int pm_mode;\n"
 "uniform vec4 look_a[16];\n"
 "uniform vec4 look_b[16];\n"
 "in vec2 section;\n"
@@ -321,8 +321,8 @@ static const char* Segments_Fragment_Shader =
 // host's prelude (Viewer::set_base_color_prelude, EXTERNAL_BASE_COLOR) works it out per fragment.
 "flat in int seg_role;\n"
 "in float extruded_volume;\n"
-"in float mc_direct;\n"
-"in vec4 mc_plain;\n"
+"in float pm_direct;\n"
+"in vec4 pm_plain;\n"
 "vec3 bead_base;\n"
 "const float s_light_top_diffuse = 0.6 * 0.8;\n"
 "const float s_light_top_specular = 0.6 * 0.25;\n"
@@ -454,14 +454,14 @@ static const char* Segments_Fragment_Shader =
 "      c = smooth_lit(n, crease);\n"
 "#endif\n"
 "    } else {\n"
-// EDGE (multi-colour P5): Preview's own per-vertex lighting on the coextruded colour. mc_plain.w is
-// the layer dimming; -1 (greyed layer) keeps the grey. With mc_mode 0 it is the line below.
+// EDGE (multi-colour P5): Preview's own per-vertex lighting on the coextruded colour. pm_plain.w is
+// the layer dimming; -1 (greyed layer) keeps the grey. With pm_mode 0 it is the line below.
 "#ifdef EXTERNAL_BASE_COLOR\n"
-"      if (mc_mode != 0) {\n"
-"        vec3 mc_base = base_color;\n"
-"        if (mc_plain.w >= 0.0)\n"
-"          mc_base = external_base_color(mc_plain.rgb, section, seg_right, seg_dir, extruded_volume, int(seg_info.w + 0.5), seg_role) * mc_plain.w;\n"
-"        c = mc_base * (s_ambient + s_emission) + mc_base * mc_direct * shadow_shade(world_position, shadow_normal);\n"
+"      if (pm_mode != 0) {\n"
+"        vec3 pm_base = base_color;\n"
+"        if (pm_plain.w >= 0.0)\n"
+"          pm_base = external_base_color(pm_plain.rgb, section, seg_right, seg_dir, extruded_volume, int(seg_info.w + 0.5), seg_role) * pm_plain.w;\n"
+"        c = pm_base * (s_ambient + s_emission) + pm_base * pm_direct * shadow_shade(world_position, shadow_normal);\n"
 "      } else\n"
 "#endif\n"
 "      c = color + color_direct * shadow_shade(world_position, shadow_normal);\n"
