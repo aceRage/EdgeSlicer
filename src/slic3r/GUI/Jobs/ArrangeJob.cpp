@@ -13,6 +13,8 @@
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
+#include "slic3r/GUI/RemoteAccess.hpp"
+#include "slic3r/GUI/RemoteSliceV1.hpp"
 
 #include "libnest2d/common.hpp"
 
@@ -279,9 +281,15 @@ void ArrangeJob::prepare_loose()
         for (size_t i = 0; i < mo->instances.size(); ++i) {
             ModelInstance* mi = mo->instances[i];
             mi->arrange_order = ++order;
-            const int  pi    = plate_list.find_instance(int(oidx), int(i));
-            const bool loose = pi < 0 || !plate_list.get_plate(pi)->contain_instance_totally(int(oidx), int(i));
-            if (loose && !mi->printable)
+            const int        pi          = plate_list.find_instance(int(oidx), int(i));
+            PartPlate*       plate       = pi < 0 ? nullptr : plate_list.get_plate(pi);
+            // A plate locked above only for its print sequence is not the person's lock: what hangs
+            // over its edge still leaves it (preprocess_arrange_polygon would put it back in place).
+            const bool       user_locked = plate && plate->is_locked() &&
+                                     std::find(m_uncompatible_plates.begin(), m_uncompatible_plates.end(), pi) == m_uncompatible_plates.end();
+            const auto       route       = SliceV1::loose_route(plate != nullptr, plate && plate->contain_instance_totally(int(oidx), int(i)),
+                                                                user_locked, mi->printable);
+            if (route == SliceV1::LooseRoute::Skip)
                 continue;
             ArrangePolygon&& ap = prepare_arrange_polygon(mi);
             ap.setter = [set = ap.setter, order](const ArrangePolygon& p) {
@@ -289,14 +297,18 @@ void ArrangeJob::prepare_loose()
                 keep.itemid         = order;
                 set(keep);
             };
-            if (plate_list.preprocess_arrange_polygon(int(oidx), int(i), ap, loose)) {
+            if (route == SliceV1::LooseRoute::Place) {
+                ap.itemid = m_selected.size();
+                m_selected.emplace_back(std::move(ap));
+                continue;
+            }
+            if (plate_list.preprocess_arrange_polygon(int(oidx), int(i), ap, false)) {
                 ap.itemid = m_locked.size();
                 m_locked.emplace_back(std::move(ap));
                 continue;
             }
-            ArrangePolygons& cont = loose ? m_selected : m_unselected;
-            ap.itemid = cont.size();
-            cont.emplace_back(std::move(ap));
+            ap.itemid = m_unselected.size();
+            m_unselected.emplace_back(std::move(ap));
         }
     }
 
@@ -692,6 +704,23 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     }
     else
         plate_list.clear(false, false, true, -1);
+
+    // Place loose objects: what fits on no plate of this printer (larger than the bed, or taller
+    // than it prints) stays where it was and is named, rather than going beside the last plate
+    // (or to a virtual bed) where it would hang over an edge again and be offered once more.
+    std::set<std::string> unplaced;
+    if (m_loose_only) {
+        for (auto it = m_selected.begin(); it != m_selected.end();)
+            if (it->bed_idx < 0) {
+                unplaced.insert(it->name);
+                it = m_selected.erase(it);
+            } else
+                ++it;
+        for (const ArrangePolygon& ap : m_unprintable)
+            unplaced.insert(ap.name);
+        m_unprintable.clear();
+    }
+
     //BBS: adjust the bed_index, create new plates, get the max bed_index
     for (ArrangePolygon& ap : m_selected) {
         //if (ap.bed_idx < 0) continue;  // bed_idx<0 means unarrangable
@@ -770,6 +799,15 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
         m_plater->get_notification_manager()->push_notification(GUI::format(
             _L("Arrangement ignored the following objects which can't fit into a single bed:\n%s"),
             concat_strings(names, "\n")));
+    }
+    if (!unplaced.empty()) {
+        std::string names;
+        for (const std::string& n : unplaced)
+            names += (names.empty() ? "" : ", ") + n;
+        const std::string msg = GUI::format(_L("These objects do not fit on a plate of this printer and stay where they are: %s"), names);
+        m_plater->get_notification_manager()->push_notification(msg);
+        // Only the remote hub places loose objects: its job ends with this message.
+        RemoteAccess::get().note_error(msg);
     }
     m_plater->get_notification_manager()->close_notification_of_type(NotificationType::ArrangeOngoing);
 

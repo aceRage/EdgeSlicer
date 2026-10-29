@@ -1128,6 +1128,33 @@ TEST_CASE("arrange: place loose objects counts only what it moves", "[RemoteHub]
     CHECK(place_count({ { over }, { over } }, { false }, 0) == 2);
 }
 
+TEST_CASE("arrange: place loose objects moves exactly what it counts", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::LooseRoute;
+    using Slic3r::GUI::SliceV1::loose_route;
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::place_count;
+    // (on_plate, wholly_on_plate, user_locked, printable)
+    CHECK(loose_route(true, true, false, true) == LooseRoute::Stay);
+    CHECK(loose_route(true, false, false, true) == LooseRoute::Place);
+    CHECK(loose_route(false, false, false, true) == LooseRoute::Place);
+    // the person's lock keeps what hangs over that plate's edge; a lock the arrange takes for a
+    // plate's own print sequence is not passed as user_locked, so that plate's overhang is placed
+    CHECK(loose_route(true, false, true, true) == LooseRoute::Stay);
+    // set not to print: stays on its plate as a fixed item, and is left out when it is on none
+    CHECK(loose_route(true, false, false, false) == LooseRoute::Stay);
+    CHECK(loose_route(false, false, false, false) == LooseRoute::Skip);
+
+    // every combination on a plate: the instances it places are the ones place_count promises
+    for (int mask = 0; mask < 8; ++mask) {
+        const bool outside = mask & 1, printable = mask & 2, locked = mask & 4;
+        const bool placed  = loose_route(true, !outside, locked, printable) == LooseRoute::Place;
+        CHECK(place_count({ { PlateInstance{ outside, printable } } }, { locked }, 0) == (placed ? 1 : 0));
+    }
+    for (int printable = 0; printable < 2; ++printable)
+        CHECK(place_count({}, {}, printable) == (loose_route(false, false, false, printable) == LooseRoute::Place ? 1 : 0));
+}
+
 TEST_CASE("arrange: a guarded undo only takes back the step it was told about", "[RemoteHub][arrange]")
 {
     using Slic3r::GUI::SliceV1::undo_matches;

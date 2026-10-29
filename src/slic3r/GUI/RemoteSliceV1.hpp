@@ -209,6 +209,14 @@ nlohmann::json blocked_json(const std::string& reason);
 // on no plate (loose_printable). Everything else stays where it is, so 0 means there is nothing to do.
 int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std::vector<bool>& locked, int loose_printable);
 
+// What Place loose objects (ArrangeJob::prepare_loose) does with one instance, the same rule
+// place_count counts: Place it into free space, leave it to Stay where it is (wholly on its plate,
+// or on a plate the person locked), or Skip it (set not to print and not on a plate). `user_locked`
+// is the person's lock only: the arrange also locks, for its own run, a plate whose print sequence
+// is not the project's, and what hangs over that plate's edge is still placed (onto another plate).
+enum class LooseRoute { Place, Stay, Skip };
+LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bool printable);
+
 // POST /api/undo?expect=: whether the PC's next undo step may be taken. An empty `expect` takes
 // whatever it is; otherwise it must name the topmost undo snapshot exactly, so a phone's Undo after
 // an Arrange never undoes something a person did at the PC in the meantime.

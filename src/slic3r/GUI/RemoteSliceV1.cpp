@@ -472,6 +472,13 @@ int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std
     return n;
 }
 
+LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bool printable)
+{
+    const bool loose = !on_plate || !wholly_on_plate;
+    if (!loose || (on_plate && user_locked)) return LooseRoute::Stay;
+    return printable ? LooseRoute::Place : (on_plate ? LooseRoute::Stay : LooseRoute::Skip);
+}
+
 bool undo_matches(const std::string& expect, const std::string& top)
 {
     return expect.empty() || expect == top;
