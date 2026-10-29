@@ -660,6 +660,10 @@ private:
     wxStaticText*   m_price_note {nullptr};
     wxSizer*        price_note_create_widget(wxWindow* parent);
 
+    // Under Color: the colour make-up of the slot being edited (multi-colour P2, read only; Edit... opens the editor).
+    wxStaticText*   m_makeup_note {nullptr};
+    wxSizer*        makeup_create_widget(wxWindow* parent);
+
 public:
 	//BBS: GUI refactor
 	TabFilament(ParamsPanel* parent) :
@@ -674,6 +678,7 @@ public:
 	void		clear_pages() override;
     // Refreshes the line under Price (also called when your filament prices change).
     void        update_price_note();
+    void        update_makeup_note();
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 
     const std::string&	get_custom_gcode(const t_config_option_key& opt_key) override;

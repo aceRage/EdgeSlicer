@@ -386,6 +386,7 @@ private:
     wxChoice                *m_tone = nullptr;   // realism 1a: the post pass's tone curve
     wxSlider                *m_shadow_softness = nullptr;
     wxChoice                *m_layer_lines = nullptr;
+    wxCheckBox              *m_coextruded = nullptr;   // multi-colour P2: the scene's coextruded look
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
     std::string              m_mat_signature;

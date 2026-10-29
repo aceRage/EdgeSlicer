@@ -9,8 +9,10 @@
 #include "../GUI.hpp"
 #include "../GUI_App.hpp"
 #include "../I18N.hpp"
+#include "../FilamentColorUtils.hpp"
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
+#include "libslic3r/Showcase/MultiColourFilament.hpp"
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -454,14 +456,43 @@ void showcase_draw_callouts(ShowcaseImage &image, bool has_alpha, const Showcase
                 const std::vector<std::string> &colors = d.label.swatches;
                 const double sy = y + 0.5 * (h_main - sw);
                 gc->SetPen(*wxTRANSPARENT_PEN);
-                for (size_t c = 0; c < colors.size(); ++c) {
-                    set_brush((callout_colour(colors[c])));
-                    const double x0 = x + sw * double(c) / double(colors.size()), x1 = x + sw * double(c + 1) / double(colors.size());
-                    gc->DrawRectangle(x0, sy, x1 - x0, sw);
+                const bool disc = d.label.swatch_disc && colors.size() > 1;
+                if (disc) {
+                    // Multi-colour P2: a coextruded filament as a pie of its proportions, colour 1
+                    // centred on the rotation (0 = the front, the bottom), anticlockwise from above.
+                    const int    n     = std::min<int>(int(colors.size()), MultiColour::MAX_COLOURS);
+                    const auto   share = MultiColour::parse_split(d.label.swatch_split, n);
+                    const double cx = x + 0.5 * sw, cy = sy + 0.5 * sw, r = 0.5 * sw;
+                    const double pi2 = 6.283185307179586;
+                    double       start = 0.;   // turns, in the filament's frame
+                    for (int i = 0; i < n; ++i) {
+                        const double end   = i == n - 1 ? 1. : start + double(share[size_t(i)]);
+                        const int    steps = std::max(2, int(std::ceil((end - start) * 48.)));
+                        wxGraphicsPath path = gc->CreatePath();
+                        path.MoveToPoint(cx, cy);
+                        for (int k = 0; k <= steps; ++k) {
+                            // direction in the printer's frame, turns anticlockwise from the front
+                            const double dir = start + (end - start) * double(k) / double(steps) + d.label.swatch_angle_deg / 360. - 0.5 * double(share[0]);
+                            path.AddLineToPoint(cx + r * std::sin(dir * pi2), cy + r * std::cos(dir * pi2));
+                        }
+                        path.CloseSubpath();
+                        set_brush((callout_colour(colors[size_t(i)])));
+                        gc->FillPath(path);
+                        start = end;
+                    }
+                    set_pen((wxGraphicsPenInfo(callout_with_alpha(halo ? halo_of(ink) : ink, 0.35), std::max(1., 0.05 * F))));
+                    gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                    gc->DrawEllipse(cx - r, cy - r, 2. * r, 2. * r);
+                } else {
+                    for (size_t c = 0; c < colors.size(); ++c) {
+                        set_brush((callout_colour(colors[c])));
+                        const double x0 = x + sw * double(c) / double(colors.size()), x1 = x + sw * double(c + 1) / double(colors.size());
+                        gc->DrawRectangle(x0, sy, x1 - x0, sw);
+                    }
+                    set_pen((wxGraphicsPenInfo(callout_with_alpha(halo ? halo_of(ink) : ink, 0.35), std::max(1., 0.05 * F))));
+                    gc->SetBrush(*wxTRANSPARENT_BRUSH);
+                    gc->DrawRectangle(x, sy, sw, sw);
                 }
-                set_pen((wxGraphicsPenInfo(callout_with_alpha(halo ? halo_of(ink) : ink, 0.35), std::max(1., 0.05 * F))));
-                gc->SetBrush(*wxTRANSPARENT_BRUSH);
-                gc->DrawRectangle(x, sy, sw, sw);
                 x += sw + sw_gap;
             }
             draw_text(font_main, m.line1, ink, x, y, halo);
@@ -565,6 +596,13 @@ ShowcaseLabelContext ShowcaseLabelContext::current(int plate_index, bool with_us
             if (split.size() > 1)
                 s.colors = split;
         }
+        {
+            const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&bundle->project_config, size_t(f.slot - 1));
+            s.split     = makeUp.split;
+            s.angle_deg = makeUp.angle;
+            if (const ConfigOptionInts *modes = bundle->project_config.option<ConfigOptionInts>("filament_colour_mode"))
+                s.gradient = size_t(f.slot - 1) < modes->values.size() && modes->values[size_t(f.slot - 1)] == 1;
+        }
         const std::string match = GetFilamentMatchName(f.preset_name);
         for (size_t i = 0; i < c.m_library.size() && !match.empty(); ++i)
             if (GetFilamentMatchName(c.m_library[i].filamentName) == match) {
@@ -637,6 +675,9 @@ Showcase::LabelFilament ShowcaseLabelContext::filament(const Showcase::Scene &sc
         const Showcase::Finish finish = scene.materials.finish_for(callout.filament, s.preset_name, s.type);
         f.finish          = into_u8(showcase_finish_name(finish));
         f.standard_finish = finish == Showcase::Finish::Standard;
+        f.coextruded      = scene.materials.coextruded_look && !s.gradient && s.colors.size() > 1 && callout.color.empty();
+        f.split           = s.split;
+        f.angle_deg       = s.angle_deg;
     } else if (PresetBundle *bundle = wxGetApp().preset_bundle) {
         // A mixed filament: its parts and their shares.
         if (const MixedFilament *mf = bundle->mixed_filaments.mixed_filament_from_id(unsigned(callout.filament), m_slots.size())) {
@@ -688,7 +729,8 @@ std::string ShowcaseLabelContext::signature() const
 {
     std::string s = m_lang + "|" + m_words.currency;
     for (const Slot &slot : m_slots) {
-        s += "|" + slot.preset_name + "," + slot.vendor + "," + slot.type;
+        s += "|" + slot.preset_name + "," + slot.vendor + "," + slot.type + "," + slot.split + "," + std::to_string(int(slot.angle_deg)) +
+             (slot.gradient ? ",g" : "");
         for (const std::string &c : slot.colors)
             s += "," + c;
     }

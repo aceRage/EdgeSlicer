@@ -13,11 +13,14 @@
 #include "../GLCanvas3D.hpp"
 #include "../GUI.hpp"
 #include "../GUI_App.hpp"
+#include "../FilamentColorUtils.hpp"
 #include "../GUI_Utils.hpp"   // _3MF_COVER_SIZE
 #include "../I18N.hpp"
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
 #include "../Plater.hpp"
+#include "../PresetComboBoxes.hpp"
+#include <wx/statbmp.h>
 #include "../Widgets/StateColor.hpp"
 
 #include <wx/button.h>
@@ -734,6 +737,13 @@ void ShowcaseView::build_panel()
                                  "when the whole model is in view, so the lines show in close-ups and in large, high quality exports. "
                                  "Model only: the toolpaths view already shows the real layers."));
     row(_L("Layer lines"), m_layer_lines);
+    // Multi-colour P2 (design 4.4): the coextruded look of dual- and tri-colour filaments.
+    m_coextruded = new wxCheckBox(m_side, wxID_ANY, _L("Coextruded colours"));
+    m_coextruded->SetToolTip(_L("Shows a dual- or tri-colour filament the way it prints: its colours side by side, with the "
+                                "proportions and rotation set in the filament's colour dialog. Off: one plain colour per filament. "
+                                "Visual only; the G-code is not affected."));
+    grid->AddSpacer(0);
+    grid->Add(m_coextruded);
     // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
     // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
     wxArrayString sources;
@@ -1189,6 +1199,10 @@ void ShowcaseView::build_panel()
         if (sel >= 0)
             edit([sel](Showcase::Scene &s) { s.materials.layer_lines = Showcase::LayerLines(sel); });
     });
+    m_coextruded->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_coextruded->GetValue();
+        edit([on](Showcase::Scene &s) { s.materials.coextruded_look = on; });
+    });
     m_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_source->GetSelection();
         if (sel >= 0)
@@ -1423,9 +1437,35 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     if (m_mat_grid == nullptr)
         return;
     const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    // Multi-colour P2: a split slot shows its make-up as a chip (colours, proportions, rotation).
+    struct MakeUpChip
+    {
+        std::vector<std::string>            colors;
+        FilamentColorUtils::ColourMakeUp    makeUp;
+        bool                                shown = false;
+    };
+    std::vector<MakeUpChip> chips(filaments.size());
+    if (const PresetBundle *bundle = wxGetApp().preset_bundle) {
+        const DynamicPrintConfig &pc = bundle->project_config;
+        const bool look = scene().materials.coextruded_look;
+        for (size_t i = 0; i < filaments.size(); ++i) {
+            const size_t slot = size_t(filaments[i].slot - 1);
+            const FilamentColor c = FilamentColorUtils::GetFilamentColorFromConfig(&pc, slot, filaments[i].color);
+            chips[i].colors = c.colors;
+            chips[i].makeUp = FilamentColorUtils::GetColourMakeUp(&pc, slot);
+            chips[i].shown  = look && c.colors.size() > 1 && c.NormalizedMode() == FilamentColorMode::Segment;
+        }
+    }
     std::string signature;
-    for (const ShowcaseFilament &f : filaments)
+    for (size_t i = 0; i < filaments.size(); ++i) {
+        const ShowcaseFilament &f = filaments[i];
         signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
+        if (chips[i].shown) {
+            for (const std::string &c : chips[i].colors)
+                signature += c + ",";
+            signature += "|" + chips[i].makeUp.split + "|" + std::to_string(int(chips[i].makeUp.angle)) + "\n";
+        }
+    }
     const bool rebuild = signature != m_mat_signature || m_mat_choices.size() != filaments.size();
     if (!rebuild && !sync_selection)
         return;
@@ -1436,11 +1476,28 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         m_mat_grid->Clear(true);
         m_mat_choices.clear();
         const int em = wxGetApp().em_unit();
-        for (const ShowcaseFilament &f : filaments) {
+        for (size_t fi = 0; fi < filaments.size(); ++fi) {
+            const ShowcaseFilament &f = filaments[fi];
             auto *label  = new wxBoxSizer(wxHORIZONTAL);
-            auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
-            swatch->SetBackgroundColour(showcase_wx_colour(f.color));
-            label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+            if (chips[fi].shown) {
+                wxBitmap *split_icon = FilamentColorUtils::GetSplitFilamentColorIcon(chips[fi].colors, chips[fi].makeUp.split,
+                                                                                    chips[fi].makeUp.angle, std::string(),
+                                                                                    int(2.2 * em), int(1.4 * em));
+                auto *chip = new wxStaticBitmap(m_side, wxID_ANY, *split_icon);
+                chip->SetToolTip(_L("The colour make-up of this filament. Click to edit it (colours, proportions, rotation)."));
+                chip->SetCursor(wxCursor(wxCURSOR_HAND));
+                const int chip_slot = f.slot;
+                chip->Bind(wxEVT_LEFT_UP, [chip_slot](wxMouseEvent &) {
+                    auto &combos = wxGetApp().sidebar().combos_filament();
+                    if (chip_slot >= 1 && size_t(chip_slot) <= combos.size())
+                        combos[size_t(chip_slot - 1)]->ChangeExtruderColor();
+                });
+                label->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+            } else {
+                auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
+                swatch->SetBackgroundColour(showcase_wx_colour(f.color));
+                label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+            }
             wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
                                                   : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
             auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
@@ -1570,6 +1627,7 @@ void ShowcaseView::sync_controls()
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
     m_tone->SetSelection(s.lighting.tone == Showcase::ToneCurve::Filmic ? 1 : 0);
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
+    m_coextruded->SetValue(s.materials.coextruded_look);
     m_source->SetSelection(s.source == "toolpaths" ? 1 : 0);
     m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
     if (s.materials.toolpath_smoothness >= 0.f)
@@ -1775,7 +1833,7 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_tone, m_use_as_cover, m_source, m_smooth_auto })
+                                                          m_exposure, m_tone, m_coextruded, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
     // The toolpaths are the real layers, so the procedural lines only apply to the model.
     m_layer_lines->Enable(editable && s.source != "toolpaths");
