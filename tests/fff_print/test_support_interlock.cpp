@@ -401,6 +401,9 @@ TEST_CASE("Classic tree weave never lands on a neighbouring top roof (stepped un
         DynamicPrintConfig c = interlock_config("tree_hybrid", on);
         c.set_key_value("support_on_build_plate_only", new ConfigOptionBool(false));
         c.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.2));
+        // The test print sits around the origin; classic trees clip their support to the bed, so make
+        // the bed cover both caps.
+        c.set_deserialize_strict({ { "printable_area", "-150x-150,150x-150,150x150,-150x150" } });
         return c;
     };
     // Measured on the G-code, in bed coordinates, so the model and the support share one frame.
