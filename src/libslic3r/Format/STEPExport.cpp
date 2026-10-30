@@ -9,6 +9,7 @@
 #include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/BRep/CadEdit.hpp"
 #include "libslic3r/BRep/CadShape.hpp"
+#include "libslic3r/BRep/OcctException.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -59,10 +60,8 @@ bool is_step_path(const std::string &path)
 
 const char *occt_failure_message(const Standard_Failure &e)
 {
-    const char *msg = e.GetMessageString();
-    if (msg == nullptr || *msg == 0)
-        msg = e.what();
-    return (msg && *msg) ? msg : "unknown error";
+    const char *msg = occt_exception_message(e);
+    return *msg ? msg : "unknown error";
 }
 
 BoundingBoxf3 tight_bbox(const TopoDS_Shape &shape)

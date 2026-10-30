@@ -81,11 +81,8 @@ std::string write_shape(const TopoDS_Shape &shape)
 
 std::string occt_message(const Standard_Failure &e)
 {
-    const char *msg = e.GetMessageString();
-    if (msg == nullptr || *msg == 0)
-        msg = e.what();
     std::string out = occt_exception_type(e);
-    if (msg != nullptr && *msg != 0)
+    if (const char *msg = occt_exception_message(e); *msg != 0)
         out += std::string(": ") + msg;
     return out;
 }
