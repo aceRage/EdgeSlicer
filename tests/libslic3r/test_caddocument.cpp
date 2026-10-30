@@ -2112,6 +2112,51 @@ TEST_CASE("deserialize_recipe rejects future version with error", "[CadDocument]
     CHECK_CONTAINS(doc.error, "newer version");
 }
 
+TEST_CASE("deserialize_recipe rejects truncated or oversized length fields", "[CadDocument]")
+{
+    // Each blob claims more data than it carries; the reader must fail cleanly (no huge
+    // allocation, no crash) with an error, rather than trusting the file's length fields.
+    auto blob_of = [](auto&& write) {
+        std::ostringstream oss;
+        {
+            cereal::BinaryOutputArchive ar(oss);
+            write(ar);
+        }
+        return oss.str();
+    };
+    SECTION("v6 feature count larger than the blob") {
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0xFFFFFFFFu)); });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "could not be read");
+    }
+    SECTION("v6 feature length larger than the blob") {
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1), uint32_t(0x7FFFFFFFu), uint32_t(0)); });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "could not be read");
+    }
+    SECTION("v6 variables length larger than the blob") {
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0), uint32_t(0xFFFFFFF0u)); });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "could not be read");
+    }
+    SECTION("v4 feature count larger than the blob") {
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(4), uint64_t(1) << 40); });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "could not be read");
+    }
+    SECTION("truncated mid-length") {
+        std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1)); });
+        blob.push_back('\x05');   // half a u32 length
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        REQUIRE_FALSE(doc.error.empty());
+    }
+}
+
 TEST_CASE("deserialize_recipe rejects older version with error", "[CadDocument]")
 {
     CadDocument doc;

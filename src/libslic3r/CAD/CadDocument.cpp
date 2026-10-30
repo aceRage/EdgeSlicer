@@ -4498,6 +4498,17 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
     try {
         std::istringstream iss(blob);
         cereal::BinaryInputArchive ar(iss);
+        // Every length and count below comes from the file. Check it against the bytes that are
+        // actually left BEFORE allocating, so a truncated or corrupt blob fails cleanly instead of
+        // asking for a multi-gigabyte buffer.
+        auto remaining = [&]() -> uint64_t {
+            const std::streamoff pos = iss.tellg();
+            return pos < 0 || uint64_t(pos) > blob.size() ? 0 : uint64_t(blob.size()) - uint64_t(pos);
+        };
+        auto check_len = [&](uint64_t n, uint64_t min_bytes_each) {
+            if (n > remaining() / min_bytes_each)
+                throw std::runtime_error("length field exceeds the remaining data");
+        };
         uint32_t v;
         ar(v);
         if (v > ORCA_CAD_RECIPE_VERSION) {
@@ -4522,9 +4533,11 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             features.clear();
             uint32_t count;
             ar(count);
+            check_len(count, sizeof(uint32_t));   // each feature carries at least its u32 length
             for (uint32_t i = 0; i < count; ++i) {
                 uint32_t len;
                 ar(len);
+                check_len(len, 1);
                 std::string buf(len, '\0');
                 if (len > 0)
                     ar(cereal::binary_data(&buf[0], len));   // consume EXACTLY len bytes from the outer stream
@@ -4543,6 +4556,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             variables.clear();
             uint32_t vlen;
             ar(vlen);
+            check_len(vlen, 1);
             std::string vbuf(vlen, '\0');
             if (vlen > 0)
                 ar(cereal::binary_data(&vbuf[0], vlen));
@@ -4559,6 +4573,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             try {
                 uint32_t blen;
                 ar(blen);
+                check_len(blen, 1);
                 std::string bbuf(blen, '\0');
                 if (blen > 0)
                     ar(cereal::binary_data(&bbuf[0], blen));
@@ -4574,6 +4589,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             try {
                 uint32_t xlen;
                 ar(xlen);
+                check_len(xlen, 1);
                 std::string xbuf(xlen, '\0');
                 if (xlen > 0)
                     ar(cereal::binary_data(&xbuf[0], xlen));
@@ -4608,6 +4624,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             // shift every byte after them.
             cereal::size_type n = 0;
             ar(cereal::make_size_tag(n));
+            check_len(n, 1);   // every flat v4 feature is at least one byte
             features.assign(size_t(n), CadFeature{});
             for (CadFeature& f : features) f.load_flat_v4(ar);
             ar(variables);
