@@ -1128,7 +1128,18 @@ static Glow::UniformTable showcase_glow_table()
     const PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return Glow::UniformTable();
-    return Glow::pack_uniforms(Glow::slots_from_bundle(*bundle), Glow::intensity_from_config(bundle->project_config));
+    // Drawn twice a frame (the object pass and the floor's mirror pass), and on every entry into
+    // Showcase: rebuilt only when a value it is made from changed.
+    static std::string        cached_signature;
+    static Glow::UniformTable cached_table;
+    static bool               cached = false;
+    std::string               signature = Glow::signature(*bundle);
+    if (!cached || signature != cached_signature) {
+        cached_table     = Glow::pack_uniforms(Glow::slots_from_bundle(*bundle), Glow::intensity_from_config(bundle->project_config));
+        cached_signature = std::move(signature);
+        cached           = true;
+    }
+    return cached_table;
 }
 
 static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const MultiColour::UniformTable &t)
