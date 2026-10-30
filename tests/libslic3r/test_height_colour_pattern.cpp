@@ -120,6 +120,8 @@ DynamicPrintConfig sample_project_config(size_t filaments)
     cfg.option<ConfigOptionStrings>("filament_colour")->values       = colours;
     cfg.option<ConfigOptionStrings>("filament_settings_id", true)->values  = ids;
     cfg.option<ConfigOptionStrings>("filament_type", true)->values         = types;
+    // A real saved project slices: relative extrusion needs the E reset at each layer.
+    cfg.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0"));
     cfg.set_key_value("printer_model", new ConfigOptionString(u1 ? "Snapmaker U1" : "Bambu Lab P1S"));
     if (u1)
         cfg.set_key_value("printer_settings_id", new ConfigOptionString("Snapmaker U1 (0.4 nozzle)"));
