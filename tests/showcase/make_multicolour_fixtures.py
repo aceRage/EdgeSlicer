@@ -8,7 +8,7 @@ objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk,
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
 
     python -I make_multicolour_fixtures.py <template.3mf> <out dir> [--angle DEG] [--colors "#RRGGBB|#RRGGBB"]
-                                           [--source toolpaths|model] [--dark]
+                                           [--source toolpaths|model] [--dark] [--glow] [--lights-off [AMBIENT]]
 
 Writes <out dir>/<shape>_<view>.3mf and lists them on stdout, one per line.
 
@@ -18,6 +18,10 @@ front-right corner, as on the P0 cube (front face red, right face yellow); set i
 
 --source is the scene's source: "toolpaths" (P3, the default) or "model" (P4, Showcase mesh mode: the
 coextruded look without a slice). --dark uses the dark studio backdrop and floor instead of Studio white.
+
+--glow (glow-in-the-dark, G1) sets slot 1 to glow (filament_glow = 1, the default vibrant glow colour,
+filament_glow_intensity 100). --lights-off puts the scene's lights out (materials.lights_off), leaving AMBIENT
+(default 0.05) of the light to the filaments, the floor and the backdrop.
 """
 import argparse
 import json
@@ -204,6 +208,8 @@ def main(argv):
     ap.add_argument("--twist", type=float, default=0.0)
     ap.add_argument("--source", choices=["toolpaths", "model"], default="toolpaths")
     ap.add_argument("--dark", action="store_true")
+    ap.add_argument("--glow", action="store_true")
+    ap.add_argument("--lights-off", nargs="?", const=0.05, type=float, default=None)
     a = ap.parse_args(argv[1:])
 
     with zipfile.ZipFile(a.template) as z:
@@ -236,6 +242,10 @@ def main(argv):
         set_slot0(settings, "filament_colour_split", "")
         set_slot0(settings, "filament_colour_angle", ("%g" % a.angle))
         set_slot0(settings, "filament_colour_twist", ("%g" % a.twist))
+        if a.glow:
+            set_slot0(settings, "filament_glow", "1")
+            set_slot0(settings, "filament_glow_colour", "")
+            settings["filament_glow_intensity"] = "100"
         for view in VIEWS[shape]:
             name = "%s_%s" % (shape, view)
             scene = {"id": "plate1", "name": ("P3" if a.source == "toolpaths" else "P4") + " multi-colour: " + name, "plate_index": 0, "source": a.source,
@@ -244,6 +254,9 @@ def main(argv):
                      "floor": {"type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45},
                      "materials": {"filaments": [{"slot": 1, "finish": "silk"}]},
                      "export": {"width": 1920, "height": 1080, "quality": "high", "format": "png"}}
+            if a.lights_off is not None:
+                scene["materials"]["lights_off"] = True
+                scene["materials"]["lights_off_ambient"] = a.lights_off
             if a.dark:
                 scene["preset_base"] = "dark_gradient"
                 scene["background"] = {"type": "vertical_gradient", "color1": "#3A3D42", "color2": "#0B0C0E"}

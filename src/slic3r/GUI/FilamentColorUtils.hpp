@@ -59,6 +59,11 @@ struct ColourMakeUp
     std::string split;      // filament_colour_split
     double      angle = 0.; // filament_colour_angle, degrees
     double      twist = 0.; // filament_colour_twist, degrees per metre
+    // Glow in the dark (G1), visual only.
+    int         glow = -1;                // filament_glow: -1 follows the preset, 0 off, 1 on
+    std::string glowColour;               // filament_glow_colour: "#RRGGBB", empty = a vibrant version of the filament's colour
+    double      glowIntensity = 100.;     // filament_glow_intensity, percent; for the whole project, not this slot
+    bool        glowSuggested = false;    // not stored: the preset looks like a glow filament (what -1 resolves to)
 };
 ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot);
 // Writes the make-up of one slot into a project config (resizing the three keys to the slot count).

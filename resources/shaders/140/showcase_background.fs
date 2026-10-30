@@ -28,6 +28,8 @@ uniform float env_rotation;
 uniform float env_exposure;
 // 1a: the post pass's tone curve, so the environment behind the model matches the model.
 uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
+// G1: 0 = lights on; otherwise the share of the light taken away (1 - the ambient level).
+uniform float scene_dim;
 
 in vec2 tex_coord;
 out vec4 out_color;
@@ -129,5 +131,6 @@ void main()
         vec4 t = textureLod(env_map, to_cube(env_rotate(dir)), clamp(blur, 0.0, 1.0) * env_max_lod);
         c = vec4(linear_to_srgb(tone_curve_map(t.rgb * t.a * 16.0 * env_exposure)), 1.0);
     }
-    out_color = vec4(c.rgb, 1.0);
+    // G1: the backdrop in the dark, in display space.
+    out_color = vec4(c.rgb * pow(max(1.0 - scene_dim, 0.0), 1.0 / 2.2), 1.0);
 }

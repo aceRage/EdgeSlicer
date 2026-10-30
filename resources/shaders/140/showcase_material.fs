@@ -29,6 +29,11 @@
 //   surfaces without a slice. They exist only in the "showcase_material_mc" program (see
 //   mc_mesh_albedo()); with no coextruded slot the plain program draws, unchanged.
 //
+// - G1: glow-in-the-dark filaments (libslic3r/Showcase/GlowFilament.hpp). With the scene's lights off
+//   (scene_dim > 0) every surface keeps only 1 - scene_dim of the light, and a glow slot adds its glow
+//   colour (glow_emission()) on top, scaled by the project-wide glow_intensity, through the same HDR
+//   post pass. scene_dim = 0 is the plain material, so a program that never sets it is unchanged.
+//
 // Optional: when it does not compile the Showcase canvas draws its objects with phong as in S1.
 
 uniform vec4 uniform_color;          // the filament colour, sRGB (GLModel sets it)
@@ -42,6 +47,8 @@ uniform float mat_clearcoat;
 uniform float mat_alpha;
 uniform float mat_line_shade;
 uniform float mat_fiber_noise;
+// G1: the slot drawn, as glow_emission() reads it (0 = no glow).
+uniform vec4  glow_slot;
 
 uniform vec3  camera_position;       // world
 uniform float exposure;              // linear multiplier (2^EV); not used with hdr_output
@@ -105,6 +112,11 @@ uniform float       env_intensity;
 uniform float       env_rotation;    // radians around +Z
 uniform vec3        env_sh[9];
 
+// G1: 0 = the lights are on; otherwise the share of the light taken away (1 - the ambient level).
+uniform float scene_dim;
+// G1: the project-wide glow intensity, 1 = 100%.
+uniform float glow_intensity;
+
 vec3 srgb_to_linear(vec3 c)
 {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
@@ -156,6 +168,36 @@ vec3 tone_filmic(vec3 c)
 }
 
 vec3 tone_curve_map(vec3 c) { return tone_curve == 1 ? tone_filmic(c) : tone_map(c); }
+
+// --- glow in the dark (G1) -----------------------------------------------------------------------
+
+// The more vibrant version of an sRGB colour: the same hue, saturation s + (1 - s) * 0.5, value
+// v + (1 - v) * 0.8; a grey glows phosphor green. GlowFilament.hpp vibrant() with the same constants
+// (SAT_LIFT, VAL_LIFT, GREY_SAT, GREY_GLOW).
+vec3 glow_vibrant(vec3 c)
+{
+    c = clamp(c, 0.0, 1.0);
+    float mx = max(c.r, max(c.g, c.b));
+    float mn = min(c.r, min(c.g, c.b));
+    float s = mx > 0.0 ? (mx - mn) / mx : 0.0;
+    if (s < 0.08)
+        return vec3(124.0 / 255.0, 1.0, 107.0 / 255.0);
+    float s2 = s + (1.0 - s) * 0.5;
+    float v2 = mx + (1.0 - mx) * 0.8;
+    return v2 * (vec3(1.0 - s2) + s2 * ((c - vec3(mn)) / (mx - mn)));
+}
+
+// What a glow slot emits, linear. glow.x: 0 not a glow slot, 1 the vibrant version of base_srgb (the
+// filament's own colour as drawn, so a split slot glows in each of its colours), 2 the explicit colour
+// in glow.yzw (linear).
+vec3 glow_emission(vec4 glow, vec3 base_srgb)
+{
+    if (glow.x < 0.5)
+        return vec3(0.0);
+    if (glow.x < 1.5)
+        return srgb_to_linear(glow_vibrant(base_srgb)) * glow_intensity;
+    return glow.yzw * glow_intensity;
+}
 
 // --- environment ---------------------------------------------------------------------------------
 
@@ -535,6 +577,8 @@ void main()
     if (mc_slot >= 0 && mc_slot < 16 && mc_count(mc_slot) > 1)
         albedo = mc_mesh_albedo(n, !gl_FrontFacing && build_clip_z < 1e9);
 #endif
+    // G1: what the slot shines with the lights off (nothing otherwise), from the colour drawn here.
+    vec3 glow_light = scene_dim > 0.0 ? glow_emission(glow_slot, linear_to_srgb(albedo)) : vec3(0.0);
 
     // Layer lines: tilt the normal with the slope of a rounded bead and darken the groove between
     // two beads; only on walls (wall-ness 1 - |n.z|).
@@ -578,7 +622,7 @@ void main()
     shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_shadow(n),
                    diffuse, specular);
 
-    vec3 lit = diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5);
+    vec3 lit = (diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5)) * (1.0 - scene_dim) + glow_light;
 
     // Translucent: the body lets light through, the rim reflects (Fresnel edge brightening).
     float n_dot_v = max(dot(n, v), 1e-4);

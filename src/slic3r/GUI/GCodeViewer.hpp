@@ -11,6 +11,7 @@
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "IMSlider.hpp"
 #include "GLModel.hpp"
 #include "I18N.hpp"
@@ -327,6 +328,21 @@ private:
     void refresh_preview_multicolour_table();
     void apply_preview_multicolour();
     bool preview_multicolour_view() const;
+    // Glow in the dark G1 (tests/design_multicolour_filament_view.md section 10): the legend's "Lights off
+    // (glow)" toggle, shown in the Tool view when a slot the G-code uses glows. Session only, off by default.
+    // Preview has no shader of its own for it: the tool colours (and the split slots' table) are swapped
+    // for their lights-off versions on the CPU and put back when the toggle goes off.
+    bool                      m_preview_lights_off = false;
+    bool                      m_preview_lights_applied = false;     // m_preview_saved_tool_colors is the palette to put back
+    std::string               m_preview_lights_key;                 // what the applied colours were made from
+    libvgcode::Palette        m_preview_saved_tool_colors;
+    std::string               m_preview_glow_signature;
+    std::vector<Glow::Slot>   m_preview_glow_slots;
+    float                     m_preview_glow_intensity = 1.f;
+    bool                      m_preview_has_glow = false;           // a slot the G-code uses glows
+    bool preview_glow_view() const;
+    void refresh_preview_glow();
+    void apply_preview_lights_off();
 
 public:
     GCodeViewer();

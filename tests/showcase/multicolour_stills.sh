@@ -7,6 +7,7 @@
 #
 #   sh tests/showcase/multicolour_stills.sh <install dir> <template.3mf> <out dir> [--size px] [--angle deg]
 #                                           [--photos dir] [--golden dir] [--mesh] [--compare dir] [--dark]
+#                                           [--glow] [--lights-off [ambient]]
 #     <template.3mf>  a project 3MF with project settings (its printer and process are used), e.g. the
 #                     U1 project tests/data/support_corpus/onepart_group.3mf, as golden.sh uses (an H2C
 #                     project slices on the command line but not in the hidden render instance)
@@ -18,6 +19,8 @@
 #     --compare       stills of the same names to show beside these in index.html (e.g. P3's
 #                     tests/p0_multicolour_cc1/p3_stills next to --mesh stills)
 #     --dark          the dark studio backdrop (the stills are otherwise on Studio white)
+#     --glow          glow G1: slot 1 glows (the vibrant version of its colours)
+#     --lights-off    glow G1: the scene's lights out; the optional ambient (default 0.05) is the light left
 #
 # Writes <out>/<shape>_<view>.png (+ .log, .report.json) and <out>/index.html.
 
@@ -31,6 +34,7 @@ GOLDEN=
 MESH=
 COMPARE=
 DARK=
+FIXARGS=
 ARGS=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -41,7 +45,13 @@ while [ $# -gt 0 ]; do
     --mesh) MESH=1; shift ;;
     --compare) COMPARE=$2; shift 2 ;;
     --dark) DARK=--dark; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    --glow) FIXARGS="$FIXARGS --glow"; shift ;;
+    --lights-off)
+        case "${2:-}" in
+        [0-9]*) FIXARGS="$FIXARGS --lights-off $2"; shift 2 ;;
+        *) FIXARGS="$FIXARGS --lights-off"; shift ;;
+        esac ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) ARGS="$ARGS $1"; shift ;;
     esac
 done
@@ -72,7 +82,7 @@ if [ -n "$MESH" ]; then
     SLICE=
     LABEL=P4
 fi
-"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" $DARK > "$OUT/fixtures.txt" || exit 2
+"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" $DARK $FIXARGS > "$OUT/fixtures.txt" || exit 2
 
 STATUS=0
 render() {   # exe datadir fixture out

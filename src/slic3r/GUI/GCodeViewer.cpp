@@ -1341,6 +1341,8 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
         m_viewer.set_dim_previous_layers_brightness(0.01f * float(std::clamp(brightness, 0, 99)));
     }
 
+    m_preview_lights_applied = false;   // glow G1: the palette set below is the real one again
+
     // avoid processing if called with the same gcode_result
     if (m_last_result_id == gcode_result.id && wxGetApp().is_editor() && skip_toolpaths == m_no_render_path) {
         //BBS: add logs
@@ -2852,6 +2854,76 @@ void GCodeViewer::load_shells(const Print& print, bool initialized, bool force_p
         % m_shells.print_id % m_shells.print_modify_count % object_count %m_shells.volumes.volumes.size();
 }
 
+// ---- Glow in the dark, G1: Preview's "Lights off (glow)" toggle ----
+
+bool GCodeViewer::preview_glow_view() const
+{
+    return m_viewer.get_view_type() == libvgcode::EViewType::Tool;
+}
+
+// Rebuilds the glow slots when a value they are made from changed, and says whether a slot the G-code
+// uses glows.
+void GCodeViewer::refresh_preview_glow()
+{
+    const PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || m_only_gcode_in_preview) {
+        m_preview_has_glow = false;
+        return;
+    }
+    std::string sig = Glow::signature(*bundle);
+    if (sig != m_preview_glow_signature) {
+        m_preview_glow_signature = std::move(sig);
+        m_preview_glow_slots     = Glow::slots_from_bundle(*bundle);
+        m_preview_glow_intensity = Glow::intensity_from_config(bundle->project_config);
+    }
+    m_preview_has_glow = Glow::any_glow(m_preview_glow_slots, m_viewer.get_used_extruders_ids());
+}
+
+void GCodeViewer::apply_preview_lights_off()
+{
+    constexpr float AMBIENT = 0.12f;   // the light the ordinary filaments keep: Preview lights them again per vertex
+    bool want = false;
+    if (m_preview_lights_off && !m_showcase.active && preview_glow_view()) {
+        refresh_preview_glow();
+        want = m_preview_has_glow;
+    }
+    const std::string key = want ? m_preview_glow_signature : std::string();
+    if (m_preview_lights_applied && (!want || key != m_preview_lights_key)) {
+        m_viewer.set_tool_colors(m_preview_saved_tool_colors);
+        m_preview_lights_applied = false;
+    }
+    if (!want)
+        return;
+    if (!m_preview_lights_applied) {
+        m_preview_saved_tool_colors = m_viewer.get_tool_colors();
+        libvgcode::Palette lit = m_preview_saved_tool_colors;
+        for (size_t i = 0; i < lit.size(); ++i) {
+            const Glow::Slot slot = i < m_preview_glow_slots.size() ? m_preview_glow_slots[i] : Glow::Slot();
+            std::array<int, 3> rgb;
+            if (MultiColour::parse_rgb8(Glow::lights_off_hex(MultiColour::format_hex8(lit[i][0], lit[i][1], lit[i][2]), slot,
+                                                              m_preview_glow_intensity, AMBIENT), rgb))
+                lit[i] = { uint8_t(rgb[0]), uint8_t(rgb[1]), uint8_t(rgb[2]) };
+        }
+        m_viewer.set_tool_colors(lit);
+        m_preview_lights_applied = true;
+        m_preview_lights_key     = key;
+    }
+    // The split slots' colours come from their table (P5), uploaded by apply_preview_multicolour() just
+    // before: put the lights-off version over it.
+    if (m_viewer.is_multicolour_preview_active()) {
+        const unsigned int program = m_viewer.get_base_color_program();
+        if (program != 0) {
+            MultiColour::UniformTable t = m_preview_mc_table;
+            Glow::apply_lights_off(t, m_preview_glow_slots, m_preview_glow_intensity, AMBIENT);
+            GLint curr_program = 0;
+            glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &curr_program));
+            glsafe(::glUseProgram(program));
+            glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
+            glsafe(::glUseProgram(GLuint(curr_program)));
+        }
+    }
+}
+
 void GCodeViewer::render_toolpaths()
 {
     const Camera& camera = wxGetApp().plater()->get_camera();
@@ -2862,6 +2934,7 @@ void GCodeViewer::render_toolpaths()
     m_viewer.set_tool_marker_scale_factor(m_tool_marker_fixed_screen_size ? 10.0f * m_tool_marker_size * camera.get_inv_zoom() : m_tool_marker_size);
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     apply_preview_multicolour();   // multi-colour P5: nothing unless the toggle is on and a split slot is used
+    apply_preview_lights_off();    // glow G1: nothing unless the legend's lights-off toggle is on and a slot glows
     m_viewer.render(converted_view_matrix, converted_projetion_matrix);
 
 #if ENABLE_NEW_GCODE_VIEWER_DEBUG
@@ -4390,6 +4463,21 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                              "does. Visual only: the G-code is not affected."), ImGui::GetFontSize() * 20.0f);
     };
 
+    // Glow G1: "Lights off (glow)" in the Tool view, only when a slot the G-code uses glows. Not kept:
+    // it is a way to look at the print, not a setting.
+    auto append_lights_off_item = [this, append_item, &imgui, predictable_icon_pos](float label_offset) {
+        if (!preview_glow_view() || m_only_gcode_in_preview)
+            return;
+        refresh_preview_glow();
+        if (!m_preview_has_glow)
+            return;
+        append_item(EItemType::None, ColorRGBA::GRAY(), { { _u8L("Lights off (glow)"), label_offset } }, true, predictable_icon_pos,
+                    m_preview_lights_off, [this]() { m_preview_lights_off = !m_preview_lights_off; });
+        if (ImGui::IsItemHovered())
+            imgui.tooltip(_L("Turn the lights out: filaments go dim and the glow-in-the-dark filaments shine in their glow "
+                             "colour. Set per filament in its colour dialog. Visual only."), ImGui::GetFontSize() * 20.0f);
+    };
+
     auto append_option_item = [this, append_item,current_time_mode, total_estimated_time, &format_compact_count, &format_percent, &format_distance](libvgcode::EOptionType type, std::vector<float> offsets) {
         const bool full_layout = offsets.size() > 4;
         auto option_stats = [this, current_time_mode, total_estimated_time, &format_compact_count, &format_percent, &format_distance, full_layout](libvgcode::EOptionType option_type) -> std::array<std::string, 4> {
@@ -4635,6 +4723,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             i++;
         }
         append_multicolour_item(offsets[0]);   // multi-colour P5
+        append_lights_off_item(offsets[0]);    // glow G1
         break;
     }
     case libvgcode::EViewType::ColorPrint: {
