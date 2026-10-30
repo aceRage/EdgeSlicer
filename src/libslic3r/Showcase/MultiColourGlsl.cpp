@@ -1,5 +1,7 @@
 #include "MultiColourGlsl.hpp"
 
+#include "../Config.hpp"
+#include "../Flow.hpp"
 #include "../PrintConfig.hpp"
 
 #include <algorithm>
@@ -118,6 +120,84 @@ const std::string &glsl_prelude()
         "  return mc_to_srgb3(mc_fragment_colour(look, role, section.x, section.y, right, dir, extruded_volume));\n"
         "}\n";
     return prelude;
+}
+
+const char *glsl_mesh_functions()
+{
+    return SLIC3R_MC_STRINGIFY(SLIC3R_MC_MESH_GLSL);
+}
+
+const std::string &glsl_mesh_prelude()
+{
+    static const std::string prelude = std::string(
+        "#define SHOWCASE_MULTICOLOUR 1\n"
+        "uniform vec4 mc_colors[64];\n"
+        "uniform vec4 mc_bounds[16];\n"
+        "uniform vec4 mc_params[16];\n"
+        "uniform vec4 mc_global;\n"
+        "uniform vec4 mc_global2;\n") +
+        glsl_functions() + "\n" + glsl_mesh_functions() + "\n";
+    return prelude;
+}
+
+std::string mesh_fragment_source(const std::string &fs)
+{
+    size_t start = 0;
+    // A byte order mark or blank lines may come first; the directive itself must still lead.
+    if (fs.compare(0, 3, "\xEF\xBB\xBF") == 0)
+        start = 3;
+    while (start < fs.size() && (fs[start] == '\r' || fs[start] == '\n' || fs[start] == ' ' || fs[start] == '\t'))
+        ++start;
+    if (fs.compare(start, 8, "#version") != 0)
+        return std::string();
+    const size_t eol = fs.find('\n', start);
+    if (eol == std::string::npos)
+        return std::string();
+    return fs.substr(0, eol + 1) + glsl_mesh_prelude() + fs.substr(eol + 1);
+}
+
+MeshSkin mesh_skin(const ConfigBase &config, int extruder)
+{
+    MeshSkin out;
+    double nozzle = 0.4;
+    if (const auto *n = config.option<ConfigOptionFloats>("nozzle_diameter"); n != nullptr && !n->values.empty()) {
+        const size_t i = size_t(std::clamp(extruder - 1, 0, int(n->values.size()) - 1));
+        if (std::isfinite(n->values[i]) && n->values[i] > 0.)
+            nozzle = n->values[i];
+    }
+    auto abs_value = [&config, nozzle](const char *key) {
+        const auto *o = config.option<ConfigOptionFloatOrPercent>(key);
+        const double v = o != nullptr ? o->get_abs_value(nozzle) : 0.;
+        return std::isfinite(v) && v > 0. ? v : 0.;
+    };
+    auto height = [&config](const char *key, double fallback) {
+        const auto *o = config.option<ConfigOptionFloat>(key);
+        return o != nullptr && std::isfinite(o->value) && o->value > 0. ? o->value : fallback;
+    };
+    auto spacing = [&](const char *key, FlowRole role, double layer_height) {
+        double w = abs_value(key);
+        if (w <= 0.)
+            w = abs_value("line_width");
+        if (w <= 0.)
+            w = Flow::auto_extrusion_width(role, float(nozzle));
+        // Flow::spacing(): a rounded bead overlaps its neighbour by h (1 - pi / 4).
+        const double s = w - layer_height * (1. - 0.25 * 3.14159265358979323846);
+        return float(s > 0.05 ? s : w);
+    };
+    const double layer_height = height("layer_height", 0.2);
+    out.top_spacing    = spacing("top_surface_line_width", frTopSolidInfill, layer_height);
+    out.bottom_spacing = spacing("internal_solid_infill_line_width", frSolidInfill, layer_height);
+    out.first_spacing  = spacing("initial_layer_line_width", frPerimeter, height("initial_layer_print_height", layer_height));
+    if (const ConfigOption *o = config.option("wall_direction"); o != nullptr && o->serialize() == "cw")
+        out.wall_dir = -1.f;
+    out.layer_height = float(layer_height);
+    // The band of walls a slope's layer has to step past before its skin shows.
+    int loops = 2;
+    if (const auto *o = config.option<ConfigOptionInt>("wall_loops"); o != nullptr)
+        loops = std::max(1, o->value);
+    out.wall_band = spacing("outer_wall_line_width", frExternalPerimeter, layer_height) +
+                    float(loops - 1) * spacing("inner_wall_line_width", frPerimeter, layer_height);
+    return out;
 }
 
 } // namespace MultiColour

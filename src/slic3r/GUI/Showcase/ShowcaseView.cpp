@@ -741,6 +741,8 @@ void ShowcaseView::build_panel()
     m_coextruded = new wxCheckBox(m_side, wxID_ANY, _L("Coextruded colours"));
     m_coextruded->SetToolTip(_L("Shows a dual- or tri-colour filament the way it prints: its colours side by side, with the "
                                 "proportions and rotation set in the filament's colour dialog. Off: one plain colour per filament. "
+                                "Before slicing the model shows an approximation: the walls are right, but the top stripes "
+                                "are not at the real line positions, and seams and ironing are not shown. "
                                 "Visual only; the G-code is not affected."));
     grid->AddSpacer(0);
     grid->Add(m_coextruded);

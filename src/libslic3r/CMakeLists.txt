@@ -169,6 +169,8 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
