@@ -68,6 +68,12 @@ private:
     void SelectChip(int index);
     void SetChipColour(int index, const std::string& hex);
     void RefreshMakeUp();
+    // Glow in the dark (G1): the section under the make-up.
+    void BuildGlowUi(wxWindow* parent, wxSizer* sizer, int contentMargin);
+    void SetGlowState(int state);
+    void PickGlowColour();
+    void ResetGlowColour();
+    void RefreshGlow();
     void OpenMoreColorDialog();
     void PlaceNearFilamentPanel();
     void UpdateRoundedShape();
@@ -112,6 +118,12 @@ private:
     wxSizer* _stripRow { nullptr };
     SpinInput* _angleSpin { nullptr };
     SpinInput* _twistSpin { nullptr };
+    // Glow in the dark (G1): Automatic / On / Off, the glow colour, the project-wide intensity.
+    std::array<wxWindow*, 3> _glowButtons { nullptr, nullptr, nullptr };
+    wxWindow* _glowChip { nullptr };
+    wxWindow* _glowColourReset { nullptr };
+    wxStaticText* _glowHint { nullptr };
+    SpinInput* _glowIntensitySpin { nullptr };
     ColourSwatchGrid* _palette { nullptr };
     ColourSwatchGrid* _recent { nullptr };
     int _activeChip { 0 };

@@ -275,6 +275,14 @@ ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot)
     if (const ConfigOptionFloats* twist = config->option<ConfigOptionFloats>("filament_colour_twist"))
         if (slot < twist->values.size())
             out.twist = twist->values[slot];
+    if (const ConfigOptionInts* glow = config->option<ConfigOptionInts>("filament_glow"))
+        if (slot < glow->values.size())
+            out.glow = std::clamp(glow->values[slot], -1, 1);
+    if (const ConfigOptionStrings* glowColour = config->option<ConfigOptionStrings>("filament_glow_colour"))
+        if (slot < glowColour->values.size())
+            out.glowColour = glowColour->values[slot];
+    if (const ConfigOptionFloat* intensity = config->option<ConfigOptionFloat>("filament_glow_intensity"))
+        out.glowIntensity = intensity->value;
     if (const ConfigOptionFloats* dwell = config->option<ConfigOptionFloats>("filament_gradient_dwell"))
         if (slot < dwell->values.size())
             out.dwell = dwell->values[slot];
@@ -305,6 +313,16 @@ void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp
     split->values[slot] = makeUp.split;
     angle->values[slot] = makeUp.angle;
     twist->values[slot] = makeUp.twist;
+
+    auto* glow = config.option<ConfigOptionInts>("filament_glow", true);
+    auto* glowColour = config.option<ConfigOptionStrings>("filament_glow_colour", true);
+    if (glow->values.size() < size)
+        glow->values.resize(size, -1);
+    if (glowColour->values.size() < size)
+        glowColour->values.resize(size);
+    glow->values[slot] = std::clamp(makeUp.glow, -1, 1);
+    glowColour->values[slot] = makeUp.glowColour;
+    config.set_key_value("filament_glow_intensity", new ConfigOptionFloat(std::clamp(makeUp.glowIntensity, 0., 300.)));
     dwell->values[slot] = makeUp.dwell;
     transition->values[slot] = makeUp.transition;
 }

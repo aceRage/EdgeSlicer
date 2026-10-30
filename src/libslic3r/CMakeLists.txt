@@ -119,6 +119,8 @@ set(lisbslic3r_sources
     Showcase/MultiColourFilament.hpp
     Showcase/MultiColourGlsl.cpp
     Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp

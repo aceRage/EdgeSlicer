@@ -11,6 +11,7 @@
 #include "wxExtensions.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Showcase/MultiColourFilament.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 
 #include <ColorSpaceConvert.hpp>
 #include <boost/log/trivial.hpp>
@@ -1259,12 +1260,163 @@ void FilamentColorDialog::BuildMakeUpUi(wxWindow* parent, wxSizer* sizer, int ma
     sizer->AddSpacer(FromDIP(8));
     sizer->Add(twistRow, 0, wxLEFT | wxRIGHT, margin);
 
+    BuildGlowUi(parent, sizer, margin);
+
     wxStaticText* note = makeLabel(_L("Visual only: changes how the print looks in Showcase and Preview. The G-code is not affected."),
                                    wxFONTWEIGHT_NORMAL);
     note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#4A4A4A")));
     note->Wrap(contentWidth);
     sizer->AddSpacer(FromDIP(8));
     sizer->Add(note, 0, wxLEFT | wxRIGHT, margin);
+}
+
+// ---- Glow in the dark (G1) ----
+
+void FilamentColorDialog::BuildGlowUi(wxWindow* parent, wxSizer* sizer, int margin)
+{
+    const wxColour textColour = StateColor::darkModeColorFor(wxColour("#242424"));
+    auto makeLabel = [&](const wxString& text, wxFontWeight weight)
+    {
+        wxStaticText* label = new wxStaticText(parent, wxID_ANY, text);
+        label->SetFont(DialogFont(weight));
+        label->SetForegroundColour(textColour);
+        BindDragWindow(label);
+        return label;
+    };
+    auto makeButton = [&](const wxString& text, int width)
+    {
+        Button* button = new Button(parent, text, wxEmptyString, wxBORDER_NONE, 0, wxID_ANY);
+        const wxSize buttonSize(FromDIP(width), FromDIP(26));
+        button->SetMinSize(buttonSize);
+        button->SetSize(buttonSize);
+        button->SetCornerRadius(FromDIP(4));
+        button->SetBorderWidth(FromDIP(1));
+        button->SetBorderColorNormal(wxColour("#D1D5DC"));
+        button->SetFont(DialogFont(wxFONTWEIGHT_NORMAL));
+        return button;
+    };
+
+    sizer->AddSpacer(FromDIP(14));
+    sizer->Add(makeLabel(_L("Glow in the dark"), wxFONTWEIGHT_MEDIUM), 0, wxLEFT | wxRIGHT, margin);
+
+    // Automatic follows the preset (a name or type with "Glow"); On and Off override it.
+    wxBoxSizer* stateRow = new wxBoxSizer(wxHORIZONTAL);
+    const struct { const char* label; int state; } states[] = { { "Automatic", -1 }, { "On", 1 }, { "Off", 0 } };
+    for (size_t i = 0; i < 3; ++i)
+    {
+        Button* button = makeButton(_L(states[i].label), i == 0 ? 84 : 56);
+        const int state = states[i].state;
+        button->SetToolTip(state < 0 ? _L("Glows when the filament preset is a glow filament (its name or type contains \"Glow\").") :
+                           state > 0 ? _L("This filament glows in the dark.") : _L("This filament does not glow."));
+        button->Bind(wxEVT_BUTTON, [this, state](wxCommandEvent&) { SetGlowState(state); });
+        _glowButtons[i] = button;
+        stateRow->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+    }
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(stateRow, 0, wxLEFT | wxRIGHT, margin);
+
+    _glowHint = makeLabel(wxString(), wxFONTWEIGHT_NORMAL);
+    _glowHint->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#4A4A4A")));
+    sizer->AddSpacer(FromDIP(4));
+    sizer->Add(_glowHint, 0, wxLEFT | wxRIGHT, margin);
+
+    // The glow colour: the chip shows what it is now; click it to pick another, or go back to the
+    // vibrant version of the filament's own colour.
+    wxBoxSizer* colourRow = new wxBoxSizer(wxHORIZONTAL);
+    colourRow->Add(makeLabel(_L("Glow colour"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _glowChip = new MakeUpChip(parent, wxSize(FromDIP(34), FromDIP(26)), [this]() { PickGlowColour(); }, [this]() { PickGlowColour(); });
+    _glowChip->SetToolTip(_L("Click to choose the colour this filament glows in."));
+    colourRow->Add(_glowChip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    Button* reset = makeButton(_L("Vibrant"), 64);
+    reset->SetToolTip(_L("Glow in a more vibrant version of the filament's own colour (the default)."));
+    reset->SetBackgroundColorNormal(wxColour("#FFFFFF"));
+    reset->SetTextColorNormal(wxColour("#242424"));
+    reset->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ResetGlowColour(); });
+    _glowColourReset = reset;
+    colourRow->Add(reset, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(colourRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // One intensity for every glow filament of the project.
+    wxBoxSizer* intensityRow = new wxBoxSizer(wxHORIZONTAL);
+    intensityRow->Add(makeLabel(_L("Intensity"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _glowIntensitySpin = new SpinInput(parent, wxEmptyString, "%", wxDefaultPosition, wxSize(FromDIP(90), FromDIP(28)),
+                                       wxSP_ARROW_KEYS, 0, int(Glow::INTENSITY_MAX_PERCENT), 100, 10);
+    _glowIntensitySpin->SetToolTip(_L("How strongly all glow filaments shine with the lights off in Showcase and Preview. "
+                                      "This is one setting for the whole project, not for this filament."));
+    _glowIntensitySpin->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&)
+    {
+        if (!_syncingMakeUp)
+            _makeUp.glowIntensity = double(_glowIntensitySpin->GetValue());
+    });
+    intensityRow->Add(_glowIntensitySpin, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(intensityRow, 0, wxLEFT | wxRIGHT, margin);
+    RefreshGlow();
+}
+
+void FilamentColorDialog::SetGlowState(int state)
+{
+    _makeUp.glow = std::clamp(state, -1, 1);
+    RefreshGlow();
+}
+
+void FilamentColorDialog::PickGlowColour()
+{
+    std::string current = _makeUp.glowColour;
+    if (current.empty() && !_selection.colors.empty())
+        Glow::vibrant_hex(_selection.colors[size_t(std::clamp(_activeChip, 0, int(_selection.colors.size()) - 1))], current);
+    FilamentColourPickerDialog dialog(this, current.empty() ? std::string("#7CFF6B") : current);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+    const std::string normalized = FilamentColorUtils::NormalizeHexColor(dialog.Colour(), "");
+    if (normalized.empty())
+        return;
+    _makeUp.glowColour = normalized;
+    // Choosing a glow colour is meant to make the filament glow, unless it was switched off.
+    if (_makeUp.glow < 0 && !_makeUp.glowSuggested)
+        _makeUp.glow = 1;
+    RefreshGlow();
+}
+
+void FilamentColorDialog::ResetGlowColour()
+{
+    _makeUp.glowColour.clear();
+    RefreshGlow();
+}
+
+void FilamentColorDialog::RefreshGlow()
+{
+    if (_glowChip == nullptr)
+        return;
+    const int selected = _makeUp.glow < 0 ? 0 : (_makeUp.glow > 0 ? 1 : 2);
+    for (int i = 0; i < 3; ++i)
+    {
+        Button* button = static_cast<Button*>(_glowButtons[size_t(i)]);
+        const bool on = i == selected;
+        button->SetBackgroundColorNormal(on ? wxColour("#019687") : wxColour("#FFFFFF"));
+        button->SetTextColorNormal(on ? wxColour("#FFFFFF") : wxColour("#242424"));
+        button->Refresh();
+    }
+    const bool glows = _makeUp.glow < 0 ? _makeUp.glowSuggested : _makeUp.glow > 0;
+    if (_glowHint != nullptr)
+        _glowHint->SetLabel(_makeUp.glow >= 0 ? (glows ? _L("This filament glows in the dark.") : _L("This filament does not glow.")) :
+                            _makeUp.glowSuggested ? _L("Automatic: on, this preset is a glow filament.") :
+                                                    _L("Automatic: off, this preset is not a glow filament."));
+    std::string shown = _makeUp.glowColour;
+    if (shown.empty() && !_selection.colors.empty())
+        Glow::vibrant_hex(_selection.colors[size_t(std::clamp(_activeChip, 0, int(_selection.colors.size()) - 1))], shown);
+    if (!shown.empty())
+        static_cast<MakeUpChip*>(_glowChip)->SetChipColour(wxColour(shown));
+    if (_glowColourReset != nullptr)
+        _glowColourReset->Enable(!_makeUp.glowColour.empty());
+    if (_glowIntensitySpin != nullptr)
+    {
+        const bool syncing = _syncingMakeUp;
+        _syncingMakeUp = true;
+        _glowIntensitySpin->SetValue(int(std::lround(std::clamp(_makeUp.glowIntensity, 0., double(Glow::INTENSITY_MAX_PERCENT)))));
+        _syncingMakeUp = syncing;
+    }
 }
 
 // Reads the proportions for the current colours from the make-up (equal when resetSplit or unusable).
@@ -1476,6 +1628,7 @@ void FilamentColorDialog::RefreshMakeUp()
     if (_transitionSpin != nullptr)
         _transitionSpin->SetValue(static_cast<int>(std::lround(MultiColour::gradient_transition_mm(_makeUp.transition))));
     _syncingMakeUp = false;
+    RefreshGlow();
     if (_disc != nullptr)
         _disc->Refresh();
     if (_wall != nullptr)

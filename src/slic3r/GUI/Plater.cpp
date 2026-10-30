@@ -12936,6 +12936,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     "filament_colour_split",
                                     "filament_colour_angle",
                                     "filament_colour_twist",
+                                    "filament_glow",
+                                    "filament_glow_colour",
+                                    "filament_glow_intensity",
                                     "filament_gradient_dwell",
                                     "filament_gradient_transition"
                                 };

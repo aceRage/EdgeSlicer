@@ -307,6 +307,7 @@ TEST_CASE("The visual-only keys are defined, project-only and invisible to the s
 {
     const std::set<std::string> &keys = visual_only_option_keys();
     CHECK(keys == std::set<std::string>{ "filament_colour_split", "filament_colour_angle", "filament_colour_twist",
+                                         "filament_glow", "filament_glow_colour", "filament_glow_intensity",
                                          "filament_gradient_dwell", "filament_gradient_transition" });
     const DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
     for (const std::string &key : keys) {
@@ -314,7 +315,8 @@ TEST_CASE("The visual-only keys are defined, project-only and invisible to the s
         const ConfigOptionDef *def = print_config_def.get(key);
         REQUIRE(def != nullptr);
         CHECK(def->cli == ConfigOptionDef::nocli);
-        CHECK(def->default_value->is_vector());
+        // One value per slot, except the glow intensity, which is for the whole project (G1).
+        CHECK(def->default_value->is_vector() == (key != "filament_glow_intensity"));
         CHECK(is_visual_only_option(key));
         // Not part of the static PrintConfig: print_config_diffs and the placeholder parser never see them.
         CHECK_FALSE(FullPrintConfig::defaults().has(key));
@@ -336,6 +338,16 @@ TEST_CASE("The slot helpers keep the visual-only keys in step with the slots", "
         CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "", "", "" });
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 0., 0., 0. });
         cfg.option<ConfigOptionFloats>("filament_colour_twist")->values = { 1., 2., 3. };
+        // Glow (G1): new slots follow the preset (-1) and have no colour of their own; the project-wide
+        // intensity is not a slot vector and is left alone.
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ -1, -1, -1 });
+        CHECK(cfg.option<ConfigOptionStrings>("filament_glow_colour")->values == std::vector<std::string>{ "", "", "" });
+        CHECK_FALSE(cfg.has("filament_glow_intensity"));
+        cfg.option<ConfigOptionInts>("filament_glow")->values = { 1, 0, -1 };
+        visual_only_resize_slots(cfg, 2);
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, 0 });
+        visual_only_resize_slots(cfg, 3);
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, 0, -1 });
         visual_only_resize_slots(cfg, 2);
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 2. });
         visual_only_resize_slots(cfg, 4);
@@ -346,12 +358,22 @@ TEST_CASE("The slot helpers keep the visual-only keys in step with the slots", "
         cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "a", "b", "c" });
         cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 10., 20., 30. });
         cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 1., 2., 3. });
+        cfg.set_key_value("filament_glow", new ConfigOptionInts{ 1, 0, -1 });
+        cfg.set_key_value("filament_glow_colour", new ConfigOptionStrings{ "#112233", "", "#445566" });
+        cfg.set_key_value("filament_glow_intensity", new ConfigOptionFloat(150.));
         visual_only_move_slot(cfg, 0, 2);
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 0, -1, 1 });
+        CHECK(cfg.option<ConfigOptionStrings>("filament_glow_colour")->values == std::vector<std::string>{ "", "#445566", "#112233" });
+        CHECK(cfg.option<ConfigOptionFloat>("filament_glow_intensity")->value == 150.);
         CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "b", "c", "a" });
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 20., 30., 10. });
         visual_only_move_slot(cfg, 2, 0);
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 2., 3. });
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, 0, -1 });
         visual_only_erase_slot(cfg, 1);
+        CHECK(cfg.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, -1 });
+        CHECK(cfg.option<ConfigOptionStrings>("filament_glow_colour")->values == std::vector<std::string>{ "#112233", "#445566" });
+        CHECK(cfg.option<ConfigOptionFloat>("filament_glow_intensity")->value == 150.);
         CHECK(cfg.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "a", "c" });
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 30. });
         CHECK(cfg.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 3. });
@@ -377,9 +399,13 @@ TEST_CASE("The project's filament slots carry the visual-only keys through resiz
     project.option<ConfigOptionStrings>("filament_colour_split")->values = { "30|70", "40|60", "20|80" };
     project.option<ConfigOptionFloats>("filament_colour_angle")->values  = { 10., 20., 30. };
     project.option<ConfigOptionFloats>("filament_colour_twist")->values  = { 1., 2., 3. };
+    CHECK(project.option<ConfigOptionInts>("filament_glow")->values.size() == 3);
+    CHECK(project.option<ConfigOptionStrings>("filament_glow_colour")->values.size() == 3);
+    project.option<ConfigOptionInts>("filament_glow")->values = { 1, 0, -1 };
 
     // Delete the middle slot: the others keep their values.
     bundle.update_num_filaments(1);
+    CHECK(project.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, -1 });
     CHECK(project.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "20|80" });
     CHECK(project.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 10., 30. });
     CHECK(project.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 1., 3. });
@@ -534,6 +560,9 @@ TEST_CASE("The visual-only keys round-trip through a project 3MF", "[MultiColour
         cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
         cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
         cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
+        cfg.set_key_value("filament_glow", new ConfigOptionInts{ 1, 0 });
+        cfg.set_key_value("filament_glow_colour", new ConfigOptionStrings{ "#7CFF6B", "" });
+        cfg.set_key_value("filament_glow_intensity", new ConfigOptionFloat(150.));
         cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 7500., -1. });
         cfg.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 400., 0. });
         const Loaded3mf back = round_trip(cfg, "multicolour_keys.3mf");
@@ -543,6 +572,12 @@ TEST_CASE("The visual-only keys round-trip through a project 3MF", "[MultiColour
         CHECK(back.config.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "25|25|50" });
         CHECK(back.config.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 137., -45. });
         CHECK(back.config.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 90., 0. });
+        // Glow (G1) comes back the same way.
+        REQUIRE(back.config.has("filament_glow"));
+        CHECK(back.config.option<ConfigOptionInts>("filament_glow")->values == std::vector<int>{ 1, 0 });
+        CHECK(back.config.option<ConfigOptionStrings>("filament_glow_colour")->values == std::vector<std::string>{ "#7CFF6B", "" });
+        REQUIRE(back.config.has("filament_glow_intensity"));
+        CHECK(back.config.option<ConfigOptionFloat>("filament_glow_intensity")->value == 150.);
         REQUIRE(back.config.has("filament_gradient_dwell"));
         REQUIRE(back.config.has("filament_gradient_transition"));
         CHECK(back.config.option<ConfigOptionFloats>("filament_gradient_dwell")->values == std::vector<double>{ 7500., -1. });
@@ -557,6 +592,9 @@ TEST_CASE("The visual-only keys round-trip through a project 3MF", "[MultiColour
         const Loaded3mf back = round_trip(two_dual_slots(), "multicolour_nokeys.3mf");
         REQUIRE(back.loaded);
         CHECK_FALSE(back.config.has("filament_colour_split"));
+        CHECK_FALSE(back.config.has("filament_glow"));
+        CHECK_FALSE(back.config.has("filament_glow_colour"));
+        CHECK_FALSE(back.config.has("filament_glow_intensity"));
         const Filament a = from_config(back.config, 0);
         CHECK(a.n == 2);
         CHECK_THAT(a.proportion[0], WithinAbs(0.5, 1e-6));
@@ -571,6 +609,9 @@ TEST_CASE("Export Bambu 3MF drops the visual-only keys (D8)", "[MultiColour][Bam
     cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
     cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
     cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
+    cfg.set_key_value("filament_glow", new ConfigOptionInts{ 1, 0 });
+    cfg.set_key_value("filament_glow_colour", new ConfigOptionStrings{ "#7CFF6B", "" });
+    cfg.set_key_value("filament_glow_intensity", new ConfigOptionFloat(150.));
     cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 7500., -1. });
     cfg.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 400., 0. });
 

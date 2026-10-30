@@ -52,6 +52,10 @@ DynamicPrintConfig with_visual_keys(DynamicPrintConfig config)
     config.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
     config.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
     config.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
+    // Glow-in-the-dark (G1)
+    config.set_key_value("filament_glow", new ConfigOptionInts{ 1, 0 });
+    config.set_key_value("filament_glow_colour", new ConfigOptionStrings{ "#7CFF6B", "" });
+    config.set_key_value("filament_glow_intensity", new ConfigOptionFloat(150.));
     config.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 1500., -1. });
     config.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 300., 0. });
     return config;
@@ -63,6 +67,9 @@ DynamicPrintConfig with_other_visual_keys(DynamicPrintConfig config)
     config.set_key_value("filament_colour_split", new ConfigOptionStrings{ "55|45", "10|80|10" });
     config.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 0., 270. });
     config.set_key_value("filament_colour_twist", new ConfigOptionFloats{ -15., 720. });
+    config.set_key_value("filament_glow", new ConfigOptionInts{ -1, 1 });
+    config.set_key_value("filament_glow_colour", new ConfigOptionStrings{ "", "#FF00FF" });
+    config.set_key_value("filament_glow_intensity", new ConfigOptionFloat(20.));
     config.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 400., 12000. });
     config.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 0., 50. });
     return config;
@@ -180,7 +187,8 @@ TEST_CASE("Multi-colour keys: custom G-code cannot read them", "[MultiColour][Pl
 {
     // The same "Not a variable name" error as for a key that does not exist at all.
     const std::string templ = GENERATE(as<std::string>{}, "{filament_colour_angle[0]}", "{filament_colour_split[1]}",
-                                       "{filament_colour_twist[0]}", "{no_such_option_xyz[0]}");
+                                       "{filament_colour_twist[0]}", "{filament_glow[0]}", "{filament_glow_colour[1]}",
+                                       "{filament_glow_intensity}", "{no_such_option_xyz[0]}");
     CAPTURE(templ);
     DynamicPrintConfig config = with_visual_keys(two_multicolour_filaments());
     config.set_key_value("machine_start_gcode", new ConfigOptionString("; " + templ + "\n"));
