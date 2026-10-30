@@ -41,7 +41,7 @@ HpoGeometry hpo_geometry(const ModelObject &obj, const DynamicPrintConfig &full_
 {
     HpoGeometry g;
     const float max_z = float(obj.max_z());
-    const SlicingParameters sp = PrintObject::slicing_parameters(full_config, obj, max_z);
+    const SlicingParameters sp = PrintObject::slicing_parameters(full_config, obj, max_z, Vec3d::Ones());
     const std::vector<coordf_t> profile = obj.layer_height_profile.empty() ?
         layer_height_profile_from_ranges(sp, t_layer_config_ranges{}) :
         obj.layer_height_profile.get();
@@ -49,6 +49,12 @@ HpoGeometry hpo_geometry(const ModelObject &obj, const DynamicPrintConfig &full_
     g.layer_height = sp.layer_height;
     g.height       = max_z;
     return g;
+}
+
+bool hpo_is_sla()
+{
+    return wxGetApp().preset_bundle != nullptr &&
+           wxGetApp().preset_bundle->printers.get_selected_preset().printer_technology() == ptSLA;
 }
 
 // Physical + mixed filaments of the project.
@@ -94,7 +100,7 @@ wxString hpo_row_label(const ModelObject &obj, const HeightColourPattern &p, int
 void ObjectList::add_height_pattern_rows(const wxDataViewItem obj_item)
 {
     const int obj_idx = m_objects_model->GetIdByItem(obj_item);
-    if (obj_idx < 0 || obj_idx >= int(m_objects->size()) || printer_technology() == ptSLA)
+    if (obj_idx < 0 || obj_idx >= int(m_objects->size()) || hpo_is_sla())
         return;
     const ModelObject *mo = (*m_objects)[size_t(obj_idx)];
     if (mo->height_colour_patterns.empty())
@@ -135,7 +141,7 @@ void ObjectList::refresh_height_pattern_rows(int obj_idx)
 void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
 {
     Plater *plater = wxGetApp().plater();
-    if (plater == nullptr || wxGetApp().preset_bundle == nullptr || printer_technology() == ptSLA)
+    if (plater == nullptr || wxGetApp().preset_bundle == nullptr || hpo_is_sla())
         return;
 
     // Which objects: the selected ones for a new pattern, the one object for an edit.
@@ -256,7 +262,6 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
         MessageDialog ask(nullptr,
                           _L("The pattern overlaps height ranges these objects already have. Replace them?") + "\n" + clash_msg,
                           _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
-        ask.SetYesNoLabels(_L("Replace"), _L("Cancel"));
         if (ask.ShowModal() != wxID_YES)
             return;
     }
@@ -352,7 +357,6 @@ void ObjectList::height_pattern_reset(int obj_idx, int pattern_id)
         MessageDialog ask(nullptr,
                           _L("Resetting the pattern overlaps height ranges that were added by hand. Replace them?") + "\n" + hpo_range_list(clashes),
                           _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
-        ask.SetYesNoLabels(_L("Replace"), _L("Cancel"));
         if (ask.ShowModal() != wxID_YES)
             return;
     }
@@ -409,7 +413,7 @@ void ObjectList::show_height_pattern_menu(const wxDataViewItem &item)
 
 void ObjectList::check_height_patterns_after_load()
 {
-    if (wxGetApp().preset_bundle == nullptr || printer_technology() == ptSLA)
+    if (wxGetApp().preset_bundle == nullptr || hpo_is_sla())
         return;
 
     const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
@@ -446,7 +450,6 @@ void ObjectList::check_height_patterns_after_load()
     }
     msg += "\n\n" + _L("Reset the patterns to the current layer height? A pattern that uses a missing filament cannot be reset and stays as it is.");
     MessageDialog dlg(nullptr, msg, _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
-    dlg.SetYesNoLabels(_L("Reset"), _L("Keep as they are"));
     if (dlg.ShowModal() != wxID_YES)
         return;
     for (const Issue &i : issues)
