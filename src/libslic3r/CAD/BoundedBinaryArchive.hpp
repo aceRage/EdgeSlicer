@@ -1,0 +1,109 @@
+#ifndef slic3r_CAD_BoundedBinaryArchive_hpp_
+#define slic3r_CAD_BoundedBinaryArchive_hpp_
+
+// A cereal binary INPUT archive that knows how many bytes its stream holds, and refuses any
+// size tag (std::string, std::vector, std::map, ...) that claims more elements than there are
+// bytes left. Every element of every container in a recipe costs at least one byte on the wire,
+// so "size <= remaining bytes" is a bound no valid recipe can break, and it is checked BEFORE
+// the container resizes - a corrupt length can no longer ask for terabytes.
+//
+// Byte-for-byte the same format as cereal::BinaryInputArchive, so it reads everything
+// cereal::BinaryOutputArchive writes.
+
+#include <cereal/cereal.hpp>
+#include <cereal/archives/binary.hpp>
+
+#include <cstddef>
+#include <cstdint>
+#include <istream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+
+namespace Slic3r {
+
+// Thrown when a length or count in a recipe cannot be satisfied by the bytes that are left.
+// It is a CORRUPTION signal: the recipe reader lets it fail the whole load instead of treating
+// it like the end of an older, shorter record.
+struct RecipeLengthError : std::runtime_error
+{
+    explicit RecipeLengthError(const char* what = "length field exceeds the remaining data")
+        : std::runtime_error(what) {}
+};
+
+// Hard ceiling on the number of features in one recipe, far above any real design.
+constexpr uint64_t kMaxRecipeFeatures = 100000;
+// Lower bound on the bytes of one serialized feature. A feature writes well over a hundred
+// fields (a default one is several hundred bytes; a test pins that), so 64 is conservative for
+// every recipe version, and it lets a count be checked against the bytes actually present.
+constexpr uint64_t kMinFeatureRecordBytes = 64;
+
+class BoundedBinaryInputArchive
+    : public cereal::InputArchive<BoundedBinaryInputArchive, cereal::AllowEmptyClassElision>
+{
+public:
+    BoundedBinaryInputArchive(std::istream& stream, uint64_t total_bytes)
+        : cereal::InputArchive<BoundedBinaryInputArchive, cereal::AllowEmptyClassElision>(this)
+        , m_stream(stream), m_total(total_bytes) {}
+
+    void loadBinary(void* const data, std::streamsize size)
+    {
+        const auto read = m_stream.rdbuf()->sgetn(reinterpret_cast<char*>(data), size);
+        if (read > 0)
+            m_pos += uint64_t(read);
+        if (read != size)
+            throw cereal::Exception("Failed to read " + std::to_string(size) + " bytes from input stream! Read " +
+                                    std::to_string(read));
+    }
+
+    uint64_t remaining() const { return m_pos >= m_total ? 0 : m_total - m_pos; }
+
+    // Throws RecipeLengthError unless n elements of at least min_bytes_each fit in what is left.
+    void check_len(uint64_t n, uint64_t min_bytes_each = 1) const
+    {
+        if (n > remaining() / min_bytes_each)
+            throw RecipeLengthError();
+    }
+
+private:
+    std::istream& m_stream;
+    uint64_t      m_total;
+    uint64_t      m_pos{0};
+};
+
+template<class T>
+inline typename std::enable_if<std::is_arithmetic<T>::value, void>::type
+CEREAL_LOAD_FUNCTION_NAME(BoundedBinaryInputArchive& ar, T& t)
+{
+    ar.loadBinary(std::addressof(t), sizeof(t));
+}
+
+template<class T>
+inline void CEREAL_SERIALIZE_FUNCTION_NAME(BoundedBinaryInputArchive& ar, cereal::NameValuePair<T>& t)
+{
+    ar(t.value);
+}
+
+// The one place every container learns its size: check it before the container acts on it.
+template<class T>
+inline void CEREAL_SERIALIZE_FUNCTION_NAME(BoundedBinaryInputArchive& ar, cereal::SizeTag<T>& t)
+{
+    ar(t.size);
+    ar.check_len(static_cast<uint64_t>(t.size));
+}
+
+template<class T>
+inline void CEREAL_LOAD_FUNCTION_NAME(BoundedBinaryInputArchive& ar, cereal::BinaryData<T>& t)
+{
+    ar.loadBinary(t.data, static_cast<std::streamsize>(t.size));
+}
+
+} // namespace Slic3r
+
+// load_minimal (used by cereal for enums) finds the matching save_minimal through the output
+// archive paired with this input archive.
+namespace cereal { namespace traits { namespace detail {
+template<> struct get_output_from_input<Slic3r::BoundedBinaryInputArchive> { using type = cereal::BinaryOutputArchive; };
+}}}
+
+#endif // slic3r_CAD_BoundedBinaryArchive_hpp_
