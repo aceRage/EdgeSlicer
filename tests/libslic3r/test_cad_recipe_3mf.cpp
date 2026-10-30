@@ -161,6 +161,23 @@ std::string dangling_fillet_recipe()
     return blob;
 }
 
+// An Import whose BRep payload is junk text: cereal-valid, BRepTools::Read would not build a shape.
+std::string junk_import_recipe()
+{
+    CadDocument doc;
+    CadFeature  f;
+    f.type          = CadFeatureType::Import;
+    f.name          = "JunkImport";
+    f.imported_brep = "this is not a BRep";
+    doc.features.push_back(f);
+    const std::string blob = doc.serialize_recipe();
+    REQUIRE_FALSE(blob.empty());
+    reset_brep_from_string_calls();
+    REQUIRE(CadDocument::validate_recipe_bytes(blob));
+    REQUIRE(brep_from_string_calls() == 0);
+    return blob;
+}
+
 } // namespace
 
 TEST_CASE("CAD recipe round-trips through a project 3MF", "[CadRecipe][3mf]")
@@ -196,7 +213,7 @@ TEST_CASE("CAD recipe round-trips through a project 3MF", "[CadRecipe][3mf]")
     REQUIRE(loaded.cad_recipe == blob);
 
     CadDocument round;
-    REQUIRE(round.deserialize_recipe(loaded.cad_recipe));
+    REQUIRE(round.deserialize_recipe(loaded.cad_recipe.bytes()));
     REQUIRE(round.features.size() >= 2);
 }
 
@@ -270,7 +287,7 @@ TEST_CASE("A legacy SnapOrca_cad.bin recipe part still loads", "[CadRecipe][3mf]
     REQUIRE(loaded.objects.size() == 1);
     REQUIRE(loaded.cad_recipe == blob);
     CadDocument doc;
-    REQUIRE(doc.deserialize_recipe(loaded.cad_recipe));
+    REQUIRE(doc.deserialize_recipe(loaded.cad_recipe.bytes()));
 }
 
 TEST_CASE("orca_cad.bin wins over a legacy SnapOrca_cad.bin in the same archive", "[CadRecipe][3mf]")
@@ -322,6 +339,30 @@ TEST_CASE("A structurally valid recipe that would not rebuild is kept byte-for-b
     REQUIRE(load_project(file.string(), loaded));
     REQUIRE(loaded.objects.size() == 1);
     REQUIRE(loaded.cad_recipe == blob);
+
+    ScopedTemporaryFile again(".3mf");
+    REQUIRE(store_project(again.string(), loaded));
+    REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
+}
+
+TEST_CASE("An Import with junk BRep text is kept without calling BRepTools", "[CadRecipe][3mf]")
+{
+    prepare_temp_dir();
+    const std::string blob = junk_import_recipe();
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".3mf");
+    REQUIRE(store_project(file.string(), src));
+    REQUIRE(zip_entry(file.string(), "Metadata/orca_cad.bin") == blob);
+
+    reset_brep_from_string_calls();
+    Model loaded;
+    REQUIRE(load_project(file.string(), loaded));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.cad_recipe == blob);
+    REQUIRE(brep_from_string_calls() == 0);
 
     ScopedTemporaryFile again(".3mf");
     REQUIRE(store_project(again.string(), loaded));

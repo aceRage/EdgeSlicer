@@ -4411,9 +4411,15 @@ std::string brep_to_string(const TopoDS_Shape& s)
     return oss.str();
 }
 
+static int g_brep_from_string_calls = 0;
+
+void reset_brep_from_string_calls() { g_brep_from_string_calls = 0; }
+int  brep_from_string_calls() { return g_brep_from_string_calls; }
+
 TopoDS_Shape brep_from_string(const std::string& d)
 {
     if (d.empty()) return {};
+    ++g_brep_from_string_calls;
     std::istringstream iss(d);
     TopoDS_Shape s;
     BRep_Builder b;
@@ -4512,14 +4518,16 @@ static void rethrow_if_corrupt()
     }
 }
 
-// Structural parse only. Fills `doc`'s features/variables/origin from `blob` using the bounded
-// archive and the count/size caps. Does NOT recompute and does not run OCCT. Body names and
-// colours are returned through the optional out-params so deserialize_recipe can stamp them
-// after recompute() has rebuilt the bodies.
+// Structural parse. Fills `doc`'s features/variables/origin from `blob` using the bounded
+// archive and the count/size caps. Does NOT recompute. When parse_only, Import BRep strings
+// are read as text and BRepTools::Read is skipped (no OCCT on file-supplied solids). Body
+// names and colours are returned through the optional out-params so deserialize_recipe can
+// stamp them after recompute() has rebuilt the bodies.
 static bool parse_recipe_blob(CadDocument&                                  doc,
                               const std::string&                            blob,
                               std::map<uint32_t, std::string>*              named_out,
-                              std::map<uint32_t, std::array<float, 4>>*     colours_out)
+                              std::map<uint32_t, std::array<float, 4>>*     colours_out,
+                              bool                                          parse_only)
 {
     doc.error.clear();
     try {
@@ -4529,7 +4537,7 @@ static bool parse_recipe_blob(CadDocument&                                  doc,
         // check_len, and every string/vector/map size inside a record by the archive itself (see
         // BoundedBinaryArchive.hpp) - so a corrupt blob fails cleanly instead of asking for a
         // multi-gigabyte buffer.
-        BoundedBinaryInputArchive ar(iss, blob.size());
+        BoundedBinaryInputArchive ar(iss, blob.size(), parse_only);
         auto check_len = [&](uint64_t n, uint64_t min_bytes_each) { ar.check_len(n, min_bytes_each); };
         auto check_count = [&](uint64_t n, uint64_t min_bytes_each) {
             if (n > kMaxRecipeFeatures)
@@ -4574,7 +4582,7 @@ static bool parse_recipe_blob(CadDocument&                                  doc,
                 CadFeature f;
                 try {
                     std::istringstream fs(buf);
-                    BoundedBinaryInputArchive fa(fs, len);
+                    BoundedBinaryInputArchive fa(fs, len, parse_only);
                     fa(f);
                 } catch (...) {
                     rethrow_if_corrupt();
@@ -4673,7 +4681,7 @@ static bool parse_recipe_blob(CadDocument&                                  doc,
 bool CadDocument::validate_recipe_bytes(const std::string& blob, std::string* error)
 {
     CadDocument tmp;
-    const bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr);
+    const bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr, true);
     if (error != nullptr)
         *error = tmp.error;
     return ok;
@@ -4683,7 +4691,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
 {
     std::map<uint32_t, std::string>          named;
     std::map<uint32_t, std::array<float, 4>> colours;
-    if (!parse_recipe_blob(*this, blob, &named, &colours))
+    if (!parse_recipe_blob(*this, blob, &named, &colours, false))
         return false;
     // AFTER the rebuild, never before: recompute() replaces the bodies vector wholesale.
     const bool ok = recompute();

@@ -3,6 +3,7 @@
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/CAD/BoundedBinaryArchive.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/CAD/GeometryEngine.hpp"   // FaceGroup
 #include "libslic3r/Color.hpp"            // ColorRGBA (per-body display colour override)
@@ -36,6 +37,14 @@ enum class ExtrudeEnd { Blind, Symmetric, TwoSided, ThroughAll, UpToFace, UpToVe
 // inline cereal save()/load() can resolve these non-dependent calls).
 std::string brep_to_string(const TopoDS_Shape& s);
 TopoDS_Shape brep_from_string(const std::string& d);
+// Test hook: times brep_from_string actually called BRepTools::Read (empty input does not count).
+void reset_brep_from_string_calls();
+int  brep_from_string_calls();
+
+// CadFeature::load / load_flat_v4 ask the archive whether this is a parse-only check.
+template<class Archive>
+inline bool recipe_parse_only(Archive&) { return false; }
+inline bool recipe_parse_only(BoundedBinaryInputArchive& ar) { return ar.parse_only(); }
 
 struct CadFeature {
     CadFeatureType type{CadFeatureType::Sketch};
@@ -80,6 +89,10 @@ struct CadFeature {
     // other body. TopoDS_Shape is a cheap handle, so copying it through recompute/checkpoint
     // snapshots is cheap. Saved with the recipe as a BRep string (see save()/load()).
     TopoDS_Shape imported_solid;
+    // Wire-form BRep text for Import. save() writes this when imported_solid is null (so a
+    // parse-only load can still round-trip junk). load() always fills it from the cereal
+    // string; BRepTools::Read into imported_solid is skipped when the archive is parse-only.
+    std::string  imported_brep;
 
     // Non-destructive placement transform for imported_regions (Text/SVG),
     // applied at display + extrude time as
@@ -373,7 +386,9 @@ struct CadFeature {
 
     template<class Archive>
     void save(Archive& ar) const {
-        std::string brep = (type == CadFeatureType::Import) ? brep_to_string(imported_solid) : std::string();
+        std::string brep;
+        if (type == CadFeatureType::Import)
+            brep = imported_solid.IsNull() ? imported_brep : brep_to_string(imported_solid);
         ar(type, name, enabled, shape, plane, width, height, radius,
            profile, entities, constraints, entity_constraints, imported_regions,
            import_offset, import_scale_x, import_scale_y, import_on_face, import_face_body,
@@ -456,7 +471,9 @@ struct CadFeature {
                dressup_edges,
                text_string, text_font, text_height,
                revolve_axis_entity);
-        imported_solid = brep_from_string(brep);
+        imported_brep = std::move(brep);
+        if (!recipe_parse_only(ar))
+            imported_solid = brep_from_string(imported_brep);
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature
     // length, so it can only be read with exactly the field list it was written with; reading it
@@ -500,7 +517,9 @@ struct CadFeature {
                expr,
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges);
-        imported_solid = brep_from_string(brep);
+        imported_brep = std::move(brep);
+        if (!recipe_parse_only(ar))
+            imported_solid = brep_from_string(imported_brep);
     }
 
 };
@@ -773,10 +792,11 @@ public:
     static constexpr uint32_t ORCA_CAD_RECIPE_VERSION = 6;
     std::string serialize_recipe() const;
     bool deserialize_recipe(const std::string& blob);
-    // Structural parse of a recipe blob. Uses BoundedBinaryInputArchive and the feature/length
-    // caps; does NOT recompute and does not run OCCT. true = the bytes are well-formed enough
-    // to keep on Model::cad_recipe; false + *error = drop them. A recipe that would fail
-    // recompute() on this build still returns true so it can round-trip on the next save.
+    // Structural parse of a recipe blob. Uses BoundedBinaryInputArchive (parse_only) and the
+    // feature/length caps. Does NOT recompute and does NOT call BRepTools::Read: Import BRep
+    // strings are read as text and left unrestored. true = keep the bytes on Model::cad_recipe;
+    // false + *error = drop them. A recipe that would fail recompute() or fail to restore an
+    // Import solid on this build still returns true so it can round-trip on the next save.
     static bool validate_recipe_bytes(const std::string& blob, std::string* error = nullptr);
 
     // Export every body to a STEP file as native B-rep (not mesh). body_xforms is the

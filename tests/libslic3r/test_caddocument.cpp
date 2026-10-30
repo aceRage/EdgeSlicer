@@ -2321,6 +2321,26 @@ TEST_CASE("validate_recipe_bytes is parse-only", "[CadDocument]")
         REQUIRE_FALSE(rebuilt.deserialize_recipe(blob));
         REQUIRE_FALSE(rebuilt.error.empty());
     }
+    SECTION("junk Import BRep parses without BRepTools::Read") {
+        CadDocument doc;
+        CadFeature  f;
+        f.type          = CadFeatureType::Import;
+        f.name          = "JunkImport";
+        f.imported_brep = "this is not a BRep";
+        doc.features.push_back(f);
+        const std::string blob = doc.serialize_recipe();
+        reset_brep_from_string_calls();
+        std::string err;
+        REQUIRE(CadDocument::validate_recipe_bytes(blob, &err));
+        REQUIRE(err.empty());
+        REQUIRE(brep_from_string_calls() == 0);
+        CadDocument rebuilt;
+        reset_brep_from_string_calls();
+        rebuilt.deserialize_recipe(blob);
+        REQUIRE(brep_from_string_calls() >= 1);
+        REQUIRE(rebuilt.features.size() == 1);
+        REQUIRE(rebuilt.features.front().imported_solid.IsNull());
+    }
 }
 
 TEST_CASE("deserialize_recipe error is non-empty on every failure path", "[CadDocument]")
