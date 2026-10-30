@@ -59,9 +59,11 @@ struct ColourMakeUp
     std::string split;      // filament_colour_split
     double      angle = 0.; // filament_colour_angle, degrees
     double      twist = 0.; // filament_colour_twist, degrees per metre
+    double      dwell = -1.;      // filament_gradient_dwell, mm of filament per colour run (negative = the default)
+    double      transition = -1.; // filament_gradient_transition, mm of filament per colour change (negative = the default)
 };
 ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot);
-// Writes the make-up of one slot into a project config (resizing the three keys to the slot count).
+// Writes the make-up of one slot into a project config (resizing the five keys to the slot count).
 void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp& makeUp);
 
 } // namespace FilamentColorUtils
