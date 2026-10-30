@@ -45,6 +45,8 @@
 #include <TopAbs_Orientation.hxx>
 #include <exception>
 
+#include "libslic3r/BRep/OcctException.hpp"
+
 
 namespace Slic3r {
 
@@ -445,10 +447,8 @@ bool load_step_mesh(const char *path, TriangleMesh &mesh, double linear_defletio
         if (!load_step(path, &model, cancelled, linear_defletion, angle_defletion, false))
             return fail("the STEP file has no solids with faces");
     } catch (const Standard_Failure &e) {
-        const char *msg = e.GetMessageString();
-        if (msg == nullptr || *msg == 0)
-            msg = e.what();
-        return fail(std::string("OCCT failed while reading STEP: ") + (msg ? msg : "unknown error"));
+        const char *msg = occt_exception_message(e);
+        return fail(std::string("OCCT failed while reading STEP: ") + (*msg ? msg : "unknown error"));
     } catch (const std::exception &e) {
         return fail(e.what());
     }
