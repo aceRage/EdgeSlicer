@@ -53,6 +53,7 @@ wxString purpose_words(const std::string& purpose)
     if (purpose == "discovery") return _L("Printer discovery (UDP 2021, 1990)");
     if (purpose == "hub") return _L("Phone hub (TCP 13640-13659)");
     if (purpose == "flashforge") return _L("FlashForge printer search (UDP 18007)");
+    if (purpose == "mdns") return _L("Network printer search, mDNS (UDP 5353)");
     return _L("Phone camera video, go2rtc.exe (UDP and TCP 8555-8574)");
 }
 

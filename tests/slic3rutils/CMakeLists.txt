@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
+    creality_discovery_tests.cpp
     qidi_send_policy_tests.cpp
     slot_send_policy_tests.cpp
     printhost_error_tests.cpp

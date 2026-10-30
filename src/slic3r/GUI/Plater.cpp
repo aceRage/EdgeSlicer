@@ -255,6 +255,8 @@
 #include "filamentsync/SyncConfirmDialog.hpp"
 #include "filamentsync/SyncFilamentColorDialog.hpp"
 #include "ElegooCanvasUI.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
+#include "slic3r/Utils/CrealityPrintModel.hpp"
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include <chrono>
@@ -2256,7 +2258,15 @@ static wxString nozzle_type_key_to_label(const std::string& key)
 // Elegoo Centauri Carbon 1 on Elegoo Link reads its CANVAS into the same dialog
 // the Snapmaker path uses (Sidebar::show_canvas_sync_dialog).  Every other
 // vendor has nothing to sync from, so the button is hidden.
-enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas };
+enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog, ElegooCanvas, CrealityCFS };
+
+// A Creality K1/K2/SPARKX preset (CrealityPrintModel::preset_model_may_have_cfs). The saved-device
+// scan below only runs for these, so another vendor's preset never offers a CFS sync.
+static bool preset_supports_cfs(const DynamicPrintConfig &cfg)
+{
+    const ConfigOptionString *model = cfg.option<ConfigOptionString>("printer_model");
+    return model && CrealityPrintModel::preset_model_may_have_cfs(model->value);
+}
 
 static FilamentSyncTarget filament_sync_target_for_current_preset()
 {
@@ -2271,6 +2281,17 @@ static FilamentSyncTarget filament_sync_target_for_current_preset()
         return FilamentSyncTarget::BambuAms;
     if (current_printer_reads_canvas())
         return FilamentSyncTarget::ElegooCanvas;
+    if (preset_supports_cfs(cfg)) {
+        const auto *ht = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+        if (ht && ht->value == htCrealityPrint)
+            return FilamentSyncTarget::CrealityCFS;
+        try {
+            const std::string key = PrintHostDevices::model_key_for(pb->printers.get_edited_preset());
+            for (const PrintHostDevices::Device &d : PrintHostDevices::devices(key))
+                if (d.host_type == "crealityprint" && !d.address.empty())
+                    return FilamentSyncTarget::CrealityCFS;
+        } catch (...) {}
+    }
     return FilamentSyncTarget::None;
 }
 
@@ -3433,6 +3454,8 @@ Sidebar::Sidebar(Plater *parent)
             sync_ams_list();  // reports "select a printer in Device page" when none is connected
         else if (target == FilamentSyncTarget::ElegooCanvas)
             show_canvas_sync_dialog();
+        else if (target == FilamentSyncTarget::CrealityCFS)
+            show_cfs_sync_dialog();
         else
             show_sync_filament_dialog();
     });
@@ -9978,6 +10001,10 @@ void Sidebar::update_filament_sync_button()
         p->m_bpButton_sync_filament->SetToolTip(_L("Sync filaments from CANVAS"));
         sizer->Show(p->m_bpButton_sync_filament);
         break;
+    case FilamentSyncTarget::CrealityCFS:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Sync filaments from CFS"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
     default:
         sizer->Hide(p->m_bpButton_sync_filament);
         break;
@@ -10111,6 +10138,170 @@ void Sidebar::show_canvas_sync_dialog()
         return;
     }
     apply_machine_filament_sync(machineFilamentList, true);
+}
+
+// Creality K-series CFS into the same dialog the CANVAS/U1 path uses. parse_cfs_response /
+// match_filament_preset come from upstream CrealityPrintAgent; the project update is
+// apply_machine_filament_sync (MixedFilamentManager), not filament_is_mixed.
+void Sidebar::show_cfs_sync_dialog()
+{
+    if (!wxGetApp().plater())
+        return;
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle)
+        return;
+
+    std::string address;
+    {
+        const Preset &preset = preset_bundle->printers.get_edited_preset();
+        std::string   last;
+        try {
+            const std::string key = PrintHostDevices::model_key_for(preset);
+            last                  = PrintHostDevices::last_used_id(key);
+            for (const PrintHostDevices::Device &d : PrintHostDevices::devices(key)) {
+                if (d.host_type != "crealityprint" || d.address.empty())
+                    continue;
+                if (address.empty() || d.id == last)
+                    address = d.address;
+                if (d.id == last)
+                    break;
+            }
+        } catch (...) {}
+        if (address.empty()) {
+            const auto *ht = preset.config.option<ConfigOptionEnum<PrintHostType>>("host_type");
+            if (ht && ht->value == htCrealityPrint)
+                address = preset.config.opt_string("print_host");
+        }
+    }
+    if (address.empty()) {
+        SyncRichConfirmDialog dlg(this, _L("This printer has no address yet. Add one in its connection settings, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+
+    std::string       boxs;
+    std::string       info_err;
+    bool              reached = false;
+    const int         timeout_s = 2;
+    std::atomic<bool> done { false };
+    std::atomic<bool> cancel { false };
+    // Constructed after /info so the boxsInfo budget is not eaten by fetch_info.
+    std::unique_ptr<CrealityWsClient> session;
+    std::atomic<CrealityWsClient *>   session_ptr { nullptr };
+    std::thread                       worker([&] {
+        try {
+            std::string body;
+            if (CrealityPrint::fetch_info(address, body, info_err, timeout_s) && !cancel.load()) {
+                reached             = true;
+                const int budget_ms = std::max(1, timeout_s) * 1000;
+                session             = std::make_unique<CrealityWsClient>(budget_ms, budget_ms);
+                session_ptr.store(session.get());
+                if (cancel.load())
+                    session->cancel();
+                else
+                    boxs = CrealityPrint::query_boxes_info(address, timeout_s, session.get());
+            }
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "CFS sync: " << e.what();
+            info_err = e.what();
+        } catch (...) {}
+        session_ptr.store(nullptr);
+        done = true;
+    });
+    bool aborted = false;
+    {
+        wxProgressDialog progress(_L("CFS"), _L("Reading the CFS on the printer..."), 100, this,
+                                  wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT);
+        while (!done) {
+            if (!progress.Pulse()) {
+                cancel = true;
+                if (CrealityWsClient *s = session_ptr.load())
+                    s->cancel();
+                aborted = true;
+                break;
+            }
+            wxMilliSleep(80);
+        }
+    }
+    {
+        wxBusyCursor busy;
+        worker.join();
+    }
+    if (aborted)
+        return;
+    if (!reached) {
+        SyncRichConfirmDialog dlg(this,
+            format_wxstr(_L("The printer did not answer (%1%). Check that it is on and on the network."),
+                         from_u8(info_err.empty() ? std::string("no /info") : info_err)),
+            wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    const CrealityPrintModel::CfsParseResult parsed = CrealityPrintModel::parse_cfs_response(boxs);
+    if (!parsed.ok || parsed.box_count == 0) {
+        SyncRichConfirmDialog dlg(this,
+            parsed.ok ? _L("The printer reports no CFS attached. Load the filaments, then sync again.") :
+                        format_wxstr(_L("The printer did not answer (%1%). Check that it is on and on the network."),
+                                     from_u8(parsed.error.empty() ? std::string("no boxsInfo") : parsed.error)),
+            wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+
+    std::vector<CrealityPrintModel::FilamentPresetRef> refs;
+    for (const Preset &p : preset_bundle->filaments) {
+        CrealityPrintModel::FilamentPresetRef r;
+        r.name          = p.name;
+        r.filament_id   = p.filament_id;
+        r.type          = p.config.opt_string("filament_type", 0u);
+        r.vendor_name   = p.vendor ? p.vendor->name : p.config.opt_string("filament_vendor", 0u);
+        r.is_system     = p.is_system;
+        r.is_visible    = p.is_visible;
+        r.is_compatible = p.is_compatible;
+        refs.push_back(std::move(r));
+    }
+
+    std::vector<FilamentData> machineFilamentList;
+    int                       loaded = 0;
+    for (const CrealityPrintModel::CfsSlot &c : parsed.slots) {
+        if (c.external)
+            continue;
+        FilamentData fd;
+        fd.m_index = static_cast<unsigned int>(machineFilamentList.size());
+        if (c.loaded) {
+            ++loaded;
+            const std::string base = CrealityPrintModel::normalize_filament_type(c.filament_type);
+            fd.m_type              = base;
+            fd.m_vendor            = c.vendor;
+            const std::string id   = CrealityPrintModel::match_filament_preset(refs, c.vendor, c.brand_name, base);
+            fd.m_name              = c.brand_name.empty() ? (c.vendor.empty() ? base : c.vendor + " " + base) : c.brand_name;
+            if (!id.empty()) {
+                for (const auto &r : refs) {
+                    if (r.filament_id == id || r.name == id) {
+                        fd.m_name = extract_base_filament_name(r.name);
+                        break;
+                    }
+                }
+            }
+            if (!c.color_hex.empty())
+                fd.m_color = FilamentColor::FromColors({c.color_hex}, FilamentColorMode::Segment);
+        }
+        machineFilamentList.push_back(std::move(fd));
+    }
+    if (loaded == 0) {
+        SyncRichConfirmDialog dlg(this, _L("The CFS reports no loaded slots. Load the filaments, then sync again."), wxOK);
+        dlg.SetOKLabel(_L("Got it"));
+        dlg.CentreOnScreen();
+        dlg.ShowModal();
+        return;
+    }
+    apply_machine_filament_sync(machineFilamentList);
 }
 
 // The part of the sync both sources share: the colour-matching dialog, then the project's
