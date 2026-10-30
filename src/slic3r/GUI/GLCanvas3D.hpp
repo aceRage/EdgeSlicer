@@ -67,6 +67,9 @@ namespace GUI {
 class Bed3D;
 class PartPlateList;
 class FrameProfiler;
+#ifdef SLIC3R_CAD
+class DesignSketchTool;   // Design tab: interactive 2D sketch tool
+#endif
 
 class ShowcaseRenderer;
 
@@ -662,6 +665,24 @@ private:
     mutable GLToolbar m_assemble_view_toolbar;
     mutable IMReturnToolbar m_return_toolbar;
     mutable float m_paint_toolbar_width;
+    bool m_collapse_toolbar_enabled{true};
+    GLToolbar*                    m_collapse_toolbar{nullptr};
+    std::function<CollapseSide()> m_collapse_side;
+    bool m_plate_chrome_enabled{true};
+    // Design tab canvas: bed at printer home, CAD grid at the modelling origin. Default false
+    // leaves Prepare/Preview/Assemble untouched (CAD-OFF identical).
+    bool m_design_canvas{false};
+    bool m_show_bed{true};
+    bool m_sinking_contours_enabled{true};
+#ifdef SLIC3R_CAD
+    GLModel m_cad_grid_minor;
+    GLModel m_cad_grid_major;
+    BoundingBoxf m_cad_grid_bb;
+    Vec2d        m_cad_grid_center;
+    bool         m_cad_grid_valid{false};
+    DesignSketchTool* m_design_sketch_tool{nullptr};
+#endif
+    bool m_studio_lighting{false};
 
     //BBS: add canvas type for assemble view usage
     ECanvasType m_canvas_type;
@@ -1059,6 +1080,19 @@ public:
     void enable_assemble_view_toolbar(bool enable);
     void enable_return_toolbar(bool enable);
     void enable_separator_toolbar(bool enable);
+    void enable_collapse_toolbar(bool enable);
+    void set_collapse_toolbar(GLToolbar* toolbar, std::function<CollapseSide()> side);
+    void enable_plate_chrome(bool enable);
+    void set_design_canvas(bool b) { m_design_canvas = b; }
+    void set_show_bed(bool b) { m_show_bed = b; }
+    bool get_show_bed() const { return m_show_bed; }
+    void enable_sinking_contours(bool enable) { m_sinking_contours_enabled = enable; }
+    void set_studio_lighting(bool on) { m_studio_lighting = on; }
+#ifdef SLIC3R_CAD
+    void set_design_sketch_tool(DesignSketchTool* tool) { m_design_sketch_tool = tool; }
+    DesignSketchTool* get_design_sketch_tool() const { return m_design_sketch_tool; }
+    void zoom_to_box(const BoundingBoxf3& box) { _zoom_to_box(box); }
+#endif
     void enable_dynamic_background(bool enable);
     void enable_labels(bool enable) { m_labels.enable(enable); }
     void enable_slope(bool enable) { m_slope.enable(enable); }
@@ -1086,6 +1120,7 @@ public:
     bool  is_collapse_toolbar_on_left() const;
     float get_collapse_toolbar_width() const;
     float get_collapse_toolbar_height() const;
+    float get_canvas_toolbar_right() const;
 
     void update_volumes_colors_by_extruder();
 
@@ -1608,6 +1643,13 @@ private:
     bool _deactivate_orient_menu();
     //BBS: add _deactivate_layersediting_menu
     bool _deactivate_layersediting_menu();
+
+    GLToolbar& collapse_toolbar() const;
+    CollapseSide collapse_side() const;
+    bool is_bed_visible() const;
+#ifdef SLIC3R_CAD
+    void _render_cad_grid(const Transform3d& view_matrix, const Transform3d& projection_matrix);
+#endif
 
     // BBS FIXME
     float get_overlay_window_width() { return 0; /*LayersEditing::get_overlay_window_width();*/ }

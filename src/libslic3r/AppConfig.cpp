@@ -128,6 +128,21 @@ void AppConfig::set_defaults()
         if (get("auto_slice_after_change").empty())
             set_bool("auto_slice_after_change", false);
 
+#ifdef SLIC3R_CAD
+        // Experimental Design tab. Preferences checkbox is P4; the key still defaults off so a
+        // CAD-ON build matches CAD-OFF until the user opts in (or a test sets the key).
+        if (get("enable_cad_feature").empty())
+            set_bool("enable_cad_feature", false);
+        if (get("auto_close_sketch_loops").empty())
+            set_bool("auto_close_sketch_loops", true);
+        if (get("design_connector_face_glyph").empty())
+            set_bool("design_connector_face_glyph", true);
+        if (get("design_show_origin").empty())
+            set_bool("design_show_origin", false);
+        if (get("design_show_bed").empty())
+            set_bool("design_show_bed", true);
+#endif
+
         if (get("auto_slice_change_delay_seconds").empty())
             set("auto_slice_change_delay_seconds", "1");
 

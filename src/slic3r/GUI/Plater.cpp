@@ -1,4 +1,7 @@
 #include "Plater.hpp"
+#ifdef SLIC3R_CAD
+#include "slic3r/GUI/CAD/DesignPanel.hpp"
+#endif
 #include "libslic3r/StartupProfile.hpp"
 #include "AccountStatus.hpp"
 #include "MixedFilamentDialog.hpp"
@@ -12696,6 +12699,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     std::vector<size_t> empty_result;
     bool dlg_cont = true;
     bool is_user_cancel = false;
+#ifdef SLIC3R_CAD
+    bool loaded_cad_recipe = false;
+#else
+    const bool loaded_cad_recipe = false;
+#endif
     bool translate_old = false;
     int current_width = 0, current_depth = 0, current_height = 0;
     // Ultra "Keep my printer": the switch back to the preferred printer is deferred until the
@@ -13790,6 +13798,19 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 q->model().InitializeAssemblyPositions(loadedObjects);
             }
 
+#ifdef SLIC3R_CAD
+            // load_model_objects transfers meshes; Model::load_from already moves cad_recipe on
+            // the project-replacing path. Re-assign when that did not run so a 3MF with
+            // Metadata/orca_cad.bin still hydrates the Design tab. Decode stays in DesignPanel
+            // via CadDocument::deserialize_recipe.
+            if (is_project_file) {
+                if (q->model().cad_recipe.empty() && !model.cad_recipe.empty())
+                    q->model().cad_recipe = model.cad_recipe;
+                loaded_cad_recipe = !q->model().cad_recipe.empty();
+                if (DesignPanel* design = DesignPanel::if_built())
+                    design->hydrate_from_model();
+            }
+#endif
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", finished load_model_objects");
             wxString msg = wxString::Format(_L("Loading file: %s"), from_path(real_filename));
             dlg_cont     = dlg.Update(progress_percent, msg);
@@ -13957,7 +13978,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     //    q->model().stl_design_country = "";
     //}
 
-    if (tolal_model_count <= 0 && !q->m_exported_file) {
+    bool cad_can_show = false;
+#ifdef SLIC3R_CAD
+    cad_can_show = wxGetApp().is_enable_cad_feature();
+#endif
+    if (tolal_model_count <= 0 && !q->m_exported_file && (!loaded_cad_recipe || !cad_can_show)) {
         dlg.Hide();
         if (!is_user_cancel) {
             MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxOK | wxICON_WARNING);
@@ -14518,6 +14543,13 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     // Stop and reset the Print content.
     this->background_process.reset();
     model.clear_objects();
+#ifdef SLIC3R_CAD
+    // F3: the recipe is Design-document-owned, not the plate mesh. New Project / Open Project
+    // drop it with the project; deleting or cutting a plate object does not.
+    model.cad_recipe.clear();
+    if (DesignPanel* design = DesignPanel::if_built())
+        design->clear_document(); // Orca #16997: New Project must not keep the previous tree
+#endif
     assemble_view->get_canvas3d()->reset_explosion_ratio();
     update();
 
@@ -18743,6 +18775,10 @@ void Plater::priv::unbind_canvas_event_handlers()
 
     if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
         showcase_view->get_canvas3d()->unbind_event_handlers();
+#ifdef SLIC3R_CAD
+    if (DesignPanel* design = DesignPanel::if_built())
+        design->unbind_canvas_event_handlers();
+#endif
 }
 
 void Plater::priv::reset_canvas_volumes()
@@ -18755,6 +18791,10 @@ void Plater::priv::reset_canvas_volumes()
 
     if (showcase_view != nullptr && showcase_view->get_canvas3d() != nullptr)
         showcase_view->get_canvas3d()->reset_volumes();
+#ifdef SLIC3R_CAD
+    if (DesignPanel* design = DesignPanel::if_built())
+        design->reset_canvas_volumes();
+#endif
 }
 
 bool Plater::priv::init_collapse_toolbar()
@@ -22622,7 +22662,18 @@ bool Plater::is_sidebar_collapsed() const { return p->sidebar_layout.is_collapse
 void Plater::collapse_sidebar(bool collapse) { p->collapse_sidebar(collapse); }
 Sidebar::DockingState Plater::get_sidebar_docking_state() const { return p->get_sidebar_docking_state(); }
 
-void Plater::reset_window_layout() { p->reset_window_layout(); }
+void Plater::reset_window_layout()
+{
+#ifdef SLIC3R_CAD
+    if (DesignPanel* design = DesignPanel::if_built()) {
+        if (wxGetApp().mainframe && wxGetApp().mainframe->shown_design_panel()) {
+            design->reset_window_layout();
+            return;
+        }
+    }
+#endif
+    p->reset_window_layout();
+}
 
 //BBS
 void Plater::select_curr_plate_all() { p->select_curr_plate_all(); }
@@ -27601,6 +27652,13 @@ Camera& Plater::get_camera()
 {
     return p->camera;
 }
+
+#ifdef SLIC3R_CAD
+BackgroundSlicingProcess& Plater::background_process()
+{
+    return p->background_process;
+}
+#endif
 
 //BBS: partplate list related functions
 PartPlateList& Plater::get_partplate_list()

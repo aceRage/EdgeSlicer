@@ -84,6 +84,9 @@ struct Camera;
 class GLToolbar;
 class PlaterPresetComboBox;
 class PartPlateList;
+#ifdef SLIC3R_CAD
+class BackgroundSlicingProcess;
+#endif
 
 using t_optgroups = std::vector <std::shared_ptr<ConfigOptionsGroup>>;
 
@@ -880,6 +883,10 @@ public:
 
     const Camera& get_camera() const;
     Camera& get_camera();
+#ifdef SLIC3R_CAD
+    // DesignCanvas borrows the plater process: GLCanvas3D dereferences it every frame.
+    BackgroundSlicingProcess& background_process();
+#endif
 
     //BBS: partplate list related functions
     PartPlateList& get_partplate_list();
