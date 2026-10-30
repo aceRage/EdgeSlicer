@@ -2511,6 +2511,38 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     if (item_id != wxNOT_FOUND)
         menu->Destroy(item_id);
 
+    // Per-nozzle process P2: "Print on nozzle" puts this filament on a tool of a toolchanger (filament_nozzle_assignment),
+    // so it slices with that nozzle's diameter, widths and process. Rebuilt for the filament the menu opens on.
+    const int nozzle_item_id = menu->FindItem(_L("Print on nozzle"));
+    if (nozzle_item_id != wxNOT_FOUND)
+        menu->Destroy(nozzle_item_id);
+    {
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size() && bundle->filament_nozzle_assignment_supported()) {
+            const auto *nozzles = bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            const int   own     = filament + 1;
+            wxMenu     *nozzle_menu = new wxMenu();
+            for (size_t t = 0; nozzles != nullptr && t < nozzles->values.size(); ++t) {
+                const int tool = int(t) + 1;
+                wxString  label = wxString::Format("T%d  %s mm", tool, from_u8(format_diameter_to_str(nozzles->values[t])));
+                if (tool == own)
+                    label += "  " + _L("(its own)");
+                // Checked: the filament's nozzle now, its assignment or else its own tool.
+                append_menu_check_item(nozzle_menu, wxID_ANY, label, "",
+                    [filament, tool](wxCommandEvent &) { plater()->sidebar().set_filament_nozzle(size_t(filament), tool); }, nozzle_menu,
+                    []() { return true; },
+                    [filament, tool, own]() {
+                        const int assigned = wxGetApp().preset_bundle->filament_assigned_nozzle(size_t(filament));
+                        return assigned > 0 ? assigned == tool : tool == own;
+                    }, m_parent);
+            }
+            append_submenu(menu, nozzle_menu, wxID_ANY, _L("Print on nozzle"),
+                           _L("The nozzle (tool) this filament prints on. It slices with that nozzle's diameter, line widths and process."),
+                           "", []() { return true; }, m_parent);
+        }
+    }
+
     wxMenu *                      sub_menu         = new wxMenu();
     std::vector<wxBitmap *>       icons            = get_extruder_color_icons(true);
     const std::vector<std::string> &filament_presets = wxGetApp().preset_bundle->filament_presets;

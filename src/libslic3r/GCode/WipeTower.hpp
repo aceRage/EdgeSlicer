@@ -325,6 +325,27 @@ public:
         return layer_height * (m_perimeter_width - layer_height * (1.f - float(M_PI) / 4.f)) / filament_area();
     }
 
+    // Mixed nozzle diameters (per-nozzle P2, Edge; same design as WipeTower2's FOrca port): the line width
+    // a tool lays its own purge at, its nozzle x Width_To_Nozzle_Ratio. m_perimeter_width stays the tower's
+    // structure width (footprint, wall, brim, sparse fill). Uniform nozzles: the same float, so every
+    // tower is unchanged.
+    float tool_line_width(size_t tool) const
+    {
+        if (tool < m_filpar.size() && m_filpar[tool].nozzle_diameter > 0.f)
+            return m_filpar[tool].nozzle_diameter * Width_To_Nozzle_Ratio;
+        return m_perimeter_width;
+    }
+    // The extrusion flow of the tool's line width at layer_height (the current layer when negative);
+    // exactly extrusion_flow(layer_height) when the tool's width is the structure width.
+    float tool_extrusion_flow(size_t tool, float layer_height = -1.f) const
+    {
+        const float w = tool_line_width(tool);
+        if (w == m_perimeter_width)
+            return extrusion_flow(layer_height);
+        const float h = layer_height < 0 ? m_layer_height : layer_height;
+        return h * (w - h * (1.f - float(M_PI) / 4.f)) / filament_area();
+    }
+
 	bool get_floating_area(float& start_pos_y, float& end_pos_y) const;
 	bool need_thick_bridge_flow(float pos_y) const;
     float get_extrusion_flow() const { return m_extrusion_flow; }
@@ -356,7 +377,7 @@ public:
         float               ramming_step_multiplicator = 1.f;
         float               max_e_speed = std::numeric_limits<float>::max();
         std::vector<float>  ramming_speed;
-        float               nozzle_diameter;
+        float               nozzle_diameter = 0.f;
         float               filament_area;
         float               wipe_dist = 0.f; // wipe_distance, for the wipe along a rib wall
         // Tower interface (TowerInterface::): the filament as the trigger sees it, and its values.

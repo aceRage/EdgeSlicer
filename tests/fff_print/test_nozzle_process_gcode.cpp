@@ -156,3 +156,98 @@ TEST_CASE("A per-nozzle process equal to the plate's slices exactly as without i
     // The slots are identical, so every reader keeps the plate's column: the moves are byte-identical.
     CHECK(without_config_block(slice(filled)) == without_config_block(base));
 }
+
+// ==== Per-nozzle process P2: line widths per nozzle, filament -> nozzle assignment ====================
+
+namespace {
+
+// A 0.4 + 0.6 two-tool toolchanger whose plate process states every width in absolute mm (as the U1's do).
+DynamicPrintConfig mixed_two_tool_config()
+{
+    DynamicPrintConfig config = two_tool_config();
+    config.set_deserialize_strict({
+        { "nozzle_diameter", "0.4,0.6" },
+        { "line_width", "0.42" },
+        { "outer_wall_line_width", "0.42" },
+        { "inner_wall_line_width", "0.42" },
+        { "sparse_infill_line_width", "0.42" },
+        { "internal_solid_infill_line_width", "0.42" },
+        { "top_surface_line_width", "0.42" },
+        { "initial_layer_line_width", "0" },
+    });
+    return config;
+}
+
+// A 0.6 process: 0.62 mm walls.
+DynamicPrintConfig process_06()
+{
+    DynamicPrintConfig p06;
+    p06.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(0.62, false));
+    p06.set_key_value("inner_wall_line_width", new ConfigOptionFloatOrPercent(0.62, false));
+    p06.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.62, false));
+    return p06;
+}
+
+// Per tool, the ;WIDTH values of the G-code (as printed, e.g. "0.62").
+std::map<int, std::set<std::string>> widths_per_tool(const std::string &gcode)
+{
+    std::map<int, std::set<std::string>> out;
+    std::istringstream                   in(gcode);
+    std::string                          line;
+    int                                  tool = 0;
+    static const std::regex              tool_re(R"(^T([0-9]+)\b)");
+    static const std::regex              width_re(R"(^;WIDTH:([0-9.]+))");
+    while (std::getline(in, line)) {
+        std::smatch m;
+        if (std::regex_search(line, m, tool_re))
+            tool = std::stoi(m[1].str());
+        else if (std::regex_search(line, m, width_re))
+            out[tool].insert(m[1].str());
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A 0.6 nozzle with a 0.6 process prints the 0.6 process's widths", "[NozzleProcess][GCode][Widths]")
+{
+    const DynamicPrintConfig plate = mixed_two_tool_config();
+    const auto               base  = widths_per_tool(slice(plate));
+    REQUIRE(base.count(1) == 1);
+    CHECK(base.at(1).count("0.62") == 0); // without a per-nozzle process T1 prints the plate's 0.42
+
+    const DynamicPrintConfig p06    = process_06();
+    DynamicPrintConfig       filled = plate;
+    filled.option<ConfigOptionStrings>("nozzle_process_presets", true)->values = { "", "p06" };
+    REQUIRE(fill_nozzle_process_slots(filled, { nullptr, &p06 }));
+    const std::string gcode  = slice(filled);
+    const auto        widths = widths_per_tool(gcode);
+    REQUIRE(widths.count(0) == 1);
+    REQUIRE(widths.count(1) == 1);
+    CHECK(widths.at(1).count("0.62") == 1);
+    CHECK(widths.at(0).count("0.62") == 0);
+    CHECK(widths.at(0) == base.at(0)); // T0 (no process of its own) is untouched
+    CHECK(gcode.find("; nozzle_outer_wall_line_width = ") != std::string::npos);
+    CHECK(slice(plate).find("; nozzle_outer_wall_line_width = ") == std::string::npos);
+}
+
+TEST_CASE("A filament assigned to the 0.6 tool slices for that tool", "[NozzleProcess][GCode][Assignment]")
+{
+    DynamicPrintConfig config = mixed_two_tool_config();
+    config.option<ConfigOptionStrings>("nozzle_process_presets", true)->values = { "", "p06" };
+    // Filament 1 prints on T2 (the 0.6): both cubes' filaments now use the 0.6 nozzle and its process.
+    config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 2 };
+    const DynamicPrintConfig p06 = process_06();
+    REQUIRE(fill_nozzle_process_slots(config, { nullptr, &p06 }));
+    const std::string gcode  = slice(config);
+    const auto        widths = widths_per_tool(gcode);
+    // The G-code still names the filament (T0); the printer's send mapping puts it on the tool.
+    REQUIRE(widths.count(0) == 1);
+    CHECK(widths.at(0).count("0.62") == 1);
+    CHECK(gcode.find("; filament_nozzle_assignment = 2") != std::string::npos);
+    // Without the assignment the same config keeps filament 1 on the 0.4 at the plate's widths.
+    DynamicPrintConfig unassigned = mixed_two_tool_config();
+    unassigned.option<ConfigOptionStrings>("nozzle_process_presets", true)->values = { "", "p06" };
+    REQUIRE(fill_nozzle_process_slots(unassigned, { nullptr, &p06 }));
+    CHECK(widths_per_tool(slice(unassigned)).at(0).count("0.62") == 0);
+}

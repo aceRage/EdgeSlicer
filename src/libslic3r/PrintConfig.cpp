@@ -585,16 +585,29 @@ bool has_nozzle_rack(const PrintConfig &config)
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
     return physical_extruder_for_filament(config.nozzle_diameter.values.size(), config.filament_diameter.values.size(),
-                                          config.filament_map.values, filament_id);
+                                          config.filament_map.values, filament_id, config.filament_nozzle_assignment.values);
 }
 
-size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id)
+int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id)
+{
+    if (filament_id == 0 || size_t(filament_id - 1) >= assignment.size())
+        return -1;
+    const int tool = assignment[filament_id - 1];
+    return tool >= 1 && size_t(tool) <= nozzle_count ? tool - 1 : -1;
+}
+
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id,
+                                      const std::vector<int> &assignment)
 {
     if (filament_id == 0)
         return 0;
     const size_t direct = size_t(filament_id - 1);
     if (nozzle_count == 0)
         return 0;
+    // Per-nozzle process P2: a filament the user put on a tool of its own choosing (a toolchanger's
+    // filament_nozzle_assignment) prints there, whatever its index.
+    if (const int assigned = assigned_nozzle_for_filament(assignment, nozzle_count, filament_id); assigned >= 0)
+        return size_t(assigned);
     // When the printer has at least as many nozzles as filaments, every filament owns a physical
     // extruder (a toolchanger such as the U1, or any printer without an AMS sharing one nozzle),
     // so the filament index already IS the physical extruder. Only when more filaments share
@@ -4531,6 +4544,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P2 (tests/design_per_nozzle_process.md): which tool each filament prints on, on a
+    // toolchanger (Snapmaker U1 and other printers with one nozzle per filament slot). Project-level, like the
+    // filament colours. 0 (or no entry) = the filament's own tool, which is what every project did before.
+    def = this->add("filament_nozzle_assignment", coInts);
+    def->label = L("Filament nozzle");
+    def->tooltip = L("The nozzle (tool) each filament prints on. 0 means the filament's own tool.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+
+    // Per-nozzle process P2: the line widths of each filament's nozzle process, per filament (filled by
+    // fill_nozzle_process_slots, stamped into the region / object widths). Internal.
+    for (const char *key : { "nozzle_outer_wall_line_width", "nozzle_inner_wall_line_width", "nozzle_sparse_infill_line_width",
+                             "nozzle_internal_solid_infill_line_width", "nozzle_top_surface_line_width",
+                             "nozzle_support_line_width" }) {
+        def = this->add(key, coFloatsOrPercents);
+        def->label = key;
+        def->tooltip = "Line width per filament from the per-nozzle process of its nozzle (internal).";
+        def->mode = comDevelop;
+        def->set_default_value(new ConfigOptionFloatsOrPercents {});
+        def->cli = ConfigOptionDef::nocli;
+    }
 
     def = this->add("filament_extruder_variant", coStrings);
     def->label = "Filament's extruder variant";
@@ -10791,6 +10826,10 @@ size_t process_extruder_for_filament(const ConfigBase &config, unsigned int fila
 {
     if (extruder_count < 2)
         return 0;
+    // Per-nozzle process P2: a filament assigned to a tool reads that tool's slots.
+    if (const ConfigOptionInts *assignment = ints_option(config, "filament_nozzle_assignment"))
+        if (const int assigned = assigned_nozzle_for_filament(assignment->values, extruder_count, filament_idx + 1); assigned >= 0)
+            return size_t(assigned);
     const size_t filaments = flow_variant_filament_count(config);
     if (filaments > extruder_count || process_grouping_machine(config, extruder_count)) {
         const ConfigOptionInts *fmap = ints_option(config, "filament_map");

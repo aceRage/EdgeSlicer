@@ -1655,6 +1655,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 enforce_support_layers))
     ((ConfigOptionInt,                 support_filament))
     ((ConfigOptionFloatOrPercent,      support_line_width))
+    // Per-nozzle process P2: per filament, the support line width of the filament's nozzle process.
+    ((ConfigOptionFloatsOrPercents,    nozzle_support_line_width))
     ((ConfigOptionBool,                support_interface_not_for_body))
     // EdgeSlicer: support interface interlock (woven band under the top contact layer).
     ((ConfigOptionBool,                support_interface_interlock))
@@ -1838,6 +1840,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
+    // Per-nozzle process P2: per FILAMENT (index filament - 1), the line width the per-nozzle process of the
+    // filament's nozzle gives each role; a missing or 0 entry leaves the region's own width
+    // (stamp_nozzle_line_widths in region_config_from_model_volume).
+    ((ConfigOptionFloatsOrPercents,     nozzle_outer_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_inner_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_sparse_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_internal_solid_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_top_surface_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
@@ -2288,6 +2298,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
     ((ConfigOptionStrings,             nozzle_process_presets))
     ((ConfigOptionBool,                process_extruder_values))
+    // Per-nozzle process P2: the 1-based physical extruder (tool) each filament prints on, 0 = its own
+    // tool (the filament's index on a toolchanger). Only toolchangers use it (physical_extruder_for_filament).
+    ((ConfigOptionInts,                filament_nozzle_assignment))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))
     ((ConfigOptionPointsGroups,        extruder_printable_area))
@@ -2784,7 +2797,12 @@ bool has_nozzle_rack(const PrintConfig &config);
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
 // The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
 // preset bundle (the support overhang highlight in the 3D view).
-size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id);
+// `assignment` is filament_nozzle_assignment (per-nozzle process P2): a filament with an entry 1..nozzle_count
+// prints on that tool before any other rule.
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id,
+                                      const std::vector<int> &assignment = {});
+// The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
+int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder

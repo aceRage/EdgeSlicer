@@ -679,6 +679,18 @@ public:
     // selection (none: the plate's process everywhere); the same printer keeps its selection, pruned.
     void                        update_nozzle_processes_for_printer(AppConfig &config);
 
+    // ---- Per-nozzle process P2: filament -> nozzle assignment (project_config "filament_nozzle_assignment") ----
+    // Whether the edited printer takes an assignment (a toolchanger that is not a Bambu grouping machine).
+    bool                        filament_nozzle_assignment_supported() const;
+    // The 0-based nozzle each filament prints on (its own index when unassigned, physical_extruder_for_filament).
+    std::vector<size_t>         filament_nozzles() const;
+    // The 1-based tool filament `filament` (0-based) is assigned to, 0 = its own nozzle.
+    int                         filament_assigned_nozzle(size_t filament) const;
+    // Put 0-based filament `filament` on 1-based tool `tool` (0 = its own). Returns true when it changed.
+    bool                        set_filament_nozzle(size_t filament, int tool);
+    // "Nozzles: 3 > T4 0.6, ..." for the filaments not on their own nozzle; empty when none.
+    std::string                 filament_nozzle_assignment_summary() const;
+
 private:
     void                        restore_nozzle_processes(AppConfig &config, const std::string &printer_name);
     // The printer the per-nozzle selection was last restored for or loaded with (a project).

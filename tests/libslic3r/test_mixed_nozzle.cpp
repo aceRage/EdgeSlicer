@@ -6,7 +6,8 @@
 //   (b) each line-width bound is measured against the nozzle of the filament its role is routed to,
 //   (c) a new per-feature bound refuses a role whose resolved width exceeds
 //       MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO x its own nozzle,
-//   (d) the prime tower refuses mixed nozzle diameters outright instead of warning.
+//   (d) the prime tower refused mixed nozzle diameters outright; per-nozzle process P2 made both towers
+//       per-tool, so (d) now checks the refusal is gone.
 //
 // Everything here is constructed PrintConfig / Model - no GUI, no preset bundle, no disk.
 
@@ -331,9 +332,10 @@ SCENARIO("Mixed nozzle (b): percent widths follow the feature's own nozzle", "[M
 }
 
 // ---------------------------------------------------------------------------------------------
-// (d) The prime tower gate - Phase 3 territory, refused rather than silently mis-sized.
+// (d) The prime tower gate. Per-nozzle process P2: each tool's tower lines are sized for its own nozzle
+// (tests/fff_print/test_mixed_width_tower.cpp), so mixed diameters are no longer refused.
 // ---------------------------------------------------------------------------------------------
-SCENARIO("Mixed nozzle (d): the prime tower refuses mixed diameters", "[MixedNozzle]")
+SCENARIO("Mixed nozzle (d): the prime tower takes mixed diameters", "[MixedNozzle]")
 {
     GIVEN("a two-filament job with 0.6 and 0.2 nozzles and the prime tower on")
     {
@@ -344,11 +346,11 @@ SCENARIO("Mixed nozzle (d): the prime tower refuses mixed diameters", "[MixedNoz
         Model model;
         add_cube(model, "cube.stl");
 
-        THEN("validation refuses it and says what to do")
+        THEN("validation no longer refuses it")
         {
             const std::string message = validate_message(model, config);
             INFO(message);
-            REQUIRE(message.find("prime tower does not support mixed nozzle diameters") != std::string::npos);
+            REQUIRE(message.find("prime tower does not support mixed nozzle diameters") == std::string::npos);
         }
     }
 

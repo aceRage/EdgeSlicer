@@ -124,6 +124,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/MemoryGuardPolicy.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "libslic3r/ColorSplit.hpp"
@@ -1349,6 +1350,8 @@ struct Sidebar::priv
     std::vector<PlaterPresetComboBox*> combos_filament;
     int editing_filament = -1;
     wxBoxSizer *sizer_filaments;
+    // Per-nozzle process P2: "Nozzles: 3 > T4 0.6" under the filament list when a filament is on another tool.
+    wxStaticText *filament_nozzle_summary = nullptr;
     PlaterPresetComboBox *combo_sla_print;
     PlaterPresetComboBox *combo_sla_material;
     PlaterPresetComboBox* combo_printer = nullptr;
@@ -2444,7 +2447,7 @@ Sidebar::Sidebar(Plater *parent)
                             // the picker stays, as a choice of base preset rather than a refusal.
                             _L("This printer reports different nozzle diameters on its tool heads. Pick the base nozzle size for the printer preset; "
                                "you can then give each head its own diameter under Printer settings -> Extruder N, and route each feature to a head "
-                               "under Filaments for Features. Note that the prime tower cannot be used with mixed nozzle diameters yet."),
+                               "under Filaments for Features."),
                             _L("Set Nozzle Diameter"),
                             diameters_raw);
                         if (dlg.ShowModal() == wxID_OK) {
@@ -3669,6 +3672,13 @@ Sidebar::Sidebar(Plater *parent)
     }
 
     sizer_filaments2->Add(p->m_scrolled_filaments, 0, wxEXPAND, 0);
+    // Per-nozzle process P2: the filament -> nozzle assignment, right under the filament list (set it from a
+    // filament's menu, "Print on nozzle"). Hidden while every filament prints on its own nozzle.
+    p->filament_nozzle_summary = new wxStaticText(p->m_panel_filament_content, wxID_ANY, wxEmptyString);
+    p->filament_nozzle_summary->SetFont(Label::Body_12);
+    p->filament_nozzle_summary->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#009688")));
+    p->filament_nozzle_summary->Hide();
+    sizer_filaments2->Add(p->filament_nozzle_summary, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(SidebarProps::ContentMargin()));
     sizer_filaments2->AddSpacer(FromDIP(8));
     // --- Color Mix Panel (inside filament content, same level as filaments) ---
     init_color_mix_panel(p->m_panel_filament_content, sizer_filaments2);
@@ -4427,6 +4437,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 
 void Sidebar::update_presets(Preset::Type preset_type)
 {
+    // Per-nozzle process P2: a printer switch drops or brings the assignment (toolchangers only).
+    if (preset_type == Preset::TYPE_PRINTER)
+        wxGetApp().CallAfter([this]() { update_filament_nozzle_summary(); });
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     const auto print_tech = preset_bundle.printers.get_edited_preset().printer_technology();
 
@@ -4745,8 +4758,45 @@ void Sidebar::jump_to_option(size_t selected)
 }
 
 // BBS. Move logic from Plater::on_extruders_change() to Sidebar::on_filaments_change().
+void Sidebar::update_filament_nozzle_summary()
+{
+    if (p->filament_nozzle_summary == nullptr || wxGetApp().preset_bundle == nullptr)
+        return;
+    const std::string summary = wxGetApp().preset_bundle->filament_nozzle_assignment_summary();
+    const wxString    text    = summary.empty() ? wxString() : _L("Filaments on other nozzles:") + " " + from_u8(summary);
+    p->filament_nozzle_summary->SetLabel(text);
+    p->filament_nozzle_summary->SetToolTip(_L("Set from a filament's menu (the button beside it): Print on nozzle."));
+    if (!text.empty() && p->m_panel_filament_content->GetClientSize().x > FromDIP(60))
+        p->filament_nozzle_summary->Wrap(p->m_panel_filament_content->GetClientSize().x - 2 * FromDIP(SidebarProps::ContentMargin()));
+    const bool show = !text.empty();
+    if (p->filament_nozzle_summary->IsShown() != show || show) {
+        p->filament_nozzle_summary->Show(show);
+        p->m_panel_filament_content->Layout();
+        Layout();
+    }
+}
+
+void Sidebar::set_filament_nozzle(size_t filament, int tool)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !bundle->set_filament_nozzle(filament, tool))
+        return;
+    update_filament_nozzle_summary();
+    // The per-slot filament lists filter by the slot's nozzle size, and the Speed page lists each nozzle's filaments.
+    for (PlaterPresetComboBox *combo : p->combos_filament)
+        if (combo != nullptr)
+            combo->update();
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+            tab_print->refresh_nozzle_header();
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
 void Sidebar::on_filaments_change(size_t num_filaments)
 {
+    // Per-nozzle process P2: a filament added or deleted (or a project loaded) changes the assignment summary.
+    wxGetApp().CallAfter([this]() { update_filament_nozzle_summary(); });
     auto& choices = combos_filament();
 
     if (num_filaments == choices.size()) {
@@ -25102,6 +25152,10 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         // filament_map is 1-based (SelectMachine / Bambu dual-nozzle). -1 when the plate is single-nozzle.
         if (fil_map && i < fil_map->values.size() && fil_map->values[i] > 0)
             f.nozzle_id = fil_map->values[i] - 1;
+        // Per-nozzle process P2: the tool the project put the filament on, and the nozzle it was sliced for.
+        f.assigned_tool = bundle->filament_assigned_nozzle(i) - 1;
+        if (const auto* nozzles = full.option<ConfigOptionFloats>("nozzle_diameter"); nozzles && !nozzles->values.empty())
+            f.sliced_nozzle = nozzles->get_at(nozzle_for_filament(full, unsigned(i + 1)));
         // The remembered CANVAS mapping keys on the preset as people know it: its alias, else its name.
         if (const Preset* fp = bundle->filaments.find_preset(bundle->filament_presets[i]))
             f.alias = fp->alias.empty() ? fp->name : fp->alias;

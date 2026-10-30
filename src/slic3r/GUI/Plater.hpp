@@ -156,6 +156,10 @@ public:
     void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
     // BBS. Add on_filaments_change() method.
     void on_filaments_change(size_t num_filaments);
+    // Per-nozzle process P2: put 0-based filament `filament` on 1-based tool `tool` (0 = its own nozzle), and the
+    // summary under the filament list.
+    void set_filament_nozzle(size_t filament, int tool);
+    void update_filament_nozzle_summary();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);

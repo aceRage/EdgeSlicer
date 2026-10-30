@@ -1031,7 +1031,7 @@ void PerimeterGenerator::split_top_surfaces(const ExPolygons &orig_polygons, ExP
     // get the real top surface
     ExPolygons grown_lower_slices;
     ExPolygons bridge_checker;
-    auto nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+    auto nozzle_diameter = this->print_config->nozzle_diameter.get_at(physical_extruder_for_filament(*this->print_config, unsigned(this->config->wall_filament.value)));
     // Check whether surface be bridge or not
     if (this->lower_slices != NULL) {
         // BBS: get the Polygons below the polygon this layer
@@ -1645,7 +1645,7 @@ void PerimeterGenerator::process_classic()
         // We consider overhang any part where the entire nozzle diameter is not supported by the
         // lower layer, so we take lower slices and offset them by half the nozzle diameter used
         // in the current layer
-        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(physical_extruder_for_filament(*this->print_config, unsigned(this->config->wall_filament.value)));
         m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(+nozzle_diameter / 2)));
     }
     
@@ -2715,7 +2715,7 @@ void PerimeterGenerator::process_arachne()
         // We consider overhang any part where the entire nozzle diameter is not supported by the
         // lower layer, so we take lower slices and offset them by half the nozzle diameter used
         // in the current layer
-        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(physical_extruder_for_filament(*this->print_config, unsigned(this->config->wall_filament.value)));
         m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(+nozzle_diameter / 2)));
     }
 
@@ -3243,7 +3243,7 @@ bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width)
 
 std::vector<Polygons> PerimeterGenerator::generate_lower_polygons_series(float width)
 {
-    float nozzle_diameter = print_config->nozzle_diameter.get_at(config->wall_filament - 1);
+    float nozzle_diameter = print_config->nozzle_diameter.get_at(physical_extruder_for_filament(*print_config, unsigned(config->wall_filament.value)));
     float start_offset = -0.5 * width;
     float end_offset = 0.5 * nozzle_diameter;
 

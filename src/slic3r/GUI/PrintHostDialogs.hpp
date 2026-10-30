@@ -48,6 +48,10 @@ struct SendPlateFilament
     std::string alias;         // its filament preset's alias (or name), for remembered mappings
     int         nozzle_temp { 0 }; // its nozzle temperature, 0 = unknown
     int         nozzle_id { -1 };  // 0-based nozzle / toolhead; -1 = single-nozzle / unknown
+    // Per-nozzle process P2: the 0-based tool the project put this filament on (filament_nozzle_assignment),
+    // -1 = its own; and the diameter of the nozzle it was sliced for, 0 = unknown.
+    int         assigned_tool { -1 };
+    double      sliced_nozzle { 0. };
 };
 
 class PrintHostSendDialog : public GUI::MsgDialog
@@ -160,7 +164,8 @@ protected:
     int note_wrap_width() const { return FromDIP(460); }
     // A dialog's own first choice for a row: a position in m_device_status.slots, or -1 to let the
     // closest-colour rule pick. The Elegoo dialog answers with the remembered mapping.
-    virtual int preselect_slot(const SendPlateFilament& f) const { return -1; }
+    // Per-nozzle process P2: a toolchanger's filament assigned to a tool starts on that tool.
+    virtual int preselect_slot(const SendPlateFilament& f) const;
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
     // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
     // Only called when there are rows (update_mapping_note() checks m_mapping_filament first).

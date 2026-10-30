@@ -545,6 +545,9 @@ public:
 	void		update() override;
 	void		clear_pages() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
+	// Per-nozzle process P2: the Speed page header's note lists the filaments on each nozzle; refresh it after a
+	// filament's nozzle assignment changed.
+	void		refresh_nozzle_header() { refresh_nozzle_controls(); }
 
 private:
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
