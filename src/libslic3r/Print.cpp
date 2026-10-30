@@ -2501,6 +2501,27 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    // A height range (or a height colour pattern band) naming a filament the project does not have
+    // is not printed with that filament (object_extruders() drops it). The slice is unchanged; the user is told.
+    {
+        const size_t total_filaments = m_mixed_filament_mgr.total_filaments(m_config.filament_diameter.size());
+        for (const PrintObject *object : m_objects) {
+            const ModelObject *mo = object->model_object();
+            for (const auto &range : mo->layer_config_ranges) {
+                if (!range.second.has("extruder"))
+                    continue;
+                const int value = range.second.option("extruder")->getInt();
+                if (value > 0 && size_t(value) > total_filaments) {
+                    char z[64];
+                    std::snprintf(z, sizeof(z), "%g-%g", range.first.first, range.first.second);
+                    warn("Height range " + std::string(z) + " mm of object \"" + mo->name + "\" uses filament " + std::to_string(value) +
+                             ", but the project has only " + std::to_string(total_filaments) + " filaments; it cannot print with filament " + std::to_string(value) + ".",
+                         "extruder", mo);
+                }
+            }
+        }
+    }
+
     // ORCA #16719: a filament flow ratio of 0 makes GCode::_extrude divide 0 by 0 and write NaN (or a huge E)
     // into the G-code. Refuse it for every filament the plate prints, plus filament 1 when no flow variants
     // are active, because _extrude then scales and divides every extrusion by filament 1's ratio

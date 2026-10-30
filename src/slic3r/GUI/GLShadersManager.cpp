@@ -1,5 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Platform.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "GLShadersManager.hpp"
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
@@ -10,7 +12,9 @@
 using namespace std::literals;
 
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <glad/gl.h>
+#include <sstream>
 
 namespace Slic3r {
 
@@ -152,6 +156,28 @@ std::pair<bool, std::string> GLShadersManager::init()
             s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "shadow_map", 5 } });
         if (GLShaderProgram* s = get_shader("showcase_material"); s != nullptr)
             s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 } });
+        // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): the same material with
+        // the coextruded-colour functions put in after its #version line (they live in C++, shared
+        // with the toolpaths and the unit tests). Optional: without it coextruded slots show their
+        // plain colour on the model, as before.
+        if (get_shader("showcase_material") != nullptr) {
+            auto read = [](const std::string& name) {
+                boost::nowide::ifstream in(resources_dir() + "/shaders/" + name, boost::nowide::ifstream::binary);
+                std::stringstream       ss;
+                if (in.good())
+                    ss << in.rdbuf();
+                return ss.str();
+            };
+            GLShaderProgram::ShaderSources sources = {};
+            sources[size_t(GLShaderProgram::EShaderType::Vertex)]   = read(prefix + "showcase_material.vs");
+            sources[size_t(GLShaderProgram::EShaderType::Fragment)] = MultiColour::mesh_fragment_source(read(prefix + "showcase_material.fs"));
+            auto program = std::make_unique<GLShaderProgram>();
+            if (!sources[0].empty() && !sources[1].empty() && program->init_from_texts("showcase_material_mc", sources)) {
+                m_shaders.push_back(std::move(program));
+                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 } });
+            } else
+                BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: showcase_material_mc";
+        }
     }
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
