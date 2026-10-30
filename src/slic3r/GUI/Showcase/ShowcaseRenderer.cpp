@@ -585,15 +585,35 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
         {
             const ConfigOptionInt *e = object_config.option<ConfigOptionInt>("extruder");
             info.mc_skin = MultiColour::mesh_skin(object_config, e != nullptr && e->value > 0 ? e->value : 1);
-            double volume = 0.;
+            double volume = 0., area = 0.;
             if (!mo->instances.empty()) {
-                const double instance_det = std::abs(mo->instances.front()->get_matrix().matrix().block<3, 3>(0, 0).determinant());
+                const Transform3d instance_matrix = mo->instances.front()->get_matrix();
+                const double      instance_det    = std::abs(instance_matrix.matrix().block<3, 3>(0, 0).determinant());
                 for (const ModelVolume *mv : mo->volumes)
-                    if (mv != nullptr && mv->is_model_part())
+                    if (mv != nullptr && mv->is_model_part()) {
                         volume += std::abs(double(its_volume(mv->mesh().its))) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
+                        // The surface in the plate's frame, for the shell share below.
+                        const Transform3d m = instance_matrix * mv->get_matrix();
+                        const indexed_triangle_set &its = mv->mesh().its;
+                        for (const stl_triangle_vertex_indices &f : its.indices) {
+                            const Vec3d a0 = m * its.vertices[size_t(f[0])].cast<double>();
+                            const Vec3d a1 = m * its.vertices[size_t(f[1])].cast<double>();
+                            const Vec3d a2 = m * its.vertices[size_t(f[2])].cast<double>();
+                            area += 0.5 * (a1 - a0).cross(a2 - a0).norm();
+                        }
+                    }
                 const double height = mo->instance_bounding_box(0).size().z();
-                if (height > 1e-3 && std::isfinite(volume))
-                    info.volume_per_mm = float(volume / height);
+                if (height > 1e-3 && std::isfinite(volume)) {
+                    // What the printer extrudes is the shell (about the band of walls under the whole
+                    // surface) plus the sparse infill inside it, not the solid mesh. A gradient's colour runs
+                    // on that volume, so the solid volume would run it several times too fast.
+                    double density = 0.15;
+                    if (const auto *d = object_config.option<ConfigOptionPercent>("sparse_infill_density"))
+                        density = std::clamp(d->value / 100., 0., 1.);
+                    const double shell    = std::min(volume, area * double(info.mc_skin.wall_band));
+                    const double extruded = shell + (volume - shell) * density;
+                    info.volume_per_mm = float(extruded / height);
+                }
             }
         }
         const SlicingParameters  sp   = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
@@ -1089,17 +1109,16 @@ static MultiColour::UniformTable showcase_multicolour_table(const std::vector<Sh
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return MultiColour::UniformTable();
-    std::vector<MultiColour::Filament> slots;
-    std::vector<float>                 diameters;
+    std::vector<float> diameters;
     for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
-        slots.push_back(MultiColour::from_config(bundle->project_config, e));
         float d = 1.75f;
         if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
             p != nullptr && p->config.has("filament_diameter"))
             d = float(p->config.opt_float("filament_diameter", 0u));
         diameters.push_back(d);
     }
-    return MultiColour::pack_uniforms(slots, diameters);
+    // The same table the toolpath mode and Preview build (each slot's own settings from the project).
+    return MultiColour::table_from_config(bundle->project_config, diameters);
 }
 
 // Glow-in-the-dark (G1): which slots glow and in what colour, from the project (the visual-only keys),
@@ -1123,6 +1142,7 @@ static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const Mul
     vec4s("mc_params", t.params.data(), int(t.params.size() / 4));
     vec4s("mc_global", t.global.data(), 1);
     vec4s("mc_global2", t.global2.data(), 1);
+    vec4s("mc_grad", t.grad.data(), int(t.grad.size() / 4));
 }
 
 // S2: the objects with the filament materials. Draws each visible volume itself (rather than through
@@ -1313,7 +1333,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         // P4: so does a coextruded slot (its stripes follow the skin's lines).
         const int        mc_slot = mc && !v->is_wipe_tower && it.filament >= 1 && size_t(it.filament) <= filaments.size() &&
                                            it.filament <= MultiColour::GLSL_SLOTS &&
-                                           multicolour.bounds[size_t(it.filament - 1) * 4 + 3] > 1.5f ?
+                                           MultiColour::slot_is_multi(multicolour, it.filament - 1) ?
                                        it.filament - 1 : -1;
         const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;

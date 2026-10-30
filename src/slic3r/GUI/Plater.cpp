@@ -12938,7 +12938,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     "filament_colour_twist",
                                     "filament_glow",
                                     "filament_glow_colour",
-                                    "filament_glow_intensity"
+                                    "filament_glow_intensity",
+                                    "filament_gradient_dwell",
+                                    "filament_gradient_transition"
                                 };
                                 // A file without them gets the defaults, not the previous project's values
                                 // (apply_only() keeps a key the file lacks), as PresetBundle's project load does.

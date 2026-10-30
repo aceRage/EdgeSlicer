@@ -64,9 +64,11 @@ struct ColourMakeUp
     std::string glowColour;               // filament_glow_colour: "#RRGGBB", empty = a vibrant version of the filament's colour
     double      glowIntensity = 100.;     // filament_glow_intensity, percent; for the whole project, not this slot
     bool        glowSuggested = false;    // not stored: the preset looks like a glow filament (what -1 resolves to)
+    double      dwell = -1.;      // filament_gradient_dwell, mm of filament per colour run (negative = the default)
+    double      transition = -1.; // filament_gradient_transition, mm of filament per colour change (negative = the default)
 };
 ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot);
-// Writes the make-up of one slot into a project config (resizing the three keys to the slot count).
+// Writes the make-up of one slot into a project config (resizing the five keys to the slot count).
 void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp& makeUp);
 
 } // namespace FilamentColorUtils

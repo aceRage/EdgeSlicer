@@ -574,7 +574,11 @@ void main()
     vec3 albedo = srgb_to_linear(uniform_color.rgb);
 #ifdef SHOWCASE_MULTICOLOUR
     // P4: a coextruded slot's colours, from the geometric normal (before the layer lines tilt it).
-    if (mc_slot >= 0 && mc_slot < 16 && mc_count(mc_slot) > 1)
+    if (mc_slot >= 0 && mc_slot < 16 && mc_is_gradient(mc_slot))
+        // P6: a gradient runs along the filament, so the height stands in for its length (volume per mm
+        // of height from the bed, a guess like the twist's).
+        albedo = mc_gradient_colour(mc_slot, max(world_pos.z, 0.0) * mc_volume_per_mm);
+    else if (mc_slot >= 0 && mc_slot < 16 && mc_count(mc_slot) > 1)
         albedo = mc_mesh_albedo(n, !gl_FrontFacing && build_clip_z < 1e9);
 #endif
     // G1: what the slot shines with the lights off (nothing otherwise), from the colour drawn here.

@@ -228,6 +228,8 @@ static std::vector<std::string> s_project_options {
     "filament_glow",
     "filament_glow_colour",
     "filament_glow_intensity",
+    "filament_gradient_dwell",
+    "filament_gradient_transition",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",

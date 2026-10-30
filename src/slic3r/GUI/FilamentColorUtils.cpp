@@ -283,6 +283,12 @@ ColourMakeUp GetColourMakeUp(const DynamicPrintConfig* config, size_t slot)
             out.glowColour = glowColour->values[slot];
     if (const ConfigOptionFloat* intensity = config->option<ConfigOptionFloat>("filament_glow_intensity"))
         out.glowIntensity = intensity->value;
+    if (const ConfigOptionFloats* dwell = config->option<ConfigOptionFloats>("filament_gradient_dwell"))
+        if (slot < dwell->values.size())
+            out.dwell = dwell->values[slot];
+    if (const ConfigOptionFloats* transition = config->option<ConfigOptionFloats>("filament_gradient_transition"))
+        if (slot < transition->values.size())
+            out.transition = transition->values[slot];
     return out;
 }
 
@@ -292,12 +298,18 @@ void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp
     auto* split = config.option<ConfigOptionStrings>("filament_colour_split", true);
     auto* angle = config.option<ConfigOptionFloats>("filament_colour_angle", true);
     auto* twist = config.option<ConfigOptionFloats>("filament_colour_twist", true);
+    auto* dwell = config.option<ConfigOptionFloats>("filament_gradient_dwell", true);
+    auto* transition = config.option<ConfigOptionFloats>("filament_gradient_transition", true);
     if (split->values.size() < size)
         split->values.resize(size);
     if (angle->values.size() < size)
         angle->values.resize(size, 0.);
     if (twist->values.size() < size)
         twist->values.resize(size, 0.);
+    if (dwell->values.size() < size)
+        dwell->values.resize(size, -1.);
+    if (transition->values.size() < size)
+        transition->values.resize(size, -1.);
     split->values[slot] = makeUp.split;
     angle->values[slot] = makeUp.angle;
     twist->values[slot] = makeUp.twist;
@@ -311,6 +323,8 @@ void SetColourMakeUp(DynamicPrintConfig& config, size_t slot, const ColourMakeUp
     glow->values[slot] = std::clamp(makeUp.glow, -1, 1);
     glowColour->values[slot] = makeUp.glowColour;
     config.set_key_value("filament_glow_intensity", new ConfigOptionFloat(std::clamp(makeUp.glowIntensity, 0., 300.)));
+    dwell->values[slot] = makeUp.dwell;
+    transition->values[slot] = makeUp.transition;
 }
 
 } // namespace FilamentColorUtils
