@@ -11,6 +11,7 @@
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
 
@@ -584,15 +585,35 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
         {
             const ConfigOptionInt *e = object_config.option<ConfigOptionInt>("extruder");
             info.mc_skin = MultiColour::mesh_skin(object_config, e != nullptr && e->value > 0 ? e->value : 1);
-            double volume = 0.;
+            double volume = 0., area = 0.;
             if (!mo->instances.empty()) {
-                const double instance_det = std::abs(mo->instances.front()->get_matrix().matrix().block<3, 3>(0, 0).determinant());
+                const Transform3d instance_matrix = mo->instances.front()->get_matrix();
+                const double      instance_det    = std::abs(instance_matrix.matrix().block<3, 3>(0, 0).determinant());
                 for (const ModelVolume *mv : mo->volumes)
-                    if (mv != nullptr && mv->is_model_part())
+                    if (mv != nullptr && mv->is_model_part()) {
                         volume += std::abs(double(its_volume(mv->mesh().its))) * std::abs(mv->get_matrix().matrix().block<3, 3>(0, 0).determinant()) * instance_det;
+                        // The surface in the plate's frame, for the shell share below.
+                        const Transform3d m = instance_matrix * mv->get_matrix();
+                        const indexed_triangle_set &its = mv->mesh().its;
+                        for (const stl_triangle_vertex_indices &f : its.indices) {
+                            const Vec3d a0 = m * its.vertices[size_t(f[0])].cast<double>();
+                            const Vec3d a1 = m * its.vertices[size_t(f[1])].cast<double>();
+                            const Vec3d a2 = m * its.vertices[size_t(f[2])].cast<double>();
+                            area += 0.5 * (a1 - a0).cross(a2 - a0).norm();
+                        }
+                    }
                 const double height = mo->instance_bounding_box(0).size().z();
-                if (height > 1e-3 && std::isfinite(volume))
-                    info.volume_per_mm = float(volume / height);
+                if (height > 1e-3 && std::isfinite(volume)) {
+                    // What the printer extrudes is the shell (about the band of walls under the whole
+                    // surface) plus the sparse infill inside it, not the solid mesh. A gradient's colour runs
+                    // on that volume, so the solid volume would run it several times too fast.
+                    double density = 0.15;
+                    if (const auto *d = object_config.option<ConfigOptionPercent>("sparse_infill_density"))
+                        density = std::clamp(d->value / 100., 0., 1.);
+                    const double shell    = std::min(volume, area * double(info.mc_skin.wall_band));
+                    const double extruded = shell + (volume - shell) * density;
+                    info.volume_per_mm = float(extruded / height);
+                }
             }
         }
         const SlicingParameters  sp   = PrintObject::slicing_parameters(full, *mo, float(mo->max_z()), Vec3d::Ones());
@@ -855,6 +876,7 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     shader->set_uniform("viewport_size", Vec2f(float(t.width), float(t.height)));
     const float blur = m_scene ? std::clamp(m_scene->background.blur, 0.f, 1.f) : 0.f;
     shader->set_uniform("blur", blur);
+    shader->set_uniform("scene_dim", m_scene ? m_scene->materials.scene_dim() : 0.f);   // glow G1: lights off
     // Level 7 of a 4096 px picture is 32 px: very soft, still recognisable.
     shader->set_uniform("image_lod", blur * 7.f);
     if (mode == 5) {
@@ -989,6 +1011,7 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     shader->set_uniform("shadow_map_texel", 1.0f / float(std::max(1u, m_canvas.m_shadow_map_size)));
     shader->set_uniform("shadow_softness", m_scene->lighting.shadow_softness);
     shader->set_uniform("mode", mode);
+    shader->set_uniform("scene_dim", m_scene->materials.scene_dim());   // glow G1: lights off
     shader->set_uniform("floor_color", showcase_color(fl.color, ColorRGBA(0.95f, 0.95f, 0.95f, 1.f)));
     shader->set_uniform("shadow_strength", fl.shadow_strength);
     shader->set_uniform("fade_start", 0.45f);
@@ -1086,17 +1109,37 @@ static MultiColour::UniformTable showcase_multicolour_table(const std::vector<Sh
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return MultiColour::UniformTable();
-    std::vector<MultiColour::Filament> slots;
-    std::vector<float>                 diameters;
+    std::vector<float> diameters;
     for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS) && e < filaments.size(); ++e) {
-        slots.push_back(MultiColour::from_config(bundle->project_config, e));
         float d = 1.75f;
         if (const Preset *p = bundle->filaments.find_preset(filaments[e].preset_name, false);
             p != nullptr && p->config.has("filament_diameter"))
             d = float(p->config.opt_float("filament_diameter", 0u));
         diameters.push_back(d);
     }
-    return MultiColour::pack_uniforms(slots, diameters);
+    // The same table the toolpath mode and Preview build (each slot's own settings from the project).
+    return MultiColour::table_from_config(bundle->project_config, diameters);
+}
+
+// Glow-in-the-dark (G1): which slots glow and in what colour, from the project (the visual-only keys),
+// and the project-wide intensity, as the shaders' table.
+static Glow::UniformTable showcase_glow_table()
+{
+    const PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return Glow::UniformTable();
+    // Drawn twice a frame (the object pass and the floor's mirror pass), and on every entry into
+    // Showcase: rebuilt only when a value it is made from changed.
+    static std::string        cached_signature;
+    static Glow::UniformTable cached_table;
+    static bool               cached = false;
+    std::string               signature = Glow::signature(*bundle);
+    if (!cached || signature != cached_signature) {
+        cached_table     = Glow::pack_uniforms(Glow::slots_from_bundle(*bundle), Glow::intensity_from_config(bundle->project_config));
+        cached_signature = std::move(signature);
+        cached           = true;
+    }
+    return cached_table;
 }
 
 static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const MultiColour::UniformTable &t)
@@ -1110,6 +1153,7 @@ static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const Mul
     vec4s("mc_params", t.params.data(), int(t.params.size() / 4));
     vec4s("mc_global", t.global.data(), 1);
     vec4s("mc_global2", t.global2.data(), 1);
+    vec4s("mc_grad", t.grad.data(), int(t.grad.size() / 4));
 }
 
 // S2: the objects with the filament materials. Draws each visible volume itself (rather than through
@@ -1248,6 +1292,11 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     }
     shader->set_uniform("camera_position", eye);
     shader->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+    // Glow G1: the lights-off view takes the light away from everything and lets the glow slots shine.
+    const float                glow_dim   = m_scene->materials.scene_dim();
+    const Glow::UniformTable   glow_table = glow_dim > 0.f ? showcase_glow_table() : Glow::UniformTable();
+    shader->set_uniform("scene_dim", glow_dim);
+    shader->set_uniform("glow_intensity", glow_table.intensity);
     // 1a: linear light into the HDR layer (the post pass applies the exposure and the curve), or
     // tone-mapped sRGB (the floor's mirror, which the floor composites in display space).
     shader->set_uniform("hdr_output", hdr);
@@ -1282,13 +1331,20 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         shader->set_uniform("mat_alpha", v->is_wipe_tower ? 1.f : mp.alpha);
         shader->set_uniform("mat_line_shade", mp.line_shade);
         shader->set_uniform("mat_fiber_noise", mp.fiber_noise);
+        // Glow G1: this slot's glow (none for the wipe tower and with the lights on).
+        {
+            std::array<float, 4> glow{ 0.f, 0.f, 0.f, 0.f };
+            if (glow_dim > 0.f && !v->is_wipe_tower && it.filament >= 1 && it.filament <= MultiColour::GLSL_SLOTS)
+                std::copy_n(glow_table.slot.begin() + size_t(it.filament - 1) * 4, 4, glow.begin());
+            shader->set_uniform("glow_slot", glow);
+        }
 
         // 1c: an anisotropic finish needs the layers too, for the skin's turn per layer.
         const bool       aniso  = mp.anisotropy > 0.f && !v->is_wipe_tower;
         // P4: so does a coextruded slot (its stripes follow the skin's lines).
         const int        mc_slot = mc && !v->is_wipe_tower && it.filament >= 1 && size_t(it.filament) <= filaments.size() &&
                                            it.filament <= MultiColour::GLSL_SLOTS &&
-                                           multicolour.bounds[size_t(it.filament - 1) * 4 + 3] > 1.5f ?
+                                           MultiColour::slot_is_multi(multicolour, it.filament - 1) ?
                                        it.filament - 1 : -1;
         const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;
@@ -2487,6 +2543,14 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
         glsafe(::glUniform1i(at("hdr_output"), hdr ? 1 : 0));
         glsafe(::glUniform1i(at("tone_curve"), int(m_scene->lighting.tone)));
         glsafe(::glUniform1f(at("sc_exposure"), std::exp2(m_scene->lighting.exposure)));
+        // Glow G1: the lights-off view, per extruder as the smooth look reads them.
+        {
+            const float              dim   = m_scene->materials.scene_dim();
+            const Glow::UniformTable glow  = dim > 0.f ? showcase_glow_table() : Glow::UniformTable();
+            glsafe(::glUniform1f(at("scene_dim"), dim));
+            glsafe(::glUniform1f(at("glow_intensity"), glow.intensity));
+            glsafe(::glUniform4fv(at("sc_glow"), 16, glow.slot.data()));
+        }
         const Showcase::EnvironmentInfo *env = ensure_environment();
         glsafe(::glUniform1i(at("use_env"), env != nullptr ? 1 : 0));
         glsafe(::glUniform1f(at("env_max_lod"), float(std::max(0, showcase_environments().levels - 1))));

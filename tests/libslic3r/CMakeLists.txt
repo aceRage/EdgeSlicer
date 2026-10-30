@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
 	test_multicolour_glsl.cpp
+	test_glow_filament.cpp
 	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp

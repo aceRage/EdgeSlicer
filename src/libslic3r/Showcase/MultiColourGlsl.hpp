@@ -18,12 +18,18 @@
 //                                 narrowest slice (turns, caps the blend), ironing pull to the average
 //   uniform vec4 mc_global;       wall blend, top blend (turns), k, wall visible height
 //   uniform vec4 mc_global2;      top flatten (BeadParams::flatten of the other beads), unused x3
+//   uniform vec4 mc_grad[16];     P6, gradient slots: palette stops g in x (0 = not a gradient, else 2..5),
+//                                 palette cycles per mm3 of extruded volume in y, the dwell share of one
+//                                 stop's dwell + transition in z (0..1). The stops sit in
+//                                 mc_colors (4 colours per slot): stops 0..3 as the colours, stop 4 in
+//                                 the w of entries 0..2, which are otherwise unused
 // pack_uniforms() fills them. A slot with n <= 1 takes the plain path (its own base colour).
 //
 // Twist and, later, gradient filaments (P6) run on the cumulative extruded volume of the slot, in
 // mm3, per vertex (libvgcode::Viewer::set_extruded_volume_enabled()). Volume rather than filament
 // length keeps libvgcode free of filament diameters: twist_turns_per_mm3() folds the diameter into
-// the rate. A gradient's palette cycle (filament length per colour cycle) converts the same way.
+// the rate. A gradient's palette cycle (filament length per colour cycle) converts the same way
+// (gradient_cycles_per_mm3(), of the whole cycle: stops * (dwell + transition)); a gradient slot is not split (mc_count = 1), it takes the gradient path.
 
 #include "MultiColourFilament.hpp"
 
@@ -87,8 +93,26 @@ vec3 mc_bead_colour(int slot, float sx, float sy, vec3 R, vec3 D, float twist_tu
     float phi = mc_wrap(mc_direction_turns(vx, vy) - mc_params[slot].x - twist_turns + 0.5 * mc_bound(slot, 1)); \
     return mc_colour_at(slot, phi, blend); \
 } \
+bool mc_is_gradient(int slot) { return mc_grad[slot].x > 1.5; } \
+vec3 mc_gradient_stop(int slot, int i) { \
+    if (i < 4) return mc_colour(slot, i); \
+    return vec3(mc_colors[slot * 4].w, mc_colors[slot * 4 + 1].w, mc_colors[slot * 4 + 2].w); \
+} \
+vec3 mc_gradient_colour(int slot, float volume) { \
+    int g = int(mc_grad[slot].x + 0.5); \
+    float t = mc_wrap(volume * mc_grad[slot].y) * float(g); \
+    int i = int(floor(t)); \
+    if (i > g - 1) i = g - 1; \
+    int j = i + 1; \
+    if (j >= g) j = 0; \
+    float r = t - float(i); \
+    float dwell = mc_grad[slot].z; \
+    if (r < dwell) return mc_gradient_stop(slot, i); \
+    return mix(mc_gradient_stop(slot, i), mc_gradient_stop(slot, j), (r - dwell) / (1.0 - dwell)); \
+} \
 bool mc_is_wall(int role) { return role == 1 || role == 2 || role == 3 || role == 20; } \
 vec3 mc_fragment_colour(int slot, int role, float sx, float sy, vec3 R, vec3 D, float volume) { \
+    if (mc_is_gradient(slot)) return mc_gradient_colour(slot, volume); \
     if (mc_count(slot) <= 1) return mc_colour(slot, 0); \
     bool wall = mc_is_wall(role); \
     float rl = sqrt(R.x * R.x + R.y * R.y); \
@@ -178,9 +202,26 @@ struct UniformTable
     std::array<float, GLSL_SLOTS * 4>               params{};  // mc_params
     std::array<float, 4>                            global{};  // mc_global
     std::array<float, 4>                            global2{}; // mc_global2
-    bool any_multi = false;   // some slot has 2 or more colours
-    bool any_twist = false;   // some multi-colour slot twists (the volume buffer is needed)
+    std::array<float, GLSL_SLOTS * 4>               grad{};    // mc_grad (P6)
+    bool any_multi    = false;   // some slot has 2 or more colours, or is a gradient
+    bool any_twist    = false;   // some multi-colour slot twists (the volume buffer is needed)
+    bool any_gradient = false;   // some slot is a gradient (the volume buffer is needed)
+    // Whether the extruded-volume buffer is needed: twist and gradients both run on it.
+    bool any_volume() const { return any_twist || any_gradient; }
 };
+
+// Palette cycles per mm3 of extruded volume for a gradient whose whole palette takes cycle_mm of filament
+// of this diameter (mm; <= 0 or not finite = 1.75; a cycle under 1 mm counts as 1).
+float gradient_cycles_per_mm3(float cycle_mm, float diameter_mm);
+// The table of the filament slots of a project / full config (slot i = GLSL slot i, up to GLSL_SLOTS;
+// `diameters_mm[i]` its filament diameter, missing = 1.75). What Showcase's toolpath and mesh modes and
+// Preview all upload, so a slot's own settings (colours, split, rotation, twist, gradient dwell and
+// transition) reach every view the same way.
+UniformTable table_from_config(const ConfigBase &config, const std::vector<float> &diameters_mm);
+// Slot s (0-based) of the table: a split slot (2 or more colours) or a gradient. Slots past
+// GLSL_SLOTS are neither.
+bool slot_is_multi(const UniformTable &table, int slot);
+bool slot_is_gradient(const UniformTable &table, int slot);
 
 // Twist per mm3 of extruded volume, in turns, for a twist in degrees per metre of filament of this
 // diameter (mm; <= 0 or not finite = 1.75).
@@ -195,6 +236,8 @@ UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector
 bool uses_split(const UniformTable &table, const std::vector<unsigned char> &slots);
 // The same for twist: some of those slots is multi-colour and twists (the volume buffer is needed).
 bool uses_twist(const UniformTable &table, const std::vector<unsigned char> &slots);
+// And for gradients (P6): some of those slots is a gradient (the volume buffer is needed).
+bool uses_gradient(const UniformTable &table, const std::vector<unsigned char> &slots);
 // A string that changes whenever a value the table is made from changes: the slots' colours and
 // every visual-only key of `config` (the project config). Lets Preview rebuild the table only then.
 std::string config_signature(const ConfigBase &config);
