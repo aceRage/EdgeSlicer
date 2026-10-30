@@ -10029,8 +10029,8 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         std::unique_ptr<wxBusyInfo> paint_busy;
         if (std::any_of(cut_mo->volumes.begin(), cut_mo->volumes.end(),
                         [](const ModelVolume *v) { return PaintTransfer::has_painting(*v); })) {
-            if (GLCanvas3D *canvas = plater->get_current_canvas3D())
-                paint_busy = std::make_unique<wxBusyInfo>(_L("Keeping the painting..."), canvas->get_wxglcanvas());
+            // Parent on the Plater: wxGLCanvas is only forward-declared here, so it does not convert to wxWindow* (Mac build).
+            paint_busy = std::make_unique<wxBusyInfo>(wxString(_L("Keeping the painting...")), static_cast<wxWindow *>(plater));
             wxSafeYield(nullptr, true); // let it paint before the work starts (macOS draws nothing otherwise)
         }
 
