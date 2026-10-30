@@ -19,7 +19,8 @@ GLGizmoSketch::GLGizmoSketch(GLCanvas3D& parent, const std::string& icon_filenam
 
 bool GLGizmoSketch::on_init()
 {
-    // K: unused as a Prepare gizmo letter (Ctrl+K is unused; K alone was free).
+    // K: unused as a Prepare gizmo letter. Ctrl+K clones in the Objects list
+    // when that list has focus; the canvas binding is the letter K only.
     m_shortcut_key = WXK_CONTROL_K;
     return true;
 }

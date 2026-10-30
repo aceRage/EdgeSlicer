@@ -19,7 +19,7 @@ GLGizmoPrimitive::GLGizmoPrimitive(GLCanvas3D& parent, const std::string& icon_f
 
 bool GLGizmoPrimitive::on_init()
 {
-    // W: unused as a Prepare gizmo letter (Ctrl+W is unused; W alone was free).
+    // W: unused as a Prepare gizmo letter (W alone was free).
     m_shortcut_key = WXK_CONTROL_W;
     return true;
 }
