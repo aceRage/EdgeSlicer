@@ -187,8 +187,8 @@ const std::string BBS_LAYER_HEIGHTS_PROFILE_FILE = "Metadata/layer_heights_profi
 // unless Model::cad_recipe is non-empty. The pre-rename name is read-only.
 const std::string ORCA_CAD_RECIPE_FILE   = "Metadata/orca_cad.bin";
 const std::string LEGACY_CAD_RECIPE_FILE = "Metadata/SnapOrca_cad.bin";
-// 1 GiB uncompressed: Orca's cap. Combined with CadDocument::deserialize_recipe
-// (BoundedBinaryInputArchive + kMaxRecipeFeatures) so a hostile part cannot allocate unbounded.
+// 1 GiB uncompressed: Orca's cap. Combined with CadDocument::validate_recipe_bytes
+// (BoundedBinaryInputArchive + kMaxRecipeFeatures, parse-only) so a hostile part cannot allocate unbounded.
 static constexpr mz_uint64 kMaxCadRecipe = mz_uint64(1) << 30;
 #endif
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/layer_config_ranges.xml";
@@ -696,8 +696,9 @@ namespace Slic3r {
 #ifdef SLIC3R_CAD
 // Extract Metadata/orca_cad.bin (or the legacy name) into model.cad_recipe. A missing, empty,
 // oversized, truncated or corrupt part is not a 3MF load failure: the mesh still loads and
-// cad_recipe stays empty. deserialize_recipe (BoundedBinaryInputArchive + feature/length caps)
-// is the only parser; we do not keep untrusted bytes that fail it.
+// cad_recipe stays empty. validate_recipe_bytes is parse-only (BoundedBinaryInputArchive +
+// feature/length caps, no recompute / no OCCT). Bytes that parse are kept exactly as read,
+// even if they would fail to rebuild on this build, so the next save still round-trips them.
 static void load_cad_recipe_part(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, bool legacy, Model &model)
 {
     if (legacy && !model.cad_recipe.empty())
@@ -710,10 +711,10 @@ static void load_cad_recipe_part(mz_zip_archive &archive, const mz_zip_archive_f
     }
     if (buf.empty())
         return;
-    CadDocument doc;
-    if (!doc.deserialize_recipe(buf)) {
+    std::string parse_err;
+    if (!CadDocument::validate_recipe_bytes(buf, &parse_err)) {
         BOOST_LOG_TRIVIAL(error) << "3MF: CAD recipe could not be read"
-                                 << (doc.error.empty() ? std::string() : (": " + doc.error)) << "; the mesh is still loaded";
+                                 << (parse_err.empty() ? std::string() : (": " + parse_err)) << "; the mesh is still loaded";
         return;
     }
     model.cad_recipe = std::move(buf);

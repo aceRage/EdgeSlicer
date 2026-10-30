@@ -148,6 +148,19 @@ std::string square_extrude_recipe()
     return blob;
 }
 
+// A Fillet with no body: cereal-valid, but recompute() throws "fillet needs a body".
+std::string dangling_fillet_recipe()
+{
+    CadDocument doc;
+    REQUIRE(doc.add_fillet(1.0, std::vector<int>{}, "DanglingFillet") >= 0);
+    const std::string blob = doc.serialize_recipe();
+    REQUIRE_FALSE(blob.empty());
+    REQUIRE(CadDocument::validate_recipe_bytes(blob));
+    CadDocument rebuilt;
+    REQUIRE_FALSE(rebuilt.deserialize_recipe(blob));
+    return blob;
+}
+
 } // namespace
 
 TEST_CASE("CAD recipe round-trips through a project 3MF", "[CadRecipe][3mf]")
@@ -226,8 +239,7 @@ TEST_CASE("A truncated or corrupt CAD recipe part fails cleanly and still loads 
         REQUIRE(loaded.objects.size() == 1);
         REQUIRE_FALSE(loaded.objects.front()->volumes.empty());
         REQUIRE(loaded.cad_recipe.empty());
-        CadDocument doc;
-        REQUIRE_FALSE(doc.deserialize_recipe(payload));
+        REQUIRE_FALSE(CadDocument::validate_recipe_bytes(payload));
     };
 
     SECTION("garbage bytes under the current name") {
@@ -259,4 +271,59 @@ TEST_CASE("A legacy SnapOrca_cad.bin recipe part still loads", "[CadRecipe][3mf]
     REQUIRE(loaded.cad_recipe == blob);
     CadDocument doc;
     REQUIRE(doc.deserialize_recipe(loaded.cad_recipe));
+}
+
+TEST_CASE("orca_cad.bin wins over a legacy SnapOrca_cad.bin in the same archive", "[CadRecipe][3mf]")
+{
+    prepare_temp_dir();
+    Model src;
+    one_cube(src);
+    ScopedTemporaryFile clean(".3mf");
+    REQUIRE(store_project(clean.string(), src));
+
+    const std::string current = square_extrude_recipe();
+    const std::string legacy  = dangling_fillet_recipe();
+    REQUIRE(current != legacy);
+
+    auto load_both = [&](const std::string &first_name, const std::string &first_blob,
+                         const std::string &second_name, const std::string &second_blob) {
+        ScopedTemporaryFile mid(".3mf");
+        ScopedTemporaryFile both(".3mf");
+        REQUIRE(clone_zip_with_entry(clean.string(), mid.string(), first_name, first_blob));
+        REQUIRE(clone_zip_with_entry(mid.string(), both.string(), second_name, second_blob));
+        REQUIRE(zip_has_entry(both.string(), "Metadata/orca_cad.bin"));
+        REQUIRE(zip_has_entry(both.string(), "Metadata/SnapOrca_cad.bin"));
+        Model loaded;
+        REQUIRE(load_project(both.string(), loaded));
+        REQUIRE(loaded.cad_recipe == current);
+    };
+
+    SECTION("legacy listed first") {
+        load_both("Metadata/SnapOrca_cad.bin", legacy, "Metadata/orca_cad.bin", current);
+    }
+    SECTION("current listed first") {
+        load_both("Metadata/orca_cad.bin", current, "Metadata/SnapOrca_cad.bin", legacy);
+    }
+}
+
+TEST_CASE("A structurally valid recipe that would not rebuild is kept byte-for-byte", "[CadRecipe][3mf]")
+{
+    prepare_temp_dir();
+    const std::string blob = dangling_fillet_recipe();
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".3mf");
+    REQUIRE(store_project(file.string(), src));
+    REQUIRE(zip_entry(file.string(), "Metadata/orca_cad.bin") == blob);
+
+    Model loaded;
+    REQUIRE(load_project(file.string(), loaded));
+    REQUIRE(loaded.objects.size() == 1);
+    REQUIRE(loaded.cad_recipe == blob);
+
+    ScopedTemporaryFile again(".3mf");
+    REQUIRE(store_project(again.string(), loaded));
+    REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
 }

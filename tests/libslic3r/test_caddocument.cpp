@@ -2277,6 +2277,52 @@ TEST_CASE("deserialize_recipe handles empty blob without throwing", "[CadDocumen
     REQUIRE_FALSE(doc.error.empty());
 }
 
+TEST_CASE("validate_recipe_bytes is parse-only", "[CadDocument]")
+{
+    SECTION("garbage fails") {
+        std::string err;
+        REQUIRE_FALSE(CadDocument::validate_recipe_bytes("this is not a valid cereal blob", &err));
+        REQUIRE_FALSE(err.empty());
+    }
+    SECTION("empty fails") {
+        std::string err;
+        REQUIRE_FALSE(CadDocument::validate_recipe_bytes("", &err));
+        REQUIRE_FALSE(err.empty());
+    }
+    SECTION("future version fails") {
+        std::ostringstream oss;
+        {
+            cereal::BinaryOutputArchive ar(oss);
+            uint32_t v = 999;
+            ar(v);
+        }
+        std::string err;
+        REQUIRE_FALSE(CadDocument::validate_recipe_bytes(oss.str(), &err));
+        REQUIRE_CONTAINS(err, "newer version");
+    }
+    SECTION("a rebuildable recipe parses") {
+        CadDocument doc;
+        SketchProfile sp;
+        sp.points = {Vec2d(-10, -10), Vec2d(10, -10), Vec2d(10, 10), Vec2d(-10, 10)};
+        sp.closed = true;
+        const int sk = doc.add_sketch_profile(sp, SketchPlane::XY(), "Square");
+        REQUIRE(sk >= 0);
+        REQUIRE(doc.add_extrude(sk, 5.0, false, BooleanMode::New, "Extrude") >= 0);
+        REQUIRE(CadDocument::validate_recipe_bytes(doc.serialize_recipe()));
+    }
+    SECTION("a recipe that will not rebuild still parses") {
+        CadDocument doc;
+        REQUIRE(doc.add_fillet(1.0, std::vector<int>{}, "DanglingFillet") >= 0);
+        const std::string blob = doc.serialize_recipe();
+        std::string err;
+        REQUIRE(CadDocument::validate_recipe_bytes(blob, &err));
+        REQUIRE(err.empty());
+        CadDocument rebuilt;
+        REQUIRE_FALSE(rebuilt.deserialize_recipe(blob));
+        REQUIRE_FALSE(rebuilt.error.empty());
+    }
+}
+
 TEST_CASE("deserialize_recipe error is non-empty on every failure path", "[CadDocument]")
 {
     CadDocument doc;

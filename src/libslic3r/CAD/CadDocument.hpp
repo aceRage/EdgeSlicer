@@ -773,6 +773,11 @@ public:
     static constexpr uint32_t ORCA_CAD_RECIPE_VERSION = 6;
     std::string serialize_recipe() const;
     bool deserialize_recipe(const std::string& blob);
+    // Structural parse of a recipe blob. Uses BoundedBinaryInputArchive and the feature/length
+    // caps; does NOT recompute and does not run OCCT. true = the bytes are well-formed enough
+    // to keep on Model::cad_recipe; false + *error = drop them. A recipe that would fail
+    // recompute() on this build still returns true so it can round-trip on the next save.
+    static bool validate_recipe_bytes(const std::string& blob, std::string* error = nullptr);
 
     // Export every body to a STEP file as native B-rep (not mesh). body_xforms is the
     // per-body display transform (Move gizmo); when supplied the bodies are written at

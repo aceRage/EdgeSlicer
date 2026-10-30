@@ -4512,9 +4512,16 @@ static void rethrow_if_corrupt()
     }
 }
 
-bool CadDocument::deserialize_recipe(const std::string& blob)
+// Structural parse only. Fills `doc`'s features/variables/origin from `blob` using the bounded
+// archive and the count/size caps. Does NOT recompute and does not run OCCT. Body names and
+// colours are returned through the optional out-params so deserialize_recipe can stamp them
+// after recompute() has rebuilt the bodies.
+static bool parse_recipe_blob(CadDocument&                                  doc,
+                              const std::string&                            blob,
+                              std::map<uint32_t, std::string>*              named_out,
+                              std::map<uint32_t, std::array<float, 4>>*     colours_out)
 {
-    error.clear();
+    doc.error.clear();
     try {
         std::istringstream iss(blob);
         // Every length and count below comes from the file. Each is checked against the bytes
@@ -4531,16 +4538,16 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
         };
         uint32_t v;
         ar(v);
-        if (v > ORCA_CAD_RECIPE_VERSION) {
-            error = format(_u8L("saved with a newer version of the Design tab (format v%1%, this build reads up to v%2%)"),
-                           v, ORCA_CAD_RECIPE_VERSION);
+        if (v > CadDocument::ORCA_CAD_RECIPE_VERSION) {
+            doc.error = format(_u8L("saved with a newer version of the Design tab (format v%1%, this build reads up to v%2%)"),
+                               v, CadDocument::ORCA_CAD_RECIPE_VERSION);
             return false;
         }
         // The framed layout has been byte-identical since v5 (v6 advanced the stamp without
         // touching the bytes), so every version from 5 up is read below. A future bump that DOES
         // change the framing must exclude itself there — this is what forces that decision
         // instead of letting a v7 blob be silently misread by the v5 reader.
-        static_assert(ORCA_CAD_RECIPE_VERSION <= 6,
+        static_assert(CadDocument::ORCA_CAD_RECIPE_VERSION <= 6,
                       "recipe version bumped: confirm the new version still uses the v5 framing");
         if (v >= 5) {
             // Framed path: every feature is a length-prefixed self-contained cereal stream, so
@@ -4550,7 +4557,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             // while the rest default. Newer file, older build: the sub-stream has MORE bytes
             // than this build knows how to read; it reads what it knows and simply stops, and
             // the outer stream is unaffected because the length prefix was consumed in full.
-            features.clear();
+            doc.features.clear();
             uint32_t count;
             ar(count);
             // Each feature is its u32 length plus a record no real feature writes in fewer bytes.
@@ -4575,9 +4582,9 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                     // so far is kept and the remaining fields stay at their defaults. Deliberately NOT an
                     // error — a field a project predates is not a corrupt project.
                 }
-                features.push_back(f);
+                doc.features.push_back(f);
             }
-            variables.clear();
+            doc.variables.clear();
             uint32_t vlen;
             ar(vlen);
             check_len(vlen, 1);
@@ -4587,7 +4594,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             try {
                 std::istringstream vs(vbuf);
                 BoundedBinaryInputArchive va(vs, vlen);
-                va(variables);
+                va(doc.variables);
             } catch (...) {
                 rethrow_if_corrupt();
                 // Variables blob predates this build: keep what was read, default the rest.
@@ -4624,26 +4631,18 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 double ox = 0, oy = 0, oz = 0;
                 bool   weld = true;
                 xa(ox, oy, oz, colours, weld);
-                modeling_origin    = Vec3d(ox, oy, oz);
-                origin_from_recipe = true;
-                auto_close_loops   = weld;
+                doc.modeling_origin    = Vec3d(ox, oy, oz);
+                doc.origin_from_recipe = true;
+                doc.auto_close_loops   = weld;
             } catch (...) {
                 rethrow_if_corrupt();
                 colours.clear();   // older project: the caller's origin stands
             }
-            // AFTER the rebuild, never before: recompute() replaces the bodies vector wholesale.
-            const bool ok = recompute();
-            for (const auto& kv : named)
-                if (kv.first < bodies.size()) {
-                    bodies[kv.first].has_user_name = true;
-                    bodies[kv.first].user_name     = kv.second;
-                }
-            for (const auto& kv : colours)
-                if (kv.first < bodies.size()) {
-                    bodies[kv.first].has_color = true;
-                    bodies[kv.first].color     = ColorRGBA(kv.second[0], kv.second[1], kv.second[2], kv.second[3]);
-                }
-            return ok;
+            if (named_out != nullptr)
+                *named_out = std::move(named);
+            if (colours_out != nullptr)
+                *colours_out = std::move(colours);
+            return true;
         }
         if (v == 4) {
             // Pre-framing flat path: v4 projects keep opening, read with the FROZEN v4 field list
@@ -4652,23 +4651,53 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             cereal::size_type n = 0;
             ar(cereal::make_size_tag(n));
             check_count(n, kMinFeatureRecordBytes);
-            features.assign(size_t(n), CadFeature{});
-            for (CadFeature& f : features) f.load_flat_v4(ar);
-            ar(variables);
-            return recompute();
+            doc.features.assign(size_t(n), CadFeature{});
+            for (CadFeature& f : doc.features) f.load_flat_v4(ar);
+            ar(doc.variables);
+            return true;
         }
         // v < 4: the field lists for v2/v3 no longer exist in this code, so those files
         // cannot be recovered here. This fix is for the future, not the past.
-        error = format(_u8L("saved with an older version of the Design tab (format v%1%); this project cannot be opened by this build"), v);
+        doc.error = format(_u8L("saved with an older version of the Design tab (format v%1%); this project cannot be opened by this build"), v);
         return false;
     } catch (const std::exception& e) {
-        error = *e.what() ? format(_u8L("CAD data could not be read: %1%"), e.what())
-                          : _u8L("CAD data could not be read");
+        doc.error = *e.what() ? format(_u8L("CAD data could not be read: %1%"), e.what())
+                              : _u8L("CAD data could not be read");
         return false;
     } catch (...) {
-        error = _u8L("CAD data could not be read");
+        doc.error = _u8L("CAD data could not be read");
         return false;
     }
+}
+
+bool CadDocument::validate_recipe_bytes(const std::string& blob, std::string* error)
+{
+    CadDocument tmp;
+    const bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr);
+    if (error != nullptr)
+        *error = tmp.error;
+    return ok;
+}
+
+bool CadDocument::deserialize_recipe(const std::string& blob)
+{
+    std::map<uint32_t, std::string>          named;
+    std::map<uint32_t, std::array<float, 4>> colours;
+    if (!parse_recipe_blob(*this, blob, &named, &colours))
+        return false;
+    // AFTER the rebuild, never before: recompute() replaces the bodies vector wholesale.
+    const bool ok = recompute();
+    for (const auto& kv : named)
+        if (kv.first < bodies.size()) {
+            bodies[kv.first].has_user_name = true;
+            bodies[kv.first].user_name     = kv.second;
+        }
+    for (const auto& kv : colours)
+        if (kv.first < bodies.size()) {
+            bodies[kv.first].has_color = true;
+            bodies[kv.first].color     = ColorRGBA(kv.second[0], kv.second[1], kv.second[2], kv.second[3]);
+        }
+    return ok;
 }
 
 bool CadDocument::export_step(const std::string& path,
