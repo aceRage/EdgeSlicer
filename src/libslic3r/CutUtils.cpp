@@ -5,6 +5,7 @@
 #include "Model.hpp"
 #include "FlexiJoint.hpp"
 #include "PushFit.hpp"
+#include "TacJoint.hpp"
 #include "CurvedCut.hpp"
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
@@ -157,12 +158,68 @@ static void process_pushfit_cut(ModelVolume* volume, ModelObjectCutAttributes at
                  PushFitSide::Lower, "_B");
 }
 
+static void process_tac_joint_cut(ModelVolume*                  volume,
+                                  ModelObjectCutAttributes      attributes,
+                                  ModelObject*                  upper,
+                                  ModelObject*                  lower,
+                                  std::vector<CutSeparatePart>& separate,
+                                  double                        face_lo,
+                                  double                        face_hi)
+{
+    const TacJointParams& params = volume->cut_info.tac_joint;
+    const Transform3d     frame  = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
+    if (attributes.has(ModelObjectCutAttribute::CreateDowels)) {
+        TriangleMesh pin_mesh(tac_joint_connector_mesh(params));
+        // Lay the long axis on the bed and put the broad reference face down.
+        Transform3d print_pose = rotation_transform(Vec3d(0.5 * PI, 0., 0.));
+        const auto  print_box  = pin_mesh.transformed_bounding_box(print_pose);
+        print_pose             = translation_transform(Vec3d(0., 0., -print_box.min.z())) * print_pose;
+        pin_mesh.transform(print_pose);
+        ModelObject* pin = nullptr;
+        volume->get_object()->clone_for_cut(&pin);
+        ModelVolume* vol = pin->add_volume(std::move(pin_mesh), ModelVolumeType::MODEL_PART);
+        vol->name        = volume->name;
+        vol->config.assign_config(volume->config);
+        vol->cut_info = volume->cut_info;
+        CutSeparatePart part;
+        part.object            = pin;
+        part.part_to_cut_frame = frame * print_pose.inverse();
+        part.is_pin            = true;
+        separate.push_back(part);
+    }
+
+    const auto cutter = tac_joint_cutter_mesh(params);
+    // Extend each socket just through its own face so boolean slicing cannot leave a cap
+    // coincident with the cut face. Its outer depth and reference fit stay unchanged.
+    constexpr float mouth_overlap = 0.02f;
+    auto            add_socket    = [&](ModelObject* half, bool top) {
+        if (!half)
+            return;
+        indexed_triangle_set clipped;
+        if (top)
+            cut_mesh(cutter, float(face_hi) - mouth_overlap, &clipped, nullptr);
+        else
+            cut_mesh(cutter, float(face_lo) + mouth_overlap, nullptr, &clipped);
+        TriangleMesh hole(std::move(clipped));
+        add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
+    };
+    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+        add_socket(upper, true);
+    if (attributes.has(ModelObjectCutAttribute::KeepLower))
+        add_socket(lower ? lower : (attributes.has(ModelObjectCutAttribute::KeepAsParts) ? upper : nullptr), false);
+}
+
 static void process_connector_cut(  ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                     ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
                                     std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0)
 {
     assert(volume->cut_info.is_connector);
     volume->cut_info.set_processed();
+
+    if (volume->cut_info.connector_type == CutConnectorType::TacJoint) {
+        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi);
+        return;
+    }
 
     if (volume->cut_info.connector_type == CutConnectorType::PushFit) {
         process_pushfit_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi);
@@ -659,6 +716,26 @@ ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, 
     return vol;
 }
 
+ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
+{
+    const auto validation = tac_joint_validate(connector.tac_joint);
+    if (!validation.valid)
+        throw std::invalid_argument(validation.message);
+    ModelVolume* vol = mo->add_volume(TriangleMesh(tac_joint_connector_mesh(connector.tac_joint)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    vol->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                            rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
+    vol->cut_info           = ModelVolume::CutInfo(CutConnectorType::TacJoint, 0.f, 0.f);
+    vol->cut_info.tac_joint = connector.tac_joint;
+    vol->name               = name;
+    return vol;
+}
+
+static bool has_tac_joint(const ModelObject* object)
+{
+    return std::any_of(object->volumes.begin(), object->volumes.end(),
+                       [](const ModelVolume* volume) { return volume->cut_info.is_tac_joint() && !volume->cut_info.is_processed; });
+}
+
 // Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses. The chain
 // itself lives in MeshBoolean so the push-fit pin's slit shares it.
 static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::string& op)
@@ -672,6 +749,8 @@ static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::str
 
 const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument("TAC Joint requires a planar cut without a Flexi joint.");
     using namespace Geometry;
 
     ModelObject* mo = m_model.objects.front();
@@ -885,6 +964,9 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     if (sheet.is_flat())
         return perform_with_plane(thickness, offset);
 
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument("TAC Joint supports planar cuts only.");
+
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
@@ -1057,6 +1139,8 @@ static void process_solid_part_draw_cut(ModelVolume* volume, const Transform3d& 
 
 const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params)
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument("TAC Joint supports planar cuts only.");
     // There is no "zero stroke" that degenerates to the flat cut the way a zero
     // sheet does - an empty stroke is simply no cut - so unlike
     // perform_with_curved_sheet() there is nothing to route back into
@@ -1165,6 +1249,24 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
 
 const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOffset offset)
 {
+    // Validate before cloning halves: a rejected fit must not leave partial cut objects.
+    double tac_face_lo = 0., tac_face_hi = 0.;
+    if (thickness > 0.)
+        curved_cut_thickness_faces(thickness, offset, tac_face_lo, tac_face_hi);
+    if (!m_model.objects.empty()) {
+        for (const auto* volume : m_model.objects.front()->volumes) {
+            if (!volume->cut_info.is_tac_joint() || volume->cut_info.is_processed)
+                continue;
+            const auto validation = tac_joint_validate(volume->cut_info.tac_joint, tac_face_lo, tac_face_hi);
+            if (!validation.valid)
+                throw std::invalid_argument(validation.message);
+            const Transform3d local = m_cut_matrix.inverse() * volume->get_matrix();
+            const Vec3d       axis  = local.linear() * Vec3d::UnitZ();
+            if (!local.matrix().allFinite() || !std::isfinite(thickness) || (axis - Vec3d::UnitZ()).norm() > 1e-4 ||
+                std::abs(local.translation().z()) > 1e-3)
+                throw std::invalid_argument("TAC Joint must stand on the planar cut surface.");
+        }
+    }
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
@@ -1259,9 +1361,9 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
 
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
-            add_separate_parts(dowels, cut_object_ptrs);
     }
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - end";
 
@@ -1320,6 +1422,8 @@ static void merge_solid_parts_inside_object(ModelObjectPtrs& objects)
 
 const ModelObjectPtrs& Cut::perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count)
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument("TAC Joint does not support individual part selection.");
     ModelObject* cut_mo = m_model.objects.front();
 
     // C1: PartSelection's pieces keep the object's own frame (the instance is not baked into them,
@@ -1428,6 +1532,8 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove&       groove,
                                                 const float         plane_radius,
                                                 bool                keep_as_parts /* = false*/)
 {
+    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
+        throw std::invalid_argument("TAC Joint does not support groove cuts.");
     ModelObject* cut_mo = m_model.objects.front();
     // The gizmo caps the count (20); a recipe or a caller asking for none still gets one dovetail.
     groove_count = std::max(1, groove_count);
