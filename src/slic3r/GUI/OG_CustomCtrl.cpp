@@ -367,7 +367,7 @@ void OG_CustomCtrl::OnMotion(wxMouseEvent& event)
             // BBS: markdown tip
             focusedLine = &line;
             markdowntip = line.og_line.label.empty() 
-                ? line.og_line.get_options().front().opt_id : into_u8(line.og_line.label);
+                ? (line.og_line.get_options().empty() ? std::string() : line.og_line.get_options().front().opt_id) : into_u8(line.og_line.label);
             markdowntip.erase(0, markdowntip.find_last_of('#') + 1);
             // BBS
             break;
@@ -718,7 +718,8 @@ void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
         return;
     const std::vector<Option>& option_set = og_line.get_options();
 
-    const ConfigOptionMode& line_mode = option_set.front().opt.mode;
+    // A widget-only line (no option) is shown in every mode.
+    const ConfigOptionMode line_mode = option_set.empty() ? comSimple : option_set.front().opt.mode;
     is_visible = og_line.toggle_visible && line_mode <= mode;
 
     if (draw_just_act_buttons)
@@ -768,7 +769,7 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord h_pos, wxCoord v_pos)
         return;
     }
 
-    Field* field = ctrl->opt_group->get_field(og_line.get_options().front().opt_id);
+    Field* field = og_line.get_options().empty() ? nullptr : ctrl->opt_group->get_field(og_line.get_options().front().opt_id);
 
     bool suppress_hyperlinks = false;
     if (draw_just_act_buttons) {
