@@ -2126,7 +2126,7 @@ TEST_CASE("deserialize_recipe rejects truncated or oversized length fields", "[C
         return oss.str();
     };
     SECTION("v6 feature count larger than the blob") {
-        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0xFFFFFFFFu)); });
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(50000)); });   // under the hard cap, so the bytes-left check is what fires
         CadDocument doc;
         REQUIRE_FALSE(doc.deserialize_recipe(blob));
         CHECK_CONTAINS(doc.error, "exceeds the remaining data");
