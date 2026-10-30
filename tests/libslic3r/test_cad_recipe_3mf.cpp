@@ -368,3 +368,28 @@ TEST_CASE("An Import with junk BRep text is kept without calling BRepTools", "[C
     REQUIRE(store_project(again.string(), loaded));
     REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
 }
+
+TEST_CASE("A sliced .gcode.3mf does not carry the CAD recipe", "[CadRecipe][3mf]")
+{
+    // F5: project 3MFs keep Metadata/orca_cad.bin; sliced handoff files do not.
+    prepare_temp_dir();
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20, 10, 0, "Sketch");
+    doc.add_extrude(sk, 5.0, false, BooleanMode::New, "Extrude");
+    REQUIRE(doc.recompute());
+    const std::string blob = doc.serialize_recipe();
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".gcode.3mf");
+    DynamicPrintConfig cfg = project_config();
+    StoreParams        sp;
+    sp.path     = file.string();
+    sp.model    = &src;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary | SaveStrategy::SkipStatic |
+                  SaveStrategy::WithGcode;
+    REQUIRE(store_bbs_3mf(sp));
+    REQUIRE_FALSE(zip_has_entry(file.string(), "Metadata/orca_cad.bin"));
+}

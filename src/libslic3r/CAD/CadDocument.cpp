@@ -40,6 +40,7 @@
 #include <functional>
 #include <exception>
 #include <cstdint>
+#include <atomic>
 #include <cereal/cereal.hpp>
 #include <cereal/details/helpers.hpp>
 #include <gp_Pln.hxx>
@@ -266,6 +267,9 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
     std::vector<Token> tokens;
     size_t i = 0;
     bool prev_was_val = false; // tracked for unary-minus detection
+    // German locale: accept "1,5" as 1.5 when the expression is not a function call
+    // (no '('), so min(1,2) keeps comma as the arity separator.
+    const bool decimal_comma = src.find('(') == std::string::npos;
     while (i < src.size()) {
         char c = src[i];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
@@ -274,8 +278,10 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
         if (c == ',') { tokens.push_back({Token::Comma, ","}); ++i; prev_was_val = false; continue; }
         if (isdigit(c) || c == '.') {
             size_t start = i;
-            while (i < src.size() && (isdigit(src[i]) || src[i] == '.')) ++i;
+            while (i < src.size() && (isdigit(src[i]) || src[i] == '.' || (decimal_comma && src[i] == ','))) ++i;
             Token t{Token::Num, src.substr(start, i - start)};
+            for (char& ch : t.val)
+                if (ch == ',') ch = '.';
             t.num = std::stod(t.val);
             tokens.push_back(t);
             prev_was_val = true;
@@ -4411,15 +4417,15 @@ std::string brep_to_string(const TopoDS_Shape& s)
     return oss.str();
 }
 
-static int g_brep_from_string_calls = 0;
+static std::atomic<int> g_brep_from_string_calls{0};
 
-void reset_brep_from_string_calls() { g_brep_from_string_calls = 0; }
-int  brep_from_string_calls() { return g_brep_from_string_calls; }
+void reset_brep_from_string_calls() { g_brep_from_string_calls.store(0); }
+int  brep_from_string_calls() { return g_brep_from_string_calls.load(); }
 
 TopoDS_Shape brep_from_string(const std::string& d)
 {
     if (d.empty()) return {};
-    ++g_brep_from_string_calls;
+    g_brep_from_string_calls.fetch_add(1);
     std::istringstream iss(d);
     TopoDS_Shape s;
     BRep_Builder b;

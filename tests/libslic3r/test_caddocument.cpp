@@ -5316,6 +5316,19 @@ TEST_CASE("function + pi in expression binding", "[CadDocument][variables]")
     REQUIRE(doc.recompute());
     REQUIRE(doc.error.empty());
     REQUIRE_THAT(doc.features[sk].radius, WithinAbs(10.0, 1e-6));
+
+    // German locale: a decimal comma is accepted when there is no function call.
+    doc.variables = {{"r", "6,5"}};
+    doc.features[sk].expr = {{"radius", "r"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(6.5, 1e-6));
+
+    // min() still uses comma as the arity separator.
+    doc.variables = {{"r", "min(4, 9)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(4.0, 1e-6));
 }
 
 TEST_CASE("cycle detected fails recompute with error", "[CadDocument][variables]")

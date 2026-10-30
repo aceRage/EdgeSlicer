@@ -7470,7 +7470,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
 #ifdef SLIC3R_CAD
-            if (!_add_cad_recipe_file_to_archive(archive, model)) {
+            // F5: .gcode.3mf is a sliced handoff, not a project. Keep the recipe in project
+            // 3MFs only. F4 (optional [Content_Types] bin) is deferred.
+            if (!m_save_gcode && !_add_cad_recipe_file_to_archive(archive, model)) {
                 close_zip_writer(&archive);
                 return false;
             }
