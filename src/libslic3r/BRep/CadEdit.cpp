@@ -80,8 +80,6 @@ std::string write_shape(const TopoDS_Shape &shape)
 std::string occt_message(const Standard_Failure &e)
 {
     const char *msg = e.GetMessageString();
-    if (msg == nullptr || *msg == 0)
-        msg = e.what();
     std::string out = e.DynamicType()->Name();
     if (msg != nullptr && *msg != 0)
         out += std::string(": ") + msg;

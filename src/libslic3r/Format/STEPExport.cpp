@@ -61,7 +61,7 @@ const char *occt_failure_message(const Standard_Failure &e)
 {
     const char *msg = e.GetMessageString();
     if (msg == nullptr || *msg == 0)
-        msg = e.what();
+        msg = e.DynamicType()->Name();
     return (msg && *msg) ? msg : "unknown error";
 }
 
