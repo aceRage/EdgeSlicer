@@ -31,6 +31,7 @@ add_executable(${_TEST_NAME}_tests
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
+	test_nozzle_process_gcode.cpp
 	test_printobject.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp

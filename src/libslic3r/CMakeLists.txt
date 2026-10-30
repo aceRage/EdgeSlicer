@@ -565,6 +565,8 @@ set(lisbslic3r_sources
     SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    NozzleProcess.cpp
+    NozzleProcess.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp

@@ -99,6 +99,7 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/ProjectConfigFill.hpp"
 #include <algorithm>
 #include <array>
@@ -3672,6 +3673,32 @@ int CLI::run(int argc, char **argv)
     m_print_config.apply(m_extra_config, true);
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
+
+    // Per-nozzle process P1: --nozzle-process-presets "A;B" (or a project's nozzle_process_presets) names the
+    // process each physical extruder takes its speeds, accelerations and jerk from. Copy them into the
+    // extruders' slots of the process keys, as the GUI's full_config() does. A name that cannot be found
+    // leaves that extruder as the project / plate has it (a project already carries the copied values).
+    if (const std::vector<std::string> nozzle_process_names = nozzle_process_preset_names(m_print_config); !nozzle_process_names.empty()) {
+        const auto &names = m_print_config.option<ConfigOptionStrings>("nozzle_process_presets")->values;
+        std::vector<DynamicPrintConfig>         nozzle_process_store(names.size());
+        std::vector<const DynamicPrintConfig *> nozzle_process_sources(names.size(), nullptr);
+        for (size_t e = 0; e < names.size(); ++e) {
+            if (names[e].empty())
+                continue;
+            std::string filament_id_unused;
+            if (const Preset *preset = named_presets().find_system(names[e], Preset::TYPE_PRINT)) {
+                nozzle_process_store[e] = preset->config;
+                nozzle_process_sources[e] = &nozzle_process_store[e];
+            } else if (named_presets().find_user(names[e], Preset::TYPE_PRINT, nozzle_process_store[e], filament_id_unused)) {
+                nozzle_process_sources[e] = &nozzle_process_store[e];
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << names[e] << "' for extruder " << e + 1 << " not found";
+                boost::nowide::cerr << "per-nozzle process: preset not found: " << names[e] << std::endl;
+            }
+        }
+        if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources))
+            BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filled the extruder slots of the process keys";
+    }
 
     m_print_config.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology", true)->value = printer_technology;
 

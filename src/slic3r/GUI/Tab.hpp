@@ -306,6 +306,17 @@ protected:
         EditScope edit_scope { EditScope::ActiveMode };
         std::function<const std::vector<std::string>&()> options;
         std::function<bool(const std::string&)> is_option;
+
+        // Per-nozzle process P1 (process tab, printers with several physical extruders): which nozzle the
+        // speed page shows (Left / Right, T1..Tn) and the process that nozzle takes its speeds from.
+        SegmentedToggle*         nozzle_selector { nullptr };
+        ::ComboBox*              nozzle_process_combo { nullptr };
+        Button*                  nozzle_apply_btn { nullptr };
+        wxStaticText*            nozzle_note { nullptr };
+        wxStaticText*            nozzle_mode_label { nullptr }; // "Nozzles edited separately"
+        std::vector<wxString>    nozzle_labels;
+        size_t                   selected_extruder { 0 };
+        std::vector<std::string> nozzle_combo_names; // combo row -> preset name ("" = the plate's process)
     };
     std::unique_ptr<FlowVariantView> m_flow_variant_view;
 
@@ -479,6 +490,26 @@ protected:
     bool enter_flow_variant_both();
     void on_copy_standard_to_high_flow();
     void maybe_dual_write_flow_variant(const std::string& opt_key);
+
+    // Per-nozzle process P1 (tests/design_per_nozzle_process.md D5).
+    // Nozzle switch labels for the edited printer: Left / Right on a Bambu two-extruder machine, T1..Tn on
+    // other multi-extruder printers, empty when the printer takes no per-nozzle processes (or not a process tab).
+    std::vector<wxString> nozzle_switch_labels() const;
+    // The slot of `key` the fields show for the selected nozzle and flow mode when the edited process keeps
+    // per-extruder slots for that key (an H2D / H2C / X2D process), else -1 (the flow-mode column).
+    int  nozzle_slot_index(const std::string& key) const;
+    // The process the selected nozzle takes its speeds from ("" = the plate's process, this one).
+    std::string selected_nozzle_process() const;
+    void on_nozzle_selected(int index);
+    void on_nozzle_process_chosen(int row);
+    void on_apply_nozzle_to_all();
+    void refresh_nozzle_controls();
+    void disable_fields_of_nozzle_process();
+    void enable_fields_of_nozzle_process();
+    // The edited process holds per-extruder slots for every nozzle (an H2D / H2C / X2D process), so its
+    // nozzles can be edited separately, and whether they are (process_extruder_values).
+    bool nozzle_layout_splittable() const;
+    bool nozzle_values_split() const;
 
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);

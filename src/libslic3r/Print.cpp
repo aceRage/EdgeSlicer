@@ -593,6 +593,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     // Cache the plenty of parameters, which influence the G-code generator only,
     // or they are only notes not influencing the generated G-code.
     static std::unordered_set<std::string> steps_gcode = {
+        // Per-nozzle process P1: the names only reach the G-code's config block; the values they
+        // stand for are the process keys' extruder slots.
+        "nozzle_process_presets",
         //BBS
         "additional_cooling_fan_speed",
         "reduce_crossing_wall",
@@ -794,7 +797,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "filament_flow_support"
             || opt_key == "process_flow_support"
             || opt_key == "printer_flow_support"
-            || opt_key == "filament_flow_step_size") {
+            || opt_key == "filament_flow_step_size"
+            // Per-nozzle process P1: which extruder slot of the process keys a filament reads.
+            || opt_key == "print_extruder_id"
+            || opt_key == "print_extruder_variant"
+            || opt_key == "process_extruder_values") {
             // Snapmaker: switching a filament's flow variant changes the values read out of
             // flow-variant arrays without the arrays themselves changing.
             invalidated |= this->invalidate_all_steps();

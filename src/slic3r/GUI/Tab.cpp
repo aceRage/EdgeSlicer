@@ -74,6 +74,7 @@
 #include "Widgets/Button.hpp"
 #include "Widgets/SegmentedToggle.hpp"
 #include "FlowVariantEdit.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "CostsDialog.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
@@ -948,6 +949,12 @@ void Tab::destroy_flow_variant_header_controls()
     m_flow_variant_view->host     = nullptr;
     m_flow_variant_view->selector = nullptr;
     m_flow_variant_view->copy_btn = nullptr;
+    // Per-nozzle process P1: children of the host, destroyed with it.
+    m_flow_variant_view->nozzle_selector      = nullptr;
+    m_flow_variant_view->nozzle_process_combo = nullptr;
+    m_flow_variant_view->nozzle_apply_btn     = nullptr;
+    m_flow_variant_view->nozzle_note          = nullptr;
+    m_flow_variant_view->nozzle_mode_label    = nullptr;
 }
 
 void Tab::register_flow_variant_view(ConfigFlowDomain domain,
@@ -1057,7 +1064,53 @@ bool Tab::enter_flow_variant_both()
                                          m_flow_variant_view->modes.end(),
                                          FLOW_MODE_HIGH_FLOW) != m_flow_variant_view->modes.end();
 
-    if (has_standard && has_high_flow &&
+    // Per-nozzle process P1: on another nozzle of a per-extruder process the two modes are that nozzle's
+    // own Standard and High Flow slots.
+    if (has_standard && has_high_flow && m_flow_variant_view->selected_extruder > 0 &&
+        nozzle_slot_index("outer_wall_speed") >= 0) {
+        const std::string saved_mode = m_flow_variant_view->selected_mode;
+        auto slot_of = [this](const std::string& key, const char* mode) {
+            m_flow_variant_view->selected_mode = mode;
+            return nozzle_slot_index(key);
+        };
+        auto copy_slots = [this, &slot_of](const char* from, const char* to, bool check_only) {
+            bool differ = false;
+            for (const std::string& key : per_nozzle_process_options()) {
+                const int src = slot_of(key, from), dst = slot_of(key, to);
+                auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(key));
+                if (src < 0 || dst < 0 || src == dst || opt == nullptr)
+                    continue;
+                const std::vector<std::string> values = opt->vserialize();
+                if (values[size_t(src)] == values[size_t(dst)])
+                    continue;
+                differ = true;
+                if (!check_only) {
+                    std::unique_ptr<ConfigOption> copy(opt->clone());
+                    opt->set_at(copy.get(), size_t(dst), size_t(src));
+                }
+            }
+            return differ;
+        };
+        const bool differ = copy_slots(FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW, true);
+        m_flow_variant_view->selected_mode = saved_mode;
+        if (differ) {
+            wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+            RichMessageDialog dlg(parent,
+                _L("Standard and High flow settings of this nozzle differ. Choose which values to keep for both flow modes. "
+                   "This will overwrite the other mode."),
+                _L("Flow settings differ"),
+                wxYES_NO | wxCANCEL | wxICON_QUESTION);
+            dlg.SetYesNoCancelLabels(_L("Use Standard values"), _L("Use High-flow values"), _L("Cancel"));
+            const int answer = dlg.ShowModal();
+            if (answer == wxID_YES)
+                copy_slots(FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW, false);
+            else if (answer == wxID_NO)
+                copy_slots(FLOW_MODE_HIGH_FLOW, FLOW_MODE_STANDARD, false);
+            m_flow_variant_view->selected_mode = saved_mode;
+            if (answer != wxID_YES && answer != wxID_NO)
+                return false;
+        }
+    } else if (has_standard && has_high_flow &&
         flow_variant_slots_differ(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW)) {
         wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
         RichMessageDialog dlg(parent,
@@ -1120,7 +1173,282 @@ void Tab::maybe_dual_write_flow_variant(const std::string& opt_key)
         return;
     if (!m_flow_variant_view->is_option(opt_key))
         return;
+    // Per-nozzle process P1: a field bound to the selected nozzle's slot writes that nozzle's other mode.
+    if (const int slot = nozzle_slot_index(opt_key); slot >= 0) {
+        auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(opt_key));
+        const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(*m_config);
+        const auto* variants = m_config->option<ConfigOptionStrings>("print_extruder_variant");
+        const size_t e = m_flow_variant_view->selected_extruder;
+        if (opt == nullptr || variants == nullptr || e >= slots.size())
+            return;
+        std::unique_ptr<ConfigOption> source(opt->clone());
+        for (size_t s : slots[e])
+            if (int(s) != slot && process_variant_flow_mode(variants->values[s]) >= 0)
+                opt->set_at(source.get(), s, size_t(slot));
+        return;
+    }
     replicate_flow_variant_value(*m_config, opt_key, flow_variant_view_index(), m_flow_variant_view->modes);
+}
+
+// ---- Per-nozzle process P1 (tests/design_per_nozzle_process.md D5) ------------------------------
+
+// The "Speeds from" combo's section header rows ("System presets", ...) map to this, never to a preset.
+static const char* const NOZZLE_COMBO_HEADER = "\x01section";
+
+std::vector<wxString> Tab::nozzle_switch_labels() const
+{
+    std::vector<wxString> labels;
+    if (m_type != Preset::TYPE_PRINT || !m_flow_variant_view || m_flow_variant_view->domain != ConfigFlowDomain::Process ||
+        m_preset_bundle == nullptr)
+        return labels;
+    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    if (!supports_nozzle_processes(printer))
+        return labels;
+    const std::vector<double>& nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter")->values;
+    int        extruder_count = 0;
+    // Bambu's two-extruder machines (H2D, H2C, X2D) name their nozzles; logical extruder 0 is the left one.
+    const bool sided = nozzles.size() == 2 && printer.support_different_extruders(extruder_count);
+    const bool mixed = has_mixed_nozzle_diameters(nozzles);
+    for (size_t e = 0; e < nozzles.size(); ++e) {
+        wxString label = sided ? (e == 0 ? _L("Left") : _L("Right")) : wxString::Format("T%d", int(e + 1));
+        if (mixed)
+            label += " " + from_u8(format_diameter_to_str(nozzles[e]));
+        labels.push_back(label);
+    }
+    return labels;
+}
+
+bool Tab::nozzle_layout_splittable() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_config == nullptr)
+        return false;
+    return process_nozzles_splittable(*m_config, m_flow_variant_view->nozzle_labels.size());
+}
+
+bool Tab::nozzle_values_split() const
+{
+    return m_config != nullptr && process_nozzles_split(*m_config);
+}
+
+int Tab::nozzle_slot_index(const std::string& key) const
+{
+    // Only a process the user split per nozzle is read per extruder; any other one prints every nozzle
+    // from the flow-mode column, which is what the fields show then.
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_config == nullptr || !nozzle_layout_splittable())
+        return -1;
+    return process_nozzle_slot(*m_config, key, m_flow_variant_view->selected_extruder,
+                               m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW ? fvtHighFlow : fvtStandard);
+}
+
+std::string Tab::selected_nozzle_process() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_preset_bundle == nullptr)
+        return std::string();
+    const std::vector<std::string> selection = m_preset_bundle->nozzle_process_selection();
+    const size_t e = m_flow_variant_view->selected_extruder;
+    return e < selection.size() ? selection[e] : std::string();
+}
+
+void Tab::on_nozzle_selected(int index)
+{
+    if (!m_flow_variant_view || index < 0 || size_t(index) >= m_flow_variant_view->nozzle_labels.size())
+        return;
+    m_flow_variant_view->selected_extruder = size_t(index);
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_changed_ui();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+}
+
+void Tab::on_nozzle_process_chosen(int row)
+{
+    if (!m_flow_variant_view || m_preset_bundle == nullptr || row < 0 ||
+        size_t(row) >= m_flow_variant_view->nozzle_combo_names.size())
+        return;
+    const std::string name = m_flow_variant_view->nozzle_combo_names[size_t(row)];
+    // A section header ("System presets", ...) is not a choice.
+    if (name == NOZZLE_COMBO_HEADER || m_flow_variant_view->nozzle_process_combo->IsItemDisabled(unsigned(row)))
+        return;
+    if (m_preset_bundle->set_nozzle_process(m_flow_variant_view->selected_extruder, name)) {
+        // Remembered per printer, saved with the project, and re-sliced like any other settings change.
+        m_preset_bundle->export_selections(*wxGetApp().app_config);
+        DynamicPrintConfig full = m_preset_bundle->full_config();
+        if (wxGetApp().mainframe)
+            wxGetApp().mainframe->on_config_changed(&full);
+        if (wxGetApp().plater())
+            wxGetApp().plater()->update_project_dirty_from_presets();
+    }
+    // The combo's own event is still running: rebuild nothing here, only refresh its contents later.
+    wxGetApp().CallAfter([this]() {
+        if (!m_flow_variant_view)
+            return;
+        refresh_nozzle_controls();
+        Tab::reload_config();
+        toggle_options();
+        update_visibility();
+        m_parent->Layout();
+    });
+}
+
+void Tab::on_apply_nozzle_to_all()
+{
+    if (!m_flow_variant_view || m_config == nullptr || !nozzle_layout_splittable())
+        return;
+    const size_t   e      = m_flow_variant_view->selected_extruder;
+    const wxString nozzle = e < m_flow_variant_view->nozzle_labels.size() ? m_flow_variant_view->nozzle_labels[e] : wxString();
+    bool changed = false;
+    if (nozzle_values_split()) {
+        // "Link nozzles": back to one set of values, the shown nozzle's. Ask when the others would lose values
+        // of their own (YES = link: a phone or agent driving the GUI only gets here by asking to link).
+        if (process_extruder_slots_differ(*m_config)) {
+            wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+            MessageDialog dlg(parent,
+                format_wxstr(_L("Use the %1% values for all nozzles? The other nozzles' own values will be discarded."), nozzle),
+                _L("Link nozzles"), wxYES_NO | wxICON_QUESTION);
+            if (dlg.ShowModal() != wxID_YES)
+                return;
+        }
+        changed = link_process_nozzles(*m_config, e, &m_presets->get_selected_preset().config);
+    } else {
+        // "Edit nozzles separately": every nozzle starts from what it prints now (libslic3r NozzleProcess).
+        changed = split_process_per_nozzle(*m_config, m_flow_variant_view->nozzle_labels.size());
+    }
+    if (!changed)
+        return;
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_dirty();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+    // The flag decides which slots the slicer reads: re-slice like any other edit.
+    if (wxGetApp().mainframe)
+        wxGetApp().mainframe->on_config_changed(m_config);
+}
+
+// Show `text` in the combo shortened to its width, so a long preset name never pushes anything aside.
+static void set_ellipsized_combo_label(::ComboBox* combo, const wxString& text)
+{
+    if (combo == nullptr)
+        return;
+    const int width = combo->GetClientSize().x - combo->FromDIP(28); // the drop-down arrow
+    if (width <= 0) {
+        combo->SetLabel(text);
+        return;
+    }
+    wxClientDC dc(combo);
+    dc.SetFont(combo->GetFont());
+    combo->SetLabel(wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, width));
+    combo->SetToolTip(text);
+}
+
+void Tab::refresh_nozzle_controls()
+{
+    FlowVariantView* view = m_flow_variant_view.get();
+    if (view == nullptr || view->nozzle_process_combo == nullptr || m_preset_bundle == nullptr)
+        return;
+    const size_t e = view->selected_extruder;
+    const wxString nozzle = e < view->nozzle_labels.size() ? view->nozzle_labels[e] : wxString();
+    ::ComboBox* combo = view->nozzle_process_combo;
+
+    // Use Global Setting, then the candidates grouped like the sidebar's process combo: favourites
+    // (starred in the process combo), system presets, user presets. Header rows cannot be picked.
+    view->nozzle_combo_names.clear();
+    combo->Clear();
+    combo->Append(_L("Use Global Setting"));
+    view->nozzle_combo_names.emplace_back();
+    std::vector<std::string> favourites, system, user;
+    const std::set<std::string> starred = FavoriteFilamentsUI::load(FavoriteFilamentsUI::Kind::Process);
+    for (const std::string& name : m_preset_bundle->nozzle_process_candidates(e)) {
+        const Preset* preset = m_preset_bundle->prints.find_preset(name, false);
+        if (preset == nullptr)
+            continue;
+        if (starred.count(FavoriteFilamentsUI::key_for(*preset)) > 0)
+            favourites.push_back(name);
+        (preset->is_system ? system : user).push_back(name);
+    }
+    auto add_section = [&](const wxString& title, const std::vector<std::string>& names, const wxString& prefix) {
+        if (names.empty())
+            return;
+        combo->Append(title);
+        view->nozzle_combo_names.emplace_back(NOZZLE_COMBO_HEADER);
+        combo->SetItemDisabled(combo->GetCount() - 1);
+        for (const std::string& name : names) {
+            combo->Append(prefix + from_u8(name));
+            view->nozzle_combo_names.push_back(name);
+        }
+    };
+    add_section(_L("Favorite process presets"), favourites, wxString::FromUTF8("\xE2\x98\x85 ")); // a star
+    add_section(_L("System presets"), system, wxString());
+    add_section(_L("User presets"), user, wxString());
+
+    const std::string current = selected_nozzle_process();
+    auto it = std::find(view->nozzle_combo_names.begin(), view->nozzle_combo_names.end(), current);
+    if (it == view->nozzle_combo_names.end()) {
+        combo->Append(from_u8(current));
+        view->nozzle_combo_names.push_back(current);
+        it = view->nozzle_combo_names.end() - 1;
+    }
+    const int row = int(it - view->nozzle_combo_names.begin());
+    combo->SetSelection(row);
+    set_ellipsized_combo_label(combo, current.empty() ? _L("Use Global Setting") : from_u8(current));
+
+    const bool splittable = nozzle_layout_splittable();
+    const bool split      = splittable && nozzle_values_split();
+    wxString note;
+    if (!current.empty())
+        note = format_wxstr(_L("%1% takes its speeds, accelerations and jerk from \"%2%\". Layer height, walls, infill and line widths come from this process."),
+                            nozzle, from_u8(current));
+    else if (split)
+        note = format_wxstr(_L("The fields below are %1%'s."), nozzle);
+    else if (e > 0)
+        note = _L("All nozzles without a process of their own share these values.");
+    if (view->nozzle_note != nullptr) {
+        view->nozzle_note->SetLabel(note);
+        view->nozzle_note->SetToolTip(note);
+        view->nozzle_note->Show(!note.empty());
+    }
+    if (view->nozzle_mode_label != nullptr)
+        view->nozzle_mode_label->Show(split);
+    if (view->nozzle_apply_btn != nullptr) {
+        view->nozzle_apply_btn->SetLabel(split ? _L("Link nozzles") : _L("Edit nozzles separately"));
+        view->nozzle_apply_btn->SetToolTip(split ? _L("Edit all nozzles together again: every nozzle takes the values of the nozzle shown.") :
+                                                   _L("Give each nozzle its own speeds, accelerations and jerk in this process. "
+                                                      "Every nozzle starts from the values it prints with now."));
+        // Always shown, so it can be found: disabled with the reason when it cannot act.
+        const bool can_act = current.empty() && splittable;
+        if (!can_act)
+            view->nozzle_apply_btn->SetToolTip(!current.empty() ?
+                _L("This nozzle takes its speeds from its own process. Pick \"Use Global Setting\" to edit them here.") :
+                _L("This process keeps one set of speeds for all nozzles (the U1's processes do). "
+                   "Pick a process for this nozzle in \"Speeds from\" instead."));
+        view->nozzle_apply_btn->Enable(can_act);
+        view->nozzle_apply_btn->Show(true);
+    }
+    if (view->host != nullptr)
+        view->host->Layout();
+}
+
+void Tab::enable_fields_of_nozzle_process()
+{
+    // Undo disable_fields_of_nozzle_process() of a previously selected nozzle; ConfigManipulation's own
+    // rules run after this and still win.
+    if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty())
+        return;
+    for (const std::string& key : per_nozzle_process_options())
+        toggle_option(key, true);
+}
+
+void Tab::disable_fields_of_nozzle_process()
+{
+    // The selected nozzle takes these from its own process: the plate process's values shown here are not
+    // used for it, so they are not editable for it either.
+    if (selected_nozzle_process().empty())
+        return;
+    for (const std::string& key : per_nozzle_process_options())
+        toggle_option(key, false);
 }
 
 void Tab::refresh_flow_variant_view()
@@ -1153,7 +1481,13 @@ void Tab::refresh_flow_variant_view()
         m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
     }
 
-    if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes)
+    // Per-nozzle process P1: the nozzle switch of a process tab on a multi-extruder printer.
+    const std::vector<wxString> nozzle_labels = nozzle_switch_labels();
+    if (m_flow_variant_view->selected_extruder >= nozzle_labels.size())
+        m_flow_variant_view->selected_extruder = 0;
+
+    if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes ||
+        nozzle_labels != m_flow_variant_view->nozzle_labels)
     {
         if (modes != m_flow_variant_view->modes)
             m_flow_variant_view->edit_scope = FlowVariantView::EditScope::ActiveMode;
@@ -1161,6 +1495,7 @@ void Tab::refresh_flow_variant_view()
         destroy_flow_variant_header_controls();
 
         m_flow_variant_view->modes = modes;
+        m_flow_variant_view->nozzle_labels = nozzle_labels;
         std::vector<wxString> labels;
         labels.reserve(modes.size() + 1);
         for (const std::string& mode : modes)
@@ -1182,7 +1517,80 @@ void Tab::refresh_flow_variant_view()
         wxWindow* header = m_parent->get_page_header();
         auto* host = new wxPanel(header, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
         host->SetBackgroundColour(header->GetBackgroundColour());
-        auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
+        // Row 1: [Nozzle: Left | Right] (or T1..Tn) beside the Standard / High flow selector.
+        // Row 2 (per-nozzle process P1): the process that nozzle prints with, Edit nozzles separately /
+        // Apply to all nozzles, and a note. Two rows, so nothing is pushed off the right edge.
+        auto* host_vsizer = new wxBoxSizer(wxVERTICAL);
+        auto* host_sizer  = new wxBoxSizer(wxHORIZONTAL);
+        host_vsizer->Add(host_sizer, 0, wxEXPAND);
+        auto make_caption = [host](const wxString& text) {
+            auto* caption = new wxStaticText(host, wxID_ANY, text);
+            caption->SetFont(Label::Body_13);
+            caption->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
+            return caption;
+        };
+
+        if (!nozzle_labels.empty()) {
+            host_sizer->Add(make_caption(_L("Nozzle") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+            m_flow_variant_view->nozzle_selector = new SegmentedToggle(host, nozzle_labels,
+                                                                       int(m_flow_variant_view->selected_extruder),
+                                                                       SegmentedToggle::Style::Pill);
+            m_flow_variant_view->nozzle_selector->SetToolTip(_L("The nozzle whose speed settings this page shows"));
+            host_sizer->Add(m_flow_variant_view->nozzle_selector, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(16));
+
+            // Row 2: "Speeds from:" and the picker, which takes the rest of the width and shrinks with the
+            // sidebar (its label is shortened to fit, the full name is in the tooltip).
+            auto* row2 = new wxBoxSizer(wxHORIZONTAL);
+            row2->Add(make_caption(_L("Speeds from") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+            auto* combo = new ::ComboBox(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(120), -1), 0,
+                                         nullptr, wxCB_READONLY);
+            combo->SetMinSize(wxSize(FromDIP(120), -1));
+            combo->SetToolTip(_L("The process this nozzle takes its speeds, accelerations and jerk from. Layer height, "
+                                 "walls, infill, line widths and supports always come from the global (plate) process."));
+            combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& evt) { on_nozzle_process_chosen(evt.GetSelection()); });
+            combo->Bind(wxEVT_SIZE, [this](wxSizeEvent& evt) {
+                evt.Skip();
+                wxGetApp().CallAfter([this]() {
+                    if (m_flow_variant_view && m_flow_variant_view->nozzle_process_combo) {
+                        const std::string current = selected_nozzle_process();
+                        set_ellipsized_combo_label(m_flow_variant_view->nozzle_process_combo,
+                                                   current.empty() ? _L("Use Global Setting") : from_u8(current));
+                    }
+                });
+            });
+            row2->Add(combo, 1, wxALIGN_CENTER_VERTICAL);
+            m_flow_variant_view->nozzle_process_combo = combo;
+            host_vsizer->Add(row2, 0, wxEXPAND | wxTOP, FromDIP(6));
+
+            // Row 3: the mode button on a row of its own, left-aligned, so no width can push it out of view;
+            // the mode label beside it.
+            auto* row3 = new wxBoxSizer(wxHORIZONTAL);
+            auto* apply_btn = new Button(host, _L("Edit nozzles separately"));
+            apply_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            apply_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_apply_nozzle_to_all(); });
+            row3->Add(apply_btn, 0, wxALIGN_CENTER_VERTICAL);
+            m_flow_variant_view->nozzle_apply_btn = apply_btn;
+            auto* mode_label = new wxStaticText(host, wxID_ANY, _L("Nozzles edited separately"));
+            mode_label->SetFont(Label::Body_12);
+            mode_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#009688")));
+            row3->Add(mode_label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+            m_flow_variant_view->nozzle_mode_label = mode_label;
+            host_vsizer->Add(row3, 0, wxTOP, FromDIP(6));
+
+            // Row 4: the note, shortened to the width (full text in its tooltip).
+            auto* note = new wxStaticText(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
+                                          wxST_ELLIPSIZE_END | wxST_NO_AUTORESIZE);
+            note->SetFont(Label::Body_12);
+            note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
+            note->SetMinSize(wxSize(FromDIP(40), -1));
+            host_vsizer->Add(note, 0, wxEXPAND | wxTOP, FromDIP(4));
+            m_flow_variant_view->nozzle_note = note;
+
+            m_flow_variant_view->nozzle_selector->bindSelectionCallback([this](int index) {
+                // The toggle's own click is still running: switch after it returns.
+                wxGetApp().CallAfter([this, index]() { on_nozzle_selected(index); });
+            });
+        }
 
         // Pill style = dark rounded container with a filled green selected
         // segment (Bambu-style segmented control), hosted in the frozen page header.
@@ -1205,12 +1613,15 @@ void Tab::refresh_flow_variant_view()
         host_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
         m_flow_variant_view->copy_btn = copy_btn;
 
-        host->SetSizer(host_sizer);
+        host->SetSizer(host_vsizer);
         m_flow_variant_view->host = host;
-        m_parent->get_page_header_sizer()->Add(host,
-                                               0,
-                                               wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM,
-                                               FromDIP(10));
+        if (!nozzle_labels.empty())
+            m_parent->get_page_header_sizer()->Add(host, 1, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, FromDIP(10));
+        else
+            m_parent->get_page_header_sizer()->Add(host,
+                                                   0,
+                                                   wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM,
+                                                   FromDIP(10));
         m_flow_variant_view->selector->bindSelectionCallback([this](int index) {
             on_flow_variant_segment_selected(index);
         });
@@ -1219,7 +1630,10 @@ void Tab::refresh_flow_variant_view()
     else if (m_flow_variant_view->selector != nullptr)
     {
         m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
+        if (m_flow_variant_view->nozzle_selector != nullptr)
+            m_flow_variant_view->nozzle_selector->setSelected(int(m_flow_variant_view->selected_extruder));
     }
+    refresh_nozzle_controls();
 
     update_flow_variant_view_visibility();
 
@@ -1232,8 +1646,11 @@ void Tab::refresh_flow_variant_view()
             for (const auto& option : group->opt_map())
             {
                 const std::string& key = option.second.first;
-                if (m_flow_variant_view->is_option(key))
-                    group->set_option_index(key, flow_index);
+                if (m_flow_variant_view->is_option(key)) {
+                    // Per-nozzle process P1: the selected nozzle's slot of a per-extruder process.
+                    const int slot = nozzle_slot_index(key);
+                    group->set_option_index(key, slot >= 0 ? slot : flow_index);
+                }
             }
         }
     }
@@ -1258,7 +1675,7 @@ void Tab::update_flow_variant_view_visibility()
         std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
                     [this](const PageShp& page) { return m_active_page == page.get(); });
     const bool show = active_page_supports_flow_variants && host
-                      && m_flow_variant_view->modes.size() > 1;
+                      && (m_flow_variant_view->modes.size() > 1 || !m_flow_variant_view->nozzle_labels.empty());
 
     if (host) {
         // Reveal only this tab's host; hide any sibling selector left visible by
@@ -1269,11 +1686,14 @@ void Tab::update_flow_variant_view_visibility()
                     sibling->Hide();
         }
         host->Show(show);
+        if (show && m_flow_variant_view->selector != nullptr)
+            m_flow_variant_view->selector->Show(m_flow_variant_view->modes.size() > 1);
         if (m_flow_variant_view && m_flow_variant_view->copy_btn) {
             const bool show_copy = show
                 && flow_variant_both_allowed()
                 && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::ActiveMode
                 && m_flow_variant_view->selected_mode == FLOW_MODE_STANDARD
+                && m_flow_variant_view->selected_extruder == 0
                 && std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
                     != m_flow_variant_view->modes.end();
             m_flow_variant_view->copy_btn->Show(show_copy);
@@ -1341,6 +1761,26 @@ void Tab::update_changed_ui()
         const size_t current_index = flow_variant_view_index();
         for (const std::string& key : m_flow_variant_view->options())
         {
+            // Per-nozzle process P1: a field showing another nozzle's slot is modified / non-system by that
+            // slot alone (the per-mode lists above only cover the flow-mode columns).
+            if (const int slot = nozzle_slot_index(key); slot >= 0 && m_flow_variant_view->selected_extruder > 0) {
+                const auto* edited = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(key));
+                auto differs = [edited, &key, slot](const Preset* reference) {
+                    if (reference == nullptr || edited == nullptr)
+                        return false;
+                    const auto* ref = dynamic_cast<const ConfigOptionVectorBase*>(reference->config.option(key));
+                    if (ref == nullptr || ref->size() <= size_t(slot))
+                        return true;
+                    return edited->vserialize()[size_t(slot)] != ref->vserialize()[size_t(slot)];
+                };
+                int flags = m_opt_status_value;
+                if (differs(&m_presets->get_selected_preset()))
+                    flags &= ~osInitValue;
+                if (differs(m_presets->get_selected_preset_parent()))
+                    flags &= ~osSystemValue;
+                m_options_list[key] = flags;
+                continue;
+            }
             if (both) {
                 int flags = m_opt_status_value;
                 bool any = false;
@@ -2573,6 +3013,11 @@ void Tab::on_presets_changed()
         wxGetApp().plater()->get_partplate_list().set_render_cali(false);
     }
 
+    // Per-nozzle process P1: another printer brings its own remembered per-nozzle processes; a changed
+    // nozzle drops the processes that no longer fit it. Before the process tab reloads its nozzle switch.
+    if (m_type == Preset::TYPE_PRINTER)
+        wxGetApp().preset_bundle->update_nozzle_processes_for_printer(*wxGetApp().app_config);
+
     // Printer selected at the Printer tab, update "compatible" marks at the print and filament selectors.
     for (auto t: m_dependent_tabs)
     {
@@ -3744,6 +4189,8 @@ void TabPrint::toggle_options()
         m_config_manipulation.set_is_BBL_Printer(is_BBL_printer);
     }
 
+    // Per-nozzle process P1: fields a nozzle's own process greyed out come back first.
+    enable_fields_of_nozzle_process();
     m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
 
     if (m_type == Preset::TYPE_PLATE) {
@@ -3834,6 +4281,9 @@ void TabPrint::toggle_options()
             }
         }
     }
+
+    // Per-nozzle process P1.
+    disable_fields_of_nozzle_process();
 }
 
 void TabPrint::update()
