@@ -5,6 +5,7 @@
 #include "PrintConfig.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 #include <boost/log/trivial.hpp>
