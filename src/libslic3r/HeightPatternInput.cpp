@@ -231,7 +231,7 @@ std::string height_pattern_row_label(const HeightColourPattern &p)
 {
     const std::set<int> distinct(p.sequence.begin(), p.sequence.end());
     const int           bands = height_pattern_band_count(p);
-    return "Height colour pattern (" + std::to_string(distinct.size()) + (distinct.size() == 1 ? " filament x " : " filaments x ") +
+    return "Color Pattern (" + std::to_string(distinct.size()) + (distinct.size() == 1 ? " filament x " : " filaments x ") +
            std::to_string(bands) + (bands == 1 ? " band)" : " bands)");
 }
 

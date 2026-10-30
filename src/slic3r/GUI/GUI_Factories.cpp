@@ -966,8 +966,8 @@ wxMenuItem* MenuFactory::append_menu_item_layers_editing(wxMenu* menu)
         [](wxCommandEvent&) { obj_list()->layers_editing(); wxGetApp().params_panel()->switch_to_object(); }, "height_range_modifier", menu,
         []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
     // Right under it: the same bands, generated from a start / band / gap / repeat description.
-    append_menu_item(menu, wxID_ANY, _L("Height colour pattern..."),
-        _L("Colour bands of the object by height: start, band height, gap, repeat and a filament sequence"),
+    append_menu_item(menu, wxID_ANY, _L("Color Pattern..."),
+        _L("Color bands of the object by height: start, band height, gap, repeat and a filament sequence"),
         [](wxCommandEvent&) { obj_list()->height_pattern_dialog(-1); }, "height_range_modifier", menu,
         []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
     return height_range;

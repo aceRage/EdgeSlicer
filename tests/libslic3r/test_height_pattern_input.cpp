@@ -262,7 +262,7 @@ TEST_CASE("Height pattern row label counts distinct filaments and bands", "[Heig
     in.sequence = { 1, 2, 3, 4 };
     HeightColourPattern p = height_pattern_from_input(in, 0.2, tops);
     REQUIRE(apply_height_colour_pattern(*obj, p, tops, 0.2, false, 120., 4).ok);
-    CHECK(height_pattern_row_label(obj->height_colour_patterns.front()) == "Height colour pattern (4 filaments x 4 bands)");
+    CHECK(height_pattern_row_label(obj->height_colour_patterns.front()) == "Color Pattern (4 filaments x 4 bands)");
 
     SECTION("gap ranges are not bands")
     {
@@ -285,7 +285,7 @@ TEST_CASE("Height pattern row label counts distinct filaments and bands", "[Heig
         one.sequence = { 2 };
         HeightColourPattern p1 = height_pattern_from_input(one, 0.2, tops);
         REQUIRE(apply_height_colour_pattern(*o2, p1, tops, 0.2, false, 120., 4).ok);
-        CHECK(height_pattern_row_label(o2->height_colour_patterns.front()) == "Height colour pattern (1 filament x 1 band)");
+        CHECK(height_pattern_row_label(o2->height_colour_patterns.front()) == "Color Pattern (1 filament x 1 band)");
     }
 }
 
@@ -361,5 +361,28 @@ TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
         REQUIRE(c.ok());
         CHECK(c.expansion.clipped_at_top);
         CHECK(height_pattern_short_summary(c.expansion) == "18 bands, last band cut short by the top of the object");
+    }
+}
+
+TEST_CASE("Color pattern axis is reserved and does not change the Phase 1 sidecar", "[HeightPattern]")
+{
+    Model model;
+    ModelObject *obj = hp_cube(model, 120.);
+    const std::vector<double> tops = hp_grid(120., 0.2, 0.2);
+    HeightColourPattern p = height_pattern_from_input(hp_example(), 0.2, tops);
+    REQUIRE(apply_height_colour_pattern(*obj, p, tops, 0.2, false, 120., 4).ok);
+    CHECK(obj->height_colour_patterns.front().axis == 0);
+
+    const std::vector<const std::vector<HeightColourPattern> *> objs = { &obj->height_colour_patterns };
+    const std::string json = height_patterns_to_json(objs);
+    CHECK(json.find("axis") == std::string::npos);   // nothing new is written for a height pattern
+    REQUIRE(height_patterns_from_json(json).size() == 1);
+
+    SECTION("a pattern for another direction is written, and dropped by a build that cannot show it")
+    {
+        obj->height_colour_patterns.front().axis = 1;
+        const std::string with_axis = height_patterns_to_json(objs);
+        CHECK(with_axis.find("axis") != std::string::npos);
+        CHECK(height_patterns_from_json(with_axis).empty());
     }
 }

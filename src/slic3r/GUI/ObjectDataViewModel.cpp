@@ -73,7 +73,7 @@ const std::map<InfoItemType, InfoItemAtributes> INFO_ITEMS{
             //{ InfoItemType::Sinking,             {L("Sinking"),                 "objlist_sinking"}, },
             { InfoItemType::CutConnectors,       {L("Cut connectors"),          "cut_connectors" },    },
             { InfoItemType::FuzzySkin,           {L("Paint-on fuzzy skin"),     "objlist_fuzzy_skin_paint" }, },
-            { InfoItemType::HeightPattern,       {L("Height colour pattern"),   "height_range_modifier" }, },
+            { InfoItemType::HeightPattern,       {L("Color Pattern"),   "height_range_modifier" }, },
 };
 
 ObjectDataViewModelNode::ObjectDataViewModelNode(ObjectDataViewModelNode*   parent,

@@ -408,7 +408,7 @@ void HeightPatternDialog::save_last_input() const
 HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDialogContext &ctx, const HeightPatternInput &initial)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
-                ctx.own_pattern_id > 0 ? _L("Edit height colour pattern") : _L("Height colour pattern"),
+                ctx.own_pattern_id > 0 ? _L("Edit Color Pattern") : _L("Color Pattern"),
                 wxDefaultPosition,
                 wxDefaultSize,
                 wxCAPTION | wxCLOSE_BOX)

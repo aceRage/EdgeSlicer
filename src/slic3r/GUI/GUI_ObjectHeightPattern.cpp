@@ -238,7 +238,7 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
         if (!exp.ok() || exp.ranges.empty()) {
             const wxString why = exp.ok() ? _L("no band fits inside the object") : from_u8(exp.error);
             if (idx == primary) {
-                MessageDialog err(nullptr, why, _L("Height colour pattern"), wxOK | wxICON_WARNING);
+                MessageDialog err(nullptr, why, _L("Color Pattern"), wxOK | wxICON_WARNING);
                 err.ShowModal();
                 return;
             }
@@ -261,7 +261,7 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
     if (!clash_msg.empty()) {
         MessageDialog ask(nullptr,
                           _L("The pattern overlaps height ranges these objects already have. Replace them?") + "\n" + clash_msg,
-                          _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
+                          _L("Color Pattern"), wxYES_NO | wxICON_QUESTION);
         if (ask.ShowModal() != wxID_YES)
             return;
     }
@@ -269,7 +269,7 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
     // ---- apply, one undo step ------------------------------------------------------------------------
     wxString failed;
     {
-        Plater::TakeSnapshot snapshot(plater, "Height colour pattern");
+        Plater::TakeSnapshot snapshot(plater, "Color Pattern");
         for (const Plan &plan : plans) {
             ModelObject *mo = (*m_objects)[size_t(plan.obj_idx)];
             const HeightPatternApplyResult r = apply_height_colour_pattern(*mo, plan.pattern, plan.geo.tops, plan.geo.layer_height,
@@ -292,7 +292,7 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
     if (!skipped.empty() || !failed.empty()) {
         MessageDialog info(nullptr,
                            (skipped.empty() ? wxString() : _L("Not applied to:") + skipped) + (failed.empty() ? wxString() : "\n" + _L("Failed:") + failed),
-                           _L("Height colour pattern"), wxOK | wxICON_INFORMATION);
+                           _L("Color Pattern"), wxOK | wxICON_INFORMATION);
         info.ShowModal();
     }
 }
@@ -305,7 +305,7 @@ void ObjectList::height_pattern_remove(int obj_idx, int pattern_id)
     if (find_height_colour_pattern(*mo, pattern_id) == nullptr)
         return;
     {
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Remove height colour pattern");
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Remove Color Pattern");
         remove_height_colour_pattern(*mo, pattern_id);
         changed_object(obj_idx);
     }
@@ -320,7 +320,7 @@ void ObjectList::height_pattern_detach(int obj_idx, int pattern_id)
     if (find_height_colour_pattern(*mo, pattern_id) == nullptr)
         return;
     {
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Detach height colour pattern");
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Detach Color Pattern");
         // The ranges stay exactly as they are; they just stop being a pattern, so they show as
         // ordinary Height ranges from now on. Nothing about the slicing changes.
         detach_height_colour_pattern(*mo, pattern_id);
@@ -347,7 +347,7 @@ void ObjectList::height_pattern_reset(int obj_idx, int pattern_id)
         wxString why = exp.ok() ? _L("No band fits inside the object.") : from_u8(exp.error);
         if (!exp.ok())
             why += "\n\n" + _L("Use Edit to pick filaments the project has.");
-        MessageDialog err(nullptr, why, _L("Height colour pattern"), wxOK | wxICON_WARNING);
+        MessageDialog err(nullptr, why, _L("Color Pattern"), wxOK | wxICON_WARNING);
         err.ShowModal();
         return;
     }
@@ -356,16 +356,16 @@ void ObjectList::height_pattern_reset(int obj_idx, int pattern_id)
     if (!clashes.empty()) {
         MessageDialog ask(nullptr,
                           _L("Resetting the pattern overlaps height ranges that were added by hand. Replace them?") + "\n" + hpo_range_list(clashes),
-                          _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
+                          _L("Color Pattern"), wxYES_NO | wxICON_QUESTION);
         if (ask.ShowModal() != wxID_YES)
             return;
     }
 
     {
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Reset height colour pattern");
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Reset Color Pattern");
         const HeightPatternApplyResult r = apply_height_colour_pattern(*mo, pattern, geo.tops, geo.layer_height, true, geo.height, filaments);
         if (!r.ok) {
-            MessageDialog err(nullptr, from_u8(r.error), _L("Height colour pattern"), wxOK | wxICON_WARNING);
+            MessageDialog err(nullptr, from_u8(r.error), _L("Color Pattern"), wxOK | wxICON_WARNING);
             err.ShowModal();
             return;
         }
@@ -441,15 +441,15 @@ void ObjectList::check_height_patterns_after_load()
         return;
 
     const bool any_stale = std::any_of(issues.begin(), issues.end(), [](const Issue &i) { return i.stale; });
-    wxString msg = _L("Some height colour patterns in this project no longer match it:") + lines;
+    wxString msg = _L("Some color patterns in this project no longer match it:") + lines;
     if (!any_stale) {
         msg += "\n\n" + _L("Open the pattern's row in the object list and use Edit to pick other filaments.");
-        MessageDialog dlg(nullptr, msg, _L("Height colour pattern"), wxOK | wxICON_WARNING);
+        MessageDialog dlg(nullptr, msg, _L("Color Pattern"), wxOK | wxICON_WARNING);
         dlg.ShowModal();
         return;
     }
     msg += "\n\n" + _L("Reset the patterns to the current layer height? A pattern that uses a missing filament cannot be reset and stays as it is.");
-    MessageDialog dlg(nullptr, msg, _L("Height colour pattern"), wxYES_NO | wxICON_QUESTION);
+    MessageDialog dlg(nullptr, msg, _L("Color Pattern"), wxYES_NO | wxICON_QUESTION);
     if (dlg.ShowModal() != wxID_YES)
         return;
     for (const Issue &i : issues)
