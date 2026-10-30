@@ -37,6 +37,7 @@ const char* const RULE_HUB       = "EdgeSlicer";
 const char* const RULE_DISCOVERY = "EdgeSlicer LAN discovery";
 const char* const RULE_WEBRTC    = "EdgeSlicer WebRTC video";
 const char* const RULE_FLASHFORGE = "EdgeSlicer FlashForge discovery";
+const char* const RULE_MDNS       = "EdgeSlicer mDNS discovery";
 
 static const char* const RULE_DESCRIPTION = "Added by EdgeSlicer (Help > Check Windows Firewall).";
 
@@ -243,6 +244,10 @@ std::vector<ExpectedRule> expected_rules(const std::string& exe, const std::stri
     // listens on, UDP 18007; the printers answer to 18007, which Windows Firewall drops unless
     // there is an inbound rule for it. Kept last so the other rules keep their positions.
     out.push_back({ RULE_FLASHFORGE, exe, ProtoUDP, "18007", "flashforge" });
+    // mDNS: the Bonjour browse (Bonjour.cpp) listens on UDP 5353 for the multicast answers of
+    // OctoPrint / Moonraker hosts. The Creality K-series search (cxmdns) asks for unicast answers on
+    // an ephemeral port and needs no rule; this one is its backstop too.
+    out.push_back({ RULE_MDNS, exe, ProtoUDP, "5353", "mdns" });
     return out;
 }
 
