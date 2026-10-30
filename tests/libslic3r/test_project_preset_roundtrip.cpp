@@ -528,3 +528,83 @@ TEST_CASE("validate_presets skips the empty names of padded filament slots", "[P
     CHECK(bundle.validate_presets("padded.3mf", config, different) == VALIDATE_PRESETS_FILAMENTS_NOT_FOUND);
     CHECK(different == std::set<std::string>{ "Edge Test Custom PLA" });
 }
+
+// Owner, 2026-10-30: an H2S project preset saved "for every printer", with every option of
+// Process > Speed > Overhang speed changed - Inner wall slowdown / reach (Edge-only percents), the
+// four overhang speeds and the external / internal bridge speeds (per-flow-mode vectors) - lost
+// them after switching to another preset and back. The cause was in the settings tab
+// (GUI::change_opt_value dropped coFloatsOrPercents edits, see slic3rutils change_opt_value_tests);
+// this pins the library side: once the edit is in the config, the project preset keeps all eight
+// through a process switch, a printer switch and a store / re-open, in the flow slot that was edited.
+TEST_CASE("A project preset keeps the whole Overhang speed section", "[Preset][Bundle][ProjectPreset][FlowVariant]")
+{
+    const std::string H2S          = "Bambu Lab H2S 0.4 nozzle";
+    const std::string H2S_PROC     = "0.16mm High Quality @BBL H2S";
+    const std::string H2S_OTHER    = "0.20mm Standard @BBL H2S";
+    const std::string H2S_PLA      = "Bambu PLA Basic @BBL H2S";
+    const std::string PROJ_H2S     = "0.16mm @H2S - Custom HQ";
+    const char       *fop_keys[]   = { "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed", "internal_bridge_speed" };
+    const FloatOrPercent fop_vals[] = { { 41, false }, { 32, false }, { 23, false }, { 14, false }, { 135, true } };
+
+    auto check_section = [&](const DynamicPrintConfig &cfg, const std::string &where) {
+        INFO(where);
+        CHECK(cfg.option<ConfigOptionPercent>("overhang_shadow_speed_ratio")->value == Approx(55.));
+        CHECK(cfg.option<ConfigOptionPercent>("overhang_shadow_distance")->value == Approx(150.));
+        REQUIRE(cfg.option<ConfigOptionFloats>("bridge_speed") != nullptr);
+        CHECK(cfg.option<ConfigOptionFloats>("bridge_speed")->values.front() == Approx(31.));
+        for (size_t i = 0; i < 5; ++i) {
+            INFO(fop_keys[i]);
+            const auto *opt = cfg.option<ConfigOptionFloatsOrPercents>(fop_keys[i]);
+            REQUIRE(opt != nullptr);
+            REQUIRE(!opt->values.empty());
+            CHECK(opt->values.front() == fop_vals[i]);
+        }
+    };
+
+    auto bundle = bbl_bundle();
+    select_machine(*bundle, H2S, H2S_PROC, H2S_PLA);
+
+    // What the settings tab writes into the edited preset: the Standard (first) flow slot of each
+    // vector, the scalars as they are.
+    DynamicPrintConfig &edited = bundle->prints.get_edited_preset().config;
+    edited.set_key_value("overhang_shadow_inner_wall", new ConfigOptionBool(true));
+    edited.set_key_value("overhang_shadow_speed_ratio", new ConfigOptionPercent(55.));
+    edited.set_key_value("overhang_shadow_distance", new ConfigOptionPercent(150.));
+    edited.option<ConfigOptionFloats>("bridge_speed")->values.front() = 31.;
+    for (size_t i = 0; i < 5; ++i)
+        edited.option<ConfigOptionFloatsOrPercents>(fop_keys[i], true)->values.front() = fop_vals[i];
+    bundle->prints.update_dirty();
+    REQUIRE(bundle->prints.current_is_dirty());
+
+    save_to_project(*bundle, bundle->prints, PROJ_H2S, ProjectPresetPrinters::EveryPrinter);
+    REQUIRE(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    REQUIRE(fits_every_printer(find(bundle->prints, PROJ_H2S)));
+    check_section(find(bundle->prints, PROJ_H2S)->config, "saved");
+
+    // Another process preset and back.
+    REQUIRE(bundle->prints.select_preset_by_name(H2S_OTHER, true));
+    bundle->update_compatible(PresetSelectCompatibleType::Never);
+    REQUIRE(bundle->prints.select_preset_by_name(PROJ_H2S, true));
+    bundle->update_compatible(PresetSelectCompatibleType::Never);
+    CHECK_FALSE(bundle->prints.current_is_dirty());
+    check_section(bundle->prints.get_edited_preset().config, "after switching presets and back");
+
+    // Another printer and back: "for every printer" keeps it selected throughout.
+    switch_printer(*bundle, X1C);
+    CHECK(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(bundle->prints.get_edited_preset().config, "on another printer");
+    switch_printer(*bundle, H2S);
+    CHECK(bundle->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(bundle->prints.get_edited_preset().config, "back on the H2S");
+
+    // Stored and opened in a new session (restart).
+    const std::string path = project_path("overhang_section.3mf");
+    store_project(*bundle, path);
+    auto next = bbl_bundle();
+    select_machine(*next, H2S, H2S_OTHER, H2S_PLA);
+    REQUIRE(open_project(*next, path) >= 1);
+    REQUIRE(find(next->prints, PROJ_H2S) != nullptr);
+    check_section(find(next->prints, PROJ_H2S)->config, "re-opened, project preset");
+    CHECK(next->prints.get_selected_preset_name() == PROJ_H2S);
+    check_section(next->prints.get_edited_preset().config, "re-opened, selected");
+}

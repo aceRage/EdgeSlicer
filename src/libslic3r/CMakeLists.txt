@@ -119,6 +119,8 @@ set(lisbslic3r_sources
     Showcase/MultiColourFilament.hpp
     Showcase/MultiColourGlsl.cpp
     Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
@@ -171,6 +173,8 @@ set(lisbslic3r_sources
     CutRecipe.hpp
     HeightColourPattern.cpp
     HeightColourPattern.hpp
+    HeightPatternInput.cpp
+    HeightPatternInput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
