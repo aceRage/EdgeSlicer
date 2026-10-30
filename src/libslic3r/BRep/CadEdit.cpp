@@ -63,6 +63,8 @@
 #include <eh.h>
 #endif
 
+#include "OcctException.hpp"
+
 namespace Slic3r { namespace BRep {
 
 // ---- CadShape.hpp -----------------------------------------------------------------------------
@@ -80,7 +82,9 @@ std::string write_shape(const TopoDS_Shape &shape)
 std::string occt_message(const Standard_Failure &e)
 {
     const char *msg = e.GetMessageString();
-    std::string out = e.DynamicType()->Name();
+    if (msg == nullptr || *msg == 0)
+        msg = e.what();
+    std::string out = occt_exception_type(e);
     if (msg != nullptr && *msg != 0)
         out += std::string(": ") + msg;
     return out;

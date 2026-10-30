@@ -447,7 +447,7 @@ bool load_step_mesh(const char *path, TriangleMesh &mesh, double linear_defletio
     } catch (const Standard_Failure &e) {
         const char *msg = e.GetMessageString();
         if (msg == nullptr || *msg == 0)
-            msg = e.DynamicType()->Name();
+            msg = e.what();
         return fail(std::string("OCCT failed while reading STEP: ") + (msg ? msg : "unknown error"));
     } catch (const std::exception &e) {
         return fail(e.what());
