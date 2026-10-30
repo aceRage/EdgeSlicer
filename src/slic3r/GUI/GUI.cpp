@@ -162,8 +162,14 @@ void change_opt_value(DynamicPrintConfig& config, const t_config_option_key& opt
 			// A one-value vector, not a ConfigOptionFloatOrPercent: set_at() reads a scalar source as
 			// ConfigOptionSingle<FloatOrPercent>, which ConfigOptionFloatOrPercent is not.
 			const ConfigOptionFloatsOrPercents vec_new{ FloatOrPercent{ val, percent } };
-			if (auto *vec = dynamic_cast<ConfigOptionVectorBase*>(config.option(opt_key)))
-				vec->set_at(&vec_new, opt_index, 0);
+			if (auto *vec = dynamic_cast<ConfigOptionVectorBase*>(config.option(opt_key))) {
+				// An empty vector (per-nozzle P2's internal per-filament width arrays) has nothing set_at() can
+				// grow from: it takes the value as its first entry.
+				if (vec->empty())
+					vec->set(&vec_new);
+				else
+					vec->set_at(&vec_new, opt_index, 0);
+			}
 			break;}
 		case coPercent:
 			config.set_key_value(opt_key, new ConfigOptionPercent(boost::any_cast<double>(value)));
