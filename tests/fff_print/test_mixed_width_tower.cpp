@@ -86,7 +86,7 @@ std::map<int, std::set<long>> wipe_widths_per_tool(const std::string &gcode)
     int                           tool    = 0;
     bool                          in_wipe = false;
     static const std::regex       tool_re(R"(^T([0-9]+)\b)");
-    static const std::regex       width_re(R"(^;\s*WIDTH:([0-9.]+))");
+    static const std::regex       width_re(R"(^;\s*(?:LINE_)?WIDTH:\s*([0-9.]+))");
     while (std::getline(in, line)) {
         std::smatch m;
         if (std::regex_search(line, m, tool_re)) {
@@ -115,7 +115,7 @@ std::set<long> all_widths(const std::string &gcode)
     std::set<long>          out;
     std::istringstream      in(gcode);
     std::string             line;
-    static const std::regex width_re(R"(^;\s*WIDTH:([0-9.]+))");
+    static const std::regex width_re(R"(^;\s*(?:LINE_)?WIDTH:\s*([0-9.]+))");
     bool                    in_tower = false;
     while (std::getline(in, line)) {
         if (line.find("; CP TOOLCHANGE START") != std::string::npos)
@@ -173,14 +173,15 @@ TEST_CASE("The Bambu tower purges each tool at its own nozzle's width", "[MixedN
     for (const auto &[tool, set] : widths)
         for (long w : set) {
             INFO("tool " << tool << " width " << w);
-            CHECK((w == (tool == 0 ? 500 : 750) || w == std::lround((tool == 0 ? 0.5 : 0.75) * 1.15 * 1000.)));
+            // Bambu G-code writes "; LINE_WIDTH: 0.862500" on the first layer (0.75 x 1.15): within 1 micrometre.
+            const long plain = tool == 0 ? 500 : 750;
+            const long first = tool == 0 ? 575 : 863;
+            CHECK((std::abs(w - plain) <= 1 || std::abs(w - first) <= 1));
         }
-    if (widths.count(1) == 0) {
-        // Diagnostics: the first toolchange blocks as printed.
-        const size_t at = gcode.find("; CP TOOLCHANGE START");
-        INFO(gcode.substr(at == std::string::npos ? 0 : at, 6000));
-        CHECK(widths.count(1) == 1);
-    }
+    REQUIRE(widths.count(0) == 1);
+    REQUIRE(widths.count(1) == 1);
+    // The 0.6 tool's purge is announced at its own width, not the tower's 0.5 mm structure width.
+    CHECK(*widths.at(1).rbegin() >= 750);
 }
 
 TEST_CASE("The Bambu tower with uniform nozzles announces no per-tool width", "[MixedNozzle][WipeTower]")
@@ -189,6 +190,7 @@ TEST_CASE("The Bambu tower with uniform nozzles announces no per-tool width", "[
     // already wrote (1.15 x and back to 1 x the single width).
     const std::string gcode  = slice(two_tool_tower_config("0.4,0.4", "type1"), true);
     const auto        widths = all_widths(gcode);
+    REQUIRE_FALSE(widths.empty()); // the first layer's 1.15 x tags at least
     for (long w : widths) {
         INFO("width " << w);
         CHECK((w == 0 || w == 500 || w == 575));
