@@ -325,3 +325,41 @@ TEST_CASE("Height pattern health reports modified, missing filaments and a stale
         CHECK(height_pattern_health(*obj, rec, 0, 0.2).ok());
     }
 }
+
+TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
+{
+    const std::vector<double> tops = hp_grid(120., 0.2, 0.2);
+
+    SECTION("bands only, gap ranges left out")
+    {
+        HeightPatternInput in = hp_example();
+        in.gap_mode     = int(HeightPatternGapMode::Fixed);
+        in.gap_filament = 4;
+        const HeightPatternPreview pv = preview_height_pattern(nullptr, in, 0, tops, 0.2, 120., 4);
+        REQUIRE(pv.ok());
+        CHECK(pv.expansion.ranges.size() == 5);
+        const std::vector<HeightPatternRange> bands = height_pattern_band_ranges(pv.expansion);
+        REQUIRE(bands.size() == 3);
+        CHECK(bands[0].extruder == 1);
+        CHECK(bands[2].lo == Approx(42.).margin(1e-6));
+        CHECK(height_pattern_short_summary(pv.expansion) == "3 bands");
+    }
+    SECTION("a clipped last band is named, and 50 bands stay one short line")
+    {
+        HeightPatternInput in = hp_example();
+        in.to_top = true;
+        in.start  = 0.;
+        in.band   = 2.;
+        in.gap    = 0.;
+        const HeightPatternPreview pv = preview_height_pattern(nullptr, in, 0, tops, 0.2, 120., 4);
+        REQUIRE(pv.ok());
+        CHECK(height_pattern_band_ranges(pv.expansion).size() == 60);
+        CHECK(height_pattern_short_summary(pv.expansion) == "60 bands");
+
+        in.band = 7.;
+        const HeightPatternPreview c = preview_height_pattern(nullptr, in, 0, tops, 0.2, 120., 4);
+        REQUIRE(c.ok());
+        CHECK(c.expansion.clipped_at_top);
+        CHECK(height_pattern_short_summary(c.expansion) == "18 bands, last band cut short by the top of the object");
+    }
+}

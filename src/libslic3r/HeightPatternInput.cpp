@@ -152,6 +152,30 @@ int height_pattern_band_count(const HeightColourPattern &p)
     return (n + 1) / 2;
 }
 
+std::vector<HeightPatternRange> height_pattern_band_ranges(const HeightPatternExpansion &e)
+{
+    std::vector<HeightPatternRange> bands;
+    // With gap ranges mixed in, every other range is a gap and the first range is a band.
+    const bool has_gap_ranges = int(e.ranges.size()) > e.bands;
+    for (size_t i = 0; i < e.ranges.size(); i += has_gap_ranges ? 2 : 1)
+        bands.push_back(e.ranges[i]);
+    return bands;
+}
+
+std::string height_pattern_short_summary(const HeightPatternExpansion &e)
+{
+    if (!e.ok())
+        return {};
+    if (e.bands == 0)
+        return "No band fits inside the object.";
+    std::string s = std::to_string(e.bands) + (e.bands == 1 ? " band" : " bands");
+    if (e.clipped_at_top)
+        s += ", last band cut short by the top of the object";
+    if (e.dropped > 0)
+        s += ", " + std::to_string(e.dropped) + (e.dropped == 1 ? " band" : " bands") + " too thin for the layer grid dropped";
+    return s;
+}
+
 std::string height_pattern_summary(const HeightPatternExpansion &e, double object_top)
 {
     if (!e.ok())

@@ -53,6 +53,28 @@ wxColour hcp_border_colour() { return wxGetApp().dark_mode() ? wxColour(120, 120
 wxColour hcp_panel_colour() { return wxGetApp().dark_mode() ? wxColour(45, 45, 49) : wxColour(255, 255, 255); }
 wxColour hcp_muted_text() { return wxGetApp().dark_mode() ? wxColour(170, 170, 175) : wxColour(107, 107, 107); }
 
+// Dialog width and content width in DIP. Nothing may make the dialog wider than this.
+constexpr int HCP_W       = 540;
+constexpr int HCP_INNER_W = 516;
+constexpr int HCP_BAND_ROWS_VISIBLE = 6;
+
+wxString hcp_help_text()
+{
+    return _L("A band prints with its filament for every part of the object inside it, replacing the part's own filament. "
+              "Painted faces keep their paint.");
+}
+
+// Set a label that wraps at `width` pixels and is as tall as its wrapped lines (at least
+// `min_lines` lines). Label::Wrap alone leaves the one-line best size, which cuts the text off.
+void hcp_set_wrapped(::Label *l, const wxString &text, int width, int min_lines)
+{
+    l->SetLabel(text);
+    l->Wrap(width);
+    l->InvalidateBestSize();
+    const int min_h = min_lines > 0 ? min_lines * l->GetCharHeight() : 0;
+    l->SetMinSize(wxSize(width, std::max(l->GetBestSize().y, min_h)));
+}
+
 wxBitmap hcp_swatch_bitmap(const wxColour &c, int w, int h)
 {
     wxBitmap bmp(w, h);
@@ -234,6 +256,88 @@ private:
     std::vector<HeightPatternRange> m_ranges;
     double                          m_top = 0.;
     std::vector<wxColour>           m_colours;
+};
+
+// One row per band: number, filament swatch and number, from-to Z, and a mark on the last band when
+// the top of the object cut it short. A fixed size with its own scroll bar, so 1 band and 50 bands
+// take the same room in the dialog.
+class HeightPatternBandList : public wxScrolledWindow
+{
+public:
+    HeightPatternBandList(wxWindow *parent, int width_dip)
+        : wxScrolledWindow(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL | wxBORDER_SIMPLE)
+        , m_width_dip(width_dip)
+    {
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        rescale();
+    }
+
+    void set_bands(std::vector<HeightPatternRange> bands, std::vector<wxColour> colours, bool last_cut_short)
+    {
+        m_bands = std::move(bands);
+        m_colours = std::move(colours);
+        m_cut_short = last_cut_short;
+        update_virtual_size();
+        Scroll(0, 0);
+        Refresh();
+    }
+    void clear() { m_bands.clear(); update_virtual_size(); Refresh(); }
+
+    void rescale()
+    {
+        const wxSize s(FromDIP(m_width_dip), row_h() * HCP_BAND_ROWS_VISIBLE + 2);
+        SetMinSize(s);
+        SetMaxSize(s);
+        SetSize(s);
+        SetScrollRate(0, row_h());
+        update_virtual_size();
+        Refresh();
+    }
+
+    void OnDraw(wxDC &dc) override
+    {
+        const wxSize client = GetClientSize();
+        const int    rh     = row_h();
+        const bool   dark   = wxGetApp().dark_mode();
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(hcp_panel_colour()));
+        dc.DrawRectangle(0, 0, client.x, std::max(client.y, int(m_bands.size()) * rh) + rh);
+        dc.SetFont(Label::Body_14);
+        const wxColour text = dark ? wxColour(235, 235, 238) : wxColour(30, 30, 30);
+        const int sw_w = FromDIP(18), sw_h = FromDIP(13);
+        for (size_t i = 0; i < m_bands.size(); ++i) {
+            const int y = int(i) * rh;
+            if (i % 2 == 1) {
+                dc.SetBrush(wxBrush(dark ? wxColour(55, 55, 60) : wxColour(244, 244, 246)));
+                dc.DrawRectangle(0, y, client.x, rh);
+            }
+            const HeightPatternRange &b = m_bands[i];
+            const size_t fi = size_t(std::max(1, b.extruder)) - 1;
+            const int ty = y + (rh - dc.GetCharHeight()) / 2;
+            dc.SetTextForeground(hcp_muted_text());
+            dc.DrawText(wxString::Format("%d", int(i) + 1), FromDIP(8), ty);
+            dc.SetBrush(wxBrush(fi < m_colours.size() ? m_colours[fi] : wxColour(128, 128, 128)));
+            dc.SetPen(wxPen(hcp_border_colour()));
+            dc.DrawRoundedRectangle(FromDIP(48), y + (rh - sw_h) / 2, sw_w, sw_h, FromDIP(3));
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetTextForeground(text);
+            dc.DrawText(wxString::Format("%d", b.extruder), FromDIP(48) + sw_w + FromDIP(6), ty);
+            dc.DrawText(wxString::Format("%s - %s %s", hcp_num(b.lo), hcp_num(b.hi), _L("mm")), FromDIP(120), ty);
+            if (m_cut_short && i + 1 == m_bands.size()) {
+                dc.SetTextForeground(wxColour("#D9534F"));
+                dc.DrawText(_L("cut short by the top"), FromDIP(290), ty);
+            }
+        }
+    }
+
+private:
+    int  row_h() const { return FromDIP(24); }
+    void update_virtual_size() { SetVirtualSize(GetClientSize().x, std::max<int>(1, int(m_bands.size())) * row_h()); }
+
+    int                             m_width_dip;
+    std::vector<HeightPatternRange> m_bands;
+    std::vector<wxColour>           m_colours;
+    bool                            m_cut_short = false;
 };
 
 HeightPatternInput HeightPatternDialog::load_last_input()
@@ -433,37 +537,15 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     v_sizer->Add(grid, 0, wxEXPAND | wxALL, FromDIP(12));
 
     // ---- filament sequence ----------------------------------------------------------------------
+    // Two labelled rows so they do not read as duplicates: "Sequence" is what the bands will use,
+    // in order (click a chip to remove it); "Add filament" is the project's palette.
     {
         auto *box = new wxBoxSizer(wxVERTICAL);
-        box->Add(new ::Label(this, Label::Body_14, _L("Filaments, in the order the bands use them (repeating)") + ":"), 0, wxBOTTOM, FromDIP(4));
 
-        m_sequence = new HeightPatternSwatches(this, 420, _L("Click a filament below to add it"));
-        m_sequence->set_tooltip_prefix(_L("Click to remove filament"));
-        m_sequence->set_on_click([this](int idx) {
-            if (idx >= 0 && idx < int(m_input.sequence.size())) {
-                m_input.sequence.erase(m_input.sequence.begin() + idx);
-                rebuild_sequence();
-                update_preview();
-            }
-        });
-        box->Add(m_sequence, 0, wxBOTTOM, FromDIP(6));
-
-        auto *pal_row = new wxBoxSizer(wxHORIZONTAL);
-        m_palette = new HeightPatternSwatches(this, 340, wxEmptyString);
-        m_palette->set_tooltip_prefix(_L("Add filament"));
-        std::vector<HeightPatternSwatches::Chip> chips;
-        for (int f = 1; f <= m_ctx.max_filament; ++f)
-            chips.push_back({ f, size_t(f) <= m_ctx.filament_colours.size() ? hcp_parse_colour(m_ctx.filament_colours[size_t(f) - 1]) : wxColour(128, 128, 128) });
-        m_palette->set_chips(chips);
-        m_palette->set_on_click([this](int idx) {
-            if (idx >= 0 && idx < m_ctx.max_filament) {
-                m_input.sequence.push_back(idx + 1);
-                rebuild_sequence();
-                update_preview();
-            }
-        });
-        pal_row->Add(m_palette, 0, wxALIGN_CENTER_VERTICAL);
-
+        auto *seq_head = new wxBoxSizer(wxHORIZONTAL);
+        seq_head->Add(new ::Label(this, Label::Head_14, _L("Sequence") + ":"), 0, wxALIGN_CENTER_VERTICAL);
+        seq_head->Add(new ::Label(this, Label::Body_12, _L("(used in this order, repeating)")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
+        seq_head->AddStretchSpacer(1);
         auto *reverse_btn = new ::Button(this, _L("Reverse"));
         reverse_btn->SetStyle(ButtonStyle::Regular, ButtonType::Window);
         reverse_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
@@ -478,9 +560,36 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
             rebuild_sequence();
             update_preview();
         });
-        pal_row->Add(reverse_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(12));
-        pal_row->Add(clear_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
-        box->Add(pal_row, 0);
+        seq_head->Add(reverse_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
+        seq_head->Add(clear_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
+        box->Add(seq_head, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+
+        m_sequence = new HeightPatternSwatches(this, HCP_INNER_W, _L("Click a filament below to add it"));
+        m_sequence->set_tooltip_prefix(_L("Click to remove filament"));
+        m_sequence->set_on_click([this](int idx) {
+            if (idx >= 0 && idx < int(m_input.sequence.size())) {
+                m_input.sequence.erase(m_input.sequence.begin() + idx);
+                rebuild_sequence();
+                update_preview();
+            }
+        });
+        box->Add(m_sequence, 0, wxBOTTOM, FromDIP(8));
+
+        box->Add(new ::Label(this, Label::Head_14, _L("Add filament") + ":"), 0, wxBOTTOM, FromDIP(4));
+        m_palette = new HeightPatternSwatches(this, HCP_INNER_W, wxEmptyString);
+        m_palette->set_tooltip_prefix(_L("Add filament"));
+        std::vector<HeightPatternSwatches::Chip> chips;
+        for (int f = 1; f <= m_ctx.max_filament; ++f)
+            chips.push_back({ f, size_t(f) <= m_ctx.filament_colours.size() ? hcp_parse_colour(m_ctx.filament_colours[size_t(f) - 1]) : wxColour(128, 128, 128) });
+        m_palette->set_chips(chips);
+        m_palette->set_on_click([this](int idx) {
+            if (idx >= 0 && idx < m_ctx.max_filament) {
+                m_input.sequence.push_back(idx + 1);
+                rebuild_sequence();
+                update_preview();
+            }
+        });
+        box->Add(m_palette, 0);
         v_sizer->Add(box, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
     }
 
@@ -498,31 +607,37 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     }
 
     // ---- live result --------------------------------------------------------------------------------
+    // Everything below is a fixed width, and the band list a fixed height with its own scroll bar, so
+    // the dialog is the same size for 1 band and for 50.
+    auto *res = new wxBoxSizer(wxVERTICAL);
     m_strip = new HeightPatternStrip(this);
-    v_sizer->Add(m_strip, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(12));
+    res->Add(m_strip, 0, wxEXPAND);
 
-    m_result_text = new ::Label(this, Label::Body_14, wxEmptyString);
-    v_sizer->Add(m_result_text, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+    m_result_text = new ::Label(this, Label::Head_14, wxEmptyString);
+    res->Add(m_result_text, 0, wxTOP, FromDIP(8));
+
+    m_band_list = new HeightPatternBandList(this, HCP_INNER_W);
+    res->Add(m_band_list, 0, wxTOP, FromDIP(6));
 
     m_note_text = new ::Label(this, Label::Body_12, wxEmptyString);
     m_note_text->SetForegroundColour(wxColour("#6B6B6B"));
-    v_sizer->Add(m_note_text, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(4));
+    res->Add(m_note_text, 0, wxTOP, FromDIP(4));
 
     m_clash_text = new ::Label(this, Label::Body_14, wxEmptyString);
     m_clash_text->SetForegroundColour(wxColour("#D9534F"));
-    v_sizer->Add(m_clash_text, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(4));
+    res->Add(m_clash_text, 0, wxTOP, FromDIP(4));
 
     m_error_text = new ::Label(this, Label::Body_14, wxEmptyString);
     m_error_text->SetForegroundColour(wxColour("#D9534F"));
-    v_sizer->Add(m_error_text, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(4));
+    res->Add(m_error_text, 0, wxTOP, FromDIP(4));
 
-    // Help text that is always true (design D7).
-    auto *help = new ::Label(this, Label::Body_12,
-                             _L("A band prints with its filament for every part of the object inside it, replacing the part's own filament. "
-                                "Painted faces keep their paint."));
-    help->SetForegroundColour(wxColour("#6B6B6B"));
-    help->Wrap(FromDIP(420));
-    v_sizer->Add(help, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+    // Help text that is always true (design D7). Wrapped to the dialog width and given the height of
+    // its wrapped lines, or the label keeps the one-line height and the second line is cut off.
+    m_help_text = new ::Label(this, Label::Body_12, wxEmptyString);
+    m_help_text->SetForegroundColour(wxColour("#6B6B6B"));
+    hcp_set_wrapped(m_help_text, hcp_help_text(), FromDIP(HCP_INNER_W), 0);
+    res->Add(m_help_text, 0, wxTOP, FromDIP(8));
+    v_sizer->Add(res, 0, wxLEFT | wxRIGHT, FromDIP(12));
 
     // ---- buttons ------------------------------------------------------------------------------------
     auto *dlg_btns = new DialogButtons(this, { "OK", "Cancel" });
@@ -544,8 +659,7 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     update_preview();
 
     SetSizer(v_sizer);
-    Layout();
-    v_sizer->Fit(this);
+    refit();
     CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(this);
 }
@@ -592,10 +706,7 @@ void HeightPatternDialog::update_gap_controls()
 {
     const bool fixed = m_gap_mode->GetSelection() == int(HeightPatternGapMode::Fixed);
     m_gap_filament->Show(fixed);
-    if (GetSizer() != nullptr) {
-        Layout();
-        GetSizer()->Fit(this);
-    }
+    refit();
 }
 
 void HeightPatternDialog::rebuild_sequence()
@@ -604,69 +715,76 @@ void HeightPatternDialog::rebuild_sequence()
     for (int f : m_input.sequence)
         chips.push_back({ f, f >= 1 && size_t(f) <= m_ctx.filament_colours.size() ? hcp_parse_colour(m_ctx.filament_colours[size_t(f) - 1]) : wxColour(128, 128, 128) });
     m_sequence->set_chips(chips);
-    if (GetSizer() != nullptr) {
-        Layout();
-        GetSizer()->Fit(this);
-    }
+    refit();
+}
+
+void HeightPatternDialog::refit()
+{
+    if (GetSizer() == nullptr)
+        return;
+    // A fixed width: nothing in the dialog is allowed to widen it (long text wraps, the band list
+    // scrolls). The height follows the content, which does not depend on the number of bands.
+    GetSizer()->SetMinSize(FromDIP(HCP_W), 0);
+    Layout();
+    GetSizer()->Fit(this);
 }
 
 void HeightPatternDialog::update_preview()
 {
-    if (m_result_text == nullptr || m_ok_button == nullptr || m_strip == nullptr)
+    if (m_result_text == nullptr || m_ok_button == nullptr || m_strip == nullptr || m_band_list == nullptr)
         return;   // still constructing
 
     const HeightPatternInput in = current_input();
     const HeightPatternPreview pv = preview_height_pattern(m_ctx.object, in, m_ctx.own_pattern_id, m_ctx.layer_tops,
                                                            m_ctx.layer_height, m_ctx.object_height, m_ctx.max_filament);
     const double top = m_ctx.layer_tops.empty() ? m_ctx.object_height : m_ctx.layer_tops.back();
+    const int    w   = FromDIP(HCP_INNER_W);
+
+    std::vector<wxColour> colours;
+    for (const std::string &s : m_ctx.filament_colours)
+        colours.push_back(hcp_parse_colour(s));
 
     m_has_clash = pv.ok() && !pv.clashes.empty();
     m_ok_button->Enable(pv.ok());
     m_ok_button->SetLabel(m_has_clash ? _L("Replace and apply") : _L("Apply"));
 
-    wxString note;
+    wxString note, error;
     if (pv.ok()) {
-        m_result_text->SetLabel(from_u8(pv.summary));
+        // One short wrapped line (two lines are always reserved, so the dialog does not jump) and the
+        // per-band detail in the scrolling list below it.
+        hcp_set_wrapped(m_result_text, from_u8(height_pattern_short_summary(pv.expansion)), w, 2);
         // Say so when snapping moved the start, in the unit the user typed it in.
         const HeightColourPattern typed = height_pattern_from_input(in, m_ctx.layer_height, m_ctx.layer_tops);
         if (in.snap_to_layers && !pv.expansion.ranges.empty() && std::abs(pv.expansion.ranges.front().lo - typed.start_z) > 0.005)
             note = wxString::Format(_L("The start snaps from %s to %s mm to fall on a layer boundary."), hcp_num(typed.start_z), hcp_num(pv.expansion.ranges.front().lo));
-        m_strip->set_data(pv.expansion.ranges, top, [&] {
-            std::vector<wxColour> cols;
-            for (const std::string &s : m_ctx.filament_colours)
-                cols.push_back(hcp_parse_colour(s));
-            return cols;
-        }());
-        m_error_text->SetLabel(wxEmptyString);
+        m_strip->set_data(pv.expansion.ranges, top, colours);
+        m_band_list->set_bands(height_pattern_band_ranges(pv.expansion), colours, pv.expansion.clipped_at_top);
     } else {
-        m_result_text->SetLabel(wxEmptyString);
+        hcp_set_wrapped(m_result_text, wxEmptyString, w, 2);
         m_strip->clear();
-        m_error_text->SetLabel(from_u8(pv.error));
+        m_band_list->clear();
+        error = from_u8(pv.error);
     }
     if (m_all_cb != nullptr && m_all_cb->GetValue() && m_ctx.other_heights_differ) {
         if (!note.empty())
             note += " ";
         note += _L("The objects are not all the same height: each gets the pattern worked out from its own bottom, so the bands will not line up.");
     }
-    m_note_text->SetLabel(note);
-    m_note_text->Wrap(FromDIP(420));
-    m_clash_text->SetLabel(m_has_clash ? from_u8(height_pattern_clash_text(pv.clashes)) + ". " + _L("Applying replaces them.") : wxString());
-    m_clash_text->Wrap(FromDIP(420));
-    m_error_text->Wrap(FromDIP(420));
+    hcp_set_wrapped(m_note_text, note, w, 0);
+    hcp_set_wrapped(m_clash_text, m_has_clash ? from_u8(height_pattern_clash_text(pv.clashes)) + ". " + _L("Applying replaces them.") : wxString(), w, 0);
+    hcp_set_wrapped(m_error_text, error, w, 0);
 
-    if (GetSizer() != nullptr) {
-        Layout();
-        GetSizer()->Fit(this);
-    }
+    refit();
 }
 
 void HeightPatternDialog::on_dpi_changed(const wxRect &)
 {
     if (m_palette != nullptr) m_palette->rescale();
     if (m_sequence != nullptr) m_sequence->rescale();
-    Layout();
-    if (GetSizer() != nullptr)
-        GetSizer()->Fit(this);
+    if (m_band_list != nullptr) m_band_list->rescale();
+    if (m_help_text != nullptr)
+        hcp_set_wrapped(m_help_text, hcp_help_text(), FromDIP(HCP_INNER_W), 0);
+    update_preview();
     Refresh();
 }
 

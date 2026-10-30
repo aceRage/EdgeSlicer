@@ -57,6 +57,7 @@ struct HeightPatternDialogResult
 
 class HeightPatternSwatches; // defined in the .cpp
 class HeightPatternStrip;    // defined in the .cpp
+class HeightPatternBandList; // defined in the .cpp
 
 class HeightPatternDialog : public DPIDialog
 {
@@ -75,6 +76,7 @@ protected:
 private:
     HeightPatternInput current_input() const;
     void               update_preview();
+    void               refit();   // keeps the dialog at its fixed width
     void               update_unit_labels();
     void               update_gap_controls();
     void               rebuild_sequence();
@@ -105,6 +107,8 @@ private:
     HeightPatternSwatches *m_palette  = nullptr;
     HeightPatternSwatches *m_sequence = nullptr;
     HeightPatternStrip    *m_strip    = nullptr;
+    HeightPatternBandList *m_band_list = nullptr;
+    ::Label               *m_help_text = nullptr;
 };
 
 }} // namespace Slic3r::GUI

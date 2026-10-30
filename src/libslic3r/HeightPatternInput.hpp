@@ -65,6 +65,12 @@ std::vector<std::pair<double, double>> find_height_pattern_clashes(const ModelOb
 // shows as an ordinary range.
 bool height_pattern_owns_range(const ModelObject &object, const t_layer_height_range &range);
 
+// The band ranges only (a gap range written for a gap filament is not a band), in order.
+std::vector<HeightPatternRange> height_pattern_band_ranges(const HeightPatternExpansion &expansion);
+
+// One short line for the dialog: "14 bands, last band cut short by the top of the object".
+std::string height_pattern_short_summary(const HeightPatternExpansion &expansion);
+
 // "6 bands: 2.00-12.00, 22.00-32.00, ... (last band ends at 112.00 of 120.00 mm)". Snapped values.
 std::string height_pattern_summary(const HeightPatternExpansion &expansion, double object_top);
 
