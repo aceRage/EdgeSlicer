@@ -457,6 +457,10 @@ public:
     }
 
     libvgcode::EViewType get_view_type() const { return m_viewer.get_view_type(); }
+    // RemoteAccess (phone preview v2): the libvgcode viewer itself, so a phone frame can be coloured,
+    // have features hidden and moves shown, and the PC's own choice be put back after rendering.
+    libvgcode::Viewer&       get_libvgcode_viewer() { return m_viewer; }
+    const libvgcode::Viewer& get_libvgcode_viewer() const { return m_viewer; }
 
     // ORCA: darken the layers not scrubbed to while using the preview layer slider
     void set_dim_previous_layers(bool value) { m_viewer.set_dim_previous_layers(value); }
