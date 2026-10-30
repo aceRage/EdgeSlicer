@@ -2779,7 +2779,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                if (!equal_layering(slicing_params, slicing_params0))
+                // Per-nozzle process P2: objects printed through nozzles of different sizes carry their own nozzles'
+                // min / max layer height limits, which only clamp a variable layer height profile; the layers the
+                // tower shares are compared below (has_custom_layering) and by layer_height above. So the limits
+                // do not have to match.
+                SlicingParameters same_limits = slicing_params;
+                same_limits.min_layer_height  = slicing_params0.min_layer_height;
+                same_limits.max_layer_height  = slicing_params0.max_layer_height;
+                if (!equal_layering(same_limits, slicing_params0))
                     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
                 if (has_custom_layering) {
                     auto &lh         = layer_height_profile(i);

@@ -175,7 +175,12 @@ TEST_CASE("The Bambu tower purges each tool at its own nozzle's width", "[MixedN
             INFO("tool " << tool << " width " << w);
             CHECK((w == (tool == 0 ? 500 : 750) || w == std::lround((tool == 0 ? 0.5 : 0.75) * 1.15 * 1000.)));
         }
-    CHECK(widths.count(1) == 1);
+    if (widths.count(1) == 0) {
+        // Diagnostics: the first toolchange blocks as printed.
+        const size_t at = gcode.find("; CP TOOLCHANGE START");
+        INFO(gcode.substr(at == std::string::npos ? 0 : at, 6000));
+        CHECK(widths.count(1) == 1);
+    }
 }
 
 TEST_CASE("The Bambu tower with uniform nozzles announces no per-tool width", "[MixedNozzle][WipeTower]")
