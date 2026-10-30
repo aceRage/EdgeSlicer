@@ -23,7 +23,7 @@ struct LockRegionParam;
 namespace sla { class IndexedMesh; }
 
 namespace FillAdaptive {
-    struct Octree;
+    struct Octrees;
 };
 
 namespace FillLightning {
@@ -165,6 +165,10 @@ public:
     ExPolygons 				 lslices;
     ExPolygons 				 lslices_extrudable;  // BBS: the extrudable part of lslices used for tree support
     std::vector<BoundingBox> lslices_bboxes;
+    // Orca: for separated infills / per-model centering / octree infills. Aligned with lslices: for each
+    // island, the 3D connected body (across all layers) it belongs to, indexing
+    // PrintObject::separated_body_bboxes(). Populated by PrintObject::prepare_infill() only when needed.
+    std::vector<size_t>      lslices_separated_component_ids;
 
     // BBS
     ExPolygons              loverhangs;
@@ -199,15 +203,15 @@ public:
     void                    make_perimeters();
     // Phony version of make_fills() without parameters for Perl integration only.
     void                    make_fills() { this->make_fills(nullptr, nullptr); }
-    void                    make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator = nullptr);
+    void                    make_fills(const FillAdaptive::Octrees* adaptive_fill_octrees, const FillAdaptive::Octrees* support_fill_octrees, FillLightning::Generator* lightning_generator = nullptr);
     // Locked Zag phase 2b: collect this layer's non-internal fill surfaces into lock_param.outlook
     // and hand them to the sparse infill, so the skin band hugs the model contour. Only does
     // anything for a region whose sparse pattern is Locked Zag with
     // infill_instead_top_bottom_surfaces on. Defined in Fill/Fill.cpp (friend to Layer), ported
     // from BambuStudio's Layer::set_outlook_range.
     void                    set_outlook_range(LockRegionParam &lock_param);
-    Polylines               generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree *adaptive_fill_octree,
-                                                                           FillAdaptive::Octree *support_fill_octree,
+    Polylines               generate_sparse_infill_polylines_for_anchoring(const FillAdaptive::Octrees *adaptive_fill_octrees,
+                                                                           const FillAdaptive::Octrees *support_fill_octrees,
                                                                            FillLightning::Generator* lightning_generator) const;
     void 					make_ironing();
     // ZAA (Z contouring): raycast the eligible extrusions of this layer into the object's mesh and
@@ -323,6 +327,10 @@ public:
     // schedule it) and GCode (to print with it). Reset with the layer like the flag above.
     int                          chameleon_residual_extruder  = -1;
     bool                         chameleon_residual_all_roles = false;
+    // EdgeSlicer (support interface interlock): this layer carries woven body stripes
+    // (generate_support_toolpaths). Flush into support leaves the layer's support body alone, so purge
+    // never lands in the weave (design D5). Reset with the layer like the flags above.
+    bool                         interlock_woven = false;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports
@@ -336,6 +344,8 @@ public:
         out.insert(out.end(), roof_areas.begin(), roof_areas.end());
         out.insert(out.end(), roof_1st_layer.begin(), roof_1st_layer.end());
         out.insert(out.end(), floor_areas.begin(), floor_areas.end());
+        for (const InterlockRoofPart &part : interlock_roof)
+            out.insert(out.end(), part.areas.begin(), part.areas.end());
         return out;
     }
 
@@ -365,6 +375,16 @@ protected:
     ExPolygons                                roof_1st_layer; // the layer just below roof. When working with PolySupport, this layer should be printed with regular material
     ExPolygons                                floor_areas;
     ExPolygons                                roof_gap_areas; // the areas in the gap between support roof and overhang
+    // EdgeSlicer (support interface interlock): the woven stripes of a classic tree roof, taken out of
+    // roof_areas / roof_1st_layer by TreeSupport::draw_circles and filled solid along the stripe by
+    // TreeSupport::generate_toolpaths. Body stripes print with the support filament, interface stripes
+    // with the interface filament. Empty unless support_interface_interlock is on.
+    struct InterlockRoofPart {
+        ExPolygons areas;
+        float      angle { 0.f };
+        bool       body  { false };
+    };
+    std::vector<InterlockRoofPart>            interlock_roof;
     enum AreaType { BaseType = 0, RoofType = 1, FloorType = 2, Roof1stLayer = 3 };
     struct AreaGroup
     {

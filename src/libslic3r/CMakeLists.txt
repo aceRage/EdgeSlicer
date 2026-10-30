@@ -100,7 +100,37 @@ set(lisbslic3r_sources
     ImageFill.cpp
     FlexiJoint.cpp
     FlexiJoint.hpp
+    PushFit.cpp
+    PushFit.hpp
     ImageFill.hpp
+    RealisticRenderSettings.cpp
+    RealisticRenderSettings.hpp
+    Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseScene.hpp
+    Showcase/ShowcaseAssets.cpp
+    Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseCallouts.cpp
+    Showcase/ShowcaseCallouts.hpp
+    Showcase/ShowcaseMaterial.cpp
+    Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
+    Showcase/MultiColourGlsl.cpp
+    Showcase/MultiColourGlsl.hpp
+    Showcase/ShowcaseTone.cpp
+    Showcase/ShowcaseTone.hpp
+    Showcase/ShowcaseWebP.cpp
+    Showcase/ShowcaseWebP.hpp
+    Showcase/ShowcaseVideo.cpp
+    Showcase/ShowcaseVideo.hpp
+    Showcase/ShowcaseEncoder.cpp
+    Showcase/ShowcaseEncoder.hpp
+    Showcase/ShowcasePath.cpp
+    Showcase/ShowcasePath.hpp
+    Showcase/ShowcaseRenderCli.cpp
+    Showcase/ShowcaseRenderCli.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -139,6 +169,8 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -214,8 +246,12 @@ set(lisbslic3r_sources
     Fill/FillBase.hpp
     Fill/FillConcentric.cpp
     Fill/FillConcentric.hpp
+    Fill/FillSpiralInset.cpp
+    Fill/FillSpiralInset.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
+    Fill/FillCornerSmoothing.cpp
+    Fill/FillCornerSmoothing.hpp
     FDMHollowing.cpp
     FDMHollowing.hpp
     Fill/Fill.cpp
@@ -234,6 +270,8 @@ set(lisbslic3r_sources
     Fill/FillPlanePath.hpp
     Fill/FillRectilinear.cpp
     Fill/FillRectilinear.hpp
+    Fill/AdaptiveInfillField.cpp
+    Fill/AdaptiveInfillField.hpp
     Fill/FillTpmsD.cpp
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp
@@ -266,6 +304,8 @@ set(lisbslic3r_sources
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
+    Format/DXF.cpp
+    Format/DXF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
     Format/objparser.cpp
@@ -591,6 +631,8 @@ set(lisbslic3r_sources
     Slicing.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
+    Support/SupportInterlock.cpp
+    Support/SupportInterlock.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
@@ -665,6 +707,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    SpreadPaint.cpp
+    SpreadPaint.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp
@@ -736,6 +780,10 @@ slic3r_unity_build(libslic3r SKIP
     Shape/TextShape.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Geometry/VoronoiUtilsCgal.cpp   # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
+    Showcase/ShowcaseVideo.cpp      # file-local vector helpers (V3, v_add, PI) with common names
+    Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
+    Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
+    Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
 )
 
 if (SLIC3R_STATIC)

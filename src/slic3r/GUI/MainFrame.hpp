@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "GUI_Utils.hpp"
+#include "MainTabs.hpp"
 #include "Event.hpp"
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
@@ -250,19 +251,23 @@ public:
     bool request_quit(bool discard = false);
 
     //BBS GUI refactor
+    // The values live in MainTabs.hpp (unit tested). Showcase (D1) sits after Preview, so Device
+    // and everything after it moved up by one on 2026-10-18; nothing compares or stores these by
+    // number (see MainTabs.hpp).
     enum TabPosition
     {
-        tpHome          = 0,
-        tp3DEditor      = 1,
-        tpPreview       = 2,
-        tpMonitor       = 3,
-        tpStream        = 4,
-        tpPrinters      = 5, // the Printers tab (PrintersPanel); always present
+        tpHome          = MainTabs::Home,
+        tp3DEditor      = MainTabs::Editor3D,
+        tpPreview       = MainTabs::Preview,
+        tpShowcase      = MainTabs::Showcase, // the third page hosting the plater
+        tpMonitor       = MainTabs::Monitor,
+        tpStream        = MainTabs::Stream,
+        tpPrinters      = MainTabs::Printers, // the Printers tab (PrintersPanel); always present
         tpMultiDevice   = tpPrinters, // its old name: the Multi-device tab had this slot
-        tpProject       = 6,
-        tpCalibration   = 7,
-        tpAuxiliary     = 8,
-        toDebugTool     = 9,
+        tpProject       = MainTabs::Project,
+        tpCalibration   = MainTabs::Calibration,
+        tpAuxiliary     = MainTabs::Auxiliary,
+        toDebugTool     = MainTabs::DebugTool,
     };
 
     //BBS: add slice&&print status update logic
@@ -441,6 +446,8 @@ public:
 
     //SoftFever
     void show_device(bool bBBLPrinter);
+    // The notebook index the Device page is inserted at (see the .cpp).
+    int  device_page_position() const;
     // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
     void show_bambu_connect_menu_items(bool show);
 
@@ -515,7 +522,11 @@ public:
     ParamsDialog*         m_param_dialog{ nullptr };
     //BBS
     SettingsDialog        m_settings_dialog;
-    DiffPresetDialog      diff_dialog;
+    // "Compare presets": built on first use (startup round 2). Its constructor copies the whole
+    // preset bundle twice, ~1 s of the main window's construction with a large preset library.
+    DiffPresetDialog&     diff_dialog();
+    // The dialog when it has been built, else null (nothing to keep up to date yet).
+    DiffPresetDialog*     diff_dialog_if_built() { return m_diff_dialog.get(); }
     wxWindow*             m_plater_page{ nullptr };
     PrintHostQueueDialog* m_printhost_queue_dlg;
 
@@ -552,6 +563,9 @@ private:
     // teardown guard in update_slice_print_status (wxGetApp().mainframe does
     // not point at this frame yet during construction).
     void update_slice_print_status_impl(SlicePrintEventType event, bool can_slice, bool can_print);
+    // See diff_dialog(). Destroyed with the frame's members, before wx destroys the frame's children,
+    // as the by-value member it replaces was.
+    std::unique_ptr<DiffPresetDialog> m_diff_dialog;
 };
 
 wxDECLARE_EVENT(EVT_HTTP_ERROR, wxCommandEvent);

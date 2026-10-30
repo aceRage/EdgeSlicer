@@ -4,6 +4,8 @@
 // itself sits in ElegooCanvasQuery.cpp.
 
 #include "ElegooCanvas.hpp"
+#include "ElegooCc2.hpp"
+#include "ElegooSdcp.hpp" // read_frame / hub_state: what the Cmd 0 status says the printer is doing
 
 #include <nlohmann/json.hpp>
 #include <boost/algorithm/string.hpp>
@@ -431,6 +433,11 @@ bool canvas_capable_model(const std::string& printer_model)
     return boost::iequals(cv_trimmed(printer_model), "Elegoo Centauri Carbon");
 }
 
+bool canvas_reader_model(const std::string& printer_model)
+{
+    return canvas_capable_model(printer_model) || ElegooCc2::is_cc2_model(printer_model);
+}
+
 std::string canvas_generic_preset_name(const std::string& family)
 {
     // "@ECC" is the suffix of every Centauri Carbon 1 filament preset (resources/profiles/Elegoo/filament/ECC).
@@ -609,18 +616,22 @@ CanvasQueryResult canvas_query_over(SdcpTransport& transport, const CanvasQueryO
         return result;
     }
     {
+        Sdcp::Status     status;
+        Sdcp::Attributes attrs;
         const auto deadline = CvClock::now() + std::chrono::milliseconds(opts.step_timeout_ms);
         for (int i = 0; i < opts.max_frames; ++i) {
             const int left = std::min(opts.frame_timeout_ms, cv_remaining_ms(deadline));
             std::string frame;
             if (left <= 0 || !transport.receive(frame, left, err))
                 break;
+            Sdcp::read_frame(frame, status, attrs); // the print state rides in the same status frame
             const int st = sdcp_ams_connect_status(frame);
             if (st >= 0) {
                 result.ams_connect_status = st;
                 break;
             }
         }
+        result.print_state = Sdcp::hub_state(status);
     }
     transport.close();
     if (result.ams_connect_status == 0) {

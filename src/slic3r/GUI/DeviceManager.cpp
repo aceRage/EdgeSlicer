@@ -16,6 +16,7 @@
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "MsgDialog.hpp"
 #include "Plater.hpp"
 #include "GUI_App.hpp"
@@ -5809,7 +5810,9 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 void MachineObject::set_ctt_dlg( wxString text){
     if (!m_set_ctt_dlg) {
         m_set_ctt_dlg = true;
-        auto print_error_dlg = new GUI::SecondaryCheckDialog(nullptr, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
+        // Parented so it is destroyed with the main frame: a parentless top-level window,
+        // even hidden, keeps wx from leaving the event loop on exit.
+        auto print_error_dlg = new GUI::SecondaryCheckDialog(GUI::wxGetApp().mainframe, wxID_ANY, _L("Warning"), GUI::SecondaryCheckDialog::ButtonStyle::ONLY_CONFIRM);
         print_error_dlg->update_text(text);
         print_error_dlg->Bind(wxEVT_SHOW, [this](auto& e) {
             if (!e.IsShown()) {
@@ -7257,6 +7260,44 @@ void DeviceManager::full_report_tick()
     }
 }
 
+void DeviceManager::cloud_watch_tick()
+{
+    if (!m_agent || !Slic3r::GUI::wxGetApp().is_user_login()) {
+        // Signed out: whatever was subscribed went with the session, so a later sign-in starts over.
+        m_cloud_watch_asked.clear();
+        return;
+    }
+    const auto steady = std::chrono::steady_clock::now();
+    if (m_cloud_watch_at != std::chrono::steady_clock::time_point{} &&
+        steady - m_cloud_watch_at < std::chrono::milliseconds(CLOUD_WATCH_TICK_MS))
+        return;
+    m_cloud_watch_at = steady;
+
+    // Every online printer bound to the account and reached through the cloud. The selected one is
+    // left out: the agent subscribed it when it was selected and the Device tab keeps it reporting.
+    const MachineObject* sel = get_selected_machine();
+    const auto           now = std::chrono::system_clock::now();
+    std::vector<BambuCloudWatch::Candidate> cands;
+    for (const auto& kv : userMachineList) {
+        MachineObject* m = kv.second;
+        if (!m || m == sel || m->dev_id.empty() || m->is_lan_mode_printer() || !m->is_online()) continue;
+        BambuCloudWatch::Candidate c;
+        c.id = m->dev_id;
+        if (m->m_push_count > 0)
+            c.silence_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(now - m->last_push_time).count();
+        cands.push_back(c);
+    }
+    const long long now_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::vector<std::string> due = BambuCloudWatch::subscribe_due(m_cloud_watch_asked, cands, now_ms);
+    if (due.empty()) return;
+    // UltraNet's add_subscribe subscribes each printer's report topic and asks it for a full report.
+    m_agent->add_subscribe(due);
+    std::string ids;
+    for (const std::string& id : due) ids += (ids.empty() ? "" : ",") + id;
+    BOOST_LOG_TRIVIAL(info) << "cloud_watch: subscribed [" << ids << "] (" << cands.size() << " cloud printer(s) online besides the selected one)";
+}
+
 void DeviceManager::lan_watch_tick()
 {
     if (!m_agent || Slic3r::GUI::wxGetApp().is_hub_managed()) return;
@@ -7293,7 +7334,8 @@ void DeviceManager::lan_watch_tick()
 //
 // Candidates: every Bambu machine this instance knows with a saved access code and an address -
 // the same test the Device tab applies before it offers to connect. Cloud-bound machines are not
-// here: with a login the agent's own server session already reports all of them at once.
+// here: they share the agent's one cloud session, which reports every printer subscribed on it -
+// and cloud_watch_tick subscribes all of them (the plug-in alone only subscribes the selected one).
 MachineObject* DeviceManager::lan_watch_rotate()
 {
     std::vector<MachineObject*> cands;
@@ -7574,7 +7616,16 @@ void DeviceManager::fetch_bind_list_async(std::function<void()> done)
     std::thread([this, agent, token = std::weak_ptr<int>(m_refresh_token), done = std::move(done)]() mutable {
         unsigned int http_code = 0;
         std::string  body;
-        const int    result = agent->get_user_print_info(&http_code, &body);
+        // This is a bare std::thread: an exception from the plug-in would be std::terminate. A failed
+        // fetch still has to reach the CallAfter below, so `done` runs and the UI does not wait for it.
+        int result = -1;
+        try {
+            result = agent->get_user_print_info(&http_code, &body);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw: " << e.what();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "Printer refresh: get_user_print_info threw an unknown exception";
+        }
         Slic3r::GUI::wxGetApp().CallAfter([this, token, result, body = std::move(body), done = std::move(done)]() {
             if (token.expired())
                 return;
@@ -7847,7 +7898,7 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
             if (last_selected->second->is_connecting() && !need_disconnect)
                 return false;
 
-            if (!need_disconnect) {m_agent->disconnect_printer(); }
+            if (!need_disconnect && m_agent) {m_agent->disconnect_printer(); }
         }
     }
 

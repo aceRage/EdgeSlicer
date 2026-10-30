@@ -421,6 +421,7 @@ public:
     Field*          get_field(const t_config_option_key &opt_key, Page** selected_page, int opt_index = -1);
     void            toggle_option(const std::string &opt_key, bool toggle, int opt_index = -1);
     void            toggle_line(const std::string &opt_key, bool toggle); // BBS: hide some line
+    void            set_option_label(const std::string &opt_key, const wxString &label);
 	wxSizer*		description_line_widget(wxWindow* parent, ogStaticText** StaticText, wxString text = wxEmptyString);
 	bool			current_preset_is_dirty() const;
 	bool			saved_preset_is_dirty() const;
@@ -659,6 +660,10 @@ private:
     wxStaticText*   m_price_note {nullptr};
     wxSizer*        price_note_create_widget(wxWindow* parent);
 
+    // Under Color: the colour make-up of the slot being edited (multi-colour P2, read only; Edit... opens the editor).
+    wxStaticText*   m_makeup_note {nullptr};
+    wxSizer*        makeup_create_widget(wxWindow* parent);
+
 public:
 	//BBS: GUI refactor
 	TabFilament(ParamsPanel* parent) :
@@ -673,6 +678,7 @@ public:
 	void		clear_pages() override;
     // Refreshes the line under Price (also called when your filament prices change).
     void        update_price_note();
+    void        update_makeup_note();
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 
     const std::string&	get_custom_gcode(const t_config_option_key& opt_key) override;

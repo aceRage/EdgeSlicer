@@ -113,8 +113,13 @@ std::string canvas_tray_name(const CanvasTray& tray);
 // carries no usable canvas_list.
 bool canvas_parse_payload(const std::string& payload, CanvasInfo& info, std::string& error);
 
-// True for the printer models this fork reads CANVAS from: the Centauri Carbon 1 only (design D10).
+// True for the Centauri Carbon 1, whose CANVAS (and Storage tab, and capture) speak SDCP (design D10).
 bool canvas_capable_model(const std::string& printer_model);
+
+// True for every model whose CANVAS the send dialog, the filament sync and the Device-tab card
+// read: the Centauri Carbon 1 (SDCP) and the Centauri Carbon 2 / Centauri 2 (MQTT, ElegooCc2.hpp).
+// On the CC2 the CANVAS is optional; canvas_query_for() says no_canvas when it is not there.
+bool canvas_reader_model(const std::string& printer_model);
 
 // The CC1's own Generic filament preset for a family ("PLA" -> "Generic PLA @ECC"). The sync prefers
 // it for an untagged or Generic spool when the profiles have it, else the usual "Generic <type>".
@@ -155,6 +160,10 @@ struct CanvasQueryResult
     bool        reached   = false;   // the printer accepted a connection at all
     std::string error;               // why not ok, for the log and the dialogs (English)
     CanvasInfo  info;
+    // What the status (Cmd 0) said the machine is doing, in Sdcp::hub_state's words ("standby",
+    // "printing", "paused", ...); "" when no status frame said. The unattended send checks it before
+    // anything is uploaded (RemoteSend), as the QIDI path checks print_stats.
+    std::string print_state;
 };
 
 struct CanvasQueryOptions
@@ -189,6 +198,10 @@ std::string canvas_redact_frame(const std::string& frame);
 // Ask the printer at `address` (a print_host value) for its CANVAS state. Blocking - call it off the
 // GUI thread. Bounded: a few seconds when the printer is off.
 CanvasQueryResult canvas_query(const std::string& address, const CanvasQueryOptions& opts = CanvasQueryOptions());
+// canvas_query() over whichever protocol the model speaks. `token` is the access code (the preset's
+// or device's API key), used by the Centauri Carbon 2 only; "" = the printer's default.
+CanvasQueryResult canvas_query_for(const std::string& address, const std::string& printer_model, const std::string& token,
+                                   const CanvasQueryOptions& opts = CanvasQueryOptions());
 std::string       canvas_capture(const std::string& address, const std::string& context_json,
                                  const CanvasQueryOptions& opts = CanvasQueryOptions());
 

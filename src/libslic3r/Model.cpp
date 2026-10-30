@@ -26,6 +26,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#ifdef _WIN32
+#include <boost/nowide/convert.hpp>
+#endif
 #include <boost/nowide/iostream.hpp>
 
 #include "SVG.hpp"
@@ -106,6 +109,7 @@ Model& Model::assign_copy(const Model &rhs)
 
     // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
     this->image_assets = rhs.image_assets;
+    this->showcase     = rhs.showcase;
 
     return *this;
 }
@@ -154,6 +158,8 @@ Model& Model::assign_copy(Model &&rhs)
     // Image Fill (Phase 2): move the image store with everything else.
     this->image_assets = std::move(rhs.image_assets);
     rhs.image_assets.clear();
+    this->showcase = std::move(rhs.showcase);
+    rhs.showcase.clear();
     return *this;
 }
 
@@ -1143,43 +1149,71 @@ std::string Model::get_auxiliary_file_temp_path()
 }
 
 // BBS: backup dir
+// A fresh backup folder for a model under parent, named by date, pid and model id.
+static std::string new_backup_path(const std::string &parent, size_t model_id)
+{
+    std::time_t t = std::time(0);
+    std::tm* now_time = std::localtime(&t);
+    std::stringstream buf;
+    buf << "/snapmaker_orca_model/";
+    buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
+    buf << get_current_pid() << "#";
+    buf << model_id;
+    return boost::filesystem::path(parent).string() + buf.str();
+}
+
 std::string Model::get_backup_path()
 {
+    bool generated = false;
     if (backup_path.empty())
     {
-        auto pid = get_current_pid();
-        boost::filesystem::path parent_path(temporary_dir());
-        std::time_t t = std::time(0);
-        std::tm* now_time = std::localtime(&t);
-        std::stringstream buf;
-        buf << "/snapmaker_orca_model/";
-        buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
-        buf << pid << "#";
-        buf << this->id().id;
-
-        backup_path = parent_path.string() + buf.str();
+        backup_path = new_backup_path(temporary_dir(), this->id().id);
+        generated = true;
         BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, backup_path empty, set to %3%")%this%this->id().id%backup_path;
-        boost::filesystem::path temp_path(backup_path);
-        if (boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
-            boost::filesystem::remove_all(temp_path);
-        }
     }
-    boost::filesystem::path temp_path(backup_path);
-    try {
-        if (!boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/3D/Objects");
-            BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/Metadata");
-            BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
-            save_string_file(backup_path + "/lock.txt",
-                boost::lexical_cast<std::string>(get_current_pid()));
+    auto create_backup_dirs = [this, generated]() -> bool {
+        boost::filesystem::path temp_path(backup_path);
+        try {
+            if (generated && boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
+                boost::filesystem::remove_all(temp_path);
+            }
+            if (!boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/3D/Objects");
+                BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/Metadata");
+                BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
+                save_string_file(backup_path + "/lock.txt",
+                    boost::lexical_cast<std::string>(get_current_pid()));
+            }
+            return true;
+        } catch (std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+            return false;
         }
-    } catch (std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+    };
+    if (!create_backup_dirs() && generated) {
+        // temporary_dir() is unset or not writable (unset, the path is "/snapmaker_orca_model", read-only
+        // on macOS). The 3MF importer extracts the project settings into this folder, so fall back to the
+        // system temp folder rather than hand out one nothing can be written to.
+        boost::system::error_code ec;
+        const boost::filesystem::path system_temp = boost::filesystem::temp_directory_path(ec);
+        if (!ec && !system_temp.empty()) {
+#ifdef _WIN32
+            // Wide path to UTF-8: path::string() is a narrow ACP conversion on Windows and mangles a
+            // non-ASCII %TEMP% (an accented user name). wstring() can throw under a C locale on POSIX,
+            // so this stays Windows only.
+            const std::string system_temp_utf8 = boost::nowide::narrow(system_temp.wstring());
+#else
+            const std::string system_temp_utf8 = system_temp.string();
+#endif
+            backup_path = new_backup_path(system_temp_utf8, this->id().id);
+            BOOST_LOG_TRIVIAL(warning) << boost::format("model %1%, id %2%, backup path falls back to %3%")%this%this->id().id%backup_path;
+            create_backup_dirs();
+        }
     }
 
     return backup_path;
@@ -1325,6 +1359,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->brim_points                 = rhs.brim_points;
     this->layer_config_ranges         = rhs.layer_config_ranges;
+    this->height_colour_patterns      = rhs.height_colour_patterns;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
@@ -1368,6 +1403,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->brim_points                 = std::move(brim_points);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
+    this->height_colour_patterns      = std::move(rhs.height_colour_patterns);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
@@ -1825,6 +1861,9 @@ indexed_triangle_set ModelObject::raw_indexed_triangle_set() const
             size_t j = out.indices.size();
             append(out.vertices, v->mesh().its.vertices);
             append(out.indices,  v->mesh().its.indices);
+            // Orca: Point the volume's triangles at its own vertices, which follow those of the volumes before it.
+            for (size_t k = j; k < out.indices.size(); ++ k)
+                out.indices[k] += stl_triangle_vertex_indices::Constant(int(i));
             const Transform3d& m = v->get_matrix();
             for (; i < out.vertices.size(); ++ i)
                 out.vertices[i] = (m * out.vertices[i].cast<double>()).cast<float>().eval();
@@ -3737,6 +3776,8 @@ double Model::findMaxSpeed(const ModelObject* object) {
     double topSolidInfillSpeedObj = Model::printSpeedMap.topSolidInfillSpeed;
     double supportSpeedObj = Model::printSpeedMap.supportSpeed;
     double smallPerimeterSpeedObj = Model::printSpeedMap.smallPerimeterSpeed;
+    double smallSupportPerimeterSpeedObj = Model::printSpeedMap.smallSupportPerimeterSpeed;
+    std::optional<FloatOrPercent> smallSupportPerimeterSpeedOpt;
     for (std::string objectKey : objectKeys) {
         if (objectKey == "inner_wall_speed"){
             perimeterSpeedObj = object->config.get().opt_float(objectKey, 0);
@@ -3758,8 +3799,18 @@ double Model::findMaxSpeed(const ModelObject* object) {
                 smallPerimeterSpeedObj = v.percent ? v.value / 100.0 * perimeterSpeedObj : v.value;
             }
         }
+        // OrcaSlicer #13459 / #15232: a FloatOrPercent; a percentage is of the support speed, which is
+        // resolved after the loop (the keys come sorted, "small_support..." before "support_speed").
+        if (objectKey == "small_support_perimeter_speed") {
+            if (const auto *opt = object->config.get().option<ConfigOptionFloatsOrPercents>(objectKey))
+                smallSupportPerimeterSpeedOpt = opt->get_at(0);
+        }
     }
-    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, objMaxSpeed)))))));
+    if (smallSupportPerimeterSpeedOpt)
+        smallSupportPerimeterSpeedObj = smallSupportPerimeterSpeedOpt->percent ?
+                                            smallSupportPerimeterSpeedOpt->value / 100.0 * supportSpeedObj :
+                                            smallSupportPerimeterSpeedOpt->value;
+    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, std::max(smallSupportPerimeterSpeedObj, objMaxSpeed))))))));
     if (objMaxSpeed <= 0) objMaxSpeed = 250.;
     return objMaxSpeed;
 }
@@ -4349,6 +4400,48 @@ bool model_has_advanced_features(const Model &model)
             	return true;
     }
     return false;
+}
+
+// Orca #14591: a project may store only the bare filename of a source (the default), while the file read
+// back from disk carries its full path (or the reverse), so compare the exact path first and then the
+// filename alone, case-insensitively.
+static bool same_reload_source(const std::string &new_input_file, const std::string &old_input_file)
+{
+    return new_input_file == old_input_file ||
+           boost::algorithm::iequals(boost::filesystem::path(new_input_file).filename().string(),
+                                     boost::filesystem::path(old_input_file).filename().string());
+}
+
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume)
+{
+    // The volume at the indices the old volume remembers, when it still comes from the same file.
+    int source_object = -1, source_volume = -1;
+    if (file_matches_source) {
+        const int o = old_volume.source.object_idx, v = old_volume.source.volume_idx;
+        if (o >= 0 && o < int(new_model.objects.size()) && v >= 0 && v < int(new_model.objects[o]->volumes.size()) &&
+            same_reload_source(new_model.objects[o]->volumes[v]->source.input_file, old_volume.source.input_file)) {
+            source_object = o;
+            source_volume = v;
+        }
+    }
+    // Trust the remembered indices only while they still point at a volume of that name.
+    if (source_object >= 0 && (old_volume.name.empty() || new_model.objects[source_object]->volumes[source_volume]->name == old_volume.name))
+        return {source_object, source_volume};
+
+    if ((file_matches_source || file_named_like_volume) && !old_volume.name.empty()) {
+        for (int o = 0; o < int(new_model.objects.size()); ++o) {
+            const ModelObject *obj = new_model.objects[o];
+            for (int v = 0; v < int(obj->volumes.size()); ++v)
+                if (obj->volumes[v]->name == old_volume.name)
+                    return {o, v};
+            // A STEP model loaded as one volume: the object carries the name.
+            if (obj->name == old_volume.name)
+                return {o, -1};
+        }
+    }
+    // Nothing of that name: the volume was renamed, so the remembered indices are all there is.
+    return {source_object, source_volume};
 }
 
 #ifndef NDEBUG

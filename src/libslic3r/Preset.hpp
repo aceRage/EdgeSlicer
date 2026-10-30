@@ -592,6 +592,11 @@ public:
     Preset&         load_preset(const std::string &path, const std::string &name, const DynamicPrintConfig &config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
     Preset&         load_preset(const std::string &path, const std::string &name, DynamicPrintConfig &&config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
 
+    // A new user preset `name` that inherits `parent` (a system preset), with `overrides` applied on top
+    // and saved as a difference against the parent. The selection is left alone. Returns the preset,
+    // or nullptr when `name` is taken or the parent is not a system preset. Used for a third-party
+    // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
+    const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
@@ -688,7 +693,14 @@ public:
     Preset&         get_edited_preset()         { return m_edited_preset; }
     const Preset&   get_edited_preset() const   { return m_edited_preset; }
 
-    const Preset& get_selected_preset_base() const { return *get_preset_base(m_presets[m_idx_selected]); }
+    // The root of the selected preset's inherits chain, or the selected preset itself when
+    // the chain names a preset that is not loaded (e.g. a vendor that is not installed).
+    const Preset& get_selected_preset_base() const
+    {
+        const Preset &selected = m_presets[m_idx_selected];
+        const Preset *base     = get_preset_base(selected);
+        return base ? *base : selected;
+    }
 
     // Return the last saved preset.
 //  const Preset&   get_saved_preset() const { return m_saved_preset; }

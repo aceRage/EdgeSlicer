@@ -5546,12 +5546,20 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
 
 TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[MixedFilament][ColorMatch]")
 {
-    // Snap #1008: 15% floor on every participating component. Search passes the
-    // two-color cap (85%); three-color recipes then top out at 70% because the
-    // other two keep the floor. Recipes land in MixedFilamentManager.
+    // Snap #1008: 15% floor on every participating component. Automatic search
+    // passes the two-color cap (85%); three-color recipes then top out at 70%
+    // because the other two keep the floor. Recipes land in MixedFilamentManager.
     CHECK(kMixedColorMatchMinComponentPercent == 15);
     CHECK(kMixedColorMatchMaxPairComponentPercent == 85);
     CHECK(kMixedColorMatchMaxMultiComponentPercent == 70);
+    CHECK(kMixedColorMatchManualMinComponentPercent == 0);
+    CHECK(kMixedColorMatchManualMaxComponentPercent == 100);
+    CHECK(kMixedColorMatchMultiColorComponentCount == 3);
+
+    CHECK(mixed_color_match_search_min_percent(false) == 15);
+    CHECK(mixed_color_match_search_max_percent(false) == 85);
+    CHECK(mixed_color_match_search_min_percent(true) == 0);
+    CHECK(mixed_color_match_search_max_percent(true) == 100);
 
     CHECK(mixed_color_match_max_component_percent(0) == 85);
     CHECK(mixed_color_match_max_component_percent(1) == 85);
@@ -5565,6 +5573,33 @@ TEST_CASE("Automatic mixed colour match uses count-dependent ratio caps", "[Mixe
     // Advisory: a valid 85% two-color recipe is in range; 85% of a three-color is not.
     CHECK(85 <= mixed_color_match_max_component_percent(2));
     CHECK(85 > mixed_color_match_max_component_percent(3));
+}
+
+TEST_CASE("Manual mixed colour match keeps 0-100 search and warns on recommended bounds", "[MixedFilament][ColorMatch]")
+{
+    // Snap #1008 later commits: manual search is 0–100; the 15–85 / 15–70
+    // recommended range is advisory only. Zero weight is an excluded color.
+    CHECK_FALSE(mixed_color_match_weight_outside_recommended(0, 2));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 85}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({50, 50}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 15, 70}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({20, 20, 60}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({15, 85, 0, 0}));
+    CHECK_FALSE(mixed_color_match_weights_outside_recommended({85, 15, 0}));
+
+    CHECK(mixed_color_match_weights_outside_recommended({10, 90}));
+    CHECK(mixed_color_match_weights_outside_recommended({5, 95}));
+    CHECK(mixed_color_match_weights_outside_recommended({10, 20, 70}));
+    CHECK(mixed_color_match_weights_outside_recommended({20, 10, 70}));
+    CHECK(mixed_color_match_weights_outside_recommended({20, 20, 85}));
+    CHECK(mixed_color_match_weights_outside_recommended({90, 10, 0, 0}));
+    CHECK(mixed_color_match_weights_outside_recommended({15, 15, 85, 0}));
+
+    // Remapped component IDs can exceed the current physical-slot count.
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2) == 4);
+    CHECK(mixed_color_match_advisory_weight_count(4, 12, 2) == 12);
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2, {3, 12}) == 12);
+    CHECK(mixed_color_match_advisory_weight_count(4, 1, 2, {}) == 4);
 }
 
 // ============================================================================
@@ -6157,4 +6192,195 @@ TEST_CASE("Mixed filament config remap follows mixed-deletion painting table", "
     CHECK(object_config.extruder() == 5);
     CHECK(object_config.opt_int("wall_filament") == 5);
     CHECK_FALSE(object_config.has("sparse_infill_filament"));
+}
+
+TEST_CASE("Rebuild filament multi-color fields from plain colours when a 3MF omits them",
+          "[FilamentColor][3MF]")
+{
+    const int segment = FilamentColorModeToConfig(FilamentColorMode::Segment);
+    const int gradient = FilamentColorModeToConfig(FilamentColorMode::Gradient);
+    REQUIRE(segment == 0);
+    REQUIRE(gradient == 1);
+
+    SECTION("need rebuild only when an imported field is short")
+    {
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(4, 4, 4));
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(4, 4, 0));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(0, 0, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(4, 0, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(0, 4, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(2, 4, 4));
+        CHECK(ImportedFilamentMultiFieldsNeedRebuild(4, 2, 4));
+    }
+
+    SECTION("both fields missing: copy filament_colour as Segment")
+    {
+        const std::vector<std::string> colours = {"#FF0000", "#00FF00", "#0000FF", "#FFFF00"};
+        std::vector<std::string> leftover_multi = {"#111111|#222222", "#333333"};
+        std::vector<int> leftover_modes = {gradient, gradient};
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, leftover_multi, leftover_modes, 4, 0, 0));
+        REQUIRE(leftover_multi.size() == 4);
+        REQUIRE(leftover_modes.size() == 4);
+        CHECK(leftover_multi[0] == "#FF0000");
+        CHECK(leftover_multi[1] == "#00FF00");
+        CHECK(leftover_multi[2] == "#0000FF");
+        CHECK(leftover_multi[3] == "#FFFF00");
+        CHECK(leftover_modes[0] == segment);
+        CHECK(leftover_modes[1] == segment);
+        CHECK(leftover_modes[2] == segment);
+        CHECK(leftover_modes[3] == segment);
+    }
+
+    SECTION("complete imported multi-colour is not overwritten when only modes are missing")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222", "#333333", "#444444"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00|#0000FF|#FFFFFF", "#AAAAAA|#BBBBBB", "#00FF00", "#0000FF"};
+        std::vector<int> modes;
+        REQUIRE(ImportedFilamentMultiFieldsNeedRebuild(4, 0, 4));
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 4, 4, 0));
+        REQUIRE(multi.size() == 4);
+        CHECK(multi[0] == "#FF0000|#00FF00|#0000FF|#FFFFFF");
+        CHECK(multi[1] == "#AAAAAA|#BBBBBB");
+        CHECK(multi[2] == "#00FF00");
+        CHECK(multi[3] == "#0000FF");
+        REQUIRE(modes.size() == 4);
+        CHECK(modes[0] == segment);
+        CHECK(modes[3] == segment);
+    }
+
+    SECTION("short imported multi-colors keep the supplied slots and fill the rest")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222", "#333333", "#444444"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00", "#00AABB"};
+        std::vector<int> modes = {gradient, gradient};
+        REQUIRE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 4, 2, 2));
+        REQUIRE(multi.size() == 4);
+        CHECK(multi[0] == "#FF0000|#00FF00");
+        CHECK(multi[1] == "#00AABB");
+        CHECK(multi[2] == "#333333");
+        CHECK(multi[3] == "#444444");
+        REQUIRE(modes.size() == 4);
+        CHECK(modes[0] == gradient);
+        CHECK(modes[1] == gradient);
+        CHECK(modes[2] == segment);
+        CHECK(modes[3] == segment);
+    }
+
+    SECTION("complete imported fields: helper writes nothing")
+    {
+        const std::vector<std::string> colours = {"#111111", "#222222"};
+        std::vector<std::string> multi = {"#FF0000|#00FF00", "#ABCDEF"};
+        std::vector<int> modes = {gradient, segment};
+        CHECK_FALSE(ImportedFilamentMultiFieldsNeedRebuild(2, 2, 2));
+        CHECK_FALSE(RebuildFilamentMultiFieldsFromPlainColors(colours, multi, modes, 2, 2, 2));
+        CHECK(multi[0] == "#FF0000|#00FF00");
+        CHECK(multi[1] == "#ABCDEF");
+        CHECK(modes[0] == gradient);
+        CHECK(modes[1] == segment);
+    }
+}
+
+// Snapmaker OrcaSlicer #1104: update_multi_material_filament_presets resized filament_colour
+// then regenerated mixed filaments, but left filament_multi_colors / filament_colour_mode
+// stale or oversized. Swatches read those two fields first.
+TEST_CASE("update_multi_material_filament_presets aligns multi_colors and colour_mode to the physical count",
+          "[Preset][FilamentColor]")
+{
+    const int segment  = FilamentColorModeToConfig(FilamentColorMode::Segment);
+    const int gradient = FilamentColorModeToConfig(FilamentColorMode::Gradient);
+
+    SECTION("same-count path trims an oversized leftover auto-palette")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#111111", "#222222", "#333333", "#444444"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0, 0};
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000");
+        CHECK(multi->values[1] == "#00FF00");
+        CHECK(modes->values[0] == segment);
+        CHECK(modes->values[1] == segment);
+    }
+
+    SECTION("shrink after a filament-count drop trims the multi-color tail")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2", "F3"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0};
+        bundle.update_multi_material_filament_presets();
+
+        bundle.filament_presets.pop_back();
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
+        // Simulate a path that resized filament_colour but left the multi-color arrays alone
+        // (the same-count 3MF / leftover-tail case, not set_num_filaments).
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000", "#00FF00", "#0000FF"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {0, 0, 0};
+        // Multi-colour P1's visual-only keys carry the same stale three-slot tail.
+        bundle.project_config.set_key_value("filament_colour_split", new ConfigOptionStrings{"30|70", "", "50|50"});
+        bundle.project_config.set_key_value("filament_colour_angle", new ConfigOptionFloats{45., 0., 90.});
+        bundle.project_config.set_key_value("filament_colour_twist", new ConfigOptionFloats{90., 0., 180.});
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000");
+        CHECK(multi->values[1] == "#00FF00");
+
+        // The visual-only keys follow the physical count too, and the kept slots keep their values.
+        const auto *split = bundle.project_config.option<ConfigOptionStrings>("filament_colour_split");
+        const auto *angle = bundle.project_config.option<ConfigOptionFloats>("filament_colour_angle");
+        const auto *twist = bundle.project_config.option<ConfigOptionFloats>("filament_colour_twist");
+        REQUIRE(split != nullptr);
+        REQUIRE(angle != nullptr);
+        REQUIRE(twist != nullptr);
+        REQUIRE(split->values.size() == 2);
+        REQUIRE(angle->values.size() == 2);
+        REQUIRE(twist->values.size() == 2);
+        CHECK(split->values[0] == "30|70");
+        CHECK(angle->values[0] == 45.);
+        CHECK(twist->values[0] == 90.);
+    }
+
+    SECTION("real multi-colour and gradient slots survive alignment")
+    {
+        PresetBundle bundle;
+        bundle.filament_presets = {"F1", "F2"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#111111", "#222222"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors", true)->values =
+            {"#FF0000|#00FF00|#0000FF|#FFFFFF", "#AAAAAA|#BBBBBB"};
+        bundle.project_config.option<ConfigOptionInts>("filament_colour_mode", true)->values = {gradient, gradient};
+
+        bundle.update_multi_material_filament_presets();
+
+        const auto *multi = bundle.project_config.option<ConfigOptionStrings>("filament_multi_colors");
+        const auto *modes = bundle.project_config.option<ConfigOptionInts>("filament_colour_mode");
+        REQUIRE(multi != nullptr);
+        REQUIRE(modes != nullptr);
+        REQUIRE(multi->values.size() == 2);
+        REQUIRE(modes->values.size() == 2);
+        CHECK(multi->values[0] == "#FF0000|#00FF00|#0000FF|#FFFFFF");
+        CHECK(multi->values[1] == "#AAAAAA|#BBBBBB");
+        CHECK(modes->values[0] == gradient);
+        CHECK(modes->values[1] == gradient);
+    }
 }

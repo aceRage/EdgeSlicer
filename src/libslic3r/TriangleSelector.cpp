@@ -601,7 +601,7 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
 // This is done by an actual recursive call. Returns false if the triangle is
 // outside the cursor.
 // Called by select_patch() and by itself.
-bool TriangleSelector::select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting, bool select_partially)
+bool TriangleSelector::select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting, bool select_partially, bool protect_painted)
 {
     assert(facet_idx < int(m_triangles.size()));
 
@@ -611,7 +611,7 @@ bool TriangleSelector::select_triangle(int facet_idx, EnforcerBlockerType type, 
     Vec3i32 neighbors = m_neighbors[facet_idx];
     assert(this->verify_triangle_neighbors(m_triangles[facet_idx], neighbors));
 
-    if (! select_triangle_recursive(facet_idx, neighbors, type, triangle_splitting, select_partially))
+    if (! select_triangle_recursive(facet_idx, neighbors, type, triangle_splitting, select_partially, protect_painted))
         return false;
 
     // In case that all children are leafs and have the same state now,
@@ -951,7 +951,7 @@ Vec3i32 TriangleSelector::child_neighbors_propagated(const Triangle &tr, const V
     return out;
 }
 
-bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting, bool select_partially)
+bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting, bool select_partially, bool protect_painted)
 {
     assert(facet_idx < int(m_triangles.size()));
 
@@ -968,7 +968,21 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
      && ! m_cursor->is_edge_inside_cursor(*tr, m_vertices))
         return false;
 
-    if (num_of_inside_vertices == 3) {
+    // Edge (Spread paint): a leaf painted in another state is kept as it is.
+    auto protected_leaf = [protect_painted, type](const Triangle &t) {
+        return protect_painted && ! t.is_split() && t.get_state() != EnforcerBlockerType::NONE && t.get_state() != type;
+    };
+
+    if (num_of_inside_vertices == 3 && protect_painted && tr->is_split()) {
+        // Keep the subdivision: only the leaves that are not protected change.
+        int num_of_children = tr->number_of_split_sides() + 1;
+        for (int i = 0; i < num_of_children; ++i) {
+            select_triangle_recursive(tr->children[i], this->child_neighbors(*tr, neighbors, i), type, triangle_splitting, select_partially, protect_painted);
+            tr = &m_triangles[facet_idx]; // might have been invalidated
+        }
+    } else if (num_of_inside_vertices == 3) {
+        if (protected_leaf(*tr))
+            return true;
         // dump any subdivision and select whole triangle
         undivide_triangle(facet_idx);
         tr->set_state(type);
@@ -981,6 +995,8 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
             // No need to split, all children would end up selected anyway.
             return true;
         }
+        if (protected_leaf(*tr))
+            return true;
 
         if (triangle_splitting)
             split_triangle(facet_idx, neighbors);
@@ -997,13 +1013,40 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
                 assert(tr->children[i] < int(m_triangles.size()));
                 // Recursion, deep first search over the children of this triangle.
                 // All children of this triangle were created by splitting a single source triangle of the original mesh.
-                select_triangle_recursive(tr->children[i], this->child_neighbors(*tr, neighbors, i), type, triangle_splitting, select_partially);
+                select_triangle_recursive(tr->children[i], this->child_neighbors(*tr, neighbors, i), type, triangle_splitting, select_partially, protect_painted);
                 tr = &m_triangles[facet_idx]; // might have been invalidated
             }
         }
     }
 
     return true;
+}
+
+void TriangleSelector::select_triangles_with_cursor(const std::vector<int>  &facets,
+                                                    std::unique_ptr<Cursor> &&cursor,
+                                                    EnforcerBlockerType       new_state,
+                                                    float                     edge_limit,
+                                                    bool                      protect_painted,
+                                                    std::vector<uint8_t>     *fully_inside)
+{
+    // Borrow m_cursor and the edge limit for the duration of the call, so the brush finds its own
+    // state untouched afterwards (select_patch() only resets the edge limit when its radius changes).
+    std::swap(m_cursor, cursor);
+    const float old_edge_limit_sqr = m_edge_limit_sqr;
+    set_edge_limit(edge_limit);
+
+    if (fully_inside)
+        fully_inside->assign(facets.size(), 0);
+    for (size_t i = 0; i < facets.size(); ++i) {
+        const int facet_idx = facets[i];
+        assert(facet_idx >= 0 && facet_idx < m_orig_size_indices);
+        if (fully_inside)
+            (*fully_inside)[i] = m_cursor->vertices_inside(m_triangles[facet_idx], m_vertices) == 3;
+        select_triangle(facet_idx, new_state, true, false, protect_painted);
+    }
+
+    m_edge_limit_sqr = old_edge_limit_sqr;
+    std::swap(m_cursor, cursor);
 }
 
 void TriangleSelector::set_facet(int facet_idx, EnforcerBlockerType state)

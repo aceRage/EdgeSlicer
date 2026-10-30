@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <cstdlib>
+#include <chrono>
 
 #include <imgui/imgui.h>
 
@@ -63,6 +64,8 @@ class ImGuiWrapper
     unsigned m_mouse_buttons{ 0 };
     bool m_disabled{ false };
     bool m_new_frame_open{ false };
+    // ORCA Start of the previous frame, see new_frame().
+    std::chrono::steady_clock::time_point m_last_frame_time{};
 #if ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
     bool m_requires_extra_frame{ false };
 #endif // ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
@@ -157,6 +160,8 @@ public:
     void text_wrapped(const std::string &label, float wrap_width);
     void text_wrapped(const wxString &label, float wrap_width);
     void tooltip(const char *label, float wrap_width);
+    // UTF-8 text (_u8L, into_u8): without this a std::string went through wxString's locale conversion (OrcaSlicer #11078).
+    void tooltip(const std::string &label, float wrap_width);
     void tooltip(const wxString &label, float wrap_width);
 
 
@@ -309,6 +314,13 @@ public:
     bool requires_extra_frame() const { return m_requires_extra_frame; }
     void set_requires_extra_frame() { m_requires_extra_frame = true; }
     void reset_requires_extra_frame() { m_requires_extra_frame = false; }
+    // ORCA Call right after a widget with +/- buttons. ImGui repeats a held button only on new frames and the
+    // canvas renders on events only, so keep frames coming while the widget is held.
+    void request_frames_while_held()
+    {
+        if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            set_requires_extra_frame();
+    }
 
     void disable_background_fadeout_animation();
 

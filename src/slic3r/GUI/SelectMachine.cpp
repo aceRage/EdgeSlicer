@@ -2672,9 +2672,17 @@ void SelectMachineDialog::update_user_machine_list()
     if (m_agent && m_agent->is_user_login()) {
         boost::thread get_print_info_thread = Slic3r::create_thread([this, token = std::weak_ptr<int>(m_token)] {
             NetworkAgent* agent = wxGetApp().getAgent();
-            unsigned int http_code;
+            unsigned int http_code = 0;
             std::string body;
-            int result = agent->get_user_print_info(&http_code, &body);
+            // A thread body: the agent can be gone (no plug-in) and the plug-in can throw, and either
+            // would take the whole slicer down (std::terminate / null dereference).
+            int result = -1;
+            try {
+                if (agent)
+                    result = agent->get_user_print_info(&http_code, &body);
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "get_user_print_info threw";
+            }
             CallAfter([token, this, result, body] {
                 if (token.expired()) {return;}
                 if (result == 0) {
@@ -2931,7 +2939,7 @@ void SelectMachineDialog::update_user_printer()
     else {
         m_printer_last_select = "";
         update_select_layout(nullptr);
-        m_comboBox_printer->SetTextLabel("");
+        m_comboBox_printer->SetValue(_L("No available printers"));
     }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "for send task, current printer id =  " << m_printer_last_select << std::endl;

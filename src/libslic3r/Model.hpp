@@ -21,8 +21,11 @@
 #include "TriangleSelector.hpp"
 #include "ImageFill.hpp"
 #include "FlexiJoint.hpp"
+#include "PushFit.hpp"
 #include "CutRecipe.hpp"
+#include "HeightColourPattern.hpp"
 #include "CostPricing.hpp"
+#include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
 #include "TextureDisplacement.hpp"
 
@@ -261,11 +264,19 @@ enum class CutConnectorType : int {
     // the three original types are untouched. Since phase 3 a flexi connector DOES reach a 3MF
     // - a project saved with the joint placed but not yet cut carries it, and its parameters,
     // in Metadata/cut_information.xml - so the 3MF reader's type range check bounds against
-    // this enumerator rather than against Undef. Keep FlexiJoint last.
+    // this enumerator rather than against Undef.
     , FlexiJoint
+    // Push-fit "Pin": a separate printed pin pushed into a generated hole in each half
+    // (tests/design_pushfit_connector.md). Appended after FlexiJoint so no stored value moves;
+    // 3 is deliberately avoided (BambuStudio's Thread). The 3MF readers bound the type against
+    // this enumerator, so keep PushFit LAST.
+    , PushFit
 };
 
 inline bool is_flexi_connector_type(CutConnectorType t) { return t == CutConnectorType::FlexiJoint; }
+inline bool is_pushfit_connector_type(CutConnectorType t) { return t == CutConnectorType::PushFit; }
+// A connector that becomes a separate object of its own (CreateDowels): the Dowel and the Pin.
+inline bool is_separate_pin_connector_type(CutConnectorType t) { return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit; }
 
 enum class CutConnectorStyle : int {
     Prism
@@ -330,6 +341,8 @@ struct CutConnector
     CutConnectorAttributes attribs;
     // Only meaningful when attribs.type == CutConnectorType::FlexiJoint.
     FlexiJointParams flexi;
+    // Only meaningful when attribs.type == CutConnectorType::PushFit.
+    PushFitParams    pushfit;
 
     CutConnector()
         : pos(Vec3d::Zero()), rotation_m(Transform3d::Identity()), radius(5.f), height(10.f), radius_tolerance(0.f), height_tolerance(0.1f), z_angle(0.f)
@@ -341,14 +354,14 @@ struct CutConnector
 
     CutConnector(const CutConnector& rhs) :
         CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs)
-    { flexi = rhs.flexi; }
+    { flexi = rhs.flexi; pushfit = rhs.pushfit; }
 
     bool operator==(const CutConnector& other) const;
 
     bool operator!=(const CutConnector& other) const { return !(other == (*this)); }
 
     template<class Archive> inline void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit);
     }
 };
 
@@ -428,6 +441,9 @@ public:
     ModelConfigObject 		config;
     // Variation of a layer thickness for spans of Z coordinates + optional parameter overrides.
     t_layer_config_ranges   layer_config_ranges;
+    // Height colour patterns (HeightColourPattern.hpp): the authoring record of the ranges a
+    // pattern generated. Normally empty; the slicer never reads it, only the ranges.
+    std::vector<HeightColourPattern> height_colour_patterns;
     // Profile of increasing z to a layer height, to be linearly interpolated when calculating the layers.
     // The pairs of <z, layer_height> are packed into a 1D array.
     LayerHeightProfile      layer_height_profile;
@@ -772,7 +788,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
     }
     template<class Archive> void load(Archive& ar) {
         ar(cereal::base_class<ObjectBase>(this));
@@ -785,7 +801,7 @@ private:
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
-            cut_connectors, cut_id, cut_recipe);
+            cut_connectors, cut_id, cut_recipe, height_colour_patterns);
         std::vector<ObjectID> volume_ids2;
         std::transform(volumes.begin(), volumes.end(), std::back_inserter(volume_ids2), std::mem_fn(&ObjectBase::id));
         if (volume_ids != volume_ids2)
@@ -922,6 +938,9 @@ public:
         // regenerates both the male body and the female cavity from these, so they have to
         // travel with the connector volume from the gizmo down into CutUtils.
         FlexiJointParams    flexi;
+        // Only meaningful when connector_type == CutConnectorType::PushFit: the cut builds the
+        // pin and both holes from these.
+        PushFitParams       pushfit;
 
         CutInfo() = default;
         CutInfo(CutConnectorType type, float rad_tolerance, float h_tolerance, bool processed = false) :
@@ -937,9 +956,10 @@ public:
         void reset_from_upper() { is_from_upper = true; }
 
         bool is_flexi_joint() const { return is_connector && is_flexi_connector_type(connector_type); }
+        bool is_pushfit() const { return is_connector && is_pushfit_connector_type(connector_type); }
 
         template<class Archive> inline void serialize(Archive& ar) {
-            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi);
+            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit);
         }
     };
     CutInfo             cut_info;
@@ -1591,7 +1611,7 @@ public:
     Transform3d get_matrix_no_offset() const { return m_transformation.get_matrix_no_offset(); }
 
     bool is_printable() const { return object->printable && printable && (print_volume_state == ModelInstancePVS_Inside); }
-    bool is_assemble_initialized() { return m_assemble_initialized; }
+    bool is_assemble_initialized() const { return m_assemble_initialized; }
 
     //BBS
     double get_auto_brim_width(double deltaT, double adhesion) const;
@@ -1711,6 +1731,7 @@ struct GlobalSpeedMap
     double topSolidInfillSpeed;
     double supportSpeed;
     double smallPerimeterSpeed;
+    double smallSupportPerimeterSpeed;
     double maxSpeed;
     Polygon bed_poly;
 };
@@ -1794,6 +1815,10 @@ public:
     // picture share one entry because the key is the content's SHA-256; the 3MF writes each
     // entry once as Metadata/image_fill/<sha256>.png.
     ImageAssetStore image_assets;
+
+    // Showcase tab: the per-plate presentation scenes and their images (Metadata/showcase/ in the
+    // 3MF). A plain value member like image_assets: no object id, not part of undo/redo.
+    Showcase::Project showcase;
 
     //makerlab information
     std::string mk_name;
@@ -2077,6 +2102,16 @@ bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo
 bool model_has_multi_part_objects(const Model &model);
 // If the model has advanced features, then it cannot be processed in simple mode.
 bool model_has_advanced_features(const Model &model);
+
+// Reload from disk: finds the volume of `new_model` (freshly read from the source file) that replaces `old_volume`.
+// Returns {object index, volume index}; the volume index is -1 when only an object (a STEP model loaded as one volume)
+// matched, and both are -1 when nothing matched.
+// The indices stored in old_volume.source are those of the file the volume was first imported from. A 3MF project
+// records them for every volume and keeps them after objects were deleted, merged or reordered, so they only count
+// when the volume found there still has the old volume's name; otherwise the volume is looked up by name.
+// `file_matches_source` / `file_named_like_volume`: the reloaded file has the volume's source file name / the volume's name.
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume);
 
 #ifndef NDEBUG
 // Verify whether the IDs of Model / ModelObject / ModelVolume / ModelInstance / ModelMaterial are valid and unique.

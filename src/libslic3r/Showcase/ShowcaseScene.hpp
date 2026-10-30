@@ -1,0 +1,456 @@
+#ifndef slic3r_Showcase_ShowcaseScene_hpp_
+#define slic3r_Showcase_ShowcaseScene_hpp_
+
+// Showcase (tab after Preview): presentation renders of the model. This is the GL-free half - the
+// scene description, its JSON form in the 3MF (Metadata/showcase/scenes.json), the built-in presets
+// and the pure layout maths the renderer and the exporter share (export sizes, the safe frame, the
+// user's branding watermark), from S3 the scene's filament callouts (ShowcaseCallouts.hpp) and from
+// S4 its video (ShowcaseVideo.hpp).
+// Design: tests/design_showcase_tab.md (phases S1 to S4).
+//
+// Kept wxWidgets- and GL-free so the 3MF code, the CLI and the unit tests can use it.
+
+#include "ShowcaseCallouts.hpp"
+#include "ShowcaseMaterial.hpp"
+#include "ShowcaseTone.hpp"
+#include "ShowcaseVideo.hpp"
+
+#include <array>
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace Slic3r {
+namespace Showcase {
+
+// The scenes.json schema this build writes. A file with a higher number opens read-only: its scenes
+// are shown but the file is written back exactly as it was read. 2 (S2): lights, environments,
+// materials, textured and reflective floors, WebP, the project cover. A schema 1 file reads as is
+// (the new settings take their defaults); an S1 build opens a schema 2 file read-only, so it never
+// writes back a floor or backdrop type it does not know.
+// S3 adds "callouts" to a scene without a new number: an S2 build keeps a scene's unknown keys and
+// writes them back untouched, so the callouts survive it; an S1 build opens the file read-only.
+// S4 adds "video" the same way: S2 and S3 builds keep it.
+constexpr int SCHEMA_VERSION = 2;
+
+// The archive folder. Nothing in the core model references it, so other readers ignore it.
+inline const char *ARCHIVE_DIR        = "Metadata/showcase/";
+inline const char *ARCHIVE_SCENES     = "Metadata/showcase/scenes.json";
+
+// Limits (D11): no side of an export, nor of the supersampled image behind it, exceeds this.
+constexpr int MAX_EXPORT_SIDE = 8192;
+constexpr int MIN_EXPORT_SIDE = 16;
+
+// New values go at the end: the panel's choices follow this order.
+enum class BackgroundType : int { Solid = 0, VerticalGradient, RadialGradient, Image, Transparent, Environment };
+enum class ImageFit       : int { Fill = 0, Fit, Tile };
+enum class FloorType      : int { None = 0, ShadowCatcher, Solid, Grid, Texture, Image };
+enum class Quality        : int { Draft = 0, High, Best };
+enum class ImageFormat    : int { PNG = 0, JPEG, WebP };
+enum class Projection     : int { Perspective = 0, Ortho };
+enum class Anchor         : int { TopLeft = 0, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight };
+
+// The built-in presets: S1's three, then S2's (design 1.3). builtin_presets() gives the order the
+// panel lists them in.
+enum class PresetId : int { StudioWhite = 0, DarkGradient, BuildPlate, DeskWood, Outdoor };
+
+const char *to_string(BackgroundType v);
+const char *to_string(ImageFit v);
+const char *to_string(FloorType v);
+const char *to_string(Quality v);
+const char *to_string(ImageFormat v);
+const char *to_string(Projection v);
+const char *to_string(Anchor v);
+const char *to_string(PresetId v);
+bool from_string(const std::string &s, BackgroundType &v);
+bool from_string(const std::string &s, ImageFit &v);
+bool from_string(const std::string &s, FloorType &v);
+bool from_string(const std::string &s, Quality &v);
+bool from_string(const std::string &s, ImageFormat &v);
+bool from_string(const std::string &s, Projection &v);
+bool from_string(const std::string &s, Anchor &v);
+bool from_string(const std::string &s, PresetId &v);
+
+// "#RRGGBB" (or "#RRGGBBAA") <-> 0..1 floats. Colours are kept as text in the scene so a save and a
+// reload give back exactly the same string.
+bool               parse_hex_color(const std::string &hex, std::array<float, 4> &rgba);
+std::string        normalize_hex_color(const std::string &hex, const std::string &fallback);
+std::string        to_hex_color(const std::array<float, 4> &rgba, bool with_alpha = false);
+
+struct Background
+{
+    BackgroundType type   = BackgroundType::RadialGradient;
+    std::string    color1 = "#FFFFFF";   // solid colour; gradient top / centre
+    std::string    color2 = "#D9DCE1";   // gradient bottom / edge
+    std::string    image;                // sha256 of an image in Project::images (type Image)
+    ImageFit       fit    = ImageFit::Fill;
+    // Image and Environment: 0 = sharp, 1 = very soft (a shallow depth of field look).
+    float          blur   = 0.f;
+
+    bool operator==(const Background &o) const;
+    bool operator!=(const Background &o) const { return !(*this == o); }
+};
+
+struct Floor
+{
+    FloorType   type            = FloorType::ShadowCatcher;
+    std::string color           = "#F2F2F2";
+    float       shadow_strength = 0.45f;   // 0..1, how dark a full shadow gets on the floor
+    float       grid_spacing    = 10.f;    // mm, Grid floor
+    bool        hide_plate      = true;    // draw the floor instead of the printer's plate
+    bool        hide_wipe_tower = true;
+    // Texture: a bundled photo floor (FloorManifest id). Image: the user's picture (sha256 in
+    // Project::images), tiled every texture_size mm.
+    std::string texture         = "oak";
+    std::string image;
+    float       texture_scale   = 1.f;     // Texture: times the tile size the texture was shot at
+    float       texture_size    = 300.f;   // Image: mm the picture spans on the floor
+    // Texture and Image: the picture turned counter-clockwise (seen from above) by 0 / 90 / 180 / 270
+    // degrees, and mirrored left to right (before the turn). The picture's top points to the back (+Y).
+    int         rotation        = 0;
+    bool        flip            = false;
+    // Glossy floor: strength of the mirrored objects in it (0 = none, a planar reflection pass).
+    float       reflection      = 0.f;
+    // The soft "sitting on the table" darkening right under the objects (design 2.3). Also what
+    // a transparent export's shadow catcher carries as alpha.
+    float       contact_shadow  = 0.6f;
+
+    bool operator==(const Floor &o) const;
+    bool operator!=(const Floor &o) const { return !(*this == o); }
+};
+
+struct Lighting
+{
+    // D14: the key light is fixed in the world, so orbiting the camera leaves the shadows where they
+    // are. Off = the editing views' headlight.
+    bool  world_fixed   = true;
+    // Direction TO the light: azimuth around +Z from +X (counter-clockwise, degrees), elevation above
+    // the XY plane (degrees).
+    float azimuth_deg   = 225.f;
+    float elevation_deg = 55.f;
+    bool  shadows       = true;
+    float shadow_intensity = 0.35f;   // darkening of a fully shadowed object surface
+    bool  ssao          = true;
+
+    // S2: the key light's strength and colour, and the fill and rim lights placed around it
+    // (three_point_lights()), all world-fixed like the key (D14).
+    float key_intensity   = 1.f;      // 0..3
+    float key_temperature = 5600.f;   // kelvin, 2000..10000
+    bool  fill            = true;
+    float fill_intensity  = 0.35f;
+    bool  rim             = true;
+    float rim_intensity   = 0.45f;
+    // Image-based light from a bundled environment (D3, EnvironmentManifest id; empty = none).
+    std::string environment     = "studio";
+    float       env_intensity   = 0.7f;   // 0..3
+    float       env_rotation_deg = 0.f;   // around +Z
+    float       exposure        = 0.f;    // EV, -3..3
+    float       shadow_softness = 1.f;    // 0.5 (hard, sun) .. 4 (very soft)
+    // 1a: the post pass's tone curve (D-R1: Khronos PBR Neutral by default, filmic as an option).
+    ToneCurve   tone            = ToneCurve::Neutral;
+
+    bool operator==(const Lighting &o) const;
+    bool operator!=(const Lighting &o) const { return !(*this == o); }
+};
+
+// S3: how light the backdrop is (0 black .. 1 white) at a point of the frame (0..1, origin top-left),
+// as the scene describes it - so a callout's ink is picked the same for the screen and every export.
+// Pictures and environments count as the scene's two colours.
+double backdrop_luminance(const Background &background, double nx, double ny);
+
+// The direction TO the light for the given angles, world space, unit length.
+std::array<double, 3> light_direction(float azimuth_deg, float elevation_deg);
+
+// One analytic light: the direction TO it (world, unit) and its linear colour times intensity.
+struct LightSource
+{
+    std::array<float, 3> dir{ { 0.f, 0.f, 1.f } };
+    std::array<float, 3> color{ { 1.f, 1.f, 1.f } };
+};
+// The key light, then the fill (the other side of the subject, low and neutral) and the rim
+// (behind, high), each only when on and brighter than nothing. Fixed in the world (D14).
+std::vector<LightSource> three_point_lights(const Lighting &lighting);
+
+// The lights panel's arrangements. Each sets the key's height and strength, the fill and the rim
+// and the shadow softness; the key's direction and colour and the environment stay as they are.
+enum class LightRig : int { SoftThreePoint = 0, ClassicThreePoint, Dramatic, KeyOnly, Sun };
+std::vector<LightRig> light_rigs();
+void                  apply_light_rig(Lighting &lighting, LightRig rig);
+
+struct CameraView
+{
+    std::string           name;
+    Projection            projection = Projection::Perspective;
+    std::array<double, 3> eye{ 0., -200., 150. };
+    std::array<double, 3> target{ 0., 0., 0. };
+    std::array<double, 3> up{ 0., 0., 1. };
+    double                zoom  = 1.;
+    bool                  valid = false;   // false until the user (or the first frame) sets it
+
+    bool operator==(const CameraView &o) const;
+    bool operator!=(const CameraView &o) const { return !(*this == o); }
+};
+
+// D12 (owner, 2026-10-18): the user's own branding, a logo and/or a line of text over the image.
+// Off by default; never a forced "Made with ..." mark.
+struct Watermark
+{
+    std::string name;                 // the preset name it came from (informational)
+    bool        enabled     = false;
+    std::string text;
+    std::string font_face;            // empty = the UI font
+    bool        bold        = false;
+    std::string text_color  = "#FFFFFF";
+    std::string logo;                 // sha256 of an image in Project::images, empty = no logo
+    Anchor      anchor      = Anchor::BottomRight;
+    float       size_pct    = 6.f;    // height of the mark, % of the image height
+    float       opacity     = 0.85f;  // 0..1
+    float       margin_pct  = 3.f;    // distance from the edges, % of the shorter image side
+
+    bool has_content() const { return !text.empty() || !logo.empty(); }
+    bool operator==(const Watermark &o) const;
+    bool operator!=(const Watermark &o) const { return !(*this == o); }
+};
+
+struct ExportSettings
+{
+    int         width        = 1920;
+    int         height       = 1080;
+    Quality     quality      = Quality::High;
+    ImageFormat format       = ImageFormat::PNG;
+    int         jpeg_quality = 92;
+    Watermark   watermark;
+    // D10: an export also becomes the project's cover picture. Opt-in, off by default.
+    bool        use_as_cover = false;
+
+    bool operator==(const ExportSettings &o) const;
+    bool operator!=(const ExportSettings &o) const { return !(*this == o); }
+};
+
+// Per filament slot (1-based, as the filament list shows it): the finish the user picked over the
+// inferred one (D4).
+struct MaterialOverride
+{
+    int    filament = 1;
+    Finish finish   = Finish::Standard;
+    bool operator==(const MaterialOverride &o) const { return filament == o.filament && finish == o.finish; }
+    bool operator!=(const MaterialOverride &o) const { return !(*this == o); }
+};
+
+struct Materials
+{
+    LayerLines                    layer_lines = LayerLines::Subtle;   // R11: subtle by default
+    std::vector<MaterialOverride> overrides;                          // sorted by filament
+    // S5 (D13): the toolpath source's Smoothness, 0 = the crisp extrusions of Preview .. 1 = fully
+    // smoothed beads and blended skins; < 0 = by each filament's finish (toolpath_look()).
+    float                         toolpath_smoothness = -1.f;
+    // Multi-colour P2 (design 4.4): the coextruded look of split filaments (their make-up in the
+    // Materials chips, the callout swatch discs and, in P3/P4, the toolpaths and the model). Off =
+    // split slots show as plain colours. Written only when off.
+    bool                          coextruded_look = true;
+
+    // The override for a filament, or null when its finish is inferred.
+    const Finish *override_for(int filament) const;
+    // Sets (or with `finish` null clears) a filament's override.
+    void          set_override(int filament, const Finish *finish);
+    // The finish a filament renders with: the override, else the inference from its preset.
+    Finish        finish_for(int filament, const std::string &preset_name, const std::string &filament_type) const;
+
+    bool operator==(const Materials &o) const
+    {
+        return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
+               coextruded_look == o.coextruded_look;
+    }
+    bool operator!=(const Materials &o) const { return !(*this == o); }
+};
+
+struct Scene
+{
+    std::string             id;
+    std::string             name;
+    int                     plate_index = 0;      // 0-based, D17: one scene per plate
+    // S5: the height in pixels of the Showcase view's safe frame when the camera, the views and the
+    // keyframes were set. A camera's zoom is pixels per mm of that frame, so --showcase-render (which
+    // renders without a window) scales the zooms by its own frame's height over this one. 0 = unknown
+    // (a scene saved before S5).
+    int                     view_frame_height = 0;
+    // "model" | "toolpaths" (S5: the sliced plate's extrusions; the model when the plate is not sliced)
+    std::string             source      = "model";
+    std::string             preset_base;           // the preset it started from (to_string(PresetId))
+    Background              background;
+    Floor                   floor;
+    Lighting                lighting;
+    CameraView              camera;
+    std::vector<CameraView> views;                  // saved, named views
+    ExportSettings          export_settings;
+    Materials               materials;
+    Callouts                callouts;   // S3
+    VideoSettings           video;      // S4
+
+    // Keys this build does not know, as a JSON object text, written back on save (forward compat).
+    std::string             extra_json;
+
+    // The image hashes this scene points at.
+    std::vector<std::string> used_images() const;
+
+    // Same content, ignoring extra_json.
+    bool operator==(const Scene &o) const;
+    bool operator!=(const Scene &o) const { return !(*this == o); }
+};
+
+struct ImageBlob
+{
+    std::string          ext;     // "png" or "jpg"
+    std::vector<uint8_t> bytes;   // encoded, verbatim
+    bool operator==(const ImageBlob &o) const { return ext == o.ext && bytes == o.bytes; }
+};
+
+class Project
+{
+public:
+    int                schema = SCHEMA_VERSION;
+    std::vector<Scene> scenes;
+    std::string        active;   // id of the scene last shown
+    // sha256 -> image. Only images a scene points at are written.
+    std::map<std::string, ImageBlob> images;
+    std::string        extra_json;   // unknown top-level keys, written back
+
+    bool empty() const { return scenes.empty(); }
+    void clear();
+
+    // A newer schema than this build knows: shown, never rewritten.
+    bool        read_only() const { return schema > SCHEMA_VERSION; }
+    // The scenes.json text a read-only project was loaded from, written back verbatim.
+    std::string original_text;
+
+    Scene       *scene_for_plate(int plate_index);
+    const Scene *scene_for_plate(int plate_index) const;
+    // The plate's scene, made from `preset` if it has none yet.
+    Scene       &ensure_scene_for_plate(int plate_index, PresetId preset = PresetId::StudioWhite);
+
+    // Stores the bytes under their SHA-256 and returns it. `ext` is "png" or "jpg".
+    std::string  add_image(std::vector<uint8_t> bytes, const std::string &ext);
+    const ImageBlob *find_image(const std::string &sha) const;
+    // Images some scene uses, sorted.
+    std::vector<std::string> used_images() const;
+    // Drops images no scene uses.
+    void         prune_images();
+
+    // A plate was deleted: its scene goes, later plates move down one.
+    void         on_plate_deleted(int plate_index);
+
+    bool operator==(const Project &o) const;
+    bool operator!=(const Project &o) const { return !(*this == o); }
+};
+
+// scenes.json <-> Project (images are separate archive files). Parsing never throws: invalid text
+// gives false and leaves `out` empty, and the caller loads the project without scenes.
+std::string scenes_to_json(const Project &project);
+bool        scenes_from_json(const std::string &text, Project &out, std::string *error = nullptr);
+std::string scene_to_json(const Scene &scene);
+bool        scene_from_json(const std::string &text, Scene &out);
+// One watermark on its own (the user's reusable watermark presets, outside any project).
+std::string watermark_to_json(const Watermark &wm);
+bool        watermark_from_json(const std::string &text, Watermark &out);
+// One callout style on its own (S4: the user's saved styles, CalloutStyleLibrary).
+std::string callout_style_to_json(const CalloutStyle &style);
+bool        callout_style_from_json(const std::string &text, CalloutStyle &out);
+
+// "Metadata/showcase/<sha>.<ext>" and back. Returns false for any other name.
+std::string image_archive_path(const std::string &sha, const std::string &ext);
+bool        parse_image_archive_path(const std::string &path, std::string &sha, std::string &ext);
+
+// A fresh scene for a plate from a built-in preset.
+Scene make_scene(PresetId preset, int plate_index);
+// Applies the preset's look (background, floor, lighting) and keeps camera, views and export.
+void  apply_preset(Scene &scene, PresetId preset);
+
+// The floor picture's orientation. Snaps any angle to the nearest of 0 / 90 / 180 / 270.
+int floor_rotation_snap(double degrees);
+// Rows {m00, m01, m10, m11} of the 2x2 matrix taking a floor point in tiles (world x, y divided by
+// the tile size; +Y is the back of the plate) to the texture coordinate of a picture uploaded with
+// its first row (the top of the image) at v = 0. Unrotated, the picture's top points to +Y and its
+// right to +X; `rotation` turns it counter-clockwise seen from above; `flip` mirrors it left to
+// right first.
+std::array<float, 4> floor_uv_matrix(int rotation, bool flip);
+std::vector<PresetId> builtin_presets();
+
+// --- export planning ------------------------------------------------------------------------
+
+// What an export of w x h at `quality` actually renders. SSAA renders the image `ssaa` times larger
+// and box-filters it down; MSAA comes on top. Each internal side is capped at MAX_EXPORT_SIDE, and
+// the GPU memory estimate at `budget_bytes` (1 GB by default, design section 6): over it MSAA goes
+// first, then the supersampling factor.
+struct ExportPlan
+{
+    int    width  = 0;     // output size
+    int    height = 0;
+    int    ssaa   = 1;     // supersampling factor
+    int    internal_width  = 0;
+    int    internal_height = 0;
+    int    msaa   = 0;     // samples, 0 = none
+    // The SSAO kernel is a few pixels wide; scaled by this so it covers the same part of the model
+    // as on screen (design 2.1, finding 2).
+    float  ssao_radius_scale = 1.f;
+    unsigned shadow_map_size = 4096;
+    double estimated_bytes = 0.;
+    bool   degraded = false;   // the requested quality did not fit
+};
+
+int        ssaa_factor(Quality q);
+size_t     export_memory_estimate(int internal_w, int internal_h, int msaa);
+// `reference_height` is the on-screen height of the frame the user framed the shot in (the SSAO
+// radius is matched to it); `max_msaa` the driver's GL_MAX_SAMPLES.
+ExportPlan plan_export(int width, int height, Quality quality, int max_msaa, int reference_height,
+                       size_t budget_bytes = size_t(1) << 30, int max_texture_size = 16384);
+// Clamps a requested size into [MIN_EXPORT_SIDE, MAX_EXPORT_SIDE].
+int        clamp_export_side(int v);
+
+// --- the safe frame -------------------------------------------------------------------------
+
+struct RectI
+{
+    int x = 0, y = 0, w = 0, h = 0;
+    bool operator==(const RectI &o) const { return x == o.x && y == o.y && w == o.w && h == o.h; }
+    bool empty() const { return w <= 0 || h <= 0; }
+};
+
+// The largest rectangle of the export's aspect ratio centred in a viewport (letterbox / pillarbox),
+// with `margin_px` kept free on every side.
+RectI fit_frame(int viewport_w, int viewport_h, int aspect_w, int aspect_h, int margin_px = 0);
+
+// --- the watermark --------------------------------------------------------------------------
+
+struct WatermarkLayout
+{
+    RectI block;   // the whole mark, clamped into the image
+    RectI logo;    // empty without a logo
+    RectI text;    // empty without text
+    int   font_px = 0;
+};
+
+// The font size the text is drawn at in an image `image_h` pixels high.
+int watermark_font_px(const Watermark &wm, int image_h, bool has_logo);
+// Lays out the mark. `logo_aspect` is the logo's width / height (0 = no logo); `text_w`/`text_h` the
+// size the text measures at watermark_font_px() (0 = no text). Coordinates: origin top-left.
+WatermarkLayout layout_watermark(const Watermark &wm, int image_w, int image_h, double logo_aspect, int text_w, int text_h);
+
+// --- image helpers --------------------------------------------------------------------------
+
+// Box-filters an RGBA8 image by an integer factor (SSAA resolve).
+std::vector<uint8_t> downsample_rgba(const std::vector<uint8_t> &src, int w, int h, int factor);
+// Turns bottom-up GL rows into top-down rows, in place.
+void flip_rows_rgba(std::vector<uint8_t> &rgba, int w, int h);
+// The renderer draws over transparent black, so a transparent export comes back premultiplied.
+void unpremultiply_rgba(std::vector<uint8_t> &rgba);
+// Composites premultiplied-free RGBA `src` (w x h) over `dst` at (x, y), scaled by `opacity`.
+void blend_over_rgba(std::vector<uint8_t> &dst, int dst_w, int dst_h, const std::vector<uint8_t> &src, int src_w, int src_h,
+                     int x, int y, float opacity);
+// Flattens an RGBA image onto an opaque colour (JPEG has no alpha).
+void flatten_rgba(std::vector<uint8_t> &rgba, uint8_t r, uint8_t g, uint8_t b);
+
+} // namespace Showcase
+} // namespace Slic3r
+
+#endif // slic3r_Showcase_ShowcaseScene_hpp_

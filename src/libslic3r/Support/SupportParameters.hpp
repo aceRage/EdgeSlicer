@@ -1,6 +1,7 @@
 #ifndef slic3r_SupportParameters_hpp_
 #define slic3r_SupportParameters_hpp_
 
+#include <algorithm>
 #include <boost/log/trivial.hpp>
 #include "../libslic3r.h"
 #include "../Flow.hpp"
@@ -151,6 +152,8 @@ struct SupportParameters {
             this->contact_fill_pattern = ipGrid;
         else if (object_config.support_interface_pattern == smipRectilinearInterlaced)
             this->contact_fill_pattern = ipRectilinear;
+        else if (object_config.support_interface_pattern == smipSpiralInset)
+            this->contact_fill_pattern = ipSpiralInset;
         else
             this->contact_fill_pattern =
             (object_config.support_interface_pattern == smipAuto && zero_gap_contact_interface) ||
@@ -217,7 +220,46 @@ struct SupportParameters {
                 support_style = smsGrid;
             }
         }
+
+        // EdgeSlicer (support interface interlock, phase 1; design D1-D7): weave the
+        // interlock_layers interface layers under the top contact layer into the support body.
+        // Needs a separate interface filament (D4: any two different filaments), top interfaces only
+        // (D3), off with Chameleon matching (D6) and room for the woven layers under the untouched
+        // top contact layer (top interface layers >= woven layers + 1). Otherwise 0, and nothing
+        // below reads any of the other interlock fields.
+        this->interlock_layers = 0;
+        if (object_config.support_interface_interlock.value &&
+            object_config.support_interface_filament.value != 0 &&
+            object_config.support_interface_filament.value != object_config.support_filament.value &&
+            ! object_config.support_filament_matching.value) {
+            const int woven = std::clamp(object_config.support_interface_interlock_layers.value, 2, 4);
+            if (int(this->num_top_interface_layers) >= woven + 1)
+                this->interlock_layers = size_t(woven);
+        }
+        // One line spacing for both filaments, so the stripes of both kinds hold whole lines on one
+        // grid. On printers with two nozzle sizes the larger spacing wins (design, risk 2).
+        this->interlock_line_spacing = std::max(this->support_material_flow.spacing(), this->support_material_interface_flow.spacing());
+        this->interlock_beam_lines   = std::clamp(object_config.support_interface_interlock_beam_lines.value, 1, 4);
     }
+
+    // EdgeSlicer (support interface interlock): number of woven layers under each top contact
+    // layer, 0 = off.
+    size_t                  interlock_layers { 0 };
+    // Fill line spacing of the woven stripes (mm), the same for the body and the interface stripes.
+    double                  interlock_line_spacing { 0. };
+    // Stripe width in lines.
+    int                     interlock_beam_lines { 2 };
+    // Stripe width (scaled): a whole number of fill line spacings, as FillRectilinear rounds them.
+    coord_t                 interlock_beam_width() const { return coord_t(this->interlock_beam_lines) * coord_t(scale_(this->interlock_line_spacing)); }
+    // Direction of the woven stripes at `depth` layers under the top contact layer (1 = the layer
+    // right under it). The layer under the top contact runs across the contact's lines, so every
+    // contact line crosses an interface stripe; each layer further down is turned 90 degrees.
+    float                   interlock_angle(size_t depth) const {
+        const float contact = this->support_interface_pattern == smipRectilinearInterlaced ?
+            this->interface_angle : this->support_interface_angle(0);
+        return (depth & 1) ? contact + float(0.5 * M_PI) : contact;
+    }
+
     // Zero-gap interface flags for top / bottom contact.
     bool                    zero_gap_interface_top;
     bool                    zero_gap_interface_bottom;

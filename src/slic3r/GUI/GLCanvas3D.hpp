@@ -29,6 +29,7 @@
 #include "IMToolbar.hpp"
 #include "slic3r/GUI/3DBed.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/RealisticRenderSettings.hpp"
 
 #include <float.h>
 
@@ -66,6 +67,8 @@ namespace GUI {
 class Bed3D;
 class PartPlateList;
 class FrameProfiler;
+
+class ShowcaseRenderer;
 
 #if ENABLE_RETINA_GL
 class RetinaHelper;
@@ -576,6 +579,8 @@ public:
         CanvasView3D = 0,
         CanvasPreview = 1,
         CanvasAssembleView = 2,
+        // The Showcase tab: drawn by ShowcaseRenderer, never edited (no picking, gizmos or toolbars).
+        CanvasShowcase = 3,
     };
 
     int GetHoverId();
@@ -794,11 +799,7 @@ public:
     }
 
     void load_arrange_settings();
-    ArrangeSettings& get_arrange_settings();// { return get_arrange_settings(this); }
-    ArrangeSettings& get_arrange_settings(PrintSequence print_seq) {
-        return (print_seq == PrintSequence::ByObject) ? m_arrange_settings_fff_seq_print
-            : m_arrange_settings_fff;
-    }
+    ArrangeSettings& get_arrange_settings();
 
     class SequentialPrintClearance
     {
@@ -881,6 +882,12 @@ public:
     unsigned int m_shadow_map_size{ 0 };
     Transform3d  m_shadow_light_vp{ Transform3d::Identity() };
     bool         m_shadow_map_valid{ false };
+    // The realistic view's switches when they do not come from the preferences (the Showcase
+    // canvas sets its own; Prepare and Preview never set it, so they read the app config).
+    std::optional<RealisticRenderSettings> m_render_settings_override;
+    // Showcase canvas: draws every frame of this canvas (owned by ShowcaseView).
+    ShowcaseRenderer* m_showcase_renderer{ nullptr };
+    friend class ShowcaseRenderer;
 public:
     explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
@@ -888,6 +895,10 @@ public:
     bool is_initialized() const { return m_initialized; }
 
     void set_context(wxGLContext* context) { m_context = context; }
+    // Realistic view switches for this canvas only, in place of the preferences (Showcase).
+    void set_render_settings_override(const RealisticRenderSettings& settings) { m_render_settings_override = settings; }
+    void clear_render_settings_override() { m_render_settings_override.reset(); }
+    void set_showcase_renderer(ShowcaseRenderer* renderer) { m_showcase_renderer = renderer; }
     void set_type(ECanvasType type) { m_canvas_type = type; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
 
@@ -1139,6 +1150,11 @@ public:
     // y down) placed at the centre; effective_zoom receives the factor really used (the camera caps zoom).
     void render_gcode_preview_image(ThumbnailData& data, unsigned int w, unsigned int h, const std::string& view, const BoundingBoxf3& box, const BoundingBoxf3& bed,
                                     double zoom = 1.0, double cx = 0.5, double cy = 0.5, double* effective_zoom = nullptr);
+    // EDGE (multi-colour P5): frame times of the loaded toolpaths in the Tool view with the Preview
+    // "Show coextruded colours" toggle off and on, alternating `rounds` times, `frames` offscreen
+    // frames of w x h each (the first 3 of a run are not counted). Reports through the log and returns
+    // the text. Dev only: the hidden --showcase-render job runs it when EDGESLICER_PREVIEW_MC_BENCH is set.
+    std::string bench_preview_multicolour(int frames, int rounds, unsigned int w, unsigned int h);
 
     static void render_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, ModelObjectPtrs& model_objects,
         const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,
@@ -1321,17 +1337,6 @@ public:
     void highlight_toolbar_item(const std::string& item_name);
     void highlight_gizmo(const std::string& gizmo_name);
 
-    ArrangeSettings get_arrange_settings() const {
-        const ArrangeSettings &settings = get_arrange_settings();
-        ArrangeSettings ret = settings;
-        if (&settings == &m_arrange_settings_fff_seq_print) {
-            ret.distance = std::max(ret.distance,
-                                    float(min_object_distance(*m_config)));
-        }
-
-        return ret;
-    }
-
     // Timestamp for FPS calculation and notification fade-outs.
     static int64_t timestamp_now() {
 #ifdef _WIN32
@@ -1384,6 +1389,11 @@ public:
     Vec3d _mouse_to_3d(const Point& mouse_pos, float* z = nullptr);
 
     bool make_current_for_postinit();
+    // The ImGui font size and style scale this canvas uses (em unit, display scale). _resize() applies
+    // it; post_init applies it before the first new_frame(), so the font atlas is built once at the
+    // size the first render keeps, not at the default size and again at the first resize (startup
+    // round 2: each build is 0.5-1.2 s).
+    void apply_imgui_scaling();
     // Ultra: make a usable GL context current and finish the one-time GL init, with no
     // dependency on this canvas ever having been shown on screen. Prefers the visible
     // canvas's context (GTK hidden-canvas SetCurrent fails) and falls back to this.
@@ -1489,9 +1499,13 @@ private:
     void _render_fps_overlay(int fps) const;
     void _render_fxaa_pass(unsigned int width, unsigned int height);
     // Orca #13704: realistic view.
+    // The switches in force: the override when a caller set one, else the preferences.
+    RealisticRenderSettings _render_settings() const;
     bool _is_realistic_view_enabled() const;
     bool _is_realistic_shadows_enabled() const;
     bool _is_ssao_enabled() const;
+    // phong's key light: the built-in headlight, or the settings' world-fixed light in eye space.
+    static void _set_key_light_uniforms(GLShaderProgram& shader, const RealisticRenderSettings& settings, const Transform3d& view_matrix);
     void _render_ssao_pass(unsigned int width, unsigned int height);
     // Orca #14702: build the light-space depth shadow map (consumed by gouraud/phong for object and self
     // shadows) and cast it onto the build plate. Realistic view only.
@@ -1505,6 +1519,9 @@ private:
     // Orca #15770: X-Ray view.
     bool _is_xray_view_active() const;
     void _render_xray_volumes();
+    // Orca #16681: the painting gizmos clip the selected instance at the plate; see _render_below_plate_volumes().
+    bool _is_below_plate_view_active() const;
+    void _render_below_plate_volumes();
     //BBS: GUI refactor: add canvas size as parameters
     void _render_gcode(int canvas_width, int canvas_height);
     //BBS: render a plane for assemble
@@ -1540,7 +1557,7 @@ private:
     void _render_selection_sidebar_hints();
     //BBS: GUI refactor: adjust main toolbar position
     bool _render_orient_menu(float left, float right, float bottom, float top);
-    bool _render_arrange_menu(float left, float right, float bottom, float top);
+    void _render_arrange_menu(float left, float right, float bottom, float top);
     void _render_3d_navigator();
     /**
      * @brief Renders the fit-camera button next to the 3D navigator.

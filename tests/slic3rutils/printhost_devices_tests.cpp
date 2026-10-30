@@ -8,10 +8,12 @@
 
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/ElegooCc2.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/Utils/CrealityPrint.hpp"
 #include "slic3r/Utils/CrealityPrintModel.hpp"
+#include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -24,6 +26,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <algorithm>
 #include <ctime>
 #include <future>
 #include <iostream>
@@ -391,6 +394,8 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK_FALSE(st.slots[2].loaded);
         CHECK(st.note.empty()); // there is something to map, so nothing to apologise for
         CHECK(st.slots[0].label() == "T1 PLA Basic");
+        CHECK_FALSE(st.qidi_box); // a U1 is never taken for a QIDI Box
+        CHECK_FALSE(st.qidi);     // nor for QIDI firmware: no QIDI options in its send dialog
     }
 
     SECTION("a stock Klipper names its tools and nothing in them") {
@@ -406,6 +411,499 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
         CHECK(st.slots[1].index == 1);
         CHECK(st.slots[0].nozzle == Approx(0.4));
         CHECK_FALSE(st.note.empty());
+        CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.qidi);
+    }
+
+    SECTION("a QIDI Box names its slots and what is in them") {
+        // The shape QIDIStudio's QDSDevice::updateBoxDataByJson reads off an X-Max 4.
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":1,\"box\":{\"boxes\":[{"
+            "   \"box_inserted_0\":1,\"box_inserted_1\":1,\"box_inserted_2\":0,\"box_inserted_3\":true,"
+            "   \"filament_info\":["
+            "     {\"filament_type\":\"PLA\",\"filament_str\":\"PLA Rapido\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#FFFFFF\"]},"
+            "     {\"filament_type\":\"ASA\",\"filament_str\":\"ASA\",\"vendor_str\":\"QIDI\",\"color_rgb_str\":[\"#202020\"]},"
+            "     {\"filament_type\":\"PETG\",\"color_rgb_str\":[\"#00FF00\"]},"
+            "     {\"filament_type\":\"ABS\",\"color_rgb_str\":[]}]}]}}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.online);
+        CHECK(st.qidi_box);
+        CHECK(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler); // no polar cooler pin in the answer
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4); // the Box's slots, not the one extruder
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[1].type == "ASA");
+        CHECK(st.slots[1].color == "#202020");
+        CHECK(st.slots[1].loaded);
+        CHECK(st.slots[1].label() == "Box 1 slot 2 ASA");
+        CHECK_FALSE(st.slots[2].loaded); // a tag left in the firmware from an unloaded spool
+        CHECK(st.slots[2].type.empty());
+        CHECK(st.slots[3].loaded);
+        CHECK(st.slots[3].color.empty());
+        CHECK(st.note.empty());
+        CHECK_FALSE(st.happy_hare);
+        CHECK_FALSE(st.afc);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].index / 4, st.slots[3].index % 4) == "1D");
+        CHECK(st.slots[0].color == "#FFFFFF");
+    }
+
+    SECTION("a QIDI printer with no Box plugged in is a plain Klipper") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4},"
+            " \"multi_color_controller\":{\"box_count\":0,\"boxes\":[]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK_FALSE(st.qidi_box);
+        CHECK(st.qidi); // still QIDI firmware: the print options are offered without the Box
+        CHECK_FALSE(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 1);
+    }
+
+    SECTION("a QIDI printer with a polar cooler says so") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"output_pin polar_cooler\":{\"value\":0},"
+            " \"multi_color_controller\":{\"box_count\":0}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.qidi);
+        CHECK(st.qidi_polar_cooler);
+    }
+
+    SECTION("a stock Klipper is not taken for a QIDI") {
+        const Status st = parse_moonraker_status("{\"print_stats\":{\"state\":\"standby\"},"
+                                                 " \"output_pin polar_cooler\":{\"value\":0}}",
+                                                 "octoprint");
+        CHECK_FALSE(st.qidi);
+        CHECK_FALSE(st.qidi_polar_cooler);
+    }
+
+    SECTION("the QIDI print options go out the way QIDIStudio sends them, leveling on its own") {
+        QidiPrintOptions o;
+        CHECK(qidi_start_script(o, "") == ""); // nothing offered, nothing mapped: nothing sent
+        CHECK(qidi_leveling_script(o) == "");
+
+        o.use_box      = 1;
+        o.bed_leveling = 1;
+        o.polar_cooler = 0;
+        // The Box call carries the Box and the polar cooler, never G31/G32: a firmware that
+        // refuses the leveling must not take the Box mapping down with it.
+        CHECK(qidi_start_script(o, "0:4") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot4'\"\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G31\n");
+        // The Box on with nothing mapped still switches it on.
+        CHECK(qidi_start_script(o, "") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=enable_polar_cooler VALUE=0\n");
+
+        // The Box off: no mapping goes out, whatever the table said.
+        o.use_box      = 0;
+        o.bed_leveling = 0;
+        o.polar_cooler = -1;
+        CHECK(qidi_start_script(o, "0:4") == "SAVE_VARIABLE VARIABLE=enable_box VALUE=0\n");
+        CHECK(qidi_leveling_script(o) == "G32\n");
+
+        // Leveling only (no Box, no cooler offered): the Box call is empty, the leveling is not.
+        QidiPrintOptions level_only;
+        level_only.bed_leveling = 0;
+        CHECK(qidi_start_script(level_only, "") == "");
+        CHECK(qidi_leveling_script(level_only) == "G32\n");
+    }
+
+    SECTION("the QIDI options start off, the Box on whenever there is one") {
+        Status st;
+        st.qidi     = true;
+        st.qidi_box = true;
+        st.slots.resize(4);
+        // Nothing remembered: bed leveling, timelapse and cooler start off. An empty Box starts on
+        // too: printing from the toolhead spool is the person's choice (it may hold the last
+        // print's material), never a silent default.
+        QidiOptionDefaults d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        CHECK(d.use_box);
+        // And with a loaded slot.
+        st.slots[2].loaded = true;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK(d.use_box);
+        // The person's last choice wins over the default, both ways.
+        d = qidi_option_defaults(st, "1", "1", "1");
+        CHECK(d.bed_leveling);
+        CHECK(d.timelapse);
+        CHECK(d.polar_cooler);
+        d = qidi_option_defaults(st, "0", "0", "0");
+        CHECK_FALSE(d.bed_leveling);
+        CHECK_FALSE(d.timelapse);
+        CHECK_FALSE(d.polar_cooler);
+        // No Box at all: never on, loaded slots or not (those would be a U1's tools).
+        st.qidi_box = false;
+        d = qidi_option_defaults(st, "", "", "");
+        CHECK_FALSE(d.use_box);
+    }
+
+    SECTION("the QIDI Box mapping goes out the way QIDIStudio sends it") {
+        // QIDIStudio's own quoting, VALUE="'slotN'", character for character.
+        CHECK(qidi_box_mapping_script("0:1,2:15") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t0 VALUE=\"'slot1'\"\n"
+              "SAVE_VARIABLE VARIABLE=value_t2 VALUE=\"'slot15'\"\n");
+        // The firmware keeps 16 tools and 16 Box slots; anything past that is not sent.
+        CHECK(qidi_box_mapping_script("16:0,0:16") == "");
+        CHECK(qidi_box_mapping_script("") == "");
+        CHECK(qidi_box_mapping_script("x:y,1:2") ==
+              "SAVE_VARIABLE VARIABLE=enable_box VALUE=1\n"
+              "SAVE_VARIABLE VARIABLE=value_t1 VALUE=\"'slot2'\"\n");
+    }
+
+    SECTION("a printing or paused printer is busy, anything else is not") {
+        CHECK(busy_printing("printing"));
+        CHECK(busy_printing("paused"));
+        CHECK(busy_printing("Printing"));
+        CHECK_FALSE(busy_printing("standby"));
+        CHECK_FALSE(busy_printing("complete"));
+        CHECK_FALSE(busy_printing("cancelled"));
+        CHECK_FALSE(busy_printing("error"));
+        CHECK_FALSE(busy_printing(""));
+    }
+
+    SECTION("the state comes out of a print_stats query reply") {
+        CHECK(print_state_from_query("{\"result\":{\"eventtime\":1.0,\"status\":{\"print_stats\":{\"state\":\"printing\"}}}}") ==
+              "printing");
+        CHECK(print_state_from_query("{\"result\":{\"status\":{\"print_stats\":{\"state\":\"standby\"}}}}") == "standby");
+        // Anything that does not say comes back "", which the send path takes as "could not tell": no send.
+        CHECK(print_state_from_query("{\"result\":{\"status\":{}}}") == "");
+        CHECK(print_state_from_query("{\"error\":{\"message\":\"nope\"}}") == "");
+        CHECK(print_state_from_query("not json") == "");
+        CHECK(print_state_from_query("") == "");
+    }
+
+    SECTION("auto-match: every host but a QIDI Box keeps the nearest-colour rule") {
+        std::vector<Slot> slots(4);
+        for (int i = 0; i < 4; ++i)
+            slots[i].index = i;
+        slots[0].loaded = true; slots[0].type = "PLA"; slots[0].color = "#FF0000";
+        slots[1].loaded = true; slots[1].type = "ASA"; slots[1].color = "#202020";
+        slots[2].loaded = true; slots[2].type = "PETG"; // no colour: never auto-picked here
+        slots[3].loaded = false; slots[3].type = "ASA"; slots[3].color = "#000000";
+        // The nearest colour wins whatever the material says: the ASA plate filament in red goes
+        // to the red PLA, exactly as before the QIDI change.
+        CHECK(auto_match_slot(slots, "#F01010", "ASA", false) == 1);
+        CHECK(auto_match_slot(slots, "#101010", "PLA", false) == 2);
+        // A colourless slot is skipped even when it holds the same material.
+        CHECK(auto_match_slot(slots, "#101010", "PETG", false) == 2);
+        // An unloaded slot is skipped even when its colour is the exact one.
+        CHECK(auto_match_slot(slots, "#000000", "ASA", false) == 2);
+        // Nothing loaded with a colour: "As sliced".
+        std::vector<Slot> bare(1);
+        bare[0].loaded = true;
+        bare[0].type   = "PLA";
+        CHECK(auto_match_slot(bare, "#FF0000", "PLA", false) == 0);
+        CHECK(auto_match_slot({}, "#FF0000", "PLA", false) == 0);
+        // Equal distances keep the first slot.
+        std::vector<Slot> twins(2);
+        twins[0].loaded = twins[1].loaded = true;
+        twins[0].color = twins[1].color = "#00FF00";
+        CHECK(auto_match_slot(twins, "#00FF00", "", false) == 1);
+        // An unreadable colour is grey, as the dialog's swatch draws it.
+        std::vector<Slot> greys(2);
+        greys[0].loaded = greys[1].loaded = true;
+        greys[0].color = "#FFFFFF";
+        greys[1].color = "#A0A0A0";
+        CHECK(auto_match_slot(greys, "not a colour", "", false) == 2);
+    }
+
+    SECTION("auto-match: a QIDI Box goes by material and never by colour alone") {
+        std::vector<Slot> slots(4);
+        for (int i = 0; i < 4; ++i)
+            slots[i].index = i;
+        slots[0].loaded = true; slots[0].type = "PLA"; slots[0].color = "#FF0000";
+        slots[1].loaded = true; slots[1].type = "ASA"; slots[1].color = "#FFFFFF";
+        slots[2].loaded = true; slots[2].type = "asa"; // the printer gave no colour
+        slots[3].loaded = true; slots[3].type = "ASA"; slots[3].color = "#E00000";
+        // The red ASA, never the red PLA.
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 4);
+        // Of the same material, a slot with a colour beats one without, however far the colour.
+        slots[3].loaded = false;
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 2);
+        // Only a colourless match left: it still counts (case does not matter).
+        slots[1].loaded = false;
+        CHECK(auto_match_slot(slots, "#FF0000", "ASA", true) == 3);
+        // No slot of that material, or no material on the plate filament: "As sliced".
+        CHECK(auto_match_slot(slots, "#FF0000", "PETG", true) == 0);
+        CHECK(auto_match_slot(slots, "#FF0000", "", true) == 0);
+    }
+
+    SECTION("Happy Hare names its gates and what is loaded in them") {
+        // Shape of GET /printer/objects/query?mmu, as MoonrakerPrinterAgent::fetch_hh_filament_info reads it.
+        const std::string query =
+            R"({"result":{"status":{"mmu":{
+                "num_gates":4,
+                "gate_status":[1,2,0,-1],
+                "gate_material":["PLA","PETG","ABS","TPU"],
+                "gate_color":["#FF0000","0x00FF00","#0000FF","#FFFFFF"],
+                "gate_temperature":[210,240,0,0]
+            }}}})";
+        const Status st = parse_happy_hare_mmu(query, "octoprint");
+        CHECK(st.online);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].type == "PETG");
+        CHECK(st.slots[1].color == "#00FF00"); // 0x prefix
+        CHECK(st.slots[1].loaded);
+        CHECK_FALSE(st.slots[2].loaded); // gate_status 0
+        CHECK(st.slots[2].type.empty());
+        CHECK_FALSE(st.slots[3].loaded); // gate_status -1
+        CHECK(st.slots[0].label() == "T1 PLA");
+        CHECK(st.note.empty());
+        CHECK(st.happy_hare);
+        CHECK_FALSE(st.qidi_box);
+        CHECK_FALSE(st.afc);
+        // Panel tiles group gates by four: 1A–1D. Slot::label() (combo / sent index) is unchanged.
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].index / 4, st.slots[3].index % 4) == "1D");
+
+        // The same object inside a status snapshot is enough for parse_moonraker_status.
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "mmu":{"num_gates":2,"gate_status":[1,0],"gate_material":["ASA",""],"gate_color":["202020",""]}})";
+        const Status from_status = parse_moonraker_status(status, "octoprint");
+        CHECK(from_status.state == "standby");
+        REQUIRE(from_status.slots.size() == 2);
+        CHECK(from_status.slots_have_filaments);
+        CHECK(from_status.slots[0].type == "ASA");
+        CHECK(from_status.slots[0].color == "#202020");
+        CHECK_FALSE(from_status.slots[1].loaded);
+    }
+
+    SECTION("an empty Happy Hare mmu is not a mapping table") {
+        CHECK_FALSE(parse_happy_hare_mmu(R"({"result":{"status":{"mmu":{}}}})", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_happy_hare_mmu(R"({"mmu":{"num_gates":0}})", "octoprint").slots_have_filaments);
+        const Status empty_gates = parse_happy_hare_mmu(
+            R"({"num_gates":2,"gate_status":[0,0],"gate_material":["",""],"gate_color":["",""]})", "octoprint");
+        REQUIRE(empty_gates.slots.size() == 2);
+        CHECK_FALSE(empty_gates.slots_have_filaments);
+        CHECK_FALSE(empty_gates.note.empty());
+    }
+
+    SECTION("Snapmaker print_task_config wins over a Happy Hare mmu in the same status") {
+        const std::string status =
+            R"({"print_task_config":{"filament_type":["PLA"],"filament_color_rgba":["FF0000FF"],"filament_exist":[true]},
+                "mmu":{"num_gates":1,"gate_status":[1],"gate_material":["PETG"],"gate_color":["00FF00"]}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        REQUIRE(st.slots.size() == 1);
+        CHECK(st.slots[0].type == "PLA");
+    }
+
+    SECTION("AFC / BoxTurtle lane_data names its lanes") {
+        // Shape of GET /server/database/item?namespace=lane_data, as
+        // MoonrakerPrinterAgent::fetch_moonraker_filament_data and scripts/test_moonraker_lane_data.py.
+        const std::string body =
+            R"({"result":{"namespace":"lane_data","value":{
+                "lane2":{"lane":"1","material":"PETG","color":"#00FF00","nozzle_temp":240,"bed_temp":80},
+                "lane1":{"lane":"0","material":"PLA","color":"0xFF0000","nozzle_temp":210,"bed_temp":60},
+                "lane3":{"lane":"2","material":"","color":"#None"}
+            }}})";
+        const Status st = parse_afc_lane_data(body, "octoprint");
+        CHECK(st.online);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 3); // sorted by the `lane` tool number, not the JSON key
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[1].type == "PETG");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK(st.slots[2].type.empty());
+        CHECK(st.slots[2].color.empty());
+        CHECK(st.note.empty());
+        CHECK(st.afc);
+        CHECK_FALSE(st.happy_hare);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[0].index / 4, st.slots[0].index % 4) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[1].index / 4, st.slots[1].index % 4) == "1B");
+        CHECK(st.slots[0].color == "#FF0000");
+
+        const std::string lanes_array =
+            R"({"lanes":[{"lane":0,"material":"ASA","color":"#202020"},{"lane":"1","material":"TPU","color":"#111111"}]})";
+        const Status from_array = parse_afc_lane_data(lanes_array, "octoprint");
+        REQUIRE(from_array.slots.size() == 2);
+        CHECK(from_array.slots[0].type == "ASA");
+        CHECK(from_array.slots[1].type == "TPU");
+    }
+
+    SECTION("AFC lane_data with no materials is not a mapping table") {
+        CHECK_FALSE(parse_afc_lane_data("{}", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_afc_lane_data(R"({"result":{"value":{}}})", "octoprint").slots_have_filaments);
+        CHECK_FALSE(parse_afc_lane_data("not json", "octoprint").online);
+    }
+
+    SECTION("Happy Hare named colours map to hex; unparsable names stay empty") {
+        CHECK(print_host_slot_colour("red") == "#FF0000");
+        CHECK(print_host_slot_colour("0x00FF00") == "#00FF00");
+        CHECK(print_host_slot_colour("#None").empty());
+        CHECK(print_host_slot_colour("chartreuse").empty());
+        CHECK(print_host_slot_colour("").empty());
+
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":4,"gate_status":[1,1,1,1],
+                "gate_material":["PLA","PLA","PLA","PLA"],
+                "gate_color":["red","Blue","chartreuse","#None"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].color_name.empty());
+        CHECK(st.slots[1].color == "#0000FF");
+        CHECK(st.slots[2].color.empty()); // unmapped CSS name: not '#RRGGBB', so not a colour
+        CHECK(st.slots[2].color_name == "chartreuse");
+        CHECK(st.slots[2].label().find("chartreuse") != std::string::npos);
+        CHECK(st.slots[3].color.empty()); // #None
+        CHECK(st.slots[3].color_name.empty());
+
+        const Status afc = parse_afc_lane_data(
+            R"({"lane1":{"lane":0,"material":"PLA","color":"chartreuse"}})", "octoprint");
+        REQUIRE(afc.slots.size() == 1);
+        CHECK(afc.slots[0].color.empty());
+        CHECK(afc.slots[0].color_name == "chartreuse");
+        CHECK(afc.slots[0].loaded);
+    }
+
+    SECTION("num_gates above 32 is clamped, not dropped") {
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":40,"gate_status":[1],"gate_material":["PLA"],"gate_color":["red"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 32);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[0].loaded);
+        CHECK_FALSE(st.slots[31].loaded);
+    }
+
+    SECTION("wrong-type Happy Hare fields do not throw") {
+        CHECK(parse_happy_hare_mmu(R"({"num_gates":[],"gate_status":1,"gate_material":{"0":"PLA"}})", "octoprint")
+                  .slots.empty());
+        CHECK(parse_happy_hare_mmu(R"({"num_gates":"nope"})", "octoprint").slots.empty());
+        const Status st = parse_happy_hare_mmu(
+            R"({"num_gates":"2","gate_status":[1,1],"gate_material":["PLA",1],"gate_color":[true,"green"]})",
+            "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[1].type.empty()); // material was a number
+        CHECK(st.slots[1].color == "#008000");
+    }
+
+    SECTION("a huge gate_status array is truncated to num_gates") {
+        // Two loaded gates, then padding. Starting from [1] plus zeros made gate 1
+        // empty, so the parser (which skips leftover names on status <= 0) left type blank.
+        std::string body = R"({"num_gates":2,"gate_status":[1,1)";
+        for (int i = 0; i < 200; ++i)
+            body += ",0";
+        body += R"(],"gate_material":["PLA","PETG"],"gate_color":["red","blue"]})";
+        const Status st = parse_happy_hare_mmu(body, "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[1].type == "PETG");
+    }
+
+    SECTION("a QIDI Box in the same status is not replaced by Happy Hare gates") {
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "multi_color_controller":{"box_count":1,"boxes":[]},
+                "mmu":{"num_gates":1,"gate_status":[1],"gate_material":["PLA"],"gate_color":["red"]}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK_FALSE(st.slots_have_filaments);
+        CHECK(st.qidi);
+        CHECK_FALSE(st.happy_hare); // QIDI firmware: its numbering is never replaced by gates
+    }
+
+    SECTION("AFC lanes cap at 32, de-duplicate, and reject out-of-range indices") {
+        const Status dup = parse_afc_lane_data(
+            R"({"lane1":{"lane":0,"material":"PLA","color":"red"},
+                "lane2":{"lane":0,"material":"PETG","color":"blue"},
+                "lane3":{"lane":99,"material":"ABS","color":"yellow"},
+                "lane4":{"lane":-3,"material":"TPU","color":"white"}})",
+            "octoprint");
+        REQUIRE(dup.slots.size() == 1);
+        CHECK(dup.slots[0].index == 0);
+        CHECK(dup.slots[0].type == "PLA");
+
+        std::string many = "{\"lanes\":[";
+        for (int i = 0; i < 40; ++i) {
+            if (i)
+                many += ",";
+            many += "{\"lane\":" + std::to_string(i) + ",\"material\":\"PLA\",\"color\":\"red\"}";
+        }
+        many += "]}";
+        const Status capped = parse_afc_lane_data(many, "octoprint");
+        REQUIRE(capped.slots.size() == 32);
+        CHECK(capped.slots.back().index == 31);
+    }
+
+    SECTION("Happy Hare's own get_status keys beyond the gate arrays are ignored") {
+        // What Happy Hare publishes to Moonraker (the public docs list these under printer.mmu):
+        // alongside the gate arrays there are enabled / gate / tool / filament / ttg_map /
+        // endless_spool_groups / gate_color_rgb. None of them may change the slot list.
+        const std::string status =
+            R"({"print_stats":{"state":"standby"},
+                "mmu":{"enabled":true,"num_gates":4,"is_homed":true,"tool":-1,"gate":0,"filament":"Loaded",
+                       "ttg_map":[0,1,2,3],"gate_status":[1,1,0,-1],
+                       "gate_material":["PLA","PETG","","ABS"],
+                       "gate_color":["ff0000","00ff00","","blue"],
+                       "gate_color_rgb":[[1.0,0.0,0.0],[0.0,1.0,0.0],[0.5,0.5,0.5],[0.0,0.0,1.0]],
+                       "endless_spool_groups":[0,1,2,3],"action":"Idle"}})";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        REQUIRE(st.slots.size() == 4);
+        CHECK(st.happy_hare);
+        CHECK_FALSE(st.afc);
+        CHECK(st.slots_have_filaments);
+        CHECK(st.slots[0].color == "#FF0000");
+        CHECK(st.slots[1].type == "PETG");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK_FALSE(st.slots[3].loaded); // gate_status -1: unknown, never shown as loaded
+        CHECK(st.mmu_grouped());
+    }
+
+    SECTION("AFC lane_data: the system entry and non-lane keys are ignored") {
+        const std::string body =
+            R"({"result":{"namespace":"lane_data","key":null,"value":{
+                "system":{"cur_lane":null,"cur_extruder":"extruder","extruders":{"extruder":{"lane_loaded":null}}},
+                "lane1":{"lane":"0","material":"PLA","color":"#ff0000","map":"T0"},
+                "lane2":{"lane":"1","material":"PETG","color":"#00ff00","map":"T1"}
+            }}})";
+        const Status st = parse_afc_lane_data(body, "octoprint");
+        REQUIRE(st.slots.size() == 2);
+        CHECK(st.afc);
+        CHECK(st.mmu_grouped());
+        CHECK(st.slots[1].type == "PETG");
+    }
+
+    SECTION("only the MMU kinds are shown four to a unit") {
+        // A plain Klipper tool list and a Snapmaker toolhead list keep their T<n> labels.
+        const Status plain = parse_moonraker_status(R"({"print_stats":{"state":"standby"},"extruder":{"nozzle_diameter":0.4},"extruder1":{"nozzle_diameter":0.4}})", "octoprint");
+        CHECK_FALSE(plain.happy_hare);
+        CHECK_FALSE(plain.afc);
+        CHECK_FALSE(plain.mmu_grouped());
+        const auto tiles = Slic3r::GUI::third_party_slots_from(plain.slots, plain.mmu_grouped());
+        REQUIRE(tiles.size() == 2);
+        CHECK(Slic3r::GUI::slot_display_label(tiles[1]) == "T2");
+
+        const Status hh = parse_happy_hare_mmu(
+            R"({"num_gates":6,"gate_status":[1,1,1,1,1,1],"gate_material":["PLA","PLA","PLA","PLA","PLA","PLA"],
+                "gate_color":["red","red","red","red","red","red"]})",
+            "octoprint");
+        const auto hh_tiles = Slic3r::GUI::third_party_slots_from(hh.slots, hh.mmu_grouped());
+        REQUIRE(hh_tiles.size() == 6);
+        CHECK(Slic3r::GUI::slot_display_label(hh_tiles[0]) == "1A");
+        CHECK(Slic3r::GUI::slot_display_label(hh_tiles[5]) == "2B");
     }
 
     SECTION("something that is not a Moonraker printer") {
@@ -1029,4 +1527,177 @@ TEST_CASE("CrealityPrint: silent printer WebSocket steps stay inside their deadl
         CHECK(err.find("timed out") != std::string::npos);
         CHECK_FALSE(ws.is_open());
     }
+}
+
+// ---- the printer lists: every saved device, whatever preset is selected ----
+//
+// The owner's report (2026-10-19): an Elegoo Centauri Carbon saved as a print-host device only
+// showed in the Printers tab and the app's /api/printers while a Centauri Carbon preset was
+// selected; Bambu printers and LAN Snapmakers show whatever is selected. host_listing is the one
+// rule RemoteSend::list_hosts (the rows) and RemoteControl::list_host_targets (their live state)
+// now both follow.
+
+static const ListedDevice* listed(const HostListing& l, const std::string& alias)
+{
+    for (const ListedDevice& d : l.devices)
+        if (d.device.alias == alias) return &d;
+    return nullptr;
+}
+
+// Two models' device lists, as print_host_devices.json holds them.
+static void two_models()
+{
+    std::string error;
+    for (const char* name : { "CC1", "CC2", "CC3" }) {
+        Device d = make_device(name, std::string("192.0.2.") + (name[2] == '1' ? "11" : name[2] == '2' ? "12" : "13"), "elegoolink");
+        REQUIRE(add("Elegoo Centauri Carbon", d, error));
+    }
+    Device v = make_device("Voron", "http://192.0.2.20:7125", "octoprint");
+    v.printer_model = "Voron 2.4 350";
+    REQUIRE(add("Voron 2.4 350", v, error));
+}
+
+TEST_CASE("PrintHostDevices: a Bambu preset selected still lists every saved device", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_bambu");
+    two_models();
+    // A Bambu preset on the Bambu network: no selected print-host model, no "host" row.
+    const HostListing l = host_listing(all_devices(), "", "", "");
+    REQUIRE(l.devices.size() == 4);
+    CHECK_FALSE(l.host_row);
+    for (const char* name : { "CC1", "CC2", "CC3", "Voron" }) {
+        const ListedDevice* d = listed(l, name);
+        REQUIRE(d != nullptr);
+        CHECK_FALSE(d->selected_model); // listed for monitoring: no send for another model
+    }
+    CHECK(listed(l, "CC3")->model_key == "Elegoo Centauri Carbon");
+    CHECK(listed(l, "Voron")->model_key == "Voron 2.4 350");
+}
+
+TEST_CASE("PrintHostDevices: another print-host model selected still lists the Elegoo printers", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_other");
+    two_models();
+    const HostListing l = host_listing(all_devices(), "Voron 2.4 350", "http://192.0.2.20:7125", "octoprint");
+    REQUIRE(l.devices.size() == 4);
+    // The selected model's devices first, and only they may offer a send.
+    CHECK(l.devices.front().device.alias == "Voron");
+    CHECK(l.devices.front().selected_model);
+    for (const char* name : { "CC1", "CC2", "CC3" }) {
+        const ListedDevice* d = listed(l, name);
+        REQUIRE(d != nullptr);
+        CHECK_FALSE(d->selected_model);
+    }
+    // A Moonraker preset keeps its "host" row (its controls live there), as before.
+    CHECK(l.host_row);
+}
+
+TEST_CASE("PrintHostDevices: a selected model with no saved devices lists the others", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_u1");
+    two_models();
+    const HostListing l = host_listing(all_devices(), "Snapmaker U1", "", "");
+    CHECK(l.devices.size() == 4);
+    CHECK_FALSE(l.host_row);
+    for (const ListedDevice& d : l.devices)
+        CHECK_FALSE(d.selected_model);
+}
+
+TEST_CASE("PrintHostDevices: the Elegoo preset's own address is listed once", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_cc");
+    two_models();
+
+    SECTION("the preset points at a saved device: no separate host row")
+    {
+        const HostListing l = host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.13", "elegoolink");
+        CHECK_FALSE(l.host_row);
+        REQUIRE(l.devices.size() == 4);
+        // Each saved device once, the selected model's three first.
+        std::vector<std::string> ids;
+        for (const ListedDevice& d : l.devices) ids.push_back(d.device.id);
+        std::sort(ids.begin(), ids.end());
+        CHECK(std::unique(ids.begin(), ids.end()) == ids.end());
+        for (size_t i = 0; i < 3; ++i) {
+            CHECK(l.devices[i].model_key == "Elegoo Centauri Carbon");
+            CHECK(l.devices[i].selected_model);
+        }
+        CHECK_FALSE(listed(l, "Voron")->selected_model);
+    }
+    SECTION("the same printer written another way still matches")
+    {
+        CHECK_FALSE(host_listing(all_devices(), "Elegoo Centauri Carbon", "http://192.0.2.13:3030/", "elegoolink").host_row);
+    }
+    SECTION("an address no device has keeps the host row")
+    {
+        CHECK(host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.99", "elegoolink").host_row);
+    }
+    SECTION("another model's device at that address does not hide the host row")
+    {
+        CHECK(host_listing(all_devices(), "Voron 2.4 350", "192.0.2.13", "elegoolink").host_row);
+    }
+}
+
+TEST_CASE("PrintHostDevices: an empty store lists nothing and keeps the host row", "[PrintHostDevices][listing]")
+{
+    ScopedStore store("listing_empty");
+    const HostListing l = host_listing(all_devices(), "Elegoo Centauri Carbon", "192.0.2.13", "elegoolink");
+    CHECK(l.devices.empty());
+    CHECK(l.host_row);
+    CHECK_FALSE(host_listing(all_devices(), "", "", "").host_row);
+}
+
+TEST_CASE("PrintHostDevices: bare_host reduces an address to its host", "[PrintHostDevices][listing]")
+{
+    CHECK(bare_host("192.0.2.13") == "192.0.2.13");
+    CHECK(bare_host(" HTTP://192.0.2.13:3030/ ") == "192.0.2.13");
+    CHECK(bare_host("ws://192.0.2.13:3030/websocket") == "192.0.2.13");
+    CHECK(bare_host("user:pw@printer.local:80") == "printer.local");
+    CHECK(bare_host("[fe80::1]:3030") == "fe80::1");
+    CHECK(bare_host("fe80::1") == "fe80::1");
+    CHECK(bare_host("").empty());
+}
+
+TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared device page (owner D6)", "[PrintHostDevices]")
+{
+    // The owner's hand test, 2026-10-26: a device "CC2-Combo" added in the sidebar's devices dialog -
+    // host 127.0.0.22, Elegoo Link, authorization API key, API key empty (the factory access code),
+    // serial empty - under the "Elegoo Centauri Carbon 2 0.4 nozzle" preset, whose own address is empty.
+    ScopedStore       store("cc2page");
+    const std::string key    = "Elegoo Centauri Carbon 2";
+    const std::string preset = "Elegoo Centauri Carbon 2";
+    Device            d      = make_device("CC2-Combo", "127.0.0.22", "elegoolink");
+    d.auth_type     = "key";
+    d.apikey        = "";
+    d.serial        = "";
+    d.printer_model = preset; // the devices dialog seeds a new device with the preset's model
+    std::string error;
+    REQUIRE(add(key, d, error));
+    const std::vector<Device> listed = devices(key);
+    REQUIRE(listed.size() == 1);
+    const Device& got = listed.front();
+    CHECK(got.apikey.empty());
+    CHECK(got.serial.empty());
+    // Neither the empty key nor the missing serial keeps it off; a device with no model of its own
+    // (hand-edited store) takes the preset's.
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, got.printer_model, preset));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "", preset));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, got.address, "Elegoo Centauri Carbon 2", ""));
+    CHECK(ElegooCc2::wants_shared_device_page(got.host_type, "http://127.0.0.22:80/", "", preset));
+
+    // The same printer as the preset's own address (Edit connection...), empty key and serial.
+    DynamicPrintConfig config;
+    config.opt_string("printer_model", true)            = preset;
+    config.opt_string("print_host", true)               = "127.0.0.22";
+    config.opt_string("printhost_apikey", true)         = "";
+    config.opt_string("flashforge_serial_number", true) = "";
+    config.set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(htElegooLink));
+    const Device own = from_config(config);
+    CHECK(own.host_type == "elegoolink");
+    CHECK(ElegooCc2::wants_shared_device_page(own.host_type, own.address, own.printer_model, preset));
+
+    // Not for a CC1, another host type, or a device with no address.
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "127.0.0.22", "", "Elegoo Centauri Carbon"));
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("octoprint", "127.0.0.22", "", preset));
+    CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "", "", preset));
 }

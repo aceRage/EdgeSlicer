@@ -3049,11 +3049,13 @@ void ObjectList::merge(bool to_multipart_object)
         std::vector<int> obj_idxs;
         wxDataViewItemArray sels;
         GetSelections(sels);
-        assert(!sels.IsEmpty());
+        get_object_idxs(obj_idxs, sels);
+        // Nothing usable selected (e.g. the Assembly gizmo's Merge parts when the list selection did not take):
+        // the merged object would get no instance and instances[0] below would read null (EDGESLICER-D).
+        if (obj_idxs.size() < 2)
+            return;
 
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Assemble");
-
-        get_object_idxs(obj_idxs, sels);
 
         // resulted objects merge to the one
         Model* model = (*m_objects)[0]->get_model();
@@ -3806,6 +3808,7 @@ void ObjectList::delete_all_connectors_for_object(int obj_idx)
 
             if (obj->volumes.empty() || !obj->has_solid_mesh()) {
                 model.delete_object(idx);
+                wxGetApp().plater()->get_partplate_list().notify_instance_removed(idx, -1);
                 m_objects_model->Delete(m_objects_model->GetItemById(idx));
                 continue;
             }
@@ -5193,6 +5196,11 @@ void ObjectList::update_selections()
                 int obj_idx = gl_vol->object_idx();
                 int vol_idx = gl_vol->volume_idx();
                 assert(obj_idx >= 0 && vol_idx >= 0);
+                if (obj_idx >= static_cast<int>(m_objects->size()) ||
+                    vol_idx >= static_cast<int>(object(obj_idx)->volumes.size())) {
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": stale volume index, obj " << obj_idx << ", vol " << vol_idx;
+                    continue;
+                }
                 if (object(obj_idx)->volumes[vol_idx]->is_cut_connector())
                     sels.Add(m_objects_model->GetInfoItemByType(m_objects_model->GetItemById(obj_idx), InfoItemType::CutConnectors));
                 else {

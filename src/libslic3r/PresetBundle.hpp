@@ -155,6 +155,16 @@ public:
     void set_progress_callback(ProgressCallback cb);
     void notify_progress() const { if (m_progress_callback) m_progress_callback(); }
 
+    // How the system-preset load runs. By default these follow the environment, read once:
+    // ORCA_PRESET_LOAD_SEQUENTIAL=1 loads one vendor and one file at a time (and writes no parse
+    // cache), ORCA_PRESET_CACHE=0 turns the per-vendor CBOR parse cache off. The overrides exist so
+    // a test or benchmark can compare the modes inside one process; std::nullopt goes back to the
+    // environment. Set them between loads, never while one is running.
+    static void set_sequential_load_override(std::optional<bool> sequential);
+    static void set_parse_cache_override(std::optional<bool> enabled);
+    static bool sequential_load();
+    static bool parse_cache_enabled();
+
     // Load ini files of all types (print, filament, printer) from Slic3r::data_dir() / presets.
     // Load selections (current print, current filaments, current printer) from config.ini
     // select preferred presets, if any exist
@@ -638,6 +648,13 @@ public:
 
     // Orca: for validation only
     bool has_errors() const;
+
+    // The system preset name of the current printer (its own name when it is a system preset, else the
+    // system preset it inherits), e.g. "Bambu Lab H2C 0.4 nozzle". Empty for a printer without a parent.
+    std::string                 current_printer_system_name() const;
+    // Sliced / Bambu-compatible 3MF export: if the config's print_compatible_printers is empty, set it to
+    // the current printer's system name. A non-empty list is kept.
+    void                        fill_print_compatible_printers_for_export(DynamicPrintConfig &config) const;
 
 private:
     //std::pair<PresetsConfigSubstitutions, std::string> load_system_presets(ForwardCompatibilitySubstitutionRule compatibility_rule);

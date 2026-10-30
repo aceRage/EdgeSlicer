@@ -126,6 +126,12 @@ public:
     bool operator==(const LayerTools &rhs) const { return print_z == rhs.print_z; }
 
     bool is_extruder_order(unsigned int a, unsigned int b) const;
+    // The order this layer's extruders are printed in, given the extruder already loaded when the
+    // layer starts. The G-code export and both wipe tower plans (Bambu WipeTower, WipeTower2) take
+    // the order from here, so they cannot disagree about which tool changes a layer has. The list is
+    // rotated to start with the loaded extruder, unless fixed_extruder_order says it must be printed
+    // as it is. A negative or absent start extruder leaves it unchanged.
+    std::vector<unsigned int> nominal_extruder_order(int start_extruder) const;
     bool has_extruder(unsigned int extruder) const { return std::find(this->extruders.begin(), this->extruders.end(), extruder) != this->extruders.end(); }
 
     // Resolve a 1-based filament ID the same way ToolOrdering::collect_extruders
@@ -151,6 +157,10 @@ public:
     // Zero based extruder IDs, ordered to minimize tool switches.
     std::vector<unsigned int> 	extruders;
     bool                        preserve_extruder_order = false;
+    // The order of `extruders` was fixed by Cyclic tool-change ordering or a per-plate custom
+    // sequence ("other layers print sequence"): every layer prints it as given, even when the
+    // extruder loaded from the layer below sits later in the list (Orca #13582 semantics).
+    bool                        fixed_extruder_order = false;
     // If per layer extruder switches are inserted by the G-code preview slider, this value contains the new (1 based) extruder, with which the whole object layer is being printed with.
     // If not overriden, it is set to 0.
     unsigned int 				extruder_override = 0;
@@ -328,7 +338,8 @@ private:
     // grouping compute can store its result. Null in the ByObject/PrintObject path (grouping is skipped
     // there anyway). See reorder_extruders_for_minimum_flush_volume().
     Print*                     m_print = nullptr;
-    bool                       m_is_BBL_printer = false;
+    // Orca #12781: Print::wipe_tower_type() == Type1 (always so on Bambu Lab printers).
+    bool                       m_wipe_tower_type1 = false;
     // Mixed filament support: pointer to manager (owned by Print) and
     // number of physical extruders.
     const MixedFilamentManager* m_mixed_mgr    = nullptr;

@@ -1,10 +1,14 @@
 #include "ImGuiWrapper.hpp"
+#include "ImGuiFontRanges.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 #include <cmath>
 #include <stdexcept>
 #include <set>
+#include <sstream>
 #include <string>
 
 #include <boost/format.hpp>
@@ -31,6 +35,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/Shape/TextShape.hpp"
+#include "libslic3r/StartupProfile.hpp"
 
 #include "3DScene.hpp"
 #include "GUI.hpp"
@@ -71,6 +76,7 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeIcon        , "height_range"                  },
     {ImGui::ConfirmIcon            , "confirm"                       },
     {ImGui::GapFillIcon            , "gap_fill"                      },
+    {ImGui::SpreadPaintIcon        , "spread_paint"                  }, // Edge
     {ImGui::FoldButtonIcon         , "im_fold"                       },
     {ImGui::UnfoldButtonIcon       , "im_unfold"                     },
     {ImGui::gCodeButtonIcon        , "im_code"                       }, //ORCA
@@ -92,6 +98,7 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeDarkIcon        , "height_range_dark"                  },
     {ImGui::ConfirmDarkIcon            , "confirm_dark"                       },
     {ImGui::GapFillDarkIcon            , "gap_fill_dark"                      },
+    {ImGui::SpreadPaintDarkIcon        , "spread_paint_dark"                  }, // Edge
     {ImGui::SphereButtonDarkIcon       , "toolbar_modifier_sphere_dark"       },
 
     {ImGui::TextSearchIcon             , "im_text_search"             },
@@ -533,6 +540,19 @@ void ImGuiWrapper::new_frame()
     if (m_font_texture == 0 || m_font_rebuild_pending) {
         m_font_rebuild_pending = false;
         init_font(true);
+    }
+
+    // ORCA ImGui times button and key repeat with io.DeltaTime. At its default of 1/60 s per frame the clock
+    // counts frames, so a held +/- button repeats as fast as the canvas renders. Feed it the real frame time,
+    // capped at 1/60 s so the idle gaps of the event-driven canvas don't count as time held.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        const auto now = std::chrono::steady_clock::now();
+        if (m_last_frame_time != std::chrono::steady_clock::time_point{}) {
+            const float dt = std::chrono::duration<float>(now - m_last_frame_time).count();
+            io.DeltaTime   = std::clamp(dt, 1e-4f, 1.f / 60.f); // ImGui asserts a positive DeltaTime
+        }
+        m_last_frame_time = now;
     }
 
     ImGui::NewFrame();
@@ -1080,6 +1100,11 @@ void ImGuiWrapper::tooltip(const char *label, float wrap_width)
     ImGui::PopStyleColor(1);
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
+}
+
+void ImGuiWrapper::tooltip(const std::string &label, float wrap_width)
+{
+    tooltip(label.c_str(), wrap_width);
 }
 
 void ImGuiWrapper::tooltip(const wxString &label, float wrap_width)
@@ -2721,25 +2746,29 @@ void ImGuiWrapper::pop_radio_style()
 void ImGuiWrapper::init_font(bool compress)
 {
     destroy_font();
+    // Startup round 2: one line per atlas build (they are rare: start-up, language or display scale
+    // changes), split into rasterising the fonts, the icons and the upload.
+    using build_clock = std::chrono::steady_clock;
+    const auto build_t0 = build_clock::now();
+    auto build_ms = [](build_clock::time_point a, build_clock::time_point b) {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count();
+    };
 
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
 
     // Create ranges of characters from m_glyph_ranges, possibly adding some OS specific special characters.
+    // OrcaSlicer #15419: every UI language also gets the common alphabetic scripts, because names drawn
+    // through the atlas do not follow the UI language (see ImGuiFontRanges.hpp). The currency symbols of the
+    // cost section's Preferences > Currency symbol stay in as well.
     ImVector<ImWchar> ranges;
-    ImVector<ImWchar> basic_ranges;
-    ImFontAtlas::GlyphRangesBuilder builder;
-    builder.AddRanges(m_glyph_ranges);
-    builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
-    // Currency symbols (EUR, INR, KRW, RUB, ...) for the cost section's Preferences > Currency symbol.
-    static const ImWchar ranges_currency[] = { 0x20A0, 0x20BF, 0 };
-    builder.AddRanges(ranges_currency);
+    const ImWchar *extra_ranges = nullptr;
 #ifdef __APPLE__
     if (m_font_cjk)
         // Apple keyboard shortcuts are only contained in the CJK fonts.
-        builder.AddRanges(ranges_keyboard_shortcuts);
+        extra_ranges = ranges_keyboard_shortcuts;
 #endif
-    builder.BuildRanges(&ranges); // Build the final result (ordered ranges with all the unique characters submitted)
+    ImGuiFonts::build_text_glyph_ranges(*io.Fonts, m_glyph_ranges, extra_ranges, ranges);
 
     io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
     ImFontConfig cfg = ImFontConfig();
@@ -2747,26 +2776,11 @@ void ImGuiWrapper::init_font(bool compress)
     //FIXME replace with io.Fonts->AddFontFromMemoryTTF(buf_decompressed_data, (int)buf_decompressed_size, m_font_size, nullptr, ranges.Data);
     //https://github.com/ocornut/imgui/issues/220
 
-    // Orca: temp fix for Korean font
-    auto font_name_regular = "HarmonyOS_Sans_SC_Regular.ttf";
-    auto font_name_bold = "HarmonyOS_Sans_SC_Bold.ttf";
-    if(m_glyph_ranges == ImGui::GetIO().Fonts->GetGlyphRangesKorean()) {
-        font_name_regular = "NanumGothic-Regular.ttf";
-        font_name_bold = "NanumGothic-Bold.ttf";
-    }
-    default_font = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_regular).c_str(), m_font_size, &cfg, ranges.Data);
-    if (default_font == nullptr) {
-        default_font = io.Fonts->AddFontDefault();
-        if (default_font == nullptr) {
-            throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
-        }
-    }
-
-    bold_font        = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + font_name_bold).c_str(), m_font_size, &cfg, ranges.Data);
-    if (bold_font == nullptr) {
-        bold_font = io.Fonts->AddFontDefault();
-        if (bold_font == nullptr) { throw Slic3r::RuntimeError("ImGui: Could not load deafult font"); }
-    }
+    // Regular and bold text fonts. The Korean font covers little besides its own script, so the default font
+    // is merged in behind it for the rest of the ranges (OrcaSlicer #15419).
+    if (!ImGuiFonts::add_text_fonts(*io.Fonts, Slic3r::resources_dir() + "/fonts", m_glyph_ranges, ranges, m_font_size, cfg,
+                                    default_font, bold_font))
+        throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
 
 #ifdef _WIN32
     // Render the text a bit larger (see GLCanvas3D::_resize() and issue #3401), but only if the scale factor
@@ -2810,6 +2824,7 @@ void ImGuiWrapper::init_font(bool compress)
     int width, height;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);   // Load as RGBA 32-bits (75% of the memory is wasted, but default font is so small) because it is more likely to be compatible with user's existing shaders. If your ImTextureId represent a higher-level concept than just a GL texture id, consider calling GetTexDataAsAlpha8() instead to save on GPU memory.
     BOOST_LOG_TRIVIAL(trace) << "Build default font texture done. width: " << width << ", height: " << height;
+    const auto build_t1 = build_clock::now();
 
     auto load_icon_from_svg = [this, &io, pixels, width, &rect_id](const std::pair<const wchar_t, std::string> icon, int icon_sz) {
         if (const ImFontAtlas::CustomRect* rect = io.Fonts->GetCustomRectByIndex(rect_id)) {
@@ -2844,6 +2859,8 @@ void ImGuiWrapper::init_font(bool compress)
         load_icon_from_svg(icon, icon_sz);
     }
 
+    const auto build_t2 = build_clock::now();
+
     // Upload texture to graphics system
     GLint last_texture;
     glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture));
@@ -2862,6 +2879,16 @@ void ImGuiWrapper::init_font(bool compress)
 
     // Restore state
     glsafe(::glBindTexture(GL_TEXTURE_2D, last_texture));
+
+    const auto build_t3 = build_clock::now();
+    std::ostringstream msg;
+    msg << "ImGui font atlas built: size=" << m_font_size << " atlas=" << width << "x" << height
+        << " glyphs=" << (default_font != nullptr ? default_font->Glyphs.Size : 0) << "+" << (bold_font != nullptr ? bold_font->Glyphs.Size : 0)
+        << " fonts_ms=" << build_ms(build_t0, build_t1) << " icons_ms=" << build_ms(build_t1, build_t2)
+        << " upload_ms=" << build_ms(build_t2, build_t3) << " ms=" << build_ms(build_t0, build_t3);
+    BOOST_LOG_TRIVIAL(info) << msg.str();
+    if (Slic3r::startup_profile_enabled())
+        Slic3r::startup_profile_log(msg.str());
 }
 
 void ImGuiWrapper::load_fonts_texture()

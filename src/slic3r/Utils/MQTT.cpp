@@ -1,5 +1,6 @@
 #include "MQTT.hpp"
 #include "MqttReconnectPolicy.hpp"
+#include "MqttLogRedact.hpp"
 #include <thread>
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
@@ -37,7 +38,37 @@ long long steady_ms_since(const std::chrono::steady_clock::time_point& t0)
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
+// Depth of MqttClient::CallbackThreadScope on this thread (Paho callbacks, reconnect workers).
+thread_local int t_callback_depth = 0;
+std::atomic<size_t> g_deferred_destroys{0};
+
 } // namespace
+
+MqttClient::CallbackThreadScope::CallbackThreadScope() { ++t_callback_depth; }
+MqttClient::CallbackThreadScope::~CallbackThreadScope() { --t_callback_depth; }
+
+bool MqttClient::on_callback_thread() { return t_callback_depth > 0; }
+
+size_t MqttClient::deferred_destroy_count() { return g_deferred_destroys.load(std::memory_order_acquire); }
+
+void MqttClient::destroy_client(MqttClient* client)
+{
+    if (!client)
+        return;
+    if (on_callback_thread()) {
+        // ~MqttClient on this thread would call MQTTAsync_destroy() from inside a Paho callback
+        // (it stops the thread it runs on), or make a reconnect worker wait for itself.
+        try {
+            std::thread([client]() { delete client; }).detach();
+            g_deferred_destroys.fetch_add(1, std::memory_order_acq_rel);
+            BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] last reference dropped on a callback thread; destroying the client on its own thread";
+            return;
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] could not start a teardown thread (" << e.what() << "); destroying in place";
+        }
+    }
+    delete client;
+}
 
 void MqttClient::register_live(const std::shared_ptr<MqttClient>& client)
 {
@@ -133,9 +164,10 @@ MqttClient::MqttClient(const std::string& server_address,
                       bool clean_session)
     : MqttClient(server_address, client_id, username, password, clean_session)
 {
-    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] initializing MQTT SSL connection, server_address: " << server_address << ", client_id: " << client_id
-                            << ", ca_content: " << ca_content << ", cert_content: " << cert_content << ", username: " << username
-                            << ", password: " << password;
+    // Lengths and presence only: users share these logs (see MqttLogRedact.hpp).
+    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] "
+                            << Slic3r::MqttLogRedact::ssl_init_summary(server_address, client_id, ca_content, cert_content,
+                                                                       key_content, username, password);
     
     try {
         boost::filesystem::path temp_dir = boost::filesystem::temp_directory_path();
@@ -208,6 +240,7 @@ bool MqttClient::Connect(std::string& msg)
     // it, and a fresh outage may be reported once more.
     wants_connection_.store(true, std::memory_order_release);
     failure_reported_.store(false, std::memory_order_release);
+    closed_.store(false, std::memory_order_release);
 
     if (connected_.load(std::memory_order_acquire)) {
         BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << client_id_ 
@@ -227,47 +260,64 @@ bool MqttClient::Connect(std::string& msg)
                 << "\n - private key length: " << (ssl_opts.get_private_key().empty() ? 0 : ssl_opts.get_private_key().length());
         }
 
-        const char* context = "connection";
-        mqtt::token_ptr conntok = client_->connect(connOpts_, (void*)(context), *this);
+        // Paho C++ reports a failed connect by THROWING: connect() when MQTTAsync_connect refuses at
+        // once, and token::wait_for() (check_ret) when the attempt completed with a failure - a
+        // refused port (printer in another link mode, broker not running), a CONNACK refusal, a TLS
+        // error. Connect() runs on SSWCP's worker thread, where an escaping exception is
+        // std::terminate: the whole slicer vanished, with no dialog and no crash report, when a
+        // device was bound by an IP that does not answer MQTT. Report it as a failed connect.
+        try {
+            const char* context = "connection";
+            mqtt::token_ptr conntok = client_->connect(connOpts_, (void*)(context), *this);
         
-        if (!conntok->wait_for(std::chrono::seconds(20))) {
-            auto rc = conntok->get_return_code();
-            auto reason = conntok->get_reason_code();
+            if (!conntok->wait_for(std::chrono::seconds(20))) {
+                auto rc = conntok->get_return_code();
+                auto reason = conntok->get_reason_code();
             
-            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection timeout. Return code: " << rc 
-                                    << ", Reason code: " << static_cast<int>(reason)
-                                    << ", Server: " << server_address_;
+                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection timeout. Return code: " << rc 
+                                        << ", Reason code: " << static_cast<int>(reason)
+                                        << ", Server: " << server_address_;
 
-            if (rc == MQTTASYNC_FAILURE) {
-                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed - MQTTASYNC_FAILURE";
-                msg = "MQTTASYNC_FAILURE";
-            } else if (rc == MQTTASYNC_DISCONNECTED) {
-                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed - MQTTASYNC_DISCONNECTED";
-                msg = "MQTTASYNC_DISCONNECTED";
+                if (rc == MQTTASYNC_FAILURE) {
+                    BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed - MQTTASYNC_FAILURE";
+                    msg = "MQTTASYNC_FAILURE";
+                } else if (rc == MQTTASYNC_DISCONNECTED) {
+                    BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed - MQTTASYNC_DISCONNECTED";
+                    msg = "MQTTASYNC_DISCONNECTED";
+                }
+            
+                connected_.store(false, std::memory_order_release);
+                return false;
             }
+
+            if (!client_->is_connected()) {
+                auto rc = conntok->get_return_code();
+                auto reason = conntok->get_reason_code();
             
-            connected_.store(false, std::memory_order_release);
-            return false;
+                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed. Return code: " << rc 
+                                        << ", Reason code: " << static_cast<int>(reason)
+                                        << ", Server: " << server_address_;
+
+                msg = "connetion failed, Return code: " + std::to_string(rc) + " Reason code: " + std::to_string(reason);
+            
+                connected_.store(false, std::memory_order_release);
+                return false;
+            }
+
+            connected_.store(true, std::memory_order_release);
+            BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Successfully connected to MQTT server";
+            msg = "success";
+            return true;
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed: " << e.what() << ", rc=" << e.get_return_code()
+                                     << ", Server: " << server_address_;
+            msg = std::string("connection failed: ") + e.what();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed: " << e.what() << ", Server: " << server_address_;
+            msg = std::string("connection failed: ") + e.what();
         }
-
-        if (!client_->is_connected()) {
-            auto rc = conntok->get_return_code();
-            auto reason = conntok->get_reason_code();
-            
-            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Connection failed. Return code: " << rc 
-                                    << ", Reason code: " << static_cast<int>(reason)
-                                    << ", Server: " << server_address_;
-
-            msg = "connetion failed, Return code: " + std::to_string(rc) + " Reason code: " + std::to_string(reason);
-            
-            connected_.store(false, std::memory_order_release);
-            return false;
-        }
-
-        connected_.store(true, std::memory_order_release);
-        BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Successfully connected to MQTT server";
-        msg = "success";
-        return true;
+        connected_.store(false, std::memory_order_release);
+        return false;
     }
 }
 
@@ -279,10 +329,21 @@ bool MqttClient::Disconnect(std::string& msg)
     // any lost-session watcher stands down.
     wants_connection_.store(false, std::memory_order_release);
     is_reconnecting.store(false, std::memory_order_release);
+    // One teardown per session: a second Disconnect() (the owner's after a give-up, or
+    // ~MqttClient's after the owner's) has nothing left to do - the first one already told Paho
+    // to stop (shouldBeConnected = 0) and closed the route.
+    if (closed_.exchange(true, std::memory_order_acq_rel)) {
+        BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << client_id_ << " already disconnected; nothing to do";
+        msg = "success";
+        return true;
+    }
     // A route's own session goes with this one (a route never outlives the session it serves).
     if (std::shared_ptr<MqttRoute> route = GetRoute())
         route->owner_closing();
-    return do_disconnect(msg);
+    const bool ok = do_disconnect(msg);
+    if (!ok)
+        closed_.store(false, std::memory_order_release); // let a later Disconnect() try again
+    return ok;
 }
 
 // ---- routing ----
@@ -389,10 +450,17 @@ bool MqttClient::SubscribeDirect(const std::string& topic, int qos, std::string&
 
     {
         BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Subscribing to MQTT topic '" << topic << "' with QoS " << qos;
-        mqtt::token_ptr subtok = client_->subscribe(topic, qos, nullptr, subListener_);
-        if (!subtok->wait_for(std::chrono::seconds(5))) {
-            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Subscribe timeout for topic: " << topic;
-            msg = "subscribe timeout";
+        // Paho throws for a refused or failed subscribe (see Connect()); never let it out.
+        try {
+            mqtt::token_ptr subtok = client_->subscribe(topic, qos, nullptr, subListener_);
+            if (!subtok->wait_for(std::chrono::seconds(5))) {
+                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Subscribe timeout for topic: " << topic;
+                msg = "subscribe timeout";
+                return false;
+            }
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Subscribe failed for topic " << topic << ": " << e.what();
+            msg = std::string("subscribe failed: ") + e.what();
             return false;
         }
         add_topic_to_resubscribe(topic, qos);
@@ -414,10 +482,16 @@ bool MqttClient::UnsubscribeDirect(const std::string& topic, std::string& msg)
 
     {
         BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Unsubscribing from MQTT topic '" << topic << "'";
-        mqtt::token_ptr unsubtok = client_->unsubscribe(topic);
-        if (!unsubtok->wait_for(std::chrono::seconds(5))) {
-            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Unsubscribe timeout for topic: " << topic;
-            msg = "Unsubscribe timeout for topic";
+        try {
+            mqtt::token_ptr unsubtok = client_->unsubscribe(topic);
+            if (!unsubtok->wait_for(std::chrono::seconds(5))) {
+                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Unsubscribe timeout for topic: " << topic;
+                msg = "Unsubscribe timeout for topic";
+                return false;
+            }
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Unsubscribe failed for topic " << topic << ": " << e.what();
+            msg = std::string("unsubscribe failed: ") + e.what();
             return false;
         }
         remove_topic_from_resubscribe(topic);
@@ -443,7 +517,14 @@ bool MqttClient::PublishDirect(const std::string& topic, const std::string& payl
 
     {
         BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] Publishing message to topic '" << topic << "' with QoS " << qos;
-        mqtt::token_ptr pubtok = client_->publish(pubmsg);
+        // publish() throws when Paho refuses the message at once (disconnected meanwhile, buffer full).
+        try {
+            mqtt::token_ptr pubtok = client_->publish(pubmsg);
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Publish failed for topic " << topic << ": " << e.what();
+            msg = std::string("publish failed: ") + e.what();
+            return false;
+        }
         /*if (!pubtok->wait_for(std::chrono::seconds(5))) {
             BOOST_LOG_TRIVIAL(error) << "Publish timeout for topic: " << topic;
             return false;
@@ -509,6 +590,7 @@ bool MqttClient::CheckConnected()
 // @param cause: Reason for connection loss
 void MqttClient::connection_lost(const std::string& cause)
 {
+    CallbackThreadScope callback_scope;
     BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] MQTT connection lost, address: " << this->server_address_;
     if (!cause.empty()) {
         BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] Cause: " << cause;
@@ -566,6 +648,7 @@ void MqttClient::connection_lost(const std::string& cause)
     watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
     try {
     std::thread([weak_self, watch]() {
+        CallbackThreadScope worker_scope; // a client released here is destroyed elsewhere
         using namespace Slic3r::MqttReconnectPolicy;
         const auto t0 = std::chrono::steady_clock::now();
         for (;;) {
@@ -684,6 +767,7 @@ void MqttClient::reconnect_now(const std::string& reason)
     watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
     try {
     std::thread([weak_self, watch, reason]() {
+        CallbackThreadScope worker_scope; // a client released here is destroyed elsewhere
         using namespace Slic3r::MqttReconnectPolicy;
         const auto t0      = std::chrono::steady_clock::now();
         bool       bounced = false;
@@ -770,6 +854,7 @@ void MqttClient::reconnect_now(const std::string& reason)
 // @param msg: Pointer to the received message
 void MqttClient::message_arrived(mqtt::const_message_ptr msg)
 {
+    CallbackThreadScope callback_scope;
     const std::string topic   = msg->get_topic();
     const std::string payload = msg->to_string();
     if (std::shared_ptr<MqttRoute> route = GetRoute())
@@ -805,13 +890,15 @@ void MqttClient::dispatch(const std::string& topic, const std::string& payload)
 // @param token: Delivery token containing message details
 void MqttClient::delivery_complete(mqtt::delivery_token_ptr token)
 {
+    CallbackThreadScope callback_scope;
     BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] Message delivery complete for token: " << (token ? token->get_message_id() : -1);
 }
 
 // Callback for operation failure
 // @param tok: Token containing operation details
 void MqttClient::on_failure(const mqtt::token& tok)
-{ 
+{
+    CallbackThreadScope callback_scope;
     if (tok.get_user_context() && 
         std::string(static_cast<const char*>(tok.get_user_context())) == "connection") {
         BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT connection attempt failed";
@@ -842,6 +929,7 @@ void MqttClient::on_failure(const mqtt::token& tok)
 // @param tok: Token containing operation details
 void MqttClient::on_success(const mqtt::token& tok)
 {
+    CallbackThreadScope callback_scope;
     BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] Operation successful for token: " << tok.get_message_id();
     auto top = tok.get_topics();
     if (top && !top->empty()) {
@@ -851,6 +939,7 @@ void MqttClient::on_success(const mqtt::token& tok)
 
 void MqttClient::connected(const std::string& cause)
 {
+    CallbackThreadScope callback_scope;
 
     connected_.store(true, std::memory_order_release);
     is_reconnecting.store(false, std::memory_order_release);
@@ -962,12 +1051,25 @@ MqttClient::~MqttClient()
         BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] timeout waiting for reconnect checks, forcing destruction";
     }
 
-    // 3. Disconnect: clears shouldBeConnected in the C lib, stopping the
-    //    auto-reconnect cycle before the client is destroyed.
+    // 3. Disconnect and wait (up to 5 s): clears shouldBeConnected in the C lib, stopping the
+    //    auto-reconnect cycle before the client is destroyed. A no-op when the owner already
+    //    disconnected this session (Disconnect() guards against a second teardown).
     if (client_) {
         // Reuse Disconnect: soft-catches already-disconnected and clears shouldBeConnected.
         std::string dc_msg;
         Disconnect(dc_msg);
+    }
+
+    // 3b. Detach this object from the C library's connection callbacks (connection lost,
+    //     message arrived, delivery complete) before MQTTAsync_destroy() runs: nothing may call
+    //     back into a half-destroyed MqttClient. Throws while a connect is still in progress;
+    //     the callbacks above are already no-ops then.
+    if (client_) {
+        try {
+            client_->disable_callbacks();
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] could not detach Paho callbacks before destroy: " << e.what();
+        }
     }
 
     // 4. Destroy the async client. ~async_client calls MQTTAsync_destroy(),

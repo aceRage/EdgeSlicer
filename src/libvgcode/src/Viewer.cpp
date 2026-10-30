@@ -75,6 +75,57 @@ void Viewer::set_tone(float exposure, float saturation)
     m_impl->set_tone(exposure, saturation);
 }
 
+void Viewer::set_smooth_look(bool enabled, const std::array<float, 128>& looks)
+{
+    m_impl->set_smooth_look(enabled, looks);
+}
+
+bool Viewer::is_smooth_look() const
+{
+    return m_impl->is_smooth_look();
+}
+
+bool Viewer::set_fragment_prelude(const std::string& prelude, const std::vector<std::pair<std::string, int>>& sampler_units,
+                                  std::string* error)
+{
+    return m_impl->set_fragment_prelude(prelude, sampler_units, error);
+}
+
+unsigned int Viewer::get_fragment_prelude_program() const
+{
+    return m_impl->get_fragment_prelude_program();
+}
+
+void Viewer::set_use_fragment_prelude(bool use)
+{
+    m_impl->set_use_fragment_prelude(use);
+}
+
+bool Viewer::set_base_color_prelude(const std::string& prelude, std::string* error)
+{
+    return m_impl->set_base_color_prelude(prelude, error);
+}
+
+unsigned int Viewer::get_base_color_program() const
+{
+    return m_impl->get_base_color_program();
+}
+
+void Viewer::set_extruded_volume_enabled(bool enabled)
+{
+    m_impl->set_extruded_volume_enabled(enabled);
+}
+
+void Viewer::set_multicolour_preview(bool enabled)
+{
+    m_impl->set_multicolour_preview(enabled);
+}
+
+bool Viewer::is_multicolour_preview_active() const
+{
+    return m_impl->is_multicolour_preview_active();
+}
+
 void Viewer::set_clipping_plane(const std::array<float, 4>& plane)
 {
     m_impl->set_clipping_plane(plane);

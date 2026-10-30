@@ -81,6 +81,9 @@ using namespace nlohmann;
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
+#include "libslic3r/Showcase/ShowcaseEncoder.hpp"
+#include "libslic3r/Showcase/ShowcasePath.hpp"
+#include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 
 #include "Snapmaker_Orca.hpp"
 //BBS: add exception handler for win32
@@ -90,6 +93,7 @@ using namespace nlohmann;
 #endif
 #include "slic3r/Utils/MeshInspect.hpp"
 #include "slic3r/Utils/PaintCLI.hpp"
+#include "slic3r/Utils/WebView2Args.hpp"
 #include "slic3r/Utils/WinFirewall.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
@@ -113,6 +117,10 @@ using namespace nlohmann;
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
+#include <unistd.h>
+#ifdef SLIC3R_GUI
+#include "slic3r/GUI/Widgets/WebView.hpp"
+#endif
 #endif
 
 #ifdef SLIC3R_GUI
@@ -156,7 +164,7 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_ORIENT_FAILED, "An error occurred when auto-orienting object(s)."},
     {CLI_MODIFIED_PARAMS_TO_PRINTER, "Found modified parameter in printer preset in the 3mf file, which should not be changed."},
         {CLI_FILE_VERSION_NOT_SUPPORTED, "Unsupported 3MF version. Please make sure the 3MF file was created with the official version of Bambu Studio, not a beta version."},
-    {CLI_NO_SUITABLE_OBJECTS, "One of the plate is empty or has no object fully inside it. Please check that the 3mf contains no empty plate in EdgeSlicer before uploading."},
+    {CLI_NO_SUITABLE_OBJECTS, "The plate has nothing to slice: it is empty, or no object on it is both printable and fully inside the print volume."},
     {CLI_VALIDATE_ERROR, "There are some incorrect slicing parameters in the 3mf. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECTS_PARTLY_INSIDE, "Some objects are located over the boundary of the heated bed."},
     {CLI_EXPORT_CACHE_DIRECTORY_CREATE_FAILED, "Failed creating directory when exporting cache data."},
@@ -213,7 +221,8 @@ static void emit_progress(int percent, const std::string& message, bool warning 
     j["plate_count"]   = g_progress_plate_count;
     j["plate_percent"] = percent;
     if (warning) j["warning"] = message; else j["message"] = message;
-    boost::nowide::cout << j.dump() << std::endl;
+    // Status text can carry an object name from an STL/OBJ path (arbitrary bytes on Linux).
+    boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
 }
 
 typedef struct _sliced_info {
@@ -294,7 +303,9 @@ typedef struct _cli_callback_mgr {
         else
             j["message"] = m_message;
 
-        std::string notify_message = j.dump();
+        // m_message can carry an object name, which may be invalid UTF-8 on Linux.
+        // This runs on the callback thread with no handler, so a throw would abort.
+        std::string notify_message = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         //notify_message = "Plate "+ std::to_string(m_plate_index) + "/" +std::to_string(m_plate_count)+  ": Percent " + std::to_string(m_progress) + ": "+m_message;
 
         char pipe_message[PIPE_BUFFER_SIZE] = {0};
@@ -529,9 +540,13 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         j["warnings"]    = sliced_info.warnings;
         j["strict_mode"] = sliced_info.strict_mode;
 
+        // Names can be invalid UTF-8 on Linux; write U+FFFD instead of throwing type_error.316.
+        // The catch-all below would otherwise swallow the throw and leave no result.json.
+        const std::string result_json = j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
+
         boost::nowide::ofstream c;
         c.open(result_file, std::ios::out | std::ios::trunc);
-        c << std::setw(4) << j << std::endl;
+        c << result_json << std::endl;
         c.close();
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%result_file;
@@ -539,7 +554,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         if (g_progress_json) {
             std::lock_guard<std::mutex> lock(g_progress_mutex);
             j["event"] = "result";
-            boost::nowide::cout << j.dump() << std::endl;
+            boost::nowide::cout << j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
         }
     }
     catch (...) {}
@@ -699,7 +714,7 @@ struct NamedPresets
         boost::filesystem::create_directories(out_dir);
         const std::string file = out_dir + "/" + type_dir(t) + "_" + std::to_string(ordinal) + ".json";
         boost::nowide::ofstream ofs(file, std::ios::out | std::ios::trunc);
-        ofs << j.dump(2);
+        ofs << j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         return file;
     }
 };
@@ -1231,12 +1246,47 @@ int CLI::run(int argc, char **argv)
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
     // startup if gtk3 is used. This env var has to be set explicitly to
-    // instruct the window manager to fall back to X server mode.
+    // instruct the window manager to fall back to X server mode. Keep the
+    // always-X11 force; Orca #16385's EGL/Wayland default path does not apply.
+#ifdef SLIC3R_GUI
+    // NVIDIA's proprietary driver cannot back WebKitGTK's DMABUF renderer.
+    // Force the shared-memory transport, which keeps compositing and threaded
+    // scrolling; the second variable clears Debian/Ubuntu/openSUSE's isNVIDIA().
+    if (::access("/proc/driver/nvidia/version", F_OK) == 0 && WebView::SupportsForceSharedMemory()) {
+        ::setenv("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1", /* replace */ false);
+        ::setenv("WEBKIT_FORCE_DMABUF_RENDERER", "1", /* replace */ false);
+    }
+#endif
+
     ::setenv("GDK_BACKEND", "x11", /* replace */ true);
+
+#ifdef SLIC3R_GUI
+    // Forced X11 in a Wayland session runs through XWayland. WebKit2GTK
+    // accelerated compositing could fail silently there before 2.42.
+    {
+        const char *wayland_env = ::getenv("WAYLAND_DISPLAY");
+        if (wayland_env && *wayland_env && WebView::NeedsCompositingWorkaround())
+            ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
+    }
+#endif
 
     // Also on Linux, we need to tell Xlib that we will be using threads,
     // lest we crash when we fire up GStreamer.
     XInitThreads();
+#endif
+
+#if defined(_WIN32) && defined(SLIC3R_GUI)
+    // WebView2 152+ hides the pointer while typing and only restores it on a mouse event inside
+    // the webview, so closing one from the keyboard (Enter in a dialog, the hub, Stream, ...)
+    // leaves it hidden app-wide (WebView2Feedback#5687, Orca #16880). Must be set before the
+    // first webview is created. Append the flag when the env is already set; leave it alone
+    // when HideCursorWhileTyping is already listed.
+    {
+        const char *      cur  = boost::nowide::getenv(WebView2Args::ENV_NAME);
+        const std::string next = WebView2Args::with_hide_cursor_while_typing(cur);
+        if (cur == nullptr || next != cur)
+            boost::nowide::setenv(WebView2Args::ENV_NAME, next.c_str(), /* replace */ true);
+    }
 #endif
 
 	// Switch boost::filesystem to utf8.
@@ -1261,6 +1311,13 @@ int CLI::run(int argc, char **argv)
     // it only rewrites the Windows Firewall rules of this exe and its go2rtc.exe.
     if (Slic3r::WinFirewall::is_fix_cli(argc, argv))
         return Slic3r::WinFirewall::run_fix_cli(argc, argv);
+#endif
+
+#ifdef SLIC3R_GUI
+    // Showcase S5: a Showcase video or still of a project, rendered without a window. Nothing else on
+    // the command line runs with it.
+    if (Slic3r::Showcase::is_showcase_render_cli(argc, argv))
+        return this->run_showcase_render(argc, argv);
 #endif
 
     if (!this->setup(argc, argv))
@@ -1300,6 +1357,16 @@ int CLI::run(int argc, char **argv)
                             << "MIGRATE_CONF_PATHS=" << r.conf_paths_rewritten << std::endl
                             << "MIGRATE_ERROR=" << r.error << std::endl;
         return r.error.empty() ? 0 : CLI_ENVIRONMENT_ERROR;
+    }
+
+    // Showcase S4: prove the video encoder path headless (no window, no GL) and exit.
+    if (const ConfigOptionString* video_test = m_config.opt<ConfigOptionString>("showcase_video_test");
+        video_test && !video_test->value.empty()) {
+        if (!m_actions.empty()) {
+            boost::nowide::cerr << "--showcase-video-test cannot be combined with other actions" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        return Slic3r::Showcase::run_video_selftest(video_test->value, boost::nowide::cout) == 0 ? 0 : CLI_ENVIRONMENT_ERROR;
     }
 
 #ifdef SLIC3R_GUI
@@ -1676,6 +1743,8 @@ int CLI::run(int argc, char **argv)
         params.load_configs = load_configs;
         params.extra_config = std::move(m_extra_config);
         params.start_hidden = m_config.opt_bool("hidden");
+        params.no_hub_flag   = m_config.opt_bool("no_hub");
+        params.take_hub_flag = m_config.opt_bool("take_hub");
 
         std::vector<std::string>    gcode_files;
         std::vector<std::string>    non_gcode_files;
@@ -1733,7 +1802,7 @@ int CLI::run(int argc, char **argv)
     std::vector<plate_obj_size_info_t> plate_obj_size_infos;
     int plate_to_slice = 0, filament_count = 0, duplicate_count = 0, real_duplicate_count = 0;
     bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false;
-    bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
+    bool allow_rotations = false, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false;
     Semver file_version;
     std::map<size_t, bool> orients_requirement;
     std::vector<Preset*> project_presets;
@@ -4528,6 +4597,7 @@ int CLI::run(int argc, char **argv)
 
     BOOST_LOG_TRIVIAL(info) << "finished model pre-process commands\n";
     bool oriented_or_arranged = false;
+    bool arranged_without_rotations = false;
     //BBS: add orient and arrange logic here
     for (auto& model : m_models)
     {
@@ -4786,6 +4856,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start plate %1%'s arranging...") % (i + 1);
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 //arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished plate %1%'s arranging") % (i + 1);
 
                 //step-4: postprocess the bed index and result
@@ -5218,6 +5289,7 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("start %1% th arranging...")%arrange_count;
                 arrangement::arrange(selected, unselected, beds, arrange_cfg);
                 arrangement::arrange(unprintable, {}, beds, arrange_cfg);
+                arranged_without_rotations |= !arrange_cfg.allow_rotations;
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished %1% th arranging...")%arrange_count;
 
                 //Step-4:postprocess by partplate list&&apply the result
@@ -5735,10 +5807,17 @@ int CLI::run(int argc, char **argv)
                             continue;
                         // An empty estimate is a plate that prints no tower (one filament and
                         // neither smooth timelapse, wrapping detection nor a raft).
-                        Vec3d wt_pos, wt_size;
-                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size);
+                        Vec3d                            wt_pos, wt_size;
+                        Slic3r::GUI::WipeTowerRelocation relocation;
+                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size, 0, false, &relocation);
                         if (wt_size(0) < EPSILON || wt_size(1) < EPSILON)
                             continue;
+                        // Orca #16728: a re-placed tower moves clear of the plate's objects where there is room.
+                        if (relocation.moved)
+                            BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1%: the wipe tower no longer fits at its saved position {%2%, %3%} and was moved %4%")
+                                % (index + 1) % m_print_config.option<ConfigOptionFloats>("wipe_tower_x", true)->get_at(index)
+                                % m_print_config.option<ConfigOptionFloats>("wipe_tower_y", true)->get_at(index)
+                                % (relocation.overlaps_objects ? "onto an object, as no free space is left" : "to free space");
                         // That clamp only knows the bed edges. A tower left on bed_exclude_area fails
                         // validation ("Prime Tower is too close to exclusion area", -64; Qidi Q1 Pro:
                         // the raw default y = 220 reaches the y 240-245 strip), where the GUI never puts
@@ -5824,7 +5903,15 @@ int CLI::run(int argc, char **argv)
 
                         if (count == 0) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else if ((plate_to_slice != 0) || pre_check) {
@@ -5979,8 +6066,15 @@ int CLI::run(int argc, char **argv)
                         }
                         (dynamic_cast<Print*>(print))->is_BBL_printer() = is_bbl_vendor_preset;
 
-                        StringObjectException warning;
-                        auto err = print->validate(&warning);
+                        // ORCA #14112: validate() now returns every warning; the status text joins them.
+                        std::vector<StringObjectException> warnings;
+                        auto err = print->validate(&warnings);
+                        std::string warning_text;
+                        for (const auto& w : warnings) {
+                            if (!warning_text.empty())
+                                warning_text += "\n";
+                            warning_text += w.string;
+                        }
                         if (!err.string.empty()) {
                             if ((STRING_EXCEPT_LAYER_HEIGHT_EXCEEDS_LIMIT == err.type) && no_check) {
                                 BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< err.string << std::endl;
@@ -6014,13 +6108,22 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(validate_error);
                             }
                         }
-                        else if (!warning.string.empty()) {
-                            BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< warning.string << std::endl;
+                        else if (!warnings.empty()) {
+                            for (const auto& w : warnings)
+                                BOOST_LOG_TRIVIAL(warning) << "got warnings: "<< w.string << std::endl;
                         }
 
                         if (print->empty()) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume after apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
+                            std::string no_objects_reason = cli_errors[CLI_NO_SUITABLE_OBJECTS];
+                            if (arranged_without_rotations) {
+                                //ORCA: result.json is only written on Linux, so also print the reason to stderr.
+                                no_objects_reason = "No object is fully inside the print volume. Arrange ran without rotations."
+                                                    " If an object only fits the bed when rotated, pass --allow-rotations."
+                                                    " Otherwise the plate is empty or an object is larger than the printable area or height.";
+                                boost::nowide::cerr << "plate " << index+1 << ": " << no_objects_reason << std::endl;
+                            }
+                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, no_objects_reason, sliced_info);
                             flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
                         }
                         else {
@@ -6035,8 +6138,8 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "set print's callback to cli_status_callback.";
                                     print->set_status_callback(cli_status_callback);
                                     g_cli_callback_mgr.set_plate_info(index+1, (plate_to_slice== 0)?partplate_list.get_plate_count():1);
-                                    if (!warning.string.empty()) {
-                                        PrintBase::SlicingStatus slicing_status{4, warning.string, 0, 0};
+                                    if (!warning_text.empty()) {
+                                        PrintBase::SlicingStatus slicing_status{4, warning_text, 0, 0};
                                         cli_status_callback(slicing_status);
                                     }
                                     else {
@@ -6054,7 +6157,7 @@ int CLI::run(int argc, char **argv)
 #endif
                                 g_progress_plate_index = index + 1;
                                 g_progress_plate_count = (plate_to_slice == 0) ? partplate_list.get_plate_count() : 1;
-                                emit_progress(4, warning.string.empty() ? std::string("Slicing begins") : warning.string, !warning.string.empty());
+                                emit_progress(4, warning_text.empty() ? std::string("Slicing begins") : warning_text, !warning_text.empty());
 
                                 //update information for brim
                                 const PrintConfig& print_config = print_fff->config();
@@ -7108,6 +7211,122 @@ int CLI::run(int argc, char **argv)
 
     return 0;
 }
+
+
+#ifdef SLIC3R_GUI
+int CLI::run_showcase_render(int argc, char **argv)
+{
+    using namespace Slic3r::Showcase;
+    namespace fs = boost::filesystem;
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i)
+        args.emplace_back(argv[i] != nullptr ? argv[i] : "");
+    RenderRequest req;
+    std::string   error;
+    if (!parse_render_args(args, req, error)) {
+        boost::nowide::cerr << "error: " << error << std::endl << std::endl << render_usage();
+        return RENDER_USAGE;
+    }
+    if (req.help) {
+        boost::nowide::cout << render_usage();
+        return RENDER_OK;
+    }
+    // Absolute paths: the GUI is free to change the working folder.
+    auto absolute = [](std::string &p) {
+        if (!p.empty()) {
+            boost::system::error_code ec;
+            const fs::path a = fs::absolute(fs::path(p));
+            p                = a.lexically_normal().string();
+        }
+    };
+    absolute(req.project);
+    absolute(req.path);
+    absolute(req.out);
+    absolute(req.report);
+    // A report even for what fails before the render starts.
+    auto early = [&req](int code, const std::vector<std::string> &errors, const std::vector<std::string> &warnings = {}) {
+        for (const std::string &w : warnings)
+            boost::nowide::cerr << "warning: " << w << std::endl;
+        for (const std::string &e : errors)
+            boost::nowide::cerr << "error: " << e << std::endl;
+        if (!req.report.empty()) {
+            RenderReport rep;
+            rep.ok        = false;
+            rep.exit_code = code;
+            rep.project   = req.project;
+            rep.path      = req.path;
+            rep.out       = req.out;
+            rep.plate     = req.plate;
+            rep.still     = req.still;
+            rep.errors    = errors;
+            rep.warnings  = warnings;
+            boost::nowide::ofstream f(req.report, std::ios::binary | std::ios::trunc);
+            const std::string        text = render_report_json(rep) + "\n";
+            if (f)
+                f.write(text.data(), std::streamsize(text.size()));
+        }
+        boost::nowide::cout << "SHOWCASE_RENDER_FAILED exit=" << code << std::endl;
+        return code;
+    };
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(fs::path(req.project), ec))
+        return early(RENDER_PROJECT_ERROR, { "the project does not exist: " + req.project });
+    if (!req.path.empty()) {
+        // The path file is checked here, before anything starts: its syntax and every value. Whether its
+        // objects, filaments and views exist is checked against the project in the render.
+        boost::nowide::ifstream f(req.path, std::ios::binary);
+        if (!f)
+            return early(RENDER_INVALID_PATH, { "the path file does not exist or cannot be read: " + req.path });
+        std::stringstream ss;
+        ss << f.rdbuf();
+        PathDocument doc;
+        PathIssues   issues;
+        if (!parse_path(ss.str(), doc, issues)) {
+            std::vector<std::string> errors, warnings;
+            for (const PathIssue &i : issues.items())
+                (i.error ? errors : warnings).push_back((i.where.empty() ? "" : i.where + ": ") + i.message);
+            return early(RENDER_INVALID_PATH, errors, warnings);
+        }
+    }
+    if (!req.out.empty()) {
+        const fs::path parent = fs::path(req.out).parent_path();
+        if (!parent.empty() && !fs::is_directory(parent, ec))
+            return early(RENDER_USAGE, { "the folder for --out does not exist: " + parent.string() });
+    }
+
+    // The data folder and the log, as a normal start with only --datadir would set them up.
+    std::vector<std::string> setup_args = { argc > 0 && argv[0] != nullptr ? std::string(argv[0]) : std::string("EdgeSlicer") };
+    if (!req.datadir.empty()) {
+        setup_args.emplace_back("--datadir");
+        setup_args.emplace_back(req.datadir);
+    }
+    std::vector<char *> setup_argv;
+    for (std::string &a : setup_args)
+        setup_argv.push_back(a.data());
+    setup_argv.push_back(nullptr);
+    if (!this->setup(int(setup_args.size()), setup_argv.data()))
+        return early(RENDER_USAGE, { "the data folder could not be set up" });
+    {
+        std::string temp_path = per_user_temp_dir(wxFileName::GetTempDir().utf8_str().data(), per_user_temp_id());
+        try {
+            boost::filesystem::create_directories(temp_path);
+        } catch (const std::exception &) {}
+        set_temporary_dir(temp_path);
+    }
+    BOOST_LOG_TRIVIAL(warning) << "showcase-render: " << req.project << (req.path.empty() ? std::string() : " with " + req.path) << " -> " << req.out;
+    boost::nowide::cout << "showcase-render: loading " << req.project << std::endl;
+
+    Slic3r::GUI::GUI_InitParams params;
+    params.argc            = int(setup_args.size());
+    params.argv            = setup_argv.data();
+    params.input_files     = { req.project };
+    params.start_hidden    = true;
+    params.showcase_render = std::make_shared<RenderRequest>(req);
+    const int r = Slic3r::GUI::GUI_Run(params);
+    // The job ends the process itself; coming back here means the hidden instance never got to it.
+    return early(RENDER_FAILED, { "the hidden instance stopped before rendering (GUI exit code " + std::to_string(r) + "; see the log)" });
+}
+#endif // SLIC3R_GUI
 
 bool CLI::setup(int argc, char **argv)
 {

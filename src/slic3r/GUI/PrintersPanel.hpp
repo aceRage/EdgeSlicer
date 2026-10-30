@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,6 +41,8 @@ private:
     void SetPageActive(bool active, bool force = false);
     void RunPageScript(const std::string& fn, const nlohmann::json& arg);
 
+    // What the shared bridge answers through: RunPageScript on this panel's page.
+    std::function<void(const std::string&, const nlohmann::json&)> reply();
     void get_printers();
     void get_groups();
     void control(const PrintersMonitor::Message& m);

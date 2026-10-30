@@ -5,6 +5,7 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/RemoteAccess.hpp"
+#include "slic3r/GUI/RemoteHub.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/InstanceCheck.hpp"
 #include "slic3r/Utils/InstanceRouting.hpp"
@@ -50,6 +51,13 @@ int GUI_Run(GUI_InitParams &params)
         // Ultra: the modal-dialog policy must exist before the first dialog can appear (some fire
         // from the GUI_App constructor); it only acts while the instance is hidden or serving a request.
         GUI::RemoteAccess::install_dialog_policy();
+        // --no-hub / --take-hub / EDGESLICER_NO_HUB / the edgeslicer_no_hub marker: before any panel can ask for the hub.
+        GUI::RemoteHub::init_hub_mode(params.no_hub_flag, params.take_hub_flag);
+        // Showcase S5: set before the app exists (its constructor starts the page server).
+        GUI::GUI_App::set_showcase_render_mode(params.showcase_render != nullptr);
+        // ...and starts no hub / go2rtc from any panel (they would outlive the job).
+        if (params.showcase_render)
+            GUI::RemoteHub::disable_spawn();
         GUI::GUI_App* gui = new GUI::GUI_App();
         //if (gui->get_app_mode() != GUI::GUI_App::EAppMode::GCodeViewer) {
             // G-code viewer is currently not performing instance check, a new G-code viewer is started every time.
@@ -64,7 +72,9 @@ int GUI_Run(GUI_InitParams &params)
             const bool hidden_start = Slic3r::InstanceRouting::resolve_hidden_start(
                 wxGetEnv("SNORCA_HIDDEN", &hidden_env) ? std::optional<std::string>(hidden_env.ToStdString()) : std::nullopt,
                 params.start_hidden, gui->app_config->get_bool("start_hidden"));
-            if (Slic3r::instance_check(params.argc, params.argv, gui_single_instance_setting, hidden_start)) {
+            // Showcase S5: a render job is no instance anybody hands files to, nor one that hands its own
+            // project to an open EdgeSlicer: no instance check at all.
+            if (!params.showcase_render && Slic3r::instance_check(params.argc, params.argv, gui_single_instance_setting, hidden_start)) {
                 //TODO: do we have delete gui and other stuff?
                 return -1;
             }

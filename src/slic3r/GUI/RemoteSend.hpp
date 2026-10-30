@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -10,7 +11,9 @@
 #include "BambuSendDiagnosis.hpp"
 #include "GcodeArchive.hpp"
 #include "SnapmakerLan.hpp"
+#include "slic3r/Utils/ElegooCanvasMapping.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
+#include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
 
 namespace Slic3r {
@@ -52,6 +55,13 @@ struct Request
     std::string ams_mapping;
     // Bambu two-nozzle printers: nozzle offset calibration (-1 = the desktop's remembered choice).
     int         nozzle_offset_cali { -1 };
+    // slice_v1: a plate send's preview (POST /api/plates/{i}/send/preview). prepare() then only
+    // works out what a send would do: it records nothing (no "last used" device) and does not
+    // switch the plate the PC shows.
+    bool        preview { false };
+    // A Bambu preview: select and connect the printer to read its AMS live (live=1). Without it the
+    // preview uses only what the PC already holds for that printer (SliceV1::CachedPrinter).
+    bool        live { false };
 };
 
 // Everything prepare() worked out on the GUI thread; run() only performs the transfer.
@@ -76,6 +86,23 @@ struct Prepared
     // One of this printer model's devices (<datadir>/hub/print_host_devices.json), when the target
     // was "ph:<id>" rather than the preset's own address. Empty for the plain "host" target.
     std::string      device_id, model_key;
+    // A print on a Moonraker print host that may be a QIDI with a QIDI Box: run() asks the printer
+    // (PrintHostDevices::probe) and starts the print only with a complete material-first Box
+    // mapping sent first (qidi_send_policy), never on the printer's stale value_t<n>. The filaments
+    // are file_filaments below; qidi_model_box: the target's printer_model can carry a Box, so an
+    // unreadable printer is refused the start rather than started blind.
+    bool                     qidi_guard { false };
+    bool                     qidi_model_box { false };
+    PrintHostDevices::Device qidi_device {};
+    // A print on an Elegoo Centauri Carbon 1 (Elegoo Link): run() reads the printer first (its
+    // status and CANVAS, over the hub's on-demand SDCP connection), refuses a busy printer before
+    // anything is uploaded, and maps the filaments to CANVAS trays the way the desktop dialog does
+    // (the remembered tray, else the closest colour; ElegooCanvasMapping::plan_unattended_send).
+    // canvas_mapping: filament -> tray position the request named (-1 = as sliced); empty = auto.
+    bool                                           canvas_guard { false };
+    PrintHostDevices::Device                       canvas_device {};
+    std::vector<ElegooCanvasMapping::UsedFilament> canvas_used;
+    std::map<int, int>                             canvas_mapping;
     // Snapmaker over the LAN (Moonraker HTTP): no host object, just the printer and the mapping.
     SnapmakerLan::Device                    lan {};
     std::string                             lan_filename;
@@ -142,6 +169,15 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
 // cannot take the job at all (offline, busy, another model or nozzle, no storage) is a 409 with
 // the reason; mapping problems are not errors - they are in the preview, with can_send false.
 std::pair<int, std::string> preview_record(const Request& req, nlohmann::json& out);
+
+// slice_v1 (feature slice_send_preview): a plate send's mapping sheet, before anything is sent -
+// for a Bambu printer the reprint preview's checks and AMS mapping over the plate's own exported
+// .gcode.3mf (the same file a send uploads), for a Snapmaker U1 its toolheads, for an Elegoo CANVAS
+// and a QIDI Box the slot send policy's reading of the printer (read, never written; a Box is
+// "none" with its slots shown read-only), and "none" for the rest. `out` is the JSON (RemoteSliceV1::sheet_json + printer, plate, mode, options...).
+// Any thread but the GUI one. Refusals as prepare(): 4xx with the reason; mapping problems are in
+// the sheet with can_send false.
+std::pair<int, std::string> preview_plate(const Request& req, nlohmann::json& out);
 
 // Which send path a printer id names, without asking anything: "sm:<id>" snapmaker, "host" and
 // "ph:<device>" printhost, "connect" connect, anything else a Bambu serial.

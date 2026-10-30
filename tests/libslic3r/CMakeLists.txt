@@ -5,15 +5,20 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_multicolour_filament.cpp
+	test_multicolour_glsl.cpp
 	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
 	test_untrusted_input.cpp
+	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
+	test_arrange_seq_print.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_device_info_json.cpp
@@ -30,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
 	test_paint_remap.cpp
+	test_spread_paint.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp
@@ -38,6 +44,7 @@ add_executable(${_TEST_NAME}_tests
 	test_inline_text.cpp
 	test_simple_shape.cpp
 	test_image_trace.cpp
+	test_dxf.cpp
 	test_svg_split.cpp
 	test_svg_import.cpp
 	test_image_fill.cpp
@@ -52,6 +59,9 @@ add_executable(${_TEST_NAME}_tests
 	test_draw_cut.cpp
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
+	test_height_colour_pattern.cpp
+	test_cut_paint.cpp
+	test_cut_groove.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
@@ -73,12 +83,19 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_idle_precool.cpp
 	test_export_stl_part.cpp
 	test_step_export.cpp
+	test_step_names.cpp
 	test_cad_edit.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
+	test_fill_plane_path.cpp
+	test_fill_corner_smoothing.cpp
+	test_adaptive_infill_field.cpp
 	test_elegoo_cc2_profiles.cpp
 	test_elegoo_cc2_toolchange.cpp
 	test_flexi_joint.cpp
+	test_pushfit.cpp
+	test_pushfit_cut.cpp
+	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
@@ -103,11 +120,16 @@ add_executable(${_TEST_NAME}_tests
 	test_polygon.cpp
 	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
+	test_preset_normalize.cpp
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_detached_children.cpp
+	test_u1_tag_filament_match.cpp
+	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
 	test_preset_printer_type.cpp
@@ -126,6 +148,7 @@ add_executable(${_TEST_NAME}_tests
 	test_slice_compare.cpp
 	test_stl.cpp
 	test_support_set.cpp
+	test_support_interlock.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
@@ -153,6 +176,14 @@ add_executable(${_TEST_NAME}_tests
     test_cost_estimate.cpp
     test_cost_overrides.cpp
     test_cost_pricing.cpp
+    test_showcase_scene.cpp
+    test_showcase_materials.cpp
+    test_showcase_callouts.cpp
+    test_showcase_video.cpp
+    test_showcase_path.cpp
+    test_showcase_tone.cpp
+    test_showcase_glsl.cpp
+    test_showcase_skin.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

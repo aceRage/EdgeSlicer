@@ -4,6 +4,7 @@
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "PrintBase.hpp"
+#include "Fill/AdaptiveInfillField.hpp"
 
 #include "BoundingBox.hpp"
 #include "Polygon.hpp"
@@ -19,6 +20,7 @@
 #include "GCode/ThumbnailData.hpp"
 #include "GCode/GCodeProcessor.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "ObjectID.hpp"
 #include "MixedFilament.hpp"
 #include "ExtruderAreas.hpp"
 #include "libslic3r.h"
@@ -394,6 +396,8 @@ public:
     Transform3d                  trafo_centered() const
         { Transform3d t = this->trafo(); t.pretranslate(Vec3d(- unscale<double>(m_center_offset.x()), - unscale<double>(m_center_offset.y()), 0)); return t; }
     const PrintInstances&        instances() const      { return m_instances; }
+    // Orca: Bounding box of each connected body, indexed by Layer::lslices_separated_component_ids.
+    const std::vector<BoundingBox>& separated_body_bboxes() const { return m_separated_body_bboxes; }
     PrintInstances &instances() { return m_instances; }
 
     // Whoever will get a non-const pointer to PrintObject will be able to modify its layers.
@@ -418,6 +422,7 @@ public:
     double                      max_z() const         { return m_max_z; }
     // Centering offset of the sliced mesh from the scaled and rotated mesh of the model.
     const Point& 			     center_offset() const  { return m_center_offset; }
+    const AdaptiveInfillField*       adaptive_infill_field(AdaptiveInfillMode mode) const { return m_adaptive_infill_fields[size_t(mode)].get(); }
 
     // BBS
     void generate_support_preview();
@@ -518,13 +523,17 @@ public:
     std::vector<std::reference_wrapper<const PrintRegion>> all_regions() const;
     const PrintObjectRegions*   shared_regions() const throw() { return m_shared_regions; }
 
-    bool                        has_support()           const { return m_config.enable_support || m_config.enforce_support_layers > 0; }
-    bool                        has_raft()              const { return m_config.raft_layers > 0; }
-    bool                        has_support_material()  const { return this->has_support() || this->has_raft(); }
+    static bool                 has_support(const PrintObjectConfig &config)          { return config.enable_support || config.enforce_support_layers > 0; }
+    static bool                 has_raft(const PrintObjectConfig &config)             { return config.raft_layers > 0; }
+    static bool                 has_support_material(const PrintObjectConfig &config) { return has_support(config) || has_raft(config); }
+    static bool                 has_stabilizers(const PrintObjectConfig &config)      { return config.stabilizer_supports.value != smOff; }
+    bool                        has_support()           const { return has_support(m_config); }
+    bool                        has_raft()              const { return has_raft(m_config); }
+    bool                        has_support_material()  const { return has_support_material(m_config); }
     // Side stabilizers (Support/Stabilizers.hpp) are configured for this object. They do NOT need
     // Enable supports: they print as support-role extrusions of their own, so with supports off the
     // support step runs in a stabilizers-only mode (no support, interface or raft is made).
-    bool                        has_stabilizers()       const { return m_config.stabilizer_supports.value != smOff; }
+    bool                        has_stabilizers()       const { return has_stabilizers(m_config); }
     // Something prints with the support filament: supports, a raft or stabilizers. The support
     // INTERFACE filament is used only when has_support_material().
     bool                        uses_support_filament() const { return this->has_support_material() || this->has_stabilizers(); }
@@ -759,9 +768,10 @@ private:
     void discover_horizontal_shells();
     void combine_infill();
     void _generate_support_material();
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
-        const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> prepare_adaptive_infill_data(
+        const std::vector<std::pair<const Surface*, const Layer*>>& surfaces_w_layer) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
+    AdaptiveInfillFields prepare_adaptive_infill_fields() const;
 
     // BBS
     SupportNecessaryType is_support_necessary();
@@ -800,8 +810,10 @@ private:
     std::vector<Polygons>                   m_over_support_below;
     coord_t                                 m_over_support_bridgeable = 0;
 
-    std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
+    std::pair<FillAdaptive::Octrees, FillAdaptive::Octrees> m_adaptive_fill_octrees;
+    std::vector<BoundingBox>                m_separated_body_bboxes;
     FillLightning::GeneratorPtr m_lightning_generator;
+    AdaptiveInfillFields m_adaptive_infill_fields;
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
     std::vector<groupedVolumeSlices>        firstLayerObjSliceByGroups;
@@ -1243,7 +1255,7 @@ public:
     }
 
     // Returns an empty string if valid, otherwise returns an error message.
-    StringObjectException validate(StringObjectException *warning = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const override;
+    StringObjectException validate(std::vector<StringObjectException> *warnings = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const override;
     double              skirt_first_layer_height() const;
     Flow                brim_flow() const;
     Flow                skirt_flow() const;
@@ -1280,7 +1292,7 @@ public:
             [object_id](const PrintObject *obj) { return obj->id() == object_id; });
         return (it == m_objects.end()) ? nullptr : *it;
     }
-    //BBS: Function to get m_brimMap;
+    // Orca: Old callers still expect object-keyed brim paths.
     std::map<ObjectID, ExtrusionEntityCollection>&
         get_brimMap() { return m_brimMap; }
     // Chameleon brim: brim runs whose nearest wall belongs to a different
@@ -1297,7 +1309,21 @@ public:
     PrintObjectPtrs&            objects_mutable() { return m_objects; }
     PrintRegionPtrs&            print_regions_mutable() { return m_print_regions; }
     std::vector<size_t>         layers_sorted_for_object(float start, float end, std::vector<LayerPtrs> &layers_of_objects, std::vector<BoundingBox> &boundingBox_for_objects, VecOfPoints& objects_instances_shift);
+    struct SkirtBrimGroup {
+        struct Brim {
+            ExtrusionEntityCollection brim;
+            std::vector<ObjectInstanceID> instances;
+        };
+
+        ExtrusionEntityCollection skirt;
+        std::vector<ObjectInstanceID> instances;
+        // Brims stay separate unless Combine brims merges colliding brims inside this group.
+        std::vector<Brim>         brims;
+    };
+
     const ExtrusionEntityCollection& skirt() const { return m_skirt; }
+    const std::vector<SkirtBrimGroup>& skirt_brim_groups() const { return m_skirt_brim_groups; }
+    bool has_shared_per_object_skirt() const { return m_has_shared_per_object_skirt; }
     // Convex hull of the 1st layer extrusions, for bed leveling and placing the initial purge line.
     // It encompasses the object extrusions, support extrusions, skirt, brim, wipe tower.
     // It does NOT encompass user extrusions generated by custom G-code,
@@ -1310,12 +1336,23 @@ public:
 
     // Wipe tower support.
     bool                        has_wipe_tower() const;
+    // Orca #15146: the error validate() reports, last, for a prime tower whose estimated body leaves the
+    // bed shape (a delta or custom bed's missing corner); empty when it fits or there is no tower.
+    std::string                 prime_tower_off_bed_error() const;
     const WipeTowerData&        wipe_tower_data(size_t filaments_cnt = 0) const;
     // Re-run clearance with current instance / tower / z_offset / toolhead values and
     // copy the matching TCR into wipe_tower_data().final_purge. Safe when the tower
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
     void                        select_final_purge_variant();
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
+    // Orca/BambuStudio: the 0-based physical filaments the first layer prints with (first_layer = true), or the
+    // whole print (false). Set when the skirt and brim are made.
+    void set_slice_used_filaments(const std::vector<unsigned int> &first_layer_used_filaments, const std::vector<unsigned int> &used_filaments)
+    {
+        m_slice_used_filaments_first_layer = first_layer_used_filaments;
+        m_slice_used_filaments             = used_filaments;
+    }
+    std::vector<unsigned int>   get_slice_used_filaments(bool first_layer) const { return first_layer ? m_slice_used_filaments_first_layer : m_slice_used_filaments; }
 
     bool                        enable_timelapse_print() const;
 
@@ -1376,6 +1413,10 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    // Orca #12781: the wipe tower generator this print uses. Bambu Lab printers always get Type1;
+    // the rest follow wipe_tower_type (default Type2). Same rule as resolve_wipe_tower_type(), plus
+    // the GUI's vendor flag.
+    WipeTowerType wipe_tower_type() const;
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);
@@ -1403,10 +1444,11 @@ public:
     }
     
     // Orca: Implement prusa's filament shrink compensation approach
+    // Both are decided by apply() from the filaments the model uses, before the PrintObject transformations are built.
     // Returns if all used filaments have same shrinkage compensations.
-     bool has_same_shrinkage_compensations() const;
+    bool has_same_shrinkage_compensations() const { return m_same_shrinkage_compensations; }
     // Returns scaling for each axis representing shrinkage compensations in each axis.
-     Vec3d shrinkage_compensation() const;
+    Vec3d shrinkage_compensation() const { return m_shrinkage_compensation; }
 
     std::tuple<float, float> object_skirt_offset(double margin_height = 0) const;
 
@@ -1424,6 +1466,12 @@ private:
     void                _make_wipe_tower();
     void                finalize_first_layer_convex_hull();
 
+    static void append_model_object_extruders(const ModelObject &mo, std::vector<unsigned int> &extruders);
+    static bool append_support_extruders(const PrintObjectConfig &config, unsigned int num_extruders, std::vector<unsigned int> &extruders);
+    void        append_tool_change_extruders(std::vector<unsigned int> &extruders) const;
+    void        append_wipe_tower_extruder(std::vector<unsigned int> &extruders) const;
+    void        update_shrinkage_compensation(size_t num_extruders);
+
     // Islands of objects and their supports extruded at the 1st layer.
     Polygons            first_layer_islands() const;
 
@@ -1433,6 +1481,8 @@ private:
     MixedFilamentManager                    m_mixed_filament_mgr;
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
+    bool                                    m_same_shrinkage_compensations { false };
+    Vec3d                                   m_shrinkage_compensation { Vec3d::Ones() };
     // Ultra (dual-nozzle): filament->nozzle grouping result set externally before process(); null on
     // classic machines. Reset in clear().
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
@@ -1464,9 +1514,16 @@ private:
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;
-    // BBS: collecting extrusion paths to build brim by objs
+    std::vector<SkirtBrimGroup>             m_skirt_brim_groups;
+    bool                                    m_has_shared_per_object_skirt { false };
+    // Orca: Object-keyed brim paths kept for existing code.
     std::map<ObjectID, ExtrusionEntityCollection>         m_brimMap;
-    std::map<ObjectID, ExtrusionEntityCollection>         m_supportBrimMap;
+    // Orca: Actual brim paths keyed by object instance.
+    std::map<ObjectInstanceID, ExtrusionEntityCollection> m_brimMapByInstance;
+    // Edge: objects whose brim was merged onto instance 0 (nearest-wall fallback), shared by all their instances.
+    std::set<ObjectID>                                    m_brimMergedObjects;
+    // Orca: Translated brim areas keyed by instance, used to find touching brims.
+    std::map<ObjectInstanceID, ExPolygons>                m_objectBrimAreasByInstance;
     // Chameleon brim: foreign-extruder brim runs partitioned out of m_brimMap,
     // keyed by object then by the extruder that should print them.
     std::map<ObjectID, std::map<unsigned int, ExtrusionEntityCollection>> m_brimMapByExtruder;
@@ -1481,6 +1538,8 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    std::vector<unsigned int>               m_slice_used_filaments;
+    std::vector<unsigned int>               m_slice_used_filaments_first_layer;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

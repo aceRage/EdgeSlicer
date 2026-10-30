@@ -25,20 +25,22 @@ class Button;
 namespace Slic3r {
 namespace GUI {
 
-// The selected printer preset reads CANVAS: a Centauri Carbon 1 reached through Elegoo Link (the
+// The selected printer preset reads CANVAS: a Centauri Carbon 1 or 2 reached through Elegoo Link (the
 // preset's own host_type, or a device of its model whose host type is Elegoo Link).
 bool current_printer_reads_canvas();
 
 // Where to ask: the model's last used Elegoo Link device, else the preset's own print_host, else
-// the first Elegoo Link device of the model. "" when there is none.
-std::string canvas_address_for_current_printer();
+// the first Elegoo Link device of the model. "" when there is none. `token`, when given, receives
+// that device's (or preset's) API key - the Centauri Carbon 2's access code.
+std::string canvas_address_for_current_printer(std::string* token = nullptr);
 
 // Runs `job` on a worker thread while a pulsing, app-modal progress dialog is up, and returns when
 // it has finished. The job must not touch wx; it is bounded by the query's own timeouts.
 void run_canvas_job(wxWindow* parent, const wxString& message, std::function<void()> job);
 
-// canvas_query() behind run_canvas_job().
-CanvasQueryResult query_canvas_with_progress(wxWindow* parent, const std::string& address);
+// canvas_query_for() behind run_canvas_job().
+CanvasQueryResult query_canvas_with_progress(wxWindow* parent, const std::string& address, const std::string& printer_model,
+                                             const std::string& token);
 
 // The trays as the sync dialog's machine list: one entry per tray in slot order, empty trays kept
 // (type "", which the dialog skips) so the slot numbers line up with the printer.
@@ -64,7 +66,7 @@ public:
 
     // The printer the card is for. An address of a non-CANVAS printer (or "") hides the card.
     // Returns whether the card is shown.
-    bool set_target(const std::string& address, const std::string& printer_model);
+    bool set_target(const std::string& address, const std::string& printer_model, const std::string& token = std::string());
     bool has_target() const { return !m_address.empty(); }
     // Asks the printer now, unless a query is already running. `throttled` skips it when the last
     // one started less than 10 s ago (the tab-entry refresh).
@@ -80,6 +82,7 @@ private:
 
     std::string                        m_address;
     std::string                        m_model;
+    std::string                        m_token;
     std::shared_ptr<std::atomic<bool>> m_alive;
     int                                m_generation { 0 };
     bool                               m_busy { false };

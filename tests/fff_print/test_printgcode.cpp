@@ -1817,18 +1817,27 @@ TEST_CASE("G4 dwell counts towards the layer time", "[PrintGCode][CoolingBuffer]
 // (M104 S0 ;cooldown) only after that tool's last extrusion anywhere in the print.
 namespace {
 
-DynamicPrintConfig two_tool_ooze_config()
+DynamicPrintConfig n_tool_ooze_config(unsigned int n)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     // Print::apply()/region_config_from_model_volume() derives num_extruders from
     // filament_diameter.size(), which set_num_filaments() resizes. set_num_extruders()
     // resizes nozzle_diameter. Both are needed or a per-object wall_filament of 2 is
     // clamped back to extruder 1.
-    config.set_num_extruders(2);
-    config.set_num_filaments(2);
+    config.set_num_extruders(n);
+    config.set_num_filaments(n);
+    auto csv = [n](const char *item) {
+        std::string out;
+        for (unsigned int i = 0; i < n; ++i) {
+            if (i)
+                out += ',';
+            out += item;
+        }
+        return out;
+    };
     config.set_deserialize_strict({
-        {"nozzle_diameter",                "0.4,0.4"},
-        {"filament_diameter",              "1.75,1.75"},
+        {"nozzle_diameter",                csv("0.4")},
+        {"filament_diameter",              csv("1.75")},
         {"single_extruder_multi_material", "0"},
         {"ooze_prevention",                "1"},
         {"standby_temperature_delta",      "-5"},
@@ -1849,6 +1858,8 @@ DynamicPrintConfig two_tool_ooze_config()
     });
     return config;
 }
+
+DynamicPrintConfig two_tool_ooze_config() { return n_tool_ooze_config(2); }
 
 void set_object_extruder(ModelObject &object, int extruder_1based)
 {
@@ -2202,6 +2213,105 @@ TEST_CASE("OozePrevention: wipe tower on keeps the same S0 placement", "[OozePre
     REQUIRE_FALSE(hits.empty());
     CHECK(tool_got_s0(hits, 0));
     CHECK_FALSE(tool_got_s0(hits, 1));
+    const size_t first_t0_s0 = first_s0_pos(hits, 0);
+    REQUIRE(first_t0_s0 != std::string::npos);
+    CHECK(gcode.find("T0 ; change extruder", first_t0_s0) == std::string::npos);
+}
+
+TEST_CASE("OozePrevention: shared physical heater stays on until all filaments on it finish",
+          "[OozePrevention][ToolOrdering]")
+{
+    // Orca #15849 1fe5df7d4e / 733ef2b79f. Edge has no IMEX helper, so sharing is
+    // expressed with physical_extruder_map: filaments 0 and 1 share heater 0,
+    // filament 2 is independent. T0 finishes at 4 mm but T1 keeps heater 0 in use
+    // until 10 mm, so T0 must not get S0 at 4 mm. T2 is independent and short, so
+    // it still gets exactly one S0.
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = n_tool_ooze_config(3);
+    config.set_deserialize_strict({
+        {"physical_extruder_map",     "0,0,2"},
+        {"standby_temperature_delta", "-40"},
+        {"nozzle_temperature",        "240,240,240"},
+    });
+    add_scaled_cube(model, print, "short-shared-t0", Vec3f(1.f, 1.f, 0.2f), Vec3d(0., 0., 0.), 1, true);
+    add_scaled_cube(model, print, "tall-shared-t1", Vec3f(1.f, 1.f, 0.5f), Vec3d(40., 0., 0.), 2, true);
+    add_scaled_cube(model, print, "short-indep-t2", Vec3f(1.f, 1.f, 0.2f), Vec3d(80., 0., 0.), 3, true);
+
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    int t0_s0 = 0;
+    int t1_s0 = 0;
+    int t2_s0 = 0;
+    double current_z = 0.0;
+    bool premature_s0_t0 = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader & /*self*/, const GCodeReader::GCodeLine &line) {
+        if (line.has_z())
+            current_z = line.z();
+        const std::string raw = line.raw();
+        if (raw.find(";cooldown") == std::string::npos)
+            return;
+        if (raw.find("M104 S0 T0") != std::string::npos) {
+            ++t0_s0;
+            if (current_z < 9.0)
+                premature_s0_t0 = true;
+        }
+        if (raw.find("M104 S0 T1") != std::string::npos)
+            ++t1_s0;
+        if (raw.find("M104 S0 T2") != std::string::npos)
+            ++t2_s0;
+    });
+
+    CHECK_FALSE(premature_s0_t0);
+    CHECK(t0_s0 == 0);
+    CHECK(t1_s0 == 0);
+    CHECK(t2_s0 == 1);
+}
+
+TEST_CASE("OozePrevention: independent three-tool print still turns a finished tool off",
+          "[OozePrevention][ToolOrdering]")
+{
+    // Orca #15849 733ef2b79f: physical_heater_for must not over-group independent
+    // tools. The default physical_extruder_map is a single {0}; out-of-range
+    // filaments stay identity, so T0 finishing at 4 mm still gets S0 while T1/T2
+    // print to 10 mm.
+    Print              print;
+    Model              model;
+    DynamicPrintConfig config = n_tool_ooze_config(3);
+    config.set_deserialize_strict({
+        {"standby_temperature_delta", "-40"},
+        {"nozzle_temperature",        "240,240,240"},
+    });
+    add_scaled_cube(model, print, "short-t0", Vec3f(1.f, 1.f, 0.2f), Vec3d(0., 0., 0.), 1, true);
+    add_scaled_cube(model, print, "tall-t1", Vec3f(1.f, 1.f, 0.5f), Vec3d(40., 0., 0.), 2, true);
+    add_scaled_cube(model, print, "tall-t2", Vec3f(1.f, 1.f, 0.5f), Vec3d(80., 0., 0.), 3, true);
+
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+
+    const auto hits = parse_cooldowns(gcode);
+    CHECK(tool_got_s0(hits, 0));
+    // T1 and T2 print to the top; whichever of them is switched away from on the last layer is
+    // finished too and may be turned off, so only T0 (4 mm) is pinned: it must be turned off early,
+    // not kept hot until the last layer by being grouped with the other tools.
+    double current_z = 0.0;
+    double t0_s0_z   = -1.0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader & /*self*/, const GCodeReader::GCodeLine &line) {
+        if (line.has_z())
+            current_z = line.z();
+        const std::string raw = line.raw();
+        if (t0_s0_z < 0.0 && raw.find(";cooldown") != std::string::npos && raw.find("M104 S0 T0") != std::string::npos)
+            t0_s0_z = current_z;
+    });
+    CHECK(t0_s0_z > 0.0);
+    CHECK(t0_s0_z < 9.0);
     const size_t first_t0_s0 = first_s0_pos(hits, 0);
     REQUIRE(first_t0_s0 != std::string::npos);
     CHECK(gcode.find("T0 ; change extruder", first_t0_s0) == std::string::npos);
@@ -2734,4 +2844,118 @@ TEST_CASE("First layer travel acceleration reaches Klipper's SET_VELOCITY_LIMIT"
     const std::string        override_ = slice_first_layer_travel(config, "1500", nullptr);
     CHECK(base.find("SET_VELOCITY_LIMIT ACCEL=1500") == std::string::npos);
     CHECK(override_.find("SET_VELOCITY_LIMIT ACCEL=1500") != std::string::npos);
+}
+
+// H2C "Wipe tower generation failed" (zephyra_wt_fail.3mf, 2026-10-25): Cyclic tool-change ordering
+// gives every layer the same filament order, which need not start with the filament still loaded
+// from the layer below. GCode::process_layer() rotated each layer's order to start with the loaded
+// filament anyway, while the Bambu (Type1) tower plan used the order as given: the export then asked
+// for tool changes in another order, and more of them, than the tower had planned, and threw.
+// Both now follow LayerTools::nominal_extruder_order(): a Cyclic layer is printed as given.
+// Three cubes in three filaments, Cyclic ordering, 10 layers.
+namespace {
+
+DynamicPrintConfig cyclic_three_filament_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00", "#0000FF"};
+    config.option<ConfigOptionBool>("enable_prime_tower")->value   = true;
+    config.option<ConfigOptionBool>("enable_support")->value       = false;
+    config.option<ConfigOptionBool>("spiral_mode")->value          = false;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value   = 35.;
+    config.set_deserialize_strict({{"brim_type", "no_brim"},
+                                   {"skirt_loops", "0"},
+                                   {"wipe_tower_wall_type", "rectangle"},
+                                   {"gcode_flavor", "marlin"},
+                                   {"layer_height", "0.2"},
+                                   {"initial_layer_print_height", "0.2"},
+                                   {"toolchange_ordering", "cyclic"}});
+    return config;
+}
+
+void add_three_filament_cubes(Model &model)
+{
+    for (int filament = 1; filament <= 3; ++filament) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(filament) + ".stl";
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(60. + 30. * filament, 60., 0.));
+        // 2 mm tall: 10 layers are plenty and keep the slice fast.
+        object->scale(Vec3d(1., 1., 0.1));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", filament);
+    }
+}
+
+size_t cyclic_wt_count(const std::string &haystack, const std::string &needle)
+{
+    size_t n = 0;
+    for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+} // namespace
+
+TEST_CASE("Cyclic tool-change ordering: wipe tower plan and G-code export agree", "[PrintGCode][WipeTower][ToolOrdering][Cyclic]")
+{
+    const std::string marker = "; CP TOOLCHANGE START";
+
+    SECTION("Bambu tower: every planned tool change is printed exactly once") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        print.is_BBL_printer() = true;
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        // Before the fix this threw "Wipe tower generation failed, possibly due to empty first layer."
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        size_t planned = 0;
+        for (const std::vector<WipeTower::ToolChangeResult> &layer : print.wipe_tower_data().tool_changes)
+            for (const WipeTower::ToolChangeResult &tcr : layer)
+                planned += cyclic_wt_count(tcr.gcode, marker);
+
+        // Layers 2..9 print 1,2,3 in that order after ending the layer below on 3: three tool changes
+        // each, not the two a "start with the loaded filament" rotation gives (layer 1 follows the
+        // flush-optimised first layer, so it may have two).
+        CHECK(planned >= 3 * 8 + 2);
+        CHECK(cyclic_wt_count(gcode, marker) == planned);
+    }
+
+    SECTION("WipeTower2 (non-Bambu): the fixed order is kept, three tool changes per layer") {
+        Print print;
+        Model model;
+        add_three_filament_cubes(model);
+        print.apply(model, cyclic_three_filament_config());
+        REQUIRE_FALSE(print.is_BBL_printer());
+        REQUIRE(print.has_wipe_tower());
+
+        std::string gcode;
+        REQUIRE_NOTHROW(gcode = Test::gcode(print));
+
+        static const std::regex tool_cmd(R"(^T(\d+)\b)");
+        std::istringstream      in(gcode);
+        std::string             line;
+        std::smatch             m;
+        int                     current = -1;
+        size_t                  changes = 0;
+        while (std::getline(in, line)) {
+            if (!std::regex_search(line, m, tool_cmd))
+                continue;
+            const int tool = std::stoi(m[1].str());
+            if (current >= 0 && tool != current)
+                ++changes;
+            current = tool;
+        }
+        CHECK(changes >= 3 * 8 + 2);
+    }
 }

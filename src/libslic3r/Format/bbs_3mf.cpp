@@ -205,6 +205,8 @@ const std::string CUT_INFORMATION_FILE = "Metadata/cut_information.xml";
 // halves - exactly the contract Metadata/cut_information.xml and Metadata/image_fill/ already
 // keep. The mesh is stored ONCE per cut and shared by both halves through its hash.
 const std::string CUT_RECIPE_FILE = "Metadata/cut_recipe.xml";
+// Height colour pattern records (HeightColourPattern.hpp). EdgeSlicer-only; written only when an object has one.
+const std::string HEIGHT_PATTERNS_FILE = "Metadata/edgeslicer_height_patterns.json";
 const std::string CUT_RECIPE_MESH_DIR = "Metadata/cut_recipe/";
 
 const unsigned int AUXILIARY_STR_LEN = 12;
@@ -360,10 +362,12 @@ static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
 // EdgeSlicer: the per-plate filament arrangement the user confirmed before slicing on a Bambu
-// two-extruder printer (DualNozzleSync::Confirmation JSON). Not written into Bambu exports.
+// two-extruder printer (DualNozzleSync::Confirmation JSON). Project files only: not written into
+// Bambu exports or sliced-plate files (m_sliced_plate_export).
 static constexpr const char* DUAL_NOZZLE_CONFIRM_ATTR = "edgeslicer_dual_nozzle_confirm";
 // EdgeSlicer: when and where the plate was sent (PlatePrintHistory.hpp). One metadata element per
-// plate, written only when the plate has a history and never into Bambu exports; a build that does
+// plate, written only when the plate has a history and never into Bambu exports or sliced-plate
+// files (.gcode.3mf, printer and Bambu Connect sends); a build that does
 // not know the key skips it.
 static constexpr const char* PRINT_HISTORY_ATTR = "edgeslicer_print_history";
 
@@ -1064,6 +1068,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // which is what every pre-phase-3 file's connectors were loaded as.
                 bool             processed{ true };
                 FlexiJointParams flexi;
+                // The push-fit Pin's parameters (type PushFit). `has_pushfit` false: none in
+                // the file, the defaults stand.
+                bool             has_pushfit{ false };
+                PushFitParams    pushfit;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -1288,6 +1296,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // their own SHA-256, so two halves of one cut find the same entry and the mesh is held
         // once no matter how many objects refer to it.
         IdToCutRecipeInfoMap       m_cut_recipe_infos;
+        // 1 based model object index -> height colour pattern records
+        std::map<int, std::vector<HeightColourPattern>> m_height_patterns;
         std::map<std::string, TriangleMesh> m_cut_recipe_meshes;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
@@ -1368,6 +1378,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // RE-EDITABLE CUTS: Metadata/cut_recipe.xml, and one Metadata/cut_recipe/<sha256>.bin
         // pre-cut mesh blob per distinct mesh.
         void _extract_cut_recipe_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
+        void _extract_height_patterns_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_cut_recipe_mesh_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat);
         void _extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
@@ -1378,10 +1389,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         // Image Fill (Phase 2): one Metadata/image_fill/<sha256>.png into Model::image_assets.
         void _extract_image_fill_asset_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
+        // Showcase tab: Metadata/showcase/scenes.json and the images it names, into Model::showcase.
+        void _extract_showcase_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         //BBS: add project config file logic
-        void _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
+        // False when the settings could not be extracted at all; a load must not go on without them.
+        bool _extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, Model& model);
         //BBS: extract project embedded presets
         void _extract_project_embedded_presets_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, std::vector<Preset*>&project_presets, Model& model, Preset::Type type, bool use_json = true);
 
@@ -1581,6 +1595,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_objects_metadata.clear();
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
+        m_height_patterns.clear();
         m_brim_ear_points.clear();
         //m_sla_support_points.clear();
         m_curr_metadata_name.clear();
@@ -1760,7 +1775,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
                     ConfigSubstitutionContext config_substitutions(ForwardCompatibilitySubstitutionRule::Disable);
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model))
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, BBS_MODEL_CONFIG_FILE)) {
                     // extract slic3r model config file
@@ -2119,7 +2135,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //} else
                 if (boost::algorithm::iequals(name, BBS_PROJECT_CONFIG_FILE)) {
                     // extract slic3r print config file
-                    _extract_project_config_from_archive(archive, stat, config, config_substitutions, model);
+                    if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model) && !dont_load_config)
+                        return false;
                 }
                 else if (boost::algorithm::iequals(name, CUT_INFORMATION_FILE)) {
                     // extract object cut info
@@ -2130,6 +2147,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // no recipe, which is every file written before this feature.
                 else if (boost::algorithm::iequals(name, CUT_RECIPE_FILE)) {
                     _extract_cut_recipe_from_archive(archive, stat);
+                }
+                else if (boost::algorithm::iequals(name, HEIGHT_PATTERNS_FILE)) {
+                    _extract_height_patterns_from_archive(archive, stat);
                 }
                 else if (boost::algorithm::istarts_with(name, CUT_RECIPE_MESH_DIR)) {
                     _extract_cut_recipe_mesh_from_archive(archive, stat);
@@ -2192,6 +2212,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // dropped rather than trusted - the annotation then simply finds no image.
                     if (!boost::algorithm::iequals(name, IMAGE_FILL_MANIFEST_FILE))
                         _extract_image_fill_asset_from_archive(archive, stat, model);
+                }
+                else if (boost::algorithm::istarts_with(name, Showcase::ARCHIVE_DIR)) {
+                    // Showcase scenes and their images. Before the generic Metadata/*.png branch
+                    // below, which would otherwise take a backdrop picture for a plate thumbnail.
+                    _extract_showcase_from_archive(archive, stat, model);
                 }
                 else if (boost::algorithm::istarts_with(name, AUXILIARY_DIR)) {
                     // extract auxiliary directory to temp directory, do nothing for restore
@@ -2325,6 +2350,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (obj_layer_config_ranges != m_layer_config_ranges.end())
                 model_object->layer_config_ranges = std::move(obj_layer_config_ranges->second);
 
+            // Height colour patterns are indexed the same way. A record whose ranges are not in
+            // the object any more is still kept: the state check reports it as modified.
+            if (auto pat = m_height_patterns.find(object.second + 1); pat != m_height_patterns.end())
+                model_object->height_colour_patterns = std::move(pat->second);
+
             IdToBrimPointsMap::iterator obj_brim_points = m_brim_ear_points.find(object.second + 1);
             if (obj_brim_points != m_brim_ear_points.end())
                 model_object->brim_points = std::move(obj_brim_points->second);
@@ -2418,7 +2448,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // a 3MF (a project saved with the joint placed but not yet cut), so the
                     // bound is the last enumerator instead - still a range check on untrusted
                     // file content, just one that covers the whole enum.
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::FlexiJoint)) {
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::PushFit)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
@@ -2430,6 +2460,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // the defaults set by CutInfo stand.
                     if (connector.has_flexi)
                         model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
+                    if (connector.has_pushfit)
+                        model_object->volumes[connector.volume_id]->cut_info.pushfit = connector.pushfit;
                 }
             }
 
@@ -2960,6 +2992,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_flexi = true;
                             }
+                            // The push-fit Pin's parameters. Untrusted file content: every value
+                            // is clamped by pushfit_from_attributes() (pushfit_sanitize).
+                            if (connector.type == int(CutConnectorType::PushFit) &&
+                                connector_tree.get_optional<double>("<xmlattr>.pushfit_diameter")) {
+                                connector.pushfit = pushfit_from_attributes([&connector_tree](const std::string& name) -> std::optional<double> {
+                                    if (boost::optional<double> v = connector_tree.get_optional<double>("<xmlattr>." + name))
+                                        return *v;
+                                    return std::nullopt;
+                                });
+                                connector.processed   = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                                connector.has_pushfit = true;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -3064,6 +3108,43 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     add_error("Invalid cut recipe rotation matrix");
                     continue;
                 }
+            }
+            {
+                // Version 5 (OD11 PR D): the cut instance's linear transform, the same
+                // 16-number row-major form. Absent = not recorded.
+                const std::string m = rt.get<std::string>("<xmlattr>.instance_linear", "");
+                std::vector<double> v;
+                if (!m.empty()) {
+                    std::istringstream iss(m);
+                    double x;
+                    while (iss >> x)
+                        v.push_back(x);
+                }
+                if (v.size() == 16) {
+                    Transform3d t = Transform3d::Identity();
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col)
+                            t(row, col) = v[size_t(row) * 4 + size_t(col)];
+                    r.instance_linear     = t;
+                    r.instance_linear_set = true;
+                }
+                // Per half: 16 numbers per model part.
+                const std::string hp = rt.get<std::string>("<xmlattr>.half_part_matrices", "");
+                std::vector<double> hv;
+                if (!hp.empty()) {
+                    std::istringstream iss(hp);
+                    double x;
+                    while (iss >> x)
+                        hv.push_back(x);
+                }
+                if (!hv.empty() && hv.size() % 16 == 0)
+                    for (size_t k = 0; k < hv.size(); k += 16) {
+                        Transform3d t = Transform3d::Identity();
+                        for (int row = 0; row < 4; ++row)
+                            for (int col = 0; col < 4; ++col)
+                                t(row, col) = hv[k + size_t(row) * 4 + size_t(col)];
+                        r.half_part_matrices.push_back(t);
+                    }
             }
 
             // --- shared parameters ---------------------------------------------------
@@ -3200,6 +3281,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 g.angle_init         = groove_tree->get<float>("<xmlattr>.angle_init", 0.f);
                 g.depth_tolerance    = groove_tree->get<float>("<xmlattr>.depth_tolerance", 0.1f);
                 g.width_tolerance    = groove_tree->get<float>("<xmlattr>.width_tolerance", 0.1f);
+                // Version 5 (multiple dovetails). Absent in <= 4: one dovetail.
+                g.count              = std::max(1, groove_tree->get<int>("<xmlattr>.count", 1));
+                g.gap                = groove_tree->get<float>("<xmlattr>.gap", 10.f);
+                g.plane_radius       = groove_tree->get<float>("<xmlattr>.plane_radius", 0.f);
             }
 
             // --- connectors ----------------------------------------------------------
@@ -3239,12 +3324,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     const int type  = ct.get<int>("<xmlattr>.type", 0);
                     const int style = ct.get<int>("<xmlattr>.style", 0);
                     const int shape = ct.get<int>("<xmlattr>.shape", 0);
-                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::FlexiJoint)) ? type  : 0;
+                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::PushFit)) ? type  : 0;
                     rc.style = (style >= 0 && style <= int(CutConnectorStyle::Undef))     ? style : 0;
                     rc.shape = (shape >= 0 && shape <= int(CutConnectorShape::Undef))     ? shape : 0;
                     // The Flexi joint's own parameters, when this is one. Same defaulting
                     // rule as cut_information.xml: every field falls back to the
                     // FlexiJointParams default, and the counts that drive loops are clamped.
+                    if (rc.type == int(CutConnectorType::PushFit))
+                        rc.pushfit = pushfit_from_attributes([&ct](const std::string& name) -> std::optional<double> {
+                            if (boost::optional<double> v = ct.get_optional<double>("<xmlattr>." + name))
+                                return *v;
+                            return std::nullopt;
+                        });
                     if (rc.type == int(CutConnectorType::FlexiJoint)) {
                         const FlexiJointParams def;
                         FlexiJointParams &fj = rc.flexi;
@@ -3305,6 +3396,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
     }
 
+    // Metadata/edgeslicer_height_patterns.json. Untrusted file content: the parser drops what it
+    // cannot make sense of, and a missing or broken file leaves the plain ranges as they are.
+    void _BBS_3MF_Importer::_extract_height_patterns_from_archive(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
+    {
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull)
+            return;
+        std::string buffer((size_t) stat.m_uncomp_size, 0);
+        if (mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, (void *) buffer.data(), (size_t) stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading height colour pattern data to buffer");
+            return;
+        }
+        for (auto &entry : height_patterns_from_json(buffer))
+            m_height_patterns.emplace(entry.first, std::move(entry.second));
+    }
+
     // RE-EDITABLE CUTS: one Metadata/cut_recipe/<sha256>.bin pre-cut mesh blob.
     //
     // The file name IS the hash, exactly as the Image Fill store works: the bytes are
@@ -3363,7 +3469,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     }
 
     //BBS: extract project config from json files
-    void _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
+    bool _BBS_3MF_Importer::_extract_project_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& config_substitutions, Model& model)
     {
         if (stat.m_uncomp_size > 0) {
             const std::string& temp_path = model.get_backup_path();
@@ -3373,21 +3479,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, dest_zip_file.c_str(), 0);
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", extract  %1% from 3mf %2%, ret %3%\n") % dest_file % stat.m_filename % res;
             if (res == 0) {
-                add_error("Error while extract project config file to file");
-                return;
+                // The backup folder cannot be written. Going on would hand the caller an empty config
+                // for a project that has one, and callers read its options without checking for them.
+                add_error("Error while extract project config file to file " + dest_file);
+                return false;
             }
             std::map<std::string, std::string> key_values;
             std::string reason;
             int ret = config.load_from_json(dest_file, config_substitutions, true, key_values, reason);
             if (ret) {
+                // A damaged settings file stays a warning, as it always was.
                 add_error("Error load config from json:"+reason);
-                return;
+                return true;
             }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": project has no enable_power_loss_recovery; Bambu Lab printer, set to enable";
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
         }
+        return true;
     }
 
     //BBS: extract project embedded presets
@@ -4039,6 +4149,47 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!expect.empty() && !boost::iequals(expect, stored))
             BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << stat.m_filename
                                        << " does not match its own hash (" << stored << ")";
+    }
+
+    void _BBS_3MF_Importer::_extract_showcase_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, Model &model)
+    {
+        // Never fatal: a damaged or unknown file just means the project opens without its scenes.
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase entry " << stat.m_filename << " has an implausible size, skipped";
+            return;
+        }
+        std::vector<uint8_t> bytes(size_t(stat.m_uncomp_size));
+        if (!mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, bytes.data(), bytes.size(), 0)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read showcase entry " << stat.m_filename;
+            return;
+        }
+        const std::string name = stat.m_filename;
+        if (boost::algorithm::iequals(name, Showcase::ARCHIVE_SCENES)) {
+            Showcase::Project loaded;
+            std::string       error;
+            if (!Showcase::scenes_from_json(std::string(bytes.begin(), bytes.end()), loaded, &error)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << error << "; the project opens without showcase scenes";
+                return;
+            }
+            if (loaded.read_only())
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase scenes use schema " << loaded.schema
+                                           << ", newer than this build's " << Showcase::SCHEMA_VERSION << "; kept read-only";
+            // Images read before the scenes file (archive order) stay.
+            loaded.images  = std::move(model.showcase.images);
+            model.showcase = std::move(loaded);
+            return;
+        }
+        std::string sha, ext;
+        if (!Showcase::parse_image_archive_path(name, sha, ext)) {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": unknown showcase entry " << name << " ignored";
+            return;
+        }
+        // The file name is the content hash; a file whose bytes do not match it is dropped.
+        if (image_fill_sha256_hex(bytes) != sha) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << name << " does not match its own hash, dropped";
+            return;
+        }
+        model.showcase.add_image(std::move(bytes), ext);
     }
 
     void _BBS_3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
@@ -6788,6 +6939,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
+        // A sliced-plate file (.gcode.3mf export, a send to a printer or Bambu Connect, a cloud print's
+        // config 3MF), not a project save or backup. Such files leave the machine and get shared, so
+        // the EdgeSlicer-only plate metadata (print history with printer names, the dual-nozzle
+        // confirmation with the printer serial) stays out of them.
+        bool m_sliced_plate_export { false };
         // Export Bambu 3MF (StoreParams::bambu_compat): the project config converted once up front,
         // the context the per-object conversions need, and what was changed.
         bool m_bambu_compat { false };
@@ -6864,6 +7020,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // per distinct pre-cut mesh. The mesh is written ONCE however many objects refer to it,
         // which is what keeps the two halves of one cut to a single copy.
         bool _add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model);
+        // "Metadata/edgeslicer_height_patterns.json": only when an object has a height colour
+        // pattern, and never in "Export Bambu 3MF" (the plain ranges are what Bambu reads).
+        bool _add_height_patterns_file_to_archive(mz_zip_archive &archive, Model &model);
+        // Showcase tab: "Metadata/showcase/scenes.json" plus the images the scenes use.
+        bool _add_showcase_to_archive(mz_zip_archive &archive, const Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
         // Ultra (H2C 3MF schema): "Metadata/filament_sequence.json" (filament / nozzle entry order).
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
@@ -6904,6 +7065,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_skip_auxiliary = store_params.strategy & SaveStrategy::SkipAuxiliary;
         m_share_mesh       = store_params.strategy & SaveStrategy::ShareMesh;
         m_from_backup_save = store_params.strategy & SaveStrategy::Backup;
+        m_sliced_plate_export = (m_save_gcode || (store_params.strategy & SaveStrategy::WithSliceInfo)) && !m_from_backup_save;
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
@@ -7424,6 +7586,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // that carry one, so a project with no editable cut gains nothing at all.
         if (!_add_cut_recipe_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_recipe_file_to_archive failed\n");
+            return false;
+        }
+
+        if (!m_bambu_compat && !_add_height_patterns_file_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_height_patterns_file_to_archive failed";
+            return false;
+        }
+
+        // Showcase scenes (D9): project saves and backups only. Not in "Export Bambu 3MF" (a file
+        // for another slicer) and not in a sliced-plate file (sent to a printer).
+        if (!m_bambu_compat && !m_skip_model && (!m_save_gcode || m_from_backup_save) && !_add_showcase_to_archive(archive, model)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", _add_showcase_to_archive failed";
             return false;
         }
 
@@ -8499,6 +8673,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
                     connectors_tree.put("<xmlattr>.r_tolerance", volume->cut_info.radius_tolerance);
                     connectors_tree.put("<xmlattr>.h_tolerance", volume->cut_info.height_tolerance);
+                    // The push-fit Pin: its holes and the pin object are rebuilt from these by a
+                    // re-cut, and a reopened project shows them in the panel. Pin volumes only, so
+                    // nothing changes in a file without pins.
+                    if (volume->cut_info.is_pushfit()) {
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        for (const auto& [name, value] : pushfit_attributes(volume->cut_info.pushfit))
+                            connectors_tree.put("<xmlattr>." + name, value);
+                    }
                     // A Flexi joint regenerates its whole geometry from these parameters at
                     // cut time, so they have to survive a save/load or a project reopened
                     // before the cut would come back with a different joint. Written only for
@@ -8832,6 +9014,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     bool _BBS_3MF_Exporter::_add_project_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, Model& model)
     {
         if (m_bambu_compat) {
+            // Bambu Connect hangs on import when the key is missing (see below); an empty list is accepted.
+            if (m_bambu_project.find("print_compatible_printers") == m_bambu_project.end()) {
+                BambuExport::Value empty;
+                empty.vector  = true;
+                empty.strings = true;
+                m_bambu_project["print_compatible_printers"] = empty;
+            }
             const std::string out = BambuExport::to_json(m_bambu_project, "project_settings", "project", BambuExport::export_version());
             if (!mz_zip_writer_add_mem(&archive, BBS_PROJECT_CONFIG_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
                 add_error("Unable to add project config file to archive");
@@ -8850,10 +9039,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         const DynamicPrintConfig* to_write = &config;
         DynamicPrintConfig        aligned;
         if (m_save_gcode) {
+            // Bambu Connect turns white and hangs on import when project_settings.config has no
+            // print_compatible_printers key. PresetBundle::full_fff_config() only writes it when the
+            // print preset has a non-empty compatible_printers, which user process presets usually
+            // do not. An empty list is accepted by Bambu Connect, and on load PresetBundle ignores an
+            // empty list, so the reloaded preset is not restricted or marked modified.
+            if (config.option("print_compatible_printers") == nullptr) {
+                aligned = config;
+                aligned.option<ConfigOptionStrings>("print_compatible_printers", true);
+                to_write = &aligned;
+            }
             const auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"));
             const auto* map     = config.option<ConfigOptionInts>("filament_map");
             if (colours != nullptr && map != nullptr && map->values.size() < colours->values.size()) {
-                aligned = config;
+                if (to_write != &aligned)
+                    aligned = config;
                 aligned.option<ConfigOptionInts>("filament_map")->values.resize(colours->values.size(), 1);
                 to_write = &aligned;
             }
@@ -9260,10 +9460,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 }
                 stream << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->dual_nozzle_confirm.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->dual_nozzle_confirm.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DUAL_NOZZLE_CONFIRM_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->dual_nozzle_confirm) << "\"/>\n";
 
-                if (!m_bambu_compat && !plate_data->print_history.empty())
+                if (!m_bambu_compat && !m_sliced_plate_export && !plate_data->print_history.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINT_HISTORY_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->print_history) << "\"/>\n";
 
                 if (save_gcode)
@@ -9401,6 +9601,60 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
     // COMPATIBILITY. Neither the recipe nor the blobs are referenced from the main
     // <resources> model, so a slicer that knows nothing about them loads the two halves and
     // ignores these entries - the same contract Metadata/cut_information.xml keeps.
+    bool _BBS_3MF_Exporter::_add_showcase_to_archive(mz_zip_archive &archive, const Model &model)
+    {
+        const Showcase::Project &project = model.showcase;
+        if (project.empty() && !project.read_only())
+            return true;
+        const std::string text = Showcase::scenes_to_json(project);
+        if (!mz_zip_writer_add_mem(&archive, Showcase::ARCHIVE_SCENES, (const void *) text.data(), text.size(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add the showcase scenes to archive");
+            return false;
+        }
+        // A read-only (newer schema) project keeps every image it came with: this build cannot tell
+        // which ones its scenes use.
+        std::vector<std::string> images = project.used_images();
+        if (project.read_only()) {
+            images.clear();
+            for (const auto &it : project.images)
+                images.push_back(it.first);
+        }
+        for (const std::string &sha : images) {
+            const Showcase::ImageBlob *blob = project.find_image(sha);
+            if (blob == nullptr) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": showcase image " << sha << " is referenced but not present; not written";
+                continue;
+            }
+            const std::string path = Showcase::image_archive_path(sha, blob->ext);
+            // Stored, not deflated: the payload is already compressed (PNG / JPEG).
+            if (!mz_zip_writer_add_mem(&archive, path.c_str(), (const void *) blob->bytes.data(), blob->bytes.size(), MZ_NO_COMPRESSION)) {
+                add_error("Unable to add a showcase image to archive");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool _BBS_3MF_Exporter::_add_height_patterns_file_to_archive(mz_zip_archive &archive, Model &model)
+    {
+        bool any = false;
+        std::vector<const std::vector<HeightColourPattern> *> per_object;
+        per_object.reserve(model.objects.size());
+        for (const ModelObject *object : model.objects) {
+            per_object.push_back(&object->height_colour_patterns);
+            any = any || !object->height_colour_patterns.empty();
+        }
+        // Nothing to say: write nothing, so a project that never used a pattern is unchanged.
+        if (!any)
+            return true;
+        const std::string out = height_patterns_to_json(per_object);
+        if (!mz_zip_writer_add_mem(&archive, HEIGHT_PATTERNS_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add height colour patterns file to archive");
+            return false;
+        }
+        return true;
+    }
+
     bool _BBS_3MF_Exporter::_add_cut_recipe_file_to_archive(mz_zip_archive &archive, Model &model)
     {
         pt::ptree tree;
@@ -9446,6 +9700,26 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     for (int col = 0; col < 4; ++col)
                         oss << (row == 0 && col == 0 ? "" : " ") << r.rotation_m(row, col);
                 rt.put("<xmlattr>.rotation", oss.str());
+            }
+            if (r.instance_linear_set) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                for (int row = 0; row < 4; ++row)
+                    for (int col = 0; col < 4; ++col)
+                        oss << (row == 0 && col == 0 ? "" : " ") << r.instance_linear(row, col);
+                rt.put("<xmlattr>.instance_linear", oss.str());
+            }
+            if (!r.half_part_matrices.empty()) {
+                std::ostringstream oss;
+                oss << std::setprecision(17);
+                bool first = true;
+                for (const Transform3d &t : r.half_part_matrices)
+                    for (int row = 0; row < 4; ++row)
+                        for (int col = 0; col < 4; ++col) {
+                            oss << (first ? "" : " ") << t(row, col);
+                            first = false;
+                        }
+                rt.put("<xmlattr>.half_part_matrices", oss.str());
             }
 
             rt.put("<xmlattr>.thickness",          r.thickness);
@@ -9524,6 +9798,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 g.put("<xmlattr>.angle_init",       r.groove.angle_init);
                 g.put("<xmlattr>.depth_tolerance",  r.groove.depth_tolerance);
                 g.put("<xmlattr>.width_tolerance",  r.groove.width_tolerance);
+                g.put("<xmlattr>.count",            r.groove.count);
+                g.put("<xmlattr>.gap",              r.groove.gap);
+                g.put("<xmlattr>.plane_radius",     r.groove.plane_radius);
             }
 
             if (!r.connectors.empty()) {
@@ -9549,6 +9826,10 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     ct.put("<xmlattr>.type",        c.type);
                     ct.put("<xmlattr>.style",       c.style);
                     ct.put("<xmlattr>.shape",       c.shape);
+                    // The push-fit Pin (recipe version 6), only for pins.
+                    if (c.type == int(CutConnectorType::PushFit))
+                        for (const auto& [name, value] : pushfit_attributes(c.pushfit))
+                            ct.put("<xmlattr>." + name, value);
                     // The Flexi joint rebuilds its whole geometry from these, so a re-cut that
                     // did not have them would produce a differently shaped joint. Written only
                     // for the flexi type, so nothing changes for any other connector.

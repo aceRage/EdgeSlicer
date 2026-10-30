@@ -678,13 +678,13 @@ bool BackgroundSlicingProcess::empty() const
 	return m_print->empty();
 }
 
-StringObjectException BackgroundSlicingProcess::validate(StringObjectException *warning, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
+StringObjectException BackgroundSlicingProcess::validate(std::vector<StringObjectException> *warnings, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons)
 {
 	assert(m_print != nullptr);
     assert(m_print == m_fff_print);
 
     m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
-    return m_print->validate(warning, collison_polygons, height_polygons);
+    return m_print->validate(warnings, collison_polygons, height_polygons);
 }
 
 // Apply config over the print. Returns false, if the new config values caused any of the already
@@ -953,6 +953,9 @@ void BackgroundSlicingProcess::prepare_upload()
 
 	if (m_print == m_fff_print) {
         if (m_upload_job.upload_data.use_3mf) {
+            // The 3mf was packed by Plater::export_3mf / send_gcode. Non-BBL G-code inside it was
+            // post-processed there; BBL G-code was post-processed after slicing. Do not run scripts
+            // again on the archive (or they would run twice).
             source_path = m_upload_job.upload_data.source_path;
         } else {
 		    m_print->set_status(95, _utf8(L("Running post-processing scripts")));
