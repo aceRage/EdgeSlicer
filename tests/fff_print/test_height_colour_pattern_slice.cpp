@@ -158,7 +158,10 @@ std::vector<LayerSig> layer_sigs(const std::string &gcode)
             out.back().height = std::atof(line.c_str() + 8);
         else if (line.rfind(";TYPE:", 0) == 0) {
             type = line.substr(6);
-            ++out.back().types[type];
+            // The prime tower and custom G-code exist only because of the tool changes; they are the
+            // one thing a band is allowed to add.
+            if (type.rfind("Prime", 0) != 0 && type.rfind("Wipe", 0) != 0 && type.rfind("Custom", 0) != 0)
+                ++out.back().types[type];
         } else if (type == "Outer wall" && line.rfind("G1 ", 0) == 0 && line.find(" X") != std::string::npos) {
             const size_t e = line.find(" E");
             if (e != std::string::npos) {
