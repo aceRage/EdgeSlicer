@@ -1,7 +1,12 @@
 #ifndef slic3r_PrintHostSendDialog_hpp_
 #define slic3r_PrintHostSendDialog_hpp_
 
+#include <atomic>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <boost/filesystem/path.hpp>
 
@@ -53,7 +58,7 @@ class PrintHostSendDialog : public GUI::MsgDialog
 {
 public:
     PrintHostSendDialog(const boost::filesystem::path &path, PrintHostPostUploadActions post_actions, const wxArrayString& groups, const wxArrayString& storage_paths, const wxArrayString& storage_names, bool switch_to_device_tab);
-    virtual ~PrintHostSendDialog() {}
+    virtual ~PrintHostSendDialog();
     boost::filesystem::path filename() const;
     PrintHostPostUploadAction post_action() const;
     std::string group() const;
@@ -102,20 +107,30 @@ public:
 
     virtual void EndModal(int ret) override;
     virtual void init();
-    virtual std::map<std::string, std::string> extendedInfo() const { return {}; }
+    // CrealityPrint: useCFS, enableSelfTest, colorMatch_n. Empty for every other host.
+    virtual std::map<std::string, std::string> extendedInfo() const;
 
 protected:
     // Builds the device row and the mapping table into content_sizer. Called from init() before
     // the file name, so the target is the first thing read and the first thing tabbed to.
     void build_device_ui();
-    // Asks the picked device what is loaded and rebuilds the mapping table. Blocking, with a busy
-    // cursor and a short timeout - the same shape as the devices dialog's Test button.
+    // Asks the picked device what is loaded and rebuilds the mapping table. Every host but
+    // CrealityPrint: blocking, with a busy cursor and a short timeout - the same shape as the
+    // devices dialog's Test button. CrealityPrint: on a worker (its /info + boxsInfo pair can take
+    // two deadlines), Upload/Print disabled until apply_device_status() paints the result.
     void refresh_device_status();
+    void apply_device_status();
     void rebuild_mapping_rows();
     // Bambu-style MaterialItem swatches (ThirdPartyFilamentMapPanel) for every host that names its
-    // slots: Elegoo CANVAS, Snapmaker U1 toolheads, QIDI Box. A dialog that still wants the old
-    // wxChoice rows overrides this with false. No slots: no rows at all, as before.
+    // slots: Elegoo CANVAS, Snapmaker U1 toolheads, QIDI Box, Creality CFS. A dialog that still
+    // wants the old wxChoice rows overrides this with false. No slots: no rows at all, as before.
     virtual bool use_third_party_map_panel() const { return true; }
+    // CrealityPrint options (Use CFS, Calibrate before printing), shown when the picked
+    // device is a crealityprint host. Called with the mapping rows.
+    void rebuild_creality_options();
+    void update_creality_mapping_enabled();
+    // Upload / Upload and Print, both off while a Creality probe is still on its worker.
+    void set_send_enabled(bool on);
     // Creality K3 holders: show the two colours, no popup.
     // Happy Hare / AFC: the tiles show the gates or lanes and what is in them, nothing more. The
     // probe reads them, but no gate or lane mapping is sent at start (the printer's own tool-to-gate
@@ -131,7 +146,7 @@ protected:
     // A vendor dialog's options for the picked device, into m_vendor_panel. Called with the mapping
     // rows; the plain dialog has none.
     virtual void rebuild_vendor_options() {}
-    // "As sliced" and greyed out while the QIDI Box is switched off: nothing is fed from it.
+    // "As sliced" and greyed out while the QIDI Box / Use CFS is switched off: nothing is fed from it.
     void update_mapping_enabled();
     // What PrintHostDevices::qidi_send_policy needs, from the picked device and the rows.
     PrintHostDevices::QidiSendFacts qidi_send_facts() const;
@@ -153,6 +168,7 @@ protected:
     virtual int preselect_slot(const SendPlateFilament& f) const;
     // One or more lines under the mapping table, refreshed whenever a choice changes; "" = none.
     // Vendor PRs (#616/#619/#620/#622) override this; keep the name and signature.
+    // Only called when there are rows (update_mapping_note() checks m_mapping_filament first).
     virtual wxString mapping_warning() const;
     // Panel type/colour mismatch (identity slots when read-only). Combined with mapping_warning()
     // in update_mapping_note(); vendor overrides of mapping_warning() still compile after rebase.
@@ -197,6 +213,21 @@ protected:
     wxWindow*                             m_vendor_panel { nullptr };
     wxBoxSizer*                           m_vendor_sizer { nullptr };
     wxStaticText*                         m_mapping_note { nullptr };
+    // CrealityPrint: Use CFS + Calibrate, null when the device is not a Creality host.
+    wxWindow*                             m_creality_panel { nullptr };
+    wxBoxSizer*                           m_creality_sizer { nullptr };
+    wxCheckBox*                           m_creality_use_cfs { nullptr };
+    wxCheckBox*                           m_creality_calibrate { nullptr };
+    // Lets a late probe result drop itself if the dialog closed or the user switched devices.
+    // alive is read/written under mtx; the worker is joinable and joined on close.
+    struct ProbeToken {
+        std::mutex        mtx;
+        int               gen { 0 };
+        bool              alive { true };
+    };
+    std::shared_ptr<ProbeToken>           m_probe_token;
+    std::thread                           m_probe_thread;
+    bool                                  m_probe_pending { false };
     // The end-of-print unload, when this printer is a Snapmaker tool changer.
     bool                                  m_offer_unload { false };
     bool                                  m_unload_default { false };

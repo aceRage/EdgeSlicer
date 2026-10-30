@@ -68,6 +68,10 @@ struct HeightColourPattern
     int                      gap_mode  = int(HeightPatternGapMode::ObjectFilament);
     int                      gap_filament = 0; // HeightPatternGapMode::Fixed only
     bool                     snap_to_layers = true;
+    // Which direction the bands run in: 0 = Z (height), the only one there is today. Reserved for
+    // horizontal and angled colour patterns; saved in the sidecar only when it is not 0, so files
+    // without it are exactly the Phase 1 format.
+    int                      axis      = 0;
     // The ranges the last apply wrote (the keys this pattern owns).
     std::vector<HeightPatternRange> generated;
 
@@ -75,7 +79,7 @@ struct HeightColourPattern
 
     template<class Archive> void serialize(Archive &ar)
     {
-        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated);
+        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated, axis);
     }
 };
 
