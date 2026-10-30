@@ -1265,8 +1265,10 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - start";
 
-    // Before the loop below resets every part's painting.
-    const SavedPaintings saved_paintings = save_paintings(mo);
+    // No save_paintings() here: process_solid_part_cut() carries every painted model part onto
+    // its pieces with PaintTransfer, so the spatial remap in finalize() would only redo that work.
+    // The nested calls from perform_by_contour() / perform_with_groove() only take connectors or
+    // run without KeepPaint; those callers remap from their own saved paintings.
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -1351,7 +1353,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - end";
 
-    finalize(cut_object_ptrs, saved_paintings);
+    finalize(cut_object_ptrs, SavedPaintings{});
 
     return m_model.objects;
 }

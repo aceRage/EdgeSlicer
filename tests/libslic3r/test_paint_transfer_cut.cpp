@@ -171,3 +171,45 @@ TEST_CASE("Without KeepPaint a painted cut drops every FacetsAnnotation layer", 
         for (const ModelVolume *v : half->volumes)
             CHECK_FALSE(PaintTransfer::has_painting(*v));
 }
+
+TEST_CASE("A rotated plane cut with a kerf paints each half by PaintTransfer alone", "[PaintTransfer][CutPaint][CutPaintKerf]")
+{
+    // perform_with_plane() no longer saves paintings for the remap in finalize(), so every
+    // painted facet below must come from PaintTransfer. A no-op transfer leaves both halves bare.
+    Model        model;
+    ModelObject *mo = ptc_make_cube(model);
+    ModelVolume *v  = mo->volumes.front();
+    {
+        const TriangleMesh &mesh = v->mesh();
+        TriangleSelector    sel(mesh);
+        for (int i = 0; i < int(mesh.its.indices.size()); ++i) {
+            const Vec3f n = its_face_normal(mesh.its, i);
+            if (n.x() > 0.9f)
+                sel.set_facet(i, EnforcerBlockerType::Extruder2); // stays vertical: split by the cut
+            else if (n.y() > 0.9f)
+                sel.set_facet(i, EnforcerBlockerType::Extruder3); // becomes the top after the X turn
+        }
+        v->mmu_segmentation_facets.set_data(sel.serialize());
+    }
+    // Local +Y turns to world +Z (X by 90 deg), then a 30 deg Z turn.
+    mo->instances.front()->set_rotation(Vec3d(0.5 * PI, 0., PI / 6.));
+
+    const double kerf = 2.0;
+    Cut cut(mo, 0, Transform3d::Identity(), PTC_HALVES | ModelObjectCutAttribute::KeepPaint);
+    const ModelObjectPtrs &res = cut.perform_with_plane(kerf);
+    REQUIRE(res.size() == 2);
+
+    // Each half keeps (H - kerf/2) x CUBE of the +X face; the kerf band and the caps are bare.
+    const double side = (PTC_H - 0.5 * kerf) * PTC_CUBE;
+    double top_total = 0.;
+    for (const ModelObject *half : res) {
+        const ModelObjectPtrs one{ const_cast<ModelObject *>(half) };
+        CHECK_THAT(ptc_painted_area(one, &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder2),
+                   WithinAbs(side, 2.0));
+        top_total += ptc_painted_area(one, &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder3);
+    }
+    // The painted top lies whole on one half.
+    CHECK_THAT(top_total, WithinAbs(PTC_CUBE * PTC_CUBE, 2.0));
+    const double top0 = ptc_painted_area({ res[0] }, &ModelVolume::mmu_segmentation_facets, EnforcerBlockerType::Extruder3);
+    CHECK((top0 < 1.0 || top0 > PTC_CUBE * PTC_CUBE - 2.0));
+}
