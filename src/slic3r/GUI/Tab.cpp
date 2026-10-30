@@ -4904,8 +4904,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
         {
-            Line makeup_line = Line{ L("Colour make-up"), L("The colours, proportions and rotation of the filament slot being edited. "
-                                                            "Visual only: it changes how the print looks in Showcase and Preview, not the G-code.") };
+            // A full-width line, like the price note: OG_CustomCtrl draws a labelled line from its
+            // first option, so a labelled line with only a widget crashed when the page showed.
+            Line makeup_line = Line{ "", "" };
+            makeup_line.full_width = 1;
             makeup_line.widget = [this](wxWindow* parent) { return makeup_create_widget(parent); };
             optgroup->append_line(makeup_line);
         }
@@ -5327,6 +5329,11 @@ wxSizer* TabFilament::makeup_create_widget(wxWindow* parent)
 {
     const int em = em_unit(parent);
     auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* label = new wxStaticText(parent, wxID_ANY, _L("Colour make-up") + ":");
+    label->SetFont(wxGetApp().normal_font());
+    label->SetToolTip(_L("The colours, proportions and rotation of the filament slot being edited. "
+                         "Visual only: it changes how the print looks in Showcase and Preview, not the G-code."));
+    hsizer->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em);
     m_makeup_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
     m_makeup_note->SetFont(wxGetApp().normal_font());
     hsizer->Add(m_makeup_note, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
