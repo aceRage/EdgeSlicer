@@ -6735,6 +6735,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
+                       what == "/preview/legend" || what == "/preview/layers" || // PR E: preview v2
                        what == "/result"); // slice_v1: results detail and warnings
     }
     if (sub.compare(0, 10, "/api/jobs/") == 0) {
