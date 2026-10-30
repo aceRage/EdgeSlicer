@@ -61,6 +61,7 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_recipe.cpp
 	test_height_colour_pattern.cpp
 	test_cut_paint.cpp
+	test_paint_transfer_cut.cpp
 	test_cut_groove.cpp
 	test_config_include.cpp
 	test_foreign_preset_keys.cpp

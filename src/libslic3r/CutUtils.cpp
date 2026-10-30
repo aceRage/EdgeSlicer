@@ -9,10 +9,12 @@
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "PaintTransfer.hpp"
 #include "ObjectID.hpp"
 #include "AABBMesh.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <initializer_list>
 
 namespace Slic3r {
 
@@ -69,6 +71,36 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     vol->cut_info = src_volume->cut_info;
 }
 
+// Orca dropped all the painting when cutting. Each piece is repainted from the volume it was
+// cut from; the cap of the cut lies away from the old skin and stays unpainted.
+// `src_to_world` and the matrix of each piece map into the same frame (the instance frame
+// before the cut, without its offset).
+// `maps` (one per piece, may be empty) say which facets of each piece are facets of `src`, left
+// whole by the cut: their painting is copied as it is, only the facets along the plane are resampled.
+//
+// add_cut_volume() is left alone so ImageMap 5c (PR #569) can pass a pre_transform for the
+// picture's frame without fighting this helper: paint is carried after the volume exists.
+static void carry_cut_painting(const ModelVolume* src, const Transform3d& src_to_world, std::initializer_list<ModelVolume*> pieces,
+                               std::initializer_list<const std::vector<int>*> maps)
+{
+    if (src == nullptr || !PaintTransfer::has_painting(*src))
+        return;
+    PaintTransfer::Source source;
+    source.volume   = src;
+    source.to_world = src_to_world;
+    source.filament = PaintTransfer::effective_filament(*src);
+    PaintTransfer::Transfer transfer(std::vector<PaintTransfer::Source>{ source });
+    auto map_it = maps.begin();
+    for (ModelVolume* piece : pieces) {
+        const std::vector<int>* map = map_it != maps.end() ? *map_it++ : nullptr;
+        if (piece == nullptr)
+            continue;
+        if (map != nullptr && map->empty())
+            map = nullptr;
+        transfer.to(*piece, piece->get_matrix(), PaintTransfer::effective_filament(*piece), map);
+    }
+}
+
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
 // slices at +/- t/2 instead of one at zero, each keeping only its own outer half
 // - the band between them is what the saw took away. That reuses cut_mesh() as
@@ -79,7 +111,8 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
 // the no-kerf output is not "equivalent to" today's - it IS today's.
 static void process_volume_cut( ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                 ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh,
-                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
+                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred,
+                                std::vector<int>* upper_map = nullptr, std::vector<int>* lower_map = nullptr)
 {
     const auto volume_matrix = volume->get_matrix();
 
@@ -92,14 +125,42 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
     mesh.transform(invert_cut_matrix * instance_matrix * volume_matrix, true);
 
     indexed_triangle_set upper_its, lower_its;
+    double face_lo = 0.0, face_hi = 0.0;
     if (thickness > 0.0) {
-        double face_lo = 0.0, face_hi = 0.0;
         curved_cut_thickness_faces(thickness, offset, face_lo, face_hi);
         cut_mesh(mesh.its, float(face_lo), nullptr, &lower_its);
         cut_mesh(mesh.its, float(face_hi), &upper_its, nullptr);
     }
     else
         cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);
+    // The facets the plane does not cross keep their corners bit for bit
+    // (and their order, unless the transformation mirrored them, which flips the corners).
+    if ((upper_map != nullptr || lower_map != nullptr) && PaintTransfer::has_painting(*volume) &&
+        (instance_matrix * volume_matrix).matrix().block<3, 3>(0, 0).determinant() > 0.) {
+        const PaintTransfer::FacetMatcher matcher(mesh.its);
+        // The cap lies on the cut plane: a few huge new facets that are not skin. Resampling
+        // them split them into millions of slivers along the painted rim, so they are left
+        // unpainted without sampling. With a kerf the cap sits at face_lo / face_hi, not z = 0.
+        auto mark_cap = [](const indexed_triangle_set& its, std::vector<int>& map, float plane_z) {
+            const float eps = 1e-4f;
+            for (size_t i = 0; i < map.size(); ++i)
+                if (map[i] < 0) {
+                    const auto& f = its.indices[i];
+                    if (std::abs(its.vertices[f(0)].z() - plane_z) < eps &&
+                        std::abs(its.vertices[f(1)].z() - plane_z) < eps &&
+                        std::abs(its.vertices[f(2)].z() - plane_z) < eps)
+                        map[i] = PaintTransfer::FACET_UNPAINTED;
+                }
+        };
+        if (upper_map != nullptr && attributes.has(ModelObjectCutAttribute::KeepUpper)) {
+            *upper_map = matcher.match(upper_its);
+            mark_cap(upper_its, *upper_map, float(face_hi));
+        }
+        if (lower_map != nullptr && attributes.has(ModelObjectCutAttribute::KeepLower)) {
+            *lower_map = matcher.match(lower_its);
+            mark_cap(lower_its, *lower_map, float(face_lo));
+        }
+    }
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))
@@ -265,24 +326,45 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
 {
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
-    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
+    std::vector<int> upper_map, lower_map;
+    const bool keep_paint = attributes.has(ModelObjectCutAttribute::KeepPaint) && PaintTransfer::has_painting(*volume);
+    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset,
+                       keep_paint ? &upper_map : nullptr, keep_paint ? &lower_map : nullptr);
 
-    // Add required cut parts to the objects
+    // Add required cut parts to the objects. add_cut_volume() is unchanged (PR #569 can still
+    // pass a pre_transform for ImageMap); the new volume is the last one on the object.
+    const Transform3d src_to_world = instance_matrix * volume->get_matrix();
+    ModelVolume *upper_vol = nullptr, *lower_vol = nullptr;
+
+    auto take_back = [](ModelObject* object, const TriangleMesh& mesh) -> ModelVolume* {
+        return (object != nullptr && !mesh.empty()) ? object->volumes.back() : nullptr;
+    };
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
         add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        upper_vol = take_back(upper, upper_mesh);
         if (!lower_mesh.empty()) {
             add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            lower_vol = take_back(upper, lower_mesh);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
+        if (keep_paint)
+            carry_cut_painting(volume, src_to_world, { upper_vol, lower_vol }, { &upper_map, &lower_map });
         return;
     }
 
-    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+    if (attributes.has(ModelObjectCutAttribute::KeepUpper)) {
         add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        upper_vol = take_back(upper, upper_mesh);
+    }
 
-    if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
+    if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty()) {
         add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        lower_vol = take_back(lower, lower_mesh);
+    }
+
+    if (keep_paint)
+        carry_cut_painting(volume, src_to_world, { upper_vol, lower_vol }, { &upper_map, &lower_map });
 }
 
 static void reset_instance_transformation(ModelObject* object, size_t src_instance_idx, 
@@ -1183,8 +1265,10 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - start";
 
-    // Before the loop below resets every part's painting.
-    const SavedPaintings saved_paintings = save_paintings(mo);
+    // No save_paintings() here: process_solid_part_cut() carries every painted model part onto
+    // its pieces with PaintTransfer, so the spatial remap in finalize() would only redo that work.
+    // The nested calls from perform_by_contour() / perform_with_groove() only take connectors or
+    // run without KeepPaint; those callers remap from their own saved paintings.
 
     // Clone the object to duplicate instances, materials etc.
     ModelObject* upper{ nullptr };
@@ -1213,7 +1297,11 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         curved_cut_thickness_faces(thickness, offset, kerf_face_lo, kerf_face_hi);
 
     for (ModelVolume* volume : mo->volumes) {
-        volume->reset_extra_facets();
+        // Model parts keep their painting until PaintTransfer has carried it over to the
+        // pieces (mo is a temporary copy, deleted with m_model). Curved / drawn / flexi still
+        // reset here and remap in finalize — those meshes are rebuilt, so FacetMatcher cannot copy.
+        if (!volume->is_model_part() || !m_attributes.has(ModelObjectCutAttribute::KeepPaint))
+            volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
@@ -1265,7 +1353,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
 
     BOOST_LOG_TRIVIAL(trace) << "ModelObject::cut - end";
 
-    finalize(cut_object_ptrs, saved_paintings);
+    finalize(cut_object_ptrs, SavedPaintings{});
 
     return m_model.objects;
 }
@@ -1294,17 +1382,28 @@ static void merge_solid_parts_inside_object(ModelObjectPtrs& objects)
 {
     for (ModelObject* mo : objects) {
         TriangleMesh mesh;
+        // The merged parts are the sources of the painting of the result (cut by contour).
+        std::vector<PaintTransfer::Source> paint_sources;
         // Merge all SolidPart but not Connectors
         for (const ModelVolume* mv : mo->volumes) {
             if (mv->is_model_part() && !mv->is_cut_connector()) {
                 TriangleMesh m = mv->mesh();
                 m.transform(mv->get_matrix());
                 mesh.merge(m);
+                PaintTransfer::Source src;
+                src.volume   = mv;
+                src.to_world = mv->get_matrix();
+                src.filament = PaintTransfer::effective_filament(*mv);
+                paint_sources.push_back(src);
             }
         }
         if (!mesh.empty()) {
             ModelVolume* new_volume = mo->add_volume(mesh);
             new_volume->name = mo->name;
+            if (PaintTransfer::worth_transferring(paint_sources)) {
+                PaintTransfer::transfer(paint_sources, *new_volume, new_volume->get_matrix(),
+                                        PaintTransfer::effective_filament(*new_volume));
+            }
             // Delete all merged SolidPart but not Connectors
             for (int i = int(mo->volumes.size()) - 2; i >= 0; --i) {
                 const ModelVolume* mv = mo->volumes[i];
