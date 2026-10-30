@@ -1,5 +1,6 @@
 #include "libslic3r/CAD/GeometryEngine.hpp"
 #include "libslic3r/BRep/MeshToBRep.hpp"
+#include "libslic3r/BRep/OcctException.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/I18N.hpp"
@@ -83,7 +84,8 @@ std::vector<TopoDS_Shape> GeometryEngine::read_step_solids(const std::string& pa
         if (out.empty())
             out.push_back(shape);
     } catch (const Standard_Failure& e) {
-        err = *e.what() ? e.what() : _u8L("OCCT failed to read STEP");
+        const char *msg = occt_exception_message(e);
+        err = *msg ? std::string(msg) : _u8L("OCCT failed to read STEP");
         out.clear();
     }
     return out;
