@@ -458,6 +458,9 @@ private:
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
     const WipeTowerInfo::ToolChange     *m_active_tool_change = nullptr;
+    // Mixed nozzle diameters (per-nozzle P2): the incoming tool of a local-Z tool change, which has no
+    // m_active_tool_change, so toolchange_Unload() aligns the wipe with that tool's width. -1 = none.
+    int                                  m_local_z_new_tool = -1;
 
 	// This sums height of all extruded layers, not counting the layers which
 	// will be later removed when the "no_sparse_layers" is used.

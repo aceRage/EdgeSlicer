@@ -2125,7 +2125,9 @@ WipeTower::ToolChangeResult WipeTower2::local_z_tool_change(size_t new_tool,
     const int old_tool_temp = is_first_layer() ? m_filpar[m_current_tool].first_layer_temperature : m_filpar[m_current_tool].temperature;
     const int new_tool_temp = is_first_layer() ? m_filpar[new_tool].first_layer_temperature : m_filpar[new_tool].temperature;
 
+    m_local_z_new_tool = int(new_tool);
     toolchange_Unload(writer, cleaning_box, m_filpar[m_current_tool].material, old_tool_temp, new_tool_temp);
+    m_local_z_new_tool = -1;
     // Orca #15144 (Edge Local-Z): this mini tower knows only its reserve slot, not where it sits on the
     // bed, so with wait_for_temp_on_wipe_tower it waits in place, over the slot, instead of parking.
     toolchange_Change(writer, new_tool, m_filpar[new_tool].material,
@@ -2406,7 +2408,9 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     // this is to align ramming and future wiping extrusions, so the future y-steps can be uniform from the start:
     // the perimeter_width will later be subtracted, it is there to not load while moving over just extruded material
     // Mixed nozzle diameters: the wipe that follows is laid by the incoming tool at its own width.
-    const float wipe_pw = m_active_tool_change != nullptr ? tool_line_width(m_active_tool_change->new_tool) : m_perimeter_width;
+    const float wipe_pw = m_active_tool_change != nullptr ? tool_line_width(m_active_tool_change->new_tool) :
+                          m_local_z_new_tool >= 0         ? tool_line_width(size_t(m_local_z_new_tool)) :
+                                                            m_perimeter_width;
     Vec2f pos = Vec2f(end_of_ramming.x(),
         end_of_ramming.y() + (y_step / m_extra_spacing_ramming - wipe_pw) / 2.f + m_perimeter_width);
     if (do_ramming)

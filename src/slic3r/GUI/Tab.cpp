@@ -1404,7 +1404,7 @@ void Tab::refresh_nozzle_controls()
                             << ", own process '" << current << "', split " << split << " -> button state " << int(control);
     wxString note;
     if (!current.empty())
-        note = format_wxstr(_L("%1% takes its speeds, accelerations, jerk and line widths from \"%2%\". Layer height, walls and infill come from this process."),
+        note = format_wxstr(_L("%1% takes its speeds, accelerations, jerk and its wall, infill, top surface and support line widths from \"%2%\". Layer height, first layer and bridge widths, walls and infill settings come from this process."),
                             nozzle, from_u8(current));
     else if (split)
         note = format_wxstr(_L("The fields below are %1%'s."), nozzle);
