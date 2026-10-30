@@ -92,6 +92,7 @@ add_executable(${_TEST_NAME}_tests
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
+    change_opt_value_tests.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
     bambu_connect_tests.cpp
