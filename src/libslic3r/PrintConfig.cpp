@@ -2851,6 +2851,19 @@ void PrintConfigDef::init_fff_params()
     def->max = 3600;
     def->set_default_value(new ConfigOptionFloats{ 0. });
 
+    // P6: gradient filaments. Visual only like the three above: the palette repeats every this many mm
+    // of filament. 0 (the default) means MultiColour::GRADIENT_CYCLE_MM_DEFAULT.
+    def = this->add("filament_colour_cycle", coFloats);
+    def->label = L("Gradient cycle length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament it takes to run through "
+                     "all its colours once, before the colours repeat. 0 means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = 0;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
     def->tooltip  = L("first small thumb");
@@ -11072,11 +11085,12 @@ const std::vector<std::string>& part_support_keys()
 
 const std::set<std::string>& visual_only_option_keys()
 {
-    // Multi-colour filaments P1. Glow (G1) and the gradient cycle length (P6) add their keys here.
+    // Multi-colour filaments P1; P6 adds the gradient cycle length. Glow (G1) adds its keys here.
     static const std::set<std::string> s_keys {
         "filament_colour_split",
         "filament_colour_angle",
         "filament_colour_twist",
+        "filament_colour_cycle",
     };
     return s_keys;
 }

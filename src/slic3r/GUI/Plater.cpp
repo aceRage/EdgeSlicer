@@ -12935,7 +12935,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     // Multi-colour P1: visual only, they follow the adopted colours.
                                     "filament_colour_split",
                                     "filament_colour_angle",
-                                    "filament_colour_twist"
+                                    "filament_colour_twist",
+                                    "filament_colour_cycle"
                                 };
                                 // A file without them gets the defaults, not the previous project's values
                                 // (apply_only() keeps a key the file lacks), as PresetBundle's project load does.

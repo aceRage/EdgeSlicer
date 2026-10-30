@@ -23,19 +23,47 @@ float twist_turns_per_mm3(float twist_deg_per_m, float diameter_mm)
     return float(double(twist_deg_per_m) / 360. / (1000. * area));
 }
 
+float gradient_cycles_per_mm3(float cycle_mm, float diameter_mm)
+{
+    const double d     = std::isfinite(diameter_mm) && diameter_mm > 0.f ? double(diameter_mm) : 1.75;
+    const double area  = 3.14159265358979323846 * 0.25 * d * d;   // mm2 of filament
+    const double cycle = std::isfinite(cycle_mm) && cycle_mm > 0.f ? double(cycle_mm) : double(GRADIENT_CYCLE_MM_DEFAULT);
+    return float(1. / (cycle * area));
+}
+
+bool slot_is_gradient(const UniformTable &table, int slot)
+{
+    return slot >= 0 && slot < GLSL_SLOTS && table.grad[size_t(slot) * 4] > 1.5f;
+}
+
+bool slot_is_multi(const UniformTable &table, int slot)
+{
+    return slot >= 0 && slot < GLSL_SLOTS && (table.bounds[size_t(slot) * 4 + 3] > 1.5f || table.grad[size_t(slot) * 4] > 1.5f);
+}
+
 UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector<float> &diameters_mm)
 {
     UniformTable t;
     for (int s = 0; s < GLSL_SLOTS; ++s) {
         const Filament f = size_t(s) < slots.size() ? slots[size_t(s)] : Filament();
         const int      n = std::clamp(f.n, 1, MAX_COLOURS);
+        const bool     gradient = f.is_gradient() && n == 1;
+        const int      stops    = gradient ? std::clamp(f.gradient_stops, 2, GRADIENT_MAX_STOPS) : 0;
         for (int c = 0; c < MAX_COLOURS; ++c) {
-            const RGB &col = f.colour[size_t(c < n ? c : 0)];
+            // A gradient keeps its stops in the colour entries (the fifth in the w of the first three).
+            const RGB &col = gradient ? f.gradient[size_t(c < stops ? c : 0)] : f.colour[size_t(c < n ? c : 0)];
             float     *dst = &t.colors[size_t((s * MAX_COLOURS + c) * 4)];
             dst[0] = col[0];
             dst[1] = col[1];
             dst[2] = col[2];
-            dst[3] = 1.f;
+            dst[3] = stops == GRADIENT_MAX_STOPS && c < 3 ? f.gradient[4][size_t(c)] : 1.f;
+        }
+        if (gradient) {
+            float *g = &t.grad[size_t(s * 4)];
+            g[0] = float(stops);
+            g[1] = gradient_cycles_per_mm3(f.cycle_mm, size_t(s) < diameters_mm.size() ? diameters_mm[size_t(s)] : 1.75f);
+            t.any_gradient = true;
+            t.any_multi    = true;
         }
         float *b = &t.bounds[size_t(s * 4)];
         b[0] = f.boundary(1);
@@ -63,7 +91,17 @@ bool uses_split(const UniformTable &table, const std::vector<unsigned char> &slo
     if (!table.any_multi)
         return false;
     for (const unsigned char s : slots)
-        if (s < GLSL_SLOTS && table.bounds[size_t(s) * 4 + 3] > 1.5f)
+        if (slot_is_multi(table, int(s)))
+            return true;
+    return false;
+}
+
+bool uses_gradient(const UniformTable &table, const std::vector<unsigned char> &slots)
+{
+    if (!table.any_gradient)
+        return false;
+    for (const unsigned char s : slots)
+        if (slot_is_gradient(table, int(s)))
             return true;
     return false;
 }
@@ -92,6 +130,7 @@ std::string config_signature(const ConfigBase &config)
     add("filament_colour");
     add("filament_multi_colors");
     add("filament_colour_mode");
+    // The visual-only keys, which include filament_colour_cycle (P6).
     for (const std::string &key : visual_only_option_keys())
         add(key);
     return sig;
@@ -109,13 +148,14 @@ const std::string &glsl_prelude()
         "uniform vec4 mc_bounds[16];\n"
         "uniform vec4 mc_params[16];\n"
         "uniform vec4 mc_global;\n"
-        "uniform vec4 mc_global2;\n") +
+        "uniform vec4 mc_global2;\n"
+        "uniform vec4 mc_grad[16];\n") +
         glsl_functions() +
         "\n"
         // libvgcode's hook (Viewer::set_base_color_prelude): section is (+1 right of travel, +1 top),
         // right and dir the segment's right and travel directions, look the slot (role buffer).
         "vec3 external_base_color(vec3 base_color, vec2 section, vec3 right, vec3 dir, float extruded_volume, int look, int role) {\n"
-        "  if (look < 0 || look > 15 || mc_count(look) <= 1)\n"
+        "  if (look < 0 || look > 15 || (mc_count(look) <= 1 && !mc_is_gradient(look)))\n"
         "    return base_color;\n"
         "  return mc_to_srgb3(mc_fragment_colour(look, role, section.x, section.y, right, dir, extruded_volume));\n"
         "}\n";
@@ -135,7 +175,8 @@ const std::string &glsl_mesh_prelude()
         "uniform vec4 mc_bounds[16];\n"
         "uniform vec4 mc_params[16];\n"
         "uniform vec4 mc_global;\n"
-        "uniform vec4 mc_global2;\n") +
+        "uniform vec4 mc_global2;\n"
+        "uniform vec4 mc_grad[16];\n") +
         glsl_functions() + "\n" + glsl_mesh_functions() + "\n";
     return prelude;
 }

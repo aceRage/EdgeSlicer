@@ -36,6 +36,22 @@ namespace MultiColour {
 
 constexpr int MAX_COLOURS = 4; // D10
 
+// ---- Gradient filaments (P6, design 1.3): the colour changes along the strand's length ----
+// A gradient slot (filament_colour_mode = 1) has two or more colours that run one after another and
+// repeat: the palette cycles, last colour back to the first, once per `filament_colour_cycle` mm of
+// filament. The most stops any known spool has is 5 (Snapmaker "Pastel Rainbow"; Bambu's "Dawn
+// Radiance" has 4), so 5 is the cap; a longer palette is resampled to 5 evenly spaced stops.
+constexpr int GRADIENT_MAX_STOPS = 5;
+// Filament length per palette cycle when the slot does not set one. A GUESS, not spool data: no
+// vendor publishes the repeat length. 3 m puts about one full cycle through a 10 g print of 1.75 mm
+// PLA (about 3.3 m of filament) and several through a 100 g one.
+constexpr float GRADIENT_CYCLE_MM_DEFAULT = 3000.f;
+constexpr float GRADIENT_CYCLE_MM_MIN     = 50.f;
+constexpr float GRADIENT_CYCLE_MM_MAX     = 100000.f;
+// The cycle length the key's value means: 0, a missing or a bad value gives the default, anything
+// else is clamped to [MIN, MAX].
+float gradient_cycle_mm(double stored);
+
 // Boundary blend width, in turns of the strand (about 15 degrees). P0 found the wall transition
 // soft and wide; P3 retunes it (a constant, not a setting) and never lets it exceed the narrowest
 // slice.
@@ -95,10 +111,17 @@ struct Filament
     std::array<float, MAX_COLOURS>      proportion{ 1.f, 0.f, 0.f, 0.f }; // sums to 1 over [0, n)
     float                               rotation_deg    = 0.f;
     float                               twist_deg_per_m = 0.f;
-    // P6 (gradient filaments along the length) adds its palette-cycle length here, read from its
-    // own visual-only key; the cumulative filament length bead_colour() already takes is its input.
+    // P6: a gradient slot. n stays 1 (it is not split across the strand); the palette runs along the
+    // length instead, on the same cumulative filament length that bead_colour() takes for twist.
+    int                                 gradient_stops = 0;        // 0 = not a gradient, else 2..GRADIENT_MAX_STOPS
+    std::array<RGB, GRADIENT_MAX_STOPS> gradient{};                // linear RGB, in palette order
+    float                               cycle_mm       = GRADIENT_CYCLE_MM_DEFAULT;
 
     bool  is_multi() const { return n > 1; }
+    bool  is_gradient() const { return gradient_stops >= 2; }
+    // The palette colour after filament_length_m metres of this slot's filament: linear blend between
+    // neighbouring stops (linear RGB), wrapping every cycle_mm. A non-gradient slot gives colour[0].
+    RGB   gradient_colour(float filament_length_m) const;
     // Cumulative start of slice i in turns (boundary(0) = 0, boundary(n) = 1).
     float boundary(int i) const;
     // The blend width actually used: BLEND_TURNS, never more than the narrowest slice.
@@ -164,10 +187,15 @@ bool                  parse_rgb8(const std::string &text, std::array<int, 3> &ou
 // the swatch half extents. Returns the colour index 0..n-1.
 int swatch_slice(const Filament &f, float px, float py, float hw, float hh);
 
+// A palette (any count >= 1) as exactly `count` evenly spaced stops of the same cyclic palette (the
+// cycle wraps last -> first). The same colours come back when it already has `count` stops.
+std::vector<RGB> resample_cyclic_palette(const std::vector<RGB> &palette, int count);
+
 // Slot `slot` of a project / full config: filament_multi_colors + filament_colour_mode (+ the
 // filament_colour fallback) and the visual-only keys. Missing keys and short vectors take their
 // defaults (equal split, angle 0, twist 0). Gradient slots (filament_colour_mode = 1) and slots
-// with one colour come back as a single colour (n = 1) in v1 (design 2.3; gradients are P6).
+// with one colour come back as a single colour (n = 1); a gradient slot with two or more colours
+// also carries its palette (gradient_stops, gradient) and filament_colour_cycle (P6).
 Filament from_config(const ConfigBase &config, size_t slot);
 
 } // namespace MultiColour

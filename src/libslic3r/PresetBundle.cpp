@@ -224,6 +224,7 @@ static std::vector<std::string> s_project_options {
     "filament_colour_split",
     "filament_colour_angle",
     "filament_colour_twist",
+    "filament_colour_cycle",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",

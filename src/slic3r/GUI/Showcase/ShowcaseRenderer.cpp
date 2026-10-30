@@ -1110,6 +1110,7 @@ static void showcase_set_multicolour_uniforms(GLShaderProgram &shader, const Mul
     vec4s("mc_params", t.params.data(), int(t.params.size() / 4));
     vec4s("mc_global", t.global.data(), 1);
     vec4s("mc_global2", t.global2.data(), 1);
+    vec4s("mc_grad", t.grad.data(), int(t.grad.size() / 4));
 }
 
 // S2: the objects with the filament materials. Draws each visible volume itself (rather than through
@@ -1288,7 +1289,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         // P4: so does a coextruded slot (its stripes follow the skin's lines).
         const int        mc_slot = mc && !v->is_wipe_tower && it.filament >= 1 && size_t(it.filament) <= filaments.size() &&
                                            it.filament <= MultiColour::GLSL_SLOTS &&
-                                           multicolour.bounds[size_t(it.filament - 1) * 4 + 3] > 1.5f ?
+                                           MultiColour::slot_is_multi(multicolour, it.filament - 1) ?
                                        it.filament - 1 : -1;
         const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;

@@ -385,6 +385,39 @@ std::array<int, MAX_COLOURS> quantize_percent(const std::array<float, MAX_COLOUR
     return q;
 }
 
+float gradient_cycle_mm(double stored)
+{
+    if (!std::isfinite(stored) || stored <= 0.)
+        return GRADIENT_CYCLE_MM_DEFAULT;
+    return float(std::clamp(stored, double(GRADIENT_CYCLE_MM_MIN), double(GRADIENT_CYCLE_MM_MAX)));
+}
+
+RGB Filament::gradient_colour(float filament_length_m) const
+{
+    if (!is_gradient())
+        return colour[0];
+    const float cycle = cycle_mm > 0.f ? cycle_mm : GRADIENT_CYCLE_MM_DEFAULT;
+    const float t     = wrap_turns(filament_length_m * 1000.f / cycle) * float(gradient_stops);
+    const int   i     = std::min(int(std::floor(t)), gradient_stops - 1);
+    return mix(gradient[size_t(i)], gradient[size_t((i + 1) % gradient_stops)], t - float(i));
+}
+
+std::vector<RGB> resample_cyclic_palette(const std::vector<RGB> &palette, int count)
+{
+    std::vector<RGB> out;
+    if (palette.empty() || count < 1)
+        return out;
+    const size_t n = palette.size();
+    if (n == size_t(count))
+        return palette;
+    for (int k = 0; k < count; ++k) {
+        const double pos = double(k) * double(n) / double(count);
+        const size_t i   = std::min(size_t(std::floor(pos)), n - 1);
+        out.push_back(mix(palette[i], palette[(i + 1) % n], float(pos - double(i))));
+    }
+    return out;
+}
+
 Filament from_config(const ConfigBase &config, size_t slot)
 {
     Filament f;
@@ -394,11 +427,16 @@ Filament from_config(const ConfigBase &config, size_t slot)
         have_primary = parse_hex(*c, primary);
 
     std::vector<RGB> colours;
+    std::vector<RGB> palette;   // every colour (up to 16), for a gradient; colours keeps the first MAX_COLOURS
     if (const std::string *multi = string_at(config, "filament_multi_colors", slot); multi != nullptr && !multi->empty())
         for (const std::string &part : split_bar(*multi)) {
             RGB c;
-            if (parse_hex(part, c) && int(colours.size()) < MAX_COLOURS)
+            if (!parse_hex(part, c))
+                continue;
+            if (int(colours.size()) < MAX_COLOURS)
                 colours.push_back(c);
+            if (palette.size() < 16)
+                palette.push_back(c);
         }
 
     int mode = 0;
@@ -414,6 +452,22 @@ Filament from_config(const ConfigBase &config, size_t slot)
         f.n = int(colours.size());
         for (int i = 0; i < f.n; ++i)
             f.colour[i] = srgb_to_linear(colours[i]);
+    }
+
+    if (mode == 1 && palette.size() >= 2) {
+        // A gradient (P6): the palette runs along the length. Split data stays n = 1 as before.
+        std::vector<RGB> linear;
+        for (const RGB &c : palette)
+            linear.push_back(srgb_to_linear(c));
+        const std::vector<RGB> stops = resample_cyclic_palette(linear, std::min<int>(int(linear.size()), GRADIENT_MAX_STOPS));
+        f.gradient_stops = int(stops.size());
+        for (size_t i = 0; i < stops.size(); ++i)
+            f.gradient[i] = stops[i];
+        double cycle = 0.;
+        if (const auto *c = dynamic_cast<const ConfigOptionFloats*>(config.option("filament_colour_cycle"));
+            c != nullptr && slot < c->values.size())
+            cycle = c->values[slot];
+        f.cycle_mm = gradient_cycle_mm(cycle);
     }
 
     const std::string *split = string_at(config, "filament_colour_split", slot);

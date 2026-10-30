@@ -2036,7 +2036,7 @@ void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
         }
     }
     m_showcase_mc_program = program;
-    m_viewer.set_extruded_volume_enabled(want && look.multicolour.any_twist && program != 0);
+    m_viewer.set_extruded_volume_enabled(want && look.multicolour.any_volume() && program != 0);
     if (program == 0)
         return;
     const MultiColour::UniformTable plain = MultiColour::pack_uniforms({}, {});
@@ -2053,6 +2053,7 @@ void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global"), 1, t.global.data()));
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global2"), 1, t.global2.data()));
+        glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_grad"), GLsizei(t.grad.size() / 4), t.grad.data()));
     }
     glsafe(::glUseProgram(GLuint(curr_program)));
 }
@@ -2095,7 +2096,8 @@ void GCodeViewer::refresh_preview_multicolour_table()
         m_preview_mc_table = MultiColour::pack_uniforms(slots, diameters);
     }
     m_preview_mc_has_split = MultiColour::uses_split(m_preview_mc_table, used);
-    m_preview_mc_has_twist = MultiColour::uses_twist(m_preview_mc_table, used);
+    // The extruded-volume buffer serves twist and gradients (P6) alike.
+    m_preview_mc_has_twist = MultiColour::uses_twist(m_preview_mc_table, used) || MultiColour::uses_gradient(m_preview_mc_table, used);
 }
 
 // The toggle is offered in the views that colour by filament.
@@ -2153,6 +2155,7 @@ void GCodeViewer::apply_preview_multicolour()
     glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
     glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global"), 1, t.global.data()));
     glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global2"), 1, t.global2.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_grad"), GLsizei(t.grad.size() / 4), t.grad.data()));
     glsafe(::glUseProgram(GLuint(curr_program)));
     m_viewer.set_multicolour_preview(true);
 }

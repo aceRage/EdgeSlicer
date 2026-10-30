@@ -6,6 +6,7 @@
 
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
+#include "libslic3r/Format/BambuKeyAliases.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -305,7 +306,8 @@ TEST_CASE("A slot is read from the project config with defaults for anything mis
 TEST_CASE("The visual-only keys are defined, project-only and invisible to the static config", "[MultiColour][Config]")
 {
     const std::set<std::string> &keys = visual_only_option_keys();
-    CHECK(keys == std::set<std::string>{ "filament_colour_split", "filament_colour_angle", "filament_colour_twist" });
+    CHECK(keys == std::set<std::string>{ "filament_colour_split", "filament_colour_angle", "filament_colour_twist",
+                                         "filament_colour_cycle" });
     const DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
     for (const std::string &key : keys) {
         INFO(key);
@@ -532,6 +534,7 @@ TEST_CASE("The visual-only keys round-trip through a project 3MF", "[MultiColour
         cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
         cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
         cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
+        cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1500., 0. });
         const Loaded3mf back = round_trip(cfg, "multicolour_keys.3mf");
         REQUIRE(back.stored);
         REQUIRE(back.loaded);
@@ -539,6 +542,8 @@ TEST_CASE("The visual-only keys round-trip through a project 3MF", "[MultiColour
         CHECK(back.config.option<ConfigOptionStrings>("filament_colour_split")->values == std::vector<std::string>{ "30|70", "25|25|50" });
         CHECK(back.config.option<ConfigOptionFloats>("filament_colour_angle")->values == std::vector<double>{ 137., -45. });
         CHECK(back.config.option<ConfigOptionFloats>("filament_colour_twist")->values == std::vector<double>{ 90., 0. });
+        REQUIRE(back.config.has("filament_colour_cycle"));
+        CHECK(back.config.option<ConfigOptionFloats>("filament_colour_cycle")->values == std::vector<double>{ 1500., 0. });
         const Filament b = from_config(back.config, 1);
         CHECK(b.n == 3);
         CHECK_THAT(b.proportion[2], WithinAbs(0.5, 1e-6));
@@ -563,6 +568,7 @@ TEST_CASE("Export Bambu 3MF drops the visual-only keys (D8)", "[MultiColour][Bam
     cfg.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
     cfg.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
     cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
+    cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1500., 0. });
 
     BambuExport::Context      ctx = BambuExport::Context::from_project(cfg);
     BambuExport::Report       report;
@@ -641,4 +647,214 @@ TEST_CASE("Swatch slices follow the proportions and the rotation (P2)", "[MultiC
     CHECK(swatch_slice(g, -10.f, -1.f, 18.f, 8.f) == 2); // left
     Filament one;
     CHECK(swatch_slice(one, 3.f, 3.f, 18.f, 8.f) == 0);
+}
+
+// ---- P6: gradient filaments along the length (tests/design_multicolour_filament_view.md 1.3) ----
+
+namespace {
+
+DynamicPrintConfig gradient_config()
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings{ "#FF0000", "#00FF00", "#0000FF", "#FFFFFF", "#123456" });
+    cfg.set_key_value("filament_multi_colors",
+                      new ConfigOptionStrings{ "#FF0000|#FFFF00|#0000FF",                                    // 0: gradient, 3 stops
+                                               "#FF0000|#FFFF00",                                            // 1: split
+                                               "#FF0000|#00FF00|#0000FF|#FFFF00|#FF00FF",                    // 2: gradient, 5 stops
+                                               "#000000|#202020|#404040|#606060|#808080|#A0A0A0|#C0C0C0|#E0E0E0",   // 3: gradient, 8 colours
+                                               "#FF0000" });                                                 // 4: gradient of one colour
+    cfg.set_key_value("filament_colour_mode", new ConfigOptionInts{ 1, 0, 1, 1, 1 });
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("A gradient slot is read with its palette and cycle length (P6)", "[MultiColour][Gradient][Config]")
+{
+    DynamicPrintConfig cfg = gradient_config();
+
+    SECTION("the palette, in order, in linear RGB; the slot is not split")
+    {
+        const Filament g = from_config(cfg, 0);
+        REQUIRE(g.is_gradient());
+        CHECK(g.gradient_stops == 3);
+        CHECK(g.n == 1);
+        CHECK(same(g.gradient[0], RED_L));
+        CHECK(same(g.gradient[1], YELLOW_L));
+        CHECK(same(g.gradient[2], BLUE_L));
+        // Split behaviour is as before: the plain colour is filament_colour.
+        CHECK(same(g.colour[0], srgb_to_linear(RGB{ 1.f, 0.f, 0.f })));
+    }
+    SECTION("a split slot (mode 0) is not a gradient, whatever its cycle key says")
+    {
+        cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 0., 800. });
+        const Filament s = from_config(cfg, 1);
+        CHECK_FALSE(s.is_gradient());
+        CHECK(s.gradient_stops == 0);
+        CHECK(s.n == 2);
+    }
+    SECTION("one colour in gradient mode is a plain colour")
+    {
+        const Filament one = from_config(cfg, 4);
+        CHECK_FALSE(one.is_gradient());
+        CHECK(one.n == 1);
+    }
+    SECTION("five stops are kept; a longer palette is resampled to five")
+    {
+        const Filament five = from_config(cfg, 2);
+        CHECK(five.gradient_stops == GRADIENT_MAX_STOPS);
+        CHECK(same(five.gradient[3], YELLOW_L));
+        CHECK(same(five.gradient[4], srgb_to_linear(RGB{ 1.f, 0.f, 1.f })));
+        const Filament eight = from_config(cfg, 3);
+        CHECK(eight.gradient_stops == GRADIENT_MAX_STOPS);
+        CHECK(same(eight.gradient[0], srgb_to_linear(RGB{ 0.f, 0.f, 0.f })));
+        // Stop k of 5 sits k * 8 / 5 colours along the cyclic palette: stop 5 would be the start again.
+        CHECK(eight.gradient[1][0] > eight.gradient[0][0]);
+        CHECK(eight.gradient[4][0] > eight.gradient[3][0]);
+    }
+    SECTION("the cycle length: the default, the key, and its limits")
+    {
+        CHECK(from_config(cfg, 0).cycle_mm == GRADIENT_CYCLE_MM_DEFAULT);
+        cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1500., 0., -5. });
+        CHECK(from_config(cfg, 0).cycle_mm == 1500.f);
+        CHECK(from_config(cfg, 2).cycle_mm == GRADIENT_CYCLE_MM_DEFAULT);   // 0 = default
+        cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1.f, 1e9 });
+        CHECK(from_config(cfg, 0).cycle_mm == GRADIENT_CYCLE_MM_MIN);
+        CHECK(from_config(cfg, 1).cycle_mm == GRADIENT_CYCLE_MM_DEFAULT);   // split slot: untouched default
+        cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1e9, 1e9, 1e9 });
+        CHECK(from_config(cfg, 2).cycle_mm == GRADIENT_CYCLE_MM_MAX);
+        CHECK(gradient_cycle_mm(std::nan("")) == GRADIENT_CYCLE_MM_DEFAULT);
+        CHECK(gradient_cycle_mm(-1.) == GRADIENT_CYCLE_MM_DEFAULT);
+    }
+}
+
+TEST_CASE("A gradient runs through its palette once per cycle and wraps (P6)", "[MultiColour][Gradient]")
+{
+    Filament g;
+    g.gradient_stops = 3;
+    g.gradient       = { RED_L, YELLOW_L, BLUE_L };
+    g.cycle_mm       = 3000.f;
+    g.colour[0]      = GREEN_L;
+
+    SECTION("stop k is reached k / n of the way through the cycle")
+    {
+        CHECK(same(g.gradient_colour(0.f), RED_L));
+        CHECK(same(g.gradient_colour(1.f), YELLOW_L));
+        CHECK(same(g.gradient_colour(2.f), BLUE_L));
+    }
+    SECTION("between two stops the blend is linear, and the last stop blends back to the first")
+    {
+        const RGB half = g.gradient_colour(0.5f);
+        CHECK_THAT(half[0], WithinAbs((RED_L[0] + YELLOW_L[0]) / 2, 1e-5));
+        CHECK_THAT(half[1], WithinAbs((RED_L[1] + YELLOW_L[1]) / 2, 1e-5));
+        const RGB back = g.gradient_colour(2.5f);
+        CHECK_THAT(back[0], WithinAbs((BLUE_L[0] + RED_L[0]) / 2, 1e-5));
+        CHECK_THAT(back[2], WithinAbs((BLUE_L[2] + RED_L[2]) / 2, 1e-5));
+    }
+    SECTION("the colour repeats every cycle, also backwards and far out")
+    {
+        CHECK(same(g.gradient_colour(3.f), RED_L, 1e-3f));
+        CHECK(same(g.gradient_colour(4.f), g.gradient_colour(1.f), 1e-3f));
+        CHECK(same(g.gradient_colour(300.f + 2.f), BLUE_L, 5e-3f));
+        CHECK(same(g.gradient_colour(-1.f), BLUE_L, 1e-3f));   // one third of a cycle before the start
+        CHECK(same(g.gradient_colour(-3.f), RED_L, 1e-3f));
+    }
+    SECTION("a shorter cycle runs faster")
+    {
+        g.cycle_mm = 300.f;
+        CHECK(same(g.gradient_colour(0.1f), YELLOW_L));
+        CHECK(same(g.gradient_colour(0.2f), BLUE_L));
+        CHECK(same(g.gradient_colour(0.3f), RED_L, 1e-3f));
+    }
+    SECTION("two colours go there and back")
+    {
+        Filament two;
+        two.gradient_stops = 2;
+        two.gradient       = { RED_L, BLUE_L };
+        two.cycle_mm       = 2000.f;
+        CHECK(same(two.gradient_colour(0.f), RED_L));
+        CHECK(same(two.gradient_colour(1.f), BLUE_L));
+        const RGB three_quarter = two.gradient_colour(1.5f);
+        CHECK_THAT(three_quarter[0], WithinAbs(RED_L[0] / 2 + BLUE_L[0] / 2, 1e-5));
+    }
+    SECTION("a slot that is not a gradient keeps its colour")
+    {
+        Filament plain;
+        plain.colour[0] = GREEN_L;
+        CHECK_FALSE(plain.is_gradient());
+        CHECK(same(plain.gradient_colour(1.f), GREEN_L));
+    }
+}
+
+TEST_CASE("A palette resamples to evenly spaced stops of the same cycle (P6)", "[MultiColour][Gradient]")
+{
+    const std::vector<RGB> three = { RED_L, YELLOW_L, BLUE_L };
+    CHECK(resample_cyclic_palette(three, 3) == three);
+    CHECK(resample_cyclic_palette({}, 5).empty());
+
+    const std::vector<RGB> six = resample_cyclic_palette(three, 6);
+    REQUIRE(six.size() == 6);
+    CHECK(same(six[0], RED_L));
+    CHECK(same(six[2], YELLOW_L));
+    CHECK(same(six[4], BLUE_L));
+    CHECK_THAT(six[1][0], WithinAbs((RED_L[0] + YELLOW_L[0]) / 2, 1e-5));
+    CHECK_THAT(six[5][2], WithinAbs((BLUE_L[2] + RED_L[2]) / 2, 1e-5));   // the last blends towards the first
+
+    const std::vector<RGB> two = resample_cyclic_palette({ RED_L, BLUE_L, GREEN_L, YELLOW_L, RED_L, BLUE_L, GREEN_L }, 5);
+    CHECK(two.size() == 5);
+}
+
+TEST_CASE("Bambu's gradient spelling reads as a gradient slot (P6)", "[MultiColour][Gradient][BambuAlias]")
+{
+    // filament_colour_type: "0" is Bambu's gradient (ours is mode 1), "1" its default (split or single).
+    std::string key = "filament_colour_type", value = "0";
+    REQUIRE(BambuKeyAliases::import_key(key, value));
+    CHECK(key == "filament_colour_mode");
+    CHECK(value == "1");
+    key = "filament_colour_type"; value = "1";
+    REQUIRE(BambuKeyAliases::import_key(key, value));
+    CHECK(value == "0");
+    // The palette: space-separated there, '|' here.
+    key = "filament_multi_colour"; value = "#EC984C #6CD4BC #A66EB9 #D87694";   // Dawn Radiance
+    REQUIRE(BambuKeyAliases::import_key(key, value));
+    CHECK(key == "filament_multi_colors");
+    CHECK(value == "#EC984C|#6CD4BC|#A66EB9|#D87694");
+
+    // Imported, it is a four-stop gradient with the default cycle length.
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings{ "#EC984C" });
+    cfg.set_key_value("filament_multi_colors", new ConfigOptionStrings{ value });
+    cfg.set_key_value("filament_colour_mode", new ConfigOptionInts{ 1 });
+    const Filament g = from_config(cfg, 0);
+    CHECK(g.is_gradient());
+    CHECK(g.gradient_stops == 4);
+    CHECK(g.cycle_mm == GRADIENT_CYCLE_MM_DEFAULT);
+
+    // Going out, the cycle length is ours alone: the Bambu name has no equivalent.
+    CHECK(BambuKeyAliases::by_ours("filament_colour_cycle") == nullptr);
+    CHECK(BambuKeyAliases::by_bambu("filament_colour_cycle") == nullptr);
+}
+
+TEST_CASE("The cycle length is a per-slot visual-only key that follows the slots (P6)", "[MultiColour][Gradient][Config]")
+{
+    CHECK(is_visual_only_option("filament_colour_cycle"));
+    const ConfigOptionDef *def = print_config_def.get("filament_colour_cycle");
+    REQUIRE(def != nullptr);
+    CHECK(def->cli == ConfigOptionDef::nocli);
+    CHECK_FALSE(FullPrintConfig::defaults().has("filament_colour_cycle"));
+
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1000., 2000., 3000. });
+    visual_only_erase_slot(cfg, 1);
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_cycle")->values == std::vector<double>{ 1000., 3000. });
+    visual_only_resize_slots(cfg, 4);
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_cycle")->values == std::vector<double>{ 1000., 3000., 0., 0. });
+    visual_only_move_slot(cfg, 0, 1);
+    CHECK(cfg.option<ConfigOptionFloats>("filament_colour_cycle")->values == std::vector<double>{ 3000., 1000., 0., 0. });
+
+    // Print::apply() strips it, like the others.
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1500. });
+    strip_visual_only_options(full);
+    CHECK_FALSE(full.has("filament_colour_cycle"));
 }
