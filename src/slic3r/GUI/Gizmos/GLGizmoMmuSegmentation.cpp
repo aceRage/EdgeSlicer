@@ -211,6 +211,7 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["perform"]              = _L("Perform");
 
     m_desc["remove_all"]           = _L("Erase all painting");
+    m_desc["color_pattern"]        = _L("Color Pattern...");
     m_desc["circle"]               = _L("Circle");
     m_desc["sphere"]               = _L("Sphere");
     m_desc["pointer"]              = _L("Triangles");
@@ -498,7 +499,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     const float remove_btn_width = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
     const float filter_btn_width = m_imgui->calc_text_size(m_desc.at("perform")).x + m_imgui->scaled(1.f);
     const float remap_btn_width = m_imgui->calc_text_size(m_desc.at("perform_remap")).x + m_imgui->scaled(1.f);
-    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + m_imgui->scaled(2.f);
+    const float pattern_btn_width = m_imgui->calc_text_size(m_desc.at("color_pattern")).x + m_imgui->scaled(1.f);
+    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + pattern_btn_width + m_imgui->scaled(2.f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
     const float color_button_width = m_imgui->calc_text_size(std::string_view{""}).x + m_imgui->scaled(1.75f);
     const size_t total_filament_count = m_extruders_colors.size();
@@ -1130,6 +1132,18 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
         update_model_object();
         m_parent.set_as_dirty();
+    }
+
+    // Shortcut to the Color Pattern dialog (bands by height) for the painted object. The dialog is
+    // modal and rebuilds the object list, so leave the gizmo first and open it once this frame is done.
+    ImGui::SameLine();
+    if (m_imgui->button(m_desc.at("color_pattern"))) {
+        const int obj_idx = m_parent.get_selection().get_object_idx();
+        wxGetApp().CallAfter([obj_idx]() {
+            if (GLCanvas3D *cnv = wxGetApp().plater()->get_view3D_canvas3D())
+                cnv->get_gizmos_manager().reset_all_states();
+            wxGetApp().obj_list()->height_pattern_dialog(obj_idx);
+        });
     }
     ImGui::PopStyleVar(2);
     GizmoImguiEnd();

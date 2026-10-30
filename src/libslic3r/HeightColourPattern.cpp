@@ -352,9 +352,12 @@ std::string height_patterns_to_json(const std::vector<const std::vector<HeightCo
             json gen = json::array();
             for (const HeightPatternRange &g : p.generated)
                 gen.push_back({ { "lo", g.lo }, { "hi", g.hi }, { "extruder", g.extruder }, { "layer_height", g.layer_height } });
-            pats.push_back({ { "id", p.id }, { "start_z", p.start_z }, { "band_h", p.band_h }, { "gap_h", p.gap_h },
+            json pat = { { "id", p.id }, { "start_z", p.start_z }, { "band_h", p.band_h }, { "gap_h", p.gap_h },
                              { "repeat", p.repeat }, { "sequence", p.sequence }, { "gap_mode", p.gap_mode },
-                             { "gap_filament", p.gap_filament }, { "snap_to_layers", p.snap_to_layers }, { "generated", gen } });
+                             { "gap_filament", p.gap_filament }, { "snap_to_layers", p.snap_to_layers }, { "generated", gen } };
+            if (p.axis != 0)
+                pat["axis"] = p.axis;   // only written when set: Phase 1 files stay byte-identical
+            pats.push_back(std::move(pat));
         }
         objs.push_back({ { "object", int(i) + 1 }, { "patterns", pats } });
     }
@@ -385,6 +388,7 @@ std::vector<std::pair<int, std::vector<HeightColourPattern>>> height_patterns_fr
                 p.gap_mode       = j.value("gap_mode", 0);
                 p.gap_filament   = j.value("gap_filament", 0);
                 p.snap_to_layers = j.value("snap_to_layers", true);
+                p.axis           = j.value("axis", 0);
                 if (j.contains("sequence") && j["sequence"].is_array())
                     for (const json &f : j["sequence"])
                         p.sequence.push_back(f.get<int>());
@@ -398,7 +402,7 @@ std::vector<std::pair<int, std::vector<HeightColourPattern>>> height_patterns_fr
                         p.generated.push_back(r);
                     }
                 // A record that cannot describe a pattern is dropped, not half-applied.
-                if (p.id < 1 || p.sequence.empty() || p.generated.empty() || p.gap_mode < 0 || p.gap_mode > 2)
+                if (p.id < 1 || p.sequence.empty() || p.generated.empty() || p.gap_mode < 0 || p.gap_mode > 2 || p.axis != 0)
                     continue;
                 bool unique = true;
                 for (const HeightColourPattern &q : pats)
