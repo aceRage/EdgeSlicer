@@ -1417,7 +1417,15 @@ void Tab::refresh_nozzle_controls()
         view->nozzle_apply_btn->SetToolTip(split ? _L("Copy this nozzle's speeds, accelerations and jerk to every other nozzle of this process") :
                                                    _L("Give each nozzle its own speeds, accelerations and jerk in this process. "
                                                       "Every nozzle starts from the values it prints with now."));
-        view->nozzle_apply_btn->Show(current.empty() && splittable);
+        // Always shown, so it can be found: disabled with the reason when it cannot act.
+        const bool can_act = current.empty() && splittable;
+        if (!can_act)
+            view->nozzle_apply_btn->SetToolTip(!current.empty() ?
+                _L("This nozzle takes its speeds from its own process. Pick \"This process (the plate's)\" to edit them here.") :
+                _L("This process keeps one set of speeds for all nozzles (the U1's processes do). "
+                   "Pick a process for this nozzle in \"Speeds from\" instead."));
+        view->nozzle_apply_btn->Enable(can_act);
+        view->nozzle_apply_btn->Show(true);
     }
     if (view->host != nullptr)
         view->host->Layout();
@@ -1509,36 +1517,49 @@ void Tab::refresh_flow_variant_view()
         wxWindow* header = m_parent->get_page_header();
         auto* host = new wxPanel(header, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
         host->SetBackgroundColour(header->GetBackgroundColour());
-        auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
+        // Row 1: [Nozzle: Left | Right] (or T1..Tn) beside the Standard / High flow selector.
+        // Row 2 (per-nozzle process P1): the process that nozzle prints with, Edit nozzles separately /
+        // Apply to all nozzles, and a note. Two rows, so nothing is pushed off the right edge.
+        auto* host_vsizer = new wxBoxSizer(wxVERTICAL);
+        auto* host_sizer  = new wxBoxSizer(wxHORIZONTAL);
+        host_vsizer->Add(host_sizer, 0, wxEXPAND);
+        auto make_caption = [host](const wxString& text) {
+            auto* caption = new wxStaticText(host, wxID_ANY, text);
+            caption->SetFont(Label::Body_13);
+            caption->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
+            return caption;
+        };
 
-        // Per-nozzle process P1: [Left | Right] (or T1..Tn), the process that nozzle prints with, and a note.
         if (!nozzle_labels.empty()) {
+            host_sizer->Add(make_caption(_L("Nozzle") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
             m_flow_variant_view->nozzle_selector = new SegmentedToggle(host, nozzle_labels,
                                                                        int(m_flow_variant_view->selected_extruder),
                                                                        SegmentedToggle::Style::Pill);
             m_flow_variant_view->nozzle_selector->SetToolTip(_L("The nozzle whose speed settings this page shows"));
-            host_sizer->Add(m_flow_variant_view->nozzle_selector, 0, wxALIGN_CENTER_VERTICAL);
+            host_sizer->Add(m_flow_variant_view->nozzle_selector, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(16));
 
-            auto* combo = new ::ComboBox(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(340), -1), 0,
+            auto* row2 = new wxBoxSizer(wxHORIZONTAL);
+            row2->Add(make_caption(_L("Speeds from") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+            auto* combo = new ::ComboBox(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(320), -1), 0,
                                          nullptr, wxCB_READONLY);
             combo->SetToolTip(_L("The process this nozzle takes its speeds, accelerations and jerk from. Layer height, "
                                  "walls, infill, line widths and supports always come from this (the plate's) process."));
             combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& evt) { on_nozzle_process_chosen(evt.GetSelection()); });
-            host_sizer->Add(combo, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+            row2->Add(combo, 0, wxALIGN_CENTER_VERTICAL);
             m_flow_variant_view->nozzle_process_combo = combo;
 
-            auto* apply_btn = new Button(host, _L("Apply to all nozzles"));
+            auto* apply_btn = new Button(host, _L("Edit nozzles separately"));
             apply_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
-            apply_btn->SetToolTip(_L("Copy this nozzle's speeds, accelerations and jerk to every other nozzle of this process"));
             apply_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_apply_nozzle_to_all(); });
-            host_sizer->Add(apply_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+            row2->Add(apply_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
             m_flow_variant_view->nozzle_apply_btn = apply_btn;
 
             auto* note = new wxStaticText(host, wxID_ANY, wxEmptyString);
             note->SetFont(Label::Body_12);
             note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
-            host_sizer->Add(note, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(10));
+            row2->Add(note, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(10));
             m_flow_variant_view->nozzle_note = note;
+            host_vsizer->Add(row2, 0, wxEXPAND | wxTOP, FromDIP(6));
 
             m_flow_variant_view->nozzle_selector->bindSelectionCallback([this](int index) {
                 // The toggle's own click is still running: switch after it returns.
@@ -1567,7 +1588,7 @@ void Tab::refresh_flow_variant_view()
         host_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
         m_flow_variant_view->copy_btn = copy_btn;
 
-        host->SetSizer(host_sizer);
+        host->SetSizer(host_vsizer);
         m_flow_variant_view->host = host;
         m_parent->get_page_header_sizer()->Add(host,
                                                0,
