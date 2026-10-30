@@ -1,3 +1,4 @@
+// Ported from OrcaSlicer @3610d8bb (AGPL-3.0); original authors as credited upstream. See src/slic3r/GUI/CAD/NOTICE.md.
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
@@ -4931,6 +4932,8 @@ void DesignPanel::sync_recipe_to_model()
 {
     Plater* plater = wxGetApp().plater();
     if (plater == nullptr) return;
+    // A newer-version recipe is kept byte-for-byte so a save round-trips it (F7).
+    if (m_recipe_read_only) return;
     // An empty document CLEARS it, so a non-CAD project never carries a stale recipe.
     std::string recipe = m_doc.features.empty() ? std::string() : m_doc.serialize_recipe();
     if (plater->model().cad_recipe == recipe)
@@ -7550,7 +7553,17 @@ void DesignPanel::update_sidebar_pane(bool force_update)
 void DesignPanel::load_recipe(const std::string& blob)
 {
     if (blob.empty()) return;
+    m_recipe_read_only = false;
     if (!m_doc.deserialize_recipe(blob)) {
+        if (CadDocument::newer_recipe_version(blob) != 0) {
+            // Not loaded, and read-only: the project still saves the original bytes.
+            m_recipe_read_only = true;
+            m_doc.clear();
+            set_status(StatusKind::Error, wxString::Format(
+                _L("Could not restore the CAD model: %s. The design is kept unchanged in the project; edits made here are not saved."),
+                wxString::FromUTF8(m_doc.error.empty() ? std::string("newer format") : m_doc.error)));
+            return;
+        }
         // Carry the kernel's reason. deserialize_recipe distinguishes three cases that matter
         // very differently to the person reading this — saved by a NEWER build, saved by an
         // OLDER one, or genuinely unreadable — and replacing all three with one sentence left
@@ -8212,6 +8225,7 @@ void DesignPanel::on_new_design()
 // the previous project's feature tree into the new one.
 void DesignPanel::clear_document()
 {
+    m_recipe_read_only = false;    // a new design / project owns the recipe again
     tool_cancel();                 // leave any active tool / sketch / constrain cleanly
     end_body_move(true);           // ...and a Move, which tool_cancel leaves while a value is pending
     m_doc.clear();                 // features + bodies + meshes + history

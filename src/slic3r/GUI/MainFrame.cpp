@@ -455,8 +455,12 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     //BBS
     Bind(EVT_SELECT_TAB, [this](wxCommandEvent&evt) {
         TabPosition pos = (TabPosition)evt.GetInt();
+#ifdef SLIC3R_CAD
         // Design is sentinel 100, not a notebook index; select_tab maps it through FindPage.
         select_tab(size_t(pos));
+#else
+        m_tabpanel->SetSelection(pos);
+#endif
     });
 
     // Profiling aid for the lazily built tabs: with ORCA_STARTUP_PROFILE_OPEN_TABS set to

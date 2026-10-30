@@ -1,3 +1,4 @@
+// Ported from OrcaSlicer @3610d8bb (AGPL-3.0); original authors as credited upstream. See src/slic3r/GUI/CAD/NOTICE.md.
 // GENERATED FILE — DO NOT EDIT.
 // Source: scripts/CAD/tool_atlas.json   Generator: scripts/CAD/gen_offer_table.py
 //

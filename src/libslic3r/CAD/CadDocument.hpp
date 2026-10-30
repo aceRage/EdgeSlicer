@@ -807,7 +807,12 @@ public:
     // strings are read as text and left unrestored. true = keep the bytes on Model::cad_recipe;
     // false + *error = drop them. A recipe that would fail recompute() or fail to restore an
     // Import solid on this build still returns true so it can round-trip on the next save.
+    // A newer, unknown recipe version also returns true (bytes kept opaque, see newer_recipe_version).
     static bool validate_recipe_bytes(const std::string& blob, std::string* error = nullptr);
+    // The blob's version when it is newer than this build reads (and within
+    // kMaxFutureRecipeVersion, so random bytes do not qualify); 0 otherwise.
+    static constexpr uint32_t kMaxFutureRecipeVersion = 255;
+    static uint32_t newer_recipe_version(const std::string& blob);
 
     // Export every body to a STEP file as native B-rep (not mesh). body_xforms is the
     // per-body display transform (Move gizmo); when supplied the bodies are written at

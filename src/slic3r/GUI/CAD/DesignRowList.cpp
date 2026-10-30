@@ -1,3 +1,4 @@
+// Ported from OrcaSlicer @3610d8bb (AGPL-3.0); original authors as credited upstream. See src/slic3r/GUI/CAD/NOTICE.md.
 #include "slic3r/GUI/CAD/DesignRowList.hpp"
 
 #include "slic3r/GUI/Widgets/StateColor.hpp"

@@ -1,3 +1,4 @@
+// Ported from OrcaSlicer @3610d8bb (AGPL-3.0); original authors as credited upstream. See src/slic3r/GUI/CAD/NOTICE.md.
 #ifndef slic3r_DesignPanel_hpp_
 #define slic3r_DesignPanel_hpp_
 
@@ -1028,6 +1029,9 @@ private:
     bool              m_dof_last_ok{true};
     bool              m_dof_last_has{false};
     int               m_feature_counter{0};
+    // The project's recipe was written by a newer Design tab. Its bytes stay on
+    // Model::cad_recipe untouched; sync_recipe_to_model() must not overwrite them.
+    bool              m_recipe_read_only{false};
 
     std::vector<::Button*> m_confirm_btns;
     // refresh_preview's verdict on the open card's candidate (open_tool resets it). Kept here, not

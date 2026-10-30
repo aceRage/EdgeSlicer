@@ -1406,7 +1406,11 @@ void GLCanvas3D::CenterOfMass::render(GLCanvas3D& canvas)
     const bool preview = canvas.m_canvas_type == ECanvasType::CanvasPreview;
     // The other gizmos work on the surface the marker would cover.
     const GLGizmosManager::EType gizmo = canvas.get_gizmos_manager().get_current_type();
-    if (!wxGetApp().show_center_of_mass() || canvas.m_design_canvas ||
+#ifdef SLIC3R_CAD
+    if (canvas.m_design_canvas)
+        return;
+#endif
+    if (!wxGetApp().show_center_of_mass() ||
         !(canvas.m_canvas_type == ECanvasType::CanvasView3D || (preview && canvas.m_render_preview)) ||
         (gizmo != GLGizmosManager::Undefined && gizmo != GLGizmosManager::Move && gizmo != GLGizmosManager::Rotate &&
          gizmo != GLGizmosManager::Scale && gizmo != GLGizmosManager::Flatten))
@@ -3475,6 +3479,7 @@ void GLCanvas3D::enable_return_toolbar(bool enable)
     m_return_toolbar.set_enabled(enable);
 }
 
+#ifdef SLIC3R_CAD
 void GLCanvas3D::enable_collapse_toolbar(bool enable)
 {
     m_collapse_toolbar_enabled = enable;
@@ -3533,6 +3538,7 @@ float GLCanvas3D::get_canvas_toolbar_right() const
     const float left = wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE : CANVAS_TOOLBAR_MARGIN;
     return (left + 2.f * CANVAS_TOOLBAR_PADDING + CANVAS_TOOLBAR_BUTTON) * sc;
 }
+#endif // SLIC3R_CAD
 
 void GLCanvas3D::enable_separator_toolbar(bool enable)
 {
@@ -3641,6 +3647,7 @@ void GLCanvas3D::update_volumes_colors_by_extruder()
         m_volumes.update_colors_by_extruder(m_config);
 }
 
+#ifdef SLIC3R_CAD
 bool GLCanvas3D::is_collapse_toolbar_on_left() const
 {
     return collapse_side() == CollapseSide::Left;
@@ -3655,6 +3662,29 @@ float GLCanvas3D::get_collapse_toolbar_height() const
 {
     return collapse_side() != CollapseSide::None ? collapse_toolbar().get_height() : 0;
 }
+#else
+bool GLCanvas3D::is_collapse_toolbar_on_left() const
+{
+    auto state = wxGetApp().plater()->get_sidebar_docking_state();
+    return state == Sidebar::Left;
+}
+
+float GLCanvas3D::get_collapse_toolbar_width() const
+{
+    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
+    const auto state            = wxGetApp().plater()->get_sidebar_docking_state();
+
+    return state != Sidebar::None ? collapse_toolbar.get_width() : 0;
+}
+
+float GLCanvas3D::get_collapse_toolbar_height() const
+{
+    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
+    const auto state            = wxGetApp().plater()->get_sidebar_docking_state();
+
+    return state != Sidebar::None ? collapse_toolbar.get_height() : 0;
+}
+#endif
 
 bool GLCanvas3D::make_current_for_postinit() {
     return _set_current();
@@ -6363,7 +6393,11 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         return;
     }
 
+#ifdef SLIC3R_CAD
     if (!mouse_in_layer_editing && collapse_toolbar().on_mouse(evt, *this)) {
+#else
+    if (!mouse_in_layer_editing && wxGetApp().plater()->get_collapse_toolbar().on_mouse(evt, *this)) {
+#endif
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
         m_mouse.set_start_position_3D_as_invalid();
@@ -10992,7 +11026,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     else {
         m_volumes.set_clipping_plane(m_camera_clipping_plane.get_data());
     }
+#ifdef SLIC3R_CAD
     if (m_canvas_type == CanvasAssembleView || !m_sinking_contours_enabled)
+#else
+    if (m_canvas_type == CanvasAssembleView)
+#endif
         m_volumes.set_show_sinking_contours(false);
     else
         m_volumes.set_show_sinking_contours(!m_gizmos.is_hiding_instances());
@@ -11012,7 +11050,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     // Orca #13704: Phong in the realistic view, falling back to gouraud.
     const RealisticRenderSettings render_settings = _render_settings();
     const bool realistic_phong = _is_realistic_view_enabled() && render_settings.phong;
+#ifdef SLIC3R_CAD
     GLShaderProgram* shader = (m_studio_lighting || realistic_phong) ? wxGetApp().get_shader("phong") : nullptr;
+#else
+    GLShaderProgram* shader = realistic_phong ? wxGetApp().get_shader("phong") : nullptr;
+#endif
     if (shader == nullptr)
         shader = wxGetApp().get_shader("gouraud");
     ECanvasType canvas_type = this->m_canvas_type;
@@ -12171,6 +12213,23 @@ void GLCanvas3D::_render_separator_toolbar_left() const
 
 void GLCanvas3D::_render_collapse_toolbar() const
 {
+#ifndef SLIC3R_CAD
+    auto&      plater              = *wxGetApp().plater();
+    const auto sidebar_docking_dir = plater.get_sidebar_docking_state();
+    if (sidebar_docking_dir == Sidebar::None) {
+        return;
+    }
+
+    GLToolbar& collapse_toolbar = plater.get_collapse_toolbar();
+
+    const Size cnv_size = get_canvas_size();
+    const float top  = 0.5f * (float)cnv_size.get_height();
+    const float left = sidebar_docking_dir == Sidebar::Right ? 0.5f * (float) cnv_size.get_width() - (float) collapse_toolbar.get_width() :
+                                                               -0.5f * (float) cnv_size.get_width();
+
+    collapse_toolbar.set_position(top, left);
+    collapse_toolbar.render(*this);
+#else
     if (!m_collapse_toolbar_enabled)
         return;
     const CollapseSide side = collapse_side();
@@ -12185,6 +12244,7 @@ void GLCanvas3D::_render_collapse_toolbar() const
 
     bar.set_position(top, left);
     bar.render(*this);
+#endif
 }
 
 //BBS reander assemble toolbar

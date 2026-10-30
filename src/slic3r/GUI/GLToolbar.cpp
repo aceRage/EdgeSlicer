@@ -1636,6 +1636,7 @@ float GLToolbar::get_scaled_icon_size()
     return m_layout.icons_size * m_layout.scale;
 }
 
+#ifdef SLIC3R_CAD
 bool setup_collapse_toolbar(GLToolbar& toolbar, std::function<void()> toggle)
 {
     toolbar.set_layout_type(GLToolbar::Layout::Vertical);
@@ -1656,6 +1657,7 @@ bool setup_collapse_toolbar(GLToolbar& toolbar, std::function<void()> toggle)
 
     return toolbar.add_item(item);
 }
+#endif // SLIC3R_CAD
 
 } // namespace GUI
 } // namespace Slic3r

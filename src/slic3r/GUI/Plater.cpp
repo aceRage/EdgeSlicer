@@ -12817,6 +12817,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         Slic3r::Model model;
         // BBS: add auxiliary files related logic
         bool load_aux = strategy & LoadStrategy::LoadAuxiliary, load_old_project = false;
+#ifdef SLIC3R_CAD
+        // A full project open (model + config). Geometry-only imports never adopt the file's CAD recipe.
+        const bool cad_full_project_load = load_model && load_config;
+#endif
         if (load_model && load_config && type_3mf) {
             load_aux = true;
             strategy = strategy | LoadStrategy::LoadAuxiliary;
@@ -13802,8 +13806,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             // load_model_objects transfers meshes; Model::load_from already moves cad_recipe on
             // the project-replacing path. Re-assign when that did not run so a 3MF with
             // Metadata/orca_cad.bin still hydrates the Design tab. Decode stays in DesignPanel
-            // via CadDocument::deserialize_recipe.
-            if (is_project_file) {
+            // via CadDocument::deserialize_recipe. Only a full project open adopts the recipe: a
+            // geometry/model-only import of another project must not take over its CAD design.
+            if (is_project_file && cad_full_project_load) {
                 if (q->model().cad_recipe.empty() && !model.cad_recipe.empty())
                     q->model().cad_recipe = model.cad_recipe;
                 loaded_cad_recipe = !q->model().cad_recipe.empty();

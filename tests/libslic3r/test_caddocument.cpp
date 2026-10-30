@@ -5317,7 +5317,32 @@ TEST_CASE("function + pi in expression binding", "[CadDocument][variables]")
     REQUIRE(doc.error.empty());
     REQUIRE_THAT(doc.features[sk].radius, WithinAbs(10.0, 1e-6));
 
-    // German locale: a decimal comma is accepted when there is no function call.
+    // German locale: a single comma between digits outside parentheses is a decimal mark.
+    doc.variables = {{"r", "2,5"}};
+    doc.features[sk].expr = {{"radius", "r"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(2.5, 1e-6));
+
+    // Inside a call the comma stays the argument separator.
+    doc.variables = {{"r", "max(1,2)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(2.0, 1e-6));
+
+    // A decimal comma next to a call: 2,5 + max(1,2) = 4.5.
+    doc.variables = {{"r", "2,5 + max(1,2)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(4.5, 1e-6));
+
+    // Ambiguous thousands/decimal mixes are rejected, never silently read as 1.0.
+    for (const char* bad : {"1.000,5", "1,000,5", "1.2.3"}) {
+        doc.variables = {{"r", bad}};
+        REQUIRE_FALSE(doc.recompute());
+        REQUIRE_FALSE(doc.error.empty());
+    }
+
     doc.variables = {{"r", "6,5"}};
     doc.features[sk].expr = {{"radius", "r"}};
     REQUIRE(doc.recompute());

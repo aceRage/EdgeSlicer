@@ -267,22 +267,41 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
     std::vector<Token> tokens;
     size_t i = 0;
     bool prev_was_val = false; // tracked for unary-minus detection
-    // German locale: accept "1,5" as 1.5 when the expression is not a function call
-    // (no '('), so min(1,2) keeps comma as the arity separator.
-    const bool decimal_comma = src.find('(') == std::string::npos;
+    // German locale: outside any parentheses, a single comma between digits of a number
+    // ("2,5") is a decimal mark. Inside parentheses a comma is always the argument separator,
+    // so max(1,2) keeps its arity. A number mixing '.' and ',' or carrying two commas
+    // ("1.000,5", "1,000,5") is ambiguous and is rejected rather than read as a prefix.
+    int paren_depth = 0;
+    auto digit_at = [&](size_t k) { return k < src.size() && isdigit((unsigned char)src[k]); };
     while (i < src.size()) {
         char c = src[i];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
-        if (c == '(') { tokens.push_back({Token::LParen, "("}); ++i; prev_was_val = false; continue; }
-        if (c == ')') { tokens.push_back({Token::RParen, ")"}); ++i; prev_was_val = true; continue; }
+        if (c == '(') { tokens.push_back({Token::LParen, "("}); ++i; ++paren_depth; prev_was_val = false; continue; }
+        if (c == ')') { tokens.push_back({Token::RParen, ")"}); ++i; --paren_depth; prev_was_val = true; continue; }
         if (c == ',') { tokens.push_back({Token::Comma, ","}); ++i; prev_was_val = false; continue; }
         if (isdigit(c) || c == '.') {
             size_t start = i;
-            while (i < src.size() && (isdigit(src[i]) || src[i] == '.' || (decimal_comma && src[i] == ','))) ++i;
+            int dots = 0, commas = 0;
+            while (i < src.size()) {
+                const char d = src[i];
+                if (isdigit((unsigned char)d)) { ++i; continue; }
+                if (d == '.') { ++dots; ++i; continue; }
+                if (d == ',' && paren_depth == 0 && i > start && digit_at(i - 1) && digit_at(i + 1)) {
+                    ++commas; ++i; continue;
+                }
+                break;
+            }
             Token t{Token::Num, src.substr(start, i - start)};
+            if (commas > 0 && (commas > 1 || dots > 0))
+                throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
+            if (dots > 1)
+                throw std::runtime_error(_u8L("bad number in expression"));
             for (char& ch : t.val)
                 if (ch == ',') ch = '.';
-            t.num = std::stod(t.val);
+            size_t used = 0;
+            t.num = std::stod(t.val, &used);
+            if (used != t.val.size())
+                throw std::runtime_error(_u8L("bad number in expression"));
             tokens.push_back(t);
             prev_was_val = true;
             continue;
@@ -4684,10 +4703,30 @@ static bool parse_recipe_blob(CadDocument&                                  doc,
     }
 }
 
+uint32_t CadDocument::newer_recipe_version(const std::string& blob)
+{
+    try {
+        std::istringstream iss(blob);
+        BoundedBinaryInputArchive ar(iss, blob.size(), true);
+        uint32_t v = 0;
+        ar(v);
+        if (v > ORCA_CAD_RECIPE_VERSION && v <= kMaxFutureRecipeVersion)
+            return v;
+    } catch (...) {
+    }
+    return 0;
+}
+
 bool CadDocument::validate_recipe_bytes(const std::string& blob, std::string* error)
 {
     CadDocument tmp;
-    const bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr, true);
+    bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr, true);
+    // A recipe from a NEWER Design tab cannot be parsed here, but it is not corrupt: keep its
+    // bytes untouched on Model::cad_recipe so the next save writes them back. The Design tab
+    // opens it read-only (DesignPanel::m_recipe_read_only). Garbage whose first word is not a
+    // plausible version stays rejected.
+    if (!ok && newer_recipe_version(blob) != 0)
+        ok = true;
     if (error != nullptr)
         *error = tmp.error;
     return ok;
