@@ -60,6 +60,7 @@ add_executable(${_TEST_NAME}_tests
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
 	test_height_colour_pattern.cpp
+	test_height_pattern_input.cpp
 	test_cut_paint.cpp
 	test_cut_groove.cpp
 	test_config_include.cpp
