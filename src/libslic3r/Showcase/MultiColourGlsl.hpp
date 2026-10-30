@@ -126,6 +126,16 @@ float twist_turns_per_mm3(float twist_deg_per_m, float diameter_mm);
 // diameter (missing = 1.75). Slots past the input, or past GLSL_SLOTS, are single-colour.
 UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector<float> &diameters_mm);
 
+// ---- Preview (P5, tests/design_multicolour_filament_view.md 7.4) ----
+// Whether any of the filament slots `slots` (0-based; the slots a G-code uses) has two or more colours
+// in `table`. Slots past GLSL_SLOTS count as single-colour (libvgcode folds them into the last).
+bool uses_split(const UniformTable &table, const std::vector<unsigned char> &slots);
+// The same for twist: some of those slots is multi-colour and twists (the volume buffer is needed).
+bool uses_twist(const UniformTable &table, const std::vector<unsigned char> &slots);
+// A string that changes whenever a value the table is made from changes: the slots' colours and
+// every visual-only key of `config` (the project config). Lets Preview rebuild the table only then.
+std::string config_signature(const ConfigBase &config);
+
 // SLIC3R_MC_SHARED_GLSL as text.
 const char *glsl_functions();
 // The prelude for libvgcode::Viewer::set_base_color_prelude(): the uniforms, the shared functions

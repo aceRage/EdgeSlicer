@@ -1986,6 +1986,9 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
     }
 
     m_viewer.set_smooth_look(look.smooth, look.looks);
+    // Multi-colour P5: Preview's toggle is not Showcase's; Showcase owns the volume buffer here.
+    m_viewer.set_multicolour_preview(false);
+    m_preview_mc_volume = false;
     apply_showcase_multicolour(look);
     m_viewer.set_light_top_dir(look.set_light ? libvgcode::Vec3{ look.light_dir_eye[0], look.light_dir_eye[1], look.light_dir_eye[2] } :
                                                 libvgcode::Vec3{ -0.4574957f, 0.4574957f, 0.7624929f });
@@ -2052,6 +2055,106 @@ void GCodeViewer::apply_showcase_multicolour(const ShowcaseLook &look)
         glsafe(::glUniform4fv(::glGetUniformLocation(p, "mc_global2"), 1, t.global2.data()));
     }
     glsafe(::glUseProgram(GLuint(curr_program)));
+}
+
+// Multi-colour P5 (tests/design_multicolour_filament_view.md 7.4): the Preview toggle. The shader
+// functions are Showcase's (P3); Preview lights the colour per vertex, as it always does. With the
+// toggle off, or with no split slot in the print, nothing here touches the viewer (the program is not
+// even built), so Preview is exactly as before.
+bool GCodeViewer::preview_multicolour_enabled()
+{
+    if (!m_preview_multicolour_read) {
+        m_preview_multicolour_read = true;
+        if (AppConfig *cfg = wxGetApp().app_config; cfg != nullptr)
+            m_preview_multicolour = cfg->has("preview_multicolour") ? cfg->get_bool("preview_multicolour") : true;   // on unless unticked
+    }
+    return m_preview_multicolour;
+}
+
+// Rebuilds the slot table when a value it is made from changed (a colour make-up edited while the
+// G-code stays loaded), and says whether a slot the G-code uses is a split one.
+void GCodeViewer::refresh_preview_multicolour_table()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || m_only_gcode_in_preview) {
+        m_preview_mc_has_split = m_preview_mc_has_twist = false;
+        return;
+    }
+    const std::vector<uint8_t> &used = m_viewer.get_used_extruders_ids();
+    std::string sig = MultiColour::config_signature(bundle->project_config);
+    for (const float d : m_filament_diameters)
+        sig += "|" + std::to_string(d);
+    if (sig != m_preview_mc_signature) {
+        m_preview_mc_signature = std::move(sig);
+        std::vector<MultiColour::Filament> slots;
+        std::vector<float>                 diameters;
+        for (size_t e = 0; e < size_t(MultiColour::GLSL_SLOTS); ++e) {
+            slots.push_back(MultiColour::from_config(bundle->project_config, e));
+            diameters.push_back(e < m_filament_diameters.size() && m_filament_diameters[e] > 0.f ? m_filament_diameters[e] : 1.75f);
+        }
+        m_preview_mc_table = MultiColour::pack_uniforms(slots, diameters);
+    }
+    m_preview_mc_has_split = MultiColour::uses_split(m_preview_mc_table, used);
+    m_preview_mc_has_twist = MultiColour::uses_twist(m_preview_mc_table, used);
+}
+
+// The toggle is offered in the views that colour by filament.
+bool GCodeViewer::preview_multicolour_view() const
+{
+    const libvgcode::EViewType type = m_viewer.get_view_type();
+    return type == libvgcode::EViewType::Tool || type == libvgcode::EViewType::ColorPrint;
+}
+
+void GCodeViewer::apply_preview_multicolour()
+{
+    bool want = false;
+    if (preview_multicolour_enabled() && preview_multicolour_view() && !m_showcase.active) {
+        refresh_preview_multicolour_table();
+        want = m_preview_mc_has_split;
+    }
+    if (!want) {
+        if (m_viewer.is_multicolour_preview_active() || m_preview_mc_volume) {
+            m_viewer.set_multicolour_preview(false);
+            if (m_preview_mc_volume) {
+                m_viewer.set_extruded_volume_enabled(false);
+                m_preview_mc_volume = false;
+            }
+        }
+        return;
+    }
+
+    unsigned int program = m_viewer.get_base_color_program();
+    if (program == 0 && !m_showcase_mc_failed) {
+        std::string error;
+        if (m_viewer.set_base_color_prelude(MultiColour::glsl_prelude(), &error))
+            program = m_viewer.get_base_color_program();
+        else {
+            m_showcase_mc_failed = true;
+            BOOST_LOG_TRIVIAL(error) << "Preview: the coextruded-colour shader did not build, split filaments show their plain colour: " << error;
+        }
+    }
+    if (program == 0) {
+        m_viewer.set_multicolour_preview(false);
+        return;
+    }
+    // Twist runs on the extruded volume per vertex (4 bytes each), built only while a used slot twists.
+    // Asking again each frame is cheap (it returns at once while the buffer is built) and rebuilds it
+    // after a new load.
+    if (m_preview_mc_has_twist || m_preview_mc_volume) {
+        m_viewer.set_extruded_volume_enabled(m_preview_mc_has_twist);
+        m_preview_mc_volume = m_preview_mc_has_twist;
+    }
+    const MultiColour::UniformTable &t = m_preview_mc_table;
+    GLint curr_program = 0;
+    glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &curr_program));
+    glsafe(::glUseProgram(program));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_colors"), GLsizei(t.colors.size() / 4), t.colors.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_bounds"), GLsizei(t.bounds.size() / 4), t.bounds.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_params"), GLsizei(t.params.size() / 4), t.params.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global"), 1, t.global.data()));
+    glsafe(::glUniform4fv(::glGetUniformLocation(program, "mc_global2"), 1, t.global2.data()));
+    glsafe(::glUseProgram(GLuint(curr_program)));
+    m_viewer.set_multicolour_preview(true);
 }
 
 void GCodeViewer::end_showcase()
@@ -2758,6 +2861,7 @@ void GCodeViewer::render_toolpaths()
     m_viewer.set_cog_marker_scale_factor(m_cog_marker_fixed_screen_size ? 10.0f * m_cog_marker_size * camera.get_inv_zoom() : m_cog_marker_size);
     m_viewer.set_tool_marker_scale_factor(m_tool_marker_fixed_screen_size ? 10.0f * m_tool_marker_size * camera.get_inv_zoom() : m_tool_marker_size);
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+    apply_preview_multicolour();   // multi-colour P5: nothing unless the toggle is on and a split slot is used
     m_viewer.render(converted_view_matrix, converted_projetion_matrix);
 
 #if ENABLE_NEW_GCODE_VIEWER_DEBUG
@@ -4266,7 +4370,27 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
     default: { break; }
     }
 
-    auto append_option_item = [this, append_item, current_time_mode, total_estimated_time, &format_compact_count, &format_percent, &format_distance](libvgcode::EOptionType type, std::vector<float> offsets) {
+    // Multi-colour P5: "Show coextruded colours" in the filament views, only when a slot the G-code
+    // uses is a split one (tests/design_multicolour_filament_view.md 5.3). On by default (owner, overriding D5), kept in the
+    // app config. Hidden otherwise, so a print without coextruded filaments sees no new row.
+    auto append_multicolour_item = [this, append_item, &imgui, predictable_icon_pos](float label_offset) {
+        if (!preview_multicolour_view() || m_only_gcode_in_preview)
+            return;
+        refresh_preview_multicolour_table();
+        if (!m_preview_mc_has_split)
+            return;
+        const bool shown = preview_multicolour_enabled();
+        append_item(EItemType::None, ColorRGBA::GRAY(), { { _u8L("Show coextruded colours"), label_offset } }, true, predictable_icon_pos, shown,
+                    [this]() {
+                        m_preview_multicolour = !m_preview_multicolour;
+                        wxGetApp().app_config->set_bool("preview_multicolour", m_preview_multicolour);
+                    });
+        if (ImGui::IsItemHovered())
+            imgui.tooltip(_L("Colour the toolpaths of split (coextruded) filaments by their colour make-up, as Showcase "
+                             "does. Visual only: the G-code is not affected."), ImGui::GetFontSize() * 20.0f);
+    };
+
+    auto append_option_item = [this, append_item,current_time_mode, total_estimated_time, &format_compact_count, &format_percent, &format_distance](libvgcode::EOptionType type, std::vector<float> offsets) {
         const bool full_layout = offsets.size() > 4;
         auto option_stats = [this, current_time_mode, total_estimated_time, &format_compact_count, &format_percent, &format_distance, full_layout](libvgcode::EOptionType option_type) -> std::array<std::string, 4> {
             libvgcode::EMoveType move_type;
@@ -4510,6 +4634,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             // true, "", 0.0f, 0.0f, offsets, used_filaments_m[extruder_id], used_filaments_g[extruder_id]);
             i++;
         }
+        append_multicolour_item(offsets[0]);   // multi-colour P5
         break;
     }
     case libvgcode::EViewType::ColorPrint: {
@@ -4638,6 +4763,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         imgui.text(_u8L("Filament change times") + ":");
         ImGui::SameLine();
         imgui.text(format_compact_count(m_print_statistics.total_filamentchanges));
+
+        append_multicolour_item(color_print_offsets[_u8L("Filament")]);   // multi-colour P5
 
         //BBS display cost
         render_cost_section(m_cost_breakdown, price_current_plate(m_cost_breakdown), _u8L("Cost"), 0.f, window_padding, m_cost_expanded,

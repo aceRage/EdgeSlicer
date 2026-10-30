@@ -116,6 +116,16 @@ void Viewer::set_extruded_volume_enabled(bool enabled)
     m_impl->set_extruded_volume_enabled(enabled);
 }
 
+void Viewer::set_multicolour_preview(bool enabled)
+{
+    m_impl->set_multicolour_preview(enabled);
+}
+
+bool Viewer::is_multicolour_preview_active() const
+{
+    return m_impl->is_multicolour_preview_active();
+}
+
 void Viewer::set_clipping_plane(const std::array<float, 4>& plane)
 {
     m_impl->set_clipping_plane(plane);

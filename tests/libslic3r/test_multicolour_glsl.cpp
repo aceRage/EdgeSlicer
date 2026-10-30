@@ -6,6 +6,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Showcase/MultiColourFilament.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterialGlsl.hpp"
@@ -304,5 +305,98 @@ TEST_CASE("Walls blend wide and show their face colour; tops blend narrow (P0 tu
         CHECK(flat > 0.f);       // the edge is there
         CHECK(flat < 0.18f);     // and thin
         CHECK(yellow_share(unflattened) > 0.2f);
+    }
+}
+
+// ---- Preview (P5): which slots a G-code uses, and when the table is rebuilt ----
+
+namespace {
+DynamicPrintConfig preview_config()
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings{ "#FF0000", "#00FF00", "#0000FF" });
+    cfg.set_key_value("filament_multi_colors", new ConfigOptionStrings{ "#FF0000|#FFFF00", "#00FF00", "#0000FF|#FFFFFF" });
+    cfg.set_key_value("filament_colour_mode", new ConfigOptionInts{ 0, 0, 0 });
+    return cfg;
+}
+std::vector<Filament> preview_slots(const DynamicPrintConfig &cfg)
+{
+    std::vector<Filament> slots;
+    for (size_t e = 0; e < 3; ++e)
+        slots.push_back(from_config(cfg, e));
+    return slots;
+}
+} // namespace
+
+TEST_CASE("Preview only offers the toggle when a slot the G-code uses is a split one", "[MultiColour][Preview]")
+{
+    const DynamicPrintConfig cfg   = preview_config();
+    const UniformTable       table = pack_uniforms(preview_slots(cfg), { 1.75f, 1.75f, 1.75f });
+    REQUIRE(table.any_multi);
+
+    CHECK(uses_split(table, { 0 }));
+    CHECK_FALSE(uses_split(table, { 1 }));          // a single-colour slot
+    CHECK(uses_split(table, { 1, 2 }));
+    CHECK_FALSE(uses_split(table, {}));
+    CHECK_FALSE(uses_split(table, { 5, 15 }));      // slots past the config are single-colour
+    CHECK_FALSE(uses_split(table, { 16, 200 }));    // and slots past the shader's table are ignored
+
+    const UniformTable plain = pack_uniforms({}, {});
+    CHECK_FALSE(uses_split(plain, { 0, 1, 2 }));
+}
+
+TEST_CASE("Preview builds the twist (volume) buffer only when a used split slot twists", "[MultiColour][Preview]")
+{
+    DynamicPrintConfig cfg = preview_config();
+    cfg.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 0., 90., 45. });
+    const UniformTable table = pack_uniforms(preview_slots(cfg), { 1.75f, 1.75f, 1.75f });
+    REQUIRE(table.any_twist);
+
+    CHECK_FALSE(uses_twist(table, { 0 }));          // split, no twist
+    CHECK_FALSE(uses_twist(table, { 1 }));          // twist set on a single-colour slot is ignored
+    CHECK(uses_twist(table, { 2 }));
+    CHECK(uses_twist(table, { 0, 2 }));
+    CHECK_FALSE(uses_twist(table, {}));
+
+    const UniformTable no_twist = pack_uniforms(preview_slots(preview_config()), { 1.75f, 1.75f, 1.75f });
+    CHECK_FALSE(uses_twist(no_twist, { 0, 1, 2 }));
+}
+
+TEST_CASE("The Preview table is rebuilt exactly when a value it is made from changes", "[MultiColour][Preview]")
+{
+    DynamicPrintConfig cfg = preview_config();
+    const std::string  base = config_signature(cfg);
+    CHECK(config_signature(cfg) == base);
+    CHECK(config_signature(preview_config()) == base);
+
+    SECTION("each visual-only key changes it")
+    {
+        DynamicPrintConfig a = cfg;
+        a.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70" });
+        CHECK(config_signature(a) != base);
+        DynamicPrintConfig b = cfg;
+        b.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 45. });
+        CHECK(config_signature(b) != base);
+        DynamicPrintConfig c = cfg;
+        c.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 10. });
+        CHECK(config_signature(c) != base);
+    }
+    SECTION("so do the colours and the colour mode")
+    {
+        DynamicPrintConfig a = cfg;
+        a.set_key_value("filament_multi_colors", new ConfigOptionStrings{ "#FF0000|#FFFF01", "#00FF00", "#0000FF|#FFFFFF" });
+        CHECK(config_signature(a) != base);
+        DynamicPrintConfig b = cfg;
+        b.set_key_value("filament_colour", new ConfigOptionStrings{ "#FF0001", "#00FF00", "#0000FF" });
+        CHECK(config_signature(b) != base);
+        DynamicPrintConfig c = cfg;
+        c.set_key_value("filament_colour_mode", new ConfigOptionInts{ 1, 0, 0 });
+        CHECK(config_signature(c) != base);
+    }
+    SECTION("an unrelated option does not")
+    {
+        DynamicPrintConfig a = cfg;
+        a.set_key_value("nozzle_diameter", new ConfigOptionFloats{ 0.4 });
+        CHECK(config_signature(a) == base);
     }
 }
