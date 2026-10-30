@@ -274,8 +274,8 @@ void KBShortcutsDialog::fill_shortcuts()
 
         };
 #ifdef SLIC3R_CAD
-        // K and W were unused as Prepare gizmo letters (Ctrl+K clones in the
-        // Objects list; that binding is list-focus only). Hidden with the gizmos
+        // K and W were unused as Prepare gizmo letters (Ctrl+K clones the
+        // selection; plain K and W have no canvas binding). Hidden with the gizmos
         // when the CAD feature preference is off (Orca #15762).
         if (wxGetApp().is_enable_cad_feature()) {
             plater_shortcuts.push_back({ "K", L("Gizmo sketch (opens Design)") });

@@ -1476,8 +1476,12 @@ GLGizmoBase* GLGizmosManager::get_current() const
 
 GLGizmoBase* GLGizmosManager::get_gizmo(GLGizmosManager::EType type) const
 {
+#ifdef SLIC3R_CAD
     // m_gizmos ends before the enum does when the CAD gizmos are not registered (Orca #15762).
     return type < m_gizmos.size() ? m_gizmos[type].get() : nullptr;
+#else
+    return ((type == Undefined) || m_gizmos.empty()) ? nullptr : m_gizmos[type].get();
+#endif
 }
 
 GLGizmosManager::EType GLGizmosManager::get_gizmo_from_name(const std::string& gizmo_name) const

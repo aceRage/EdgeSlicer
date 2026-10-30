@@ -10348,12 +10348,14 @@ void DesignPanel::on_commit()
             set_status(_L("All bodies hidden — show one before committing"));
             return;
         }
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Commit to Plate");
         if (m_commit_mode == CommitMode::Assembly)
             obj_list->load_mesh_object(parts, _L("Design Assembly"));
         else
             for (const auto& [mesh, name] : parts)
                 obj_list->load_mesh_object(*mesh, name);
     } else {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Commit to Plate");
         obj_list->load_mesh_object(m_disp_pick_mesh, _L("Design Body"));
     }
 

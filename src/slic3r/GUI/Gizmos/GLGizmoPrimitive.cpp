@@ -48,8 +48,9 @@ void GLGizmoPrimitive::launch_design_primitive()
     if (wxGetApp().mainframe == nullptr)
         return;
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tpDesign));
-    if (DesignPanel* design = DesignPanel::if_built())
-        design->prepare_start_primitive();
+    // The Design tab is built on first show (LazyPanelHolder); when_built runs now if it
+    // already exists, else right after select_tab realizes it.
+    DesignPanel::when_built([](DesignPanel &design) { design.prepare_start_primitive(); });
 }
 
 void GLGizmoPrimitive::on_set_state()
