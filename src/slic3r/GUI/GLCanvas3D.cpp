@@ -44,6 +44,9 @@
 #include "CameraUtils.hpp"
 #include "EmbossPicking.hpp"
 #include "Showcase/ShowcaseRenderer.hpp"
+#ifdef SLIC3R_CAD
+#include "slic3r/GUI/CAD/DesignSketchTool.hpp"
+#endif
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -1403,6 +1406,10 @@ void GLCanvas3D::CenterOfMass::render(GLCanvas3D& canvas)
     const bool preview = canvas.m_canvas_type == ECanvasType::CanvasPreview;
     // The other gizmos work on the surface the marker would cover.
     const GLGizmosManager::EType gizmo = canvas.get_gizmos_manager().get_current_type();
+#ifdef SLIC3R_CAD
+    if (canvas.m_design_canvas)
+        return;
+#endif
     if (!wxGetApp().show_center_of_mass() ||
         !(canvas.m_canvas_type == ECanvasType::CanvasView3D || (preview && canvas.m_render_preview)) ||
         (gizmo != GLGizmosManager::Undefined && gizmo != GLGizmosManager::Move && gizmo != GLGizmosManager::Rotate &&
@@ -3472,6 +3479,67 @@ void GLCanvas3D::enable_return_toolbar(bool enable)
     m_return_toolbar.set_enabled(enable);
 }
 
+#ifdef SLIC3R_CAD
+void GLCanvas3D::enable_collapse_toolbar(bool enable)
+{
+    m_collapse_toolbar_enabled = enable;
+}
+
+void GLCanvas3D::set_collapse_toolbar(GLToolbar* toolbar, std::function<CollapseSide()> side)
+{
+    m_collapse_toolbar = toolbar;
+    m_collapse_side    = std::move(side);
+}
+
+void GLCanvas3D::enable_plate_chrome(bool enable)
+{
+    // P4: Edge PartPlate has no hide_chrome. The flag is stored so DesignCanvas can call
+    // this like Orca; it is a visual no-op until PartPlate grows that API.
+    m_plate_chrome_enabled = enable;
+}
+
+GLToolbar& GLCanvas3D::collapse_toolbar() const
+{
+    return m_collapse_toolbar != nullptr ? *m_collapse_toolbar : wxGetApp().plater()->get_collapse_toolbar();
+}
+
+CollapseSide GLCanvas3D::collapse_side() const
+{
+    if (m_collapse_side)
+        return m_collapse_side();
+    switch (wxGetApp().plater()->get_sidebar_docking_state()) {
+    case Sidebar::Left:  return CollapseSide::Left;
+    case Sidebar::Right: return CollapseSide::Right;
+    default:             return CollapseSide::None;
+    }
+}
+
+bool GLCanvas3D::is_bed_visible() const
+{
+    if (m_canvas_type == ECanvasType::CanvasPreview)
+        return m_render_preview;
+    if (m_canvas_type != ECanvasType::CanvasView3D || !m_show_bed)
+        return false;
+    if (!m_main_toolbar.is_enabled())
+        return true;
+    return !_is_below_plate_view_active();
+}
+
+float GLCanvas3D::get_canvas_toolbar_right() const
+{
+    static constexpr float NAVIGATOR_SIZE        = 128.f;
+    static constexpr float CANVAS_TOOLBAR_MARGIN = 10.f;
+    static constexpr float CANVAS_TOOLBAR_PADDING = 8.f;
+    static constexpr float CANVAS_TOOLBAR_BUTTON  = 40.f;
+    float sc = get_scale();
+#ifdef WIN32
+    sc *= (float) get_dpi_for_window(wxGetApp().GetTopWindow()) / (float) DPI_DEFAULT;
+#endif
+    const float left = wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE : CANVAS_TOOLBAR_MARGIN;
+    return (left + 2.f * CANVAS_TOOLBAR_PADDING + CANVAS_TOOLBAR_BUTTON) * sc;
+}
+#endif // SLIC3R_CAD
+
 void GLCanvas3D::enable_separator_toolbar(bool enable)
 {
     m_separator_toolbar.set_enabled(enable);
@@ -3579,6 +3647,22 @@ void GLCanvas3D::update_volumes_colors_by_extruder()
         m_volumes.update_colors_by_extruder(m_config);
 }
 
+#ifdef SLIC3R_CAD
+bool GLCanvas3D::is_collapse_toolbar_on_left() const
+{
+    return collapse_side() == CollapseSide::Left;
+}
+
+float GLCanvas3D::get_collapse_toolbar_width() const
+{
+    return collapse_side() != CollapseSide::None ? collapse_toolbar().get_width() : 0;
+}
+
+float GLCanvas3D::get_collapse_toolbar_height() const
+{
+    return collapse_side() != CollapseSide::None ? collapse_toolbar().get_height() : 0;
+}
+#else
 bool GLCanvas3D::is_collapse_toolbar_on_left() const
 {
     auto state = wxGetApp().plater()->get_sidebar_docking_state();
@@ -3600,6 +3684,7 @@ float GLCanvas3D::get_collapse_toolbar_height() const
 
     return state != Sidebar::None ? collapse_toolbar.get_height() : 0;
 }
+#endif
 
 bool GLCanvas3D::make_current_for_postinit() {
     return _set_current();
@@ -3821,12 +3906,30 @@ void GLCanvas3D::render(bool only_init)
             render_opaque();
         {
             FrameProfiler::Scope scope(*m_frame_profiler, "bed");
-            if (!no_partplate)
+#ifdef SLIC3R_CAD
+            if (m_design_canvas)
+                show_grid = false;
+            // Design can hide the bed (view preference). Prepare/Preview keep the original
+            // !no_partplate gating so a CAD-ON build does not change those canvases.
+            const bool show_bed = m_design_canvas ? is_bed_visible() : true;
+#else
+            const bool show_bed = true;
+#endif
+            if (show_bed && !no_partplate) {
+#ifdef SLIC3R_CAD
+                // Orca #16256: the sketch tool draws its own reference axes; hide the bed triad then.
+                show_axes = show_axes && !(m_design_sketch_tool != nullptr && m_design_sketch_tool->draws_reference_axes());
+#endif
                 _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
+            }
             // Orca #16681: the painting gizmos hide the bed mesh on purpose and draw the plate instead, so the
             // plate list is the only bed reference in the scene while the below-plate view is active.
-            if (!no_partplate || _is_below_plate_view_active()) //BBS: add outline logic
+            if ((show_bed && !no_partplate) || _is_below_plate_view_active()) //BBS: add outline logic
                 _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid, m_plate_focus_visible_plates);
+#ifdef SLIC3R_CAD
+            if (m_design_canvas && show_bed && !no_partplate)
+                _render_cad_grid(camera.get_view_matrix(), camera.get_projection_matrix());
+#endif
         }
         if (plate_first) {
             {
@@ -3934,6 +4037,11 @@ void GLCanvas3D::render(bool only_init)
         FrameProfiler::Scope scope(*m_frame_profiler, "fxaa");
         _render_fxaa_pass(static_cast<unsigned int>(cnv_size.get_width()), static_cast<unsigned int>(cnv_size.get_height()));
     }
+
+#ifdef SLIC3R_CAD
+    if (m_design_sketch_tool != nullptr && m_design_sketch_tool->has_display())
+        m_design_sketch_tool->render(*this);
+#endif
 
     // draw overlays
     {
@@ -6246,6 +6354,24 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 		printf((format_mouse_event_debug_message(evt) + " - other\n").c_str());
 #endif /* SLIC3R_DEBUG_MOUSE_EVENTS */
     }
+#ifdef SLIC3R_CAD
+    if (m_design_sketch_tool != nullptr && m_design_sketch_tool->has_display()) {
+        if (collapse_toolbar().on_mouse(evt, *this)) {
+            if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
+                mouse_up_cleanup();
+            m_mouse.set_start_position_3D_as_invalid();
+            return;
+        }
+        if (evt.LeftDown() && m_canvas != nullptr)
+            m_canvas->SetFocus();
+        if (m_design_sketch_tool->on_mouse(evt, *this)) {
+            m_dirty = true;
+            render();
+            return;
+        }
+    }
+#endif
+
     const int selected_object_idx      = m_selection.get_object_idx();
     const int layer_editing_object_idx = is_layers_editing_enabled() ? selected_object_idx : -1;
     const bool mouse_in_layer_editing  = layer_editing_object_idx != -1 && m_layers_editing.bar_rect_contains(*this, pos(0), pos(1));
@@ -6267,7 +6393,11 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         return;
     }
 
+#ifdef SLIC3R_CAD
+    if (!mouse_in_layer_editing && collapse_toolbar().on_mouse(evt, *this)) {
+#else
     if (!mouse_in_layer_editing && wxGetApp().plater()->get_collapse_toolbar().on_mouse(evt, *this)) {
+#endif
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
         m_mouse.set_start_position_3D_as_invalid();
@@ -10732,14 +10862,103 @@ void GLCanvas3D::_render_bed(const Transform3d& view_matrix, const Transform3d& 
     */
     //bool show_texture = true;
     //BBS set axes mode
+#ifdef SLIC3R_CAD
+    if (m_design_canvas) {
+        const Vec2d bc = m_bed.build_volume().bed_center();
+        m_bed.set_axes_origin(Vec3d(bc.x(), bc.y(), 0.0));
+    } else
+#endif
     m_bed.set_axes_mode(m_main_toolbar.is_enabled());
     m_bed.render(*this, view_matrix, projection_matrix, bottom, scale_factor, show_axes);
 }
 
 void GLCanvas3D::_render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid, const std::set<int>& visible_plates)
 {
-    wxGetApp().plater()->get_partplate_list().render(view_matrix, projection_matrix, bottom, only_current, only_body, hover_id, render_cali, show_grid, visible_plates);
+    PartPlateList& plate_list = wxGetApp().plater()->get_partplate_list();
+#ifdef SLIC3R_CAD
+    PartPlate* curr_plate = plate_list.get_curr_plate();
+    const Transform3d vm = m_design_canvas && curr_plate != nullptr ?
+        Transform3d(view_matrix * Geometry::translation_transform(-curr_plate->get_origin())) : view_matrix;
+#else
+    const Transform3d& vm = view_matrix;
+#endif
+    plate_list.render(vm, projection_matrix, bottom, only_current, only_body, hover_id, render_cali, show_grid, visible_plates);
 }
+
+#ifdef SLIC3R_CAD
+void GLCanvas3D::_render_cad_grid(const Transform3d& view_matrix, const Transform3d& projection_matrix)
+{
+    const BuildVolume& build_volume = m_bed.build_volume();
+    if (!build_volume.valid())
+        return;
+
+    const Vec2d        center = build_volume.bed_center();
+    const BoundingBoxf bb     = build_volume.bounding_volume2d();
+    if (!m_cad_grid_valid || m_cad_grid_center != center || m_cad_grid_bb != bb) {
+        m_cad_grid_center = center;
+        m_cad_grid_bb     = bb;
+        m_cad_grid_valid  = true;
+
+        const float z = -0.26f;
+
+        auto build_grid = [&z, &center, &bb](double step, GLModel& model) {
+            std::vector<std::pair<Vec2d, Vec2d>> segs;
+            for (double x = center.x(); x >= bb.min.x(); x -= step)
+                segs.emplace_back(Vec2d(x, bb.min.y()), Vec2d(x, bb.max.y()));
+            for (double x = center.x() + step; x <= bb.max.x(); x += step)
+                segs.emplace_back(Vec2d(x, bb.min.y()), Vec2d(x, bb.max.y()));
+            for (double y = center.y(); y >= bb.min.y(); y -= step)
+                segs.emplace_back(Vec2d(bb.min.x(), y), Vec2d(bb.max.x(), y));
+            for (double y = center.y() + step; y <= bb.max.y(); y += step)
+                segs.emplace_back(Vec2d(bb.min.x(), y), Vec2d(bb.max.x(), y));
+
+            GLModel::Geometry data;
+            data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+            data.reserve_vertices(2 * segs.size());
+            data.reserve_indices(2 * segs.size());
+            for (const auto& s : segs) {
+                data.add_vertex(Vec3f(float(s.first.x()), float(s.first.y()), z));
+                data.add_vertex(Vec3f(float(s.second.x()), float(s.second.y()), z));
+                const unsigned int vc = static_cast<unsigned int>(data.vertices_count());
+                data.add_line(vc - 2, vc - 1);
+            }
+            model.init_from(std::move(data));
+        };
+
+        m_cad_grid_minor.reset();
+        m_cad_grid_major.reset();
+        build_grid(10.0, m_cad_grid_minor);
+        build_grid(50.0, m_cad_grid_major);
+    }
+
+    if (!m_cad_grid_minor.is_initialized() || !m_cad_grid_major.is_initialized())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    shader->start_using();
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    shader->set_uniform("view_model_matrix", view_matrix);
+    shader->set_uniform("projection_matrix", projection_matrix);
+
+    const ColorRGBA minor_color(0.40f, 0.40f, 0.42f, 1.0f);
+    const ColorRGBA major_color(0.90f, 0.90f, 0.90f, 1.0f);
+
+    glsafe(::glLineWidth(1.0f));
+    m_cad_grid_minor.set_color(minor_color);
+    m_cad_grid_minor.render();
+
+    glsafe(::glLineWidth(2.0f));
+    m_cad_grid_major.set_color(major_color);
+    m_cad_grid_major.render();
+
+    glsafe(::glDisable(GL_BLEND));
+    shader->stop_using();
+}
+#endif
 
 void GLCanvas3D::_render_plane() const
 {
@@ -10807,7 +11026,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     else {
         m_volumes.set_clipping_plane(m_camera_clipping_plane.get_data());
     }
+#ifdef SLIC3R_CAD
+    if (m_canvas_type == CanvasAssembleView || !m_sinking_contours_enabled)
+#else
     if (m_canvas_type == CanvasAssembleView)
+#endif
         m_volumes.set_show_sinking_contours(false);
     else
         m_volumes.set_show_sinking_contours(!m_gizmos.is_hiding_instances());
@@ -10827,7 +11050,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     // Orca #13704: Phong in the realistic view, falling back to gouraud.
     const RealisticRenderSettings render_settings = _render_settings();
     const bool realistic_phong = _is_realistic_view_enabled() && render_settings.phong;
+#ifdef SLIC3R_CAD
+    GLShaderProgram* shader = (m_studio_lighting || realistic_phong) ? wxGetApp().get_shader("phong") : nullptr;
+#else
     GLShaderProgram* shader = realistic_phong ? wxGetApp().get_shader("phong") : nullptr;
+#endif
     if (shader == nullptr)
         shader = wxGetApp().get_shader("gouraud");
     ECanvasType canvas_type = this->m_canvas_type;
@@ -11986,6 +12213,7 @@ void GLCanvas3D::_render_separator_toolbar_left() const
 
 void GLCanvas3D::_render_collapse_toolbar() const
 {
+#ifndef SLIC3R_CAD
     auto&      plater              = *wxGetApp().plater();
     const auto sidebar_docking_dir = plater.get_sidebar_docking_state();
     if (sidebar_docking_dir == Sidebar::None) {
@@ -12001,6 +12229,22 @@ void GLCanvas3D::_render_collapse_toolbar() const
 
     collapse_toolbar.set_position(top, left);
     collapse_toolbar.render(*this);
+#else
+    if (!m_collapse_toolbar_enabled)
+        return;
+    const CollapseSide side = collapse_side();
+    if (side == CollapseSide::None)
+        return;
+
+    GLToolbar& bar = collapse_toolbar();
+    const Size cnv_size = get_canvas_size();
+    const float top  = 0.5f * (float)cnv_size.get_height();
+    const float left = side == CollapseSide::Right ? 0.5f * (float) cnv_size.get_width() - (float) bar.get_width() :
+                                                               -0.5f * (float) cnv_size.get_width();
+
+    bar.set_position(top, left);
+    bar.render(*this);
+#endif
 }
 
 //BBS reander assemble toolbar

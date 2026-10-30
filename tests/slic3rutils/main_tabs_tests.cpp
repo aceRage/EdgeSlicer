@@ -21,6 +21,10 @@ TEST_CASE("main tabs: Showcase sits right after Preview and the rest moved up by
     CHECK(MainTabs::Calibration == 8);
     CHECK(MainTabs::Auxiliary == 9);
     CHECK(MainTabs::DebugTool == 10);
+#ifdef SLIC3R_CAD
+    CHECK(MainTabs::Design == 100);
+    CHECK(!MainTabs::hosts_plater(MainTabs::Design));
+#endif
 
     // Contiguous and distinct: the notebook index of page n is n.
     const int all[] = { MainTabs::Home, MainTabs::Editor3D, MainTabs::Preview, MainTabs::Showcase, MainTabs::Monitor,
@@ -50,6 +54,9 @@ TEST_CASE("main tabs: web pages switch tabs by name", "[MainTabs]")
     CHECK(MainTabs::tab_from_name("MultiDevice") == MainTabs::Printers);
     CHECK(MainTabs::tab_from_name("Printers") == MainTabs::Printers);
     CHECK(MainTabs::tab_from_name("Calibration") == MainTabs::Calibration);
+#ifdef SLIC3R_CAD
+    CHECK(MainTabs::tab_from_name("Design") == MainTabs::Design);
+#endif
     CHECK(MainTabs::tab_from_name("") == -1);
     CHECK(MainTabs::tab_from_name("monitor") == -1);
 }

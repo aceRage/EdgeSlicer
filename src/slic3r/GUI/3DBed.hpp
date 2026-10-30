@@ -131,6 +131,9 @@ public:
 
     void set_position(Vec2d& position);
     void set_axes_mode(bool origin);
+#ifdef SLIC3R_CAD
+    void set_axes_origin(const Vec3d& origin) { m_axes.set_origin(origin); }
+#endif
     const Vec2d& get_position() const { return m_position; }
 
     // Build volume geometry for various collision detection tasks.

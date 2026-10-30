@@ -5316,6 +5316,75 @@ TEST_CASE("function + pi in expression binding", "[CadDocument][variables]")
     REQUIRE(doc.recompute());
     REQUIRE(doc.error.empty());
     REQUIRE_THAT(doc.features[sk].radius, WithinAbs(10.0, 1e-6));
+
+    // German locale: a single comma between digits outside parentheses is a decimal mark.
+    doc.variables = {{"r", "2,5"}};
+    doc.features[sk].expr = {{"radius", "r"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(2.5, 1e-6));
+
+    // Inside a call the comma stays the argument separator.
+    doc.variables = {{"r", "max(1,2)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(2.0, 1e-6));
+
+    // A decimal comma next to a call: 2,5 + max(1,2) = 4.5.
+    doc.variables = {{"r", "2,5 + max(1,2)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(4.5, 1e-6));
+
+    // Grouping parentheses keep the decimal comma: (2,5+1)*2 = 7.
+    doc.variables = {{"r", "(2,5+1)*2"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(7.0, 1e-6));
+
+    // Directly inside a call the comma separates arguments: max(1,5) = 5.
+    doc.variables = {{"r", "max(1,5)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(5.0, 1e-6));
+
+    // A nested grouping inside a call is grouping again: max((2,5), 1) = 2.5.
+    doc.variables = {{"r", "max((2,5), 1)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(2.5, 1e-6));
+
+    // Two fractional digits.
+    doc.variables = {{"r", "1,25"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(1.25, 1e-6));
+
+    // Exactly three digits after the comma reads as a thousands separator: rejected.
+    for (const char* bad : {"1,000", "12,500"}) {
+        doc.variables = {{"r", bad}};
+        REQUIRE_FALSE(doc.recompute());
+        REQUIRE_CONTAINS(doc.error, "ambiguous decimal separator");
+    }
+
+    // Ambiguous thousands/decimal mixes are rejected, never silently read as 1.0.
+    for (const char* bad : {"1.000,5", "1,000,5", "1.2.3"}) {
+        doc.variables = {{"r", bad}};
+        REQUIRE_FALSE(doc.recompute());
+        REQUIRE_FALSE(doc.error.empty());
+    }
+
+    doc.variables = {{"r", "6,5"}};
+    doc.features[sk].expr = {{"radius", "r"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(6.5, 1e-6));
+
+    // min() still uses comma as the arity separator.
+    doc.variables = {{"r", "min(4, 9)"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(4.0, 1e-6));
 }
 
 TEST_CASE("cycle detected fails recompute with error", "[CadDocument][variables]")
