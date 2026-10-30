@@ -22,6 +22,7 @@
 #include "libslic3r/Slicing.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 
 namespace Slic3r { namespace GUI {
@@ -64,6 +65,49 @@ int hpo_filament_count()
         return 0;
     const size_t physical = size_t(std::max(wxGetApp().filaments_cnt(), 0));
     return int(wxGetApp().preset_bundle->mixed_filaments.total_filaments(physical));
+}
+
+// Translucent bands for the 3D view, in the project's filament colours.
+std::vector<GLCanvas3D::ColorPatternSlab> hpo_slabs(const std::vector<HeightPatternRange> &ranges, const std::vector<std::string> &colours)
+{
+    std::vector<GLCanvas3D::ColorPatternSlab> out;
+    for (const HeightPatternRange &r : ranges) {
+        wxColour c(128, 128, 128);
+        const size_t i = size_t(std::max(1, r.extruder)) - 1;
+        if (i < colours.size() && colours[i].size() >= 7 && colours[i][0] == '#') {
+            wxColour parsed(wxString::FromUTF8(colours[i].substr(0, 7)));
+            if (parsed.IsOk())
+                c = parsed;
+        }
+        GLCanvas3D::ColorPatternSlab s;
+        s.lo    = r.lo;
+        s.hi    = r.hi;
+        s.color = ColorRGBA(c.Red() / 255.f, c.Green() / 255.f, c.Blue() / 255.f, 0.4f);
+        out.push_back(s);
+    }
+    return out;
+}
+
+// The purge table and densities for the dialog's "adds N filament changes" line.
+HeightPatternChangeInput hpo_change_input(const ModelObject &obj, const DynamicPrintConfig &full_config)
+{
+    HeightPatternChangeInput in;
+    in.base_filament = obj.config.has("extruder") ? std::max(1, obj.config.opt_int("extruder")) : 1;
+    if (wxGetApp().preset_bundle != nullptr) {
+        const DynamicPrintConfig &project = wxGetApp().preset_bundle->project_config;
+        if (const auto *m = project.option<ConfigOptionFloats>("flush_volumes_matrix")) {
+            const int n = int(std::sqrt(double(m->values.size())) + 0.001);
+            if (n > 0 && size_t(n) * size_t(n) == m->values.size()) {
+                in.filament_count = n;
+                in.flush_matrix.assign(m->values.begin(), m->values.end());
+            }
+        }
+        if (const auto *mult = project.option<ConfigOptionFloat>("flush_multiplier"))
+            in.flush_multiplier = mult->getFloat();
+    }
+    if (const auto *d = full_config.option<ConfigOptionFloats>("filament_density"))
+        in.density.assign(d->values.begin(), d->values.end());
+    return in;
 }
 
 wxString hpo_object_name(const ModelObject &obj)
@@ -180,6 +224,20 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
     ctx.object_height  = geo.height;
     ctx.max_filament   = filaments;
     ctx.filament_colours = plater->get_extruder_colors_from_plater_config();
+    ctx.change_input = hpo_change_input(*primary_obj, full_config);
+    if (existing != nullptr)
+        ctx.hand_edits = height_pattern_modified_ranges(*primary_obj, *existing);
+    // Live bands in the 3D view while the dialog is open.
+    GLCanvas3D *view_canvas = plater->get_view3D_canvas3D();
+    const std::vector<std::string> overlay_colours = ctx.filament_colours;
+    ctx.on_preview = [view_canvas, primary, overlay_colours](const std::vector<HeightPatternRange> &ranges) {
+        if (view_canvas == nullptr)
+            return;
+        if (ranges.empty())
+            view_canvas->clear_color_pattern_overlay();
+        else
+            view_canvas->set_color_pattern_overlay(primary, hpo_slabs(ranges, overlay_colours));
+    };
 
     // The rest of the current plate, for the "All objects on this plate" tick.
     std::set<int> in_targets(targets.begin(), targets.end());
@@ -203,7 +261,10 @@ void ObjectList::height_pattern_dialog(int obj_hint, int pattern_id)
                                                               HeightPatternDialog::load_last_input();
 
     HeightPatternDialog dlg(nullptr, ctx, initial);
-    if (dlg.ShowModal() != wxID_OK)
+    const int dialog_result = dlg.ShowModal();
+    if (view_canvas != nullptr)
+        view_canvas->clear_color_pattern_overlay();
+    if (dialog_result != wxID_OK)
         return;
     const HeightPatternDialogResult res = dlg.result();
 
@@ -342,6 +403,19 @@ void ObjectList::height_pattern_reset(int obj_idx, int pattern_id)
     const HeightColourPattern pattern = *rec;
     const int filaments = std::max(hpo_filament_count(), 1);
     const HpoGeometry geo = hpo_geometry(*mo, wxGetApp().preset_bundle->full_config());
+
+    // Only edited by hand (right filaments, right layer height): put back just those bands and leave
+    // everything else, including hand-made ranges elsewhere, exactly as it is.
+    const HeightPatternHealth health = height_pattern_health(*mo, *rec, hpo_filament_count(), geo.layer_height);
+    if (health.modified && health.missing_filaments.empty() && !health.layer_height_stale) {
+        {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Reset Color Pattern bands");
+            reset_height_pattern_modified_ranges(*mo, pattern_id);
+            changed_object(obj_idx);
+        }
+        refresh_height_pattern_rows(obj_idx);
+        return;
+    }
     const HeightPatternExpansion exp = expand_height_colour_pattern(pattern, geo.tops, geo.layer_height, geo.height, filaments);
     if (!exp.ok() || exp.ranges.empty()) {
         wxString why = exp.ok() ? _L("No band fits inside the object.") : from_u8(exp.error);
@@ -374,6 +448,25 @@ void ObjectList::height_pattern_reset(int obj_idx, int pattern_id)
     refresh_height_pattern_rows(obj_idx);
 }
 
+void ObjectList::show_height_pattern_overlay(int obj_idx, int pattern_id)
+{
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return;
+    GLCanvas3D *cnv = plater->get_view3D_canvas3D();
+    if (cnv == nullptr)
+        return;
+    if (pattern_id <= 0 || obj_idx < 0 || obj_idx >= int(m_objects->size())) {
+        cnv->clear_color_pattern_overlay();
+        return;
+    }
+    const HeightColourPattern *rec = find_height_colour_pattern(*(*m_objects)[size_t(obj_idx)], pattern_id);
+    if (rec == nullptr || rec->generated.empty())
+        cnv->clear_color_pattern_overlay();
+    else
+        cnv->set_color_pattern_overlay(obj_idx, hpo_slabs(rec->generated, plater->get_extruder_colors_from_plater_config()));
+}
+
 void ObjectList::show_height_pattern_menu(const wxDataViewItem &item)
 {
     const int obj_idx    = m_objects_model->GetObjectIdByItem(item);
@@ -392,7 +485,7 @@ void ObjectList::show_height_pattern_menu(const wxDataViewItem &item)
     const int id_edit = wxWindow::NewControlId(), id_reset = wxWindow::NewControlId(),
               id_detach = wxWindow::NewControlId(), id_remove = wxWindow::NewControlId();
     menu.Append(id_edit, _L("Edit..."));
-    wxMenuItem *reset = menu.Append(id_reset, _L("Reset to the pattern"));
+    wxMenuItem *reset = menu.Append(id_reset, _L("Reset edited bands"));
     reset->Enable(!health.ok());
     menu.Append(id_detach, _L("Detach (keep the ranges as plain height ranges)"));
     menu.AppendSeparator();
