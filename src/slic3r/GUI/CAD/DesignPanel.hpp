@@ -1032,6 +1032,10 @@ private:
     // The project's recipe was written by a newer Design tab. Its bytes stay on
     // Model::cad_recipe untouched; sync_recipe_to_model() must not overwrite them.
     bool              m_recipe_read_only{false};
+    bool              m_read_only_warned{false};   // the one-time modal has been shown
+    // True (and the edit must be abandoned) while the design is read-only. Shows a modal the
+    // first time, a status line after that.
+    bool block_read_only_edit();
 
     std::vector<::Button*> m_confirm_btns;
     // refresh_preview's verdict on the open card's candidate (open_tool resets it). Kept here, not

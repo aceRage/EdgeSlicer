@@ -4708,6 +4708,7 @@ void DesignPanel::sync_sketch_display()
 
 void DesignPanel::on_add_text()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     open_text_dialog(-1);
 }
 
@@ -4847,6 +4848,7 @@ void DesignPanel::text_dialog_done(bool accepted)
 
 void DesignPanel::on_import_svg()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     wxFileDialog dlg(this, _L("Import SVG"), wxEmptyString, wxEmptyString,
                      _L("SVG files (*.svg)|*.svg|All files|*.*"),
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -4967,6 +4969,7 @@ bool DesignPanel::recompute_guarded(const wxString& message)
 
 void DesignPanel::on_import_step()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     wxFileDialog dlg(this, _L("Import STEP"), wxEmptyString, wxEmptyString,
                      _L("STEP files (*.step;*.stp)|*.step;*.stp|All files|*.*"),
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -5028,6 +5031,7 @@ void DesignPanel::on_import_step()
 // every downstream feature tool (fillet / cut / shell / face-extrude) works on it unchanged.
 void DesignPanel::on_import_mesh()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     wxFileDialog dlg(this, _L("Import mesh"), wxEmptyString, wxEmptyString,
                      _L("Mesh files (*.stl;*.obj)|*.stl;*.obj|All files|*.*"),
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -5128,6 +5132,7 @@ void DesignPanel::add_imported_sketch(
     const std::vector<std::vector<std::vector<Vec2d>>>& regions,
     const wxString& base_name)
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (regions.empty()) {
         set_status(StatusKind::Error, _L("No importable geometry found"));
         return;
@@ -5252,6 +5257,7 @@ void DesignPanel::on_transform_imported(int feat_idx)
 
 void DesignPanel::on_add_sketch()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     SketchShape shape = (m_shape->GetSelection() == 1) ? SketchShape::Circle
                                                         : SketchShape::Rectangle;
     wxString where;                                            // named for the status line
@@ -5285,6 +5291,7 @@ std::string DesignPanel::feature_name(const wxString& kind) const
 
 void DesignPanel::on_add_extrude()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     BooleanMode mode = static_cast<BooleanMode>(m_mode->GetSelection());  // New/Add/Cut/Intersect
     m_feature_counter++;
     const std::string name = feature_name(_L_CONTEXT("Extrude", "Design"));
@@ -5333,6 +5340,7 @@ void DesignPanel::on_add_extrude()
 
 void DesignPanel::on_add_dressup()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.body.IsNull()) {
         set_status(_L("Add a solid (sketch + extrude) first"));
         return;
@@ -5402,6 +5410,7 @@ SketchPlane DesignPanel::hole_plane() const
 
 void DesignPanel::on_add_hole()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.body.IsNull()) {
         set_status(_L("Add a solid (sketch + extrude) first"));
         return;
@@ -5482,6 +5491,7 @@ void DesignPanel::infer_thread_spec(double diameter, bool internal)
 
 void DesignPanel::on_add_thread()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     bool internal = m_thread_internal->GetValue();
     if (internal && m_doc.body.IsNull()) {
         set_status(StatusKind::Warning, _L("Thread needs a solid body — add or import one first"));
@@ -5508,6 +5518,7 @@ void DesignPanel::on_add_thread()
 
 void DesignPanel::on_add_revolve()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_revolve_sketch_ref < 0 || m_revolve_sketch_ref >= int(m_doc.features.size())) {
         set_status(_L("Pick a sketch profile to revolve first"));
         return;
@@ -5534,6 +5545,7 @@ void DesignPanel::on_add_revolve()
 
 void DesignPanel::on_add_sweep()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_sweep_profile_ref < 0 || m_sweep_profile_ref >= int(m_doc.features.size())) {
         set_status(_L("Pick a profile sketch to sweep first"));
         return;
@@ -5564,6 +5576,7 @@ void DesignPanel::on_add_sweep()
 
 void DesignPanel::on_add_loft()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     // Collect the checked profile sketches in list (recipe) order.
     std::vector<int> refs;
     for (unsigned i = 0; i < m_loft_list->GetCount(); ++i)
@@ -5592,6 +5605,7 @@ void DesignPanel::on_add_loft()
 
 void DesignPanel::on_add_surface_extrude()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_surf_extrude_sketch_ref < 0 || m_surf_extrude_sketch_ref >= int(m_doc.features.size())) {
         set_status(_L("Pick a sketch profile to extrude first"));
         return;
@@ -5608,6 +5622,7 @@ void DesignPanel::on_add_surface_extrude()
 
 void DesignPanel::on_add_surface_revolve()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_surf_revolve_sketch_ref < 0 || m_surf_revolve_sketch_ref >= int(m_doc.features.size())) {
         set_status(_L("Pick a sketch profile to revolve first"));
         return;
@@ -5627,6 +5642,7 @@ void DesignPanel::on_add_surface_revolve()
 
 void DesignPanel::on_add_surface_loft()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     std::vector<int> refs;
     for (unsigned i = 0; i < m_surf_loft_list->GetCount(); ++i)
         if (m_surf_loft_list->IsChecked(i) && i < m_surf_loft_sketch_idx.size())
@@ -5647,6 +5663,7 @@ void DesignPanel::on_add_surface_loft()
 
 void DesignPanel::on_add_surface_fill()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_surf_fill_sketch_ref < 0 || m_surf_fill_sketch_ref >= int(m_doc.features.size())) {
         set_status(_L("Pick a sketch to fill first"));
         return;
@@ -5663,6 +5680,7 @@ void DesignPanel::on_add_surface_fill()
 
 void DesignPanel::on_add_surface_offset()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     const int sel = sheet_choice_body(m_surf_offset_body);
     if (sel < 0 || sel >= int(m_doc.bodies.size())) {
         set_status(_L("Select a sheet body first"));
@@ -5680,6 +5698,7 @@ void DesignPanel::on_add_surface_offset()
 
 void DesignPanel::on_add_thicken_surface()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     const int sel = sheet_choice_body(m_surf_thicken_body);
     if (sel < 0 || sel >= int(m_doc.bodies.size())) {
         set_status(_L("Select a sheet body first"));
@@ -5757,6 +5776,7 @@ void DesignPanel::xf_clear_preview()
 
 void DesignPanel::on_add_transform()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     xf_clear_preview();   // the feature performs this motion parametrically; the preview must go
     // The gizmo baked its drag into the display transform so the body followed the cursor.
     // The feature about to be created performs that same motion parametrically, so hand the
@@ -5793,6 +5813,7 @@ void DesignPanel::on_add_transform()
 
 void DesignPanel::on_add_mirror()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Mirror needs a body — add or import one first"));
         return;
@@ -5812,6 +5833,7 @@ void DesignPanel::on_add_mirror()
 
 void DesignPanel::on_add_thicken()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Thicken needs a solid body — add or import one first"));
         return;
@@ -5834,6 +5856,7 @@ void DesignPanel::on_add_thicken()
 
 void DesignPanel::on_add_rib()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Rib needs a solid body — add or import one first"));
         return;
@@ -5859,6 +5882,7 @@ void DesignPanel::on_add_rib()
 
 void DesignPanel::on_add_project()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Project needs a body — add or import one first"));
         return;
@@ -5879,6 +5903,7 @@ void DesignPanel::on_add_project()
 
 void DesignPanel::on_add_delete_face()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Delete Face needs a body — add or import one first"));
         return;
@@ -5901,6 +5926,7 @@ void DesignPanel::on_add_delete_face()
 
 void DesignPanel::on_add_helix()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     m_feature_counter++;
     m_doc.add_helix(plane_from_choice(m_helix_plane->GetSelection()),
                     m_helix_radius->GetValue(), m_helix_pitch->GetValue(),
@@ -5915,6 +5941,7 @@ void DesignPanel::on_add_helix()
 
 void DesignPanel::on_add_mate()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     const int sel_a = m_mate_cs_a->GetSelection();
     const int sel_b = m_mate_cs_b->GetSelection();
     if (sel_a == wxNOT_FOUND || sel_b == wxNOT_FOUND) {
@@ -6045,6 +6072,7 @@ void DesignPanel::select_sheet_choice(ComboBox* c, int body)
 
 void DesignPanel::on_add_pattern()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Pattern needs a solid body — add or import one first"));
         return;
@@ -6130,6 +6158,7 @@ void DesignPanel::fill_body_choice(ComboBox* c, int as_of_feature, int want)
 
 void DesignPanel::on_add_boolean()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.size() < 2) {
         set_status(StatusKind::Warning, _L("Boolean needs two bodies — add or import a second one"));
         return;
@@ -6151,6 +6180,7 @@ void DesignPanel::on_add_boolean()
 
 void DesignPanel::on_add_cut()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.bodies.empty()) {
         set_status(StatusKind::Warning, _L("Cut needs a solid body — add or import one first"));
         return;
@@ -6324,6 +6354,7 @@ int DesignPanel::offer_selection_kind() const
 // and the menu from drifting into three behaviours.
 void DesignPanel::run_offer_action(const char* action)
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (!action || !*action)
         return;
     const std::string a(action);
@@ -7212,6 +7243,7 @@ bool DesignPanel::on_add_plane()
 
 void DesignPanel::on_add_axis()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     m_feature_counter++;
     int idx = m_doc.add_axis((AxisType)m_axis_type->GetSelection(),
                              feature_name(_L("Axis")));
@@ -7223,6 +7255,7 @@ void DesignPanel::on_add_axis()
 
 void DesignPanel::on_add_coordsys()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     m_feature_counter++;
     Vec3d pt(m_cs_x->GetValue(), m_cs_y->GetValue(), m_cs_z->GetValue());
     int idx = m_doc.add_coordsys((CoordSysType)m_coordsys_type->GetSelection(), pt,
@@ -7235,6 +7268,7 @@ void DesignPanel::on_add_coordsys()
 
 void DesignPanel::on_add_shell()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.body.IsNull()) {
         set_status(StatusKind::Warning, _L("Shell needs a solid body — add or import one first"));
         return;
@@ -7255,6 +7289,7 @@ void DesignPanel::on_add_shell()
 
 void DesignPanel::on_add_draft()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_doc.body.IsNull()) {
         set_status(StatusKind::Warning, _L("Draft needs a solid body — add or import one first"));
         return;
@@ -7558,6 +7593,7 @@ void DesignPanel::load_recipe(const std::string& blob)
         if (CadDocument::newer_recipe_version(blob) != 0) {
             // Not loaded, and read-only: the project still saves the original bytes.
             m_recipe_read_only = true;
+            m_read_only_warned = false;
             m_doc.clear();
             set_status(StatusKind::Error, wxString::Format(
                 _L("Could not restore the CAD model: %s. The design is kept unchanged in the project; edits made here are not saved."),
@@ -8209,8 +8245,30 @@ void DesignPanel::after_tree_edit(bool ok)
 // Erase the whole document (every feature + body) and start fresh. The single "wipe" the
 // feature tree's per-row Delete can't give you — also the way out when a body has no
 // removable owning feature.
+bool DesignPanel::block_read_only_edit()
+{
+    if (!m_recipe_read_only)
+        return false;
+    const wxString msg = _L("This design was saved by a newer version of the Design tab. It is kept unchanged in the project, but it cannot be edited here and edits would not be saved. Use New Design to replace it.");
+    if (!m_read_only_warned) {
+        m_read_only_warned = true;
+        MessageDialog(this, msg, _L("Design is read-only"), wxOK | wxICON_WARNING).ShowModal();
+    }
+    set_status(StatusKind::Warning, msg);
+    return true;
+}
+
 void DesignPanel::on_new_design()
 {
+    if (m_recipe_read_only) {
+        // The project carries a newer-version design this build cannot show; New Design replaces it.
+        MessageDialog dlg(this,
+            _L("This project's design was saved by a newer version of the Design tab. Start a new design? The new design replaces it when the project is saved."),
+            _L("New Design"), wxYES_NO | wxICON_EXCLAMATION);
+        if (dlg.ShowModal() != wxID_YES) return;
+        clear_document();
+        return;
+    }
     if (m_doc.features.empty() && m_doc.bodies.empty()) { set_status_ok(); return; }
     MessageDialog dlg(this,
         _L("Erase all features and bodies and start a new design? This cannot be undone."),
@@ -8226,6 +8284,7 @@ void DesignPanel::on_new_design()
 void DesignPanel::clear_document()
 {
     m_recipe_read_only = false;    // a new design / project owns the recipe again
+    m_read_only_warned = false;
     tool_cancel();                 // leave any active tool / sketch / constrain cleanly
     end_body_move(true);           // ...and a Move, which tool_cancel leaves while a value is pending
     m_doc.clear();                 // features + bodies + meshes + history
@@ -11317,6 +11376,7 @@ void DesignPanel::refresh_pinned()
 
 void DesignPanel::start_sketch()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (m_ui_mode != UiMode::Feature) return;   // already sketching or constraining
     if (m_active != Tool::None || m_text_dlg != nullptr || body_move_pending()) {
         set_status(StatusKind::Info, _L("Finish or cancel what is open first"));
@@ -11337,6 +11397,7 @@ void DesignPanel::start_sketch()
 
 void DesignPanel::start_sketch_on_target(bool offer_tools)
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     if (!m_viewport) return;
     wxString on;
     const SketchPlane plane = sketch_plane_from_selection(on);
@@ -12395,6 +12456,7 @@ private:
 
 void DesignPanel::on_add_variable()
 {
+    if (block_read_only_edit()) return;   // F9: newer-version design is read-only
     DesignVariableDialog dlg(this, _L("Add Variable"), "", "0", true);
     if (dlg.ShowModal() != wxID_OK) return;
     const wxString name = dlg.name();

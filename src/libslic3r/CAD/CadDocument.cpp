@@ -267,17 +267,26 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
     std::vector<Token> tokens;
     size_t i = 0;
     bool prev_was_val = false; // tracked for unary-minus detection
-    // German locale: outside any parentheses, a single comma between digits of a number
-    // ("2,5") is a decimal mark. Inside parentheses a comma is always the argument separator,
-    // so max(1,2) keeps its arity. A number mixing '.' and ',' or carrying two commas
-    // ("1.000,5", "1,000,5") is ambiguous and is rejected rather than read as a prefix.
-    int paren_depth = 0;
+    // German locale: a single comma between digits of a number ("2,5") is a decimal mark,
+    // except DIRECTLY inside a function call's parentheses, where a comma is always the
+    // argument separator (max(1,5) has two arguments). Grouping parentheses do not change
+    // that: (2,5+1)*2 is 7. Ambiguous forms are rejected rather than read as a prefix:
+    //  - a number mixing '.' and ',' or carrying two commas ("1.000,5", "1,000,5");
+    //  - exactly three digits after the comma ("1,000", "12,500"), which reads as a
+    //    thousands separator. 1-2 or 4+ fractional digits are accepted ("1,25", "1,2500").
+    std::vector<bool> paren_is_call;   // one entry per open '(': true = function call
     auto digit_at = [&](size_t k) { return k < src.size() && isdigit((unsigned char)src[k]); };
     while (i < src.size()) {
         char c = src[i];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
-        if (c == '(') { tokens.push_back({Token::LParen, "("}); ++i; ++paren_depth; prev_was_val = false; continue; }
-        if (c == ')') { tokens.push_back({Token::RParen, ")"}); ++i; --paren_depth; prev_was_val = true; continue; }
+        if (c == '(') {
+            paren_is_call.push_back(!tokens.empty() && tokens.back().type == Token::Id);
+            tokens.push_back({Token::LParen, "("}); ++i; prev_was_val = false; continue;
+        }
+        if (c == ')') {
+            if (!paren_is_call.empty()) paren_is_call.pop_back();
+            tokens.push_back({Token::RParen, ")"}); ++i; prev_was_val = true; continue;
+        }
         if (c == ',') { tokens.push_back({Token::Comma, ","}); ++i; prev_was_val = false; continue; }
         if (isdigit(c) || c == '.') {
             size_t start = i;
@@ -286,7 +295,12 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
                 const char d = src[i];
                 if (isdigit((unsigned char)d)) { ++i; continue; }
                 if (d == '.') { ++dots; ++i; continue; }
-                if (d == ',' && paren_depth == 0 && i > start && digit_at(i - 1) && digit_at(i + 1)) {
+                if (d == ',' && (paren_is_call.empty() || !paren_is_call.back()) && i > start &&
+                    digit_at(i - 1) && digit_at(i + 1)) {
+                    size_t k = i + 1;
+                    while (digit_at(k)) ++k;
+                    if (k - (i + 1) == 3)
+                        throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
                     ++commas; ++i; continue;
                 }
                 break;
