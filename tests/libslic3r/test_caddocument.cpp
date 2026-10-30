@@ -9601,7 +9601,7 @@ TEST_CASE("Commit to Plate payload is a normal mesh; an empty document ships not
     REQUIRE(doc.display_body_meshes.size() == 1);
     REQUIRE_FALSE(doc.display_body_meshes[0].its.indices.empty());
     const BoundingBoxf3 bb = doc.display_mesh.bounding_box();
-    REQUIRE_THAT(bb.size().x(), WithinAbs(20.0, 0.5));
-    REQUIRE_THAT(bb.size().y(), WithinAbs(20.0, 0.5));
-    REQUIRE_THAT(bb.size().z(), WithinAbs(20.0, 0.5));
+    REQUIRE_THAT(bb.size().x(), Catch::WithinAbs(20.0, 0.5));
+    REQUIRE_THAT(bb.size().y(), Catch::WithinAbs(20.0, 0.5));
+    REQUIRE_THAT(bb.size().z(), Catch::WithinAbs(20.0, 0.5));
 }
