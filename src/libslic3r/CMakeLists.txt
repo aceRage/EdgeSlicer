@@ -457,6 +457,8 @@ set(lisbslic3r_sources
     MixedFilament.hpp
     MixedFilamentCliGates.cpp
     MixedFilamentCliGates.hpp
+    CliPresetSlots.cpp
+    CliPresetSlots.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
     BambuFlowSupport.cpp
