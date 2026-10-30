@@ -11140,7 +11140,7 @@ void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
     for (const std::string &key : visual_only_option_keys()) {
         const ConfigOptionDef *def = print_config_def.get(key);
         // A key for the whole project (filament_glow_intensity) is not per slot.
-        if (def == nullptr || def->default_value == nullptr || !def->default_value->is_vector())
+        if (def == nullptr || def->default_value.get() == nullptr || !def->default_value->is_vector())
             continue;
         auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
         if (opt == nullptr)
