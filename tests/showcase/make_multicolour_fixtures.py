@@ -8,7 +8,8 @@ objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk,
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
 
     python -I make_multicolour_fixtures.py <template.3mf> <out dir> [--angle DEG] [--colors "#RRGGBB|#RRGGBB"]
-                                           [--source toolpaths|model] [--dark]
+                                           [--source toolpaths|model] [--dark] [--glow] [--lights-off [AMBIENT]]
+                                           [--source toolpaths|model] [--dark] [--gradient] [--dwell MM] [--transition MM]
 
 Writes <out dir>/<shape>_<view>.3mf and lists them on stdout, one per line.
 
@@ -18,6 +19,14 @@ front-right corner, as on the P0 cube (front face red, right face yellow); set i
 
 --source is the scene's source: "toolpaths" (P3, the default) or "model" (P4, Showcase mesh mode: the
 coextruded look without a slice). --dark uses the dark studio backdrop and floor instead of Studio white.
+
+--glow (glow-in-the-dark, G1) sets slot 1 to glow (filament_glow = 1, the default vibrant glow colour,
+filament_glow_intensity 100). --lights-off puts the scene's lights out (materials.lights_off), leaving AMBIENT
+(default 0.05) of the light to the filaments, the floor and the backdrop.
+--gradient (P6) makes slot 1 a gradient filament instead (filament_colour_mode 1): the five colours of
+Snapmaker's "Pastel Rainbow" unless --colors is given: each colour holds for --dwell mm of filament and
+blends to the next over --transition mm (defaults 7000 and 1000, the real-spool defaults; small shapes
+use only a metre or so of filament, so pass e.g. --dwell 100 --transition 40 to see the bands on them).
 """
 import argparse
 import json
@@ -204,6 +213,11 @@ def main(argv):
     ap.add_argument("--twist", type=float, default=0.0)
     ap.add_argument("--source", choices=["toolpaths", "model"], default="toolpaths")
     ap.add_argument("--dark", action="store_true")
+    ap.add_argument("--glow", action="store_true")
+    ap.add_argument("--lights-off", nargs="?", const=0.05, type=float, default=None)
+    ap.add_argument("--gradient", action="store_true")
+    ap.add_argument("--dwell", type=float, default=7000.0)
+    ap.add_argument("--transition", type=float, default=1000.0)
     a = ap.parse_args(argv[1:])
 
     with zipfile.ZipFile(a.template) as z:
@@ -215,6 +229,8 @@ def main(argv):
     for shape, entry in SHAPES.items():
         make_mesh, overrides = entry[0], entry[1]
         colors = entry[2] if len(entry) > 2 else a.colors
+        if a.gradient:
+            colors = a.colors if a.colors != "#D7261E|#F5BE1B" else "#64C5D9|#8CB1DF|#CB95D0|#D7BFAA|#C6D4C0"
         mesh = make_mesh()
         xs = [p[0] for p in mesh[0]]
         zs = [p[2] for p in mesh[0]]
@@ -232,18 +248,28 @@ def main(argv):
             diffs[0] = ";".join(sorted(keys))
         set_slot0(settings, "filament_colour", colors.split("|")[0])
         set_slot0(settings, "filament_multi_colors", colors)
-        set_slot0(settings, "filament_colour_mode", "0")
+        set_slot0(settings, "filament_colour_mode", "1" if a.gradient else "0")
+        if a.gradient:
+            set_slot0(settings, "filament_gradient_dwell", "%g" % a.dwell)
+            set_slot0(settings, "filament_gradient_transition", "%g" % a.transition)
         set_slot0(settings, "filament_colour_split", "")
         set_slot0(settings, "filament_colour_angle", ("%g" % a.angle))
         set_slot0(settings, "filament_colour_twist", ("%g" % a.twist))
+        if a.glow:
+            set_slot0(settings, "filament_glow", "1")
+            set_slot0(settings, "filament_glow_colour", "")
+            settings["filament_glow_intensity"] = "100"
         for view in VIEWS[shape]:
             name = "%s_%s" % (shape, view)
-            scene = {"id": "plate1", "name": ("P3" if a.source == "toolpaths" else "P4") + " multi-colour: " + name, "plate_index": 0, "source": a.source,
+            scene = {"id": "plate1", "name": ("P6 gradient" if a.gradient else "P3" if a.source == "toolpaths" else "P4") + " multi-colour: " + name, "plate_index": 0, "source": a.source,
                      "preset_base": "studio_white", "view_frame_height": FRAME_HEIGHT,
                      "background": {"type": "radial_gradient", "color1": "#FFFFFF", "color2": "#D9DCE1"},
                      "floor": {"type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45},
                      "materials": {"filaments": [{"slot": 1, "finish": "silk"}]},
                      "export": {"width": 1920, "height": 1080, "quality": "high", "format": "png"}}
+            if a.lights_off is not None:
+                scene["materials"]["lights_off"] = True
+                scene["materials"]["lights_off_ambient"] = a.lights_off
             if a.dark:
                 scene["preset_base"] = "dark_gradient"
                 scene["background"] = {"type": "vertical_gradient", "color1": "#3A3D42", "color2": "#0B0C0E"}

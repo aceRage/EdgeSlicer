@@ -29,6 +29,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/FilamentSyncMatch.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -154,6 +155,20 @@ wxBitmap* GetFilamentColorPickerBitmap(const DynamicPrintConfig& config,
     return FilamentColorUtils::GetFilamentColorIcon(multiColors, colorMode, fallbackColor, label,
                                                     std::max(1, size.GetWidth()), std::max(1, size.GetHeight()),
                                                     wxNullColour, &makeUp.split, makeUp.angle);
+}
+
+// The make-up of a slot for the colour dialog, with whether its preset looks like a glow filament (G1).
+FilamentColorUtils::ColourMakeUp GetDialogMakeUp(const DynamicPrintConfig& config, size_t slot, const std::string& presetName)
+{
+    FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&config, slot);
+    std::string type;
+    if (wxGetApp().preset_bundle != nullptr)
+        if (const Preset* preset = wxGetApp().preset_bundle->filaments.find_preset(presetName, false, true))
+            if (const ConfigOptionStrings* t = preset->config.option<ConfigOptionStrings>("filament_type"))
+                if (!t->values.empty())
+                    type = t->values.front();
+    makeUp.glowSuggested = Glow::suggests_glow(presetName, type);
+    return makeUp;
 }
 
 } // namespace
@@ -1331,7 +1346,7 @@ void PlaterPresetComboBox::ChangeExtruderColor()
     {
         const FilamentColorMode currentMode = FilamentColorModeFromConfig(currentModeValue);
         const FilamentColor currentColor = FilamentColor::FromMultiColors(currentMultiColors, currentMode, currentColorHex);
-        FilamentColorDialog dialog(this, filament, currentColor, FilamentColorUtils::GetColourMakeUp(&config, size_t(m_filament_idx)));
+        FilamentColorDialog dialog(this, filament, currentColor, GetDialogMakeUp(config, size_t(m_filament_idx), filamentPresetName));
 
         if (dialog.ShowModal() == wxID_OK)
         {
@@ -1359,7 +1374,7 @@ void PlaterPresetComboBox::SelectLegacyFilamentColor()
         ConfigStringAt(config, "filament_colour", m_filament_idx));
     FilamentColorInfo noLibraryEntry;
     FilamentColorDialog dialog(this, noLibraryEntry, current,
-                               FilamentColorUtils::GetColourMakeUp(&config, size_t(m_filament_idx)));
+                               GetDialogMakeUp(config, size_t(m_filament_idx), CurrentFilamentPresetName()));
     if (dialog.ShowModal() == wxID_OK)
         ApplyFilamentColor(dialog.Selection(), &dialog.MakeUp());
 }

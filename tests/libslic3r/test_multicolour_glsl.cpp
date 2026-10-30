@@ -58,6 +58,7 @@ vec4 mc_bounds[16];
 vec4 mc_params[16];
 vec4 mc_global;
 vec4 mc_global2;
+vec4 mc_grad[16];
 
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -76,6 +77,7 @@ void load(const UniformTable &t)
     for (int i = 0; i < 16; ++i) {
         mc_bounds[i] = { t.bounds[i * 4], t.bounds[i * 4 + 1], t.bounds[i * 4 + 2], t.bounds[i * 4 + 3] };
         mc_params[i] = { t.params[i * 4], t.params[i * 4 + 1], t.params[i * 4 + 2], t.params[i * 4 + 3] };
+        mc_grad[i]   = { t.grad[i * 4], t.grad[i * 4 + 1], t.grad[i * 4 + 2], t.grad[i * 4 + 3] };
     }
     mc_global  = { t.global[0], t.global[1], t.global[2], t.global[3] };
     mc_global2 = { t.global2[0], t.global2[1], t.global2[2], t.global2[3] };
@@ -130,7 +132,7 @@ TEST_CASE("The shared GLSL is one text for the shader and the C++ check", "[Mult
 TEST_CASE("The coextruded-colour prelude shares no name with libvgcode's shader or realism 1b's prelude", "[MultiColour][Glsl]")
 {
     // Both preludes go into the same program (libvgcode::Viewer::set_base_color_prelude/set_fragment_prelude).
-    const std::vector<std::string> mine = { "mc_colors", "mc_bounds", "mc_params", "mc_global", "mc_global2", "external_base_color" };
+    const std::vector<std::string> mine = { "mc_colors", "mc_bounds", "mc_params", "mc_global", "mc_global2", "mc_grad", "external_base_color" };
     for (const std::string &n : Slic3r::Showcase::libvgcode_fragment_globals()) {
         INFO(n);
         CHECK(n.rfind("mc_", 0) != 0);
@@ -673,5 +675,243 @@ TEST_CASE("The Preview table is rebuilt exactly when a value it is made from cha
         DynamicPrintConfig a = cfg;
         a.set_key_value("nozzle_diameter", new ConfigOptionFloats{ 0.4 });
         CHECK(config_signature(a) == base);
+    }
+}
+
+// ---- P6: gradient filaments along the length ----
+
+namespace {
+
+Filament random_gradient(std::mt19937 &rng)
+{
+    std::uniform_real_distribution<float> u01(0.f, 1.f);
+    Filament f;
+    f.gradient_stops = std::uniform_int_distribution<int>(2, GRADIENT_MAX_STOPS)(rng);
+    for (int i = 0; i < f.gradient_stops; ++i)
+        f.gradient[size_t(i)] = { u01(rng), u01(rng), u01(rng) };
+    f.dwell_mm      = 3000.f * u01(rng) * u01(rng);      // often short, sometimes long; may be about 0
+    f.transition_mm = 20.f + 1500.f * u01(rng);
+    return f;
+}
+
+} // namespace
+
+TEST_CASE("The shader's gradient matches the reference model at random inputs (P6)", "[MultiColour][Glsl][Gradient]")
+{
+    std::mt19937                          rng(20261029);
+    std::uniform_real_distribution<float> u01(0.f, 1.f);
+    float                                 worst = 0.f;
+    for (int iter = 0; iter < 10000; ++iter) {
+        const Filament f    = random_gradient(rng);
+        const int      slot = std::uniform_int_distribution<int>(0, GLSL_SLOTS - 1)(rng);
+        std::vector<Filament> slots(GLSL_SLOTS);
+        slots[slot] = f;
+        const float d = u01(rng) < 0.5f ? 1.75f : 2.85f;
+        const UniformTable table = pack_uniforms(slots, std::vector<float>(GLSL_SLOTS, d));
+        REQUIRE(slot_is_gradient(table, slot));
+        sh::load(table);
+
+        // Up to 10 cycles in, as a long print on a short cycle would be.
+        const float length_m = f.gradient_cycle_mm() / 1000.f * 10.f * u01(rng);
+        const float volume   = length_m * 1000.f * filament_area(d);
+        const RGB   c        = f.gradient_colour(length_m);
+        worst = std::max(worst, max_diff(sh::mc_gradient_colour(slot, volume), c));
+        // The fragment entry point ignores the bead for a gradient, whatever the role.
+        const int role = int(std::uniform_int_distribution<int>(0, 3)(rng)) * 2;
+        worst = std::max(worst, max_diff(sh::mc_fragment_colour(slot, role, 0.3f, 0.7f, sh::vec3(1., 0., 0.), sh::vec3(0., 1., 0.), volume), c));
+    }
+    INFO("largest channel difference (linear RGB): " << worst);
+    CHECK(worst < 5e-3f);   // float volume at 1e5 mm3 keeps a few 1e-4 of the cycle
+}
+
+TEST_CASE("A gradient is packed into the colour entries and its own uniform (P6)", "[MultiColour][Glsl][Gradient]")
+{
+    Filament five;
+    five.gradient_stops = 5;
+    for (int i = 0; i < 5; ++i)
+        five.gradient[size_t(i)] = { 0.1f * float(i + 1), 0.2f, 0.3f };
+    five.dwell_mm      = 900.f;
+    five.transition_mm = 300.f;   // one run through five stops: 5 * 1200 = 6000 mm
+    Filament dual;
+    dual.n = 2;
+
+    std::vector<Filament> slots = { dual, five, Filament() };
+    const UniformTable    t     = pack_uniforms(slots, { 1.75f, 2.85f, 1.75f });
+    CHECK(t.any_gradient);
+    CHECK(t.any_multi);
+    CHECK(t.any_volume());
+
+    CHECK_FALSE(slot_is_gradient(t, 0));
+    CHECK(slot_is_gradient(t, 1));
+    CHECK_FALSE(slot_is_gradient(t, 2));
+    CHECK(slot_is_multi(t, 0));
+    CHECK(slot_is_multi(t, 1));
+    CHECK_FALSE(slot_is_multi(t, 2));
+    CHECK_FALSE(slot_is_multi(t, 16));
+    CHECK_FALSE(slot_is_multi(t, -1));
+
+    CHECK(t.grad[1 * 4] == 5.f);
+    CHECK_THAT(t.grad[1 * 4 + 1] * 6000.f * filament_area(2.85f), WithinAbs(1.0, 1e-5));   // one cycle per cycle length
+    CHECK_THAT(t.grad[1 * 4 + 2], WithinAbs(0.75, 1e-6));                                    // 900 of every 1200 mm is dwell
+    CHECK(t.grad[0] == 0.f);
+    CHECK(t.bounds[1 * 4 + 3] == 1.f);   // not split
+    // Stops 0..3 are the colours, stop 4 hides in the w of the first three entries.
+    CHECK_THAT(t.colors[(1 * 4 + 3) * 4], WithinAbs(0.4, 1e-6));
+    CHECK_THAT(t.colors[(1 * 4 + 0) * 4 + 3], WithinAbs(0.5, 1e-6));
+    CHECK_THAT(t.colors[(1 * 4 + 1) * 4 + 3], WithinAbs(0.2, 1e-6));
+    CHECK_THAT(t.colors[(1 * 4 + 2) * 4 + 3], WithinAbs(0.3, 1e-6));
+
+    // A table with split slots only has no gradient and no new volume need.
+    const UniformTable only_split = pack_uniforms({ dual }, { 1.75f });
+    CHECK_FALSE(only_split.any_gradient);
+    CHECK_FALSE(only_split.any_volume());
+    CHECK(only_split.grad[0] == 0.f);
+
+    CHECK_THAT(gradient_cycles_per_mm3(3000.f, 1.75f) * 3000.f * filament_area(1.75f), WithinAbs(1.0, 1e-5));
+    CHECK_THAT(gradient_cycles_per_mm3(3000.f, 0.f), WithinAbs(gradient_cycles_per_mm3(3000.f, 1.75f), 1e-12));
+    CHECK_THAT(gradient_cycles_per_mm3(0.f, 1.75f), WithinAbs(gradient_cycles_per_mm3(1.f, 1.75f), 1e-12));   // under 1 mm counts as 1
+}
+
+TEST_CASE("Split slots pack and draw exactly as before next to a gradient (P6)", "[MultiColour][Glsl][Gradient]")
+{
+    Filament dual;
+    dual.n          = 2;
+    dual.colour[0]  = srgb_to_linear(RGB{ 1.f, 0.f, 0.f });
+    dual.colour[1]  = srgb_to_linear(RGB{ 1.f, 1.f, 0.f });
+    dual.proportion = { 0.5f, 0.5f, 0.f, 0.f };
+    Filament grad;
+    grad.gradient_stops = 2;
+    grad.gradient       = { dual.colour[0], dual.colour[1] };
+
+    const UniformTable alone = pack_uniforms({ dual }, { 1.75f });
+    const UniformTable both  = pack_uniforms({ dual, grad }, { 1.75f, 1.75f });
+    for (int i = 0; i < 16; ++i)
+        CHECK(alone.colors[size_t(i)] == both.colors[size_t(i)]);   // slot 0's colours
+    for (int i = 0; i < 4; ++i) {
+        CHECK(alone.bounds[size_t(i)] == both.bounds[size_t(i)]);
+        CHECK(alone.params[size_t(i)] == both.params[size_t(i)]);
+    }
+    sh::load(both);
+    sh::load(both);
+    const sh::vec3 a = sh::mc_fragment_colour(0, 2, 1.f, 0.f, sh::vec3(0., -1., 0.), sh::vec3(1., 0., 0.), 123.f);
+    sh::load(alone);
+    const sh::vec3 b = sh::mc_fragment_colour(0, 2, 1.f, 0.f, sh::vec3(0., -1., 0.), sh::vec3(1., 0., 0.), 123.f);
+    CHECK(a.x == b.x);
+    CHECK(a.y == b.y);
+    CHECK(a.z == b.z);
+}
+
+TEST_CASE("The preludes declare the gradient uniform and the hook takes gradient slots (P6)", "[MultiColour][Glsl][Gradient]")
+{
+    const std::string &prelude = glsl_prelude();
+    CHECK(prelude.find("uniform vec4 mc_grad[16];") != std::string::npos);
+    CHECK(prelude.find("mc_count(look) <= 1 && !mc_is_gradient(look)") != std::string::npos);
+    CHECK(glsl_mesh_prelude().find("uniform vec4 mc_grad[16];") != std::string::npos);
+    CHECK(std::string(glsl_functions()).find("vec3 mc_gradient_colour(int slot, float volume)") != std::string::npos);
+
+    // Mesh mode: a gradient stands the height in for the filament length.
+    std::ifstream     in(std::string(TEST_DATA_DIR) + "/../../resources/shaders/140/showcase_material.fs", std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string fs = ss.str();
+    CHECK(fs.find("mc_is_gradient(mc_slot)") != std::string::npos);
+    CHECK(fs.find("mc_gradient_colour(mc_slot, max(world_pos.z, 0.0) * mc_volume_per_mm)") != std::string::npos);
+}
+
+TEST_CASE("Preview offers the toggle and builds the volume buffer for a gradient slot (P6)", "[MultiColour][Preview][Gradient]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings{ "#FF0000", "#00FF00" });
+    cfg.set_key_value("filament_multi_colors", new ConfigOptionStrings{ "#FF0000|#FFFF00|#0000FF", "#00FF00" });
+    cfg.set_key_value("filament_colour_mode", new ConfigOptionInts{ 1, 0 });
+    const UniformTable table = pack_uniforms({ from_config(cfg, 0), from_config(cfg, 1) }, { 1.75f, 1.75f });
+    REQUIRE(table.any_gradient);
+
+    CHECK(uses_split(table, { 0 }));
+    CHECK_FALSE(uses_split(table, { 1 }));
+    CHECK(uses_gradient(table, { 0 }));
+    CHECK(uses_gradient(table, { 1, 0 }));
+    CHECK_FALSE(uses_gradient(table, { 1 }));
+    CHECK_FALSE(uses_gradient(table, {}));
+    CHECK_FALSE(uses_twist(table, { 0 }));   // no twist: the buffer is wanted for the gradient
+
+    // The table is rebuilt when the dwell or the transition changes.
+    const std::string base = config_signature(cfg);
+    cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 900. });
+    const std::string with_dwell = config_signature(cfg);
+    CHECK(with_dwell != base);
+    cfg.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 90. });
+    CHECK(config_signature(cfg) != with_dwell);
+}
+
+TEST_CASE("Every view's uniforms come from the slot's own gradient settings (P6)", "[MultiColour][Glsl][Gradient][Mesh]")
+{
+    // Showcase's toolpath and mesh modes and Preview all build their table with table_from_config(): the
+    // mesh mode reads the same per-slot dwell and transition as the toolpaths, not a default.
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings{ "#FF0000", "#00FF00", "#0000FF" });
+    cfg.set_key_value("filament_multi_colors",
+                      new ConfigOptionStrings{ "#FF0000|#FFFF00|#0000FF", "#00FF00|#00FFFF", "#0000FF|#FFFFFF" });
+    cfg.set_key_value("filament_colour_mode", new ConfigOptionInts{ 1, 1, 0 });
+    const std::vector<float> diameters = { 1.75f, 2.85f, 1.75f };
+
+    SECTION("defaults when the slot sets nothing")
+    {
+        const UniformTable t = table_from_config(cfg, diameters);
+        REQUIRE(slot_is_gradient(t, 0));
+        // 3 stops * (7000 + 1000) mm of 1.75 mm filament per cycle, 7000 / 8000 of it dwell.
+        CHECK_THAT(t.grad[0 * 4 + 1] * 3.f * 8000.f * filament_area(1.75f), WithinAbs(1.0, 1e-5));
+        CHECK_THAT(t.grad[0 * 4 + 2], WithinAbs(0.875, 1e-6));
+    }
+    SECTION("each slot's own dwell and transition reach the table")
+    {
+        cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 2000., 500. });
+        cfg.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 500., 1500. });
+        const UniformTable t = table_from_config(cfg, diameters);
+        REQUIRE(slot_is_gradient(t, 0));
+        REQUIRE(slot_is_gradient(t, 1));
+        CHECK_FALSE(slot_is_gradient(t, 2));
+        CHECK(t.grad[0 * 4] == 3.f);
+        CHECK_THAT(t.grad[0 * 4 + 1] * 3.f * 2500.f * filament_area(1.75f), WithinAbs(1.0, 1e-5));
+        CHECK_THAT(t.grad[0 * 4 + 2], WithinAbs(0.8, 1e-6));
+        CHECK(t.grad[1 * 4] == 2.f);
+        CHECK_THAT(t.grad[1 * 4 + 1] * 2.f * 2000.f * filament_area(2.85f), WithinAbs(1.0, 1e-5));   // its own diameter too
+        CHECK_THAT(t.grad[1 * 4 + 2], WithinAbs(0.25, 1e-6));
+    }
+    SECTION("a changed setting changes the uploaded table")
+    {
+        const UniformTable before = table_from_config(cfg, diameters);
+        cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 4000. });
+        const UniformTable after = table_from_config(cfg, diameters);
+        CHECK(after.grad[0 * 4 + 1] != before.grad[0 * 4 + 1]);
+        CHECK(after.grad[0 * 4 + 2] != before.grad[0 * 4 + 2]);
+    }
+    SECTION("the table equals the one made slot by slot")
+    {
+        cfg.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 2000., 500. });
+        std::vector<Filament> slots;
+        for (size_t e = 0; e < size_t(GLSL_SLOTS); ++e)
+            slots.push_back(from_config(cfg, e));
+        const UniformTable a = table_from_config(cfg, diameters);
+        const UniformTable b = pack_uniforms(slots, diameters);
+        CHECK(a.grad == b.grad);
+        CHECK(a.colors == b.colors);
+        CHECK(a.params == b.params);
+    }
+}
+
+TEST_CASE("The shader's dwell and transition are the reference's at the edges (P6)", "[MultiColour][Glsl][Gradient]")
+{
+    Filament f;
+    f.gradient_stops = 3;
+    f.gradient       = { srgb_to_linear(RGB{ 1.f, 0.f, 0.f }), srgb_to_linear(RGB{ 0.f, 1.f, 0.f }), srgb_to_linear(RGB{ 0.f, 0.f, 1.f }) };
+    f.dwell_mm       = 700.f;
+    f.transition_mm  = 100.f;
+    std::vector<Filament> slots = { f };
+    sh::load(pack_uniforms(slots, { 1.75f }));
+    for (const float length_m : { 0.f, 0.3f, 0.69f, 0.71f, 0.75f, 0.79f, 0.81f, 1.5f, 2.35f, 2.39f, 3.1f }) {
+        INFO(length_m);
+        const sh::vec3 g = sh::mc_gradient_colour(0, length_m * 1000.f * filament_area(1.75f));
+        CHECK(max_diff(g, f.gradient_colour(length_m)) < 2e-3f);
     }
 }
