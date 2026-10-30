@@ -10,6 +10,8 @@
 // in Bambu's per-extruder slot layout (print_extruder_id / print_extruder_variant, design D1), which
 // the slicer reads through process_config_idx().
 
+#include "PrintConfig.hpp"
+
 #include <string>
 #include <vector>
 
@@ -47,6 +49,31 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 // The values a filament on extruder `extruder` reads for `key` in a filled config: what the G-code of
 // that extruder will use. Test and UI helper.
 std::string nozzle_process_value(const DynamicPrintConfig &config, const std::string &key, size_t extruder, bool high_flow);
+
+// ---- One process with separate values per nozzle (the Speed page's Left / Right editing) ----
+
+// Whether `process` holds a per-extruder slot layout covering exactly `extruders` extruders (an H2D, H2C or
+// X2D process), so its nozzles can be edited separately.
+bool process_nozzles_splittable(const ConfigBase &process, size_t extruders);
+// Whether the slicer reads `process`'s extruder slots (process_extruder_values).
+bool process_nozzles_split(const ConfigBase &process);
+// The slot of `key` holding extruder `extruder`'s value for flow mode `mode` in a split process, or -1 when
+// the process is not split or `key` is not a per-nozzle key of the layout's length.
+int process_nozzle_slot(const ConfigBase &process, const std::string &key, size_t extruder, FilamentVolumeType mode);
+// "Edit nozzles separately": spread every per-nozzle key over the layout (a vector a user preset cut short
+// included), give every nozzle's Standard / High Flow slots the values it prints with now (the flow-mode
+// column) and set process_extruder_values. Returns false (process untouched) when not splittable.
+bool split_process_per_nozzle(DynamicPrintConfig &process, size_t extruders);
+// "Apply to all nozzles": copy extruder `from`'s Standard / High Flow slots to every other extruder.
+// Returns true when a value changed.
+bool copy_nozzle_slots_to_all(DynamicPrintConfig &process, size_t from);
+// "Link nozzles": every nozzle takes extruder `from`'s values and process_extruder_values is cleared, so
+// the process is edited and sliced with one set of values again. A process split and linked back with
+// unchanged values is the process it was (stock / older presets slice exactly as before).
+// `reference` (the saved preset) gives back the shape of a key that splitting spread over the layout (a
+// one- or two-value vector) when its linked values still fit that shape, so an unchanged process is
+// exactly the saved one again. Returns false when the process was not split.
+bool link_process_nozzles(DynamicPrintConfig &process, size_t from, const ConfigBase *reference = nullptr);
 
 } // namespace Slic3r
 

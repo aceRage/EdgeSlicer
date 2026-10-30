@@ -191,6 +191,114 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
     return true;
 }
 
+bool process_nozzles_splittable(const ConfigBase &process, size_t extruders)
+{
+    return extruders >= 2 && SlotLayout::of(process).extruder_count() == extruders;
+}
+
+bool process_nozzles_split(const ConfigBase &process)
+{
+    const auto *flag = dynamic_cast<const ConfigOptionBool *>(process.option("process_extruder_values"));
+    return flag != nullptr && flag->value;
+}
+
+int process_nozzle_slot(const ConfigBase &process, const std::string &key, size_t extruder, FilamentVolumeType mode)
+{
+    if (!process_nozzles_split(process) || !is_per_nozzle_process_option(key))
+        return -1;
+    const SlotLayout layout = SlotLayout::of(process);
+    const auto      *opt    = dynamic_cast<const ConfigOptionVectorBase *>(process.option(key));
+    if (layout.extruder_count() == 0 || extruder >= layout.extruder_count() || opt == nullptr || opt->size() != layout.ids.size())
+        return -1;
+    int first = -1;
+    for (size_t s = 0; s < layout.ids.size(); ++s) {
+        if (size_t(layout.ids[s]) != extruder + 1)
+            continue;
+        if (first < 0)
+            first = int(s);
+        if (process_variant_flow_mode(layout.variants[s]) == int(mode))
+            return int(s);
+    }
+    return first;
+}
+
+bool split_process_per_nozzle(DynamicPrintConfig &process, size_t extruders)
+{
+    if (!process_nozzles_splittable(process, extruders))
+        return false;
+    const SlotLayout layout = SlotLayout::of(process);
+    const size_t     size   = layout.ids.size();
+    for (const std::string &key : per_nozzle_process_options()) {
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(process.option(key));
+        if (opt == nullptr || opt->size() == 0)
+            continue;
+        const std::unique_ptr<ConfigOption> before(opt->clone());
+        const auto  *src     = static_cast<const ConfigOptionVectorBase *>(before.get());
+        const bool   in_place = src->size() == size;
+        opt->resize(size, before.get());
+        for (size_t s = 0; s < size; ++s) {
+            const size_t e = size_t(layout.ids[s] - 1);
+            // Extruder 1 keeps its slots; every other nozzle starts from the column it prints with now.
+            const size_t idx = in_place && (e == 0 || process_variant_flow_mode(layout.variants[s]) < 0) ? s :
+                                                                       layout.column(src->size(), process_variant_fill_mode(layout.variants[s]));
+            opt->set_at(src, s, idx);
+        }
+    }
+    process.set_key_value("process_extruder_values", new ConfigOptionBool(true));
+    return true;
+}
+
+bool copy_nozzle_slots_to_all(DynamicPrintConfig &process, size_t from)
+{
+    const SlotLayout layout = SlotLayout::of(process);
+    if (layout.extruder_count() == 0 || from >= layout.extruder_count())
+        return false;
+    bool changed = false;
+    for (const std::string &key : per_nozzle_process_options()) {
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(process.option(key));
+        if (opt == nullptr || opt->size() != layout.ids.size())
+            continue;
+        const std::unique_ptr<ConfigOption> before(opt->clone());
+        const std::vector<std::string>      values = opt->vserialize();
+        for (size_t dst = 0; dst < layout.ids.size(); ++dst) {
+            const int mode = process_variant_flow_mode(layout.variants[dst]);
+            if (size_t(layout.ids[dst]) == from + 1 || mode < 0)
+                continue;
+            const int src = process_nozzle_slot(process, key, from, FilamentVolumeType(mode));
+            if (src >= 0 && values[size_t(src)] != values[dst]) {
+                opt->set_at(before.get(), dst, size_t(src));
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+bool link_process_nozzles(DynamicPrintConfig &process, size_t from, const ConfigBase *reference)
+{
+    if (!process_nozzles_split(process))
+        return false;
+    copy_nozzle_slots_to_all(process, from);
+    if (reference != nullptr) {
+        const SlotLayout layout = SlotLayout::of(process);
+        for (const std::string &key : per_nozzle_process_options()) {
+            auto       *opt = dynamic_cast<ConfigOptionVectorBase *>(process.option(key));
+            const auto *ref = dynamic_cast<const ConfigOptionVectorBase *>(reference->option(key));
+            if (opt == nullptr || ref == nullptr || ref->size() == 0 || ref->size() >= opt->size() || opt->size() != layout.ids.size())
+                continue;
+            // The reference's shorter vector is a flow-mode vector: every slot must hold its mode's column.
+            const std::vector<std::string> values = opt->vserialize();
+            bool fits = true;
+            for (size_t s = 0; s < values.size() && fits; ++s)
+                fits = values[s] == values[layout.column(ref->size(), process_variant_fill_mode(layout.variants[s]))];
+            if (fits)
+                opt->resize(ref->size());
+        }
+    }
+    process.set_key_value("process_extruder_values", new ConfigOptionBool(false));
+    return true;
+}
+
 std::string nozzle_process_value(const DynamicPrintConfig &config, const std::string &key, size_t extruder, bool high_flow)
 {
     const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));

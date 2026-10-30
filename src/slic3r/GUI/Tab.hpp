@@ -313,6 +313,7 @@ protected:
         ::ComboBox*              nozzle_process_combo { nullptr };
         Button*                  nozzle_apply_btn { nullptr };
         wxStaticText*            nozzle_note { nullptr };
+        wxStaticText*            nozzle_mode_label { nullptr }; // "Nozzles edited separately"
         std::vector<wxString>    nozzle_labels;
         size_t                   selected_extruder { 0 };
         std::vector<std::string> nozzle_combo_names; // combo row -> preset name ("" = the plate's process)

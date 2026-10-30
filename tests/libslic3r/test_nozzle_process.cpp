@@ -12,11 +12,17 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Print.hpp"
+#include "../fff_print/test_data.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <map>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -543,4 +549,129 @@ TEST_CASE("An H2D offers processes per side and drops a choice that no longer fi
     CHECK(b.prune_nozzle_processes());
     CHECK(b.nozzle_process_selection() == std::vector<std::string>{ "", "" });
     b.printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.4, 0.4 };
+}
+
+// ---- One process edited per nozzle, end to end --------------------------------------------------
+
+namespace {
+
+// Two blocks on an H2D, block i printed by filament i, filament i on extruder i (Left, Right).
+std::string slice_h2d_two_blocks(DynamicPrintConfig cfg)
+{
+    cfg.set_deserialize_strict({ { "filament_map_mode", "Manual" }, { "filament_map", "1,2" }, { "enable_prime_tower", "0" },
+                                 { "enable_arc_fitting", "0" }, { "slow_down_for_layer_cooling", "0,0" } });
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "block" + std::to_string(i + 1);
+        TriangleMesh mesh   = Test::mesh(Test::TestMesh::cube_20x20x20);
+        mesh.scale(Vec3f(1.f, 1.f, 0.2f));
+        object->add_volume(mesh);
+        object->config.set("extruder", i + 1);
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(120. + 60. * double(i), 140., 0.));
+        object->ensure_on_bed();
+    }
+    Print print;
+    print.is_BBL_printer() = true;
+    print.apply(model, cfg);
+    print.validate();
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+// Per tool (T0 / T1 lines), the F values of extruding G1 moves, the config block skipped.
+std::map<int, std::multiset<int>> feeds_per_tool(const std::string &gcode)
+{
+    std::map<int, std::multiset<int>> out;
+    std::istringstream                in(gcode);
+    std::string                       line;
+    int                               tool = 0, feed = 0;
+    bool                              in_cfg = false;
+    static const std::regex           t_re(R"(^T([0-9]+)\b)"), f_re(R"(\bF([0-9.]+))"), e_re(R"(\bE[0-9.])");
+    while (std::getline(in, line)) {
+        if (line.rfind("; CONFIG_BLOCK_START", 0) == 0) in_cfg = true;
+        if (line.rfind("; CONFIG_BLOCK_END", 0) == 0) { in_cfg = false; continue; }
+        if (in_cfg) continue;
+        std::smatch m;
+        if (std::regex_search(line, m, t_re) && std::stoi(m[1].str()) < 16) { tool = std::stoi(m[1].str()); continue; }
+        if (line.rfind("G1", 0) != 0) continue;
+        if (std::regex_search(line, m, f_re)) feed = int(std::stod(m[1].str()));
+        if (std::regex_search(line, e_re)) out[tool].insert(feed);
+    }
+    return out;
+}
+
+void prepare_h2d(PresetBundle &b)
+{
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2D 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H2D", true));
+    REQUIRE(b.filaments.select_preset_by_name("Bambu PLA Basic @BBL H2D", true));
+    b.filament_presets = { "Bambu PLA Basic @BBL H2D" };
+    b.set_num_filaments(2, std::vector<std::string>{ "#1943E0", "#FFFFFF" });
+    b.filament_presets = { "Bambu PLA Basic @BBL H2D", "Bambu PLA Basic @BBL H2D" };
+    b.update_compatible(PresetSelectCompatibleType::Never);
+    b.project_config.option<ConfigOptionStrings>("nozzle_process_presets", true)->values.clear();
+}
+
+} // namespace
+
+TEST_CASE("Editing one nozzle of a split process changes only that nozzle's G-code; linking back restores it",
+          "[NozzleProcess][GCode][Split]")
+{
+    PresetBundle &b = vendor_bundle("BBL");
+    prepare_h2d(b);
+    DynamicPrintConfig &process  = b.prints.get_edited_preset().config;
+    const DynamicPrintConfig original = process;
+    const std::string        plain    = slice_h2d_two_blocks(b.full_config());
+
+    // "Edit nozzles separately": nothing prints differently yet.
+    REQUIRE(split_process_per_nozzle(process, 2));
+    CHECK(process_nozzles_split(process));
+    CHECK(feeds_per_tool(slice_h2d_two_blocks(b.full_config())) == feeds_per_tool(plain));
+
+    // Right's (extruder 2) sparse infill 150 mm/s, as the Speed page writes it: the field bound to its slot.
+    const int slot = process_nozzle_slot(process, "sparse_infill_speed", 1, fvtStandard);
+    REQUIRE(slot == 3);
+    CHECK(process_nozzle_slot(process, "sparse_infill_speed", 0, fvtStandard) == 0);
+    process.option<ConfigOptionFloats>("sparse_infill_speed")->values[size_t(slot)] = 150.;
+    const std::string edited = slice_h2d_two_blocks(b.full_config());
+    const auto        before = feeds_per_tool(plain);
+    const auto        after  = feeds_per_tool(edited);
+    REQUIRE(after.count(0) == 1);
+    REQUIRE(after.count(1) == 1);
+    CHECK(after.at(0) == before.at(0));       // Left: every move as before
+    CHECK(after.at(1) != before.at(1));       // Right: changed
+    CHECK(after.at(1).count(150 * 60) > 0);   // ... to 150 mm/s
+    CHECK(after.at(0).count(150 * 60) == 0);
+
+    SECTION("Link nozzles from Left: the process is the original one again and slices as before")
+    {
+        REQUIRE(link_process_nozzles(process, 0, &original));
+        CHECK_FALSE(process_nozzles_split(process));
+        CHECK(process.diff(original).empty());
+        CHECK(feeds_per_tool(slice_h2d_two_blocks(b.full_config())) == before);
+    }
+    SECTION("Link nozzles from Right: every nozzle takes Right's 150 mm/s")
+    {
+        REQUIRE(link_process_nozzles(process, 1, &original));
+        CHECK_FALSE(process_nozzles_split(process));
+        CHECK(process.option<ConfigOptionFloats>("sparse_infill_speed")->values[0] == 150.);
+        const auto linked = feeds_per_tool(slice_h2d_two_blocks(b.full_config()));
+        CHECK(linked.at(0).count(150 * 60) > 0);
+        CHECK(linked.at(1).count(150 * 60) > 0);
+    }
+    process = original;
+}
+
+TEST_CASE("Splitting a process cut short by a user preset spreads every key over the layout", "[NozzleProcess][Split]")
+{
+    DynamicPrintConfig process = h2d_like({ 1, 2 }, { STD, STD }, false);
+    process.option<ConfigOptionFloats>("outer_wall_speed")->values = { 77, 88 }; // a user preset's two values
+    REQUIRE(split_process_per_nozzle(process, 2));
+    CHECK(process.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 77, 88, 88, 77, 88, 77, 88 });
+    CHECK(process_nozzle_slot(process, "outer_wall_speed", 1, fvtHighFlow) == 4);
+    CHECK(process_nozzle_slot(process, "slow_down_layers", 1, fvtStandard) == -1); // read once per print
+    CHECK_FALSE(split_process_per_nozzle(process, 4)); // not this printer's layout
 }
