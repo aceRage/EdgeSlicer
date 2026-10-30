@@ -97,7 +97,8 @@ private:
     bool _gradient { false };
     bool _uiBuilt { false };
     int _dialogWidth { 0 };
-    SpinInput* _cycleSpin { nullptr };
+    SpinInput* _dwellSpin { nullptr };
+    SpinInput* _transitionSpin { nullptr };
     wxWindow* _strip { nullptr };
     wxWindow* _splitButton { nullptr };
     wxWindow* _gradientButton { nullptr };
@@ -106,7 +107,8 @@ private:
     wxSizer* _discRow { nullptr };
     wxSizer* _angleRow { nullptr };
     wxSizer* _twistRow { nullptr };
-    wxSizer* _cycleRow { nullptr };
+    wxSizer* _cycleRow { nullptr };        // the colour length (dwell) row
+    wxSizer* _transitionRow { nullptr };
     wxSizer* _stripRow { nullptr };
     SpinInput* _angleSpin { nullptr };
     SpinInput* _twistSpin { nullptr };

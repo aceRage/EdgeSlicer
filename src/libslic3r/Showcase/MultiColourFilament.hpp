@@ -38,19 +38,21 @@ constexpr int MAX_COLOURS = 4; // D10
 
 // ---- Gradient filaments (P6, design 1.3): the colour changes along the strand's length ----
 // A gradient slot (filament_colour_mode = 1) has two or more colours that run one after another and
-// repeat: the palette cycles, last colour back to the first, once per `filament_colour_cycle` mm of
-// filament. The most stops any known spool has is 5 (Snapmaker "Pastel Rainbow"; Bambu's "Dawn
-// Radiance" has 4), so 5 is the cap; a longer palette is resampled to 5 evenly spaced stops.
+// repeat. Real gradient filament holds each colour for a long run and then changes to the next over a
+// shorter one: colour 1 for `dwell` mm of filament, a blend to colour 2 over `transition` mm, colour 2
+// for `dwell` mm, and so on, the last colour blending back to the first. One cycle is
+// stops * (dwell + transition). The two lengths are the visual-only keys filament_gradient_dwell and
+// filament_gradient_transition. The most stops any known spool has is 5 (Snapmaker "Pastel Rainbow";
+// Bambu's "Dawn Radiance" has 4), so 5 is the cap; a longer palette is resampled to 5 evenly spaced stops.
 constexpr int GRADIENT_MAX_STOPS = 5;
-// Filament length per palette cycle when the slot does not set one. A GUESS, not spool data: no
-// vendor publishes the repeat length. 3 m puts about one full cycle through a 10 g print of 1.75 mm
-// PLA (about 3.3 m of filament) and several through a 100 g one.
-constexpr float GRADIENT_CYCLE_MM_DEFAULT = 3000.f;
-constexpr float GRADIENT_CYCLE_MM_MIN     = 50.f;
-constexpr float GRADIENT_CYCLE_MM_MAX     = 100000.f;
-// The cycle length the key's value means: 0, a missing or a bad value gives the default, anything
-// else is clamped to [MIN, MAX].
-float gradient_cycle_mm(double stored);
+// Owner's figures for real spools (2026-10-29), used when a slot does not set its own.
+constexpr float GRADIENT_DWELL_MM_DEFAULT      = 7000.f;
+constexpr float GRADIENT_TRANSITION_MM_DEFAULT = 1000.f;
+constexpr float GRADIENT_LENGTH_MM_MAX         = 100000.f;
+// The length a key's value means: a negative, missing or bad value gives the default, anything else is
+// clamped to [0, MAX]. 0 is a real value (no dwell: a constant blend; no transition: hard edges).
+float gradient_dwell_mm(double stored);
+float gradient_transition_mm(double stored);
 
 // Boundary blend width, in turns of the strand (about 15 degrees). P0 found the wall transition
 // soft and wide; P3 retunes it (a constant, not a setting) and never lets it exceed the narrowest
@@ -115,12 +117,18 @@ struct Filament
     // length instead, on the same cumulative filament length that bead_colour() takes for twist.
     int                                 gradient_stops = 0;        // 0 = not a gradient, else 2..GRADIENT_MAX_STOPS
     std::array<RGB, GRADIENT_MAX_STOPS> gradient{};                // linear RGB, in palette order
-    float                               cycle_mm       = GRADIENT_CYCLE_MM_DEFAULT;
+    float                               dwell_mm       = GRADIENT_DWELL_MM_DEFAULT;       // mm of filament per colour run
+    float                               transition_mm  = GRADIENT_TRANSITION_MM_DEFAULT;  // mm of filament per blend
 
     bool  is_multi() const { return n > 1; }
     bool  is_gradient() const { return gradient_stops >= 2; }
-    // The palette colour after filament_length_m metres of this slot's filament: linear blend between
-    // neighbouring stops (linear RGB), wrapping every cycle_mm. A non-gradient slot gives colour[0].
+    // mm of filament per run through the whole palette: stops * (dwell + transition), at least 1 per stop.
+    float gradient_cycle_mm() const;
+    // The share of one stop's (dwell + transition) that is dwell, 0..1.
+    float gradient_dwell_fraction() const;
+    // The palette colour after filament_length_m metres of this slot's filament (linear RGB): a stop's
+    // colour for dwell_mm, then a linear blend to the next stop over transition_mm, wrapping every
+    // gradient_cycle_mm(). A non-gradient slot gives colour[0].
     RGB   gradient_colour(float filament_length_m) const;
     // Cumulative start of slice i in turns (boundary(0) = 0, boundary(n) = 1).
     float boundary(int i) const;
@@ -195,7 +203,7 @@ std::vector<RGB> resample_cyclic_palette(const std::vector<RGB> &palette, int co
 // filament_colour fallback) and the visual-only keys. Missing keys and short vectors take their
 // defaults (equal split, angle 0, twist 0). Gradient slots (filament_colour_mode = 1) and slots
 // with one colour come back as a single colour (n = 1); a gradient slot with two or more colours
-// also carries its palette (gradient_stops, gradient) and filament_colour_cycle (P6).
+// also carries its palette (gradient_stops, gradient) and filament_gradient_dwell / _transition (P6).
 Filament from_config(const ConfigBase &config, size_t slot);
 
 } // namespace MultiColour

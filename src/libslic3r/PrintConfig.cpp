@@ -2851,18 +2851,30 @@ void PrintConfigDef::init_fff_params()
     def->max = 3600;
     def->set_default_value(new ConfigOptionFloats{ 0. });
 
-    // P6: gradient filaments. Visual only like the three above: the palette repeats every this many mm
-    // of filament. 0 (the default) means MultiColour::GRADIENT_CYCLE_MM_DEFAULT.
-    def = this->add("filament_colour_cycle", coFloats);
-    def->label = L("Gradient cycle length");
-    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament it takes to run through "
-                     "all its colours once, before the colours repeat. 0 means the default.");
+    // P6: gradient filaments. Visual only like the three above: a gradient holds each colour for `dwell`
+    // mm of filament, then blends to the next over `transition` mm. A negative value (the default) means
+    // MultiColour::GRADIENT_DWELL_MM_DEFAULT / GRADIENT_TRANSITION_MM_DEFAULT.
+    def = this->add("filament_gradient_dwell", coFloats);
+    def->label = L("Gradient colour length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament each colour holds before "
+                     "it starts changing to the next one. A negative value means the default.");
     def->sidetext = L("mm");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
-    def->min = 0;
+    def->min = -1;
     def->max = 100000;
-    def->set_default_value(new ConfigOptionFloats{ 0. });
+    def->set_default_value(new ConfigOptionFloats{ -1. });
+
+    def = this->add("filament_gradient_transition", coFloats);
+    def->label = L("Gradient transition length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament the change from one colour "
+                     "to the next takes. A negative value means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ -1. });
 
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
@@ -11085,12 +11097,13 @@ const std::vector<std::string>& part_support_keys()
 
 const std::set<std::string>& visual_only_option_keys()
 {
-    // Multi-colour filaments P1; P6 adds the gradient cycle length. Glow (G1) adds its keys here.
+    // Multi-colour filaments P1; P6 adds the gradient dwell and transition lengths. Glow (G1) adds its keys here.
     static const std::set<std::string> s_keys {
         "filament_colour_split",
         "filament_colour_angle",
         "filament_colour_twist",
-        "filament_colour_cycle",
+        "filament_gradient_dwell",
+        "filament_gradient_transition",
     };
     return s_keys;
 }

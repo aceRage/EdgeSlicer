@@ -27,8 +27,16 @@ float gradient_cycles_per_mm3(float cycle_mm, float diameter_mm)
 {
     const double d     = std::isfinite(diameter_mm) && diameter_mm > 0.f ? double(diameter_mm) : 1.75;
     const double area  = 3.14159265358979323846 * 0.25 * d * d;   // mm2 of filament
-    const double cycle = std::isfinite(cycle_mm) && cycle_mm > 0.f ? double(cycle_mm) : double(GRADIENT_CYCLE_MM_DEFAULT);
+    const double cycle = std::isfinite(cycle_mm) ? std::max(double(cycle_mm), 1.) : 1.;
     return float(1. / (cycle * area));
+}
+
+UniformTable table_from_config(const ConfigBase &config, const std::vector<float> &diameters_mm)
+{
+    std::vector<Filament> slots;
+    for (size_t e = 0; e < size_t(GLSL_SLOTS); ++e)
+        slots.push_back(from_config(config, e));
+    return pack_uniforms(slots, diameters_mm);
 }
 
 bool slot_is_gradient(const UniformTable &table, int slot)
@@ -61,7 +69,8 @@ UniformTable pack_uniforms(const std::vector<Filament> &slots, const std::vector
         if (gradient) {
             float *g = &t.grad[size_t(s * 4)];
             g[0] = float(stops);
-            g[1] = gradient_cycles_per_mm3(f.cycle_mm, size_t(s) < diameters_mm.size() ? diameters_mm[size_t(s)] : 1.75f);
+            g[1] = gradient_cycles_per_mm3(f.gradient_cycle_mm(), size_t(s) < diameters_mm.size() ? diameters_mm[size_t(s)] : 1.75f);
+            g[2] = f.gradient_dwell_fraction();
             t.any_gradient = true;
             t.any_multi    = true;
         }
@@ -130,7 +139,7 @@ std::string config_signature(const ConfigBase &config)
     add("filament_colour");
     add("filament_multi_colors");
     add("filament_colour_mode");
-    // The visual-only keys, which include filament_colour_cycle (P6).
+    // The visual-only keys, which include the gradient dwell and transition (P6).
     for (const std::string &key : visual_only_option_keys())
         add(key);
     return sig;

@@ -52,7 +52,8 @@ DynamicPrintConfig with_visual_keys(DynamicPrintConfig config)
     config.set_key_value("filament_colour_split", new ConfigOptionStrings{ "30|70", "25|25|50" });
     config.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 137., -45. });
     config.set_key_value("filament_colour_twist", new ConfigOptionFloats{ 90., 0. });
-    config.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 1500., 0. });
+    config.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 1500., -1. });
+    config.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 300., 0. });
     return config;
 }
 
@@ -62,7 +63,8 @@ DynamicPrintConfig with_other_visual_keys(DynamicPrintConfig config)
     config.set_key_value("filament_colour_split", new ConfigOptionStrings{ "55|45", "10|80|10" });
     config.set_key_value("filament_colour_angle", new ConfigOptionFloats{ 0., 270. });
     config.set_key_value("filament_colour_twist", new ConfigOptionFloats{ -15., 720. });
-    config.set_key_value("filament_colour_cycle", new ConfigOptionFloats{ 400., 12000. });
+    config.set_key_value("filament_gradient_dwell", new ConfigOptionFloats{ 400., 12000. });
+    config.set_key_value("filament_gradient_transition", new ConfigOptionFloats{ 0., 50. });
     return config;
 }
 

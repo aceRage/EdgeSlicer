@@ -5366,8 +5366,9 @@ void TabFilament::update_makeup_note()
         const FilamentColor color = FilamentColorUtils::GetFilamentColorFromConfig(&project, size_t(slot), "#26A69A");
         const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&project, size_t(slot));
         if (color.NormalizedMode() == FilamentColorMode::Gradient)
-            text = wxString::Format(_L("Filament %d: gradient, %d colours, %d mm per cycle"), slot + 1, int(color.colors.size()),
-                                    int(std::lround(MultiColour::gradient_cycle_mm(makeUp.cycle))));
+            text = wxString::Format(_L("Filament %d: gradient, %d colours, %d mm + %d mm transition"), slot + 1,
+                                    int(color.colors.size()), int(std::lround(MultiColour::gradient_dwell_mm(makeUp.dwell))),
+                                    int(std::lround(MultiColour::gradient_transition_mm(makeUp.transition))));
         else if (color.colors.size() < 2)
             text = wxString::Format(_L("Filament %d: one colour"), slot + 1);
         else {
