@@ -1,4 +1,5 @@
 #include "libslic3r/CAD/CadDocument.hpp"
+#include "libslic3r/CAD/BoundedBinaryArchive.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/format.hpp"
 #include "libslic3r/Point.hpp"
@@ -95,6 +96,8 @@
 #include <sstream>
 
 #include <cereal/archives/binary.hpp>
+#include <new>
+#include <stdexcept>
 #include <cereal/types/array.hpp>
 #include <BRepTools.hxx>
 #include <BRepClass_FaceClassifier.hxx>   // faces_made_by: is a point on a face
@@ -4492,22 +4495,39 @@ std::string CadDocument::serialize_recipe() const
     return oss.str();
 }
 
+// Inside a recipe, a failed sub-read normally means "this record is from an OLDER build and
+// simply ends early", which is not an error. A length that cannot fit, or an allocation that
+// fails, is corruption instead: call this first in such a catch(...) to let those through.
+static void rethrow_if_corrupt()
+{
+    try {
+        throw;
+    } catch (const RecipeLengthError&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::length_error&) {
+        throw;
+    } catch (...) {
+    }
+}
+
 bool CadDocument::deserialize_recipe(const std::string& blob)
 {
     error.clear();
     try {
         std::istringstream iss(blob);
-        cereal::BinaryInputArchive ar(iss);
-        // Every length and count below comes from the file. Check it against the bytes that are
-        // actually left BEFORE allocating, so a truncated or corrupt blob fails cleanly instead of
-        // asking for a multi-gigabyte buffer.
-        auto remaining = [&]() -> uint64_t {
-            const std::streamoff pos = iss.tellg();
-            return pos < 0 || uint64_t(pos) > blob.size() ? 0 : uint64_t(blob.size()) - uint64_t(pos);
-        };
-        auto check_len = [&](uint64_t n, uint64_t min_bytes_each) {
-            if (n > remaining() / min_bytes_each)
-                throw std::runtime_error("length field exceeds the remaining data");
+        // Every length and count below comes from the file. Each is checked against the bytes
+        // that are actually left BEFORE anything is allocated - the explicit ones here through
+        // check_len, and every string/vector/map size inside a record by the archive itself (see
+        // BoundedBinaryArchive.hpp) - so a corrupt blob fails cleanly instead of asking for a
+        // multi-gigabyte buffer.
+        BoundedBinaryInputArchive ar(iss, blob.size());
+        auto check_len = [&](uint64_t n, uint64_t min_bytes_each) { ar.check_len(n, min_bytes_each); };
+        auto check_count = [&](uint64_t n, uint64_t min_bytes_each) {
+            if (n > kMaxRecipeFeatures)
+                throw RecipeLengthError("feature count exceeds the limit");
+            check_len(n, min_bytes_each);
         };
         uint32_t v;
         ar(v);
@@ -4533,10 +4553,13 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             features.clear();
             uint32_t count;
             ar(count);
-            check_len(count, sizeof(uint32_t));   // each feature carries at least its u32 length
+            // Each feature is its u32 length plus a record no real feature writes in fewer bytes.
+            check_count(count, sizeof(uint32_t) + kMinFeatureRecordBytes);
             for (uint32_t i = 0; i < count; ++i) {
                 uint32_t len;
                 ar(len);
+                if (len < kMinFeatureRecordBytes)
+                    throw RecipeLengthError("feature record is shorter than any real feature");
                 check_len(len, 1);
                 std::string buf(len, '\0');
                 if (len > 0)
@@ -4544,9 +4567,10 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 CadFeature f;
                 try {
                     std::istringstream fs(buf);
-                    cereal::BinaryInputArchive fa(fs);
+                    BoundedBinaryInputArchive fa(fs, len);
                     fa(f);
                 } catch (...) {
+                    rethrow_if_corrupt();
                     // An OLDER file: the blob ran out before this build's field list did. Everything read
                     // so far is kept and the remaining fields stay at their defaults. Deliberately NOT an
                     // error — a field a project predates is not a corrupt project.
@@ -4562,9 +4586,10 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 ar(cereal::binary_data(&vbuf[0], vlen));
             try {
                 std::istringstream vs(vbuf);
-                cereal::BinaryInputArchive va(vs);
+                BoundedBinaryInputArchive va(vs, vlen);
                 va(variables);
             } catch (...) {
+                rethrow_if_corrupt();
                 // Variables blob predates this build: keep what was read, default the rest.
             }
             // Body names, if this project carries them. A project written before the block
@@ -4578,9 +4603,10 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 if (blen > 0)
                     ar(cereal::binary_data(&bbuf[0], blen));
                 std::istringstream bs(bbuf);
-                cereal::BinaryInputArchive ba(bs);
+                BoundedBinaryInputArchive ba(bs, blen);
                 ba(named);
             } catch (...) {
+                rethrow_if_corrupt();
                 named.clear();
             }
             // Document extras (origin, colours), when the project has them. The origin must be
@@ -4594,7 +4620,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 if (xlen > 0)
                     ar(cereal::binary_data(&xbuf[0], xlen));
                 std::istringstream xs(xbuf);
-                cereal::BinaryInputArchive xa(xs);
+                BoundedBinaryInputArchive xa(xs, xlen);
                 double ox = 0, oy = 0, oz = 0;
                 bool   weld = true;
                 xa(ox, oy, oz, colours, weld);
@@ -4602,6 +4628,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 origin_from_recipe = true;
                 auto_close_loops   = weld;
             } catch (...) {
+                rethrow_if_corrupt();
                 colours.clear();   // older project: the caller's origin stands
             }
             // AFTER the rebuild, never before: recompute() replaces the bodies vector wholesale.
@@ -4624,7 +4651,7 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
             // shift every byte after them.
             cereal::size_type n = 0;
             ar(cereal::make_size_tag(n));
-            check_len(n, 1);   // every flat v4 feature is at least one byte
+            check_count(n, kMinFeatureRecordBytes);
             features.assign(size_t(n), CadFeature{});
             for (CadFeature& f : features) f.load_flat_v4(ar);
             ar(variables);

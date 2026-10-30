@@ -31,6 +31,7 @@
          CHECK(_actual.find(sub) != std::string::npos); } while (0)
 
 #include "libslic3r/CAD/CadDocument.hpp"
+#include "libslic3r/CAD/BoundedBinaryArchive.hpp"
 #include "libslic3r/CAD/GeometryEngine.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/CAD/SketchImport.hpp"
@@ -2128,25 +2129,115 @@ TEST_CASE("deserialize_recipe rejects truncated or oversized length fields", "[C
         const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0xFFFFFFFFu)); });
         CadDocument doc;
         REQUIRE_FALSE(doc.deserialize_recipe(blob));
-        CHECK_CONTAINS(doc.error, "could not be read");
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
     }
     SECTION("v6 feature length larger than the blob") {
         const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1), uint32_t(0x7FFFFFFFu), uint32_t(0)); });
         CadDocument doc;
         REQUIRE_FALSE(doc.deserialize_recipe(blob));
-        CHECK_CONTAINS(doc.error, "could not be read");
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
     }
     SECTION("v6 variables length larger than the blob") {
         const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0), uint32_t(0xFFFFFFF0u)); });
         CadDocument doc;
         REQUIRE_FALSE(doc.deserialize_recipe(blob));
-        CHECK_CONTAINS(doc.error, "could not be read");
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
     }
     SECTION("v4 feature count larger than the blob") {
-        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(4), uint64_t(1) << 40); });
+        std::string blob = blob_of([](auto& ar) { ar(uint32_t(4), uint64_t(1000)); });
+        blob.append(1000, '\0');   // enough for a 1-byte-per-feature check, far too little for real features
         CadDocument doc;
         REQUIRE_FALSE(doc.deserialize_recipe(blob));
-        CHECK_CONTAINS(doc.error, "could not be read");
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("v4 feature count above the hard cap") {
+        std::string blob = blob_of([](auto& ar) { ar(uint32_t(4), uint64_t(kMaxRecipeFeatures + 1)); });
+        blob.append(size_t((kMaxRecipeFeatures + 1) * kMinFeatureRecordBytes), '\0');
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "feature count exceeds the limit");
+    }
+    SECTION("v6 too many zero-length features for the blob") {
+        // 1000 features of length 0: the old 4-bytes-per-feature check accepted this and pushed
+        // 1000 default features. A real feature record is never that small.
+        std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1000)); });
+        blob.append(1000 * sizeof(uint32_t) + 16, '\0');
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("v6 feature record shorter than any real feature") {
+        std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1), uint32_t(0)); });
+        blob.append(256, '\0');
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "shorter than any real feature");
+    }
+    SECTION("v6 body-names length larger than the blob") {
+        const std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(0), uint32_t(0), uint32_t(0xFFFFFFF0u)); });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("v6 extras length larger than the blob") {
+        const std::string names = blob_of([](auto& ar) { ar(std::map<uint32_t, std::string>{}); });
+        std::string blob = blob_of([&](auto& ar) {
+            ar(uint32_t(6), uint32_t(0), uint32_t(0), uint32_t(names.size()));
+            ar(cereal::binary_data(names.data(), names.size()));
+            ar(uint32_t(0xFFFFFFF0u));
+        });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("v6 body-names map size larger than its block") {
+        // The block length is honest; the map's own size tag inside it is not.
+        const std::string names = blob_of([](auto& ar) { ar(cereal::make_size_tag(cereal::size_type(1) << 40)); });
+        const std::string blob = blob_of([&](auto& ar) {
+            ar(uint32_t(6), uint32_t(0), uint32_t(0), uint32_t(names.size()));
+            ar(cereal::binary_data(names.data(), names.size()));
+        });
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    // Inner sizes inside a REAL feature record: write a genuine recipe, then corrupt one size tag
+    // in place (the record's own length stays honest, so only the bounded archive can catch it).
+    // Before the fix these were swallowed by the per-feature catch as "an older file".
+    auto corrupt_size_before = [](std::string blob, const std::string& marker) {
+        const size_t at = blob.find(marker);
+        REQUIRE(at != std::string::npos);
+        REQUIRE(at >= sizeof(uint64_t));
+        const uint64_t huge = uint64_t(1) << 40;
+        blob.replace(at - sizeof(uint64_t), sizeof(uint64_t), reinterpret_cast<const char*>(&huge), sizeof(huge));
+        return blob;
+    };
+    SECTION("v6 inner string size larger than its feature record") {
+        CadDocument src;
+        CadFeature f;
+        f.name = "BOUNDS_MARKER_NAME";
+        src.features.push_back(f);
+        const std::string blob = corrupt_size_before(src.serialize_recipe(), "BOUNDS_MARKER_NAME");
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("v6 inner vector size larger than its feature record") {
+        CadDocument src;
+        CadFeature f;
+        const int32_t marker = 0x5A17C0DE;
+        f.delete_faces = {marker};
+        src.features.push_back(f);
+        const std::string blob = corrupt_size_before(src.serialize_recipe(),
+                                                     std::string(reinterpret_cast<const char*>(&marker), sizeof(marker)));
+        CadDocument doc;
+        REQUIRE_FALSE(doc.deserialize_recipe(blob));
+        CHECK_CONTAINS(doc.error, "exceeds the remaining data");
+    }
+    SECTION("a default feature is above the per-record minimum") {
+        // Pins the assumption behind kMinFeatureRecordBytes.
+        const std::string one = blob_of([](auto& ar) { ar(CadFeature{}); });
+        CHECK(one.size() >= kMinFeatureRecordBytes);
     }
     SECTION("truncated mid-length") {
         std::string blob = blob_of([](auto& ar) { ar(uint32_t(6), uint32_t(1)); });

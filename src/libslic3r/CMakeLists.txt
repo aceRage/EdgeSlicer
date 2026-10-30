@@ -747,6 +747,7 @@ if (SLIC3R_CAD)
             CAD/SketchImport.cpp
             CAD/SketchImport.hpp
             CAD/CadDocument.cpp
+            CAD/BoundedBinaryArchive.hpp
             CAD/CadDocument.hpp
             CAD/ThreadStandards.cpp
             CAD/ThreadStandards.hpp
