@@ -3,5 +3,5 @@
 
 tests/cli/*.sh text eol=lf
 tests/showcase/*.sh text eol=lf
-*.brep -text
-*.bin binary
+tests/data/cad_*.bin binary
+tests/data/cad_*.brep -text -diff
