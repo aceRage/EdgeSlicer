@@ -295,6 +295,11 @@ public:
     void                load_generic_subobject(const std::string& type_name, const ModelVolumeType type);
     void                load_shape_object(const std::string &type_name);
     void                load_mesh_object(const TriangleMesh &mesh, const wxString &name, bool center = true);
+#ifdef SLIC3R_CAD
+    // Design-tab Commit to Plate (assembly): one object, one part per body.
+    void                load_mesh_object(const std::vector<std::pair<const TriangleMesh *, wxString>> &parts,
+                                         const wxString &name, bool center = true);
+#endif
     // BBS
     void                switch_to_object_process();
     bool                del_object(const int obj_idx, bool refresh_immediately = true);

@@ -27,6 +27,10 @@
 #include "slic3r/GUI/Gizmos/GLGizmoSculpt.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
+#ifdef SLIC3R_CAD
+#include "slic3r/GUI/Gizmos/GLGizmoPrimitive.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoSketch.hpp"
+#endif
 #include "slic3r/GUI/Gizmos/GLGizmoEmboss.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSVG.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoMeshBoolean.hpp"
@@ -195,6 +199,14 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::CadFillet):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg");
             break;
+#ifdef SLIC3R_CAD
+        case (EType::Primitive):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_modifier_cube.svg" : "toolbar_modifier_cube.svg");
+            break;
+        case (EType::Sketch):
+            gizmo->set_icon_filename("design_sketch.svg");
+            break;
+#endif
         }
 
     }
@@ -242,6 +254,15 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
     m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
     m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
+#ifdef SLIC3R_CAD
+    // Registered last: Primitive and Sketch are the final entries before Undefined, so
+    // omitting them leaves every preceding m_gizmos index (indexed by EType) untouched.
+    // Orca #15762: hide them unless the experimental CAD feature is enabled.
+    if (wxGetApp().is_enable_cad_feature()) {
+        m_gizmos.emplace_back(new GLGizmoPrimitive(m_parent, "toolbar_modifier_cube.svg", static_cast<unsigned int>(Primitive)));
+        m_gizmos.emplace_back(new GLGizmoSketch(m_parent, "design_sketch.svg", static_cast<unsigned int>(Sketch)));
+    }
+#endif
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));
@@ -535,6 +556,20 @@ bool GLGizmosManager::handle_shortcut(int key)
         dynamic_cast<GLGizmoEmboss *>(gizmo_emboss)->on_shortcut_key();
         return true;
     }
+
+#ifdef SLIC3R_CAD
+    // Sketch / Primitive launch the Design tab; they do not need a plate selection.
+    if (wxGetApp().is_enable_cad_feature()) {
+        auto try_cad = [&](EType t) {
+            if (static_cast<size_t>(t) >= m_gizmos.size())
+                return false;
+            GLGizmoBase* g = m_gizmos[t].get();
+            return g != nullptr && is_key(g->get_shortcut_key()) && open_gizmo(t);
+        };
+        if (try_cad(Primitive) || try_cad(Sketch))
+            return true;
+    }
+#endif
 
     if (m_parent.get_selection().is_empty())
         return false;
@@ -1441,7 +1476,8 @@ GLGizmoBase* GLGizmosManager::get_current() const
 
 GLGizmoBase* GLGizmosManager::get_gizmo(GLGizmosManager::EType type) const
 {
-    return ((type == Undefined) || m_gizmos.empty()) ? nullptr : m_gizmos[type].get();
+    // m_gizmos ends before the enum does when the CAD gizmos are not registered (Orca #15762).
+    return type < m_gizmos.size() ? m_gizmos[type].get() : nullptr;
 }
 
 GLGizmosManager::EType GLGizmosManager::get_gizmo_from_name(const std::string& gizmo_name) const
@@ -1629,6 +1665,12 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
         return "Edit";
     case GLGizmosManager::EType::CadFillet:
         return "CAD Fillet";
+#ifdef SLIC3R_CAD
+    case GLGizmosManager::EType::Primitive:
+        return "Primitive";
+    case GLGizmosManager::EType::Sketch:
+        return "Sketch";
+#endif
     case GLGizmosManager::EType::TextureDisplacement:
         return "Texture Displacement";
     default:

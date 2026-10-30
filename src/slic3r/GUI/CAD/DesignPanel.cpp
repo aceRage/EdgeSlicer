@@ -7489,7 +7489,10 @@ void DesignPanel::hydrate_from_model()
         Slic3r::set_sketch_auto_close(m_doc.auto_close_loops);
     }
     const std::string& blob = plater->model().cad_recipe.bytes();
-    if (!blob.empty()) load_recipe(blob);
+    if (!blob.empty())
+        load_recipe(blob);
+    else
+        m_read_only_warned = false;   // F11: hydrating a project with no recipe
 }
 
 // Application close / language switch, from the plater's canvas teardown.
@@ -7589,11 +7592,13 @@ void DesignPanel::load_recipe(const std::string& blob)
 {
     if (blob.empty()) return;
     m_recipe_read_only = false;
+    // F11: every recipe load is a different project/document. Reset the one-time
+    // read-only modal so a later newer-version file can warn again.
+    m_read_only_warned = false;
     if (!m_doc.deserialize_recipe(blob)) {
         if (CadDocument::newer_recipe_version(blob) != 0) {
             // Not loaded, and read-only: the project still saves the original bytes.
             m_recipe_read_only = true;
-            m_read_only_warned = false;
             m_doc.clear();
             set_status(StatusKind::Error, wxString::Format(
                 _L("Could not restore the CAD model: %s. The design is kept unchanged in the project; edits made here are not saved."),
@@ -10343,11 +10348,11 @@ void DesignPanel::on_commit()
             set_status(_L("All bodies hidden — show one before committing"));
             return;
         }
-        // P4: Orca's ObjectList::load_mesh_object(parts, assembly name) is not on Edge yet.
-        // Commit still ships every visible body; assembly grouping is stubbed as independent
-        // plate objects (same as CommitMode::Bodies).
-        for (const auto& [mesh, name] : parts)
-            obj_list->load_mesh_object(*mesh, name);
+        if (m_commit_mode == CommitMode::Assembly)
+            obj_list->load_mesh_object(parts, _L("Design Assembly"));
+        else
+            for (const auto& [mesh, name] : parts)
+                obj_list->load_mesh_object(*mesh, name);
     } else {
         obj_list->load_mesh_object(m_disp_pick_mesh, _L("Design Body"));
     }
@@ -11425,6 +11430,30 @@ void DesignPanel::start_sketch_on_target(bool offer_tools)
     // instead of picking a row costs nothing.
     if (offer_tools)
         CallAfter([this] { show_offer_menu(offer_anchor()); });
+}
+
+void DesignPanel::prepare_start_sketch()
+{
+    start_sketch();
+}
+
+void DesignPanel::prepare_start_primitive()
+{
+    if (block_read_only_edit()) return;
+    if (m_active != Tool::None || m_text_dlg != nullptr || body_move_pending()) {
+        set_status(StatusKind::Info, _L("Finish or cancel what is open first"));
+        return;
+    }
+    // Design-tab equivalent of Orca's one-click Add Shape: a 20 mm box
+    // (rectangle sketch + extrude). The old ImGui PrimitiveParams / make_primitive
+    // path is gone at 3610d8bb.
+    m_feature_counter++;
+    const int sk = m_doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20.0, 20.0, 0.0,
+                                    feature_name(_L("Sketch")));
+    m_feature_counter++;
+    m_doc.add_extrude(sk, 20.0, false, BooleanMode::New, feature_name(_L_CONTEXT("Extrude", "Design")));
+    after_tree_edit(m_doc.recompute());
+    set_status(StatusKind::Ok, _L("Added a 20 mm box"));
 }
 
 void DesignPanel::end_sketch_plane_choice()

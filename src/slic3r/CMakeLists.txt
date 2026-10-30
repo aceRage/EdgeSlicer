@@ -1166,6 +1166,10 @@ if (SLIC3R_CAD)
         GUI/CAD/DesignInteraction.hpp
         GUI/CAD/SketchInlineEditor.cpp
         GUI/CAD/SketchInlineEditor.hpp
+        GUI/Gizmos/GLGizmoSketch.cpp
+        GUI/Gizmos/GLGizmoSketch.hpp
+        GUI/Gizmos/GLGizmoPrimitive.cpp
+        GUI/Gizmos/GLGizmoPrimitive.hpp
     )
 endif ()
 
