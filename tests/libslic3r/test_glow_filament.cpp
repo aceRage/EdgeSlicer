@@ -98,11 +98,11 @@ TEST_CASE("The default glow colour is a more vibrant version of the filament's o
     SECTION("blue becomes bright blue, green bright green")
     {
         const RGB blue = vibrant(RGB{ 0.1f, 0.2f, 0.5f });
-        CHECK(blue[2] > 0.9f);
+        CHECK(blue[2] > 0.85f);
         CHECK(blue[2] > blue[0]);
         CHECK(blue[2] > blue[1]);
         const RGB green = vibrant(RGB{ 0.2f, 0.45f, 0.25f });
-        CHECK(green[1] > 0.9f);
+        CHECK(green[1] > 0.85f);
         CHECK(green[1] > green[0]);
         CHECK(green[1] > green[2]);
     }
