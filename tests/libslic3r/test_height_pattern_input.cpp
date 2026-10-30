@@ -175,7 +175,7 @@ TEST_CASE("Height pattern preview shows the snapped result", "[HeightPattern]")
         HeightPatternInput to_top = hp_example();
         to_top.to_top = true;
         to_top.start  = 0.;
-        to_top.band   = 50.;
+        to_top.band   = 55.;
         to_top.gap    = 20.;
         const HeightPatternPreview c = preview_height_pattern(nullptr, to_top, 0, tops, 0.2, 120., 4);
         REQUIRE(c.ok());
