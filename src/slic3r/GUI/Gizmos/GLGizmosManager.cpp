@@ -201,7 +201,7 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             break;
 #ifdef SLIC3R_CAD
         case (EType::Primitive):
-            gizmo->set_icon_filename(m_is_dark ? "toolbar_modifier_cube.svg" : "toolbar_modifier_cube.svg");
+            gizmo->set_icon_filename("toolbar_modifier_cube.svg");   // no _dark variant is vendored
             break;
         case (EType::Sketch):
             gizmo->set_icon_filename("design_sketch.svg");

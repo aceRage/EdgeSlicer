@@ -14563,6 +14563,8 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     // that repaint picks against the plates reinit() deleted.
     if (DesignPanel* design = DesignPanel::if_built())
         design->clear_document();
+    else
+        DesignPanel::drop_deferred(DesignPanel::k_launch_action_key);
 #endif
 
     //BBS

@@ -328,6 +328,8 @@ public:
     void update_undo_redo_buttons();
     // Prepare-toolbar Sketch / Primitive gizmos (P4). Switch is already done by the
     // gizmo; these start the matching Design action.
+    // when_built key shared by the Prepare Sketch/Primitive gizmo launches (latest wins).
+    static constexpr const char* k_launch_action_key = "prepare_launch";
     void prepare_start_sketch();
     void prepare_start_primitive();
 private:

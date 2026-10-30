@@ -203,6 +203,7 @@ if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE
         test_caddocument.cpp
         test_cad_recipe_3mf.cpp
+        test_cad_lazy.cpp
         test_sketchconstraints.cpp
         test_sketchedit.cpp
         test_sketchprofile.cpp

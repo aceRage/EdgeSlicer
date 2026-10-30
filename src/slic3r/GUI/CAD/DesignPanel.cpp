@@ -11442,6 +11442,7 @@ void DesignPanel::prepare_start_sketch()
 void DesignPanel::prepare_start_primitive()
 {
     if (block_read_only_edit()) return;
+    if (m_ui_mode != UiMode::Feature) return;   // already sketching or constraining (as start_sketch)
     if (m_active != Tool::None || m_text_dlg != nullptr || body_move_pending()) {
         set_status(StatusKind::Info, _L("Finish or cancel what is open first"));
         return;
@@ -11449,6 +11450,7 @@ void DesignPanel::prepare_start_primitive()
     // Design-tab equivalent of Orca's one-click Add Shape: a 20 mm box
     // (rectangle sketch + extrude). The old ImGui PrimitiveParams / make_primitive
     // path is gone at 3610d8bb.
+    m_doc.checkpoint();   // undo boundary: one Ctrl+Z removes the box (as confirm_tool)
     m_feature_counter++;
     const int sk = m_doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20.0, 20.0, 0.0,
                                     feature_name(_L("Sketch")));

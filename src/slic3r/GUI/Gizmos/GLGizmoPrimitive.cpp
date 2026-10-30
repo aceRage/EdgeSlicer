@@ -49,8 +49,9 @@ void GLGizmoPrimitive::launch_design_primitive()
         return;
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tpDesign));
     // The Design tab is built on first show (LazyPanelHolder); when_built runs now if it
-    // already exists, else right after select_tab realizes it.
-    DesignPanel::when_built([](DesignPanel &design) { design.prepare_start_primitive(); });
+    // already exists, else right after select_tab realizes it. Sketch and Primitive share one
+    // launch key, so only the latest K/W press is pending.
+    DesignPanel::when_built(DesignPanel::k_launch_action_key, [](DesignPanel &design) { design.prepare_start_primitive(); });
 }
 
 void GLGizmoPrimitive::on_set_state()
