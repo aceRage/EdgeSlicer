@@ -14552,11 +14552,20 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     // F3: the recipe is Design-document-owned, not the plate mesh. New Project / Open Project
     // drop it with the project; deleting or cutting a plate object does not.
     model.cad_recipe.clear();
-    if (DesignPanel* design = DesignPanel::if_built())
-        design->clear_document(); // Orca #16997: New Project must not keep the previous tree
 #endif
     assemble_view->get_canvas3d()->reset_explosion_ratio();
     update();
+
+#ifdef SLIC3R_CAD
+    // Orca #16997: clear the Design document only once the scene is rebuilt. Clearing
+    // hands the keyboard to the Design canvas, and when the app has no focus that
+    // activates the main window, whose 3D view repaints on the spot. Before update()
+    // that repaint picks against the plates reinit() deleted.
+    if (DesignPanel* design = DesignPanel::if_built())
+        design->clear_document();
+    else
+        DesignPanel::drop_deferred(DesignPanel::k_launch_action_key);
+#endif
 
     //BBS
     if (wxGetApp().is_editor()) {

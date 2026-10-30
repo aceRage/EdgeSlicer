@@ -407,6 +407,80 @@ TEST_CASE("An Import with junk BRep text is kept without calling BRepTools", "[C
     REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
 }
 
+bool clone_zip_replace_entry(const std::string &src, const std::string &dst,
+                             const std::string &name, const std::string &data)
+{
+    mz_zip_archive in;
+    mz_zip_archive out;
+    mz_zip_zero_struct(&in);
+    mz_zip_zero_struct(&out);
+    if (!open_zip_reader(&in, src))
+        return false;
+    if (!open_zip_writer(&out, dst)) {
+        close_zip_reader(&in);
+        return false;
+    }
+    const mz_uint n = mz_zip_reader_get_num_files(&in);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&in, i, &stat)) {
+            close_zip_reader(&in);
+            close_zip_writer(&out);
+            return false;
+        }
+        if (boost::algorithm::iequals(stat.m_filename, name))
+            continue;
+        if (!mz_zip_writer_add_from_zip_reader(&out, &in, i)) {
+            close_zip_reader(&in);
+            close_zip_writer(&out);
+            return false;
+        }
+    }
+    const bool added = mz_zip_writer_add_mem(&out, name.c_str(), data.data(), data.size(), MZ_DEFAULT_COMPRESSION);
+    const bool fin   = added && mz_zip_writer_finalize_archive(&out);
+    close_zip_reader(&in);
+    close_zip_writer(&out);
+    return fin;
+}
+
+TEST_CASE("A CAD recipe part loads when [Content_Types].xml has no Override for it", "[CadRecipe][3mf][F4]")
+{
+    // #794 F4: the recipe bin's content type is optional on read. Load looks up
+    // Metadata/orca_cad.bin by zip name and must not fail if [Content_Types].xml
+    // omits an Override (Orca @3610d8bb write path) or if another writer added one.
+    prepare_temp_dir();
+    const std::string blob = square_extrude_recipe();
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".3mf");
+    REQUIRE(store_project(file.string(), src));
+    REQUIRE(zip_has_entry(file.string(), "Metadata/orca_cad.bin"));
+    const std::string ctypes = zip_entry(file.string(), "[Content_Types].xml");
+    REQUIRE_FALSE(ctypes.empty());
+    REQUIRE(ctypes.find("orca_cad") == std::string::npos);
+
+    Model loaded;
+    REQUIRE(load_project(file.string(), loaded));
+    REQUIRE(loaded.cad_recipe == blob);
+
+    const std::string with_override =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n"
+        " <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n"
+        " <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n"
+        " <Override PartName=\"/Metadata/orca_cad.bin\" ContentType=\"application/octet-stream\"/>\n"
+        "</Types>";
+    ScopedTemporaryFile overridden(".3mf");
+    REQUIRE(clone_zip_replace_entry(file.string(), overridden.string(), "[Content_Types].xml", with_override));
+    REQUIRE(zip_entry(overridden.string(), "[Content_Types].xml").find("orca_cad") != std::string::npos);
+
+    Model loaded_override;
+    REQUIRE(load_project(overridden.string(), loaded_override));
+    REQUIRE(loaded_override.cad_recipe == blob);
+}
+
 TEST_CASE("A sliced .gcode.3mf does not carry the CAD recipe", "[CadRecipe][3mf]")
 {
     // F5: project 3MFs keep Metadata/orca_cad.bin; sliced handoff files do not.

@@ -2633,6 +2633,74 @@ void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name
 #endif /* _DEBUG */
 }
 
+#ifdef SLIC3R_CAD
+void ObjectList::load_mesh_object(const std::vector<std::pair<const TriangleMesh *, wxString>> &parts,
+                                  const wxString &name, bool center)
+{
+    if (parts.empty())
+        return;
+
+    Model &model = wxGetApp().plater()->model();
+
+#ifdef _DEBUG
+    check_model_ids_validity(model);
+#endif /* _DEBUG */
+
+    ModelObject *new_object = model.add_object();
+    new_object->name        = into_u8(name);
+    new_object->add_instance();
+
+    BoundingBoxf3 bb;
+    bool          has_bb = false;
+    for (const auto &[mesh, part_name] : parts) {
+        if (mesh == nullptr || mesh->its.indices.empty())
+            continue;
+        ModelVolume *new_volume = new_object->add_volume(*mesh);
+        new_volume->name        = into_u8(part_name);
+        const BoundingBoxf3 vol_bb = mesh->bounding_box();
+        if (!has_bb) {
+            bb     = vol_bb;
+            has_bb = true;
+        } else {
+            bb.merge(vol_bb);
+        }
+    }
+    if (new_object->volumes.empty()) {
+        model.delete_object(new_object);
+        return;
+    }
+
+    new_object->sort_volumes(true);
+    new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+    new_object->invalidate_bounding_box();
+    if (has_bb)
+        new_object->translate(-bb.center());
+
+    Slic3r::save_object_mesh(*new_object);
+
+    auto start_point = wxGetApp().plater()->build_volume().bounding_volume2d().center();
+    auto empty_cell  = wxGetApp().plater()->canvas3D()->get_nearest_empty_cell({start_point(0), start_point(1)});
+
+    new_object->instances[0]->set_offset(center ? to_3d(Vec2d(empty_cell(0), empty_cell(1)), -new_object->origin_translation.z()) :
+                                                  bb.center());
+
+    new_object->ensure_on_bed();
+    model.InitializeAssemblyPositions({new_object});
+
+    std::vector<size_t> object_idxs;
+    object_idxs.push_back(model.objects.size() - 1);
+#ifdef _DEBUG
+    check_model_ids_validity(model);
+#endif /* _DEBUG */
+
+    paste_objects_into_list(object_idxs);
+
+#ifdef _DEBUG
+    check_model_ids_validity(model);
+#endif /* _DEBUG */
+}
+#endif
+
 //BBS
 bool ObjectList::del_object(const int obj_idx, bool refresh_immediately)
 {
