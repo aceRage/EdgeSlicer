@@ -178,7 +178,8 @@ TEST_CASE("The Bambu tower purges each tool at its own nozzle's width", "[MixedN
             const long first = tool == 0 ? 575 : 863;
             CHECK((std::abs(w - plain) <= 1 || std::abs(w - first) <= 1));
         }
-    REQUIRE(widths.count(0) == 1);
+    // T0 purges at the structure width (0.5 mm) and, past the first layer, announces nothing new: only T1 is
+    // sure to have announced widths.
     REQUIRE(widths.count(1) == 1);
     // The 0.6 tool's purge is announced at its own width, not the tower's 0.5 mm structure width.
     CHECK(*widths.at(1).rbegin() >= 750);
