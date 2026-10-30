@@ -2865,6 +2865,61 @@ void PrintConfigDef::init_fff_params()
     def->max = 3600;
     def->set_default_value(new ConfigOptionFloats{ 0. });
 
+    // Glow-in-the-dark filaments, G1 (tests/design_multicolour_filament_view.md section 10). The same
+    // rules as the three keys above: visual only, project-only, stripped at Print::apply().
+    def = this->add("filament_glow", coInts);
+    def->label = L("Glow in the dark");
+    def->tooltip = L("Visual only. Whether this filament glows in the dark in the lights-off views of Showcase and "
+                     "Preview. -1 follows the preset (on for a preset whose name or type contains \"Glow\"), 0 is off, 1 is on.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInts{ -1 });
+
+    def = this->add("filament_glow_colour", coStrings);
+    def->label = L("Glow colour");
+    def->tooltip = L("Visual only. The colour a glow-in-the-dark filament shines in, as #RRGGBB. Empty means a more vibrant "
+                     "version of the filament's own colour.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    // One value for the whole project (not per slot): how strongly every glow filament shines.
+    def = this->add("filament_glow_intensity", coFloat);
+    def->label = L("Glow intensity");
+    def->tooltip = L("Visual only. How strongly all glow-in-the-dark filaments shine in the lights-off views, in percent.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = 0;
+    def->max = 300;
+    def->set_default_value(new ConfigOptionFloat(100.));
+    // P6: gradient filaments. Visual only like the three above: a gradient holds each colour for `dwell`
+    // mm of filament, then blends to the next over `transition` mm. A negative value (the default) means
+    // MultiColour::GRADIENT_DWELL_MM_DEFAULT / GRADIENT_TRANSITION_MM_DEFAULT.
+    def = this->add("filament_gradient_dwell", coFloats);
+    def->label = L("Gradient colour length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament each colour holds before "
+                     "it starts changing to the next one. A negative value means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ -1. });
+
+    def = this->add("filament_gradient_transition", coFloats);
+    def->label = L("Gradient transition length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament the change from one colour "
+                     "to the next takes. A negative value means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ -1. });
+
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
     def->tooltip  = L("first small thumb");
@@ -11346,11 +11401,17 @@ const std::vector<std::string>& part_support_keys()
 
 const std::set<std::string>& visual_only_option_keys()
 {
-    // Multi-colour filaments P1. Glow (G1) and the gradient cycle length (P6) add their keys here.
+    // Multi-colour filaments P1, glow (G1), gradient dwell and transition lengths (P6).
+    // filament_glow_intensity is one value for the project; the others are one per filament slot.
     static const std::set<std::string> s_keys {
         "filament_colour_split",
         "filament_colour_angle",
         "filament_colour_twist",
+        "filament_glow",
+        "filament_glow_colour",
+        "filament_glow_intensity",
+        "filament_gradient_dwell",
+        "filament_gradient_transition",
     };
     return s_keys;
 }
@@ -11378,8 +11439,11 @@ void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
 {
     for (const std::string &key : visual_only_option_keys()) {
         const ConfigOptionDef *def = print_config_def.get(key);
+        // A key for the whole project (filament_glow_intensity) is not per slot.
+        if (def == nullptr || def->default_value.get() == nullptr || !def->default_value->is_vector())
+            continue;
         auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
-        if (def == nullptr || opt == nullptr)
+        if (opt == nullptr)
             continue;
         // New slots take the definition's default (the first element of the default vector), not a
         // copy of slot 1 as ConfigOptionVector::resize() would give them.
