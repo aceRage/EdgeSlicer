@@ -1150,6 +1150,11 @@ public:
     // y down) placed at the centre; effective_zoom receives the factor really used (the camera caps zoom).
     void render_gcode_preview_image(ThumbnailData& data, unsigned int w, unsigned int h, const std::string& view, const BoundingBoxf3& box, const BoundingBoxf3& bed,
                                     double zoom = 1.0, double cx = 0.5, double cy = 0.5, double* effective_zoom = nullptr);
+    // EDGE (multi-colour P5): frame times of the loaded toolpaths in the Tool view with the Preview
+    // "Show coextruded colours" toggle off and on, alternating `rounds` times, `frames` offscreen
+    // frames of w x h each (the first 3 of a run are not counted). Reports through the log and returns
+    // the text. Dev only: the hidden --showcase-render job runs it when EDGESLICER_PREVIEW_MC_BENCH is set.
+    std::string bench_preview_multicolour(int frames, int rounds, unsigned int w, unsigned int h);
 
     static void render_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, PartPlateList& partplate_list, ModelObjectPtrs& model_objects,
         const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,

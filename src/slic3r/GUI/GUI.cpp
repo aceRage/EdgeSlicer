@@ -145,6 +145,26 @@ void change_opt_value(DynamicPrintConfig& config, const t_config_option_key& opt
             double val = std::stod(str); // locale-dependent (on purpose - the input is the actual content of the field)
 			config.set_key_value(opt_key, new ConfigOptionFloatOrPercent(val, percent));
 			break;}
+		// Edge: the per-flow-mode "mm/s or %" options (overhang_1_4_speed .. overhang_4_4_speed,
+		// internal_bridge_speed, small_perimeter_speed, initial_layer_travel_speed, the bridge /
+		// sparse / internal solid infill accelerations, ...) became coFloatsOrPercents vectors with the
+		// High Flow work, and this switch had no case for them: every edit fell through to default,
+		// the field kept showing the typed value, and the preset never changed. Set the edited flow
+		// mode's slot the way BambuStudio does.
+		case coFloatsOrPercents:{
+			std::string str = boost::any_cast<std::string>(value);
+			bool percent = false;
+			if (!str.empty() && str.back() == '%') {
+				str.pop_back();
+				percent = true;
+			}
+            double val = std::stod(str); // locale-dependent (on purpose - the input is the actual content of the field)
+			// A one-value vector, not a ConfigOptionFloatOrPercent: set_at() reads a scalar source as
+			// ConfigOptionSingle<FloatOrPercent>, which ConfigOptionFloatOrPercent is not.
+			const ConfigOptionFloatsOrPercents vec_new{ FloatOrPercent{ val, percent } };
+			if (auto *vec = dynamic_cast<ConfigOptionVectorBase*>(config.option(opt_key)))
+				vec->set_at(&vec_new, opt_index, 0);
+			break;}
 		case coPercent:
 			config.set_key_value(opt_key, new ConfigOptionPercent(boost::any_cast<double>(value)));
 			break;

@@ -162,8 +162,8 @@ struct SkinTangent
     SkinPattern        pattern = SkinPattern::Isotropic;
     // Lines: layer i of the object (0 = its first layer) runs at angles_deg[i % size()].
     std::vector<float> angles_deg;
-    // Lines: neighbouring lines run opposite ways (a zig-zag, rectilinear); false when every line
-    // runs the same way (monotonic, monotonic line). The sheen does not care; P4's stripes do.
+    // Lines: neighbouring lines run opposite ways (a zig-zag: rectilinear, monotonic); false when
+    // every line runs the same way (monotonic line). The sheen does not care; P4's stripes do.
     bool               zigzag = true;
 
     // Lines: the direction of layer `layer` in degrees, [0, 180); 0 for the other patterns.

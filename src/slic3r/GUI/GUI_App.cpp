@@ -5177,6 +5177,20 @@ void GUI_App::run_showcase_render_job()
     }
 
     auto render = [this, st, finish]() {
+        // EDGE (multi-colour P5): dev benchmark of Preview's coextruded-colour toggle on the sliced
+        // plate, EDGESLICER_PREVIEW_MC_BENCH=<frames per run>[,<rounds>[,<size>]]; no effect unset.
+        if (wxString bench; wxGetEnv("EDGESLICER_PREVIEW_MC_BENCH", &bench) && !bench.empty()) {
+            long frames = 30, rounds = 3, size = 1024;
+            wxArrayString parts = wxSplit(bench, ',');
+            if (parts.size() > 0) parts[0].ToLong(&frames);
+            if (parts.size() > 1) parts[1].ToLong(&rounds);
+            if (parts.size() > 2) parts[2].ToLong(&size);
+            if (GLCanvas3D *canvas = plater_->get_preview_canvas3D(); canvas != nullptr) {
+                const std::string text = canvas->bench_preview_multicolour(int(std::max(1L, frames)), int(std::max(1L, rounds)),
+                                                                          (unsigned int) std::max(64L, size), (unsigned int) std::max(64L, size));
+                boost::nowide::cout << "preview-mc-bench: " << text << std::endl;
+            }
+        }
         plater_->select_view_3D("Showcase");
         ShowcaseView *view = plater_->get_showcase_view();
         if (view == nullptr) {

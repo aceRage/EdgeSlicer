@@ -25,6 +25,14 @@
 //   showcase_toolpath.glsl, to libvgcode as the prelude of its smooth-path fragment shader. Keep it
 //   free of names libvgcode's shader declares (camera_position, exposure, shadow_map, world_position,
 //   UP, LUMA: Showcase::toolpath_prelude_problems() lists them) and of the varyings of this file.
+// - Multi-colour P4: the blocks under #ifdef SHOWCASE_MULTICOLOUR colour a coextruded filament's
+//   surfaces without a slice. They exist only in the "showcase_material_mc" program (see
+//   mc_mesh_albedo()); with no coextruded slot the plain program draws, unchanged.
+//
+// - G1: glow-in-the-dark filaments (libslic3r/Showcase/GlowFilament.hpp). With the scene's lights off
+//   (scene_dim > 0) every surface keeps only 1 - scene_dim of the light, and a glow slot adds its glow
+//   colour (glow_emission()) on top, scaled by the project-wide glow_intensity, through the same HDR
+//   post pass. scene_dim = 0 is the plain material, so a program that never sets it is unchanged.
 //
 // Optional: when it does not compile the Showcase canvas draws its objects with phong as in S1.
 
@@ -39,6 +47,8 @@ uniform float mat_clearcoat;
 uniform float mat_alpha;
 uniform float mat_line_shade;
 uniform float mat_fiber_noise;
+// G1: the slot drawn, as glow_emission() reads it (0 = no glow).
+uniform vec4  glow_slot;
 
 uniform vec3  camera_position;       // world
 uniform float exposure;              // linear multiplier (2^EV); not used with hdr_output
@@ -102,6 +112,11 @@ uniform float       env_intensity;
 uniform float       env_rotation;    // radians around +Z
 uniform vec3        env_sh[9];
 
+// G1: 0 = the lights are on; otherwise the share of the light taken away (1 - the ambient level).
+uniform float scene_dim;
+// G1: the project-wide glow intensity, 1 = 100%.
+uniform float glow_intensity;
+
 vec3 srgb_to_linear(vec3 c)
 {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
@@ -153,6 +168,36 @@ vec3 tone_filmic(vec3 c)
 }
 
 vec3 tone_curve_map(vec3 c) { return tone_curve == 1 ? tone_filmic(c) : tone_map(c); }
+
+// --- glow in the dark (G1) -----------------------------------------------------------------------
+
+// The more vibrant version of an sRGB colour: the same hue, saturation s + (1 - s) * 0.5, value
+// v + (1 - v) * 0.8; a grey glows phosphor green. GlowFilament.hpp vibrant() with the same constants
+// (SAT_LIFT, VAL_LIFT, GREY_SAT, GREY_GLOW).
+vec3 glow_vibrant(vec3 c)
+{
+    c = clamp(c, 0.0, 1.0);
+    float mx = max(c.r, max(c.g, c.b));
+    float mn = min(c.r, min(c.g, c.b));
+    float s = mx > 0.0 ? (mx - mn) / mx : 0.0;
+    if (s < 0.08)
+        return vec3(124.0 / 255.0, 1.0, 107.0 / 255.0);
+    float s2 = s + (1.0 - s) * 0.5;
+    float v2 = mx + (1.0 - mx) * 0.8;
+    return v2 * (vec3(1.0 - s2) + s2 * ((c - vec3(mn)) / (mx - mn)));
+}
+
+// What a glow slot emits, linear. glow.x: 0 not a glow slot, 1 the vibrant version of base_srgb (the
+// filament's own colour as drawn, so a split slot glows in each of its colours), 2 the explicit colour
+// in glow.yzw (linear).
+vec3 glow_emission(vec4 glow, vec3 base_srgb)
+{
+    if (glow.x < 0.5)
+        return vec3(0.0);
+    if (glow.x < 1.5)
+        return srgb_to_linear(glow_vibrant(base_srgb)) * glow_intensity;
+    return glow.yzw * glow_intensity;
+}
 
 // --- environment ---------------------------------------------------------------------------------
 
@@ -438,6 +483,83 @@ bool skin_tangent(vec3 n, out vec3 t)
 // 0 at 1 px a layer and below, 1 at 2 px and above (layer_line_fade() in C++).
 float layer_fade(float layer_px) { return smoothstep(1.0, 2.0, layer_px); }
 
+#ifdef SHOWCASE_MULTICOLOUR
+// Multi-colour (coextruded) filaments, P4 (tests/design_multicolour_filament_view.md 7.3): the mesh's
+// stand-in for the toolpaths' colours, without a slice. Only in the "showcase_material_mc" program,
+// which ShowcaseRenderer builds with MultiColour::glsl_mesh_prelude() after the #version line (the
+// uniforms mc_colors... and the shared functions mc_*); this file alone is the plain material.
+// World space, so turning an object on the plate turns its colours, as on a real printer.
+uniform int   mc_slot;               // the filament slot drawn (0-based); -1 = its plain colour
+uniform float mc_wall_dir;           // +1 walls anticlockwise seen from above (Orca's default), -1 clockwise
+uniform float mc_spacing_top;        // mm between neighbouring top-skin lines
+uniform float mc_spacing_bottom;     // the same under overhangs and bridges (solid infill)
+uniform float mc_spacing_first;      // the same on the first layer, the face on the bed
+uniform bool  mc_zigzag_top;         // neighbouring skin lines run opposite ways (rectilinear)
+uniform bool  mc_zigzag_bottom;
+uniform float mc_volume_per_mm;      // twist: mm3 of filament per mm of height, from the bed (a guess)
+uniform float mc_layer_height;       // mm, when there is no layer table (mc_skin_weight())
+uniform float mc_wall_band;          // mm across the walls (outer + inner), mc_skin_weight()
+
+// cap: the inside seen through the build-up's cut, lit as a flat face (no skin lines there).
+// n is the interpolated (smooth) normal: ShowcaseRenderer draws coextruded volumes with per-corner
+// normals, so the colour follows the surface instead of jumping triangle by triangle.
+vec3 mc_mesh_albedo(vec3 n, bool cap)
+{
+    // Derivatives first, while the whole quad still runs the same code.
+    float z     = world_pos.z;
+    float z_px  = max(fwidth(z), 1e-6);
+    vec2  xy_px = max(fwidth(world_pos.xy), vec2(1e-6));
+
+    // The layer here, and the height within it (s.y) with the layer lines. The colour bands s.y makes
+    // in the transition zones alias sooner than the groove shading: they fade out below 8 px a layer.
+    float h  = mc_layer_height;
+    float sy = 0.0;
+    if (layer_mode != 0) {
+        vec2 layer = layer_at(z);
+        h = max(layer.y - layer.x, 1e-4);
+        if (line_depth > 0.0)
+            sy = (2.0 * clamp((z - layer.x) / h, 0.0, 1.0) - 1.0) * smoothstep(3.0, 8.0, h / z_px);
+    }
+    // Walls or skin: on the slicer's terms, a slope is stacked walls until each layer steps in by
+    // more than the band of walls (mc_skin_weight() in MultiColourGlsl.hpp).
+    float w = cap ? 1.0 : mc_skin_weight(n.z, h, mc_wall_band);
+
+    // The skin's lines on a top or bottom face (skin_tangent() above, without the sheen's projection).
+    bool  top     = n.z > 0.0;
+    int   mode    = top ? skin_mode_top : skin_mode_bottom;
+    float spacing = top ? mc_spacing_top : (z < 0.05 ? mc_spacing_first : mc_spacing_bottom);
+    bool  zigzag  = top ? mc_zigzag_top : mc_zigzag_bottom;
+    vec2  p       = world_pos.xy;
+    vec2  dir     = vec2(0.0);
+    if (mode == 1) {
+        int count = top ? skin_count_top : skin_count_bottom;
+        int i = layer_index_at(z + (top ? -0.001 : 0.001));
+        int k = count > 0 ? i - (i / count) * count : 0;
+        float a = skin_angles[(top ? 0 : 8) + k];
+        dir = vec2(cos(a), sin(a));
+    }
+    // Concentric and other patterns without one direction: the slot's average (design 7.3).
+    int skin = mode == 1 && !cap ? 1 : 0;
+    // Stripes closer than a few pixels on screen would alias into a crosshatch: fade them to the
+    // face's average. The pitch is measured across the lines, from the screen-space derivatives.
+    if (skin == 1) {
+        float across = abs(dir.y) * xy_px.x + abs(dir.x) * xy_px.y;
+        if (smoothstep(2.0, 4.0, spacing / max(across, 1e-6)) <= 0.0)
+            skin = 0;
+    }
+
+    float twist = mc_params[mc_slot].y * max(z, 0.0) * mc_volume_per_mm;
+    vec3  c = mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, skin, dir.x, dir.y, zigzag, spacing, twist, w);
+    if (skin == 1 && w > 0.0) {
+        float across = abs(dir.y) * xy_px.x + abs(dir.x) * xy_px.y;
+        float fade   = smoothstep(2.0, 4.0, spacing / max(across, 1e-6));
+        if (fade < 1.0)
+            c = mix(mc_mesh_colour(mc_slot, n.x, n.y, n.z, p.x, p.y, sy, mc_wall_dir, 0, 0.0, 0.0, false, spacing, twist, w), c, fade);
+    }
+    return c;
+}
+#endif
+
 void main()
 {
     if (clip_floor && world_pos.z < -0.001)
@@ -450,6 +572,17 @@ void main()
         n = build_clip_z < 1e9 ? vec3(0.0, 0.0, 1.0) : -n;
     vec3 v = normalize(camera_position - world_pos.xyz);
     vec3 albedo = srgb_to_linear(uniform_color.rgb);
+#ifdef SHOWCASE_MULTICOLOUR
+    // P4: a coextruded slot's colours, from the geometric normal (before the layer lines tilt it).
+    if (mc_slot >= 0 && mc_slot < 16 && mc_is_gradient(mc_slot))
+        // P6: a gradient runs along the filament, so the height stands in for its length (volume per mm
+        // of height from the bed, a guess like the twist's).
+        albedo = mc_gradient_colour(mc_slot, max(world_pos.z, 0.0) * mc_volume_per_mm);
+    else if (mc_slot >= 0 && mc_slot < 16 && mc_count(mc_slot) > 1)
+        albedo = mc_mesh_albedo(n, !gl_FrontFacing && build_clip_z < 1e9);
+#endif
+    // G1: what the slot shines with the lights off (nothing otherwise), from the colour drawn here.
+    vec3 glow_light = scene_dim > 0.0 ? glow_emission(glow_slot, linear_to_srgb(albedo)) : vec3(0.0);
 
     // Layer lines: tilt the normal with the slope of a rounded bead and darken the groove between
     // two beads; only on walls (wall-ness 1 - |n.z|).
@@ -493,7 +626,7 @@ void main()
     shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_shadow(n),
                    diffuse, specular);
 
-    vec3 lit = diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5);
+    vec3 lit = (diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5)) * (1.0 - scene_dim) + glow_light;
 
     // Translucent: the body lets light through, the rim reflects (Fresnel edge brightening).
     float n_dot_v = max(dot(n, v), 1e-4);

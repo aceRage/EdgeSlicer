@@ -9096,6 +9096,44 @@ void GLCanvas3D::render_gcode_preview_image(ThumbnailData& data, unsigned int w,
         set_as_dirty(); // the live canvas repaints with its own viewport and camera
 }
 
+std::string GLCanvas3D::bench_preview_multicolour(int frames, int rounds, unsigned int w, unsigned int h)
+{
+    BoundingBoxf3 box = m_gcode_viewer.get_paths_bounding_box();
+    if (!box.defined)
+        return "no toolpaths to draw";
+    box.min.z() = std::min(box.min.z(), -1.0);
+    const BoundingBoxf3& pb = wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_bounding_box();
+    const BoundingBoxf3  bed(Vec3d(pb.min.x(), pb.min.y(), -1.0), Vec3d(pb.max.x(), pb.max.y(), 0.0));
+    ThumbnailData        data;
+    // Warm-up, and the first draw builds the coextruded-colour program, which is not what is timed.
+    auto run = [&](bool on, int n, double &ms) {
+        m_gcode_viewer.bench_preview_multicolour(on);
+        for (int i = 0; i < 3; ++i)
+            render_gcode_preview_image(data, w, h, "iso", box, bed);
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < n; ++i)
+            render_gcode_preview_image(data, w, h, "iso", box, bed);
+        ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / double(n);
+    };
+    std::string out = "segments " + std::to_string(m_gcode_viewer.bench_vertices_count()) + ", " + std::to_string(w) + "x" + std::to_string(h) + ", " +
+                      std::to_string(frames) + " frames per run\n";
+    double off_sum = 0., on_sum = 0.;
+    for (int r = 0; r < rounds; ++r) {
+        double off = 0., on = 0.;
+        run(false, frames, off);
+        run(true, frames, on);
+        out += "round " + std::to_string(r + 1) + ": off " + std::to_string(off) + " ms, on " + std::to_string(on) + " ms" +
+               (m_gcode_viewer.bench_multicolour_active() ? "" : " (the toggle was NOT active: no split slot?)") + "\n";
+        off_sum += off;
+        on_sum += on;
+    }
+    m_gcode_viewer.bench_preview_multicolour(false);
+    out += "mean: off " + std::to_string(off_sum / rounds) + " ms, on " + std::to_string(on_sum / rounds) + " ms, on/off " +
+           std::to_string(on_sum / std::max(off_sum, 1e-9)) + "\n";
+    BOOST_LOG_TRIVIAL(warning) << "preview multicolour bench:\n" << out;
+    return out;
+}
+
 void GLCanvas3D::render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, PartPlateList &partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors, GLShaderProgram* shader, Camera::EType camera_type)
 {
     report_thumbnail_entry_gl_errors(w, h, false);
