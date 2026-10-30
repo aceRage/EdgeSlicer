@@ -1966,6 +1966,66 @@ static LayerColorStat compute_layer_color_stat(const ConstLayerPtrsAdaptor &laye
     return out;
 }
 
+// Airbrush P1 (tests/airbrush_p0_photos/NOTES.md, top face): the white top skin of the P0 card came
+// out pitted and porous wherever 0.4-0.6 mm specks were painted. Measured on the CC1 G-code of that
+// card (classic walls, 0.42 mm outer wall): every speck the opening above lets through becomes an
+// island of its own PrintRegion, the base colour's region is cut around it, and the classic
+// perimeter generator prints nothing in an island narrower than about one wall plus a spacing (its
+// first loop is offset2(-(w/2 + spacing/2), +spacing/2), see PerimeterGenerator.cpp). So the area
+// is claimed by a colour that never extrudes it and taken from the colour that would have: 0.4 mm
+// specks printed 0% of their colour and left holes over the whole requested coverage (63% at 50%),
+// 0.6 mm specks about a third. The opening's own threshold (half a line with gap fill on) assumes
+// gap fill rescues such islands; on a top surface it does not.
+//
+// So a PAINTED top/bottom claim drops, WHOLE, every component that (a) has no core that can hold
+// the classic generator's first loop - a core of radius (w + (1 - INSET_OVERLAP_TOLERANCE) *
+// spacing) / 2, the width that offset2 keeps - and (b) lies entirely inside the layer, at least
+// one wall stack from its contour. Its area goes back to whatever claims it otherwise (the base
+// colour's lateral region), which prints it as part of its own skin. Every other component is
+// kept unchanged, so wide paint keeps its exact shape. (b) is what keeps sloped paint working: on a
+// slope the per-layer top projection is a thin ring hugging the layer's contour, narrower than a
+// loop by nature, and it is the seed of the normal-thickness descent below (paint-depth tests).
+// Paint near a top's edge is likewise left to the walls. Painted claims of the base colour (0) and
+// Arachne walls (which print a bead in any island past min_feature_size) are left alone.
+static ExPolygons drop_unprintable_painted_islands(const ExPolygons &claim, const float core_radius, const ExPolygons &layer,
+                                                  const float edge_band)
+{
+    if (claim.empty() || !(core_radius > 0.f) || !(edge_band > 0.f))
+        return claim;
+    // Representative points of pieces that each lie inside exactly one claim component (the
+    // components are disjoint and every piece is a subset of the claim).
+    // The point is taken a hair inside the piece, so it never sits on a hole boundary of the claim
+    // (ExPolygon::contains() counts a hole's boundary as outside).
+    std::vector<Point> reps;
+    auto add_reps = [&reps](const ExPolygons &pieces) {
+        for (const ExPolygon &c : pieces) {
+            const ExPolygons inner = offset_ex(c, -float(SCALED_EPSILON));
+            const ExPolygon &use   = inner.empty() ? c : inner.front();
+            if (!use.contour.points.empty())
+                reps.push_back(use.contour.points.front());
+        }
+    };
+    // (a) printable cores ...
+    add_reps(offset_ex(claim, -core_radius));
+    // ... (b) parts within one wall stack of the layer's contour.
+    add_reps(diff_ex(claim, offset_ex(layer, -edge_band)));
+    if (reps.empty())
+        return {};
+    std::sort(reps.begin(), reps.end(), [](const Point &a, const Point &b) { return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y()); });
+    ExPolygons out;
+    out.reserve(claim.size());
+    for (const ExPolygon &component : claim) {
+        const BoundingBox bb = get_extents(component.contour);
+        auto it = std::lower_bound(reps.begin(), reps.end(), bb.min, [](const Point &p, const Point &v) { return p.x() < v.x(); });
+        bool keep = false;
+        for (; it != reps.end() && it->x() <= bb.max.x() && !keep; ++it)
+            keep = bb.contains(*it) && component.contains(*it);
+        if (keep)
+            out.push_back(component);
+    }
+    return out;
+}
+
 // Returns segmentation of top and bottom layers based on painting in segmentation gizmos.
 // Fix-wave (wave-b-review.md Important 2): legacy_top_and_bottom_layers_out is filled with the
 // SAME per-colour top/bottom claims, but each one stopped at top_shell_layers/bottom_shell_layers
@@ -2227,10 +2287,18 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
     // granularity layers, i.e. never past the previous group, which always has the OPPOSITE
     // parity. Same work, same per-layer body, same partition sizes; only the boundaries move.
     const size_t num_groups = (num_layers + size_t(granularity) - 1) / size_t(granularity);
+    // See drop_unprintable_painted_islands(): only the classic generator leaves such islands empty.
+    const bool classic_walls = print_object.config().wall_generator.value == PerimeterGeneratorType::Classic;
+    auto unprintable_core_radius = [classic_walls](const size_t color_idx, const LayerColorStat &stat) -> float {
+        if (!classic_walls || color_idx == 0)
+            return 0.f;
+        return 0.5f * (stat.extrusion_width + float(1. - INSET_OVERLAP_TOLERANCE) * stat.extrusion_spacing) - float(SCALED_EPSILON);
+    };
     tbb::parallel_for(size_t(0), num_groups, [&granularity, &num_layers, &num_facets_states, &layer_color_stat, &top_raw, &triangles_by_color_top,
                                               &throw_on_cancel_callback, &input_expolygons, &bottom_raw, &triangles_by_color_bottom,
                                               &shell_triangles_by_color_top, &shell_triangles_by_color_bottom,
-                                              &legacy_shell_triangles_by_color_top, &legacy_shell_triangles_by_color_bottom](const size_t group_idx) {
+                                              &legacy_shell_triangles_by_color_top, &legacy_shell_triangles_by_color_bottom,
+                                              &unprintable_core_radius](const size_t group_idx) {
         size_t layer_idx_offset = (group_idx & 1) * num_layers;
         const size_t group_end  = std::min(num_layers, (group_idx + 1) * size_t(granularity));
         for (size_t layer_idx = group_idx * size_t(granularity); layer_idx < group_end; ++ layer_idx) {
@@ -2241,6 +2309,9 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                     if (ExPolygons top_ex = union_ex(top[layer_idx]); ! top_ex.empty()) {
                         // Clean up thin projections. They are not printable anyways.
                         top_ex = opening_ex(top_ex, stat.small_region_threshold);
+                        // ... nor are painted islands too narrow for the first wall loop.
+                        top_ex = drop_unprintable_painted_islands(top_ex, unprintable_core_radius(color_idx, stat), input_expolygons[layer_idx],
+                                                                  stat.extrusion_width + stat.extrusion_spacing);
                         // Fix-wave N2 (.superpowers/sdd/2026-08-31-paint-depth/vertical-depth-
                         // fixwave-rereview.md): top_raw having geometry here only proves SOME
                         // region on the object has a nonzero top shell (the object-wide
@@ -2458,6 +2529,8 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                     if (ExPolygons bottom_ex = union_ex(bottom[layer_idx]); ! bottom_ex.empty()) {
                         // Clean up thin projections. They are not printable anyways.
                         bottom_ex = opening_ex(bottom_ex, stat.small_region_threshold);
+                        bottom_ex = drop_unprintable_painted_islands(bottom_ex, unprintable_core_radius(color_idx, stat), input_expolygons[layer_idx],
+                                                                     stat.extrusion_width + stat.extrusion_spacing);
                         // TAPER BOUND, symmetry fix: the vertical-depth fix wave gated the TOP
                         // surface claim on stat.top_shell_layers > 0 (fix-wave N2, see its comment
                         // above) but deliberately left this, the symmetric BOTTOM site, ungated and
