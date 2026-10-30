@@ -279,10 +279,7 @@ void OptionsGroup::activate_line(Line& line)
     }
 
 	auto option_set = line.get_options();
-	// A labelled line that is only a widget (the Filament tab's "Colour make-up", Multi-colour P2) has no
-	// option: front() of the empty list was a null read that crashed opening the Filament tab. Such a line
-	// takes the widget path below.
-	bool is_legend_line = !option_set.empty() && option_set.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
+	bool is_legend_line = option_set.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
 
     if (!custom_ctrl && m_use_custom_ctrl) {
         custom_ctrl = new OG_CustomCtrl(is_legend_line || !staticbox ? this->parent() : static_cast<wxWindow*>(this->stb), this);
