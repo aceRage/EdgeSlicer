@@ -20250,6 +20250,14 @@ void Plater::load_project(wxString const& filename2,
         p->set_plater_dirty(true);
     }
 
+    // Height colour patterns made for other filaments / another layer height: say so now rather
+    // than at slicing. Deferred so the project is fully shown first.
+    if (!res.empty())
+        wxGetApp().CallAfter([]() {
+            if (wxGetApp().plater() != nullptr && wxGetApp().obj_list() != nullptr)
+                wxGetApp().obj_list()->check_height_patterns_after_load();
+        });
+
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
 }
 

@@ -94,6 +94,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
     GUI/FillBedDialog.hpp
+    GUI/HeightPatternDialog.cpp
+    GUI/HeightPatternDialog.hpp
+    GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
     GUI/RoundDialog.cpp
@@ -1314,6 +1317,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/MediaPlayCtrl.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/ParamsPanel.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Preferences.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
