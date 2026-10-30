@@ -1397,16 +1397,34 @@ void Tab::refresh_nozzle_controls()
 
     const bool splittable = nozzle_layout_splittable();
     const bool split      = splittable && nozzle_values_split();
+    // P2: one testable rule (libslic3r nozzle_split_control) decides the button; the old rule also required the
+    // process's slot layout to cover exactly these nozzles, which kept it greyed out for many processes.
+    const NozzleSplitControl control = nozzle_split_control(view->nozzle_labels.size(), !current.empty(), split);
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process: nozzle " << e + 1 << " of " << view->nozzle_labels.size()
+                            << ", own process '" << current << "', split " << split << " -> button state " << int(control);
     wxString note;
     if (!current.empty())
-        note = format_wxstr(_L("%1% takes its speeds, accelerations and jerk from \"%2%\". Layer height, walls, infill and line widths come from this process."),
+        note = format_wxstr(_L("%1% takes its speeds, accelerations, jerk and line widths from \"%2%\". Layer height, walls and infill come from this process."),
                             nozzle, from_u8(current));
     else if (split)
         note = format_wxstr(_L("The fields below are %1%'s."), nozzle);
     else if (e > 0)
         note = _L("All nozzles without a process of their own share these values.");
+    // P2: which filaments print on the shown nozzle (the sidebar's filament menu assigns them).
+    {
+        wxString on_nozzle;
+        const std::vector<size_t> nozzles = m_preset_bundle->filament_nozzles();
+        for (size_t f = 0; f < nozzles.size(); ++f)
+            if (nozzles[f] == e)
+                on_nozzle += (on_nozzle.empty() ? "" : ", ") + wxString::Format("%d", int(f + 1));
+        const wxString filaments = on_nozzle.empty() ? format_wxstr(_L("No filament prints on %1%."), nozzle) :
+                                                       format_wxstr(_L("Filaments on %1%: %2%."), nozzle, on_nozzle);
+        note = note.empty() ? filaments : note + " " + filaments;
+    }
     if (view->nozzle_note != nullptr) {
         view->nozzle_note->SetLabel(note);
+        if (view->host != nullptr && view->host->GetClientSize().x > FromDIP(60))
+            view->nozzle_note->Wrap(view->host->GetClientSize().x - FromDIP(8));
         view->nozzle_note->SetToolTip(note);
         view->nozzle_note->Show(!note.empty());
     }
@@ -1417,13 +1435,23 @@ void Tab::refresh_nozzle_controls()
         view->nozzle_apply_btn->SetToolTip(split ? _L("Edit all nozzles together again: every nozzle takes the values of the nozzle shown.") :
                                                    _L("Give each nozzle its own speeds, accelerations and jerk in this process. "
                                                       "Every nozzle starts from the values it prints with now."));
-        // Always shown, so it can be found: disabled with the reason when it cannot act.
-        const bool can_act = current.empty() && splittable;
-        if (!can_act)
-            view->nozzle_apply_btn->SetToolTip(!current.empty() ?
-                _L("This nozzle takes its speeds from its own process. Pick \"Use Global Setting\" to edit them here.") :
-                _L("This process keeps one set of speeds for all nozzles (the U1's processes do). "
-                   "Pick a process for this nozzle in \"Speeds from\" instead."));
+        // Always shown, so it can be found: disabled with the reason, in visible text, when it cannot act.
+        const bool can_act = control == NozzleSplitControl::Split || control == NozzleSplitControl::Link;
+        if (control == NozzleSplitControl::OwnProcess) {
+            const wxString reason = format_wxstr(_L("%1% uses its own process. Set \"Speeds from\" to \"Use Global Setting\" to edit its values separately."), nozzle);
+            view->nozzle_apply_btn->SetToolTip(reason);
+            if (view->nozzle_note != nullptr) {
+                // Wrapped, not shortened: the reason must be readable in a narrow sidebar.
+                view->nozzle_note->SetLabel(reason);
+                if (view->host != nullptr && view->host->GetClientSize().x > FromDIP(60))
+                    view->nozzle_note->Wrap(view->host->GetClientSize().x - FromDIP(8));
+                view->nozzle_note->SetToolTip(note);
+                view->nozzle_note->Show(true);
+            }
+        }
+        // An enabled button in the accent style, so it never reads as greyed out (the Regular style's grey fill
+        // looks the same enabled or not).
+        view->nozzle_apply_btn->SetStyle(can_act ? ButtonStyle::Confirm : ButtonStyle::Disabled, ButtonType::Compact);
         view->nozzle_apply_btn->Enable(can_act);
         view->nozzle_apply_btn->Show(true);
     }
@@ -1578,8 +1606,8 @@ void Tab::refresh_flow_variant_view()
             host_vsizer->Add(row3, 0, wxTOP, FromDIP(6));
 
             // Row 4: the note, shortened to the width (full text in its tooltip).
-            auto* note = new wxStaticText(host, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize,
-                                          wxST_ELLIPSIZE_END | wxST_NO_AUTORESIZE);
+            // Wraps to the width (refresh_nozzle_controls), so a disabled button's reason is never cut off.
+            auto* note = new wxStaticText(host, wxID_ANY, wxEmptyString);
             note->SetFont(Label::Body_12);
             note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
             note->SetMinSize(wxSize(FromDIP(40), -1));

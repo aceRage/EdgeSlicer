@@ -801,7 +801,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // Per-nozzle process P1: which extruder slot of the process keys a filament reads.
             || opt_key == "print_extruder_id"
             || opt_key == "print_extruder_variant"
-            || opt_key == "process_extruder_values") {
+            || opt_key == "process_extruder_values"
+            // Per-nozzle process P2: which nozzle a filament prints on decides its widths, flows and speeds.
+            || opt_key == "filament_nozzle_assignment") {
             // Snapmaker: switching a filament's flow variant changes the values read out of
             // flow-variant arrays without the arrays themselves changing.
             invalidated |= this->invalidate_all_steps();
@@ -1220,7 +1222,7 @@ double Print::max_allowed_layer_height() const
 {
     double nozzle_diameter_max = 0.;
     for (unsigned int extruder_id : this->extruders())
-        nozzle_diameter_max = std::max(nozzle_diameter_max, m_config.nozzle_diameter.get_at(extruder_id));
+        nozzle_diameter_max = std::max(nozzle_diameter_max, m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, extruder_id + 1)));
     return nozzle_diameter_max;
 }
 
@@ -2693,24 +2695,32 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                   "on the first layer. Enable the prime tower, or turn \"Preload all filaments\" off."),
                 nullptr, "enable_prime_tower"};
 
+    // Per-nozzle process P2 (design D10): a Bambu printer (H2D / H2C / X2D) printing through left and right nozzles of
+    // different diameters slices like any mixed job, but whether its firmware accepts such a third-party slice is
+    // not documented and not yet confirmed on hardware. Say so plainly instead of refusing.
+    if (this->is_BBL_printer() && ! m_objects.empty() && nozzles >= 2) {
+        double first_used = -1.;
+        bool   mixed_used = false;
+        for (unsigned int extruder_idx : extruders) {
+            const double d = m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, extruder_idx + 1));
+            if (first_used < 0.)
+                first_used = d;
+            else if (std::abs(d - first_used) > EPSILON)
+                mixed_used = true;
+        }
+        if (mixed_used)
+            warn(L("Experimental: this print uses left and right nozzles of different diameters. Bambu firmware support for "
+                   "this is not confirmed. Do a small test print first and watch the first layers."), "nozzle_diameter");
+    }
+
     if (this->has_wipe_tower() && ! m_objects.empty()) {
-        // Make sure all extruders use same diameter filament and have the same nozzle diameter
-        // EPSILON comparison is used for nozzles and 10 % tolerance is used for filaments
-        // Mixed nozzle sizes (Phase 2 gate): the prime tower is still generated at ONE line width -
-        // WipeTower::set_extruder() overwrites the single m_perimeter_width scalar for every
-        // registered filament, so a mixed-diameter job would print the tower at whichever nozzle
-        // happened to register last. Refuse the combination with a message that names the way out
-        // instead of warning and printing something wrong. Phase 3 makes the tower per-tool.
-        auto nozzle_dmr_of = [this](unsigned int filament_id_0based) -> double {
-            return m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, filament_id_0based + 1));
-        };
-        double first_nozzle_diam = nozzle_dmr_of(extruders.front());
+        // Make sure all extruders use same diameter filament.
+        // 10 % tolerance is used for filaments.
+        // Mixed nozzle sizes (per-nozzle P2): both prime towers lay each tool's ramming and purge at that
+        // tool's own width (nozzle x 1.25) and keep one structure width for the footprint, the wall, the
+        // brim and the sparse fill (WipeTower2: FOrca 0b1f80cd22, AGPL-3.0; WipeTower: the same design,
+        // Edge's own), so mixed nozzle diameters no longer refuse the tower.
         double first_filament_diam = m_config.filament_diameter.get_at(extruders.front());
-        for (const auto& extruder_idx : extruders)
-            if (std::abs(nozzle_dmr_of(extruder_idx) - first_nozzle_diam) > EPSILON)
-                return {L("The prime tower does not support mixed nozzle diameters: it is generated at a single line "
-                          "width for every filament. Turn the prime tower off, or use filaments that all print through "
-                          "nozzles of the same diameter."), nullptr, "enable_prime_tower"};
         for (const auto& extruder_idx : extruders) {
             double filament_diam = m_config.filament_diameter.get_at(extruder_idx);
             if (std::abs((filament_diam - first_filament_diam) / first_filament_diam) > 0.1) {
@@ -3433,7 +3443,7 @@ Flow Print::brim_flow() const
         frPerimeter,
         // Flow::new_from_config_width takes care of the percent to value substitution
 		width,
-        (float)m_config.nozzle_diameter.get_at(m_print_regions.front()->config().wall_filament-1),
+        (float)m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, unsigned(m_print_regions.front()->config().wall_filament.value))),
 		(float)this->skirt_first_layer_height());
 }
 
@@ -3453,8 +3463,8 @@ Flow Print::skirt_flow() const
     return Flow::new_from_config_width(frPerimeter,
                                        // Flow::new_from_config_width takes care of the percent to value substitution
                                        width,
-                                       (float) m_config.nozzle_diameter.get_at(
-                                           m_objects.empty() ? 0 : m_objects.front()->config().support_filament - 1),
+                                       (float) m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config,
+                                           m_objects.empty() ? 1u : unsigned(m_objects.front()->config().support_filament.value))),
                                        (float) this->skirt_first_layer_height());
 }
 

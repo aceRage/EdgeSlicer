@@ -241,6 +241,8 @@ static std::vector<std::string> s_project_options {
     "nozzle_volume_type",
     // Per-nozzle process P1: the process each physical extruder takes its speeds from.
     "nozzle_process_presets",
+    // Per-nozzle process P2: the nozzle (tool) each filament prints on, on a toolchanger.
+    "filament_nozzle_assignment",
     // Ultra (dual-nozzle): plate-level filament grouping state.
     "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_map_mode",
     "enable_filament_dynamic_map", "has_filament_switcher", "prime_volume_mode",
@@ -2767,6 +2769,12 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
 
     EraseFilamentColorFields(project_config, to_del_filament_id);
     EraseEnumsOptionAt(project_config, "filament_volume_type", to_del_filament_id);
+    // Per-nozzle process P2: the deleted filament's nozzle assignment goes with it.
+    if (auto *assignment = project_config.option<ConfigOptionInts>("filament_nozzle_assignment");
+        assignment != nullptr && assignment->values.size() > to_del_filament_id) {
+        assignment->values.erase(assignment->values.begin() + to_del_filament_id);
+        assignment->values = filament_nozzle_assignment_stored(std::move(assignment->values));
+    }
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
@@ -2793,6 +2801,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     ams_multi_color_filment.resize(n);
     EnsureFilamentColorFieldsAligned(project_config);
     EnsureFilamentVolumeTypesAligned(project_config, n);
+    // Per-nozzle process P2: a removed filament's assignment must not come back with a new filament.
+    if (auto *assignment = project_config.option<ConfigOptionInts>("filament_nozzle_assignment"); assignment != nullptr && assignment->values.size() > n)
+        assignment->values = filament_nozzle_assignment_stored(std::vector<int>(assignment->values.begin(), assignment->values.begin() + n));
     // BBS set new filament color to new_color
     if (old_slot_count < n) {
         if (!new_colors.empty()) {
@@ -2826,6 +2837,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     ams_multi_color_filment.resize(n);
     EnsureFilamentColorFieldsAligned(project_config);
     EnsureFilamentVolumeTypesAligned(project_config, n);
+    // Per-nozzle process P2: a removed filament's assignment must not come back with a new filament.
+    if (auto *assignment = project_config.option<ConfigOptionInts>("filament_nozzle_assignment"); assignment != nullptr && assignment->values.size() > n)
+        assignment->values = filament_nozzle_assignment_stored(std::vector<int>(assignment->values.begin(), assignment->values.begin() + n));
 
     //BBS set new filament color to new_color
     if (old_slot_count < n) {
@@ -3295,6 +3309,73 @@ void PresetBundle::restore_nozzle_processes(AppConfig &config, const std::string
     this->prune_nozzle_processes();
 }
 
+bool PresetBundle::filament_nozzle_assignment_supported() const
+{
+    return supports_filament_nozzle_assignment(this->printers.get_edited_preset().config);
+}
+
+std::vector<size_t> PresetBundle::filament_nozzles() const
+{
+    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const auto *fmap    = this->project_config.option<ConfigOptionInts>("filament_map");
+    const auto *assign  = this->project_config.option<ConfigOptionInts>("filament_nozzle_assignment");
+    static const std::vector<int> none;
+    const bool   assignable = this->filament_nozzle_assignment_supported();
+    const size_t count      = this->filament_presets.size();
+    std::vector<size_t> out(count, 0);
+    for (size_t f = 0; f < count; ++f)
+        out[f] = physical_extruder_for_filament(nozzles != nullptr ? nozzles->values.size() : 0, count, fmap != nullptr ? fmap->values : none,
+                                                unsigned(f + 1), assignable && assign != nullptr ? assign->values : none);
+    return out;
+}
+
+int PresetBundle::filament_assigned_nozzle(size_t filament) const
+{
+    if (!this->filament_nozzle_assignment_supported())
+        return 0;
+    const auto *assign  = this->project_config.option<ConfigOptionInts>("filament_nozzle_assignment");
+    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (assign == nullptr || nozzles == nullptr)
+        return 0;
+    return assigned_nozzle_for_filament(assign->values, nozzles->values.size(), unsigned(filament + 1)) + 1;
+}
+
+bool PresetBundle::set_filament_nozzle(size_t filament, int tool)
+{
+    if (!this->filament_nozzle_assignment_supported() || filament >= this->filament_presets.size())
+        return false;
+    auto *assign = this->project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true);
+    std::vector<int> values = assign->values;
+    if (values.size() <= filament)
+        values.resize(filament + 1, 0);
+    // The filament's own tool is stored as 0, so a project that puts every filament back reads as unassigned.
+    values[filament] = tool == int(filament) + 1 ? 0 : std::max(0, tool);
+    values = filament_nozzle_assignment_stored(std::move(values));
+    if (values == assign->values)
+        return false;
+    assign->values = std::move(values);
+    return true;
+}
+
+std::string PresetBundle::filament_nozzle_assignment_summary() const
+{
+    if (!this->filament_nozzle_assignment_supported())
+        return std::string();
+    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    std::string out;
+    for (size_t f = 0; f < this->filament_presets.size(); ++f) {
+        const int tool = this->filament_assigned_nozzle(f);
+        if (tool <= 0)
+            continue;
+        if (!out.empty())
+            out += ", ";
+        out += std::to_string(f + 1) + " > T" + std::to_string(tool);
+        if (nozzles != nullptr && has_mixed_nozzle_diameters(nozzles->values))
+            out += " " + format_diameter_to_str(nozzles->get_at(size_t(tool - 1)));
+    }
+    return out;
+}
+
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
 {
     const auto *names = out.option<ConfigOptionStrings>("nozzle_process_presets");
@@ -3575,6 +3656,10 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
     add_if_some_non_empty(std::move(print_compatible_printers),     "print_compatible_printers");
 
 	out.option<ConfigOptionEnumGeneric>("printer_technology", true)->value = ptFFF;
+    // Per-nozzle process P2: the filament -> nozzle assignment only applies to a toolchanger (Bambu's grouping
+    // machines route filaments with filament_map); a project carried over to another printer drops it.
+    if (!supports_filament_nozzle_assignment(out))
+        out.set_key_value("filament_nozzle_assignment", new ConfigOptionInts());
     // Per-nozzle process P1: each extruder's chosen process into its slots of the process keys. Nothing
     // changes unless a nozzle has a process of its own.
     this->fill_nozzle_processes(out);
@@ -4018,6 +4103,9 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // process on every nozzle, not whatever the previous project chose.
         if (!config.has("nozzle_process_presets"))
             this->project_config.set_key_value("nozzle_process_presets", new ConfigOptionStrings());
+        // Per-nozzle process P2: likewise every filament prints on its own nozzle in an older project.
+        if (!config.has("filament_nozzle_assignment"))
+            this->project_config.set_key_value("filament_nozzle_assignment", new ConfigOptionInts());
         this->project_config.apply_only(config, s_project_options);
         m_nozzle_process_printer = this->printers.get_selected_preset_name();
         EnsureFilamentColorFieldsAligned(this->project_config);

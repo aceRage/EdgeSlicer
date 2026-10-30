@@ -1926,7 +1926,7 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                                                         append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
         }
 
-        const float nozzle_diameter = float(gcodegen.config().nozzle_diameter.get_at(size_t(extruder_id)));
+        const float nozzle_diameter = float(gcodegen.config().nozzle_diameter.get_at(physical_extruder_for_filament(gcodegen.config(), unsigned(extruder_id) + 1)));
         const float line_width = nozzle_diameter * 1.25f;
         const float extra_flow = float(gcodegen.config().wipe_tower_extra_flow.value) / 100.f;
         const float extra_spacing = float(gcodegen.config().wipe_tower_extra_spacing.value) / 100.f;
@@ -3933,14 +3933,14 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         {
             float filament_max_volumetric_speed = get_value_at(m_config, m_config.filament_max_volumetric_speed,
                                                               ConfigFlowDomain::Filament, initial_non_support_extruder_id);
-            const double nozzle_diameter       = m_config.nozzle_diameter.get_at(initial_non_support_extruder_id);
+            const double nozzle_diameter       = m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, unsigned(initial_non_support_extruder_id) + 1));
             float        outer_wall_line_width = print.default_region_config().get_abs_value("outer_wall_line_width", nozzle_diameter);
             if (outer_wall_line_width == 0.0) {
                 float default_line_width = print.default_object_config().get_abs_value("line_width", nozzle_diameter);
                 outer_wall_line_width    = default_line_width == 0.0 ? nozzle_diameter : default_line_width;
             }
             Flow  outer_wall_flow       = Flow(outer_wall_line_width, m_config.layer_height,
-                                               m_config.nozzle_diameter.get_at(initial_non_support_extruder_id));
+                                               m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, unsigned(initial_non_support_extruder_id) + 1)));
             float outer_wall_speed      = print.default_region_config().outer_wall_speed.values.front();
             outer_wall_volumetric_speed = outer_wall_speed * outer_wall_flow.mm3_per_mm();
             if (outer_wall_volumetric_speed > filament_max_volumetric_speed)
@@ -9824,6 +9824,11 @@ void GCode::append_full_config(const Print& print, std::string& str)
         if (!dump_filament_prices && (key == "filament_cost" || key == "time_cost"))
             continue;
         if (!dump_per_nozzle_process_keys && (key == "nozzle_process_presets" || key == "process_extruder_values"))
+            continue;
+        // Per-nozzle process P2: the filament -> nozzle assignment and the per-nozzle widths only when a job has
+        // them, so every other job's config block stays as it was.
+        if ((key == "filament_nozzle_assignment" || (boost::starts_with(key, "nozzle_") && boost::ends_with(key, "_line_width"))) &&
+            cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0)
             continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
             continue;

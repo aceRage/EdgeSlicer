@@ -673,5 +673,255 @@ TEST_CASE("Splitting a process cut short by a user preset spreads every key over
     CHECK(process.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 77, 88, 88, 77, 88, 77, 88 });
     CHECK(process_nozzle_slot(process, "outer_wall_speed", 1, fvtHighFlow) == 4);
     CHECK(process_nozzle_slot(process, "slow_down_layers", 1, fvtStandard) == -1); // read once per print
-    CHECK_FALSE(split_process_per_nozzle(process, 4)); // not this printer's layout
+    CHECK_FALSE(split_process_per_nozzle(process, 1)); // one nozzle: nothing to split
+}
+
+// ==== Per-nozzle process P2 =========================================================================
+
+TEST_CASE("A toolchanger filament prints on the tool it is assigned to", "[NozzleProcess][Assignment]")
+{
+    const std::vector<int> none;
+    // Four tools, four filaments: filament 1 assigned to T3, filament 2 to its own T2 (0), filament 4 out of range.
+    const std::vector<int> assignment = { 3, 0, 0, 9 };
+    CHECK(physical_extruder_for_filament(4, 4, none, 1, assignment) == 2);
+    CHECK(physical_extruder_for_filament(4, 4, none, 2, assignment) == 1);
+    CHECK(physical_extruder_for_filament(4, 4, none, 3, assignment) == 2);
+    CHECK(physical_extruder_for_filament(4, 4, none, 4, assignment) == 3); // 9 is not a tool: its own
+    CHECK(physical_extruder_for_filament(4, 4, none, 0, assignment) == 0); // "the current filament"
+    // No assignment: exactly the old answers.
+    for (unsigned int f = 1; f <= 4; ++f)
+        CHECK(physical_extruder_for_filament(4, 4, none, f) == f - 1);
+    CHECK(assigned_nozzle_for_filament(assignment, 4, 1) == 2);
+    CHECK(assigned_nozzle_for_filament(assignment, 4, 2) == -1);
+    CHECK(assigned_nozzle_for_filament(assignment, 4, 5) == -1);
+
+    // The PrintConfig overload and the process slot resolver read the same key.
+    DynamicPrintConfig cfg = u1_mixed();
+    cfg.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 3 };
+    PrintConfig pc;
+    pc.apply(cfg, true);
+    CHECK(physical_extruder_for_filament(pc, 1) == 2);
+    CHECK(physical_extruder_for_filament(pc, 2) == 1);
+    CHECK(nozzle_diameter_for_filament(pc, 1) == 0.6);
+    CHECK(process_extruder_for_filament(cfg, 0, 4) == 2);
+    CHECK(process_extruder_for_filament(cfg, 1, 4) == 1);
+    CHECK(nozzle_for_filament(cfg, 1) == 2);
+
+    CHECK(filament_nozzle_assignment_stored({ 0, 0 }).empty());
+    CHECK(filament_nozzle_assignment_stored({ 0, -2, 4 }) == std::vector<int>{ 0, 0, 4 });
+}
+
+TEST_CASE("A filament on a per-nozzle-process tool takes that process's line widths", "[NozzleProcess][Widths]")
+{
+    DynamicPrintConfig cfg = u1_mixed();
+    cfg.set_deserialize_strict({ { "outer_wall_line_width", "0.42" }, { "inner_wall_line_width", "0.45" }, { "sparse_infill_line_width", "0.45" },
+                                 { "internal_solid_infill_line_width", "0.42" }, { "top_surface_line_width", "0.42" },
+                                 { "support_line_width", "0.42" }, { "line_width", "0.42" } });
+    DynamicPrintConfig p06 = u1_06_process();
+    p06.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(0.62, false));
+    p06.set_key_value("inner_wall_line_width", new ConfigOptionFloatOrPercent(0.65, false));
+    p06.set_key_value("sparse_infill_line_width", new ConfigOptionFloatOrPercent(0., false)); // 0: the process's line_width
+    p06.set_key_value("internal_solid_infill_line_width", new ConfigOptionFloatOrPercent(105., true));
+    p06.set_key_value("top_surface_line_width", new ConfigOptionFloatOrPercent(0.6, false));
+    p06.set_key_value("support_line_width", new ConfigOptionFloatOrPercent(0.6, false));
+    p06.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.64, false));
+
+    SECTION("no per-nozzle process: no arrays, nothing stamped")
+    {
+        DynamicPrintConfig plain = cfg;
+        CHECK_FALSE(fill_nozzle_line_widths(plain, { nullptr, nullptr, nullptr, nullptr }));
+        CHECK(plain.option<ConfigOptionFloatsOrPercents>("nozzle_outer_wall_line_width")->values.empty());
+        PrintRegionConfig region;
+        region.apply(plain, true);
+        const double before = region.outer_wall_line_width.value;
+        stamp_nozzle_line_widths(region);
+        CHECK(region.outer_wall_line_width.value == before);
+    }
+
+    SECTION("T3/T4 on the 0.6 process, filament 1 assigned to T3")
+    {
+        cfg.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 3 };
+        REQUIRE(fill_nozzle_process_slots(cfg, { nullptr, nullptr, &p06, &p06 }));
+        const auto &outer = cfg.option<ConfigOptionFloatsOrPercents>("nozzle_outer_wall_line_width")->values;
+        REQUIRE(outer.size() == 4);
+        CHECK(outer[0].value == 0.62); // filament 1 -> T3
+        CHECK(outer[1].value == 0.42); // filament 2 -> its own T2: the plate's
+        CHECK(outer[2].value == 0.62);
+        CHECK(outer[3].value == 0.62);
+        CHECK(cfg.option<ConfigOptionFloatsOrPercents>("nozzle_sparse_infill_line_width")->values[0].value == 0.64);
+        CHECK(cfg.option<ConfigOptionFloatsOrPercents>("nozzle_internal_solid_infill_line_width")->values[0].percent);
+        // The plate's own width keys are not touched: the stamp happens per region.
+        CHECK(cfg.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->value == 0.42);
+
+        PrintRegionConfig region;
+        region.apply(cfg, true);
+        region.wall_filament.value          = 1;
+        region.sparse_infill_filament.value = 2;
+        region.solid_infill_filament.value  = 4;
+        stamp_nozzle_line_widths(region);
+        CHECK(region.outer_wall_line_width.value == 0.62);
+        CHECK(region.inner_wall_line_width.value == 0.65);
+        CHECK(region.sparse_infill_line_width.value == 0.45); // filament 2: the plate's
+        CHECK(region.internal_solid_infill_line_width.value == 105.);
+        CHECK(region.internal_solid_infill_line_width.percent);
+        CHECK(region.top_surface_line_width.value == 0.6);
+
+        // A modifier moving the walls to filament 2 stamps the plate's width back.
+        region.wall_filament.value = 2;
+        stamp_nozzle_line_widths(region);
+        CHECK(region.outer_wall_line_width.value == 0.42);
+
+        PrintObjectConfig object;
+        object.apply(cfg, true);
+        object.support_filament.value = 3;
+        stamp_nozzle_line_widths(object);
+        CHECK(object.support_line_width.value == 0.6);
+        object.support_filament.value   = 0; // "current filament": no nozzle of its own
+        object.support_line_width.value = 0.42;
+        stamp_nozzle_line_widths(object);
+        CHECK(object.support_line_width.value == 0.42);
+    }
+}
+
+TEST_CASE("Edit nozzles separately is enabled whenever the shown nozzle uses the global setting", "[NozzleProcess][Split]")
+{
+    // Owner bug 2026-10-30: the button was greyed out with "Use Global Setting" on an H2D.
+    CHECK(nozzle_split_control(2, false, false) == NozzleSplitControl::Split);
+    CHECK(nozzle_split_control(4, false, false) == NozzleSplitControl::Split);
+    CHECK(nozzle_split_control(2, true, false) == NozzleSplitControl::OwnProcess);
+    CHECK(nozzle_split_control(2, true, true) == NozzleSplitControl::Link);
+    CHECK(nozzle_split_control(2, false, true) == NozzleSplitControl::Link);
+    CHECK(nozzle_split_control(1, false, false) == NozzleSplitControl::Hidden);
+    CHECK(nozzle_split_control(0, false, false) == NozzleSplitControl::Hidden);
+
+    // Any process on a two-nozzle printer can be split, whatever slot layout it carries.
+    DynamicPrintConfig good = h2d_like({ 1, 2 }, { STD, STD }, false);
+    CHECK(process_nozzles_splittable(good, 2));
+    DynamicPrintConfig broken = good; // a user preset that saved its own two-entry variant list
+    broken.option<ConfigOptionStrings>("print_extruder_variant")->values = { "Direct Drive Standard", "Direct Drive High Flow" };
+    CHECK(process_nozzles_splittable(broken, 2));
+    CHECK_FALSE(process_nozzles_splittable(good, 1));
+}
+
+TEST_CASE("A process without a per-extruder layout splits, edits per nozzle and links back unchanged", "[NozzleProcess][Split]")
+{
+    // The U1's processes (and user presets with a broken layout) have no print_extruder_id covering the tools.
+    DynamicPrintConfig original = u1_mixed();
+    original.option<ConfigOptionInts>("print_extruder_id", true)->values         = { 1 };
+    original.option<ConfigOptionStrings>("print_extruder_variant", true)->values = { "Direct Drive Standard" };
+    DynamicPrintConfig process = original;
+
+    REQUIRE(split_process_per_nozzle(process, 4));
+    CHECK(process_nozzles_split(process));
+    CHECK(process.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>{ 1, 1, 2, 2, 3, 3, 4, 4 });
+    CHECK(process.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 200, 300, 200, 300, 200, 300, 200, 300 });
+    // The first two slots are still the flow-mode columns get_config_idx() reads.
+    CHECK(process.option<ConfigOptionStrings>("print_extruder_variant")->values[1] == "Direct Drive High Flow");
+
+    const int slot = process_nozzle_slot(process, "outer_wall_speed", 2, fvtStandard);
+    REQUIRE(slot == 4);
+    process.option<ConfigOptionFloats>("outer_wall_speed")->values[size_t(slot)] = 99.;
+    CHECK(process_extruder_slots_differ(process));
+    // A filament on T3 reads it once the slicer reads the slots.
+    CHECK(get_value_at(process, *process.option<ConfigOptionFloats>("outer_wall_speed"), ConfigFlowDomain::Process, 2) == 99.);
+    CHECK(get_value_at(process, *process.option<ConfigOptionFloats>("outer_wall_speed"), ConfigFlowDomain::Process, 0) == 200.);
+
+    SECTION("link from T1: the saved process again")
+    {
+        REQUIRE(link_process_nozzles(process, 0, &original));
+        CHECK(process.diff(original).empty());
+    }
+    SECTION("link from T3: every tool takes 99, in the saved shape")
+    {
+        REQUIRE(link_process_nozzles(process, 2, &original));
+        CHECK_FALSE(process_nozzles_split(process));
+        CHECK(process.option<ConfigOptionFloats>("outer_wall_speed")->values == std::vector<double>{ 99, 300 });
+        CHECK(process.option<ConfigOptionInts>("print_extruder_id")->values == std::vector<int>{ 1 });
+    }
+}
+
+TEST_CASE("Layer height is held to the smallest nozzle that prints", "[NozzleProcess][LayerHeight]")
+{
+    DynamicPrintConfig printer;
+    printer.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4, 0.6, 0.6 }));
+    printer.set_key_value("min_layer_height", new ConfigOptionFloats({ 0.08, 0.08, 0.12, 0.12 }));
+    printer.set_key_value("max_layer_height", new ConfigOptionFloats({ 0.28, 0.28, 0.42, 0.42 }));
+    double lo = 0., hi = 0.;
+    // Nothing known in use: the old rule, the loosest limits.
+    layer_height_limits_for_nozzles(printer, {}, lo, hi);
+    CHECK(lo == 0.08);
+    CHECK(hi == 0.42);
+    // Only the 0.6 tools print: their limits.
+    layer_height_limits_for_nozzles(printer, { 2, 3 }, lo, hi);
+    CHECK(lo == 0.12);
+    CHECK(hi == 0.42);
+    // A 0.4 tool prints too: the 0.4's limits bind.
+    layer_height_limits_for_nozzles(printer, { 2, 0 }, lo, hi);
+    CHECK(lo == 0.08);
+    CHECK(hi == 0.28);
+    // Uniform nozzles: unchanged rule.
+    printer.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4, 0.4, 0.4 }));
+    layer_height_limits_for_nozzles(printer, { 2 }, lo, hi);
+    CHECK(lo == 0.08);
+    CHECK(hi == 0.42);
+}
+
+TEST_CASE("The filament nozzle assignment saves and reopens with the project", "[NozzleProcess][Assignment][3mf]")
+{
+    DynamicPrintConfig cfg = u1_mixed();
+    cfg.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 0, 0, 4 };
+    DynamicPrintConfig loaded;
+    REQUIRE(round_trip_project(cfg, loaded));
+    REQUIRE(loaded.has("filament_nozzle_assignment"));
+    CHECK(loaded.option<ConfigOptionInts>("filament_nozzle_assignment")->values == std::vector<int>{ 0, 0, 4 });
+}
+
+TEST_CASE("A U1 0.4+0.6 puts a filament on a 0.6 tool from the bundle", "[NozzleProcess][Assignment][PresetBundle]")
+{
+    PresetBundle &b = vendor_bundle("Snapmaker");
+    REQUIRE(b.printers.select_preset_by_name("Snapmaker U1 (0.4+0.6 nozzle)", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @Snapmaker U1 (0.4+0.6 nozzle)", true));
+    b.update_compatible(PresetSelectCompatibleType::Never);
+    b.project_config.option<ConfigOptionStrings>("nozzle_process_presets", true)->values.clear();
+    b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values.clear();
+    const size_t filaments = b.filament_presets.size();
+    REQUIRE(filaments >= 1);
+    REQUIRE(b.filament_nozzle_assignment_supported());
+
+    const DynamicPrintConfig plain = b.full_config();
+    REQUIRE(b.set_filament_nozzle(0, 3));
+    CHECK(b.filament_assigned_nozzle(0) == 3);
+    CHECK(b.filament_nozzles()[0] == 2);
+    CHECK(b.filament_nozzle_assignment_summary() == "1 > T3 0.6");
+    const DynamicPrintConfig assigned = b.full_config();
+    CHECK(assigned.option<ConfigOptionInts>("filament_nozzle_assignment")->values == std::vector<int>{ 3 });
+
+    // With the 0.6 process on T3, filament 1's widths come from it.
+    const std::string p06 = "0.30mm Standard @Snapmaker U1 (0.6 nozzle)";
+    REQUIRE(b.set_nozzle_process(2, p06));
+    const DynamicPrintConfig filled     = b.full_config();
+    const Preset            *p06_preset = b.prints.find_preset(p06, false);
+    REQUIRE(p06_preset != nullptr);
+    const auto *outer = filled.option<ConfigOptionFloatsOrPercents>("nozzle_outer_wall_line_width");
+    REQUIRE(outer != nullptr);
+    REQUIRE(outer->values.size() == filaments);
+    CHECK(outer->values[0].value == p06_preset->config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->value);
+
+    // Back to its own tool: stored empty, and the job is the plain one again.
+    REQUIRE(b.set_nozzle_process(2, ""));
+    REQUIRE(b.set_filament_nozzle(0, 1));
+    CHECK(b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment")->values.empty());
+    CHECK(b.full_config().diff(plain).empty());
+}
+
+TEST_CASE("Bambu grouping printers take no filament nozzle assignment", "[NozzleProcess][Assignment][PresetBundle]")
+{
+    PresetBundle &b = vendor_bundle("BBL");
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H2D 0.4 nozzle", true));
+    CHECK_FALSE(b.filament_nozzle_assignment_supported());
+    CHECK_FALSE(b.set_filament_nozzle(0, 2));
+    // A project carried over from a U1 keeps the key, but the H2D slices without it.
+    b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 2 };
+    CHECK(b.full_config().option<ConfigOptionInts>("filament_nozzle_assignment")->values.empty());
+    b.project_config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values.clear();
 }

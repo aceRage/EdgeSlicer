@@ -81,8 +81,8 @@ SlicingParameters SlicingParameters::create_from_config(
     // which is consistent with the requirement that if support_filament == 0 resp. support_interface_filament == 0,
     // support will not trigger tool change, but it will use the current nozzle instead.
     // In that case all the nozzles have to be of the same diameter.
-    coordf_t support_material_extruder_dmr           = print_config.nozzle_diameter.get_at(object_config.support_filament.value - 1);
-    coordf_t support_material_interface_extruder_dmr = print_config.nozzle_diameter.get_at(object_config.support_interface_filament.value - 1);
+    coordf_t support_material_extruder_dmr           = print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, unsigned(std::max(0, object_config.support_filament.value))));
+    coordf_t support_material_interface_extruder_dmr = print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, unsigned(std::max(0, object_config.support_interface_filament.value))));
 
     // ORCA: store Z distance
     const coordf_t support_top_z_gap    = object_config.support_top_z_distance.value;

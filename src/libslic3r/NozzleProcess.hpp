@@ -28,6 +28,13 @@ bool has_nozzle_process_presets(const ConfigBase &config);
 // nozzle fed by several filaments (single_extruder_multi_material).
 bool supports_nozzle_processes(const ConfigBase &printer_config);
 
+// Per-nozzle process P2: whether filaments can be put on a nozzle of the user's choosing
+// (filament_nozzle_assignment): a toolchanger (supports_nozzle_processes()) that is not one of Bambu's
+// grouping machines (H2D / H2C / X2D route filaments with filament_map and their own grouping dialog).
+bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config);
+// The stored assignment for `filaments` filaments, 0 = the filament's own nozzle; an all-0 list is stored empty.
+std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
+
 // Copy each extruder's chosen process into that extruder's slots of per_nozzle_process_options() in
 // `config` (a full print config). sources[e] is extruder e's process, nullptr for the plate's process.
 //
@@ -46,15 +53,50 @@ bool supports_nozzle_processes(const ConfigBase &printer_config);
 // extruders.
 bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
 
+// ---- Per-nozzle process P2: line widths per nozzle (design D8) ----
+//
+// FOrca 0b1f80cd22's technique (AGPL-3.0): resolve the width each nozzle's process gives a role, then write it
+// into the region / object scalar the engine already reads, so no reader changes and a job without
+// per-nozzle processes is untouched. The values travel per FILAMENT in the nozzle_*_line_width arrays of the
+// region and object configs (index filament - 1).
+
+// (array key, the role width key it stands for), the support one last.
+const std::vector<std::pair<std::string, std::string>> &nozzle_line_width_keys();
+// The 0-based nozzle 1-based `filament_id` prints on (physical_extruder_for_filament on a full config,
+// filament_nozzle_assignment included).
+size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id);
+// Writes the nozzle_*_line_width arrays of a full config: for each filament whose nozzle has a source process,
+// that process's role width (its line_width when the role's is 0); every other filament the plate's width. All
+// arrays are left empty when no filament's nozzle has a source. Called by fill_nozzle_process_slots(). Returns whether any entry was set.
+bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
+// Layer-height guard (design D9, FOrca 0b1f80cd22's Tab rule, AGPL-3.0): one global layer height, held to the
+// [min_layer_height, max_layer_height] of the SMALLEST nozzle that prints (`used_nozzles`, 0-based), not to the
+// loosest limits of all nozzles. With uniform nozzles or no used nozzle known: the old rule, the smallest
+// minimum and the largest maximum of all extruders.
+void layer_height_limits_for_nozzles(const ConfigBase &printer_config, const std::vector<size_t> &used_nozzles, double &min_layer_height,
+                                     double &max_layer_height);
+// Stamps the arrays into the role widths, each through the filament that prints the role (PrintRegion::extruder).
+void stamp_nozzle_line_widths(PrintRegionConfig &config);
+void stamp_nozzle_line_widths(PrintObjectConfig &config);
+
 // The values a filament on extruder `extruder` reads for `key` in a filled config: what the G-code of
 // that extruder will use. Test and UI helper.
 std::string nozzle_process_value(const DynamicPrintConfig &config, const std::string &key, size_t extruder, bool high_flow);
 
 // ---- One process with separate values per nozzle (the Speed page's Left / Right editing) ----
 
-// Whether `process` holds a per-extruder slot layout covering exactly `extruders` extruders (an H2D, H2C or
-// X2D process), so its nozzles can be edited separately.
+// Whether `process`'s nozzles can be edited separately on a printer with `extruders` extruders: two or more
+// (P2). A process whose slot layout does not cover exactly those extruders gets one when it is split.
 bool process_nozzles_splittable(const ConfigBase &process, size_t extruders);
+
+// The Speed page's "Edit nozzles separately" / "Link nozzles" button (P2: testable enable rule).
+enum class NozzleSplitControl {
+    Hidden,     // fewer than two nozzles
+    Split,      // enabled: "Edit nozzles separately"
+    Link,       // enabled: "Link nozzles" (the process is split)
+    OwnProcess, // disabled: the shown nozzle takes its speeds from its own process ("Speeds from")
+};
+NozzleSplitControl nozzle_split_control(size_t extruders, bool nozzle_has_own_process, bool split);
 // Whether the slicer reads `process`'s extruder slots (process_extruder_values).
 bool process_nozzles_split(const ConfigBase &process);
 // The slot of `key` holding extruder `extruder`'s value for flow mode `mode` in a split process, or -1 when
