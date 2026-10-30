@@ -1,5 +1,4 @@
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
-#include "libslic3r_version.h"
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
 #include "slic3r/GUI/CAD/DesignTextDialog.hpp"           // Text: font, height, live outline
@@ -53,7 +52,7 @@
 #include "slic3r/GUI/Widgets/StateColor.hpp"
 #include <utility>
 #include <wx/listbase.h>
-#include <wx/busycursor.h>
+#include <wx/utils.h> // wxBusyCursor (wx/busycursor.h is wx 3.3+)
 #include <wx/colourdata.h>
 #include "slic3r/GUI/CAD/DesignInteraction.hpp"
 #include <wx/sizer.h>
@@ -95,6 +94,21 @@
 #include "slic3r/GUI/wxExtensions.hpp"   // ScalableButton, create_scaled_bitmap
 #include "slic3r/GUI/Widgets/Label.hpp"             // HarmonyOS Sans fonts (Head_*/Body_*) shared with the rest of Orca
 #include "slic3r/GUI/Widgets/DropDown.hpp"          // Orca-themed combo dropdown (white/teal selector) for the tool flyouts
+
+namespace {
+// Orca's DropDown is Item-based; Edge's DropDown references three parallel vectors. This adapter
+// keeps the flyout code's items[i].text/.tip/.icon shape over Edge's storage.
+struct CadDropItem { wxString text; wxString tip; wxBitmap icon; };
+struct CadDropItems {
+    std::vector<wxString> texts, tips;
+    std::vector<wxBitmap> icons;
+    struct Ref { wxString& text; wxString& tip; wxBitmap& icon; };
+    size_t size() const { return texts.size(); }
+    void   resize(size_t n) { texts.resize(n); tips.resize(n); icons.resize(n); }
+    void   push_back(const CadDropItem& it) { texts.push_back(it.text); tips.push_back(it.tip); icons.push_back(it.icon); }
+    Ref    operator[](size_t i) { return Ref{texts[i], tips[i], icons[i]}; }
+};
+} // namespace
 #include "slic3r/GUI/Widgets/CheckBox.hpp"          // Orca teal check (label lives in the row's left column)
 #include "slic3r/GUI/Widgets/ComboBox.hpp"          // Orca dropdown — replaces wxChoice in every Design card
 #include "slic3r/GUI/Widgets/TextInput.hpp"
@@ -258,7 +272,6 @@ static ::Button* sidebar_icon_btn(wxWindow* parent, const char* icon, const wxSt
     auto* b = new ::Button(parent, "", icon, wxBORDER_NONE, px);
     b->SetName("design_icon_btn");
     b->SetCanFocus(false);
-    b->SetIconSpacing(0);   // off macOS an empty label still reserves the icon-text gap
     b->SetBorderColor(StateColor());
     b->SetToolTip(tip);
     style_sidebar_icon_btn(b);
@@ -650,12 +663,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // arbitrary action — the existing per-feature handler — instead of selecting a Mode.
         struct FeatVar { const char* icon; wxString tip; wxString hint; std::function<void()> action; int key = 0; };
         struct FeatFlyout {
-            std::vector<DropDown::Item> items;   // mainline DropDown is Item-based (text/tip/icon per row)
+            CadDropItems items;   // Edge DropDown takes parallel text/tip/icon vectors
             std::vector<std::function<void()>> actions;
             std::vector<std::string> icon_names;
             ScalableButton* btn = nullptr;
             DropDown drop;                 // declared LAST: destroyed before the vector it references
-            FeatFlyout() : drop(items) {}
+            FeatFlyout() : drop(items.texts, items.tips, items.icons) {}
         };
         auto feat_dropdown = [&](const char* id, const char* def_icon, const wxString& grp, std::vector<FeatVar> vars) {
             // REGISTER FIRST, BUILD SECOND. A verb's two addresses — "fly:<family>#<row>" for the
@@ -677,7 +690,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             b->SetFont(Label::Body_14);   // measure popup labels in the popup's font (no truncation)
             auto fo = std::make_shared<FeatFlyout>();
             for (auto& v : vars) {
-                DropDown::Item it;
+                CadDropItem it;
                 it.text = v.tip;
                 it.tip  = v.hint;
                 it.icon = create_scaled_bitmap(v.icon, m_form, 18);
@@ -1260,13 +1273,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // icon; clicking drops the variants; a small chevron marks it as a group.
         struct SkVar { const char* icon; DesignSketchTool::Mode mode; wxString tip; wxString hint; };
         struct ToolFlyout {
-            std::vector<DropDown::Item> items;   // mainline DropDown is Item-based (text/tip/icon per row)
+            CadDropItems items;   // Edge DropDown takes parallel text/tip/icon vectors
             std::vector<DesignSketchTool::Mode> modes;
             std::vector<wxString> hints;
             std::vector<std::string> icon_names;
             ScalableButton* btn = nullptr;
             DropDown drop;                 // declared LAST: destroyed before the vector it references
-            ToolFlyout() : drop(items) {}
+            ToolFlyout() : drop(items.texts, items.tips, items.icons) {}
         };
         auto dropdown = [&](const char* def_icon, const wxString& grp, std::vector<SkVar> vars) {
             // Register first, build second — the same law as feat_dropdown, for the same reason.
@@ -1290,7 +1303,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             b->SetFont(Label::Body_14);
             auto fo = std::make_shared<ToolFlyout>();
             for (auto& v : vars) {
-                DropDown::Item it;
+                CadDropItem it;
                 it.text = v.tip;
                 it.tip  = v.hint;
                 it.icon = create_scaled_bitmap(v.icon, m_form, 18);
@@ -1664,10 +1677,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
         // Same themed-DropDown shape as the FEATURE flyouts; row index == int(CommitMode).
         struct CommitFlyout {
-            std::vector<DropDown::Item> items;
+            CadDropItems items;
             wxLongLong closed_ms;          // when the list last closed (wxGetLocalTimeMillis)
             DropDown drop;                 // declared LAST: destroyed before the vector it references
-            CommitFlyout() : drop(items) {}
+            CommitFlyout() : drop(items.texts, items.tips, items.icons) {}
         };
         auto cf = std::make_shared<CommitFlyout>();
         cf->items.resize(2);
@@ -4393,7 +4406,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // docked like Prepare's sidebar: left by default, movable to the right or floating, resizable
     // and collapsible.
     m_aui.init(body_panel);
-    m_aui.AddPane(m_form, AuiMgr::sidebar_pane_info().MinSize(m_form->GetMinSize()));
+    m_aui.AddPane(m_form, CadAuiMgr::sidebar_pane_info().MinSize(m_form->GetMinSize()));
     m_aui.AddPane(view_col, wxAuiPaneInfo().Name("main").CenterPane().PaneBorder(false));
     m_default_layout = m_aui.SavePerspective();
     load_window_layout();
@@ -4920,7 +4933,7 @@ void DesignPanel::sync_recipe_to_model()
     if (plater == nullptr) return;
     // An empty document CLEARS it, so a non-CAD project never carries a stale recipe.
     std::string recipe = m_doc.features.empty() ? std::string() : m_doc.serialize_recipe();
-    if (recipe == plater->model().cad_recipe)
+    if (plater->model().cad_recipe == recipe)
         return;   // no change — this is the rehydrate of a project that was just opened
     plater->model().cad_recipe = std::move(recipe);
 

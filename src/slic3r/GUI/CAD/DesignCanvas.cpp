@@ -574,7 +574,7 @@ void DesignCanvas::refresh_bed()
     const auto* ph_opt = config->opt<ConfigOptionFloat>("printable_height");
     if (ph_opt) printable_height = ph_opt->value;
     // No position: the Design bed stays at the printer bed's home, whichever plate is current.
-    m_bed.set_shape(bed_shape_opt->values, printable_height, {}, {}, "", false);  // mainline added extruder_areas/heights params
+    m_bed.set_shape(bed_shape_opt->values, printable_height, "", false);  // Edge Bed3D has no extruder_areas/heights params
 }
 
 void DesignCanvas::set_show_bed(bool b)

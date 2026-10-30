@@ -60,6 +60,9 @@ enum class ConversionType : int;
 class Ams;
 
 using ModelInstancePtrs = std::vector<ModelInstance*>;
+#ifdef SLIC3R_CAD
+class BackgroundSlicingProcess; // Slic3r::, not GUI::
+#endif
 
 
 namespace UndoRedo {
@@ -84,9 +87,6 @@ struct Camera;
 class GLToolbar;
 class PlaterPresetComboBox;
 class PartPlateList;
-#ifdef SLIC3R_CAD
-class BackgroundSlicingProcess;
-#endif
 
 using t_optgroups = std::vector <std::shared_ptr<ConfigOptionsGroup>>;
 

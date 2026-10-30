@@ -23,7 +23,7 @@ public:
 
 } // namespace
 
-void AuiMgr::init(wxWindow *window)
+void CadAuiMgr::init(wxWindow *window)
 {
     SetManagedWindow(window);
     SetDockSizeConstraint(1, 1);
@@ -32,7 +32,7 @@ void AuiMgr::init(wxWindow *window)
     apply_color_mode();
 }
 
-void AuiMgr::apply_color_mode()
+void CadAuiMgr::apply_color_mode()
 {
     const bool     is_dark    = wxGetApp().dark_mode();
     const wxColour sash_color = is_dark ? wxColour(38, 46, 48) : wxColour(206, 206, 206);
@@ -42,7 +42,7 @@ void AuiMgr::apply_color_mode()
     GetArtProvider()->SetColour(wxAUI_DOCKART_BORDER_COLOUR, is_dark ? *wxBLACK : wxColour(165, 165, 165));
 }
 
-void AuiMgr::track_docked_size(wxWindow *window)
+void CadAuiMgr::track_docked_size(wxWindow *window)
 {
     window->Bind(wxEVT_IDLE, [this, window](wxIdleEvent &evt) {
         wxAuiPaneInfo &pane = GetPane(window);
@@ -55,7 +55,7 @@ void AuiMgr::track_docked_size(wxWindow *window)
     });
 }
 
-wxAuiPaneInfo AuiMgr::sidebar_pane_info()
+wxAuiPaneInfo CadAuiMgr::sidebar_pane_info()
 {
     return wxAuiPaneInfo()
         .Name("sidebar")
@@ -66,7 +66,7 @@ wxAuiPaneInfo AuiMgr::sidebar_pane_info()
         .BestSize(wxSize(39 * wxGetApp().em_unit(), 90 * wxGetApp().em_unit()));
 }
 
-wxAuiFloatingFrame *AuiMgr::CreateFloatingFrame(wxWindow *parent, const wxAuiPaneInfo &pane)
+wxAuiFloatingFrame *CadAuiMgr::CreateFloatingFrame(wxWindow *parent, const wxAuiPaneInfo &pane)
 {
     return new FloatFrame(parent, this, pane);
 }

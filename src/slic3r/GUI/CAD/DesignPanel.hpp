@@ -525,7 +525,7 @@ private:
     // Below the toolbar, m_form docks beside the viewport column like Prepare's sidebar: it can
     // move to the other side, float, be resized and be collapsed, and the layout is kept between
     // sessions.
-    AuiMgr   m_aui;
+    CadAuiMgr   m_aui;
     wxString m_default_layout;
     bool     m_sidebar_collapsed{false};
     bool     m_laid_out{false};   // the tab has been shown, so the panel has its size
