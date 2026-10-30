@@ -7728,7 +7728,9 @@ void GLGizmoCut3D::render_pushfit_inputs(CutConnectors& connectors)
 
 bool GLGizmoCut3D::tac_joint_mode_supported() const
 {
-    return CutMode(m_mode) == CutMode::cutPlanar && m_surface_mode == CutSurfaceMode::Flat && !m_part_selection.valid();
+    // PROTOTYPE: a curved sheet too - the connector stands on the sheet's frame at its point.
+    return CutMode(m_mode) == CutMode::cutPlanar && (m_surface_mode == CutSurfaceMode::Flat || m_surface_mode == CutSurfaceMode::Curved) &&
+           !m_part_selection.valid();
 }
 
 void GLGizmoCut3D::sync_tac_joint_params(CutConnectors& connectors, unsigned fields)

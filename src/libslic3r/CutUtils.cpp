@@ -164,7 +164,8 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
                                   ModelObject*                  lower,
                                   std::vector<CutSeparatePart>& separate,
                                   double                        face_lo,
-                                  double                        face_hi)
+                                  double                        face_hi,
+                                  bool                          clip_sockets = true)
 {
     const TacJointParams& params = volume->cut_info.tac_joint;
     const Transform3d     frame  = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
@@ -196,6 +197,15 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
         if (!half)
             return;
         indexed_triangle_set clipped;
+        if (!clip_sockets) {
+            // PROTOTYPE (curved sheet): the cut face is not the connector's tangent plane, so a
+            // socket clipped there would leave a sliver of each half inside the connector. The
+            // full cutter is the space the connector occupies; removing it from either half is
+            // correct whatever shape the surface has inside the footprint.
+            TriangleMesh hole(cutter);
+            add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
+            return;
+        }
         if (top)
             cut_mesh(cutter, float(face_hi) - mouth_overlap, &clipped, nullptr);
         else
@@ -211,13 +221,14 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
 
 static void process_connector_cut(  ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                     ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
-                                    std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0)
+                                    std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0,
+                                    bool tac_clip_sockets = true)
 {
     assert(volume->cut_info.is_connector);
     volume->cut_info.set_processed();
 
     if (volume->cut_info.connector_type == CutConnectorType::TacJoint) {
-        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi);
+        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi, tac_clip_sockets);
         return;
     }
 
@@ -964,8 +975,23 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     if (sheet.is_flat())
         return perform_with_plane(thickness, offset);
 
-    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint supports planar cuts only.");
+    // PROTOTYPE: TAC Joint on a curved sheet, like the Pin. The connector volume already
+    // stands on the sheet's frame at its (u,v) (the gizmo bakes it into rotation_m), so only
+    // the fit and the engagement across the kerf are checked here, before anything is cloned.
+    if (!m_model.objects.empty()) {
+        double tac_face_lo = 0., tac_face_hi = 0.;
+        if (thickness > 0.)
+            curved_cut_thickness_faces(thickness, offset, tac_face_lo, tac_face_hi);
+        for (const auto* volume : m_model.objects.front()->volumes) {
+            if (!volume->cut_info.is_tac_joint() || volume->cut_info.is_processed)
+                continue;
+            const auto validation = tac_joint_validate(volume->cut_info.tac_joint, tac_face_lo, tac_face_hi);
+            if (!validation.valid)
+                throw std::invalid_argument(validation.message);
+            if (!volume->get_matrix().matrix().allFinite() || !std::isfinite(thickness))
+                throw std::invalid_argument("TAC Joint must stand on the cut surface.");
+        }
+    }
 
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
@@ -1030,7 +1056,7 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
             else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, kerf_face_lo, kerf_face_hi);
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, kerf_face_lo, kerf_face_hi, false);
         }
         else if (!volume->mesh().empty())
             process_solid_part_curved_cut(volume, instance_matrix, m_cut_matrix, m_attributes, sheet, upper, lower, thickness, offset);
@@ -1072,9 +1098,10 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         // frame, so it comes out standing along the surface normal at its (u,v),
         // and reset_instance_transformation() puts it flat on the bed for
         // printing exactly the way the flat path does.
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
-            add_separate_parts(dowels, cut_object_ptrs);
     }
+    // PROTOTYPE: as PR 801 does on the flat path, keep the separate parts with "keep as parts" too.
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";
 
