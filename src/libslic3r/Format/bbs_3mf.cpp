@@ -14,6 +14,9 @@
 #include "../Time.hpp"
 #include "../BambuConfigCompat.hpp"
 #include "../BRep/CadEdit.hpp"
+#ifdef SLIC3R_CAD
+#include "../CAD/CadDocument.hpp"
+#endif
 
 #include "../I18N.hpp"
 #include "../UntrustedInput.hpp"
@@ -177,6 +180,17 @@ const std::string SLICE_INFO_CONFIG_FILE = "Metadata/slice_info.config";
 // Ultra (H2C 3MF schema): per-plate filament / logical-nozzle entry order, as BambuStudio writes it.
 const std::string FILAMENT_SEQUENCE_FILE = "Metadata/filament_sequence.json";
 const std::string BBS_LAYER_HEIGHTS_PROFILE_FILE = "Metadata/layer_heights_profile.txt";
+#ifdef SLIC3R_CAD
+// Design-tab feature recipe. Same path and (lack of) content-type as Orca @3610d8bb:
+// Metadata/orca_cad.bin is an extra zip part, not listed in [Content_Types].xml, so
+// Snapmaker Orca 2.4.1 and Bambu Studio open the project as a plain mesh. Never written
+// unless Model::cad_recipe is non-empty. The pre-rename name is read-only.
+const std::string ORCA_CAD_RECIPE_FILE   = "Metadata/orca_cad.bin";
+const std::string LEGACY_CAD_RECIPE_FILE = "Metadata/SnapOrca_cad.bin";
+// 1 GiB uncompressed: Orca's cap. Combined with CadDocument::deserialize_recipe
+// (BoundedBinaryInputArchive + kMaxRecipeFeatures) so a hostile part cannot allocate unbounded.
+static constexpr mz_uint64 kMaxCadRecipe = mz_uint64(1) << 30;
+#endif
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/layer_config_ranges.xml";
 const std::string BRIM_EAR_POINTS_FILE = "Metadata/brim_ear_points.txt";
 /*const std::string SLA_SUPPORT_POINTS_FILE = "Metadata/Slic3r_PE_sla_support_points.txt";
@@ -678,6 +692,33 @@ bool bbs_is_valid_object_type(const std::string& type)
 }
 
 namespace Slic3r {
+
+#ifdef SLIC3R_CAD
+// Extract Metadata/orca_cad.bin (or the legacy name) into model.cad_recipe. A missing, empty,
+// oversized, truncated or corrupt part is not a 3MF load failure: the mesh still loads and
+// cad_recipe stays empty. deserialize_recipe (BoundedBinaryInputArchive + feature/length caps)
+// is the only parser; we do not keep untrusted bytes that fail it.
+static void load_cad_recipe_part(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, bool legacy, Model &model)
+{
+    if (legacy && !model.cad_recipe.empty())
+        return;
+    std::string buf;
+    std::string why;
+    if (!read_zip_entry_capped(archive, stat.m_file_index, kMaxCadRecipe, buf, &why)) {
+        BOOST_LOG_TRIVIAL(error) << "3MF: CAD recipe of " << stat.m_uncomp_size << " bytes was not loaded (" << why << ")";
+        return;
+    }
+    if (buf.empty())
+        return;
+    CadDocument doc;
+    if (!doc.deserialize_recipe(buf)) {
+        BOOST_LOG_TRIVIAL(error) << "3MF: CAD recipe could not be read"
+                                 << (doc.error.empty() ? std::string() : (": " + doc.error)) << "; the mesh is still loaded";
+        return;
+    }
+    model.cad_recipe = std::move(buf);
+}
+#endif
 
 static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
 {
@@ -2132,6 +2173,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     if (!_extract_project_config_from_archive(archive, stat, config, config_substitutions, model) && !dont_load_config)
                         return false;
                 }
+#ifdef SLIC3R_CAD
+                else if (boost::algorithm::iequals(name, ORCA_CAD_RECIPE_FILE)
+                      || boost::algorithm::iequals(name, LEGACY_CAD_RECIPE_FILE)) {
+                    // Restore the editable CAD recipe (optional; absent in non-CAD projects).
+                    // The current name wins over the legacy one whichever the archive lists first.
+                    load_cad_recipe_part(archive, stat, boost::algorithm::iequals(name, LEGACY_CAD_RECIPE_FILE), model);
+                }
+#endif
                 else if (boost::algorithm::iequals(name, CUT_INFORMATION_FILE)) {
                     // extract object cut info
                     _extract_cut_information_from_archive(archive, stat, config_substitutions);
@@ -6976,6 +7025,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_mesh_to_object_stream(std::function<bool(std::string &, bool)> const &flush, ObjectData const &object_data) const;
         bool _add_build_to_model_stream(std::stringstream& stream, const BuildItemsList& build_items) const;
         bool _add_layer_height_profile_file_to_archive(mz_zip_archive& archive, Model& model);
+#ifdef SLIC3R_CAD
+        bool _add_cad_recipe_file_to_archive(mz_zip_archive& archive, Model& model);
+#endif
         bool _add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_brim_ear_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
@@ -7413,6 +7465,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 close_zip_writer(&archive);
                 return false;
             }
+
+#ifdef SLIC3R_CAD
+            if (!_add_cad_recipe_file_to_archive(archive, model)) {
+                close_zip_writer(&archive);
+                return false;
+            }
+#endif
 
             // BBS progress point
             /*BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format("export 3mf EXPORT_STAGE_ADD_LAYER_RANGE\n");
@@ -8762,6 +8821,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         return true;
     }
+
+#ifdef SLIC3R_CAD
+    bool _BBS_3MF_Exporter::_add_cad_recipe_file_to_archive(mz_zip_archive& archive, Model& model)
+    {
+        if (model.cad_recipe.empty())
+            return true;
+        if (!mz_zip_writer_add_mem(&archive, ORCA_CAD_RECIPE_FILE.c_str(),
+                (const void*)model.cad_recipe.data(), model.cad_recipe.length(),
+                MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add CAD recipe file to archive");
+            return false;
+        }
+        return true;
+    }
+#endif
 
     bool _BBS_3MF_Exporter::_add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model)
     {

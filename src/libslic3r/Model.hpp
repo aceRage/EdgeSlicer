@@ -1822,6 +1822,13 @@ public:
     std::vector<std::string> md_name;
     std::vector<std::string> md_value;
 
+#ifdef SLIC3R_CAD
+    // Opaque parametric CAD recipe (CadDocument::serialize_recipe()), round-tripped through
+    // the 3MF as Metadata/orca_cad.bin. Empty for non-CAD projects; compiled out when
+    // SLIC3R_CAD is OFF so the Model layout matches today's.
+    std::string cad_recipe;
+#endif
+
     void SetDesigner(std::string designer, std::string designer_user_id) {
         if (design_info == nullptr) {
             design_info = std::make_shared<ModelDesignInfo>();
