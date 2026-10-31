@@ -189,7 +189,9 @@ TEST_CASE("A filament pinned to a smaller rack nozzle slices at that nozzle's wi
     const PerTool     after = per_tool(gcode);
     REQUIRE(after.widths.count(0) == 1);
     REQUIRE(after.widths.count(1) == 1);
-    CHECK(*after.widths.at(1).rbegin() < 0.25);
+    // Arachne widens a bead up to about 1.3x its nozzle where a wall narrows; a 0.4 bead would be past 0.5.
+    CHECK(*after.widths.at(1).rbegin() < 0.3);
+    CHECK(*after.widths.at(1).begin() < 0.21);
     CHECK(after.widths.at(0) == before.widths.at(0));
     CHECK(gcode.find("; physical_nozzle_properties = 0.4-standard,0.4-standard,0.2-standard") != std::string::npos);
 }
