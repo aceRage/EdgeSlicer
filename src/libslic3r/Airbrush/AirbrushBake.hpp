@@ -191,6 +191,26 @@ struct AirbrushCost
 AirbrushCost airbrush_estimate_cost(const indexed_triangle_set &its, const TriangleSelector::TriangleSplittingData &painting,
                                     const AirbrushCostParams &params, const Transform3d &trafo = Transform3d::Identity());
 
+// The swap model on its own: `per_layer[l]` lists the filaments layer l prints (any order, duplicates
+// allowed). airbrush_estimate_cost() ends here; the P2 cost meter also uses it to merge parts.
+AirbrushCost airbrush_cost_from_layers(std::vector<std::vector<int>> per_layer, const AirbrushCostParams &params);
+
+// Several parts of one object printed together: the union of their filaments on each layer, then one
+// swap count. All parts must have been estimated with the same layer heights and the same bed z.
+AirbrushCost airbrush_merge_costs(const std::vector<AirbrushCost> &parts, const AirbrushCostParams &params);
+
+// D8: the cost meter warns (never caps) above these.
+static constexpr double AIRBRUSH_WARN_PURGE_G      = 50.;
+static constexpr double AIRBRUSH_WARN_SWAP_SECONDS = 2. * 3600.;
+struct AirbrushCostWarning
+{
+    bool purge = false;
+    bool time  = false;
+    bool any() const { return purge || time; }
+};
+AirbrushCostWarning airbrush_cost_warning(const AirbrushCost &cost, double purge_g_limit = AIRBRUSH_WARN_PURGE_G,
+                                          double swap_seconds_limit = AIRBRUSH_WARN_SWAP_SECONDS);
+
 } // namespace Airbrush
 } // namespace Slic3r
 
