@@ -103,7 +103,7 @@ TEST_CASE("A project saved after an Edit-gizmo mesh edit still opens as a mesh",
     one_edited_cube(src);
     REQUIRE(src.objects.size() == 1);
     REQUIRE(src.objects.front()->volumes.size() == 1);
-    const double src_volume = src.objects.front()->volumes.front()->mesh().volume();
+    const double src_volume = TriangleMesh(src.objects.front()->volumes.front()->mesh()).volume();
     REQUIRE(src_volume > 0.);
 
     ScopedTemporaryFile file(".3mf");
@@ -121,6 +121,6 @@ TEST_CASE("A project saved after an Edit-gizmo mesh edit still opens as a mesh",
     REQUIRE(vol->is_model_part());
     REQUIRE_FALSE(vol->mesh().empty());
     REQUIRE(vol->mesh().its.indices.size() >= 12);
-    REQUIRE(vol->mesh().volume() > 0.);
-    REQUIRE_THAT(vol->mesh().volume(), Catch::Matchers::WithinAbs(src_volume, 1.0));
+    REQUIRE(TriangleMesh(vol->mesh()).volume() > 0.);
+    REQUIRE_THAT(TriangleMesh(vol->mesh()).volume(), Catch::Matchers::WithinAbs(src_volume, 1.0));
 }
