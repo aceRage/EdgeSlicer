@@ -519,7 +519,8 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
         m_gap_mode->Append(_L("A fixed filament"));
         m_gap_mode->SetSelection(std::clamp(m_input.gap_mode, 0, 2));
         m_gap_mode->SetToolTip(_L("What the gaps between the bands print with. The object's own filament writes nothing for the gaps, "
-                                  "so it adds the fewest filament changes."));
+                                  "so it adds the fewest filament changes. \"Next in the sequence\" prints each gap with the filament of the band above it; "
+                                  "gaps never use up a place in the sequence."));
         m_gap_mode->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) { e.Skip(); update_gap_controls(); update_preview(); });
         row->Add(m_gap_mode, 0, wxALIGN_CENTER_VERTICAL);
 

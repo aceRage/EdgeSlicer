@@ -38,9 +38,8 @@ int height_pattern_planned_bands(int repeat, int sequence_length, HeightPatternG
 {
     if (repeat <= 0 || sequence_length <= 0)
         return 0;
-    const long long slots = (long long)repeat * sequence_length;
-    const long long bands = gap_mode == HeightPatternGapMode::NextInSequence ? (slots + 1) / 2 : slots;
-    return int(std::min<long long>(bands, 1000000));
+    (void)gap_mode; // gaps never use up a sequence entry: every repetition is `sequence_length` bands
+    return int(std::min<long long>((long long)repeat * sequence_length, 1000000));
 }
 
 int height_pattern_repeat_from_legacy_bands(int bands, int sequence_length, HeightPatternGapMode gap_mode)
@@ -49,8 +48,8 @@ int height_pattern_repeat_from_legacy_bands(int bands, int sequence_length, Heig
         return 0;
     if (sequence_length <= 0)
         return 1;
-    const long long slots = gap_mode == HeightPatternGapMode::NextInSequence ? 2LL * bands - 1 : bands;
-    return int(std::max<long long>(1, (slots + sequence_length - 1) / sequence_length));
+    (void)gap_mode;
+    return int(std::max<long long>(1, ((long long)bands + sequence_length - 1) / sequence_length));
 }
 
 std::vector<double> height_pattern_layer_tops(const std::vector<double> &object_layers)
@@ -119,7 +118,6 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
 
     const double period = p.band_h + p.gap_h;
     const size_t n = p.sequence.size();
-    const bool interleave = gap_mode == HeightPatternGapMode::NextInSequence;
     // Source index (the i of the i-th band attempted) of every emitted band, to place the gaps.
     std::vector<int> source;
 
@@ -148,8 +146,8 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
         HeightPatternRange band;
         band.lo = lo;
         band.hi = hi;
-        // Bands and gaps share one cursor when interleaved: band i takes slot 2i, its gap 2i+1.
-        band.extruder = p.sequence[(interleave ? size_t(2 * i) : size_t(i)) % n];
+        // Bands always run the whole sequence in order; gaps never take a sequence entry.
+        band.extruder = p.sequence[size_t(i) % n];
         band.layer_height = layer_height;
         out.ranges.push_back(band);
         source.push_back(i);
@@ -163,7 +161,7 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     }
     if (p.repeat > 0 && out.bands > 0) {
         out.cut_off = stopped_early && out.bands < total_bands;
-        const size_t slot = (interleave ? size_t(2 * source.back()) : size_t(source.back())) % n;
+        const size_t slot = size_t(source.back()) % n;
         out.last_sequence_index = int(slot) + 1;
     }
 
@@ -183,7 +181,7 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
                     gap.layer_height = layer_height;
                     gap.extruder     = gap_mode == HeightPatternGapMode::Fixed ?
                                            p.gap_filament :
-                                           p.sequence[size_t(2 * source[k - 1] + 1) % n];
+                                           p.sequence[size_t(source[k - 1] + 1) % n]; // = the next band's filament
                     merged.push_back(gap);
                 }
             }

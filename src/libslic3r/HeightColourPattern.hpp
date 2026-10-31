@@ -34,9 +34,9 @@ class ModelObject;
 // What goes into the gap between two bands.
 //  ObjectFilament: nothing is written; the gap prints with the object's own
 //                  filament (D2 default, fewest tool changes).
-//  NextInSequence: bands and gaps take turns drawing from ONE cursor over the
-//                  sequence: band F1, gap F2, band F3, gap F4, ... A two-filament
-//                  sequence therefore gives plain alternating stripes.
+//  NextInSequence: the gap after band i prints with the filament of band i+1 (the
+//                  next entry of the sequence). The gap never takes a sequence entry:
+//                  bands always run the whole sequence, F1 F2 F3 F1 F2 F3 ...
 //  Fixed:          every gap uses gap_filament.
 enum class HeightPatternGapMode : int {
     ObjectFilament = 0,
@@ -110,9 +110,8 @@ struct HeightPatternExpansion
     bool ok() const { return error.empty(); }
 };
 
-// Number of bands `repeat` whole repetitions of a sequence of `sequence_length` filaments make. With
-// NextInSequence gaps the bands and the gaps share one cursor over the sequence, so a repetition is
-// `sequence_length` slots and the bands are every other slot (the first and the last slot are bands).
+// Number of bands `repeat` whole repetitions of a sequence of `sequence_length` filaments make:
+// repeat * sequence_length, whatever the gap mode (gaps sit between bands and use no sequence entry).
 // repeat <= 0 gives 0 (to the top). Used by the expansion and by the dialog's count line.
 int height_pattern_planned_bands(int repeat, int sequence_length, HeightPatternGapMode gap_mode);
 

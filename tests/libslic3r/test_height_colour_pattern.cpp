@@ -326,16 +326,71 @@ TEST_CASE("Height colour pattern: repeat, to-the-top and clipping", "[HeightColo
         CHECK(e.planned_bands == 4);
         CHECK_FALSE(e.cut_off);
     }
-    SECTION("next in sequence: a repeat is one pass over the sequence, bands are every other slot") {
-        p.gap_mode = int(HeightPatternGapMode::NextInSequence);
-        p.sequence = { 1, 2, 3, 4, 5 };
-        p.repeat   = 1;
+    SECTION("3 filaments x repeat 4 = 12 bands in order with 11 equal gaps between them") {
+        p.sequence     = { 1, 2, 3 };
+        p.start_z      = 0.;
+        p.band_h       = 2.;
+        p.gap_h        = 1.;
+        p.repeat       = 4;
+        p.gap_mode     = int(HeightPatternGapMode::Fixed);
+        p.gap_filament = 4;
         const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(100., 0.2, 0.2), 0.2);
-        // slots F1..F5 = band F1, gap F2, band F3, gap F4, band F5
-        REQUIRE(e.ranges.size() == 5);
-        CHECK(e.bands == 3);
-        CHECK(e.ranges[4].extruder == 5);
-        CHECK(height_pattern_planned_bands(2, 5, HeightPatternGapMode::NextInSequence) == 5);
+        REQUIRE(e.ok());
+        CHECK(e.bands == 12);
+        CHECK(e.planned_bands == 12);
+        CHECK_FALSE(e.cut_off);
+        REQUIRE(e.ranges.size() == 23);   // 12 bands + 11 gaps, no leading or trailing gap
+        for (size_t k = 0; k < e.ranges.size(); ++k) {
+            if (k % 2 == 0) {
+                CHECK(e.ranges[k].extruder == p.sequence[(k / 2) % 3]);
+                CHECK(e.ranges[k].hi - e.ranges[k].lo == Approx(2.).margin(1e-6));
+            } else {
+                CHECK(e.ranges[k].extruder == 4);
+                CHECK(e.ranges[k].hi - e.ranges[k].lo == Approx(1.).margin(1e-6));   // every gap the same height
+            }
+        }
+        CHECK(e.ranges.front().lo == Approx(0.).margin(1e-6));
+        CHECK(e.ranges.back().hi == Approx(35.).margin(1e-6));  // 12 * 2 + 11 * 1
+    }
+    SECTION("the object top is the only thing that cuts the pattern short") {
+        p.sequence     = { 1, 2, 3 };
+        p.start_z      = 0.;
+        p.band_h       = 2.;
+        p.gap_h        = 1.;
+        p.repeat       = 4;
+        p.gap_mode     = int(HeightPatternGapMode::Fixed);
+        p.gap_filament = 4;
+        // Bands start at 0, 3, 6, ... 15 (the 6th, cut to 15-17 by the 17 mm top).
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(17., 0.2, 0.2), 0.2);
+        REQUIRE(e.ok());
+        CHECK(e.bands == 6);
+        CHECK(e.planned_bands == 12);
+        CHECK(e.cut_off);
+        CHECK(e.last_filament == 3);
+        CHECK(e.ranges.back().hi == Approx(17.).margin(1e-6));
+        REQUIRE(e.ranges.size() == 11);
+        for (size_t k = 0; k < e.ranges.size(); k += 2)
+            CHECK(e.ranges[k].extruder == p.sequence[(k / 2) % 3]);
+    }
+    SECTION("next in sequence: gaps use the next band's filament and never take a sequence entry") {
+        p.sequence = { 1, 2, 3 };
+        p.start_z  = 0.;
+        p.band_h   = 2.;
+        p.gap_h    = 1.;
+        p.repeat   = 4;
+        p.gap_mode = int(HeightPatternGapMode::NextInSequence);
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(100., 0.2, 0.2), 0.2);
+        REQUIRE(e.ok());
+        CHECK(e.bands == 12);
+        REQUIRE(e.ranges.size() == 23);
+        for (size_t k = 0; k < e.ranges.size(); ++k) {
+            const size_t band = k / 2;
+            if (k % 2 == 0)
+                CHECK(e.ranges[k].extruder == p.sequence[band % 3]);            // F1 F2 F3 F1 F2 F3 ...
+            else
+                CHECK(e.ranges[k].extruder == p.sequence[(band + 1) % 3]);      // the next band's filament
+        }
+        CHECK(height_pattern_planned_bands(4, 3, HeightPatternGapMode::NextInSequence) == 12);
     }
     SECTION("a band thinner than half a layer collapses and is counted") {
         p.band_h = 0.05;
@@ -369,27 +424,19 @@ TEST_CASE("Height colour pattern: every gap mode", "[HeightColourPattern][Expans
         check_range(e.ranges[3], 32., 42., 4);
         check_range(e.ranges[4], 42., 52., 3);
     }
-    SECTION("next in sequence: bands and gaps share one cursor") {
+    SECTION("next in sequence: bands keep the sequence order, each gap takes the next band's filament") {
         p.gap_mode = int(HeightPatternGapMode::NextInSequence);
         p.sequence = { 1, 2, 3, 4 };
-        p.repeat   = 3;
-        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
-        REQUIRE(e.ranges.size() == 5);
-        // band 0 = slot 0 (F1), its gap = slot 1 (F2), band 1 = slot 2 (F3), its gap = slot 3 (F4), band 2 = slot 4 (F1)
+        p.repeat   = 1;
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(100., 0.2, 0.2), 0.2);
+        REQUIRE(e.ranges.size() == 7);   // B G B G B G B
         CHECK(e.ranges[0].extruder == 1);
         CHECK(e.ranges[1].extruder == 2);
-        CHECK(e.ranges[2].extruder == 3);
-        CHECK(e.ranges[3].extruder == 4);
-        CHECK(e.ranges[4].extruder == 1);
-    }
-    SECTION("next in sequence with two filaments gives plain stripes") {
-        p.gap_mode = int(HeightPatternGapMode::NextInSequence);
-        p.sequence = { 1, 2 };
-        p.repeat   = 3;
-        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
-        REQUIRE(e.ranges.size() == 5);
-        for (size_t i = 0; i < e.ranges.size(); ++i)
-            CHECK(e.ranges[i].extruder == (i % 2 == 0 ? 1 : 2));
+        CHECK(e.ranges[2].extruder == 2);
+        CHECK(e.ranges[3].extruder == 3);
+        CHECK(e.ranges[4].extruder == 3);
+        CHECK(e.ranges[5].extruder == 4);
+        CHECK(e.ranges[6].extruder == 4);
     }
     SECTION("no gap in the geometry means no gap range") {
         p.gap_h        = 0.;
@@ -893,8 +940,8 @@ TEST_CASE("Height colour pattern: records saved with the old band count still lo
     CHECK(height_pattern_repeat_from_legacy_bands(7, 3, HeightPatternGapMode::ObjectFilament) == 3);
     CHECK(height_pattern_repeat_from_legacy_bands(3, 3, HeightPatternGapMode::ObjectFilament) == 1);
     CHECK(height_pattern_repeat_from_legacy_bands(1, 1, HeightPatternGapMode::ObjectFilament) == 1);
-    // Interleaved: 3 old bands used 5 slots of a 4-filament sequence = 2 repeats (8 slots, 4 bands).
-    CHECK(height_pattern_repeat_from_legacy_bands(3, 4, HeightPatternGapMode::NextInSequence) == 2);
+    // Gaps no longer use sequence entries: 3 old bands of a 4-filament sequence = 1 repeat in either mode.
+    CHECK(height_pattern_repeat_from_legacy_bands(3, 4, HeightPatternGapMode::NextInSequence) == 1);
 
     // A record written now says so, and is read back as it is (no second conversion).
     HeightColourPattern q = p;
