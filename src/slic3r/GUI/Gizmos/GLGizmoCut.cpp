@@ -5013,7 +5013,7 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         // value the user would get back on unticking - so they could not see what they
         // had set. Greyed out says "this does nothing right now" without either.
         // 2026-09-15, owner item 2: A SLIDER OVER THE USEFUL RANGE WITH THE EXACT
-        // FIELD BESIDE IT - the same pattern the Edit gizmo's bevel width uses.
+        // FIELD BESIDE IT - the same slider-plus-field pattern.
         //
         // The slider used to run 0.1 .. the bounding box DIAGONAL, which is the range
         // the old ruled-strip Depth needed ("reach right through the part") and is

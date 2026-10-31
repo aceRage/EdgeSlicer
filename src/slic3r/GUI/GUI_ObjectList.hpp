@@ -467,12 +467,10 @@ public:
     // close_gizmos: shut an open gizmo first, for the Sculpt panel entry point -
     // a gizmo .cpp cannot reach GLGizmosManager, so it asks for the close here.
     void quad_remesh(bool close_gizmos = false);
-    // Ultra: the Edit gizmo's interim "Round all edges" - a whole-mesh fillet by the
+    // Ultra: "Round all edges" - a whole-mesh fillet by the
     // OpenVDB morphological round trip (libslic3r/MeshRound.hpp). Hidden when the
     // build has no OpenVDB (voxel_ops_available()).
-    // close_gizmos: shut an open gizmo first, for the Edit panel's button - a gizmo
-    // .cpp cannot reach GLGizmosManager, so it asks for the close here.
-    void round_all_edges(bool close_gizmos = false);
+    void round_all_edges();
     // Ultra: slice baking (phase 1) - turn the SLICED outer wall into a mesh that can be
     // re-sliced. Enabled only when this object has been sliced and has perimeters.
     // docs/superpowers/specs/2026-09-12-slice-bake-research.md
@@ -494,7 +492,7 @@ public:
     void simplify();
     // Open the exact CAD fillet / chamfer / shell gizmo on the selected part. from_gizmo: switch
     // over from another open gizmo (the Edit panel's button) instead of refusing.
-    void open_cad_fillet(bool from_gizmo = false);
+    void open_cad_fillet();
     static bool can_open_cad_fillet();
     void update_item_error_icon(const int obj_idx, int vol_idx) const ;
 

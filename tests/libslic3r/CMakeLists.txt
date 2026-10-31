@@ -148,7 +148,7 @@ add_executable(${_TEST_NAME}_tests
 	test_stl.cpp
 	test_support_set.cpp
 	test_support_interlock.cpp
-	test_mesh_edit.cpp
+	test_legacy_edit_project.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
 	test_mesh_round.cpp

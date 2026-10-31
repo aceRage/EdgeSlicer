@@ -10,7 +10,6 @@
 
 - Object / part / multi-selection menus → next to Repair/Remesh and Quad remesh → **Round all edges...**
 - Hidden without OpenVDB (`voxel_ops_available()`)
-- Also: Edit gizmo can expose a Round-all control (not only the context menu)
 
 ## How to use it
 
