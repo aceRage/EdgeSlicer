@@ -287,6 +287,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Metadata/filament_sequence.json ("optimal_assignment"); BambuStudio
         // GCodeProcessorResult::optimal_assignment.
         std::vector<int> optimal_assignment;
+        // Per-nozzle process P5: the filament (0-based) each G-code tool prints when the G-code names the tools the
+        // filaments were assigned to (output_tool_filaments of filament_output_tools), empty when it names each
+        // filament's own tool. The send dialog's rows follow it, so they always match the file.
+        std::vector<int> output_tool_filaments;
         SettingsIds settings_ids;
         size_t extruders_count;
         bool backtrace_enabled;
@@ -347,6 +351,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
             filament_change_sequence = std::forward<Other>(other).filament_change_sequence;
             nozzle_change_sequence = std::forward<Other>(other).nozzle_change_sequence;
             optimal_assignment = std::forward<Other>(other).optimal_assignment;
+            output_tool_filaments = std::forward<Other>(other).output_tool_filaments;
             settings_ids = std::forward<Other>(other).settings_ids;
             extruders_count = std::forward<Other>(other).extruders_count;
             backtrace_enabled = std::forward<Other>(other).backtrace_enabled;

@@ -75,6 +75,8 @@
 #include "Widgets/SegmentedToggle.hpp"
 #include "FlowVariantEdit.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/ToolSlots.hpp"
+#include "FilamentNozzleValuesDialog.hpp"
 #include "CostsDialog.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
@@ -955,6 +957,8 @@ void Tab::destroy_flow_variant_header_controls()
     m_flow_variant_view->nozzle_apply_btn     = nullptr;
     m_flow_variant_view->nozzle_note          = nullptr;
     m_flow_variant_view->nozzle_mode_label    = nullptr;
+    m_flow_variant_view->size_selector        = nullptr; // P5
+    m_flow_variant_view->size_split_btn       = nullptr;
 }
 
 void Tab::register_flow_variant_view(ConfigFlowDomain domain,
@@ -1066,7 +1070,7 @@ bool Tab::enter_flow_variant_both()
 
     // Per-nozzle process P1: on another nozzle of a per-extruder process the two modes are that nozzle's
     // own Standard and High Flow slots.
-    if (has_standard && has_high_flow && m_flow_variant_view->selected_extruder > 0 &&
+    if (has_standard && has_high_flow && (m_flow_variant_view->selected_extruder > 0 || nozzle_size_slots_shown()) &&
         nozzle_slot_index("outer_wall_speed") >= 0) {
         const std::string saved_mode = m_flow_variant_view->selected_mode;
         auto slot_of = [this](const std::string& key, const char* mode) {
@@ -1174,6 +1178,19 @@ void Tab::maybe_dual_write_flow_variant(const std::string& opt_key)
     if (!m_flow_variant_view->is_option(opt_key))
         return;
     // Per-nozzle process P1: a field bound to the selected nozzle's slot writes that nozzle's other mode.
+    if (const int slot = nozzle_slot_index(opt_key); slot >= 0 && nozzle_size_slots_shown()) {
+        // P5: the other flow mode of the shown size.
+        auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(opt_key));
+        if (opt == nullptr)
+            return;
+        std::unique_ptr<ConfigOption> source(opt->clone());
+        for (const FilamentVolumeType mode : { fvtStandard, fvtHighFlow }) {
+            const int other = process_diameter_slot(*m_config, opt_key, m_flow_variant_view->selected_size, mode);
+            if (other >= 0 && other != slot)
+                opt->set_at(source.get(), size_t(other), size_t(slot));
+        }
+        return;
+    }
     if (const int slot = nozzle_slot_index(opt_key); slot >= 0) {
         auto* opt = dynamic_cast<ConfigOptionVectorBase*>(m_config->option(opt_key));
         const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(*m_config);
@@ -1230,8 +1247,18 @@ bool Tab::nozzle_values_split() const
     return m_config != nullptr && process_nozzles_split(*m_config);
 }
 
+bool Tab::nozzle_size_slots_shown() const
+{
+    return m_type == Preset::TYPE_PRINT && m_flow_variant_view && m_config != nullptr && m_flow_variant_view->selected_size > 0. &&
+           process_has_diameter_slots(*m_config);
+}
+
 int Tab::nozzle_slot_index(const std::string& key) const
 {
+    // Per-nozzle process P5: a process split by nozzle size shows the selected size's slot.
+    if (nozzle_size_slots_shown())
+        return process_diameter_slot(*m_config, key, m_flow_variant_view->selected_size,
+                                     m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW ? fvtHighFlow : fvtStandard);
     // Only a process the user split per nozzle is read per extruder; any other one prints every nozzle
     // from the flow-mode column, which is what the fields show then.
     if (!m_flow_variant_view || m_flow_variant_view->nozzle_labels.empty() || m_config == nullptr || !nozzle_layout_splittable())
@@ -1295,6 +1322,9 @@ void Tab::on_nozzle_process_chosen(int row)
 void Tab::on_apply_nozzle_to_all()
 {
     if (!m_flow_variant_view || m_config == nullptr || !nozzle_layout_splittable())
+        return;
+    // Per-nozzle process P5: not while the process is edited by nozzle size.
+    if (!nozzle_values_split() && process_has_diameter_slots(*m_config))
         return;
     const size_t   e      = m_flow_variant_view->selected_extruder;
     const wxString nozzle = e < m_flow_variant_view->nozzle_labels.size() ? m_flow_variant_view->nozzle_labels[e] : wxString();
@@ -1404,7 +1434,7 @@ void Tab::refresh_nozzle_controls()
                             << ", own process '" << current << "', split " << split << " -> button state " << int(control);
     wxString note;
     if (!current.empty())
-        note = format_wxstr(_L("%1% takes its speeds, accelerations, jerk and its wall, infill, top surface and support line widths from \"%2%\". Layer height, first layer and bridge widths, walls and infill settings come from this process."),
+        note = format_wxstr(_L("%1% takes its speeds, accelerations, jerk and its wall, infill, top surface, support and first-layer line widths from \"%2%\". Layer height, walls and infill settings come from this process."),
                             nozzle, from_u8(current));
     else if (split)
         note = format_wxstr(_L("The fields below are %1%'s."), nozzle);
@@ -1455,8 +1485,80 @@ void Tab::refresh_nozzle_controls()
         view->nozzle_apply_btn->Enable(can_act);
         view->nozzle_apply_btn->Show(true);
     }
+    // Per-nozzle process P5: "Edit by nozzle size" / "Link nozzle sizes", on a printer with nozzles of two or more
+    // sizes (heads or rack) or for a process already split by size. Splitting per nozzle and per size exclude
+    // each other.
+    if (view->size_split_btn != nullptr) {
+        const bool by_size = m_config != nullptr && process_has_diameter_slots(*m_config);
+        const bool sizes   = m_preset_bundle != nullptr &&
+                           printer_nozzle_sizes(m_preset_bundle->printers.get_edited_preset().config).size() >= 2;
+        view->size_split_btn->SetLabel(by_size ? _L("Link nozzle sizes") : _L("Edit by nozzle size"));
+        const bool can_act = by_size || (sizes && !split);
+        view->size_split_btn->SetToolTip(by_size ? _L("Edit all nozzle sizes together again: every size takes the values of the size shown.") :
+                                         split   ? _L("The nozzles are edited separately. Link them first to edit by nozzle size.") :
+                                                   _L("Give each nozzle size its own speeds, accelerations and jerk in this process. Every "
+                                                      "filament printing on a nozzle of that size, on any tool, uses them."));
+        view->size_split_btn->SetStyle(can_act ? ButtonStyle::Confirm : ButtonStyle::Disabled, ButtonType::Compact);
+        view->size_split_btn->Enable(can_act);
+        view->size_split_btn->Show(by_size || sizes);
+        if (by_size && view->nozzle_apply_btn != nullptr && !split) {
+            view->nozzle_apply_btn->SetToolTip(_L("The process is edited by nozzle size. Link the sizes first to edit nozzles separately."));
+            view->nozzle_apply_btn->SetStyle(ButtonStyle::Disabled, ButtonType::Compact);
+            view->nozzle_apply_btn->Enable(false);
+        }
+        if (by_size && view->nozzle_note != nullptr) {
+            const wxString size_note = format_wxstr(_L("Edited by nozzle size: the fields below are the %1% mm nozzles'. A nozzle with its own process (Speeds from) uses that process instead."),
+                                                    from_u8(format_nozzle_diameter_word(view->selected_size)));
+            view->nozzle_note->SetLabel(size_note);
+            if (view->host != nullptr && view->host->GetClientSize().x > FromDIP(60))
+                view->nozzle_note->Wrap(view->host->GetClientSize().x - FromDIP(8));
+            view->nozzle_note->SetToolTip(size_note);
+            view->nozzle_note->Show(true);
+        }
+    }
     if (view->host != nullptr)
         view->host->Layout();
+}
+
+void Tab::on_split_by_nozzle_size()
+{
+    if (!m_flow_variant_view || m_config == nullptr || m_preset_bundle == nullptr)
+        return;
+    bool changed = false;
+    if (process_has_diameter_slots(*m_config)) {
+        const std::vector<double> sizes = process_slot_diameters(*m_config);
+        const double from = m_flow_variant_view->selected_size > 0. ? m_flow_variant_view->selected_size : (sizes.empty() ? 0. : sizes.front());
+        wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+        MessageDialog dlg(parent,
+            format_wxstr(_L("Use the %1% mm values for all nozzle sizes? The other sizes' own values will be discarded."),
+                         from_u8(format_nozzle_diameter_word(from))),
+            _L("Link nozzle sizes"), wxYES_NO | wxICON_QUESTION);
+        if (dlg.ShowModal() != wxID_YES)
+            return;
+        changed = link_process_diameters(*m_config, from, &m_presets->get_selected_preset().config);
+        m_flow_variant_view->selected_size = 0.;
+    } else if (!nozzle_values_split()) {
+        const std::vector<double> sizes = printer_nozzle_sizes(m_preset_bundle->printers.get_edited_preset().config);
+        changed = split_process_per_diameter(*m_config, sizes);
+        if (changed)
+            m_flow_variant_view->selected_size = sizes.front();
+    }
+    if (!changed)
+        return;
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_dirty();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+    // The slots decide what the slicer reads: re-slice like any other edit.
+    if (wxGetApp().mainframe)
+        wxGetApp().mainframe->on_config_changed(m_config);
+}
+
+std::vector<double> TabPrint::nozzle_size_choices() const
+{
+    return m_config != nullptr ? process_slot_diameters(*m_config) : std::vector<double>();
 }
 
 void Tab::enable_fields_of_nozzle_process()
@@ -1513,9 +1615,22 @@ void Tab::refresh_flow_variant_view()
     const std::vector<wxString> nozzle_labels = nozzle_switch_labels();
     if (m_flow_variant_view->selected_extruder >= nozzle_labels.size())
         m_flow_variant_view->selected_extruder = 0;
+    // Per-nozzle process P5: the filament tab's Nozzle size switch.
+    const std::vector<double> sizes = nozzle_size_choices();
+    if (std::none_of(sizes.begin(), sizes.end(), [this](double d) { return same_nozzle_diameter(d, m_flow_variant_view->selected_size); }))
+        m_flow_variant_view->selected_size = 0.;
+    // The process tab's sizes have no All: one of them is always shown.
+    if (!nozzle_size_has_all() && !sizes.empty() && !(m_flow_variant_view->selected_size > 0.))
+        m_flow_variant_view->selected_size = sizes.front();
+    auto size_index = [this, &sizes]() {
+        for (size_t i = 0; i < sizes.size(); ++i)
+            if (m_flow_variant_view->selected_size > 0. && same_nozzle_diameter(sizes[i], m_flow_variant_view->selected_size))
+                return int(i);
+        return int(sizes.size()); // All
+    };
 
     if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes ||
-        nozzle_labels != m_flow_variant_view->nozzle_labels)
+        nozzle_labels != m_flow_variant_view->nozzle_labels || sizes != m_flow_variant_view->sizes)
     {
         if (modes != m_flow_variant_view->modes)
             m_flow_variant_view->edit_scope = FlowVariantView::EditScope::ActiveMode;
@@ -1524,6 +1639,7 @@ void Tab::refresh_flow_variant_view()
 
         m_flow_variant_view->modes = modes;
         m_flow_variant_view->nozzle_labels = nozzle_labels;
+        m_flow_variant_view->sizes = sizes;
         std::vector<wxString> labels;
         labels.reserve(modes.size() + 1);
         for (const std::string& mode : modes)
@@ -1603,6 +1719,14 @@ void Tab::refresh_flow_variant_view()
             mode_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#009688")));
             row3->Add(mode_label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
             m_flow_variant_view->nozzle_mode_label = mode_label;
+            // Per-nozzle process P5: the same values for every nozzle of a size, on a printer with several sizes.
+            auto* size_btn = new Button(host, _L("Edit by nozzle size"));
+            size_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            size_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                wxGetApp().CallAfter([this]() { on_split_by_nozzle_size(); });
+            });
+            row3->Add(size_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+            m_flow_variant_view->size_split_btn = size_btn;
             host_vsizer->Add(row3, 0, wxTOP, FromDIP(6));
 
             // Row 4: the note, shortened to the width (full text in its tooltip).
@@ -1641,6 +1765,31 @@ void Tab::refresh_flow_variant_view()
         host_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
         m_flow_variant_view->copy_btn = copy_btn;
 
+        // Per-nozzle process P5: [Nozzle size: 0.2 | 0.4 | 0.6 | 0.8 | All] under the flow selector. Combines with
+        // it: the fields show the selected size's values for the selected flow type.
+        if (!sizes.empty()) {
+            std::vector<wxString> size_labels;
+            for (double d : sizes)
+                size_labels.push_back(from_u8(format_nozzle_diameter_word(d)));
+            if (nozzle_size_has_all())
+                size_labels.push_back(_L("All"));
+            auto* size_row = new wxBoxSizer(wxHORIZONTAL);
+            size_row->Add(make_caption(_L("Nozzle size") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+            m_flow_variant_view->size_selector = new SegmentedToggle(host, size_labels, size_index(), SegmentedToggle::Style::Pill);
+            m_flow_variant_view->size_selector->SetToolTip(nozzle_size_has_all() ?
+                _L("Values this filament takes on a nozzle of the chosen size. All shows the filament's own values, used on every "
+                   "other nozzle. With a size chosen, an edit is kept for that size only; settings that cannot differ per nozzle "
+                   "are locked. Values for one tool (T1 to Tn) are set in the Values per nozzle table.") :
+                _L("The nozzle size whose speeds this page shows. Every filament printing on a nozzle of that size, on any tool, "
+                   "uses them."));
+            size_row->Add(m_flow_variant_view->size_selector, 0, wxALIGN_CENTER_VERTICAL);
+            host_vsizer->Add(size_row, 0, wxTOP, FromDIP(6));
+            m_flow_variant_view->size_selector->bindSelectionCallback([this](int index) {
+                // The toggle's own click is still running: switch after it returns.
+                wxGetApp().CallAfter([this, index]() { on_nozzle_size_segment(index); });
+            });
+        }
+
         host->SetSizer(host_vsizer);
         m_flow_variant_view->host = host;
         if (!nozzle_labels.empty())
@@ -1660,6 +1809,8 @@ void Tab::refresh_flow_variant_view()
         m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
         if (m_flow_variant_view->nozzle_selector != nullptr)
             m_flow_variant_view->nozzle_selector->setSelected(int(m_flow_variant_view->selected_extruder));
+        if (m_flow_variant_view->size_selector != nullptr)
+            m_flow_variant_view->size_selector->setSelected(size_index());
     }
     refresh_nozzle_controls();
 
@@ -1682,6 +1833,25 @@ void Tab::refresh_flow_variant_view()
             }
         }
     }
+    // Per-nozzle process P5: the filament tab's size view follows the selection.
+    after_flow_variant_view_refresh();
+}
+
+void Tab::on_nozzle_size_segment(int index)
+{
+    if (!m_flow_variant_view || index < 0)
+        return;
+    const std::vector<double>& sizes = m_flow_variant_view->sizes;
+    const double size = size_t(index) < sizes.size() ? sizes[size_t(index)] : 0.;
+    if (same_nozzle_diameter(size, m_flow_variant_view->selected_size))
+        return;
+    m_flow_variant_view->selected_size = size;
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_changed_ui();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
 }
 
 void Tab::update_flow_variant_view_visibility()
@@ -1703,7 +1873,8 @@ void Tab::update_flow_variant_view_visibility()
         std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
                     [this](const PageShp& page) { return m_active_page == page.get(); });
     const bool show = active_page_supports_flow_variants && host
-                      && (m_flow_variant_view->modes.size() > 1 || !m_flow_variant_view->nozzle_labels.empty());
+                      && (m_flow_variant_view->modes.size() > 1 || !m_flow_variant_view->nozzle_labels.empty() ||
+                          !m_flow_variant_view->sizes.empty());
 
     if (host) {
         // Reveal only this tab's host; hide any sibling selector left visible by
@@ -1722,6 +1893,7 @@ void Tab::update_flow_variant_view_visibility()
                 && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::ActiveMode
                 && m_flow_variant_view->selected_mode == FLOW_MODE_STANDARD
                 && m_flow_variant_view->selected_extruder == 0
+                && !nozzle_size_slots_shown()
                 && std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
                     != m_flow_variant_view->modes.end();
             m_flow_variant_view->copy_btn->Show(show_copy);
@@ -1791,7 +1963,7 @@ void Tab::update_changed_ui()
         {
             // Per-nozzle process P1: a field showing another nozzle's slot is modified / non-system by that
             // slot alone (the per-mode lists above only cover the flow-mode columns).
-            if (const int slot = nozzle_slot_index(key); slot >= 0 && m_flow_variant_view->selected_extruder > 0) {
+            if (const int slot = nozzle_slot_index(key); slot >= 0 && (m_flow_variant_view->selected_extruder > 0 || nozzle_size_slots_shown())) {
                 const auto* edited = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(key));
                 auto differs = [edited, &key, slot](const Preset* reference) {
                     if (reference == nullptr || edited == nullptr)
@@ -1828,6 +2000,9 @@ void Tab::update_changed_ui()
             }
         }
     }
+
+    // Per-nozzle process P5: the filament tab marks the values of the selected nozzle size.
+    adjust_options_list();
 
     update_custom_dirty();
 
@@ -2396,6 +2571,9 @@ static wxString pad_combo_value_for_config(const DynamicPrintConfig &config)
 
 void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 {
+    // Per-nozzle process P5: an edit while the filament tab shows a nozzle size is that size's value.
+    if (on_nozzle_size_value_change(opt_key))
+        return;
     if (m_config != nullptr)
         maybe_dual_write_flow_variant(opt_key);
 
@@ -5576,11 +5754,15 @@ void TabFilament::build()
         // Per-nozzle process P4 (spec 09-07 "Phase 5"): values this filament takes on particular nozzles, e.g. a hotter
         // temperature and a higher volumetric speed on a 0.6. Resolved when the print is sliced
         // (resolve_filament_nozzle_variants), so one preset in two slots of a mixed machine prints right on both.
+        // P5: no raw text box any more. Values for a nozzle size are edited in place with the Nozzle size switch above
+        // the settings; this line sums up every value and opens the table (values for one tool live there).
         optgroup = page->new_optgroup(L("Values per nozzle (experimental)"), L"param_volumetric_speed");
-        Option variants_option = optgroup->get_option("filament_nozzle_variants");
-        variants_option.opt.full_width = true;
-        variants_option.opt.height     = 60;
-        optgroup->append_single_option_line(variants_option);
+        {
+            Line nozzle_values_line = Line{ "", "" };
+            nozzle_values_line.full_width = 1;
+            nozzle_values_line.widget = [this](wxWindow* parent) { return nozzle_values_create_widget(parent); };
+            optgroup->append_line(nozzle_values_line);
+        }
 
         //line = { "", "" };
         //line.full_width = 1;
@@ -5783,6 +5965,7 @@ void TabFilament::reload_config()
     Tab::reload_config();
     update_price_note();
     update_makeup_note();
+    update_nozzle_values_note();
 }
 
 wxSizer* TabFilament::price_note_create_widget(wxWindow* parent)
@@ -5893,6 +6076,257 @@ void TabFilament::update_price_note()
         parent->Layout();
 }
 
+// ---- Per-nozzle process P5: the Nozzle size switch and the Values per nozzle table ----------------------------
+
+std::vector<double> TabFilament::nozzle_size_choices() const
+{
+    // The usual sizes, then any other size the printer has (heads and rack nozzles) or the filament names.
+    std::vector<double> sizes { 0.2, 0.4, 0.6, 0.8 };
+    auto add = [&sizes](double d) {
+        if (d > 0. && std::none_of(sizes.begin(), sizes.end(), [d](double s) { return same_nozzle_diameter(s, d); }))
+            sizes.push_back(d);
+    };
+    if (m_preset_bundle != nullptr) {
+        const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+        if (const auto* nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter"))
+            for (double d : nozzles->values)
+                add(d);
+        for (const std::vector<RackNozzle>& rack : extruder_rack_nozzles(printer))
+            for (const RackNozzle& nozzle : rack)
+                add(nozzle.diameter);
+    }
+    if (m_config != nullptr)
+        if (const auto* text = m_config->option<ConfigOptionStrings>("filament_nozzle_variants"); text != nullptr && !text->values.empty())
+            for (double d : filament_nozzle_variant_diameters(text->values.front()))
+                add(d);
+    std::sort(sizes.begin(), sizes.end());
+    return sizes;
+}
+
+int TabFilament::size_view_flow_mode() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
+        return -1;
+    return m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW ? int(fvtHighFlow) : int(fvtStandard);
+}
+
+void TabFilament::rebuild_size_view()
+{
+    if (!m_flow_variant_view || m_config == nullptr)
+        return;
+    const double        size   = m_flow_variant_view->selected_size;
+    DynamicPrintConfig* target = m_config;
+    if (size > 0.) {
+        if (!m_size_view)
+            m_size_view = std::make_unique<DynamicPrintConfig>();
+        *m_size_view = *m_config;
+        apply_filament_nozzle_size_view(*m_size_view, size, size_view_flow_mode());
+        target = m_size_view.get();
+    }
+    // The flow pages' fields read and write the view (or the preset again, with All).
+    for (const PageShp& page : m_flow_variant_view->pages) {
+        page->set_config(target);
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups)
+            group->set_config(target);
+    }
+    if (!(size > 0.))
+        m_size_view.reset();
+}
+
+void TabFilament::after_flow_variant_view_refresh() { rebuild_size_view(); }
+
+bool TabFilament::on_nozzle_size_value_change(const std::string& opt_key)
+{
+    if (!m_size_view || !m_flow_variant_view || m_config == nullptr || !(m_flow_variant_view->selected_size > 0.))
+        return false;
+    const double size = m_flow_variant_view->selected_size;
+    std::string  key  = opt_key;
+    int          idx  = -1;
+    if (const size_t hash = key.find('#'); hash != std::string::npos) {
+        idx = std::atoi(key.c_str() + hash + 1);
+        key = key.substr(0, hash);
+    }
+    if (!is_filament_nozzle_size_key(key))
+        return false;
+    const auto* view_opt = dynamic_cast<const ConfigOptionVectorBase*>(m_size_view->option(key));
+    if (view_opt == nullptr || view_opt->size() == 0)
+        return false;
+    const bool per_mode = m_flow_variant_view->is_option(key) && view_opt->size() > 1;
+    if (idx < 0)
+        idx = per_mode ? int(flow_variant_view_index()) : 0;
+    idx = std::min(idx, int(view_opt->size()) - 1);
+    const std::string value = view_opt->vserialize()[size_t(idx)];
+
+    // Kept for the shown flow type when the value is kept per flow type; for both in Both.
+    const bool both = m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both;
+    const int  flow = per_mode && !both ? size_view_flow_mode() : -1;
+    const auto* text_opt = m_config->option<ConfigOptionStrings>("filament_nozzle_variants");
+    const std::string text = text_opt != nullptr && !text_opt->values.empty() ? text_opt->values.front() : std::string();
+    std::string rest = set_filament_nozzle_value(text, 0, size, flow, key, std::string());
+    if (both && per_mode) {
+        rest = set_filament_nozzle_value(rest, 0, size, int(fvtStandard), key, std::string());
+        rest = set_filament_nozzle_value(rest, 0, size, int(fvtHighFlow), key, std::string());
+    }
+    // A value equal to what the size shows without it (the filament's own, or a flow type's value) is not kept.
+    DynamicPrintConfig without = *m_config;
+    without.set_key_value("filament_nozzle_variants", new ConfigOptionStrings { rest });
+    apply_filament_nozzle_size_view(without, size, size_view_flow_mode());
+    const auto* inherited = dynamic_cast<const ConfigOptionVectorBase*>(without.option(key));
+    const bool  same      = inherited != nullptr && size_t(idx) < inherited->size() && inherited->vserialize()[size_t(idx)] == value;
+    std::string result    = rest;
+    if (!same) {
+        if (const std::string error = validate_filament_nozzle_value(key, value); !error.empty()) {
+            show_error(this, format_wxstr(_L("This value cannot be kept for the %1% mm nozzle: %2%"), format_nozzle_diameter_word(size), error));
+            rebuild_size_view();
+            Tab::reload_config();
+            return true;
+        }
+        result = set_filament_nozzle_value(rest, 0, size, flow, key, value);
+    }
+    if (result != text) {
+        m_config->set_key_value("filament_nozzle_variants", new ConfigOptionStrings { result });
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle filament values: " << key << " for " << size << " mm -> \"" << result << "\"";
+    }
+    rebuild_size_view();
+    update_dirty();
+    update_nozzle_values_note();
+    // The plater and the slicer see the stored key change like any other edit.
+    Tab::on_value_change("filament_nozzle_variants", boost::any(result));
+    return true;
+}
+
+void TabFilament::adjust_options_list()
+{
+    if (!m_size_view || !m_flow_variant_view || m_config == nullptr)
+        return;
+    // Only the values of the selected size are marked: modified (and not the system value) where the size has its
+    // own value, plain elsewhere. The revert button of a marked value removes the size's value again.
+    for (const PageShp& page : m_flow_variant_view->pages)
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups)
+            for (const auto& option : group->opt_map()) {
+                const std::string& key = option.second.first;
+                if (!is_filament_nozzle_size_key(key))
+                    continue;
+                const auto* view_opt = dynamic_cast<const ConfigOptionVectorBase*>(m_size_view->option(key));
+                const auto* base_opt = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(key));
+                if (view_opt == nullptr || base_opt == nullptr)
+                    continue;
+                const size_t i       = size_t(std::max(0, option.second.second));
+                const bool   differs = i < view_opt->size() && i < base_opt->size() && view_opt->vserialize()[i] != base_opt->vserialize()[i];
+                int          flags   = m_opt_status_value;
+                if (differs)
+                    flags &= ~(osInitValue | osSystemValue);
+                m_options_list[key] = flags;
+                if (option.first != key)
+                    m_options_list[option.first] = flags;
+            }
+}
+
+std::vector<wxString> TabFilament::printer_tool_labels() const
+{
+    std::vector<wxString> labels;
+    if (m_preset_bundle == nullptr)
+        return labels;
+    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    const auto*               nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzles == nullptr)
+        return labels;
+    int        extruder_count = 0;
+    const bool sided          = nozzles->values.size() == 2 && printer.support_different_extruders(extruder_count);
+    for (size_t e = 0; e < nozzles->values.size(); ++e) {
+        wxString label = wxString::Format("T%d", int(e + 1));
+        if (sided)
+            label += " (" + (e == 0 ? _L("Left") : _L("Right")) + ")";
+        label += " " + from_u8(format_nozzle_diameter_word(nozzles->values[e])) + " mm";
+        labels.push_back(label);
+    }
+    return labels;
+}
+
+wxSizer* TabFilament::nozzle_values_create_widget(wxWindow* parent)
+{
+    const int em     = em_unit(parent);
+    auto*     vsizer = new wxBoxSizer(wxVERTICAL);
+    m_nozzle_values_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    m_nozzle_values_note->SetFont(wxGetApp().normal_font());
+    vsizer->Add(m_nozzle_values_note, 0, wxEXPAND);
+    auto* btn = new Button(parent, _L("Values per nozzle table") + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(_L("Every value this filament takes on particular nozzles, in one table. Values for one tool are set "
+                       "here: tools are numbered as on the printer, T1 to Tn (the G-code counts the same tools from 0, so T1 "
+                       "is T0 in the G-code)."));
+    btn->Bind(wxEVT_BUTTON, [this, parent](wxCommandEvent&) { edit_nozzle_values_table(parent); });
+    vsizer->Add(btn, 0, wxTOP, em / 2);
+    update_nozzle_values_note();
+    return vsizer;
+}
+
+void TabFilament::update_nozzle_values_note()
+{
+    if (m_nozzle_values_note == nullptr || m_config == nullptr)
+        return;
+    const auto*       text_opt = m_config->option<ConfigOptionStrings>("filament_nozzle_variants");
+    const std::string text     = text_opt != nullptr && !text_opt->values.empty() ? text_opt->values.front() : std::string();
+    std::vector<std::string>           errors;
+    std::vector<FilamentNozzleVariant> variants = parse_filament_nozzle_variants(text, &errors);
+    wxString note;
+    for (const FilamentNozzleVariant& v : variants) {
+        wxString selector;
+        auto add = [&selector](const wxString& word) { selector += (selector.empty() ? "" : " ") + word; };
+        if (v.tool > 0)
+            add(wxString::Format("T%d", v.tool));
+        if (v.diameter > 0.)
+            add(from_u8(format_nozzle_diameter_word(v.diameter)) + " mm");
+        if (v.flow_mode == int(fvtStandard))
+            add(_L("Standard flow"));
+        else if (v.flow_mode == int(fvtHighFlow))
+            add(_L("High flow"));
+        wxString values;
+        for (const auto& [key, value] : v.values) {
+            const ConfigOptionDef* def   = print_config_def.get(key);
+            const wxString         label = def != nullptr && !def->label.empty() ? _(def->label) : from_u8(key);
+            values += (values.empty() ? "" : ", ") + label + " " + from_u8(value);
+        }
+        note += (note.empty() ? "" : "\n") + selector + ": " + values;
+    }
+    if (note.empty())
+        note = _L("None. Choose a nozzle size with the Nozzle size switch above the settings to give this filament its own values "
+                  "on that size.");
+    for (const std::string& problem : validate_filament_nozzle_variants(text))
+        note += "\n" + _L("Not used") + ": " + from_u8(problem);
+    if (m_nozzle_values_note->GetLabel() == note)
+        return;
+    m_nozzle_values_note->SetLabel(note);
+    m_nozzle_values_note->SetToolTip(note);
+    m_nozzle_values_note->Wrap(em_unit(m_nozzle_values_note) * 45);
+    if (wxWindow* parent = m_nozzle_values_note->GetParent())
+        parent->Layout();
+}
+
+void TabFilament::edit_nozzle_values_table(wxWindow* parent)
+{
+    if (m_config == nullptr)
+        return;
+    const auto*       text_opt = m_config->option<ConfigOptionStrings>("filament_nozzle_variants");
+    const std::string text     = text_opt != nullptr && !text_opt->values.empty() ? text_opt->values.front() : std::string();
+    FilamentNozzleValuesDialog dlg(parent, text, printer_tool_labels(), nozzle_size_choices());
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const std::string result = dlg.text();
+    if (result == text)
+        return;
+    m_config->set_key_value("filament_nozzle_variants", new ConfigOptionStrings { result });
+    update_dirty();
+    Tab::on_value_change("filament_nozzle_variants", boost::any(result));
+    // The size switch may offer another size now, and the shown size's values may have changed.
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_nozzle_values_note();
+    update_changed_ui();
+    toggle_options();
+    m_parent->Layout();
+}
+
 //void TabFilament::update_volumetric_flow_preset_hints()
 //{
 //    wxString text;
@@ -5922,6 +6356,11 @@ void TabFilament::toggle_options()
 {
     if (!m_active_page)
         return;
+    // Per-nozzle process P5: fields the size view locked come back first; the rules below and the lock at the end
+    // still decide.
+    for (const std::string& key : m_size_locked)
+        toggle_option(key, true);
+    m_size_locked.clear();
     bool is_BBL_printer = false;
     if (m_preset_bundle) {
       is_BBL_printer =
@@ -6088,6 +6527,26 @@ void TabFilament::toggle_options()
         toggle_line("filament_flush_temp", !fast_purge);
         toggle_line("filament_flush_temp_fast", fast_purge);
     }
+
+    // Per-nozzle process P5: with a nozzle size selected, only the values that can differ per nozzle are editable.
+    if (m_size_view && m_flow_variant_view &&
+        std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
+                    [this](const PageShp& page) { return page.get() == m_active_page; })) {
+        for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
+            for (const auto& option : group->opt_map()) {
+                const std::string& key = option.second.first;
+                if (is_filament_nozzle_size_key(key))
+                    continue;
+                if (Field* field = m_active_page->get_field(key); field != nullptr) {
+                    field->toggle(false);
+                    m_size_locked.push_back(key);
+                }
+            }
+        // The override switches write the preset's own values: not while a size is shown.
+        for (auto& [key, checkbox] : m_overrides_options)
+            if (checkbox != nullptr)
+                checkbox->Enable(false);
+    }
 }
 
 void TabFilament::update()
@@ -6122,6 +6581,8 @@ void TabFilament::clear_pages()
 	m_cooling_description_line = nullptr;
     m_price_note = nullptr;
     m_makeup_note = nullptr;
+    m_nozzle_values_note = nullptr; // P5
+    m_size_locked.clear();
 
     //BBS: GUI refactor
     m_overrides_options.clear();
@@ -6779,6 +7240,11 @@ if (is_marlin_flavor)
         };
 
 
+        // Per-nozzle process P5: the per-tool process slots and the physical-nozzle declaration (P4 keys).
+        optgroup = page->new_optgroup(L("Per-nozzle settings (experimental)"), "param_settings");
+        optgroup->append_single_option_line("tool_slot_model");
+        optgroup->append_single_option_line("support_filament_nozzle_mapping");
+
         optgroup = page->new_optgroup(L("Single extruder multi-material parameters"), "param_settings");
         optgroup->append_single_option_line("cooling_tube_retraction", "semm");
         optgroup->append_single_option_line("cooling_tube_length", "semm");
@@ -6930,6 +7396,67 @@ if (is_marlin_flavor)
                         }
                     }
                 };
+
+                // Per-nozzle process P5: the H2C's rack nozzle sizes (extruder_rack_nozzle_diameter, one text per extruder),
+                // with what is wrong with the text right under it. Its own text box, not a config field: the key starts
+                // empty (no entry per extruder), which a per-extruder field cannot write into.
+                optgroup = page->new_optgroup(L("Nozzle rack (experimental)"), L"param_extruder_size");
+                {
+                    Line rack_line = Line{ _L("Rack nozzle diameters"),
+                                           _L("Printers with a nozzle rack (H2C) only. The diameter of each nozzle in this extruder's rack, "
+                                              "separated by commas, optionally with its flow type after a colon, e.g. 0.4, 0.4, 0.2, "
+                                              "0.6:high_flow. The extruder's own nozzle size must be one of them. Empty when every rack "
+                                              "nozzle has the extruder's nozzle diameter.") };
+                    rack_line.widget = [this, extruder_idx](wxWindow* parent) {
+                        const int em    = em_unit(parent);
+                        auto*     sizer = new wxBoxSizer(wxVERTICAL);
+                        auto*     edit  = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(em * 20, -1),
+                                                         wxTE_PROCESS_ENTER);
+                        auto*     label = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+                        label->SetForegroundColour(wxColour("#E14747"));
+                        label->Hide();
+                        sizer->Add(edit, 0);
+                        sizer->Add(label, 0, wxTOP, em / 4);
+                        auto commit = [this, extruder_idx, edit]() {
+                            if (m_config == nullptr)
+                                return;
+                            const std::string text = into_u8(edit->GetValue());
+                            std::vector<std::string> values;
+                            if (const auto* racks = m_config->option<ConfigOptionStrings>("extruder_rack_nozzle_diameter"))
+                                values = racks->values;
+                            if (values.size() <= extruder_idx)
+                                values.resize(std::max(m_extruders_count, extruder_idx + 1), std::string());
+                            if (values[extruder_idx] == text)
+                                return;
+                            values[extruder_idx] = text;
+                            // No rack declared anywhere: the key's unused value again.
+                            if (std::all_of(values.begin(), values.end(), [](const std::string& v) { return v.empty(); }))
+                                values.clear();
+                            m_config->set_key_value("extruder_rack_nozzle_diameter", new ConfigOptionStrings(values));
+                            update_dirty();
+                            on_value_change("extruder_rack_nozzle_diameter", boost::any(text));
+                            update_rack_controls(extruder_idx);
+                        };
+                        edit->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent&) { commit(); });
+                        edit->Bind(wxEVT_KILL_FOCUS, [commit](wxFocusEvent& evt) { evt.Skip(); commit(); });
+                        // Live: what is wrong with the text as it is typed (stored on Enter or on leaving the box).
+                        edit->Bind(wxEVT_TEXT, [this, extruder_idx, edit](wxCommandEvent& evt) {
+                            evt.Skip();
+                            update_rack_error(extruder_idx, into_u8(edit->GetValue()));
+                        });
+                        for (wxWindow* w : std::initializer_list<wxWindow*>{ edit, label })
+                            w->Bind(wxEVT_DESTROY, [this, extruder_idx, w](wxWindowDestroyEvent& evt) {
+                                evt.Skip();
+                                auto it = m_rack_controls.find(extruder_idx);
+                                if (it != m_rack_controls.end() && (it->second.first == w || it->second.second == w))
+                                    m_rack_controls.erase(it);
+                            });
+                        m_rack_controls[extruder_idx] = { edit, label };
+                        update_rack_controls(extruder_idx);
+                        return sizer;
+                    };
+                    optgroup->append_line(rack_line);
+                }
 
                 optgroup = page->new_optgroup(L("Layer height limits"), L"param_layer_height");
                 optgroup->append_single_option_line("min_layer_height", "", extruder_idx);
@@ -7258,10 +7785,51 @@ void TabPrinter::on_gcode_flavor_changed()
     update_input_shaper_menu(flavor_option->value);
 }
 
+void TabPrinter::update_rack_error(size_t extruder, const std::string& text)
+{
+    auto it = m_rack_controls.find(extruder);
+    if (it == m_rack_controls.end() || m_config == nullptr)
+        return;
+    const auto*       nozzles = m_config->option<ConfigOptionFloats>("nozzle_diameter");
+    const double      own     = nozzles != nullptr && extruder < nozzles->values.size() ? nozzles->values[extruder] : 0.;
+    const std::string error   = validate_rack_nozzle_text(text, own);
+    const wxString    label   = error.empty() ? wxString() : _L("Not usable") + ": " + from_u8(error);
+    wxStaticText*     note    = it->second.second;
+    if (note->GetLabel() != label || note->IsShown() != !label.empty()) {
+        note->SetLabel(label);
+        note->SetToolTip(label);
+        note->Show(!label.empty());
+        if (wxWindow* parent = note->GetParent())
+            parent->Layout();
+    }
+}
+
+void TabPrinter::update_rack_controls(size_t extruder)
+{
+    auto it = m_rack_controls.find(extruder);
+    if (it == m_rack_controls.end() || m_config == nullptr)
+        return;
+    const auto*       racks  = m_config->option<ConfigOptionStrings>("extruder_rack_nozzle_diameter");
+    const std::string text   = racks != nullptr && extruder < racks->values.size() ? racks->values[extruder] : std::string();
+    const auto*       counts = m_config->option<ConfigOptionInts>("extruder_max_nozzle_count");
+    const bool        rack   = counts != nullptr && extruder < counts->values.size() && counts->values[extruder] > 1;
+    wxTextCtrl*       edit   = it->second.first;
+    if (into_u8(edit->GetValue()) != text)
+        edit->ChangeValue(from_u8(text));
+    // Editable on a printer with a nozzle rack, or where a rack is already declared (so it can be cleared).
+    edit->Enable(rack || !text.empty());
+    edit->SetToolTip(rack || !text.empty() ? wxString() : _L("This printer has no nozzle rack."));
+    update_rack_error(extruder, text);
+}
+
 void TabPrinter::toggle_options()
 {
     if (!m_active_page || m_presets->get_edited_preset().printer_technology() == ptSLA)
         return;
+
+    // Per-nozzle process P5: the rack nozzle size boxes follow the printer.
+    for (size_t e = 0; e < m_extruders_count; ++e)
+        update_rack_controls(e);
 
     //BBS: whether the preset is Bambu Lab printer
     bool is_BBL_printer = false;

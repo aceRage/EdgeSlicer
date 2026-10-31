@@ -92,6 +92,16 @@ std::vector<RackNozzle> parse_rack_nozzles(const std::string &text);
 std::vector<std::vector<RackNozzle>> extruder_rack_nozzles(const ConfigBase &config);
 // Whether some extruder's rack holds nozzles of more than one diameter.
 bool has_mixed_rack_diameters(const ConfigBase &config);
+// P5 (the Printer tab's rack field): why one extruder's extruder_rack_nozzle_diameter text is wrong, or empty when
+// it is fine (an empty text is). `extruder_diameter` (the extruder's nozzle_diameter, 0 = unknown) must be one of
+// the rack's sizes.
+std::string validate_rack_nozzle_text(const std::string &text, double extruder_diameter);
+// P5 (the filament menu's Rack nozzle size): the sizes 1-based `filament_id` can be pinned to, the distinct
+// diameters in its extruder's rack, sorted; empty when that rack has fewer than two sizes.
+std::vector<double> filament_rack_pin_choices(const ConfigBase &config, unsigned int filament_id);
+// filament_rack_nozzle_diameter with 0-based `filament` pinned to `diameter` (0 = its extruder's nozzle), sized for
+// `filaments`; { 0 } (the unused value) when nothing is pinned.
+std::vector<double> set_filament_rack_pin(std::vector<double> pins, size_t filament, size_t filaments, double diameter);
 // The rack nozzle size filament `filament_id` (1-based) is pinned to, 0 when none.
 double filament_rack_pin(const ConfigBase &config, unsigned int filament_id);
 // The nozzle diameter 1-based `filament_id` prints with, on any config: its physical extruder's
@@ -139,6 +149,41 @@ bool is_filament_nozzle_variant_key(const std::string &key);
 // (filament_flow_step_size) get the value in each of the filament's flow slots, or only in the slot of the entry's
 // flow type. Returns the number of values written; `errors` gets the keys that could not be set.
 int resolve_filament_nozzle_variants(DynamicPrintConfig &config, std::vector<std::string> *errors = nullptr);
+
+// ---- 4b. Editing per-nozzle filament values (P5: the Filament tab's nozzle-size switch and table) ---------------
+//
+// The stored key and its text format stay as P4 made them (CLI and older presets): the editor reads the text with
+// parse_filament_nozzle_variants() and writes it back with format_filament_nozzle_variants().
+
+// "0.6", "0.25": a nozzle diameter as a selector word.
+std::string format_nozzle_diameter_word(double diameter);
+// One entry's selector: "T2 0.6 high_flow" (the tool 1-based, as stored), words left out when "any".
+std::string format_filament_nozzle_selector(int tool, double diameter, int flow_mode);
+// The text of `variants`: "<selector>: key=value, key=value | ...". Entries without values are left out.
+std::string format_filament_nozzle_variants(const std::vector<FilamentNozzleVariant> &variants);
+// The keys the Filament tab's nozzle-size switch edits: a per-nozzle filament value (is_filament_nozzle_variant_key)
+// held as numbers, percentages, switches or a choice (text values could not be written in the format), and not one
+// that belongs to the spool or the bed rather than the nozzle (cost, density, bed plate temperatures...).
+bool is_filament_nozzle_size_key(const std::string &key);
+// Why `value` cannot be stored for `key` in filament_nozzle_variants, or empty when it can.
+std::string validate_filament_nozzle_value(const std::string &key, const std::string &value);
+// Every problem of a filament_nozzle_variants text: the parser's, keys that are not filament values, values that
+// are not values of their key, and characters the format cannot hold. Empty when the text is valid.
+std::vector<std::string> validate_filament_nozzle_variants(const std::string &text);
+// The value an entry with exactly this selector (tool, diameter, flow mode) sets for `key`; false when none does.
+bool find_filament_nozzle_value(const std::string &text, int tool, double diameter, int flow_mode, const std::string &key,
+                                std::string *value = nullptr);
+// The text with the entry of exactly this selector setting `key` to `value` (created when missing); an empty
+// `value` removes the key from that entry (and the entry when it has no value left). Other entries keep their order.
+std::string set_filament_nozzle_value(const std::string &text, int tool, double diameter, int flow_mode, const std::string &key,
+                                      const std::string &value);
+// The nozzle diameters the text names, sorted, each once.
+std::vector<double> filament_nozzle_variant_diameters(const std::string &text);
+// The Filament tab's view of one filament preset (`filament`, its own config) on a `diameter` nozzle: the entries
+// for any tool whose diameter is `diameter` or any, over the preset's own values, the less specific first. Values
+// kept per flow mode (filament_flow_support) take a flow entry in that mode's slot only; other values take it when
+// `flow_mode` (the mode the tab shows, -1 = both) is the entry's. Returns the number of values written.
+int apply_filament_nozzle_size_view(DynamicPrintConfig &filament, double diameter, int flow_mode);
 
 // ---- 5. physical_nozzle_properties ------------------------------------------------------------------------------
 

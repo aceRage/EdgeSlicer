@@ -1,6 +1,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Model.hpp"
 // cut_target_label() - how "Copy cut to..." names an object in its submenu.
 #include "libslic3r/CutRecipe.hpp"
@@ -2540,6 +2541,37 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
             append_submenu(menu, nozzle_menu, wxID_ANY, _L("Print on nozzle"),
                            _L("The nozzle (tool) this filament prints on. It slices with that nozzle's diameter, line widths and process."),
                            "", []() { return true; }, m_parent);
+        }
+    }
+
+    // Per-nozzle process P5: "Rack nozzle size" pins this filament to a nozzle size of its extruder's rack (H2C,
+    // filament_rack_nozzle_diameter). Only offered when that rack holds nozzles of more than one size.
+    const int rack_item_id = menu->FindItem(_L("Rack nozzle size"));
+    if (rack_item_id != wxNOT_FOUND)
+        menu->Destroy(rack_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig  full    = bundle->full_config();
+            const std::vector<double> choices = filament_rack_pin_choices(full, unsigned(filament + 1));
+            if (!choices.empty()) {
+                wxMenu *rack_menu = new wxMenu();
+                auto    pinned    = [filament]() {
+                    return filament_rack_pin(wxGetApp().preset_bundle->project_config, unsigned(filament + 1));
+                };
+                append_menu_check_item(rack_menu, wxID_ANY, _L("The extruder's nozzle size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), 0.); }, rack_menu,
+                    []() { return true; }, [pinned]() { return !(pinned() > 0.); }, m_parent);
+                for (double d : choices)
+                    append_menu_check_item(rack_menu, wxID_ANY, from_u8(format_nozzle_diameter_word(d)) + " mm", "",
+                        [filament, d](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), d); }, rack_menu,
+                        []() { return true; }, [pinned, d]() { return same_nozzle_diameter(pinned(), d); }, m_parent);
+                append_submenu(menu, rack_menu, wxID_ANY, _L("Rack nozzle size"),
+                               _L("Experimental. The size of the rack nozzle this filament prints with. It slices with that size, "
+                                  "and the slicer puts it on a rack nozzle of that size on every layer."),
+                               "", []() { return true; }, m_parent);
+            }
         }
     }
 

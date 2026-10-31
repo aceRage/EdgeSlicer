@@ -4794,6 +4794,21 @@ void Sidebar::set_filament_nozzle(size_t filament, int tool)
     wxGetApp().plater()->on_config_change(bundle->full_config());
 }
 
+void Sidebar::set_filament_rack_pin(size_t filament, double diameter)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || filament >= bundle->filament_presets.size())
+        return;
+    auto *pins = bundle->project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true);
+    std::vector<double> values = Slic3r::set_filament_rack_pin(pins->values, filament, bundle->filament_presets.size(), diameter);
+    if (values == pins->values)
+        return;
+    pins->values = std::move(values);
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filament " << filament + 1 << " pinned to rack nozzle size " << diameter;
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
 void Sidebar::on_filaments_change(size_t num_filaments)
 {
     // Per-nozzle process P2: a filament added or deleted (or a project loaded) changes the assignment summary.
@@ -25176,9 +25191,21 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         for (const SendPlateFilament& f : out)
             if (f.used)
                 used.push_back(unsigned(f.index));
-        const std::vector<int> output_tools = filament_output_tools(print_config, used);
-        if (!output_tools.empty()) {
-            const std::vector<int>         tool_filaments = output_tool_filaments(output_tools);
+        // P5: one plate's slice result carries the map its G-code was written with (the print's own filament set,
+        // which can hold a filament that extrudes nothing), so the rows always match the file. Without one (all
+        // plates, an older result) the map is worked out again from the filaments that extrude.
+        std::vector<int> tool_filaments;
+        bool             from_result = false;
+        if (plate_idx != PLATE_ALL_IDX && plate != nullptr && plate->is_slice_result_valid() && plate->get_slice_result() != nullptr) {
+            tool_filaments = plate->get_slice_result()->output_tool_filaments;
+            from_result    = true;
+        }
+        if (!from_result) {
+            const std::vector<int> output_tools = filament_output_tools(print_config, used);
+            if (!output_tools.empty())
+                tool_filaments = output_tool_filaments(output_tools);
+        }
+        if (!tool_filaments.empty()) {
             std::vector<SendPlateFilament> per_tool;
             for (size_t t = 0; t < tool_filaments.size(); ++t) {
                 if (tool_filaments[t] < 0 || size_t(tool_filaments[t]) >= out.size())

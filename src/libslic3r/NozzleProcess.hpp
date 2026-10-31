@@ -117,6 +117,26 @@ bool copy_nozzle_slots_to_all(DynamicPrintConfig &process, size_t from);
 // exactly the saved one again. Returns false when the process was not split.
 bool link_process_nozzles(DynamicPrintConfig &process, size_t from, const ConfigBase *reference = nullptr);
 
+// ---- Per-nozzle process P5: one process with separate values per nozzle SIZE (the Speed page's size switch) ----
+//
+// The P4 slot model's diameter dimension (print_extruder_nozzle_diameter): one slot per (size, flow mode) for any
+// tool, so a filament on a 0.6 nozzle reads the 0.6 values whichever tool it is on. Splitting per size and per
+// nozzle (process_extruder_values) exclude each other.
+
+// The distinct nozzle sizes of a printer: its heads and the nozzles of its racks, sorted.
+std::vector<double> printer_nozzle_sizes(const ConfigBase &printer_config);
+// The sizes a process is split into (its diameter slots), sorted; empty when it is not split by size.
+std::vector<double> process_slot_diameters(const ConfigBase &process);
+// The slot of `key` holding size `diameter`'s value for flow mode `mode` in a process split by size, else -1.
+int process_diameter_slot(const ConfigBase &process, const std::string &key, double diameter, FilamentVolumeType mode);
+// "Edit by nozzle size": one slot per size of `diameters` (two or more) and flow mode (process_flow_support), each
+// starting from the value it prints with now. Returns false (process untouched) when the process is split per
+// nozzle or already by size, or fewer than two sizes are given.
+bool split_process_per_diameter(DynamicPrintConfig &process, std::vector<double> diameters);
+// "Link nozzle sizes": back to one set of values, size `from`'s, in the shape the keys have in `reference` (the saved
+// preset) when it is not split by size itself, else one value per flow mode. Returns false when not split by size.
+bool link_process_diameters(DynamicPrintConfig &process, double from, const ConfigBase *reference = nullptr);
+
 } // namespace Slic3r
 
 #endif // slic3r_NozzleProcess_hpp_

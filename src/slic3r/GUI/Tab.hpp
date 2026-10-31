@@ -317,6 +317,13 @@ protected:
         std::vector<wxString>    nozzle_labels;
         size_t                   selected_extruder { 0 };
         std::vector<std::string> nozzle_combo_names; // combo row -> preset name ("" = the plate's process)
+
+        // Per-nozzle process P5 (filament tab): the Nozzle size switch, "0.2 | 0.4 | 0.6 | 0.8 | All". The fields
+        // of a selected size show and edit that size's values (filament_nozzle_variants); All = the preset's own.
+        SegmentedToggle*         size_selector { nullptr };
+        Button*                  size_split_btn { nullptr }; // process tab: "Edit by nozzle size" / "Link nozzle sizes"
+        std::vector<double>      sizes;            // the switch's sizes, All is the segment after them
+        double                   selected_size { 0. }; // 0 = All
     };
     std::unique_ptr<FlowVariantView> m_flow_variant_view;
 
@@ -511,6 +518,22 @@ protected:
     bool nozzle_layout_splittable() const;
     bool nozzle_values_split() const;
 
+    // Per-nozzle process P5 hooks (the filament tab's Nozzle size switch, TabFilament).
+    // The sizes the switch offers, empty for no switch.
+    virtual std::vector<double> nozzle_size_choices() const { return {}; }
+    // Whether the switch ends with "All" (the filament's own values); the process tab's sizes have no All.
+    virtual bool nozzle_size_has_all() const { return true; }
+    // The process tab: the edited process is split by nozzle size and the switch shows one of them.
+    bool nozzle_size_slots_shown() const;
+    void on_split_by_nozzle_size();
+    // Called at the end of refresh_flow_variant_view(), once the fields are bound to their slots.
+    virtual void after_flow_variant_view_refresh() {}
+    // A field changed while a nozzle size is selected: store it as that size's value. True when handled.
+    virtual bool on_nozzle_size_value_change(const std::string& /*opt_key*/) { return false; }
+    // Adjusts m_options_list (the modified / system markers) before the fields are decorated.
+    virtual void adjust_options_list() {}
+    void on_nozzle_size_segment(int index);
+
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);
 	void 			compatible_widget_reload(PresetDependencies &deps);
@@ -532,6 +555,10 @@ protected:
 
 class TabPrint : public Tab
 {
+protected:
+    // Per-nozzle process P5: the sizes of a process split by nozzle size.
+    std::vector<double> nozzle_size_choices() const override;
+    bool                nozzle_size_has_all() const override { return false; }
 public:
 	//BBS: GUI refactor
 	TabPrint(ParamsPanel* parent, Preset::Type type = Preset::TYPE_PRINT) :
@@ -684,6 +711,25 @@ private:
 	ogStaticText*	m_volumetric_speed_description_line {nullptr};
 	ogStaticText*	m_cooling_description_line {nullptr};
 
+    // Per-nozzle process P5: the Nozzle size switch. While a size is selected the Filament pages' fields read and
+    // write m_size_view, a copy of the edited preset with that size's values applied; an edit is stored as the
+    // size's value in filament_nozzle_variants of the preset itself.
+    std::unique_ptr<DynamicPrintConfig> m_size_view;
+    std::vector<std::string>            m_size_locked; // fields of the active page locked by the size view
+    std::vector<double> nozzle_size_choices() const override;
+    void                after_flow_variant_view_refresh() override;
+    bool                on_nozzle_size_value_change(const std::string& opt_key) override;
+    void                adjust_options_list() override;
+    void                rebuild_size_view();
+    // The flow mode the page shows (fvtStandard / fvtHighFlow), -1 in Both.
+    int                 size_view_flow_mode() const;
+    // The "Values per nozzle" line: a summary of every value and the table (FilamentNozzleValuesDialog).
+    wxStaticText*       m_nozzle_values_note {nullptr};
+    wxSizer*            nozzle_values_create_widget(wxWindow* parent);
+    void                edit_nozzle_values_table(wxWindow* parent);
+    // The printer's tools as it labels them: "T1", "T2"; "T1 (Left)" on Bambu's two-extruder machines.
+    std::vector<wxString> printer_tool_labels() const;
+
     PageShp         add_filament_overrides_page();
     void            update_filament_overrides_page(const DynamicPrintConfig* printers_config);
 	void 			update_volumetric_flow_preset_hints();
@@ -713,6 +759,7 @@ public:
     // Refreshes the line under Price (also called when your filament prices change).
     void        update_price_note();
     void        update_makeup_note();
+    void        update_nozzle_values_note();
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 
     const std::string&	get_custom_gcode(const t_config_option_key& opt_key) override;
@@ -737,6 +784,10 @@ private:
     // Under Time cost: which machine rate slicing uses (yours from Costs, or the preset's) and why.
     wxStaticText*       m_rate_note                     {nullptr};
     wxSizer*            rate_note_create_widget(wxWindow* parent);
+    // Per-nozzle process P5: under each extruder's Rack nozzle diameters, what is wrong with the text (or nothing).
+    std::map<size_t, std::pair<wxTextCtrl*, wxStaticText*>> m_rack_controls; // extruder -> (text box, problem)
+    void                update_rack_error(size_t extruder, const std::string& text);
+    void                update_rack_controls(size_t extruder);
 public:
 	ScalableButton*	m_reset_to_filament_color = nullptr;
 

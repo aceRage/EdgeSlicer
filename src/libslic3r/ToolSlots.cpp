@@ -11,9 +11,13 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <iomanip>
+#include <locale>
 #include <set>
+#include <sstream>
 
 #include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -274,6 +278,65 @@ std::vector<std::vector<RackNozzle>> extruder_rack_nozzles(const ConfigBase &con
                     nozzle.volume_type = extruder_volume_type(config, e) == nvtHybrid ? nvtStandard : extruder_volume_type(config, e);
         }
     return out;
+}
+
+std::string validate_rack_nozzle_text(const std::string &text, double extruder_diameter)
+{
+    size_t start = 0;
+    bool   any   = false, has_own = false;
+    while (start <= text.size()) {
+        size_t comma = text.find(',', start);
+        if (comma == std::string::npos)
+            comma = text.size();
+        const std::string entry = trimmed(text.substr(start, comma - start));
+        start                   = comma + 1;
+        if (entry.empty())
+            continue;
+        const size_t      colon = entry.find(':');
+        const std::string word  = trimmed(entry.substr(0, colon));
+        double            d     = 0.;
+        if (!parse_positive_number(word, d) || d > 3.)
+            return "\"" + entry + "\": not a nozzle diameter in mm";
+        if (colon != std::string::npos) {
+            bool ok = false;
+            parse_nozzle_volume(trimmed(entry.substr(colon + 1)), ok);
+            if (!ok)
+                return "\"" + entry + "\": the flow type after \":\" must be standard, high_flow, tpu_high_flow or e3d_high_flow";
+        }
+        any = true;
+        has_own |= extruder_diameter > 0. && same_nozzle_diameter(d, extruder_diameter);
+    }
+    if (any && extruder_diameter > 0. && !has_own)
+        return "the extruder's own nozzle (" + format_nozzle_diameter_word(extruder_diameter) + " mm) is not in the rack";
+    return std::string();
+}
+
+std::vector<double> filament_rack_pin_choices(const ConfigBase &config, unsigned int filament_id)
+{
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    const size_t                               e     = physical_extruder_of(config, filament_id);
+    std::vector<double>                        out;
+    if (e >= racks.size())
+        return out;
+    for (const RackNozzle &nozzle : racks[e])
+        if (std::none_of(out.begin(), out.end(), [&nozzle](double d) { return same_nozzle_diameter(d, nozzle.diameter); }))
+            out.push_back(nozzle.diameter);
+    std::sort(out.begin(), out.end());
+    if (out.size() < 2)
+        out.clear(); // one size: nothing to choose
+    return out;
+}
+
+std::vector<double> set_filament_rack_pin(std::vector<double> pins, size_t filament, size_t filaments, double diameter)
+{
+    if (pins.size() < filaments)
+        pins.resize(filaments, 0.);
+    if (filament < pins.size())
+        pins[filament] = diameter > 0. ? diameter : 0.;
+    // An all-0 list is stored as the key's "unused" value, { 0 }, so a project that pins nothing reads as before.
+    if (std::all_of(pins.begin(), pins.end(), [](double d) { return !(d > 0.); }))
+        return { 0. };
+    return pins;
 }
 
 bool has_mixed_rack_diameters(const ConfigBase &config)
@@ -633,8 +696,8 @@ int resolve_filament_nozzle_variants(DynamicPrintConfig &config, std::vector<std
                     continue;
                 }
                 const ConfigOptionDef        *def = print_config_def.get(key);
-                std::unique_ptr<ConfigOption> one(def->create_empty_option());
-                if (!value_text_valid(def->type, value) || !one->deserialize(value) || !one->is_vector() ||
+                std::unique_ptr<ConfigOption> one(def->create_default_option()); // not create_empty_option(): it throws for nullable enums
+                if (!(value_text_valid(def->type, value) || (def->nullable && value == "nil")) || !one->deserialize(value) || !one->is_vector() ||
                     static_cast<ConfigOptionVectorBase *>(one.get())->size() != 1) {
                     if (errors)
                         errors->push_back("filament " + std::to_string(f + 1) + ": \"" + value + "\" is not a value of " + key);
@@ -666,6 +729,227 @@ int resolve_filament_nozzle_variants(DynamicPrintConfig &config, std::vector<std
     }
     if (written > 0)
         BOOST_LOG_TRIVIAL(info) << "per-nozzle filament values: " << written << " value(s) taken from filament_nozzle_variants";
+    return written;
+}
+
+// ---- 4b. Editing per-nozzle filament values (P5) ------------------------------------------------------------------
+
+std::string format_nozzle_diameter_word(double diameter)
+{
+    std::ostringstream ss;
+    ss.imbue(std::locale::classic());
+    ss << std::setprecision(6) << diameter;
+    return ss.str();
+}
+
+std::string format_filament_nozzle_selector(int tool, double diameter, int flow_mode)
+{
+    std::string out;
+    auto add = [&out](const std::string &word) {
+        if (!out.empty())
+            out += ' ';
+        out += word;
+    };
+    if (tool > 0)
+        add("T" + std::to_string(tool));
+    if (diameter > 0.)
+        add(format_nozzle_diameter_word(diameter));
+    if (flow_mode >= 0)
+        add(to_string(FilamentVolumeType(flow_mode)));
+    return out;
+}
+
+std::string format_filament_nozzle_variants(const std::vector<FilamentNozzleVariant> &variants)
+{
+    std::string out;
+    for (const FilamentNozzleVariant &v : variants) {
+        if (v.values.empty())
+            continue;
+        const std::string selector = format_filament_nozzle_selector(v.tool, v.diameter, v.flow_mode);
+        if (selector.empty())
+            continue;
+        if (!out.empty())
+            out += " | ";
+        out += selector + ":";
+        for (size_t i = 0; i < v.values.size(); ++i)
+            out += (i == 0 ? " " : ", ") + v.values[i].first + "=" + v.values[i].second;
+    }
+    return out;
+}
+
+bool is_filament_nozzle_size_key(const std::string &key)
+{
+    if (!is_filament_nozzle_variant_key(key))
+        return false;
+    // The spool's and the bed's values, not the nozzle's.
+    static const std::set<std::string> not_per_nozzle { "filament_cost", "filament_density", "filament_soluble", "filament_is_support",
+                                                        "filament_shrink", "filament_shrinkage_compensation_z", "required_nozzle_HRC",
+                                                        "temperature_vitrification", "chamber_temperature", "filament_flow_step_size",
+                                                        "pellet_flow_coefficient", "filament_change_length", "idle_temperature" };
+    if (not_per_nozzle.count(key) > 0)
+        return false;
+    if (boost::algorithm::ends_with(key, "_plate_temp") || boost::algorithm::ends_with(key, "_plate_temp_initial_layer"))
+        return false;
+    const ConfigOptionDef *def = print_config_def.get(key);
+    switch (def->type) {
+    case coFloats:
+    case coInts:
+    case coPercents:
+    case coFloatsOrPercents:
+    case coBools:
+    case coEnums: return true;
+    default: return false;
+    }
+}
+
+std::string validate_filament_nozzle_value(const std::string &key, const std::string &value)
+{
+    if (!is_filament_nozzle_variant_key(key))
+        return "\"" + key + "\" is not a filament value that can differ per nozzle";
+    if (value.empty())
+        return "no value";
+    if (value.find_first_of(",|:\n\r") != std::string::npos)
+        return "a value cannot contain , | or :";
+    const ConfigOptionDef *def = print_config_def.get(key);
+    if (def->nullable && value == "nil")
+        return std::string();
+    std::unique_ptr<ConfigOption> one(def->create_default_option()); // not create_empty_option(): it throws for nullable enums
+    bool                          ok = value_text_valid(def->type, value);
+    if (ok) {
+        try {
+            ok = one->deserialize(value) && one->is_vector() && static_cast<ConfigOptionVectorBase *>(one.get())->size() == 1;
+        } catch (...) {
+            ok = false;
+        }
+    }
+    if (!ok)
+        return "\"" + value + "\" is not a value of " + key;
+    // The option's own bounds, where it has them.
+    if (def->type == coFloats || def->type == coInts) {
+        const double v = std::strtod(value.c_str(), nullptr);
+        if (v < def->min || v > def->max)
+            return "\"" + value + "\" is outside " + format_nozzle_diameter_word(def->min) + " .. " + format_nozzle_diameter_word(def->max);
+    }
+    return std::string();
+}
+
+std::vector<std::string> validate_filament_nozzle_variants(const std::string &text)
+{
+    std::vector<std::string>           errors;
+    std::vector<FilamentNozzleVariant> variants = parse_filament_nozzle_variants(text, &errors);
+    for (const FilamentNozzleVariant &v : variants)
+        for (const auto &[key, value] : v.values)
+            if (std::string error = validate_filament_nozzle_value(key, value); !error.empty())
+                errors.push_back(format_filament_nozzle_selector(v.tool, v.diameter, v.flow_mode) + ": " + key + ": " + error);
+    return errors;
+}
+
+namespace {
+
+bool same_selector(const FilamentNozzleVariant &v, int tool, double diameter, int flow_mode)
+{
+    return std::max(0, v.tool) == std::max(0, tool) && v.flow_mode == flow_mode &&
+           ((v.diameter <= 0. && diameter <= 0.) || (v.diameter > 0. && diameter > 0. && same_nozzle_diameter(v.diameter, diameter)));
+}
+
+} // namespace
+
+bool find_filament_nozzle_value(const std::string &text, int tool, double diameter, int flow_mode, const std::string &key, std::string *value)
+{
+    for (const FilamentNozzleVariant &v : parse_filament_nozzle_variants(text))
+        if (same_selector(v, tool, diameter, flow_mode))
+            for (const auto &[k, val] : v.values)
+                if (k == key) {
+                    if (value != nullptr)
+                        *value = val;
+                    return true;
+                }
+    return false;
+}
+
+std::string set_filament_nozzle_value(const std::string &text, int tool, double diameter, int flow_mode, const std::string &key,
+                                      const std::string &value)
+{
+    std::vector<FilamentNozzleVariant> variants = parse_filament_nozzle_variants(text);
+    bool                               done     = false;
+    for (FilamentNozzleVariant &v : variants) {
+        if (!same_selector(v, tool, diameter, flow_mode))
+            continue;
+        auto it = std::find_if(v.values.begin(), v.values.end(), [&key](const auto &kv) { return kv.first == key; });
+        if (value.empty()) {
+            if (it != v.values.end())
+                v.values.erase(it);
+        } else if (!done) {
+            if (it != v.values.end())
+                it->second = value;
+            else
+                v.values.emplace_back(key, value);
+            done = true;
+        } else if (it != v.values.end())
+            v.values.erase(it); // a second entry of the same selector: the first one holds the value
+    }
+    if (!value.empty() && !done) {
+        FilamentNozzleVariant v;
+        v.tool      = std::max(0, tool);
+        v.diameter  = diameter > 0. ? diameter : 0.;
+        v.flow_mode = flow_mode;
+        v.values.emplace_back(key, value);
+        variants.push_back(std::move(v));
+    }
+    return format_filament_nozzle_variants(variants);
+}
+
+std::vector<double> filament_nozzle_variant_diameters(const std::string &text)
+{
+    std::vector<double> out;
+    for (const FilamentNozzleVariant &v : parse_filament_nozzle_variants(text))
+        if (v.diameter > 0. &&
+            std::none_of(out.begin(), out.end(), [&v](double d) { return same_nozzle_diameter(d, v.diameter); }))
+            out.push_back(v.diameter);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+int apply_filament_nozzle_size_view(DynamicPrintConfig &filament, double diameter, int flow_mode)
+{
+    if (!(diameter > 0.))
+        return 0;
+    const auto *text_opt = filament.option<ConfigOptionStrings>("filament_nozzle_variants");
+    if (text_opt == nullptr || text_opt->values.empty())
+        return 0;
+    std::vector<FilamentNozzleVariant> variants = parse_filament_nozzle_variants(text_opt->values.front());
+    variants.erase(std::remove_if(variants.begin(), variants.end(),
+                                  [diameter](const FilamentNozzleVariant &v) {
+                                      return v.tool > 0 || (v.diameter > 0. && !same_nozzle_diameter(v.diameter, diameter));
+                                  }),
+                   variants.end());
+    std::stable_sort(variants.begin(), variants.end(),
+                     [](const FilamentNozzleVariant &a, const FilamentNozzleVariant &b) { return variant_specificity(a) < variant_specificity(b); });
+    std::vector<std::string> modes;
+    if (const auto *support = filament.option<ConfigOptionStrings>("filament_flow_support"))
+        modes = support->values;
+    int written = 0;
+    for (const FilamentNozzleVariant &v : variants)
+        for (const auto &[key, value] : v.values) {
+            auto *opt = dynamic_cast<ConfigOptionVectorBase *>(filament.option(key));
+            if (opt == nullptr || opt->size() == 0 || !validate_filament_nozzle_value(key, value).empty())
+                continue;
+            const ConfigOptionDef        *def = print_config_def.get(key);
+            std::unique_ptr<ConfigOption> one(def->create_default_option()); // not create_empty_option(): it throws for nullable enums
+            one->deserialize(value);
+            const bool per_mode = is_filament_flow_variant_option(key) && opt->size() > 1 && opt->size() == modes.size();
+            for (size_t at = 0; at < opt->size(); ++at) {
+                if (v.flow_mode >= 0) {
+                    if (per_mode) {
+                        if (modes[at] != to_string(FilamentVolumeType(v.flow_mode)))
+                            continue;
+                    } else if (flow_mode != v.flow_mode)
+                        continue;
+                }
+                opt->set_at(one.get(), at, 0);
+                ++written;
+            }
+        }
     return written;
 }
 
@@ -810,6 +1094,24 @@ void filament_values_to_tool_space(DynamicConfig &out, const ConfigBase &source,
             per_tool->set_at(per_filament.get(), t, size_t(f));
         }
         out.set_key_value(key, per_tool.release());
+    }
+    // P5: the purge matrices (one filaments x filaments block per extruder, from -> to) in tool space too: entry
+    // (from tool i, to tool j) is the purge between the filaments those tools print.
+    if (const auto *matrix = dynamic_cast<const ConfigOptionFloats *>(value_of("flush_volumes_matrix")); matrix != nullptr) {
+        const size_t block = filaments * filaments;
+        if (!matrix->values.empty() && matrix->values.size() % block == 0) {
+            const size_t        blocks = matrix->values.size() / block;
+            std::vector<double> values;
+            values.reserve(blocks * tools * tools);
+            auto filament_of = [&tool_filaments](size_t t) {
+                return t < tool_filaments.size() && tool_filaments[t] >= 0 ? size_t(tool_filaments[t]) : size_t(0);
+            };
+            for (size_t b = 0; b < blocks; ++b)
+                for (size_t from = 0; from < tools; ++from)
+                    for (size_t to = 0; to < tools; ++to)
+                        values.push_back(matrix->values[b * block + filament_of(from) * filaments + filament_of(to)]);
+            out.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(std::move(values)));
+        }
     }
     if (source.option("filament_flow_step_size") != nullptr)
         out.set_key_value("filament_flow_step_size", new ConfigOptionInts(tools, 1));

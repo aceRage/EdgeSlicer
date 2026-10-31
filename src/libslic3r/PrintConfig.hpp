@@ -1851,6 +1851,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsOrPercents,     nozzle_sparse_infill_line_width))
     ((ConfigOptionFloatsOrPercents,     nozzle_internal_solid_infill_line_width))
     ((ConfigOptionFloatsOrPercents,     nozzle_top_surface_line_width))
+    // Per-nozzle process P5: the locked-zag skin / skeleton widths, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_skin_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_skeleton_infill_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
@@ -2398,6 +2401,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
+    // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
+    // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
+    ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
     ((ConfigOptionFloat,              initial_layer_print_height))
     ((ConfigOptionFloats,              initial_layer_speed))
 
