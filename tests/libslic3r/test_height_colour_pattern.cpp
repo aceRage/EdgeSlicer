@@ -46,7 +46,7 @@ HeightColourPattern example_pattern()
     p.start_z  = 2.;
     p.band_h   = 10.;
     p.gap_h    = 10.;
-    p.repeat   = 3;
+    p.repeat   = 1;   // the whole 3-filament sequence once: 3 bands
     p.sequence = { 1, 2, 3 };
     return p;
 }
@@ -254,6 +254,7 @@ TEST_CASE("Height colour pattern: repeat, to-the-top and clipping", "[HeightColo
     }
     SECTION("a one-colour sequence is allowed") {
         p.sequence = { 2 };
+        p.repeat   = 3;
         const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
         REQUIRE(e.ranges.size() == 3);
         for (const HeightPatternRange &r : e.ranges)
@@ -267,6 +268,73 @@ TEST_CASE("Height colour pattern: repeat, to-the-top and clipping", "[HeightColo
         CHECK(e.ranges[0].extruder == 1);
         CHECK(e.ranges[1].extruder == 2);
         CHECK(e.ranges[2].extruder == 1);
+    }
+    SECTION("repeat counts whole sequences: 5 filaments x 3 = 15 bands, in sequence order") {
+        p.sequence = { 4, 2, 1, 3, 5 };
+        p.start_z  = 0.;
+        p.band_h   = 1.;
+        p.gap_h    = 1.;
+        p.repeat   = 3;
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
+        REQUIRE(e.ok());
+        REQUIRE(e.ranges.size() == 15);
+        CHECK(e.bands == 15);
+        CHECK(e.planned_bands == 15);
+        CHECK(e.repeats == 3);
+        CHECK(e.sequence_length == 5);
+        CHECK_FALSE(e.cut_off);
+        for (size_t i = 0; i < e.ranges.size(); ++i)
+            CHECK(e.ranges[i].extruder == p.sequence[i % 5]);
+        CHECK(height_pattern_planned_bands(3, 5, HeightPatternGapMode::ObjectFilament) == 15);
+    }
+    SECTION("the object top cuts the last repeat off after a named filament") {
+        p.sequence = { 4, 2, 1, 3, 5 };
+        p.start_z  = 0.;
+        p.band_h   = 1.;
+        p.gap_h    = 1.;
+        p.repeat   = 3;
+        // Bands start at 0, 2, 4, ...: a 17 mm object holds 9 of the 15 (the 9th starts at 16).
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(17., 0.2, 0.2), 0.2);
+        REQUIRE(e.ok());
+        CHECK(e.bands == 9);
+        CHECK(e.planned_bands == 15);
+        CHECK(e.cut_off);
+        CHECK(e.last_filament == 3);        // 9th band = 4th entry of the 2nd repeat
+        CHECK(e.last_sequence_index == 4);
+        CHECK(e.ranges[8].extruder == 3);
+        const std::string s = height_pattern_short_summary(e);
+        CHECK(s.find("last repeat cut off at the object top after filament 3") != std::string::npos);
+        CHECK(s.find("3 repeats of 5 filaments") != std::string::npos);
+    }
+    SECTION("a clipped last band of a complete repeat is not a cut-off repeat") {
+        p.sequence = { 1, 2 };
+        p.start_z  = 0.;
+        p.band_h   = 5.;
+        p.gap_h    = 0.;
+        p.repeat   = 1;
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(8., 0.2, 0.2), 0.2);
+        REQUIRE(e.bands == 2);
+        CHECK(e.clipped_at_top);
+        CHECK_FALSE(e.cut_off);
+    }
+    SECTION("a one-filament sequence repeated n times is n bands") {
+        p.sequence = { 3 };
+        p.repeat   = 4;
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(100., 0.2, 0.2), 0.2);
+        CHECK(e.bands == 4);
+        CHECK(e.planned_bands == 4);
+        CHECK_FALSE(e.cut_off);
+    }
+    SECTION("next in sequence: a repeat is one pass over the sequence, bands are every other slot") {
+        p.gap_mode = int(HeightPatternGapMode::NextInSequence);
+        p.sequence = { 1, 2, 3, 4, 5 };
+        p.repeat   = 1;
+        const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(100., 0.2, 0.2), 0.2);
+        // slots F1..F5 = band F1, gap F2, band F3, gap F4, band F5
+        REQUIRE(e.ranges.size() == 5);
+        CHECK(e.bands == 3);
+        CHECK(e.ranges[4].extruder == 5);
+        CHECK(height_pattern_planned_bands(2, 5, HeightPatternGapMode::NextInSequence) == 5);
     }
     SECTION("a band thinner than half a layer collapses and is counted") {
         p.band_h = 0.05;
@@ -316,6 +384,7 @@ TEST_CASE("Height colour pattern: every gap mode", "[HeightColourPattern][Expans
     SECTION("next in sequence with two filaments gives plain stripes") {
         p.gap_mode = int(HeightPatternGapMode::NextInSequence);
         p.sequence = { 1, 2 };
+        p.repeat   = 3;
         const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
         REQUIRE(e.ranges.size() == 5);
         for (size_t i = 0; i < e.ranges.size(); ++i)
@@ -393,6 +462,7 @@ TEST_CASE("Height colour pattern: applying writes ordinary ranges and a record",
         q.start_z = 54.;
         q.band_h  = 4.;
         q.repeat  = 1;
+        q.sequence = { 1 };
         const HeightPatternApplyResult r2 = apply_height_colour_pattern(*object, q, tops, 0.2, false);
         REQUIRE(r2.ok);
         CHECK(r2.pattern_id == 2);
@@ -464,7 +534,8 @@ TEST_CASE("Height colour pattern: regenerate and remove act on the pattern as on
     SECTION("regenerating with the same id replaces the old bands and never clashes with them") {
         HeightColourPattern again = object->height_colour_patterns[0];
         again.band_h = 5.;
-        again.repeat = 2;
+        again.repeat = 1;
+        again.sequence = { 1, 2 };
         const HeightPatternApplyResult r = apply_height_colour_pattern(*object, again, tops, 0.2, false);
         REQUIRE(r.ok);
         CHECK(r.pattern_id == 1);
@@ -796,4 +867,41 @@ TEST_CASE("Height colour pattern: a filament the project does not have is refuse
         CHECK(remove_height_colour_pattern(*object, 1));
         CHECK(apply_height_colour_pattern(*object, p, tops, 0.2, false, 0., 0).ok);
     }
+}
+
+TEST_CASE("Height colour pattern: records saved with the old band count still load", "[HeightColourPattern][Expansion][Sidecar]")
+{
+    // Before the sequence-repeat fix `repeat` counted single bands. The record stores the bands it
+    // generated, so loading changes none of them; only the stored count becomes whole sequences.
+    const std::string legacy =
+        "{\"version\":1,\"objects\":[{\"object\":1,\"patterns\":[{\"id\":1,\"start_z\":2,\"band_h\":10,\"gap_h\":10,"
+        "\"repeat\":3,\"sequence\":[1,2,3,4,5],\"gap_mode\":0,\"gap_filament\":0,\"snap_to_layers\":true,"
+        "\"generated\":[{\"lo\":2,\"hi\":12,\"extruder\":1,\"layer_height\":0.2},"
+        "{\"lo\":22,\"hi\":32,\"extruder\":2,\"layer_height\":0.2},{\"lo\":42,\"hi\":52,\"extruder\":3,\"layer_height\":0.2}]}]}]}";
+    const auto back = height_patterns_from_json(legacy);
+    REQUIRE(back.size() == 1);
+    REQUIRE(back[0].second.size() == 1);
+    const HeightColourPattern &p = back[0].second[0];
+    CHECK(p.generated.size() == 3);                    // the bands are untouched
+    CHECK(p.generated[2].extruder == 3);
+    CHECK(p.repeat == 1);                              // 3 old bands of a 5-filament sequence = 1 repeat
+    CHECK(p.repeat_is_sequences);
+    CHECK(height_pattern_band_count(p) == 3);
+
+    // Old 7 bands over 3 filaments: 3 repeats cover them (9 bands when regenerated).
+    CHECK(height_pattern_repeat_from_legacy_bands(7, 3, HeightPatternGapMode::ObjectFilament) == 3);
+    CHECK(height_pattern_repeat_from_legacy_bands(3, 3, HeightPatternGapMode::ObjectFilament) == 1);
+    CHECK(height_pattern_repeat_from_legacy_bands(1, 1, HeightPatternGapMode::ObjectFilament) == 1);
+    // Interleaved: 3 old bands used 5 slots of a 4-filament sequence = 2 repeats (8 slots, 4 bands).
+    CHECK(height_pattern_repeat_from_legacy_bands(3, 4, HeightPatternGapMode::NextInSequence) == 2);
+
+    // A record written now says so, and is read back as it is (no second conversion).
+    HeightColourPattern q = p;
+    q.repeat = 2;
+    std::vector<HeightColourPattern> one{ q };
+    const std::string json = height_patterns_to_json({ &one });
+    CHECK(json.find("repeat_seq") != std::string::npos);
+    const auto again = height_patterns_from_json(json);
+    REQUIRE(again.size() == 1);
+    CHECK(again[0].second[0].repeat == 2);
 }

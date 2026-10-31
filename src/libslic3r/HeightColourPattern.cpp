@@ -34,6 +34,25 @@ double snap_to_grid(double z, const std::vector<double> &tops)
 
 } // namespace
 
+int height_pattern_planned_bands(int repeat, int sequence_length, HeightPatternGapMode gap_mode)
+{
+    if (repeat <= 0 || sequence_length <= 0)
+        return 0;
+    const long long slots = (long long)repeat * sequence_length;
+    const long long bands = gap_mode == HeightPatternGapMode::NextInSequence ? (slots + 1) / 2 : slots;
+    return int(std::min<long long>(bands, 1000000));
+}
+
+int height_pattern_repeat_from_legacy_bands(int bands, int sequence_length, HeightPatternGapMode gap_mode)
+{
+    if (bands <= 0)
+        return 0;
+    if (sequence_length <= 0)
+        return 1;
+    const long long slots = gap_mode == HeightPatternGapMode::NextInSequence ? 2LL * bands - 1 : bands;
+    return int(std::max<long long>(1, (slots + sequence_length - 1) / sequence_length));
+}
+
 std::vector<double> height_pattern_layer_tops(const std::vector<double> &object_layers)
 {
     std::vector<double> tops;
@@ -104,10 +123,19 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     // Source index (the i of the i-th band attempted) of every emitted band, to place the gaps.
     std::vector<int> source;
 
-    for (int i = 0; p.repeat == 0 || i < p.repeat; ++i) {
+    // Repeat counts whole sequences: every repetition uses every filament, in order.
+    const int total_bands = p.repeat == 0 ? 0 : height_pattern_planned_bands(p.repeat, int(n), gap_mode);
+    out.planned_bands   = total_bands;
+    out.repeats         = p.repeat;
+    out.sequence_length = int(n);
+    bool stopped_early = false;
+
+    for (int i = 0; p.repeat == 0 || i < total_bands; ++i) {
         const double raw_lo = round_z(p.start_z + i * period);
-        if (raw_lo >= top - Z_EPS)
+        if (raw_lo >= top - Z_EPS) {
+            stopped_early = true;
             break;
+        }
         const double raw_hi = round_z(raw_lo + p.band_h);
         const double lo = snap(raw_lo);
         const double hi = std::min(snap(raw_hi), round_z(top));
@@ -127,8 +155,16 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
         source.push_back(i);
         ++out.bands;
         out.clipped_at_top = clipped;
-        if (clipped)
+        out.last_filament = band.extruder;
+        if (clipped) {
+            stopped_early = i + 1 < total_bands;
             break;
+        }
+    }
+    if (p.repeat > 0 && out.bands > 0) {
+        out.cut_off = stopped_early && out.bands < total_bands;
+        const size_t slot = (interleave ? size_t(2 * source.back()) : size_t(source.back())) % n;
+        out.last_sequence_index = int(slot) + 1;
     }
 
     // Gaps between consecutive emitted bands. The gap before the first band and after the
@@ -355,6 +391,8 @@ std::string height_patterns_to_json(const std::vector<const std::vector<HeightCo
             json pat = { { "id", p.id }, { "start_z", p.start_z }, { "band_h", p.band_h }, { "gap_h", p.gap_h },
                              { "repeat", p.repeat }, { "sequence", p.sequence }, { "gap_mode", p.gap_mode },
                              { "gap_filament", p.gap_filament }, { "snap_to_layers", p.snap_to_layers }, { "generated", gen } };
+            if (p.repeat_is_sequences)
+                pat["repeat_seq"] = true;   // absent = a record from before: repeat counted bands
             if (p.axis != 0)
                 pat["axis"] = p.axis;   // only written when set: Phase 1 files stay byte-identical
             pats.push_back(std::move(pat));
@@ -389,6 +427,7 @@ std::vector<std::pair<int, std::vector<HeightColourPattern>>> height_patterns_fr
                 p.gap_filament   = j.value("gap_filament", 0);
                 p.snap_to_layers = j.value("snap_to_layers", true);
                 p.axis           = j.value("axis", 0);
+                p.repeat_is_sequences = true;
                 if (j.contains("sequence") && j["sequence"].is_array())
                     for (const json &f : j["sequence"])
                         p.sequence.push_back(f.get<int>());
@@ -401,6 +440,11 @@ std::vector<std::pair<int, std::vector<HeightColourPattern>>> height_patterns_fr
                         r.layer_height = g.at("layer_height").get<double>();
                         p.generated.push_back(r);
                     }
+                // Old records counted single bands in `repeat`. The generated ranges are stored and stay
+                // as they were; only the stored count is converted to whole sequences so that editing the
+                // pattern shows a sensible number (it covers at least the bands the record had).
+                if (!j.value("repeat_seq", false) && p.repeat > 0 && !p.sequence.empty())
+                    p.repeat = height_pattern_repeat_from_legacy_bands(p.repeat, int(p.sequence.size()), HeightPatternGapMode(std::clamp(p.gap_mode, 0, 2)));
                 // A record that cannot describe a pattern is dropped, not half-applied.
                 if (p.id < 1 || p.sequence.empty() || p.generated.empty() || p.gap_mode < 0 || p.gap_mode > 2 || p.axis != 0)
                     continue;

@@ -41,7 +41,7 @@ HeightPatternInput hp_example()
     in.start    = 2.;
     in.band     = 10.;
     in.gap      = 10.;
-    in.repeat   = 3;
+    in.repeat   = 1;   // the whole 3-filament sequence once: 3 bands
     in.sequence = { 1, 2, 3 };
     return in;
 }
@@ -99,7 +99,7 @@ TEST_CASE("Height pattern input converts layers to millimetres", "[HeightPattern
     CHECK(p.start_z == Approx(2.0).margin(1e-6));
     CHECK(p.band_h == Approx(5.0).margin(1e-6));
     CHECK(p.gap_h == Approx(10.0).margin(1e-6));
-    CHECK(p.repeat == 3);
+    CHECK(p.repeat == 1);
 
     SECTION("start of zero layers is the bottom")
     {
@@ -134,7 +134,7 @@ TEST_CASE("Height pattern input round-trips through a record", "[HeightPattern]"
     CHECK(back.start == Approx(2.).margin(1e-9));
     CHECK(back.band == Approx(10.).margin(1e-9));
     CHECK(back.gap == Approx(10.).margin(1e-9));
-    CHECK(back.repeat == 3);
+    CHECK(back.repeat == 1);
     CHECK_FALSE(back.to_top);
     CHECK(back.sequence == in.sequence);
     CHECK(back.gap_mode == in.gap_mode);
@@ -153,6 +153,7 @@ TEST_CASE("Height pattern preview shows the snapped result", "[HeightPattern]")
     REQUIRE(pv.ok());
     CHECK(pv.expansion.bands == 3);
     CHECK(pv.summary.find("3 bands") == 0);
+    CHECK(pv.summary.find("1 repeat of 3 filaments") != std::string::npos);
     CHECK(pv.summary.find("(last band ends at") != std::string::npos);
     CHECK(pv.clashes.empty());
 
@@ -258,7 +259,7 @@ TEST_CASE("Height pattern row label counts distinct filaments and bands", "[Heig
     const std::vector<double> tops = hp_grid(120., 0.2, 0.2);
 
     HeightPatternInput in = hp_example();
-    in.repeat   = 4;
+    in.repeat   = 1;
     in.sequence = { 1, 2, 3, 4 };
     HeightColourPattern p = height_pattern_from_input(in, 0.2, tops);
     REQUIRE(apply_height_colour_pattern(*obj, p, tops, 0.2, false, 120., 4).ok);
@@ -342,7 +343,7 @@ TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
         REQUIRE(bands.size() == 3);
         CHECK(bands[0].extruder == 1);
         CHECK(bands[2].lo == Approx(42.).margin(1e-6));
-        CHECK(height_pattern_short_summary(pv.expansion) == "3 bands");
+        CHECK(height_pattern_short_summary(pv.expansion) == "3 bands (1 repeat of 3 filaments)");
     }
     SECTION("a clipped last band is named, and 50 bands stay one short line")
     {

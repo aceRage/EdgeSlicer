@@ -63,7 +63,14 @@ struct HeightColourPattern
     double                   start_z   = 0.;
     double                   band_h    = 0.;
     double                   gap_h     = 0.;
-    int                      repeat    = 0;    // number of bands; 0 = up to the top of the object
+    // How many times the WHOLE sequence is repeated (every repetition uses every filament, in order);
+    // 0 = repeat until the top of the object. Records written before 2.4.8.x counted single bands here;
+    // see repeat_is_sequences.
+    int                      repeat    = 0;
+    // True for records that count whole sequences. The sidecar writes "repeat_seq": true for them; a
+    // record without it is read as the old band count and converted on load (the bands it generated
+    // are stored and stay exactly as they were).
+    bool                     repeat_is_sequences = true;
     std::vector<int>         sequence;         // 1-based filament ids, cycled per band
     int                      gap_mode  = int(HeightPatternGapMode::ObjectFilament);
     int                      gap_filament = 0; // HeightPatternGapMode::Fixed only
@@ -79,7 +86,7 @@ struct HeightColourPattern
 
     template<class Archive> void serialize(Archive &ar)
     {
-        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated, axis);
+        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated, axis, repeat_is_sequences);
     }
 };
 
@@ -90,10 +97,27 @@ struct HeightPatternExpansion
     std::vector<HeightPatternRange> ranges;    // ascending, non-overlapping; layer_height filled in
     int                             bands = 0; // band ranges among `ranges` (the rest are gap ranges)
     bool                            clipped_at_top = false; // the last band was cut short by the object top
+    // Repeat counted in whole sequences (repeat > 0): the bands the full repeats would have made, and
+    // whether the object top stopped the last repetition before every filament was used.
+    int                             repeats = 0;            // the pattern's repeat (whole sequences); 0 = to the top
+    int                             planned_bands = 0;
+    bool                            cut_off = false;
+    int                             last_filament = 0;      // filament of the last band written
+    int                             last_sequence_index = 0; // 1-based position of that band's filament in the sequence
+    int                             sequence_length = 0;
     int                             dropped = 0;            // bands that collapsed to nothing when snapped
     std::string                     error;                  // non-empty: nothing was produced
     bool ok() const { return error.empty(); }
 };
+
+// Number of bands `repeat` whole repetitions of a sequence of `sequence_length` filaments make. With
+// NextInSequence gaps the bands and the gaps share one cursor over the sequence, so a repetition is
+// `sequence_length` slots and the bands are every other slot (the first and the last slot are bands).
+// repeat <= 0 gives 0 (to the top). Used by the expansion and by the dialog's count line.
+int height_pattern_planned_bands(int repeat, int sequence_length, HeightPatternGapMode gap_mode);
+
+// The legacy record counted bands in `repeat`; the sequences needed to give at least that many bands.
+int height_pattern_repeat_from_legacy_bands(int bands, int sequence_length, HeightPatternGapMode gap_mode);
 
 // The top Z of every layer of the object, ascending, from the interleaved
 // [lo, hi, lo, hi, ...] vector that generate_object_layers() returns.

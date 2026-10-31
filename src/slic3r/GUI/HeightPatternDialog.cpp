@@ -490,11 +490,12 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     // ---- repeat ---------------------------------------------------------------------------------
     {
         auto *row = new wxBoxSizer(wxHORIZONTAL);
-        m_repeat_input = new ::TextInput(this, wxString::Format("%d", m_input.repeat), _L("times"), wxEmptyString, wxDefaultPosition, input_size, wxTE_PROCESS_ENTER);
+        m_repeat_input = new ::TextInput(this, wxString::Format("%d", m_input.repeat), _L("x sequence"), wxEmptyString, wxDefaultPosition, input_size, wxTE_PROCESS_ENTER);
         m_repeat_input->GetTextCtrl()->SetFont(Label::Body_14);
         m_repeat_input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_DIGITS));
         m_repeat_input->GetTextCtrl()->Bind(wxEVT_TEXT, [this](wxCommandEvent &e) { e.Skip(); update_preview(); });
         row->Add(m_repeat_input, 0, wxALIGN_CENTER_VERTICAL);
+        m_repeat_input->SetToolTip(_L("How many times the whole filament sequence is repeated. Every repetition uses every filament in the sequence, in order, so 5 filaments repeated 3 times make 15 bands. Only the top of the object can cut the last repetition short."));
         m_to_top_cb = new ::CheckBox(this);
         m_to_top_cb->SetValue(m_input.to_top);
         m_to_top_cb->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) {
@@ -505,7 +506,7 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
         row->Add(m_to_top_cb, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(16));
         row->Add(new ::Label(this, Label::Body_14, _L("Repeat to the top")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
         m_repeat_input->Enable(!m_input.to_top);
-        grid->Add(new ::Label(this, Label::Body_14, _L("Repeat") + ":"), 0, wxALIGN_CENTER_VERTICAL);
+        grid->Add(new ::Label(this, Label::Body_14, _L("Repeat sequence") + ":"), 0, wxALIGN_CENTER_VERTICAL);
         grid->Add(row, 0, wxALIGN_CENTER_VERTICAL);
     }
 
@@ -544,7 +545,7 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
 
         auto *seq_head = new wxBoxSizer(wxHORIZONTAL);
         seq_head->Add(new ::Label(this, Label::Head_14, _L("Sequence") + ":"), 0, wxALIGN_CENTER_VERTICAL);
-        seq_head->Add(new ::Label(this, Label::Body_12, _L("(used in this order, repeating)")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
+        seq_head->Add(new ::Label(this, Label::Body_12, _L("(used in this order; the whole sequence is repeated)")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(6));
         seq_head->AddStretchSpacer(1);
         auto *reverse_btn = new ::Button(this, _L("Reverse"));
         reverse_btn->SetStyle(ButtonStyle::Regular, ButtonType::Window);

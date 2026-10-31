@@ -169,7 +169,13 @@ std::string height_pattern_short_summary(const HeightPatternExpansion &e)
     if (e.bands == 0)
         return "No band fits inside the object.";
     std::string s = std::to_string(e.bands) + (e.bands == 1 ? " band" : " bands");
-    if (e.clipped_at_top)
+    if (e.repeats > 0 && e.sequence_length > 0)
+        s += " (" + std::to_string(e.repeats) + (e.repeats == 1 ? " repeat" : " repeats") + " of " + std::to_string(e.sequence_length) +
+             (e.sequence_length == 1 ? " filament)" : " filaments)");
+    if (e.cut_off)
+        s += ", last repeat cut off at the object top after filament " + std::to_string(e.last_filament) + " (of " +
+             std::to_string(e.planned_bands) + " planned bands)";
+    else if (e.clipped_at_top)
         s += ", last band cut short by the top of the object";
     if (e.dropped > 0)
         s += ", " + std::to_string(e.dropped) + (e.dropped == 1 ? " band" : " bands") + " too thin for the layer grid dropped";
@@ -204,7 +210,10 @@ std::string height_pattern_summary(const HeightPatternExpansion &e, double objec
             s += " of " + fmt(object_top);
         s += " mm)";
     }
-    if (e.clipped_at_top)
+    if (e.cut_off)
+        s += ". The last repeat is cut off at the object top after filament " + std::to_string(e.last_filament) + ": " +
+             std::to_string(e.bands) + " of " + std::to_string(e.planned_bands) + " planned bands fit.";
+    else if (e.clipped_at_top)
         s += ". The last band is cut short by the top of the object.";
     if (e.dropped > 0)
         s += ". " + std::to_string(e.dropped) + (e.dropped == 1 ? " band" : " bands") + " too thin for the layer grid " + (e.dropped == 1 ? "was" : "were") + " dropped.";
