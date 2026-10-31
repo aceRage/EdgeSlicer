@@ -203,7 +203,7 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
 
     // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint,
     // and the push-fit Pin (PushFit = 5) comes after Flexi.
-    m_connector_types = {_u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi"), _u8L("Pin"), "TAC Joint"};
+    m_connector_types = {_u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi"), _u8L("Pin"), _u8L("TAC Joint")};
 
     m_pushfit_presets = { _u8L("S"), _u8L("M"), _u8L("L"), _u8L("Auto"), _u8L("Custom") };
     // NOTE: indexed by PushFitCutout / PushFitPose.
@@ -862,26 +862,48 @@ void GLGizmoCut3D::render_move_center_input(int axis)
     }
 }
 
-bool GLGizmoCut3D::render_connect_type_radio_button(CutConnectorType type)
+bool GLGizmoCut3D::render_connect_type_combo()
 {
-    if (type == CutConnectorType::TacJoint) {
-        ImGui::NewLine();
-        ImGui::SetCursorPosX(m_label_width);
-    } else
-        ImGui::SameLine(type == CutConnectorType::Plug ? m_label_width : 0);
-    ImGui::PushItemWidth(m_control_width);
-    const bool clicked = ImGui::RadioButton(m_connector_types[size_t(type)].c_str(), m_connector_type == type);
-    if (type == CutConnectorType::PushFit && ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
-                         ImGui::GetFontSize() * 20.0f);
-    if (clicked) {
-        if (type == CutConnectorType::TacJoint || m_connector_type == CutConnectorType::TacJoint)
-            Plater::TakeSnapshot snapshot(wxGetApp().plater(), "TAC Joint", UndoRedo::SnapshotType::GizmoAction);
-        m_connector_type = type;
-//        update_connector_shape();
-        return true;
+    // The enum has an unused Undef slot (empty label), which is skipped here.
+    static const CutConnectorType types[] = {CutConnectorType::Plug,      CutConnectorType::Dowel,
+                                             CutConnectorType::Snap,      CutConnectorType::PushFit,
+                                             CutConnectorType::FlexiJoint, CutConnectorType::TacJoint};
+
+    // Width of the widest translated label, plus the frame padding and the arrow button.
+    float widest = 0.f;
+    for (CutConnectorType t : types)
+        widest = std::max(widest, m_imgui->calc_text_size(m_connector_types[size_t(t)]).x);
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float combo_width = std::max(m_control_width, widest + 2.f * style.FramePadding.x + ImGui::GetFrameHeight());
+
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(combo_width);
+    // m_connector_type is Undef while the selected connectors have mixed types: show an empty preview then.
+    const char *preview = m_connector_type != CutConnectorType::Undef ? m_connector_types[size_t(m_connector_type)].c_str() : "";
+
+    bool changed = false;
+    if (ImGui::BeginCombo("##connector_type", preview)) {
+        for (CutConnectorType t : types) {
+            const bool unsupported = t == CutConnectorType::TacJoint && !tac_joint_mode_supported();
+            m_imgui->disabled_begin(unsupported);
+            const bool clicked = ImGui::Selectable(m_connector_types[size_t(t)].c_str(), m_connector_type == t);
+            m_imgui->disabled_end();
+            if (t == CutConnectorType::PushFit && ImGui::IsItemHovered())
+                m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
+                                 ImGui::GetFontSize() * 20.0f);
+            else if (unsupported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                m_imgui->tooltip(_L("TAC Joint requires a flat, planar cut."), ImGui::GetFontSize() * 20.0f);
+            if (clicked && !unsupported && t != m_connector_type) {
+                if (t == CutConnectorType::TacJoint || m_connector_type == CutConnectorType::TacJoint)
+                    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "TAC Joint", UndoRedo::SnapshotType::GizmoAction);
+                m_connector_type = t;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
     }
-    return false;
+    ImGui::PopItemWidth();
+    return changed;
 }
 
 void GLGizmoCut3D::render_connect_mode_radio_button(CutConnectorMode mode)
@@ -6812,14 +6834,7 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
     m_imgui->text(m_labels_map["Type"]);
     ImGuiWrapper::push_radio_style();
     const bool was_tac_joint = is_tac_joint_type();
-    bool type_changed = render_connect_type_radio_button(CutConnectorType::Plug);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::Dowel);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::Snap);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::PushFit);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::FlexiJoint);
-    m_imgui->disabled_begin(!tac_joint_mode_supported());
-    type_changed |= render_connect_type_radio_button(CutConnectorType::TacJoint);
-    m_imgui->disabled_end();
+    const bool type_changed = render_connect_type_combo();
     if (type_changed)
         apply_selected_connectors([this, &connectors] (size_t idx) { connectors[idx].attribs.type = CutConnectorType(m_connector_type); });
     if (type_changed && was_tac_joint && !is_tac_joint_type() && !is_pushfit_type() && !is_flexi_joint_type())
