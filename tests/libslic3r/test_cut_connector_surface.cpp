@@ -456,10 +456,10 @@ TEST_CASE("Curved cut: a pick outside the part's cross-section is refused", "[Cu
         REQUIRE(std::abs(v.y()) <= 0.5 * CUBE + 1.0);
     }
     const AABBMesh tree(section);
-    REQUIRE(section_hit(tree, Vec3d(0., 0., 50.), -Vec3d::UnitZ()));    // over the part: picks
-    REQUIRE(section_hit(tree, Vec3d(12., -9., 50.), -Vec3d::UnitZ()));
-    REQUIRE(!section_hit(tree, Vec3d(25., 0., 50.), -Vec3d::UnitZ()));  // the sheet out past the part: no pick
-    REQUIRE(!section_hit(tree, Vec3d(-30., 22., 50.), -Vec3d::UnitZ()));
+    REQUIRE(section_hit(tree, Vec3d(0.37, 0.53, 50.), -Vec3d::UnitZ())); // over the part: picks (off the sample grid lines)
+    REQUIRE(section_hit(tree, Vec3d(12.3, -9.1, 50.), -Vec3d::UnitZ()));
+    REQUIRE(!section_hit(tree, Vec3d(25.3, 0.4, 50.), -Vec3d::UnitZ()));  // the sheet out past the part: no pick
+    REQUIRE(!section_hit(tree, Vec3d(-30.3, 22.1, 50.), -Vec3d::UnitZ()));
 
     // And Cut refuses a connector standing on the sheet out there.
     Model        model;
