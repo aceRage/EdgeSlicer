@@ -672,14 +672,8 @@ std::string nozzle_diameter_summary(const ConfigBase &config)
     return nozzle == nullptr ? std::string() : nozzle_diameter_summary(nozzle->values);
 }
 
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id)
-{
-    const std::vector<double> &nozzles = config.nozzle_diameter.values;
-    if (nozzles.empty())
-        return 0.;
-    const size_t extruder = physical_extruder_for_filament(config, filament_id);
-    return nozzles[std::min(extruder, nozzles.size() - 1)];
-}
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int): per-nozzle process P4 made it rack-aware; it
+// lives in ToolSlots.cpp.
 
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 {

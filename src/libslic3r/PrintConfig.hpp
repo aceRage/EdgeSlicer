@@ -2842,10 +2842,9 @@ bool has_mixed_nozzle_diameters(const ConfigBase &config);
 std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters);
 std::string nozzle_diameter_summary(const ConfigBase &config);
 
-// The nozzle diameter that filament slot `filament_id` (1-based) prints through, resolved via
-// physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
-// per-slot filament preset compatibility rule measures against.
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int), the nozzle diameter filament slot `filament_id`
+// (1-based) prints through, is declared above (per-nozzle process P4: rack-aware). It is what the per-slot filament
+// preset compatibility rule measures against.
 
 // CLI --uptodate_settings / --downward_check: load_config_file() uses
 // ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits.
