@@ -47,7 +47,9 @@ std::string validate_height_pattern_input(const HeightPatternInput &in, int max_
     if (!(in.band > 0.))
         return "The band height must be above zero.";
     if (in.gap < 0.)
-        return "The gap cannot be negative.";
+        return "The filament gap cannot be negative.";
+    if (in.seq_gap < 0.)
+        return "The sequence gap cannot be negative.";
     if (in.start < 0.)
         return "The start cannot be negative.";
     if (!in.to_top && in.repeat < 1)
@@ -57,6 +59,12 @@ std::string validate_height_pattern_input(const HeightPatternInput &in, int max_
             return "Pick the filament the gaps use.";
         if (max_filament > 0 && in.gap_filament > max_filament)
             return "Filament " + std::to_string(in.gap_filament) + " is not in the project (" + std::to_string(max_filament) + " filaments).";
+    }
+    if (in.seq_gap > 0. && in.seq_gap_mode == int(HeightPatternGapMode::Fixed)) {
+        if (in.seq_gap_filament < 1)
+            return "Pick the filament the sequence gap uses.";
+        if (max_filament > 0 && in.seq_gap_filament > max_filament)
+            return "Filament " + std::to_string(in.seq_gap_filament) + " is not in the project (" + std::to_string(max_filament) + " filaments).";
     }
     return {};
 }
@@ -75,15 +83,19 @@ HeightColourPattern height_pattern_from_input(const HeightPatternInput &in, doub
             p.start_z = layer_tops[std::min<size_t>(size_t(skipped), layer_tops.size()) - 1];
         p.band_h = in.band * layer_height;
         p.gap_h  = in.gap * layer_height;
+        p.seq_gap_h = in.seq_gap * layer_height;
     } else {
         p.start_z = in.start;
         p.band_h  = in.band;
         p.gap_h   = in.gap;
+        p.seq_gap_h = in.seq_gap;
     }
     p.repeat         = in.to_top ? 0 : in.repeat;
     p.sequence       = in.sequence;
     p.gap_mode       = in.gap_mode;
     p.gap_filament   = in.gap_filament;
+    p.seq_gap_mode   = in.seq_gap_mode;
+    p.seq_gap_filament = in.seq_gap_filament;
     p.snap_to_layers = in.snap_to_layers;
     return p;
 }
@@ -100,6 +112,9 @@ HeightPatternInput height_pattern_input_from_pattern(const HeightColourPattern &
     in.sequence       = p.sequence;
     in.gap_mode       = p.gap_mode;
     in.gap_filament   = p.gap_filament;
+    in.seq_gap        = p.seq_gap_h;
+    in.seq_gap_mode   = p.seq_gap_mode;
+    in.seq_gap_filament = p.seq_gap_filament;
     in.snap_to_layers = p.snap_to_layers;
     return in;
 }
@@ -145,20 +160,19 @@ bool height_pattern_owns_range(const ModelObject &object, const t_layer_height_r
 
 int height_pattern_band_count(const HeightColourPattern &p)
 {
-    const int n = int(p.generated.size());
-    // Gaps are only written between two bands and only when they have a filament of their own.
-    if (p.gap_mode == int(HeightPatternGapMode::ObjectFilament) || n < 2)
-        return n;
-    return (n + 1) / 2;
+    int n = 0;
+    for (const HeightPatternRange &r : p.generated)
+        if (!r.gap)
+            ++n;
+    return n;
 }
 
 std::vector<HeightPatternRange> height_pattern_band_ranges(const HeightPatternExpansion &e)
 {
     std::vector<HeightPatternRange> bands;
-    // With gap ranges mixed in, every other range is a gap and the first range is a band.
-    const bool has_gap_ranges = int(e.ranges.size()) > e.bands;
-    for (size_t i = 0; i < e.ranges.size(); i += has_gap_ranges ? 2 : 1)
-        bands.push_back(e.ranges[i]);
+    for (const HeightPatternRange &r : e.ranges)
+        if (!r.gap)
+            bands.push_back(r);
     return bands;
 }
 
@@ -190,9 +204,9 @@ std::string height_pattern_summary(const HeightPatternExpansion &e, double objec
         return "No band fits inside the object.";
     // Bands only: with gap ranges mixed in, every other range is a gap.
     std::vector<const HeightPatternRange *> bands;
-    const bool has_gap_ranges = int(e.ranges.size()) > e.bands;
-    for (size_t i = 0; i < e.ranges.size(); i += has_gap_ranges ? 2 : 1)
-        bands.push_back(&e.ranges[i]);
+    for (const HeightPatternRange &r : e.ranges)
+        if (!r.gap)
+            bands.push_back(&r);
 
     std::string s = std::to_string(e.bands) + (e.bands == 1 ? " band: " : " bands: ");
     const size_t shown = std::min<size_t>(bands.size(), 6);
@@ -337,16 +351,18 @@ namespace {
 
 bool hpi_is_band_index(const HeightColourPattern &p, size_t i)
 {
-    const bool has_gap_ranges = p.gap_mode != int(HeightPatternGapMode::ObjectFilament) && p.generated.size() > 1;
-    return !has_gap_ranges || i % 2 == 0;
+    return i < p.generated.size() && !p.generated[i].gap;
 }
 
 int hpi_band_number(const HeightColourPattern &p, size_t i)
 {
     if (!hpi_is_band_index(p, i))
         return 0;
-    const bool has_gap_ranges = p.gap_mode != int(HeightPatternGapMode::ObjectFilament) && p.generated.size() > 1;
-    return int(has_gap_ranges ? i / 2 : i) + 1;
+    int k = 0;
+    for (size_t j = 0; j <= i; ++j)
+        if (!p.generated[j].gap)
+            ++k;
+    return k;
 }
 
 const ModelConfig *hpi_find(const ModelObject &o, double lo, double hi)

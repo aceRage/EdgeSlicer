@@ -90,7 +90,7 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
         out.error = "The band height must be above zero.";
         return out;
     }
-    if (p.gap_h < 0. || p.start_z < 0.) {
+    if (p.gap_h < 0. || p.seq_gap_h < 0. || p.start_z < 0.) {
         out.error = "Start and gap cannot be negative.";
         return out;
     }
@@ -101,6 +101,18 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     const auto gap_mode = HeightPatternGapMode(p.gap_mode);
     if (gap_mode == HeightPatternGapMode::Fixed && p.gap_filament < 1) {
         out.error = "The gap filament must be set.";
+        return out;
+    }
+    if (p.seq_gap_mode < 0 || p.seq_gap_mode > 2) {
+        out.error = "Unknown sequence gap mode.";
+        return out;
+    }
+    if (p.seq_gap_h > 0. && p.seq_gap_mode == int(HeightPatternGapMode::Fixed) && p.seq_gap_filament < 1) {
+        out.error = "The sequence gap filament must be set.";
+        return out;
+    }
+    if (max_filament > 0 && p.seq_gap_h > 0. && p.seq_gap_mode == int(HeightPatternGapMode::Fixed) && p.seq_gap_filament > max_filament) {
+        out.error = "Filament " + std::to_string(p.seq_gap_filament) + " is not in the project (" + std::to_string(max_filament) + " filaments).";
         return out;
     }
     if (!(layer_height > 0.)) {
@@ -116,8 +128,8 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     const std::vector<double> &grid = p.snap_to_layers ? layer_tops : std::vector<double>();
     auto snap = [&](double z) { return round_z(snap_to_grid(z, grid)); };
 
-    const double period = p.band_h + p.gap_h;
     const size_t n = p.sequence.size();
+    const auto seq_mode = HeightPatternGapMode(p.seq_gap_mode);
     // Source index (the i of the i-th band attempted) of every emitted band, to place the gaps.
     std::vector<int> source;
 
@@ -128,8 +140,13 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     out.sequence_length = int(n);
     bool stopped_early = false;
 
+    // The gap after band i is the Sequence Gap when band i ends a pass over the sequence, else the
+    // Filament Gap. Bands run at start_z + i * band_h + the gaps before them.
+    auto gap_after = [&](int i) { return (size_t(i) + 1) % n == 0 ? p.seq_gap_h : p.gap_h; };
+    double z = p.start_z;
     for (int i = 0; p.repeat == 0 || i < total_bands; ++i) {
-        const double raw_lo = round_z(p.start_z + i * period);
+        const double raw_lo = round_z(z);
+        z = raw_lo + p.band_h + gap_after(i);
         if (raw_lo >= top - Z_EPS) {
             stopped_early = true;
             break;
@@ -161,27 +178,56 @@ HeightPatternExpansion expand_height_colour_pattern(const HeightColourPattern &p
     }
     if (p.repeat > 0 && out.bands > 0) {
         out.cut_off = stopped_early && out.bands < total_bands;
-        const size_t slot = size_t(source.back()) % n;
-        out.last_sequence_index = int(slot) + 1;
+        out.last_sequence_index = int(size_t(source.back()) % n) + 1;
     }
 
     // Gaps between consecutive emitted bands. The gap before the first band and after the
     // last one is never written: the pattern starts and ends with a band.
-    if (gap_mode != HeightPatternGapMode::ObjectFilament && out.bands > 1) {
+    const bool any_gap_mode = gap_mode != HeightPatternGapMode::ObjectFilament || seq_mode != HeightPatternGapMode::ObjectFilament;
+    if (any_gap_mode && out.bands > 1) {
+        // Cycle cursors, one per gap type. The Filament Gap cursor starts one entry before F1 (the last
+        // entry) so that, with bands and gaps alternating, a gap is not simply the band below it.
+        size_t cursor_fil = n - 1, cursor_seq = 0;
+        auto cycle = [&](size_t &cursor, int below, int above) {
+            // First entry from the cursor that differs from both neighbouring bands.
+            for (size_t k = 0; k < n; ++k) {
+                const size_t idx = (cursor + k) % n;
+                const int f = p.sequence[idx];
+                if (f != below && f != above) {
+                    cursor = idx + 1;
+                    return f;
+                }
+            }
+            // Every entry equals a neighbour (1-2 filaments): least bad is an entry that differs from the
+            // band below, so the gap at least starts with a change; it then merges with the band above.
+            for (size_t k = 0; k < n; ++k) {
+                const size_t idx = (cursor + k) % n;
+                if (p.sequence[idx] != below) {
+                    cursor = idx + 1;
+                    return p.sequence[idx];
+                }
+            }
+            const int f = p.sequence[cursor % n];
+            ++cursor;
+            return f;
+        };
         std::vector<HeightPatternRange> merged;
         merged.reserve(out.ranges.size() * 2);
         for (size_t k = 0; k < out.ranges.size(); ++k) {
             if (k > 0) {
                 const HeightPatternRange &prev = out.ranges[k - 1];
                 const HeightPatternRange &cur  = out.ranges[k];
-                if (cur.lo - prev.hi > Z_EPS) {
+                const bool seq_boundary = (size_t(source[k - 1]) + 1) % n == 0;
+                const HeightPatternGapMode m = seq_boundary ? seq_mode : gap_mode;
+                if (m != HeightPatternGapMode::ObjectFilament && cur.lo - prev.hi > Z_EPS) {
                     HeightPatternRange gap;
                     gap.lo           = prev.hi;
                     gap.hi           = cur.lo;
                     gap.layer_height = layer_height;
-                    gap.extruder     = gap_mode == HeightPatternGapMode::Fixed ?
-                                           p.gap_filament :
-                                           p.sequence[size_t(source[k - 1] + 1) % n]; // = the next band's filament
+                    gap.gap          = true;
+                    gap.extruder     = m == HeightPatternGapMode::Fixed ?
+                                           (seq_boundary ? p.seq_gap_filament : p.gap_filament) :
+                                           cycle(seq_boundary ? cursor_seq : cursor_fil, prev.extruder, cur.extruder);
                     merged.push_back(gap);
                 }
             }
@@ -384,11 +430,19 @@ std::string height_patterns_to_json(const std::vector<const std::vector<HeightCo
         json pats = json::array();
         for (const HeightColourPattern &p : *objects[i]) {
             json gen = json::array();
-            for (const HeightPatternRange &g : p.generated)
-                gen.push_back({ { "lo", g.lo }, { "hi", g.hi }, { "extruder", g.extruder }, { "layer_height", g.layer_height } });
+            for (const HeightPatternRange &g : p.generated) {
+                json jr = { { "lo", g.lo }, { "hi", g.hi }, { "extruder", g.extruder }, { "layer_height", g.layer_height } };
+                if (g.gap)
+                    jr["gap"] = true;
+                gen.push_back(std::move(jr));
+            }
             json pat = { { "id", p.id }, { "start_z", p.start_z }, { "band_h", p.band_h }, { "gap_h", p.gap_h },
                              { "repeat", p.repeat }, { "sequence", p.sequence }, { "gap_mode", p.gap_mode },
                              { "gap_filament", p.gap_filament }, { "snap_to_layers", p.snap_to_layers }, { "generated", gen } };
+            // Two gap types. Absent in older records: those get the Sequence Gap of the old single gap.
+            pat["seq_gap_h"]        = p.seq_gap_h;
+            pat["seq_gap_mode"]     = p.seq_gap_mode;
+            pat["seq_gap_filament"] = p.seq_gap_filament;
             if (p.repeat_is_sequences)
                 pat["repeat_seq"] = true;   // absent = a record from before: repeat counted bands
             if (p.axis != 0)
@@ -436,8 +490,26 @@ std::vector<std::pair<int, std::vector<HeightColourPattern>>> height_patterns_fr
                         r.hi           = g.at("hi").get<double>();
                         r.extruder     = g.at("extruder").get<int>();
                         r.layer_height = g.at("layer_height").get<double>();
+                        r.gap          = g.value("gap", false);
                         p.generated.push_back(r);
                     }
+                // Two gap types. A record without them had one gap between every pair of bands: the Filament
+                // Gap keeps it and the Sequence Gap repeats it, which regenerates the same spacing. Its stored
+                // gap ranges (every other range, when it wrote any) get the gap flag.
+                if (j.contains("seq_gap_h")) {
+                    p.seq_gap_h        = j.value("seq_gap_h", 0.);
+                    p.seq_gap_mode     = j.value("seq_gap_mode", 0);
+                    p.seq_gap_filament = j.value("seq_gap_filament", 0);
+                } else {
+                    p.seq_gap_h        = p.gap_h;
+                    p.seq_gap_mode     = p.gap_mode;
+                    p.seq_gap_filament = p.gap_filament;
+                    if (p.gap_mode != int(HeightPatternGapMode::ObjectFilament) && p.generated.size() > 1)
+                        for (size_t gi = 1; gi < p.generated.size(); gi += 2)
+                            p.generated[gi].gap = true;
+                }
+                if (p.seq_gap_h < 0. || p.seq_gap_mode < 0 || p.seq_gap_mode > 2)
+                    continue;
                 // Old records counted single bands in `repeat`. The generated ranges are stored and stay
                 // as they were; only the stored count is converted to whole sequences so that editing the
                 // pattern shows a sensible number (it covers at least the bands the record had).

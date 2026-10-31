@@ -352,6 +352,7 @@ TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
         in.start  = 0.;
         in.band   = 2.;
         in.gap    = 0.;
+        in.seq_gap = 0.;
         const HeightPatternPreview pv = preview_height_pattern(nullptr, in, 0, tops, 0.2, 120., 4);
         REQUIRE(pv.ok());
         CHECK(height_pattern_band_ranges(pv.expansion).size() == 60);

@@ -34,9 +34,15 @@ class ModelObject;
 // What goes into the gap between two bands.
 //  ObjectFilament: nothing is written; the gap prints with the object's own
 //                  filament (D2 default, fewest tool changes).
-//  NextInSequence: the gap after band i prints with the filament of band i+1 (the
-//                  next entry of the sequence). The gap never takes a sequence entry:
-//                  bands always run the whole sequence, F1 F2 F3 F1 F2 F3 ...
+//  NextInSequence: "Cycle through the sequence". Each gap type keeps its own cursor over the
+//                  sequence that advances one entry per gap and skips an entry equal to the band
+//                  below or above the gap when it can (see expand_height_colour_pattern). The gaps
+//                  never take a sequence entry from the bands: F1 F2 F3 F1 F2 F3 ...
+//
+// Two gap types (owner, 2026-10-31): the "Filament Gap" (gap_h, gap_mode, gap_filament) sits between
+// consecutive bands inside one pass over the sequence, the "Sequence Gap" (seq_gap_*) between whole
+// repeats of the sequence. Height 0 = that gap type is off. Where both would apply at one boundary only
+// the Sequence Gap is used. No gap before the first band or after the last.
 //  Fixed:          every gap uses gap_filament.
 enum class HeightPatternGapMode : int {
     ObjectFilament = 0,
@@ -52,8 +58,9 @@ struct HeightPatternRange
     double hi            = 0.;
     int    extruder      = 0;   // 1-based filament id written as the "extruder" key
     double layer_height  = 0.;  // written as the "layer_height" key (mandatory, Slicing.cpp)
+    bool   gap           = false; // a gap range (not a band)
 
-    template<class Archive> void serialize(Archive &ar) { ar(lo, hi, extruder, layer_height); }
+    template<class Archive> void serialize(Archive &ar) { ar(lo, hi, extruder, layer_height, gap); }
 };
 
 struct HeightColourPattern
@@ -72,8 +79,13 @@ struct HeightColourPattern
     // are stored and stay exactly as they were).
     bool                     repeat_is_sequences = true;
     std::vector<int>         sequence;         // 1-based filament ids, cycled per band
+    // "Filament Gap": between consecutive bands inside one pass over the sequence (gap_h above).
     int                      gap_mode  = int(HeightPatternGapMode::ObjectFilament);
     int                      gap_filament = 0; // HeightPatternGapMode::Fixed only
+    // "Sequence Gap": between whole repeats of the sequence. 0 = off.
+    double                   seq_gap_h = 0.;
+    int                      seq_gap_mode = int(HeightPatternGapMode::ObjectFilament);
+    int                      seq_gap_filament = 0;
     bool                     snap_to_layers = true;
     // Which direction the bands run in: 0 = Z (height), the only one there is today. Reserved for
     // horizontal and angled colour patterns; saved in the sidecar only when it is not 0, so files
@@ -86,7 +98,7 @@ struct HeightColourPattern
 
     template<class Archive> void serialize(Archive &ar)
     {
-        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated, axis, repeat_is_sequences);
+        ar(id, start_z, band_h, gap_h, repeat, sequence, gap_mode, gap_filament, snap_to_layers, generated, axis, repeat_is_sequences, seq_gap_h, seq_gap_mode, seq_gap_filament);
     }
 };
 

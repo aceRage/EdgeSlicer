@@ -359,9 +359,12 @@ HeightPatternInput HeightPatternDialog::load_last_input()
     num("start", in.start);
     num("band", in.band);
     num("gap", in.gap);
+    num("seq_gap", in.seq_gap);
     inum("repeat", in.repeat);
     inum("gap_mode", in.gap_mode);
     inum("gap_filament", in.gap_filament);
+    inum("seq_gap_mode", in.seq_gap_mode);
+    inum("seq_gap_filament", in.seq_gap_filament);
     if (cfg->has(HCP_SECTION, "to_top"))
         in.to_top = cfg->get(HCP_SECTION, "to_top") == "true";
     if (cfg->has(HCP_SECTION, "snap"))
@@ -379,6 +382,8 @@ HeightPatternInput HeightPatternDialog::load_last_input()
     if (in.repeat < 1) in.repeat = 3;
     if (!(in.band > 0.)) in.band = 10.;
     if (in.gap < 0.) in.gap = 0.;
+    if (in.seq_gap < 0.) in.seq_gap = 0.;
+    if (in.seq_gap_mode < 0 || in.seq_gap_mode > 2) in.seq_gap_mode = 0;
     if (in.start < 0.) in.start = 0.;
     if (in.gap_mode < 0 || in.gap_mode > 2) in.gap_mode = 0;
     return in;
@@ -394,6 +399,9 @@ void HeightPatternDialog::save_last_input() const
     cfg->set(HCP_SECTION, "start", hcp_num(in.start).ToStdString());
     cfg->set(HCP_SECTION, "band", hcp_num(in.band).ToStdString());
     cfg->set(HCP_SECTION, "gap", hcp_num(in.gap).ToStdString());
+    cfg->set(HCP_SECTION, "seq_gap", hcp_num(in.seq_gap).ToStdString());
+    cfg->set(HCP_SECTION, "seq_gap_mode", std::to_string(in.seq_gap_mode));
+    cfg->set(HCP_SECTION, "seq_gap_filament", std::to_string(in.seq_gap_filament));
     cfg->set(HCP_SECTION, "repeat", std::to_string(in.repeat));
     cfg->set(HCP_SECTION, "to_top", in.to_top);
     cfg->set(HCP_SECTION, "gap_mode", std::to_string(in.gap_mode));
@@ -484,8 +492,12 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     add_row(_L("Band height"), m_band_input);
 
     m_gap_input = make_input(m_input.gap, _L("mm"));
-    m_gap_input->SetToolTip(_L("The distance between the top of one band and the bottom of the next."));
-    add_row(_L("Gap"), m_gap_input);
+    m_gap_input->SetToolTip(_L("The distance between the top of one band and the bottom of the next one inside one pass over the filament sequence (F1 | gap | F2 | gap | F3). 0 = no filament gap."));
+    add_row(_L("Filament gap"), m_gap_input);
+
+    m_seq_gap_input = make_input(m_input.seq_gap, _L("mm"));
+    m_seq_gap_input->SetToolTip(_L("The distance between the last band of one repetition of the sequence and the first band of the next (... F3 | sequence gap | F1 ...). Used instead of the filament gap at that boundary. 0 = no sequence gap."));
+    add_row(_L("Sequence gap"), m_seq_gap_input);
 
     // ---- repeat ---------------------------------------------------------------------------------
     {
@@ -510,31 +522,34 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
         grid->Add(row, 0, wxALIGN_CENTER_VERTICAL);
     }
 
-    // ---- gap mode -------------------------------------------------------------------------------
-    {
+    // ---- gap filaments (one row per gap type) -----------------------------------------------------
+    auto add_gap_mode_row = [&](const wxString &label, ::ComboBox *&mode, ::ComboBox *&fil, int mode_sel, int fil_sel, const wxString &tip) {
         auto *row = new wxBoxSizer(wxHORIZONTAL);
-        m_gap_mode = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(210), -1), 0, nullptr, wxCB_READONLY);
-        m_gap_mode->Append(_L("Object's own filament"));
-        m_gap_mode->Append(_L("Next in the sequence"));
-        m_gap_mode->Append(_L("A fixed filament"));
-        m_gap_mode->SetSelection(std::clamp(m_input.gap_mode, 0, 2));
-        m_gap_mode->SetToolTip(_L("What the gaps between the bands print with. The object's own filament writes nothing for the gaps, "
-                                  "so it adds the fewest filament changes. \"Next in the sequence\" prints each gap with the filament of the band above it; "
-                                  "gaps never use up a place in the sequence."));
-        m_gap_mode->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) { e.Skip(); update_gap_controls(); update_preview(); });
-        row->Add(m_gap_mode, 0, wxALIGN_CENTER_VERTICAL);
+        mode = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(210), -1), 0, nullptr, wxCB_READONLY);
+        mode->Append(_L("Object's own filament"));
+        mode->Append(_L("Cycle through the sequence"));
+        mode->Append(_L("A fixed filament"));
+        mode->SetSelection(std::clamp(mode_sel, 0, 2));
+        mode->SetToolTip(tip);
+        mode->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) { e.Skip(); update_gap_controls(); update_preview(); });
+        row->Add(mode, 0, wxALIGN_CENTER_VERTICAL);
 
-        m_gap_filament = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(110), -1), 0, nullptr, wxCB_READONLY);
+        fil = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(110), -1), 0, nullptr, wxCB_READONLY);
         for (int f = 1; f <= m_ctx.max_filament; ++f) {
             const wxColour c = size_t(f) <= m_ctx.filament_colours.size() ? hcp_parse_colour(m_ctx.filament_colours[size_t(f) - 1]) : wxColour(128, 128, 128);
-            m_gap_filament->Append(wxString::Format("%d", f), hcp_swatch_bitmap(c, FromDIP(18), FromDIP(14)));
+            fil->Append(wxString::Format("%d", f), hcp_swatch_bitmap(c, FromDIP(18), FromDIP(14)));
         }
-        m_gap_filament->SetSelection(m_input.gap_filament >= 1 && m_input.gap_filament <= m_ctx.max_filament ? m_input.gap_filament - 1 : 0);
-        m_gap_filament->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) { e.Skip(); update_preview(); });
-        row->Add(m_gap_filament, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
-        grid->Add(new ::Label(this, Label::Body_14, _L("In the gaps use") + ":"), 0, wxALIGN_CENTER_VERTICAL);
+        fil->SetSelection(fil_sel >= 1 && fil_sel <= m_ctx.max_filament ? fil_sel - 1 : 0);
+        fil->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) { e.Skip(); update_preview(); });
+        row->Add(fil, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+        grid->Add(new ::Label(this, Label::Body_14, label + ":"), 0, wxALIGN_CENTER_VERTICAL);
         grid->Add(row, 0, wxALIGN_CENTER_VERTICAL);
-    }
+    };
+    const wxString mode_tip = _L("What this kind of gap prints with. The object's own filament writes nothing for the gaps, so it adds the fewest filament changes. "
+                                 "\"Cycle through the sequence\" steps through the sequence one entry per gap (separately from the bands) and avoids the filament "
+                                 "of the band below and above the gap when it can; with only 1-2 filaments a match cannot be avoided.");
+    add_gap_mode_row(_L("Filament gap uses"), m_gap_mode, m_gap_filament, m_input.gap_mode, m_input.gap_filament, mode_tip);
+    add_gap_mode_row(_L("Sequence gap uses"), m_seq_gap_mode, m_seq_gap_filament, m_input.seq_gap_mode, m_input.seq_gap_filament, mode_tip);
 
     v_sizer->Add(grid, 0, wxEXPAND | wxALL, FromDIP(12));
 
@@ -699,6 +714,9 @@ HeightPatternInput HeightPatternDialog::current_input() const
     in.repeat         = int(std::lround(read_number(m_repeat_input, 0.)));
     in.gap_mode       = std::clamp(m_gap_mode->GetSelection(), 0, 2);
     in.gap_filament   = in.gap_mode == int(HeightPatternGapMode::Fixed) ? m_gap_filament->GetSelection() + 1 : 0;
+    in.seq_gap        = read_number(m_seq_gap_input, -1.);
+    in.seq_gap_mode   = std::clamp(m_seq_gap_mode->GetSelection(), 0, 2);
+    in.seq_gap_filament = in.seq_gap_mode == int(HeightPatternGapMode::Fixed) ? m_seq_gap_filament->GetSelection() + 1 : 0;
     return in;
 }
 
@@ -709,6 +727,7 @@ void HeightPatternDialog::update_unit_labels()
     m_start_input->SetLabel(u);
     m_band_input->SetLabel(u);
     m_gap_input->SetLabel(u);
+    m_seq_gap_input->SetLabel(u);
     if (m_start_input->GetParent() != nullptr)
         m_start_input->GetParent()->Layout();
 }
@@ -717,6 +736,7 @@ void HeightPatternDialog::update_gap_controls()
 {
     const bool fixed = m_gap_mode->GetSelection() == int(HeightPatternGapMode::Fixed);
     m_gap_filament->Show(fixed);
+    m_seq_gap_filament->Show(m_seq_gap_mode->GetSelection() == int(HeightPatternGapMode::Fixed));
     refit();
 }
 
