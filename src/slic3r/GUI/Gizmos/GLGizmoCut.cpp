@@ -9537,12 +9537,13 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         double face_lo = 0.0, face_hi = 0.0;
         cut_thickness_faces(face_lo, face_hi);
 
-        // 2026-10-31: perform_cut() has already closed the gizmo, which flattened the sheet and
-        // cleared the stroke, so the curved / drawn frames come from what it took beforehand.
-        // On a curved or drawn cut the kerf it took comes too. A flat cut is left exactly as it
-        // was (its frame is m_rotation_m either way).
+        // 2026-10-31: perform_cut() has already closed the gizmo, which flattened the sheet, cleared the
+        // stroke AND reset the cut thickness to 0, so the frames and the kerf both come from what it took
+        // beforehand - on a flat cut as much as on a curved or drawn one (a flat kerf cut otherwise got
+        // plugs t/2 off their half and dowels without the extra length). With thickness 0 the captured
+        // faces are 0/0, the same as a live read, so a cut without a kerf is unchanged.
         const bool baked = m_baked_connector_frames.size() == mo->cut_connectors.size();
-        if (baked && m_baked_non_planar) {
+        if (baked) {
             face_lo = m_baked_face_lo;
             face_hi = m_baked_face_hi;
         }

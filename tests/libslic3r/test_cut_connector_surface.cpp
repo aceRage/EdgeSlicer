@@ -424,3 +424,106 @@ TEST_CASE("A flat sheet with a TAC Joint and a Pin is exactly the planar cut", "
         REQUIRE((plane.second[i].max - sheet.second[i].max).norm() < 1e-9);
     }
 }
+
+// ------------------------------------------------------------------ flat cut with a kerf
+
+// The Plug and Dowel sizing GLGizmoCut3D::apply_connectors_in_model() does once perform_cut() has
+// captured the kerf (the gizmo itself closes, and zeroes the thickness, before the connectors are
+// baked): a Dowel (already doubled) gets `kerf` longer, a Plug gets `kerf` longer and its centre
+// moves to face_lo + height / 2 along the cut normal. The cut then runs with the same kerf.
+namespace {
+
+constexpr double KERF_BASE_LEN = 10.0;
+
+void add_flat_kerf_connector(ModelObject* mo, CutConnectorType type, double kerf)
+{
+    const double face_lo = -0.5 * kerf; // Centred
+    double       height  = KERF_BASE_LEN;
+    double       centre  = 0.0;
+    if (type == CutConnectorType::Dowel) {
+        height += kerf;
+    } else {
+        height += kerf;
+        centre = face_lo + 0.5 * height;
+    }
+    ModelVolume* v = mo->add_volume(TriangleMesh(its_make_cylinder(1.0, 1.0)), ModelVolumeType::NEGATIVE_VOLUME);
+    v->set_transformation(Geometry::translation_transform(Vec3d(2., 1., centre)) * Geometry::scale_transform(Vec3d(2.5, 2.5, height)));
+    v->cut_info = ModelVolume::CutInfo(type, 0.f, 0.f);
+    v->name     = type == CutConnectorType::Dowel ? "Connector-dowel" : "Connector-plug";
+}
+
+const ModelVolume* body_part(const ModelObject* o)
+{
+    for (const ModelVolume* v : o->volumes)
+        if (v->is_model_part() && !v->cut_info.is_connector)
+            return v;
+    return nullptr;
+}
+
+const ModelVolume* connector_part(const ModelObject* o)
+{
+    for (const ModelVolume* v : o->volumes)
+        if (v->is_model_part() && v->cut_info.is_connector)
+            return v;
+    return nullptr;
+}
+
+BoundingBoxf3 volume_box(const ModelVolume* v)
+{
+    REQUIRE(v != nullptr);
+    return v->mesh().transformed_bounding_box(v->get_matrix());
+}
+
+} // namespace
+
+TEST_CASE("Flat kerf cut: a Plug bridges the gap and is attached to its half", "[CutConnectorSurface][CutKerf]")
+{
+    for (const double kerf : { 1.0, 0.0 }) {
+        Model        model;
+        ModelObject* mo = surface_cube(model);
+        add_flat_kerf_connector(mo, CutConnectorType::Plug, kerf);
+        Cut                    cut(mo, 0, Transform3d::Identity(), ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+        const ModelObjectPtrs& res = cut.perform_with_plane(kerf);
+        REQUIRE(res.size() == 2);
+        REQUIRE(all_closed(res));
+
+        const BoundingBoxf3 lower_body = volume_box(body_part(res[1]));
+        const BoundingBoxf3 upper_body = volume_box(body_part(res[0]));
+        const BoundingBoxf3 plug       = volume_box(connector_part(res[1]));
+
+        // The halves' faces are the kerf's two faces.
+        REQUIRE(std::abs(lower_body.max.z() + 0.5 * kerf) < 1e-4);
+        REQUIRE(std::abs(upper_body.min.z() - 0.5 * kerf) < 1e-4);
+        // The plug starts at (touches) the lower half's face, never floating above it ...
+        REQUIRE(plug.min.z() <= lower_body.max.z() + 1e-4);
+        REQUIRE(plug.min.z() >= lower_body.max.z() - 1e-4);
+        // ... spans the gap, and reaches the full base length into the upper half.
+        REQUIRE(plug.max.z() >= upper_body.min.z() + KERF_BASE_LEN - 1e-4);
+        REQUIRE(std::abs((plug.max.z() - plug.min.z()) - (KERF_BASE_LEN + kerf)) < 1e-4);
+        // The upper half carries the matching hole.
+        REQUIRE(count_holes(res[0], CutConnectorType::Plug) == 1);
+    }
+}
+
+TEST_CASE("Flat kerf cut: a Dowel is as long as its base length plus the kerf", "[CutConnectorSurface][CutKerf]")
+{
+    for (const double kerf : { 1.0, 0.0 }) {
+        Model        model;
+        ModelObject* mo = surface_cube(model);
+        add_flat_kerf_connector(mo, CutConnectorType::Dowel, kerf);
+        Cut                    cut(mo, 0, Transform3d::Identity(), surface_attrs());
+        const ModelObjectPtrs& res = cut.perform_with_plane(kerf);
+        REQUIRE(res.size() == 3);
+        REQUIRE(all_closed(res));
+
+        const ModelObject* dowel = separate_part(res);
+        REQUIRE(dowel != nullptr);
+        const BoundingBoxf3 box = volume_box(dowel->volumes.front());
+        REQUIRE(std::abs((box.max.z() - box.min.z()) - (KERF_BASE_LEN + kerf)) < 1e-4);
+        // It spans both sockets: each half's face is inside the dowel's length.
+        REQUIRE(box.min.z() < -0.5 * kerf);
+        REQUIRE(box.max.z() > 0.5 * kerf);
+        REQUIRE(count_holes(res[0], CutConnectorType::Dowel) == 1);
+        REQUIRE(count_holes(res[1], CutConnectorType::Dowel) == 1);
+    }
+}
