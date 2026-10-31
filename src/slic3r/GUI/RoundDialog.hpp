@@ -12,8 +12,8 @@
 
 namespace Slic3r { namespace GUI {
 
-// The dialog shown before "Round all edges" (ObjectList::round_all_edges, and the
-// Edit gizmo's button). It only collects options - every bit of geometry lives in
+// The dialog shown before "Round all edges" (ObjectList::round_all_edges, from the
+// object/part right-click menu). It only collects options - every bit of geometry lives in
 // libslic3r/MeshRound.
 //
 // Deliberately the same shape as RemeshDialog: the two operations share a voxel

@@ -6575,10 +6575,10 @@ void ObjectList::repair_by_remesh()
     }
 }
 
-// Ultra: "Round all edges" - the Edit gizmo's interim, whole-mesh fillet.
+// Ultra: "Round all edges" - a whole-mesh fillet.
 //
-// The real bevel works on a SELECTED edge chain and inserts exact geometry (the Edit
-// gizmo, phase 2). This is the blunt instrument that ships alongside it: it rounds
+// Exact fillets on SELECTED edges are the CAD Fillet gizmo / Design tab. This is the
+// blunt instrument: it rounds
 // every edge of the part at once, by the morphological open/close round trip on the
 // signed distance field. See libslic3r/MeshRound.hpp for the algorithm.
 //
@@ -6587,16 +6587,11 @@ void ObjectList::repair_by_remesh()
 // filter in the middle. It clears painted data the same way, through
 // clear_before_change_mesh(), because the mesh is re-extracted from a lattice and
 // every index changes.
-void ObjectList::round_all_edges(bool close_gizmos)
+void ObjectList::round_all_edges()
 {
     if (!voxel_ops_available())
         return;
     GLGizmosManager& gizmos = wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager();
-    // The Edit gizmo's own button asks for this: it is itself a gizmo, so it would
-    // always trip the check below. Closing is the manager's job and a gizmo .cpp
-    // cannot reach it, so the request comes here instead - same as quad_remesh().
-    if (close_gizmos)
-        gizmos.reset_all_states();
     if (!gizmos.check_gizmos_closed_except(GLGizmosManager::Undefined))
         return;
 

@@ -1187,7 +1187,7 @@ wxMenuItem* MenuFactory::append_menu_item_fix_through_netfabb(wxMenu* menu)
             return !obj_idxs.empty() || !vol_idxs.empty();
         }, plater());
 
-    // Ultra: "Round all edges" - the Edit gizmo's interim whole-mesh fillet, next to
+    // Ultra: "Round all edges" - a whole-mesh fillet, next to
     // Repair/Remesh because it is the same voxel round trip with a rounding filter in
     // the middle. Hidden without OpenVDB, for the same reason the quad remesher is
     // hidden without QuadriFlow.
