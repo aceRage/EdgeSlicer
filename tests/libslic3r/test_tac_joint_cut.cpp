@@ -132,7 +132,6 @@ TEST_CASE("TAC Joint refuses unsupported cut routes before mutating the cut", "[
     add_tac_joint_volume(object, tac_connector(), "TAC Joint");
     Cut cut(object, 0, Transform3d::Identity(), tac_attrs());
     REQUIRE_THROWS_AS(cut.perform_by_contour(object, {}, 1), std::invalid_argument);
-    REQUIRE_THROWS_AS(cut.perform_with_draw_stroke(DrawCutStroke{}, DrawCutParams{}), std::invalid_argument);
     REQUIRE_THROWS_AS(cut.perform_with_groove(Cut::Groove{}, Transform3d::Identity(), 1, 0.f, 15.f), std::invalid_argument);
     REQUIRE(cut.perform_with_plane().size() == 3);
 }
@@ -171,7 +170,7 @@ TEST_CASE("TAC Joint on a tilted plane survives print placement and source assem
     REQUIRE(local_lower.max.z() == Approx(-.18).margin(1e-4));
 }
 
-// PROTOTYPE (local, not part of PR 801): TAC Joint on a curved sheet, the way the Pin works there.
+// TAC Joint on a curved sheet, the way the Pin works there (2026-10-31; more in test_cut_connector_surface.cpp).
 TEST_CASE("TAC Joint on a curved sheet keeps full sockets on the sheet frame and a printable connector", "[TACJoint][TACJointCut][CurvedCut]")
 {
     Model          model;

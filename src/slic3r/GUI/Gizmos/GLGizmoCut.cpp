@@ -1,6 +1,7 @@
 #include "GLGizmoCut.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/CameraUtils.hpp"
+#include "slic3r/GUI/GUI.hpp"
 // OpenGLManager::get_gl_info().is_mesa(), for the mm_contour shader's clip-space
 // bias the drawn stroke's ribbon uses.
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -892,7 +893,7 @@ bool GLGizmoCut3D::render_connect_type_combo()
                 m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
                                  ImGui::GetFontSize() * 20.0f);
             else if (unsupported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                m_imgui->tooltip(_L("TAC Joint requires a flat, planar cut."), ImGui::GetFontSize() * 20.0f);
+                m_imgui->tooltip(_L("TAC Joint works on a Planar cut (Flat, Curved or Draw surface), not on a Dovetail."), ImGui::GetFontSize() * 20.0f);
             if (clicked && !unsupported && t != m_connector_type) {
                 if (t == CutConnectorType::TacJoint || m_connector_type == CutConnectorType::TacJoint)
                     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "TAC Joint", UndoRedo::SnapshotType::GizmoAction);
@@ -2088,7 +2089,7 @@ Transform3d GLGizmoCut3D::connector_rotation_m(const Vec3d& pos_object) const
     if (draw_connectors_live()) {
         double s = 0.0, w = 0.0;
         if (draw_connector_sw(pos_object, s, w))
-            return m_rotation_m * draw_cut_surface_frame(m_draw_stroke, m_draw_params, s, w);
+            return m_rotation_m * draw_frame_upright(draw_cut_surface_frame(m_draw_stroke, m_draw_params, s, w), s, w);
         return m_rotation_m;
     }
 
@@ -3752,6 +3753,7 @@ void GLGizmoCut3D::update_draw_surface_raycaster()
 
     m_draw_surface_mesh.clear();
     m_draw_surface_raycaster.reset();
+    m_draw_probe.reset();
     m_draw_surface_pick_dirty = false;
 
     if (!m_draw_stroke.valid())
@@ -3782,6 +3784,8 @@ void GLGizmoCut3D::update_draw_surface_raycaster()
     indexed_triangle_set cutter = draw_cut_cutter_solid(m_draw_stroke, m_draw_params, bbox, 0.0, src);
     if (cutter.empty())
         return;
+    // 2026-10-31: the plane-frame copy is the connectors' probe (side and flatness).
+    m_draw_probe = std::make_shared<CutSurfaceProbe>(CutSurfaceProbe::drawn_from_cutter(cutter, m_draw_stroke.is_closed()));
     // To the WORLD, the way update_curved_sheet_raycaster() takes the sheet there,
     // so the raycaster's own transform is the identity at use.
     its_transform(cutter, translation_transform(m_plane_center) * m_rotation_m);
@@ -3845,6 +3849,55 @@ bool GLGizmoCut3D::draw_connector_sw(const Vec3d& pos_object, double& s, double&
     }
     const Vec3d local = m_rotation_m.inverse() * (world - m_plane_center);
     return draw_cut_surface_project(m_draw_stroke, m_draw_params, local, s, w);
+}
+
+Transform3d GLGizmoCut3D::draw_frame_upright(const Transform3d& frame, double s, double w) const
+{
+    // A connector's +Z has to point into the UPPER half - that is where the cut puts a Plug's
+    // hole, a Pin's upper hole and a TAC Joint's offset. The strip's normal is pinned to the
+    // stroke's outward binormal instead, which on a closed loop points OUT of the plug (the
+    // upper half). Ask the cutter which side is which, one step either way from the surface.
+    if (!m_draw_probe || m_draw_surface_pick_dirty || !m_draw_probe->valid())
+        return frame;
+    const Vec3d      at   = draw_cut_surface_point(m_draw_stroke, m_draw_params, s, w);
+    const Vec3d      n    = frame.linear().col(2);
+    constexpr double step = 0.3;
+    if (!m_draw_probe->is_upper_mid(at + step * n) && m_draw_probe->is_upper_mid(at - step * n))
+        return frame * Geometry::rotation_transform(PI * Vec3d::UnitX());
+    return frame;
+}
+
+std::optional<CutConnectorFit> GLGizmoCut3D::connector_surface_fit(const CutConnector& connector) const
+{
+    if (connector.attribs.type == CutConnectorType::FlexiJoint)
+        return std::nullopt;
+    const bool drawn  = draw_connectors_live();
+    const bool curved = !drawn && is_curved_surface() && !m_curved_sheet.is_flat();
+    if (!drawn && !curved)
+        return std::nullopt;
+
+    CutSurfaceProbe        sheet_probe;
+    const CutSurfaceProbe* probe = nullptr;
+    if (drawn) {
+        if (!m_draw_probe || m_draw_surface_pick_dirty)
+            return std::nullopt;
+        probe = m_draw_probe.get();
+    } else {
+        sheet_probe = CutSurfaceProbe::curved(m_curved_sheet);
+        probe       = &sheet_probe;
+    }
+
+    // The connector's frame in the cut PLANE's frame, where the sheet and the stroke live.
+    const Vec3d pos_object = connector_pos_on_sheet(connector.pos);
+    Vec3d       world      = pos_object;
+    if (const CommonGizmosDataObjects::SelectionInfo* sel = m_c ? m_c->selection_info() : nullptr)
+        if (sel->model_object() && sel->get_active_instance() >= 0) {
+            world += sel->model_object()->instances[sel->get_active_instance()]->get_offset();
+            world.z() += double(sel->get_sla_shift());
+        }
+    const Transform3d frame = (translation_transform(m_plane_center) * m_rotation_m).inverse() * translation_transform(world) *
+                              connector_rotation_m(pos_object);
+    return cut_connector_fit(*probe, frame, cut_connector_footprint_radius(connector));
 }
 
 void GLGizmoCut3D::update_draw_connector_warnings()
@@ -7743,8 +7796,11 @@ void GLGizmoCut3D::render_pushfit_inputs(CutConnectors& connectors)
 
 bool GLGizmoCut3D::tac_joint_mode_supported() const
 {
-    // PROTOTYPE: a curved sheet too - the connector stands on the sheet's frame at its point.
-    return CutMode(m_mode) == CutMode::cutPlanar && (m_surface_mode == CutSurfaceMode::Flat || m_surface_mode == CutSurfaceMode::Curved) &&
+    // Flat, Curved and Draw (2026-10-31): on a curved sheet or a drawn strip the connector stands
+    // on the surface's own frame at its point and the cut checks that the surface is flat enough
+    // under it (cut_connector_fit). Not with a groove, and not with individual part selection.
+    return CutMode(m_mode) == CutMode::cutPlanar &&
+           (m_surface_mode == CutSurfaceMode::Flat || m_surface_mode == CutSurfaceMode::Curved || m_surface_mode == CutSurfaceMode::Draw) &&
            !m_part_selection.valid();
 }
 
@@ -7864,7 +7920,7 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
             ImGuiWrapper::COL_ORANGE_LIGHT,
             _L("TAC Joint does not support individual part selection. Start a new planar cut without assigning individual parts."));
     else if (!tac_joint_mode_supported())
-        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("TAC Joint requires a flat, planar cut."));
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("TAC Joint works on a Planar cut (Flat, Curved or Draw surface), not on a Dovetail."));
     const TacJointValidation validation = tac_joint_validate(m_tac_joint, face_lo, face_hi);
     if (!validation.valid)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(validation.message));
@@ -8901,7 +8957,8 @@ void GLGizmoCut3D::render_input_window_warning() const
                         m_imgui->text(m_part_selection.valid() ?
                                           _L("TAC Joint does not support individual part selection. Start a new planar cut without "
                                              "assigning individual parts.") :
-                                          _L("TAC Joint requires a flat, planar cut. Remove these connectors or switch to a flat cut."));
+                                          _L("TAC Joint works on a Planar cut (Flat, Curved or Draw surface), not on a Dovetail. Remove these "
+                                             "connectors or switch the cut back to Planar."));
                         break;
                     }
                     double lo = 0., hi = 0.;
@@ -8922,6 +8979,14 @@ void GLGizmoCut3D::render_input_window_warning() const
                                            m_info_stats.outside_bb);
         if (m_info_stats.is_overlap)
             out += "\n - " + _L("Some connectors are overlapped");
+        if (m_info_stats.not_flat_enough > size_t(0))
+            out += "\n - " + format_wxstr(_L_PLURAL("%1$d connector stands where the cut surface is not flat enough under it",
+                                                     "%1$d connectors stand where the cut surface is not flat enough under them",
+                                                     m_info_stats.not_flat_enough),
+                                           m_info_stats.not_flat_enough) +
+                   " " + format_wxstr(_L("(more than %1% mm off flat across the connector). Move them to a flatter spot, "
+                                         "use smaller connectors, or flatten the surface there."),
+                                      CutConnectorMaxSurfaceDeviation);
         m_imgui->text(out);
     }
     if (!m_keep_upper && !m_keep_lower)
@@ -9133,6 +9198,13 @@ bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& co
     if (is_outside_of_cut_contour(idx, connectors, cur_pos))
         return true;
 
+    // 2026-10-31: on a curved or drawn cut a connector also needs the surface under its whole
+    // footprint to be close enough to its own plane. Cut refuses it otherwise; this says so first.
+    if (const std::optional<CutConnectorFit> fit = connector_surface_fit(cur_connector); fit && !fit->fits()) {
+        m_info_stats.not_flat_enough++;
+        return true;
+    }
+
     const Transform3d frame = translation_transform(cur_pos) * connector_rotation_m(cur_connector);
     BoundingBoxf3     cur_tbb;
     if (tac) {
@@ -9193,6 +9265,11 @@ void GLGizmoCut3D::check_and_update_connectors_state()
     const ModelInstance* mi = mo->instances[inst_id];
     const Vec3d& instance_offset = mi->get_offset();
     const double sla_shift       = double(sel->get_sla_shift());
+
+    // The drawn strip's probe rides on its pick raycaster; make sure it describes this stroke
+    // before the flatness test below asks it anything.
+    if (draw_connectors_live() && !connectors.empty())
+        update_draw_surface_raycaster();
 
      for (size_t i = 0; i < connectors.size(); ++i) {
         const CutConnector& connector = connectors[i];
@@ -9459,6 +9536,16 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         // THAT instead, inside perform_with_flexi_joints() - see CutUtils.cpp.
         double face_lo = 0.0, face_hi = 0.0;
         cut_thickness_faces(face_lo, face_hi);
+
+        // 2026-10-31: perform_cut() has already closed the gizmo, which flattened the sheet and
+        // cleared the stroke, so the curved / drawn frames come from what it took beforehand.
+        // On a curved or drawn cut the kerf it took comes too. A flat cut is left exactly as it
+        // was (its frame is m_rotation_m either way).
+        const bool baked = m_baked_connector_frames.size() == mo->cut_connectors.size();
+        if (baked && m_baked_non_planar) {
+            face_lo = m_baked_face_lo;
+            face_hi = m_baked_face_hi;
+        }
         const double kerf = face_hi - face_lo;
 
         // PHASE 4: on a curved cut every connector gets its OWN frame - the
@@ -9467,13 +9554,19 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         // than along the plane normal. On a flat cut (or a flat sheet) the frame
         // IS m_rotation_m and the normal IS m_cut_normal, so the flat path is
         // untouched and a curved-but-flat cut produces the same volumes.
-        for (CutConnector&connector : mo->cut_connectors) {
+        for (size_t ci = 0; ci < mo->cut_connectors.size(); ++ci) {
+            CutConnector& connector = mo->cut_connectors[ci];
             // Re-derive from the sheet at bake time so the connector follows any
             // edit made since it was placed, then BAKE it: from here on the
             // connector carries a plain position and rotation, which is what the
             // cut path and the 3MF both already understand.
-            connector.pos        = connector_pos_on_sheet(connector.pos);
-            connector.rotation_m = connector_rotation_m(connector.pos);
+            if (baked) {
+                connector.pos        = m_baked_connector_frames[ci].pos;
+                connector.rotation_m = m_baked_connector_frames[ci].rotation_m;
+            } else {
+                connector.pos        = connector_pos_on_sheet(connector.pos);
+                connector.rotation_m = connector_rotation_m(connector.pos);
+            }
             const Vec3d conn_normal = connector.rotation_m.linear() * Vec3d::UnitZ();
 
             if (connector.attribs.type == CutConnectorType::FlexiJoint) {
@@ -9504,6 +9597,8 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         }
         apply_cut_connectors(mo, _u8L("Connector"));
     }
+    m_baked_connector_frames.clear();
+    m_baked_non_planar = false;
 }
 
 Transform3d GLGizmoCut3D::get_cut_matrix(const Selection& selection)
@@ -10336,6 +10431,21 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     // them past this point would keep a whole object's meshes alive for nothing.
     m_reedit_stash.clear_objects();
 
+    // 2026-10-31: the connectors' frames on the curved / drawn surface, and that cut's kerf
+    // faces, taken while the surface still exists - reset_all_gizmos() below flattens the sheet
+    // and clears the stroke. apply_connectors_in_model() bakes them.
+    m_baked_connector_frames.clear();
+    m_baked_non_planar = (curved_surface && !curved_sheet.is_flat()) || (draw_surface && draw_stroke.valid());
+    if (CutMode(m_mode) != CutMode::cutTongueAndGroove && m_connector_mode == CutConnectorMode::Manual) {
+        if (draw_connectors_live())
+            update_draw_surface_raycaster();
+        for (const CutConnector& c : mo->cut_connectors) {
+            const Vec3d pos = connector_pos_on_sheet(c.pos);
+            m_baked_connector_frames.push_back({ pos, connector_rotation_m(pos) });
+        }
+    }
+    curved_cut_thickness_faces(cut_thickness, thickness_offset, m_baked_face_lo, m_baked_face_hi);
+
     // deactivate CutGizmo and than perform a cut
     m_parent.reset_all_gizmos();
 
@@ -10368,8 +10478,32 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         // type) back to their defaults the next time the gizmo opens; see on_set_state().
         if (has_flexi)
             m_flexi_forced_after_cut = true;
+        // A connector or a cut the libslic3r side refuses throws std::invalid_argument (a TAC Joint
+        // whose fit fails, a connector on a curve too tight for it, ...). That must not take the
+        // slicer down, nor leave the object carrying half-applied connector volumes: take what
+        // the bake and the cut-id update below change, and put it back on a refusal.
+        const CutConnectors saved_connectors = cut_mo->cut_connectors;
+        const size_t        saved_volumes    = cut_mo->volumes.size();
+        CutObjectBase       saved_cut_id;
+        saved_cut_id.copy(cut_mo->cut_id);
+        auto refuse_cut = [&](const std::invalid_argument& e) {
+            while (cut_mo->volumes.size() > saved_volumes)
+                cut_mo->delete_volume(cut_mo->volumes.size() - 1);
+            cut_mo->cut_connectors = saved_connectors;
+            cut_mo->cut_id.copy(saved_cut_id);
+            m_baked_connector_frames.clear();
+            m_baked_non_planar = false;
+            BOOST_LOG_TRIVIAL(error) << "Cut refused: " << e.what();
+            show_error(nullptr, _L("The cut could not be made.") + "\n\n" + _L(e.what()));
+        };
+
         // update connectors pos as offset of its center before cut performing
-        apply_connectors_in_model(cut_mo , dowels_count);
+        try {
+            apply_connectors_in_model(cut_mo , dowels_count);
+        } catch (const std::invalid_argument& e) {
+            refuse_cut(e);
+            return;
+        }
 
         wxBusyCursor wait;
 
@@ -10422,11 +10556,18 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         }
 
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
-        const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(mo, m_part_selection.get_cut_parts(), dowels_count):
-                                             cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, groove_radius()) :
-                                             cut_drawn         ? cut.perform_with_draw_stroke(draw_stroke, draw_params) :
-                                             cut_curved        ? cut.perform_with_curved_sheet(curved_sheet, cut_thickness, thickness_offset) :
-                                                                 cut.perform_with_plane(cut_thickness, thickness_offset);
+        const ModelObjectPtrs* cut_result = nullptr;
+        try {
+            cut_result = &(cut_by_contour    ? cut.perform_by_contour(mo, m_part_selection.get_cut_parts(), dowels_count):
+                           cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m, m_groove_count, m_groove_gap, groove_radius()) :
+                           cut_drawn         ? cut.perform_with_draw_stroke(draw_stroke, draw_params) :
+                           cut_curved        ? cut.perform_with_curved_sheet(curved_sheet, cut_thickness, thickness_offset) :
+                                               cut.perform_with_plane(cut_thickness, thickness_offset));
+        } catch (const std::invalid_argument& e) {
+            refuse_cut(e);
+            return;
+        }
+        const ModelObjectPtrs& new_objects = *cut_result;
 
         // fix_non_manifold_edges
 #ifdef HAS_WIN10SDK

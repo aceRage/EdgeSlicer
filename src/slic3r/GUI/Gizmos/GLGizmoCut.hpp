@@ -118,11 +118,15 @@ class GLGizmoCut3D : public GLGizmoBase
         unsigned int    outside_cut_contour;
         unsigned int    outside_bb;
         bool            is_overlap;
+        // 2026-10-31: on a curved or drawn cut, connectors standing where the surface strays
+        // more than CutConnectorMaxSurfaceDeviation from their own plane over their footprint.
+        unsigned int    not_flat_enough;
 
         void invalidate() {
             outside_cut_contour = 0;
             outside_bb = 0;
             is_overlap = false;
+            not_flat_enough = 0;
         } 
     } m_info_stats;
 
@@ -689,6 +693,29 @@ class GLGizmoCut3D : public GLGizmoBase
     TriangleMesh                   m_draw_surface_mesh;
     std::unique_ptr<MeshRaycaster> m_draw_surface_raycaster;
     bool                           m_draw_surface_pick_dirty{ true };
+    // 2026-10-31: the same cutter in the PLANE frame, as a probe: which side of the strip is the
+    // upper half (so a connector stands the right way up) and how flat the strip is under a
+    // connector. Built with the raycaster; ignored while the pick is dirty.
+    std::shared_ptr<CutSurfaceProbe> m_draw_probe;
+    // Turns a drawn-surface frame over when its +Z points into the LOWER half (the strip's own
+    // normal is pinned to the stroke's outward binormal, which on a loop is out of the plug).
+    Transform3d draw_frame_upright(const Transform3d& frame, double s, double w) const;
+    // The connector's fit on the curved sheet or the drawn strip; empty on a flat cut and for
+    // the flexi kinds (they have their own path and their own patch check).
+    std::optional<CutConnectorFit> connector_surface_fit(const CutConnector& connector) const;
+    // perform_cut() closes the gizmo - which flattens the sheet, clears the stroke and zeroes
+    // the thickness - BEFORE apply_connectors_in_model() bakes the connectors. So it takes each
+    // connector's point and frame on the curved / drawn surface (and that cut's kerf faces)
+    // first, and the bake uses them. Consumed (and cleared) by apply_connectors_in_model().
+    struct BakedConnectorFrame
+    {
+        Vec3d       pos;
+        Transform3d rotation_m;
+    };
+    std::vector<BakedConnectorFrame> m_baked_connector_frames;
+    double                           m_baked_face_lo{ 0.0 };
+    double                           m_baked_face_hi{ 0.0 };
+    bool                             m_baked_non_planar{ false };
     int                            m_draw_tilted_connectors{ 0 };
     int                            m_draw_unflat_connectors{ 0 };
     int                            m_draw_offsurface_connectors{ 0 };
