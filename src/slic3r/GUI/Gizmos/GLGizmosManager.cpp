@@ -25,7 +25,6 @@
 #include "slic3r/GUI/Gizmos/GLGizmoTextureDisplacement.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSimplify.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoSculpt.hpp"
-#include "slic3r/GUI/Gizmos/GLGizmoEdit.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCadFillet.hpp"
 #ifdef SLIC3R_CAD
 #include "slic3r/GUI/Gizmos/GLGizmoPrimitive.hpp"
@@ -43,8 +42,31 @@
 #include <wx/glcanvas.h>
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+
 namespace Slic3r {
 namespace GUI {
+
+namespace {
+
+// Occupies EType::Edit so CadFillet / Primitive / Sketch keep their enum values
+// and m_gizmos indices. Not selectable, not activable, not in the toolbar.
+class GLGizmoEditRemoved : public GLGizmoBase
+{
+public:
+    GLGizmoEditRemoved(GLCanvas3D &parent, const std::string &icon_filename, unsigned int sprite_id)
+        : GLGizmoBase(parent, icon_filename, sprite_id)
+    {}
+
+protected:
+    bool        on_init() override { return true; }
+    std::string on_get_name() const override { return {}; }
+    void        on_render() override {}
+    bool        on_is_activable() const override { return false; }
+    bool        on_is_selectable() const override { return false; }
+};
+
+} // namespace
+
 //BBS: GUI refactor: to support top layout
 #if BBS_TOOLBAR_ON_TOP
 const float GLGizmosManager::Default_Icons_Size = 40;
@@ -197,7 +219,8 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             break;
         case (EType::Edit):
         case (EType::CadFillet):
-            gizmo->set_icon_filename(m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg");
+            // Edit is a reserved hole (not in the toolbar). CadFillet is also hidden.
+            gizmo->set_icon_filename("reduce_triangles.svg");
             break;
 #ifdef SLIC3R_CAD
         case (EType::Primitive):
@@ -252,8 +275,8 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
-    m_gizmos.emplace_back(new GLGizmoEdit(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::Edit));
-    m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, m_is_dark ? "toolbar_edit_dark.svg" : "toolbar_edit.svg", EType::CadFillet));
+    m_gizmos.emplace_back(new GLGizmoEditRemoved(m_parent, "reduce_triangles.svg", EType::Edit));
+    m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, "reduce_triangles.svg", EType::CadFillet));
 #ifdef SLIC3R_CAD
     // Registered last: Primitive and Sketch are the final entries before Undefined, so
     // omitting them leaves every preceding m_gizmos index (indexed by EType) untouched.
@@ -918,21 +941,6 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
     if (m_current == Cut) {
         if (auto *cut = dynamic_cast<GLGizmoCut3D *>(m_gizmos[Cut].get());
             cut != nullptr && cut->on_cut_char(keyCode, evt.ShiftDown(), evt.CmdDown())) {
-            m_parent.set_as_dirty();
-            return true;
-        }
-    }
-
-    // Ultra: the Edit gizmo takes the same first refusal, for the same reason.
-    // Its mesh edits live in a gizmo-local stack (a face push is one entry), so
-    // Ctrl+Z has to reach that stack BEFORE the canvas turns it into an
-    // EVT_GLCANVAS_UNDO. It also claims Esc while something is selected, to drop
-    // the selection instead of closing the gizmo. It returns false whenever it
-    // has nothing to take back, and the plater undo then happens exactly as
-    // before.
-    if (m_current == Edit) {
-        if (auto *edit = dynamic_cast<GLGizmoEdit *>(m_gizmos[Edit].get());
-            edit != nullptr && edit->on_edit_char(keyCode, evt.ShiftDown(), evt.CmdDown())) {
             m_parent.set_as_dirty();
             return true;
         }
@@ -1666,7 +1674,7 @@ std::string get_name_from_gizmo_etype(GLGizmosManager::EType type)
     case GLGizmosManager::EType::Sculpt:
         return "Sculpt";
     case GLGizmosManager::EType::Edit:
-        return "Edit";
+        return "Edit"; // reserved slot (Design-tab P5); not a live gizmo
     case GLGizmosManager::EType::CadFillet:
         return "CAD Fillet";
 #ifdef SLIC3R_CAD

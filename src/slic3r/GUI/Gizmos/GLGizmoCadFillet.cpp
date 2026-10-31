@@ -35,7 +35,7 @@
 namespace Slic3r::GUI {
 
 // Edges and highlights are drawn as thin tubes, a fraction of the part's size thick, so they
-// read the same on a 5 mm part and a 300 mm one (the Edit gizmo's chain tubes do the same).
+// read the same on a 5 mm part and a 300 mm one (the Measure gizmo's overlays do the same).
 static constexpr float CadTubeRadiusFraction = 0.0018f;
 // How close (screen pixels, before DPI scaling) the cursor must come to an edge to pick it.
 static constexpr double CadPickPixels = 9.;
@@ -243,7 +243,7 @@ Transform3d GLGizmoCadFillet::volume_trafo() const
 double GLGizmoCadFillet::mesh_scale() const
 {
     // Sizes are typed in world millimetres; the body lives in the volume's mesh space. As the
-    // Edit gizmo does, a roughly uniform scale is assumed and the mean factor used.
+    // Measure gizmo does, a roughly uniform scale is assumed and the mean factor used.
     return BRep::mean_scale(volume_trafo());
 }
 
@@ -843,7 +843,7 @@ void GLGizmoCadFillet::build_faces(const std::vector<int> &faces, GLModel &model
             triangles.push_back(int(t));
     if (triangles.empty())
         return;
-    // The Measure / Edit gizmos' plane overlay, lifted off the surface against z-fighting.
+    // The Measure gizmo's plane overlay, lifted off the surface against z-fighting.
     model.init_from(init_plane_data(m_topo->mesh, triangles, m_tube_radius));
 }
 

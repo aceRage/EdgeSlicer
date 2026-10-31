@@ -269,11 +269,11 @@ protected:
 
     // ---- docking / collapsing of a tall input panel -------------------------
     //
-    // The tall gizmo panels (Cut, Assembly, Sculpt, Edit) open under their own
+    // The tall gizmo panels (Cut, Assembly, Sculpt) open under their own
     // toolbar icon and cover most of the viewport. A panel that opts in here
     // gains a pin button that parks it against the right edge of the 3D view at
     // full available height, and a chevron that folds the body away to the title
-    // line. Both live in the shared base so the four panels (and any later one)
+    // line. Both live in the shared base so the panels (and any later one)
     // share one implementation rather than a copy each.
     //
     // How a panel opts in - replace the SetNextWindowPos/Begin pair with:

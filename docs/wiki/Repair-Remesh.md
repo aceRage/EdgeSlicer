@@ -16,7 +16,7 @@ This is **not** [Quad remesh](Quad-remesh).
 - Part menu → **Repair/Remesh**  
 - Multi-selection menus → **Repair/Remesh**  
 
-On staging, the same helper also offers **[Round all edges...](Round-all-edges)** and **[Quad remesh...](Quad-remesh)** when those backends are available.
+On staging, the same helper also offers **[Quad remesh...](Quad-remesh)** when that backend is available.
 
 Windows also shows **Fix model** (Netfabb) when available.
 
@@ -51,6 +51,5 @@ Prefer **Simplify Model** (stock) when you only need decimation, not an SDF rebu
 ## Related
 
 - [Quad remesh](Quad-remesh)  
-- [Round all edges](Round-all-edges)  
 - [Object menu](Object-menu)  
 - [Home](Home)  

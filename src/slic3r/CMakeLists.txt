@@ -94,8 +94,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/FillBedDialog.hpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
-    GUI/RoundDialog.cpp
-    GUI/RoundDialog.hpp
     GUI/QuadRemeshDialog.cpp
     GUI/QuadRemeshDialog.hpp
     GUI/SliceBakeDialog.cpp
@@ -229,8 +227,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/FacetPicker.hpp
     GUI/Gizmos/GLGizmoSeam.cpp
     GUI/Gizmos/GLGizmoSeam.hpp
-    GUI/Gizmos/GLGizmoEdit.cpp
-    GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
@@ -351,8 +347,6 @@ set(SLIC3R_GUI_SOURCES
     GUI/InstanceCheck.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
-    GUI/Jobs/BevelJob.cpp
-    GUI/Jobs/BevelJob.hpp
     GUI/Jobs/BindJob.cpp
     GUI/Jobs/BindJob.hpp
     GUI/Jobs/BoostThreadWorker.cpp
@@ -1260,8 +1254,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/OptionsGroup.cpp                          # titleWidth clash
     GUI/RecenterDialog.cpp                        # #define BORDER leaks into neighbours
-    GUI/RemeshDialog.cpp                          # CFG_* constants also in RoundDialog.cpp / FillBedDialog.cpp
-    GUI/RoundDialog.cpp                           # CFG_* constants also in RemeshDialog.cpp / FillBedDialog.cpp
+    GUI/RemeshDialog.cpp                          # CFG_* constants also in FillBedDialog.cpp
     GUI/SelectMachinePop.cpp                      # EVT_* definitions also in SelectMachine.cpp
     GUI/SendToPrinter.cpp                         # file-local names clash with SelectMachine.cpp
     GUI/SliceBakeDialog.cpp                       # CFG_SECTION also in QuadRemeshDialog.cpp

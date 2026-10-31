@@ -16,8 +16,8 @@ if (TARGET OpenVDB::openvdb)
     set(OpenVDBUtils_SOURCES OpenVDBUtils.cpp OpenVDBUtils.hpp MeshRepair.hpp)
 else()
     # Ultra: without OpenVDB the voxel operations still have to LINK, so the GUI can
-    # ask voxel_ops_available() and hide "Round all edges" instead of offering an
-    # entry that can only ever fail. See MeshRepairStub.cpp.
+    # ask voxel_ops_available() and hide Repair/Remesh voxel work instead of offering
+    # an entry that can only ever fail. See MeshRepairStub.cpp.
     set(OpenVDBUtils_SOURCES MeshRepairStub.cpp MeshRepair.hpp)
 endif()
 
@@ -444,14 +444,10 @@ set(lisbslic3r_sources
     Measure.cpp
     Measure.hpp
     MeasureUtils.hpp
-    MeshEdit.cpp
-    MeshEdit.hpp
     MeshSculpt.cpp
     MeshSculpt.hpp
     MeshRemesh.cpp
     MeshRemesh.hpp
-    MeshRound.cpp
-    MeshRound.hpp
     QuadRemesh.cpp
     QuadRemesh.hpp
     MeshSplitImpl.hpp
