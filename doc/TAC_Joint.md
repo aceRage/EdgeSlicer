@@ -55,4 +55,3 @@ Catch2 filter `[TACJoint]`. Related regression filters are `[PushFit]`,
 `[CutRecipe]`, `[CutMirror]`, and `[DrawCut]`.
 
 Physical printing and network printing are not covered by these software tests.
-See also the [German usage guide](TAC_Joint.de.md).
