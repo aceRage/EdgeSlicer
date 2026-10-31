@@ -659,6 +659,32 @@ void GLGizmoCut3D::set_center(const Vec3d& center, bool update_tbb /*=false*/)
 // as a ghost disc while connectors were being placed on a cut that does not go
 // there. The draw field colours the halves and the cutter shell shows the surface;
 // the plane clip is wanted only for the flat (and curved-sheet) cut.
+// MeshRaycaster::unproject_on_mesh() is for CLOSED meshes: it drops a ray with an odd number of
+// unclipped hits as "starting inside". A cross-section is an open surface - one hit - so it
+// refused every click on it (owner hand test of #811, round 2: clicks on the curved and drawn
+// sections did nothing). The nearest hit in front of the camera is what a surface pick means.
+static bool pick_open_surface(const MeshRaycaster& raycaster, const Vec2d& mouse_position, Vec3d& hit, const char* what)
+{
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    Vec3d         point, direction;
+    CameraUtils::ray_from_screen_pos(camera, mouse_position, point, direction);
+    double best  = std::numeric_limits<double>::max();
+    size_t count = 0;
+    for (const AABBMesh::hit_result& h : raycaster.get_aabb_mesh().query_ray_hits(point, direction))
+        if (h.is_hit() && h.distance() > 0.0) {
+            ++count;
+            if (h.distance() < best) {
+                best = h.distance();
+                hit  = h.position();
+            }
+        }
+    BOOST_LOG_TRIVIAL(info) << "[cutconn] pick " << what << " at screen (" << mouse_position.x() << ", " << mouse_position.y()
+                            << ") ray " << point.transpose() << " dir " << direction.transpose() << ": "
+                            << (count > 0 ? "hit" : "miss (the ray does not cross the section)") << ", " << count << " crossing(s)"
+                            << (count > 0 ? ", at " : "") << (count > 0 ? hit.transpose() : Vec3d::Zero().transpose());
+    return count > 0;
+}
+
 bool GLGizmoCut3D::non_planar_connector_editing() const
 {
     return m_connectors_editing && ((is_draw_surface() && m_draw_stroke.valid()) || (is_curved_surface() && !m_curved_sheet.is_flat()));
@@ -1773,7 +1799,10 @@ void GLGizmoCut3D::apply_curved_color_clip()
 {
     // Only a sheet that is actually bent takes over the split: "Curved but
     // untouched" must stay exactly the flat cut, preview included.
-    if (!is_curved_surface() || m_curved_sheet.is_flat() || m_connectors_editing || m_hide_cut_plane) {
+    // 2026-10-31 (owner hand test of #811, round 2): NOT switched off for connectors editing any
+    // more. With it off, the halves split at the FLAT plane, so hiding the upper half cut the
+    // model open at the plane and showed its inside as a jagged flat patch over the lower half.
+    if (!is_curved_surface() || m_curved_sheet.is_flat() || m_hide_cut_plane) {
         m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0, 1.0);
         return;
     }
@@ -1826,6 +1855,15 @@ void GLGizmoCut3D::apply_side_visibility()
     const SideVisibility lower = non_planar_connector_editing() && m_lower_visibility == SideVisibility::Hidden ? SideVisibility::Visible
                                                                                                                 : m_lower_visibility;
     m_parent.set_color_clip_plane_alphas(side_visibility_alpha(upper), side_visibility_alpha(lower));
+    // [cutconn] once per change, not per frame.
+    static int last_logged = -1;
+    const int  state       = int(upper) * 10 + int(lower) + (m_connectors_editing ? 100 : 0);
+    if (state != last_logged) {
+        last_logged = state;
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] side alphas upper " << side_visibility_alpha(upper) << " lower " << side_visibility_alpha(lower)
+                                << " (editing " << m_connectors_editing << ", non-planar " << non_planar_connector_editing()
+                                << ", draw field tex " << m_draw_field_tex << ", draw line " << m_draw_stroke.valid() << ")";
+    }
 }
 
 void GLGizmoCut3D::update_curved_cap_model()
@@ -2220,12 +2258,14 @@ bool GLGizmoCut3D::unproject_on_curved_sheet(const Vec2d& mouse_position, Vec3d&
     // plane, and no hit on the sheet out past the part: a miss places nothing.
     if (m_connectors_editing) {
         update_curved_section();
-        if (!m_curved_section_raycaster)
+        if (!m_curved_section_raycaster) {
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] pick curved section: miss (no section - the sheet does not cross the part)";
             return false;
-        const Camera& camera = wxGetApp().plater()->get_camera();
-        Vec3f         hit_f, normal_f;
-        if (!m_curved_section_raycaster->unproject_on_mesh(mouse_position, Transform3d::Identity(), camera, hit_f, normal_f))
+        }
+        Vec3d hit_w;
+        if (!pick_open_surface(*m_curved_section_raycaster, mouse_position, hit_w, "curved section"))
             return false;
+        const Vec3f hit_f = hit_w.cast<float>();
         Vec3d hit_d = hit_f.cast<double>();
         if (const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info(); sel && sel->model_object() && sel->get_active_instance() >= 0) {
             hit_d -= sel->model_object()->instances[sel->get_active_instance()]->get_offset();
@@ -3921,15 +3961,15 @@ bool GLGizmoCut3D::unproject_on_draw_surface(const Vec2d& mouse_position, Vec3d&
         return false;
 
     update_draw_surface_raycaster();
-    if (!m_draw_surface_raycaster)
+    if (!m_draw_surface_raycaster) {
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] pick drawn section: miss (no section - the drawn surface does not cross the part)";
         return false;
+    }
 
-    const Camera& camera = wxGetApp().plater()->get_camera();
-    Vec3f hit_f, normal_f;
-    if (!m_draw_surface_raycaster->unproject_on_mesh(mouse_position, Transform3d::Identity(), camera, hit_f, normal_f))
+    // The pick target is the drawn section (an open surface): see pick_open_surface().
+    Vec3d hit;
+    if (!pick_open_surface(*m_draw_surface_raycaster, mouse_position, hit, "drawn section"))
         return false;
-
-    const Vec3d hit = hit_f.cast<double>();
 
     // NO CONTOUR TEST HERE, and that is deliberate. The curved sheet's version
     // projects the hit back down onto the plane and asks the object clipper whether
@@ -6566,6 +6606,11 @@ void GLGizmoCut3D::render_clipper_cut()
     // slices at a single z, so the clipper's cap is flat by construction and
     // drawing it here would put a flat disc through the curved one.
     if (is_curved_surface() && !m_curved_sheet.is_flat()) {
+        static bool logged_curved_skip = false;
+        if (m_connectors_editing && !logged_curved_skip) {
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] flat cap skipped (curved sheet): curved cap drawn instead";
+            logged_curved_skip = true;
+        }
         render_curved_cap();
         return;
     }
@@ -6581,8 +6626,14 @@ void GLGizmoCut3D::render_clipper_cut()
     // drawn cut - the one moment the flat outline is guaranteed to be wrong. The
     // draw surface is the substrate there too (placement raycasts it), so in Draw
     // mode the clipper never renders, connectors editing or not.
-    if (is_draw_surface())
+    if (is_draw_surface()) {
+        static bool logged_draw_skip = false;
+        if (m_connectors_editing && !logged_draw_skip) {
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] flat cap skipped (drawn cut): drawn section drawn instead";
+            logged_draw_skip = true;
+        }
         return;
+    }
 
     if (! m_connectors_editing)
         ::glDisable(GL_DEPTH_TEST);
@@ -8171,6 +8222,11 @@ void GLGizmoCut3D::set_connectors_editing(bool connectors_editing)
 
     const bool clip = clip_during_connector_editing();
     m_c->object_clipper()->set_behavior(clip, clip, double(m_contour_width));
+    BOOST_LOG_TRIVIAL(info) << "[cutconn] connectors editing " << (m_connectors_editing ? "ON" : "OFF") << ", surface "
+                            << (is_draw_surface() ? (m_draw_stroke.valid() ? "Draw (line ok)" : "Draw (no line)") :
+                                is_curved_surface() ? (m_curved_sheet.is_flat() ? "Curved (flat sheet)" : "Curved") : "Flat")
+                            << ", flat clipper " << (clip ? "ON" : "off") << ", upper half "
+                            << (non_planar_connector_editing() ? "hidden" : "as set") << ", draw field tex " << m_draw_field_tex;
     // The upper half hides while connectors are placed on a curved or drawn surface, the way
     // the flat clipper hides it on a flat cut (and comes back when editing ends).
     apply_side_visibility();
@@ -11218,10 +11274,15 @@ bool GLGizmoCut3D::process_cut_line(SLAGizmoEventType action, const Vec2d& mouse
 
 bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_position)
 {
+    BOOST_LOG_TRIVIAL(info) << "[cutconn] click at (" << mouse_position.x() << ", " << mouse_position.y() << "), surface "
+                            << (draw_connectors_live() ? "Draw" : is_curved_surface() && !m_curved_sheet.is_flat() ? "Curved" : "Flat")
+                            << ", editing " << m_connectors_editing << ", type " << int(m_connector_type);
     if (!m_connectors_editing)
         return false;
-    if (is_tac_joint_type() && !tac_joint_mode_supported())
+    if (is_tac_joint_type() && !tac_joint_mode_supported()) {
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] click refused: TAC Joint not supported on this cut";
         return false;
+    }
 
     Vec3d pos;
     Vec3d pos_world;
@@ -11355,6 +11416,8 @@ bool GLGizmoCut3D::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_posi
     CutConnectors& connectors = m_c->selection_info()->model_object()->cut_connectors;
 
     if (action == SLAGizmoEventType::LeftDown) {
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] left down in connectors mode, hover id " << m_hover_id << (shift_down ? " shift" : "")
+                                << (alt_down ? " alt" : "") << (m_hover_id == -1 ? "" : " - over a grabber/connector, no new connector");
         if (shift_down || alt_down) {
             // left down with shift - show the selection rectangle:
             if (m_hover_id == -1)
