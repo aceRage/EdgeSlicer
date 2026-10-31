@@ -27,8 +27,9 @@ namespace SliceV1 {
 const std::vector<std::string>& pair_features();
 
 // The instance API's manifest version (GET /api `version`). 3: slice_v1; 4: PR D, arrange (the
-// layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo).
-constexpr int INSTANCE_API_VERSION = 4;
+// layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo);
+// 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove).
+constexpr int INSTANCE_API_VERSION = 5;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
@@ -221,6 +222,43 @@ LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bo
 // whatever it is; otherwise it must name the topmost undo snapshot exactly, so a phone's Undo after
 // an Arrange never undoes something a person did at the PC in the meantime.
 bool undo_matches(const std::string& expect, const std::string& top);
+
+// ---- PR F: filament settings (feature "slice_filament_settings") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 4: a slot's filament preset edited like
+// the Process tab, saved, reverted, and a slot removed, from the phone.
+
+// The slots whose preset is the same as `slot`'s, `slot` included, in order. The Filament tab edits
+// one copy of a preset, so an edit made for one of them changes all of them ("also changes slot 3").
+std::vector<int> slots_sharing(const std::vector<std::string>& slot_presets, int slot);
+
+// A request that would make the Filament tab edit `slot`: HTTP status 200 when it may, otherwise the
+// status and the sentence. The tab holds one edited copy and is bound to one slot (`bound`, the slot
+// the sidebar last edited, 0 before any). Unsaved edits (`dirty`) belong to `edited`, the preset the
+// tab has open; the desktop asks Save / Discard before it opens another preset, which a phone cannot
+// answer, so that is refused (409) until the edits are saved or reverted. A slot using the same
+// preset shares the edits and may be opened.
+struct Refusal
+{
+    int         status { 200 };
+    std::string error;
+    bool        ok() const { return status == 200; }
+};
+Refusal bind_filament_slot(int slot, int slots, int bound, bool dirty, const std::string& slot_preset, const std::string& edited);
+
+// The name POST /settings/filament/save saves under: `requested` (Save as) when given, else the
+// preset's own name, or "<name> - Custom" for a system preset (the fork's no-prompt rule, as the
+// process save). Surrounding blanks are dropped from `requested`.
+std::string filament_save_name(const std::string& requested, const std::string& edited, bool is_system);
+
+// Save as names a preset for one slot: after the save the desktop moves every slot that used the old
+// preset to the new one (Sidebar::update_presets_from_to); the other slots go back to the old preset.
+std::vector<std::string> slots_after_save_as(std::vector<std::string> before, int slot, const std::string& saved);
+
+// POST /presets/filament_remove?index=[&replace=][&confirm=1]: whether slot `slot` of `slots`
+// physical slots may go. `replace` (-1: none, objects using it fall back to the first filament) is
+// the slot whose filament they take instead; `mixed_dependents` mixed filaments are built from it,
+// which the desktop asks about, so they need `confirm`.
+Refusal filament_remove_check(int slot, int slots, int replace, int mixed_dependents, bool confirm);
 
 } // namespace SliceV1
 } // namespace GUI

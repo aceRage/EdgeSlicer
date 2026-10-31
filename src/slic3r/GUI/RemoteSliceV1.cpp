@@ -26,9 +26,10 @@ const std::vector<std::string>& pair_features()
     // slice_preview_live: that preview never selects / connects a Bambu printer without live=1;
     // slice_arrange: PR D - the layout lists overhanging instances, /plates/loose, `blocked` on
     // /plates, arrange one plate or all, the printable toggle and transform plate=;
-    // slice_orient: POST /plates/{i}/orient; slice_undo: POST /undo.
+    // slice_orient: POST /plates/{i}/orient; slice_undo: POST /undo;
+    // slice_filament_settings: PR F - settings/filament (+ revert, save, save as) and filament_remove.
     static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live",
-                                                "slice_arrange", "slice_orient", "slice_undo" };
+                                                "slice_arrange", "slice_orient", "slice_undo", "slice_filament_settings" };
     return f;
 }
 
@@ -482,6 +483,49 @@ LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bo
 bool undo_matches(const std::string& expect, const std::string& top)
 {
     return expect.empty() || expect == top;
+}
+
+// ---- PR F: filament settings ----
+
+std::vector<int> slots_sharing(const std::vector<std::string>& slot_presets, int slot)
+{
+    std::vector<int> out;
+    if (slot < 0 || slot >= (int) slot_presets.size()) return out;
+    for (size_t i = 0; i < slot_presets.size(); ++i)
+        if (slot_presets[i] == slot_presets[slot]) out.push_back((int) i);
+    return out;
+}
+
+Refusal bind_filament_slot(int slot, int slots, int bound, bool dirty, const std::string& slot_preset, const std::string& edited)
+{
+    if (slot < 0 || slot >= slots) return { 404, "no such filament slot" };
+    if (!dirty || slot_preset == edited) return {};
+    const int owner = bound >= 0 && bound < slots ? bound : 0;
+    return { 409, "filament " + std::to_string(owner + 1) + " has unsaved changes (" + edited + "): save or revert them first" };
+}
+
+std::string filament_save_name(const std::string& requested, const std::string& edited, bool is_system)
+{
+    const size_t a = requested.find_first_not_of(" \t");
+    if (a != std::string::npos) return requested.substr(a, requested.find_last_not_of(" \t") - a + 1);
+    return is_system ? edited + " - Custom" : edited;
+}
+
+std::vector<std::string> slots_after_save_as(std::vector<std::string> before, int slot, const std::string& saved)
+{
+    if (slot >= 0 && slot < (int) before.size()) before[slot] = saved;
+    return before;
+}
+
+Refusal filament_remove_check(int slot, int slots, int replace, int mixed_dependents, bool confirm)
+{
+    if (slot < 0 || slot >= slots) return { 404, "no such filament slot" };
+    if (slots <= 1) return { 409, "the last filament cannot be removed" };
+    if (replace >= slots || replace < -1 || replace == slot) return { 400, "replace must be another filament slot" };
+    if (mixed_dependents > 0 && replace < 0 && !confirm)
+        return { 409, std::to_string(mixed_dependents) + (mixed_dependents == 1 ? " mixed filament is" : " mixed filaments are") +
+                          " made from this filament and would be removed with it: confirm=1 to go ahead" };
+    return {};
 }
 
 } // namespace SliceV1
