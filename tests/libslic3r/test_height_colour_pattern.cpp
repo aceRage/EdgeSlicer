@@ -16,6 +16,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "libslic3r/HeightColourPattern.hpp"
+#include "libslic3r/HeightPatternInput.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
