@@ -681,7 +681,7 @@ static bool pick_open_surface(const MeshRaycaster& raycaster, const Vec2d& mouse
     BOOST_LOG_TRIVIAL(info) << "[cutconn] pick " << what << " at screen (" << mouse_position.x() << ", " << mouse_position.y()
                             << ") ray " << point.transpose() << " dir " << direction.transpose() << ": "
                             << (count > 0 ? "hit" : "miss (the ray does not cross the section)") << ", " << count << " crossing(s)"
-                            << (count > 0 ? ", at " : "") << (count > 0 ? hit.transpose() : Vec3d::Zero().transpose());
+                            << ", at " << Vec3d(count > 0 ? hit : Vec3d::Zero()).transpose();
     return count > 0;
 }
 
