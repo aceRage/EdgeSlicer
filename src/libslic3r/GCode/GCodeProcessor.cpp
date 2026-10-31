@@ -779,6 +779,7 @@ void GCodeProcessorResult::reset() {
     z_offset = 0.0f;
     bed_match_result = BedMatchResult(true);
     warnings.clear();
+    output_tool_filaments.clear();
 
     //BBS: add mutex for protection of gcode result
     unlock();
@@ -1536,6 +1537,8 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;
+    // Per-nozzle process P5: the G-code's tool -> filament map, for the send dialog.
+    m_result.output_tool_filaments = m_output_tool_filaments;
     finalize_object_masses();
 
     // update width/height of wipe moves

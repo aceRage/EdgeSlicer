@@ -5,6 +5,7 @@
 #include "Preset.hpp"
 #include "StartupProfile.hpp"
 #include "BambuFlowSupport.hpp"
+#include "ToolSlots.hpp"
 #include "PresetQuarantine.hpp"
 #include "PresetBundle.hpp"
 #include "AppConfig.hpp"
@@ -240,7 +241,13 @@ static void keep_flow_support_in_differential_save(const Preset &preset, std::ve
     // readable with the layout it was written for, so the layout is saved with it.
     if (preset.type == Preset::TYPE_PRINT) {
         const auto *ids = preset.config.option<ConfigOptionInts>("print_extruder_id");
-        if (ids != nullptr && !process_extruder_variant_slots(preset.config).empty() &&
+        // P5: a process split by nozzle size (diameter slots) saves its whole layout too, the sizes included.
+        const bool by_size = process_has_diameter_slots(preset.config);
+        if (by_size && ids != nullptr)
+            for (const char *key : { "print_extruder_id", "print_extruder_variant", "print_extruder_nozzle_diameter" })
+                if (std::find(dirty_options.begin(), dirty_options.end(), key) == dirty_options.end())
+                    dirty_options.emplace_back(key);
+        if (ids != nullptr && !by_size && !process_extruder_variant_slots(preset.config).empty() &&
             std::any_of(dirty_options.begin(), dirty_options.end(), [&preset, ids](const std::string &key) {
                 const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(preset.config.option(key));
                 return is_per_nozzle_process_option(key) && opt != nullptr && opt->size() == ids->values.size();

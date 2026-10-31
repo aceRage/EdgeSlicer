@@ -160,6 +160,8 @@ public:
     // summary under the filament list.
     void set_filament_nozzle(size_t filament, int tool);
     void update_filament_nozzle_summary();
+    // Per-nozzle process P5: pin 0-based filament `filament` to rack nozzle size `diameter` (0 = its extruder's nozzle).
+    void set_filament_rack_pin(size_t filament, double diameter);
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);

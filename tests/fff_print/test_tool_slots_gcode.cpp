@@ -5,6 +5,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "test_data.hpp"
 
@@ -221,4 +222,101 @@ TEST_CASE("Filaments assigned to other tools are named by those tools in the G-c
     REQUIRE(after.feeds.count(1) == 1);
     CHECK(after.feeds.at(0) == before.feeds.at(1));
     CHECK(after.feeds.at(1) == before.feeds.at(0));
+}
+
+// ---- Per-nozzle process P5 ----------------------------------------------------------------------------------------
+
+TEST_CASE("A process split by nozzle size in the editor prints each size its own speed", "[ToolSlots][GCode][P5]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.6");
+    const std::string  plain  = slice(config);
+    REQUIRE(split_process_per_diameter(config, { 0.4, 0.6 }));
+    // Split and unchanged: the same G-code.
+    const PerTool same = per_tool(slice(config));
+    CHECK(same.feeds == per_tool(plain).feeds);
+
+    const int slot = process_diameter_slot(config, "outer_wall_speed", 0.6, fvtStandard);
+    REQUIRE(slot >= 0);
+    config.option<ConfigOptionFloats>("outer_wall_speed")->values[size_t(slot)] = 23;
+    const PerTool tools = per_tool(slice(config));
+    REQUIRE(tools.feeds.count(0) == 1);
+    REQUIRE(tools.feeds.count(1) == 1);
+    CHECK(tools.feeds.at(0).count(41 * 60) == 1);
+    CHECK(tools.feeds.at(0).count(23 * 60) == 0);
+    CHECK(tools.feeds.at(1).count(23 * 60) == 1);
+    CHECK(tools.feeds.at(1).count(41 * 60) == 0);
+}
+
+TEST_CASE("The config block's purge matrix is in tool space when the tools are renamed", "[ToolSlots][GCode][OutputTools][P5]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.4");
+    auto matrix_line = [](const std::string &gcode) {
+        const size_t at = gcode.find("; flush_volumes_matrix = ");
+        if (at == std::string::npos)
+            return std::string();
+        return gcode.substr(at, gcode.find('\n', at) - at);
+    };
+    auto values_of = [](const std::string &line) {
+        std::vector<std::string> out;
+        std::string              rest = line.substr(line.find('=') + 2);
+        size_t                   start = 0;
+        while (start <= rest.size()) {
+            size_t comma = rest.find(',', start);
+            if (comma == std::string::npos)
+                comma = rest.size();
+            out.push_back(rest.substr(start, comma - start));
+            start = comma + 1;
+        }
+        return out;
+    };
+    const std::string plain = matrix_line(slice(config));
+    REQUIRE_FALSE(plain.empty());
+    config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 2, 1 };
+    const std::string swapped = matrix_line(slice(config));
+    REQUIRE_FALSE(swapped.empty());
+    const std::vector<std::string> before = values_of(plain);
+    const std::vector<std::string> after  = values_of(swapped);
+    REQUIRE(before.size() == after.size());
+    REQUIRE(before.size() % 4 == 0);
+    // Each 2 x 2 block (from -> to) with both tools swapped: the off-diagonal entries trade places.
+    for (size_t b = 0; b < before.size(); b += 4) {
+        CHECK(after[b] == before[b + 3]);
+        CHECK(after[b + 1] == before[b + 2]);
+        CHECK(after[b + 2] == before[b + 1]);
+        CHECK(after[b + 3] == before[b]);
+    }
+}
+
+TEST_CASE("A nozzle's process gives its filaments their first-layer width", "[ToolSlots][GCode][Widths][P5]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.4");
+    config.set_deserialize_strict({
+        { "line_width", "100%" },
+        { "outer_wall_line_width", "100%" },
+        { "inner_wall_line_width", "100%" },
+        { "sparse_infill_line_width", "100%" },
+        { "internal_solid_infill_line_width", "100%" },
+        { "top_surface_line_width", "100%" },
+        { "initial_layer_line_width", "0.5" },
+        { "brim_type", "no_brim" },
+        { "skirt_loops", "0" },
+    });
+    auto has_width = [](const std::set<double> &widths, double w) {
+        return std::any_of(widths.begin(), widths.end(), [w](double v) { return std::abs(v - w) < 0.006; });
+    };
+    const PerTool plain = per_tool(slice(config));
+    REQUIRE(plain.widths.count(1) == 1);
+    CHECK(has_width(plain.widths.at(1), 0.5));
+
+    // Tool 2 takes its speeds and widths from a process with a 0.3 mm first layer.
+    DynamicPrintConfig fine;
+    fine.set_key_value("initial_layer_line_width", new ConfigOptionFloatOrPercent(0.3, false));
+    REQUIRE(fill_nozzle_process_slots(config, { nullptr, &fine }));
+    const PerTool tools = per_tool(slice(config));
+    REQUIRE(tools.widths.count(0) == 1);
+    REQUIRE(tools.widths.count(1) == 1);
+    CHECK(has_width(tools.widths.at(0), 0.5));
+    CHECK_FALSE(has_width(tools.widths.at(0), 0.3));
+    CHECK(has_width(tools.widths.at(1), 0.3));
+    CHECK_FALSE(has_width(tools.widths.at(1), 0.5));
 }

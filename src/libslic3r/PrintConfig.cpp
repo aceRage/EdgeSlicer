@@ -4553,7 +4553,9 @@ void PrintConfigDef::init_fff_params()
     // fill_nozzle_process_slots, stamped into the region / object widths). Internal.
     for (const char *key : { "nozzle_outer_wall_line_width", "nozzle_inner_wall_line_width", "nozzle_sparse_infill_line_width",
                              "nozzle_internal_solid_infill_line_width", "nozzle_top_surface_line_width",
-                             "nozzle_support_line_width" }) {
+                             "nozzle_support_line_width",
+                             // P5
+                             "nozzle_skin_infill_line_width", "nozzle_skeleton_infill_line_width", "nozzle_initial_layer_line_width" }) {
         def = this->add(key, coFloatsOrPercents);
         def->label = key;
         def->tooltip = "Line width per filament from the per-nozzle process of its nozzle (internal).";
@@ -4580,7 +4582,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Per-tool process slots");
     def->tooltip = L("Experimental. The process keeps values per tool, flow type and nozzle diameter, and each filament "
                      "reads the values of the nozzle it prints on.");
-    def->mode = comDevelop;
+    def->mode = comAdvanced; // P5: on the Printer tab's Multimaterial page
     def->set_default_value(new ConfigOptionBool(false));
 
     // Per-nozzle process P4 (K3 Tier C, tests/research_creality_k3.md item 7): a printer that maps filaments to
@@ -4590,7 +4592,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Declare physical nozzles");
     def->tooltip = L("Experimental. Write the diameter and flow type of every physical nozzle into the G-code "
                      "(physical_nozzle_properties) so the printer can check the fitted nozzles.");
-    def->mode = comDevelop;
+    def->mode = comAdvanced; // P5: on the Printer tab's Multimaterial page
     def->set_default_value(new ConfigOptionBool(false));
 
     // Per-nozzle process P4 (spec 09-07 "Phase 4"): the diameters of the nozzles in an extruder's rack (H2C),
@@ -4619,7 +4621,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Values per nozzle");
     def->tooltip = L("Filament values for particular nozzles, used when the filament prints on a matching nozzle. "
                      "Entries are separated by \"|\". Each entry is a nozzle diameter (0.6), a flow type (high_flow) "
-                     "and/or a tool (T2), a colon, then key=value pairs separated by commas. "
+                     "and/or a tool (T2: tools are numbered as on the printer from T1, while the G-code counts from T0), "
+                     "a colon, then key=value pairs separated by commas. "
                      "Example: 0.6: nozzle_temperature=230, filament_max_volumetric_speed=30");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionStrings { "" });
