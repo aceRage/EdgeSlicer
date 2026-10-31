@@ -99,16 +99,16 @@ Flow PrintRegion::flow(const PrintObject &object, FlowRole role, double layer_he
     // extruder, so on a machine with more filaments than nozzles (H2D/H2C + AMS) indexing it by the
     // filament number silently returned the first nozzle's diameter for every filament past the
     // second. Ported from OrcaSlicer PR #13782 (LixNix).
-    auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, this->extruder(role))));
+    auto nozzle_diameter = float(nozzle_diameter_for_filament(print_config, this->extruder(role)));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
 coordf_t PrintRegion::nozzle_dmr_avg(const PrintConfig &print_config) const
 {
     // Mixed nozzle sizes: map each filament to its physical extruder before reading the diameter.
-    return (print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.wall_filament.value)) +
-            print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.sparse_infill_filament.value)) +
-            print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.solid_infill_filament.value))) / 3.;
+    return (nozzle_diameter_for_filament(print_config, m_config.wall_filament.value) +
+            nozzle_diameter_for_filament(print_config, m_config.sparse_infill_filament.value) +
+            nozzle_diameter_for_filament(print_config, m_config.solid_infill_filament.value)) / 3.;
 }
 
 coordf_t PrintRegion::bridging_height_avg(const PrintConfig &print_config) const

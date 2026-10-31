@@ -40,7 +40,7 @@ double resolve_outer_wall_line_width(const PrintRegionConfig &region_config, con
     // Same extruder PrintRegion::extruder(frExternalPerimeter) picks, mapped to the physical nozzle
     // it is loaded into (a filament id of 0 resolves to the first nozzle).
     const unsigned int filament = region_config.outer_wall_filament.value > 0 ? region_config.outer_wall_filament.value : region_config.wall_filament.value;
-    const double nozzle_diameter = print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, filament));
+    const double nozzle_diameter = nozzle_diameter_for_filament(print_config, filament);
     // Same fallback as PrintRegion::flow(): a zero outer wall width follows the object line width,
     // and a zero line width means "auto". Without it a zero width fed zero spacings into the
     // segmentation below.
