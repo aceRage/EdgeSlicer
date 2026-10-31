@@ -754,7 +754,7 @@ AirbrushCost airbrush_estimate_cost(const indexed_triangle_set &its, const Trian
         }
     }
 
-    std::vector<std::vector<int>> layers(size_t(nlayers));
+    std::vector<std::vector<int>> layers(static_cast<size_t>(nlayers));
     for (int l = 0; l < nlayers; ++l)
         layers[size_t(l)].assign(per_layer[size_t(l)].begin(), per_layer[size_t(l)].end());
     return airbrush_cost_from_layers(std::move(layers), params);
