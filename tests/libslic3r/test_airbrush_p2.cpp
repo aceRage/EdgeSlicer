@@ -752,10 +752,10 @@ TEST_CASE("Airbrush P2: cost meter numbers", "[Airbrush][AirbrushP2]")
         p.trafo = Transform3d(Eigen::Translation3d(0., 0., -bb.min.z()));
         job.parts.push_back(p);
         const CostJobResult cr = run_cost_job(job);
-        // The 4 mm band is about 20 layers of two filaments; each costs one swap, plus one back to the
+        // The 4 mm band (grown by the grain cells and the dithered rim) is 20-36 layers of two filaments; each costs one swap, plus one back to the
         // base filament after the band when the band ends on the sprayed one.
         CHECK(cr.cost.multi_tool_layers >= 16);
-        CHECK(cr.cost.multi_tool_layers <= 28);
+        CHECK(cr.cost.multi_tool_layers <= 36);
         CHECK(cr.cost.swaps >= cr.cost.multi_tool_layers);
         CHECK(cr.cost.swaps <= cr.cost.multi_tool_layers + 1);
     }

@@ -312,7 +312,11 @@ size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in, std
             sc.alpha = std::min(sc.alpha, m_stroke.opacity_cap);
         const Weights w   = composite_over(sc.start, m_stroke.slot, sc.alpha);
         const Cell   *old = find(key);
-        if (old == nullptr ? true : old->w != w) {
+        // A cell that is absent and stays empty (a rim deposit that rounds to 0) is no change.
+        bool any = false;
+        for (uint8_t v : w)
+            any |= v != 0;
+        if (old == nullptr ? any : old->w != w) {
             set_cell(key, w);
             ++changed;
             if (changed_keys)
