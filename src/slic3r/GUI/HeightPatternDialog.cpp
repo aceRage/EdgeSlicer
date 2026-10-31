@@ -619,6 +619,15 @@ HeightPatternDialog::HeightPatternDialog(wxWindow *parent, const HeightPatternDi
     m_band_list = new HeightPatternBandList(this, HCP_INNER_W);
     res->Add(m_band_list, 0, wxTOP, FromDIP(6));
 
+    // Phase 3: what the pattern costs in filament changes (and purge, when the project's purge table covers it).
+    m_change_text = new ::Label(this, Label::Body_14, wxEmptyString);
+    res->Add(m_change_text, 0, wxTOP, FromDIP(6));
+
+    // Phase 3: bands of this pattern the user edited by hand (edit mode only).
+    m_edits_text = new ::Label(this, Label::Body_12, wxEmptyString);
+    m_edits_text->SetForegroundColour(wxColour("#C77700"));
+    res->Add(m_edits_text, 0, wxTOP, FromDIP(4));
+
     m_note_text = new ::Label(this, Label::Body_12, wxEmptyString);
     m_note_text->SetForegroundColour(wxColour("#6B6B6B"));
     res->Add(m_note_text, 0, wxTOP, FromDIP(4));
@@ -731,7 +740,7 @@ void HeightPatternDialog::refit()
 
 void HeightPatternDialog::update_preview()
 {
-    if (m_result_text == nullptr || m_ok_button == nullptr || m_strip == nullptr || m_band_list == nullptr)
+    if (m_result_text == nullptr || m_ok_button == nullptr || m_strip == nullptr || m_band_list == nullptr || m_change_text == nullptr || m_edits_text == nullptr)
         return;   // still constructing
 
     const HeightPatternInput in = current_input();
@@ -773,6 +782,45 @@ void HeightPatternDialog::update_preview()
     hcp_set_wrapped(m_note_text, note, w, 0);
     hcp_set_wrapped(m_clash_text, m_has_clash ? from_u8(height_pattern_clash_text(pv.clashes)) + ". " + _L("Applying replaces them.") : wxString(), w, 0);
     hcp_set_wrapped(m_error_text, error, w, 0);
+
+    // Phase 3: filament changes (and purge) this pattern adds to one object.
+    wxString changes_line;
+    if (pv.ok()) {
+        const HeightPatternChangeEstimate est = estimate_height_pattern_changes(pv.expansion.ranges, top, m_ctx.change_input);
+        if (est.changes == 0)
+            changes_line = _L("Adds no filament changes.");
+        else {
+            changes_line = wxString::Format(est.changes == 1 ? _L("Adds about %d filament change per object") : _L("Adds about %d filament changes per object"), est.changes);
+            if (est.purge_known && est.purge_g > 0.)
+                changes_line += wxString::Format(_L(", about %.1f g of purge"), est.purge_g);
+            changes_line += ".";
+        }
+    }
+    hcp_set_wrapped(m_change_text, changes_line, w, 1);
+
+    // Phase 3: bands of this pattern edited by hand (edit mode). Apply rewrites all of them.
+    wxString edits_line;
+    if (!m_ctx.hand_edits.empty()) {
+        edits_line = _L("Edited by hand") + ": ";
+        for (size_t i = 0; i < m_ctx.hand_edits.size(); ++i) {
+            const HeightPatternBandDiff &d = m_ctx.hand_edits[i];
+            if (i > 0)
+                edits_line += "; ";
+            edits_line += d.band_number > 0 ? wxString::Format(_L("band %d"), d.band_number) : _L("gap");
+            edits_line += wxString::Format(" %s-%s", hcp_num(d.lo), hcp_num(d.hi));
+            switch (d.status) {
+            case HeightPatternBandStatus::Removed:            edits_line += " (" + _L("moved or removed") + ")"; break;
+            case HeightPatternBandStatus::FilamentChanged:    edits_line += " (" + wxString::Format(_L("filament %d instead of %d"), d.actual_extruder, d.expected_extruder) + ")"; break;
+            case HeightPatternBandStatus::LayerHeightChanged: edits_line += " (" + _L("layer height") + ")"; break;
+            }
+        }
+        edits_line += ". " + _L("Apply writes every band again; use Reset in the object list to put back only these.");
+    }
+    hcp_set_wrapped(m_edits_text, edits_line, w, 0);
+
+    // Phase 3: the 3D view draws the bands live.
+    if (m_ctx.on_preview)
+        m_ctx.on_preview(pv.ok() ? pv.expansion.ranges : std::vector<HeightPatternRange>());
 
     refit();
 }

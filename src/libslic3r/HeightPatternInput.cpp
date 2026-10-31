@@ -280,4 +280,135 @@ HeightPatternHealth height_pattern_health(const ModelObject &object, const Heigh
     return h;
 }
 
+// ---- filament changes the pattern adds -----------------------------------------------------------------
+
+HeightPatternChangeEstimate estimate_height_pattern_changes(const std::vector<HeightPatternRange> &ranges,
+                                                            double                                  object_top,
+                                                            const HeightPatternChangeInput         &in)
+{
+    HeightPatternChangeEstimate out;
+    out.purge_known = true;
+    if (ranges.empty())
+        return out;
+
+    auto change = [&](int from, int to) {
+        if (from == to)
+            return;
+        ++out.changes;
+        if (in.filament_count > 0 && from >= 1 && to >= 1 && from <= in.filament_count && to <= in.filament_count &&
+            in.flush_matrix.size() >= size_t(in.filament_count) * size_t(in.filament_count)) {
+            const double mm3 = double(in.flush_matrix[size_t(from - 1) * size_t(in.filament_count) + size_t(to - 1)]) * in.flush_multiplier;
+            out.purge_mm3 += mm3;
+            if (size_t(to) <= in.density.size() && in.density[size_t(to) - 1] > 0.)
+                out.purge_g += mm3 / 1000. * in.density[size_t(to) - 1];
+        } else
+            out.purge_known = false;
+    };
+
+    constexpr double eps = 1e-4;
+    int    cur = (ranges.front().lo < eps) ? ranges.front().extruder : in.base_filament;   // filament at Z 0
+    double z   = 0.;
+    for (const HeightPatternRange &r : ranges) {
+        if (r.lo - z > eps) {           // a stretch with no range: the object's own filament
+            change(cur, in.base_filament);
+            cur = in.base_filament;
+        }
+        change(cur, r.extruder);
+        cur = r.extruder;
+        z   = r.hi;
+    }
+    if (object_top - z > eps)           // above the last band
+        change(cur, in.base_filament);
+    return out;
+}
+
+// ---- bands the user edited by hand -----------------------------------------------------------------------
+
+namespace {
+
+bool hpi_is_band_index(const HeightColourPattern &p, size_t i)
+{
+    const bool has_gap_ranges = p.gap_mode != int(HeightPatternGapMode::ObjectFilament) && p.generated.size() > 1;
+    return !has_gap_ranges || i % 2 == 0;
+}
+
+int hpi_band_number(const HeightColourPattern &p, size_t i)
+{
+    if (!hpi_is_band_index(p, i))
+        return 0;
+    const bool has_gap_ranges = p.gap_mode != int(HeightPatternGapMode::ObjectFilament) && p.generated.size() > 1;
+    return int(has_gap_ranges ? i / 2 : i) + 1;
+}
+
+const ModelConfig *hpi_find(const ModelObject &o, double lo, double hi)
+{
+    for (const auto &kv : o.layer_config_ranges)
+        if (std::abs(kv.first.first - lo) < TOL && std::abs(kv.first.second - hi) < TOL)
+            return &kv.second;
+    return nullptr;
+}
+
+} // namespace
+
+std::vector<HeightPatternBandDiff> height_pattern_modified_ranges(const ModelObject &object, const HeightColourPattern &p)
+{
+    std::vector<HeightPatternBandDiff> out;
+    for (size_t i = 0; i < p.generated.size(); ++i) {
+        const HeightPatternRange &g = p.generated[i];
+        const ModelConfig *cfg = hpi_find(object, g.lo, g.hi);
+        HeightPatternBandDiff d;
+        d.band_number       = hpi_band_number(p, i);
+        d.lo                = g.lo;
+        d.hi                = g.hi;
+        d.expected_extruder = g.extruder;
+        if (cfg == nullptr) {
+            d.status = HeightPatternBandStatus::Removed;
+        } else if (config_matches(*cfg, g)) {
+            continue;
+        } else {
+            d.actual_extruder = cfg->get().has("extruder") ? cfg->get().opt_int("extruder") : 0;
+            d.status = d.actual_extruder != g.extruder ? HeightPatternBandStatus::FilamentChanged :
+                                                         HeightPatternBandStatus::LayerHeightChanged;
+        }
+        out.push_back(d);
+    }
+    return out;
+}
+
+int reset_height_pattern_modified_ranges(ModelObject &object, int pattern_id)
+{
+    const HeightColourPattern *p = find_height_colour_pattern(object, pattern_id);
+    if (p == nullptr)
+        return -1;
+
+    // The ranges that are still exactly what the pattern wrote stay as they are.
+    std::vector<const HeightPatternRange *> untouched, to_restore;
+    for (const HeightPatternRange &g : p->generated) {
+        const ModelConfig *cfg = hpi_find(object, g.lo, g.hi);
+        (cfg != nullptr && config_matches(*cfg, g) ? untouched : to_restore).push_back(&g);
+    }
+
+    int restored = 0;
+    for (const HeightPatternRange *g : to_restore) {
+        bool blocked = false;   // overlaps an untouched band: cannot happen for a pattern's own output, but never overwrite one
+        for (const HeightPatternRange *u : untouched)
+            if (u->lo < g->hi - TOL && u->hi > g->lo + TOL)
+                blocked = true;
+        if (blocked)
+            continue;
+        for (auto it = object.layer_config_ranges.begin(); it != object.layer_config_ranges.end();) {
+            if (it->first.first < g->hi - TOL && it->first.second > g->lo + TOL)
+                it = object.layer_config_ranges.erase(it);
+            else
+                ++it;
+        }
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("layer_height", new ConfigOptionFloat(g->layer_height));
+        cfg.set_key_value("extruder", new ConfigOptionInt(g->extruder));
+        object.layer_config_ranges[{ g->lo, g->hi }].assign_config(cfg);
+        ++restored;
+    }
+    return restored;
+}
+
 } // namespace Slic3r
