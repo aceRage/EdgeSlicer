@@ -1346,6 +1346,7 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
 void GCodeProcessor::reset()
 {
     m_mass_locator = nullptr;
+    m_output_tool_filaments.clear();
     m_booked_times.clear();
     m_booking_tool_change = false;
     m_skip_end_gcode_delays = false;
@@ -4180,7 +4181,8 @@ void GCodeProcessor::process_T(const std::string_view command)
             if ((m_flavor != gcfRepRapFirmware && m_flavor != gcfRepRapSprinter) || new_extruder != -1)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         } else {
-            unsigned char id = static_cast<unsigned char>(new_extruder);
+            // Per-nozzle process P4: a G-code that names assigned tools is read back in filaments.
+            unsigned char id = static_cast<unsigned char>(filament_of_output_tool(new_extruder));
             bool tool_change_stored = false;
             if (m_extruder_id != id) {
                 if (id >= m_result.extruders_count)
@@ -4898,7 +4900,8 @@ void GCodeProcessor::run_post_process()
         if (cmd.size() >= 2) {
             // Reserved BBL special T markers (T1000/T65535/...) are not toolchanges; don't clamp or warn.
             if (tool_number != -1 && !is_bbl_special_tool_command(tool_number)) {
-                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= tool_number) {
+                // Per-nozzle process P4: the temperatures are the filament's; the line keeps the G-code's tool.
+                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= int(filament_of_output_tool(unsigned(tool_number)))) {
                     // found an invalid value, clamp it to a valid one
                     tool_number = std::clamp<int>(0, m_extruder_temps_config.size() - 1, tool_number);
                     // emit warning
@@ -4915,8 +4918,9 @@ void GCodeProcessor::run_post_process()
                     backtrace, cmd,
                     // line inserter
                     [tool_number, this, &current_layer_id](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[tool_number] :
-                                                                    m_extruder_temps_first_layer_config[tool_number]);
+                        const size_t filament_number = filament_of_output_tool(unsigned(tool_number));
+                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[filament_number] :
+                                                                    m_extruder_temps_first_layer_config[filament_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
                         /**

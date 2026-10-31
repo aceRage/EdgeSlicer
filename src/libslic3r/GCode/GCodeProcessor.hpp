@@ -932,6 +932,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         ExtrusionRole m_extrusion_role;
         unsigned char m_extruder_id;
         unsigned char m_last_extruder_id;
+        std::vector<int> m_output_tool_filaments; // Per-nozzle process P4: see set_output_tool_filaments()
         ExtruderColors m_extruder_colors;
         ExtruderTemps m_extruder_temps;
         ExtruderTemps m_extruder_temps_config;
@@ -1000,6 +1001,13 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         void apply_config(const PrintConfig& config);
         void set_print(Print* print) { m_print = print; }
+        // Per-nozzle process P4: the filament each G-code tool prints (output_tool_filaments), when the G-code names
+        // assigned tools rather than filaments; empty otherwise. T<n> is read back as that filament.
+        void set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
+        unsigned int filament_of_output_tool(unsigned int tool) const
+        {
+            return tool < m_output_tool_filaments.size() && m_output_tool_filaments[tool] >= 0 ? unsigned(m_output_tool_filaments[tool]) : tool;
+        }
         // Orca #16291: locates extrusions in the objects and bodies it numbers, those objects listed beforehand.
         void set_mass_locator(MassLocator locator, std::vector<GCodeProcessorResult::ObjectMass> objects)
         {
