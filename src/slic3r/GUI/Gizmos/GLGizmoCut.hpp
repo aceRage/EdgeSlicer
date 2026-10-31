@@ -292,6 +292,26 @@ class GLGizmoCut3D : public GLGizmoBase
     // cap; for a curved sheet the cap is the sheet itself restricted to the
     // object's interior, sampled here on the same grid the sheet is drawn on.
     GLModel        m_curved_cap_model;
+    // 2026-10-31: the same cross-section as a PICK target for connectors (cut_surface_section()
+    // over the sheet, in the world), so a connector lands only where the curved cut goes
+    // through the part. Rebuilt when m_curved_section_key (the sheet + plane) changes.
+    TriangleMesh                   m_curved_section_mesh;
+    std::unique_ptr<MeshRaycaster> m_curved_section_raycaster;
+    size_t                         m_curved_section_key{ 0 };
+    size_t curved_surface_key() const;
+    // The part in the plane frame, for "is this connector inside the cross-section" on a curved or
+    // drawn cut. Rebuilt when the plane or the sheet moves.
+    CutSolidTest m_section_object;
+    size_t       m_section_object_key{ 0 };
+    void   update_curved_section();
+    // Drawn cut: the strip's cross-section with the part, drawn while connectors are placed.
+    GLModel m_draw_section_model;
+    void    render_draw_section();
+    // Connectors are being placed on a curved or drawn surface: the flat clipper must stay out of
+    // it, the upper half is hidden (as the flat clipper hides it on a flat cut) and the section
+    // of the real surface is shown and picked.
+    bool   non_planar_connector_editing() const;
+    bool   clip_during_connector_editing() const;
     bool           m_curved_cap_dirty{ true };
     // Hash of everything the cap depends on, so a redraw that changed nothing
     // (camera orbit, hover) does not pay for a rebuild.
@@ -1118,6 +1138,10 @@ protected:
     void render_cut_plane_input_window(CutConnectors &connectors, float x, float y, float bottom_limit);
     void init_input_window_data(CutConnectors &connectors);
     void render_input_window_warning() const;
+    void render_input_window_warning_lines() const;
+    // Docked width from the rows the panel lays out, and where its text wraps (2026-10-31).
+    float docked_panel_width() const;
+    float panel_wrap_pos() const;
     bool add_connector(CutConnectors&connectors, const Vec2d&mouse_position);
     bool delete_selected_connectors(CutConnectors&connectors);
     void select_connector(int idx, bool select);

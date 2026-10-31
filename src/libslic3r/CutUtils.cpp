@@ -15,6 +15,7 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -313,6 +314,78 @@ double cut_connector_footprint_radius(const CutConnector& connector)
     case CutConnectorType::TacJoint:   return tac_joint_footprint_radius(connector.tac_joint);
     default:                           return double(connector.radius) + double(std::max(0.f, connector.radius_tolerance));
     }
+}
+
+CutSolidTest::CutSolidTest(indexed_triangle_set solid)
+{
+    if (solid.empty())
+        return;
+    auto its = std::make_shared<indexed_triangle_set>(std::move(solid));
+    m_its    = its;
+    m_tree   = std::make_shared<AABBMesh>(*its);
+}
+
+bool CutSolidTest::contains(const Vec3d& p) const
+{
+    if (!m_tree || !p.allFinite())
+        return false;
+    // Parity along a direction no axis-aligned or cut-aligned face lies in, counted from the
+    // point outwards: odd means inside.
+    static const Vec3d dir = Vec3d(0.5772156649, 0.7071067812, 0.4142135624).normalized();
+    size_t ahead = 0;
+    for (const AABBMesh::hit_result& h : m_tree->query_ray_hits(p, dir))
+        if (h.is_hit() && h.distance() > 0.0)
+            ++ahead;
+    return (ahead & 1) != 0;
+}
+
+indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, const CutSolidTest& object, double max_edge)
+{
+    indexed_triangle_set out;
+    if (surface.empty() || object.empty())
+        return out;
+    max_edge          = std::max(0.05, max_edge);
+    const double max2 = max_edge * max_edge;
+
+    // Longest-edge bisection: a long thin strip triangle (a whole ruling of a drawn cut) splits
+    // along its length only, so it costs tens of triangles rather than a full grid.
+    using Tri = std::array<Vec3d, 3>;
+    std::vector<Tri> stack;
+    auto keep = [&](const Tri& t) {
+        if (!object.contains((t[0] + t[1] + t[2]) / 3.0))
+            return;
+        const int base = int(out.vertices.size());
+        for (const Vec3d& v : t)
+            out.vertices.emplace_back(v.cast<float>());
+        out.indices.emplace_back(base, base + 1, base + 2);
+    };
+    for (const Vec3i32& f : surface.indices) {
+        stack.push_back(Tri{ surface.vertices[f[0]].cast<double>(), surface.vertices[f[1]].cast<double>(),
+                             surface.vertices[f[2]].cast<double>() });
+        while (!stack.empty()) {
+            const Tri t = stack.back();
+            stack.pop_back();
+            int    longest = 0;
+            double len2    = -1.0;
+            for (int e = 0; e < 3; ++e) {
+                const double l = (t[(e + 1) % 3] - t[e]).squaredNorm();
+                if (l > len2) {
+                    len2    = l;
+                    longest = e;
+                }
+            }
+            // The stack bound only guards a degenerate input; a real triangle never gets near it.
+            if (len2 <= max2 || stack.size() > 4096) {
+                keep(t);
+                continue;
+            }
+            const int   a = longest, b = (longest + 1) % 3, c = (longest + 2) % 3;
+            const Vec3d m = 0.5 * (t[a] + t[b]);
+            stack.push_back(Tri{ t[a], m, t[c] });
+            stack.push_back(Tri{ m, t[b], t[c] });
+        }
+    }
+    return out;
 }
 
 // The same radius from a connector VOLUME, as Cut sees it: the plain kinds carry their size in
@@ -1292,7 +1365,8 @@ static bool is_unprocessed_rigid_connector(const ModelVolume* v)
 //     surface, so its plug / hole / pin halves land in the halves they are meant for;
 //   - a TAC Joint: its fit and engagement validated at the faces it really gets.
 // `inverse_cut_matrix` takes the connector volumes (and the halves) into the cut plane's frame.
-static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const CutSurfaceProbe& probe, const Transform3d& inverse_cut_matrix)
+static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const CutSurfaceProbe& probe, const Transform3d& inverse_cut_matrix,
+                                                         const CutSolidTest& object)
 {
     NonPlanarConnectors out;
     for (ModelVolume* volume : mo->volumes) {
@@ -1310,6 +1384,16 @@ static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const 
         const CutConnectorFit fit = cut_connector_fit(probe, inverse_cut_matrix * unscaled, connector_volume_footprint_radius(*volume), axial);
         if (!fit.on_surface)
             throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        // Where its axis meets the cut has to be INSIDE the part: a sheet or a drawn strip reaches
+        // well past the object, and a connector out there would only make holes in nothing.
+        {
+            const Transform3d in_plane = inverse_cut_matrix * unscaled;
+            Vec3d             axis     = in_plane.linear().col(2);
+            axis.normalize();
+            if (!object.empty() && !object.contains(in_plane.translation() + fit.centre_offset * axis))
+                throw std::invalid_argument(L("A connector is outside the part's cross-section on the cut surface. "
+                                              "Place it where the cut goes through the part."));
+        }
         if (!fit.fits()) {
             BOOST_LOG_TRIVIAL(warning) << "Cut: connector " << volume->name << " refused, the cut surface strays " << fit.deviation
                                        << " mm from its plane over its footprint (limit " << CutConnectorMaxSurfaceDeviation << " mm)";
@@ -1336,6 +1420,21 @@ static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const 
         out[volume] = NonPlanarConnector{ fit.face_lo, fit.face_hi, fit.deviation };
     }
     return out;
+}
+
+// The object's model parts, merged, in the cut plane's frame (the frame the sheet, the stroke and
+// the probe live in).
+static indexed_triangle_set object_in_plane(const ModelObject* mo, int instance, const Transform3d& to_plane)
+{
+    indexed_triangle_set solid;
+    const Transform3d inst_lin = mo->instances[instance]->get_transformation().get_matrix_no_offset();
+    for (const ModelVolume* v : mo->volumes)
+        if (v->is_model_part() && !v->mesh().empty()) {
+            TriangleMesh m(v->mesh());
+            m.transform(to_plane * inst_lin * v->get_matrix(), true);
+            its_merge(solid, m.its);
+        }
+    return solid;
 }
 
 static bool has_unprocessed_rigid_connector(const ModelObject* mo)
@@ -1436,8 +1535,9 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         if (!std::isfinite(thickness))
             throw std::invalid_argument(L("The cut thickness must be a finite number."));
         const Transformation cut_trafo = Transformation(m_cut_matrix);
-        connector_faces = prepare_non_planar_connectors(mo, CutSurfaceProbe::curved(sheet, std::max(0.0, thickness), offset),
-                                                        cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset()));
+        const Transform3d    to_plane  = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
+        connector_faces = prepare_non_planar_connectors(mo, CutSurfaceProbe::curved(sheet, std::max(0.0, thickness), offset), to_plane,
+                                                        CutSolidTest(object_in_plane(mo, m_instance, to_plane)));
     }
 
     // Before the loop below resets every part's painting.
@@ -1630,18 +1730,11 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
             throw std::invalid_argument(L("The cut thickness must be a finite number."));
         const Transformation cut_trafo  = Transformation(m_cut_matrix);
         const Transform3d    to_plane   = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
-        const Transform3d    inst_lin   = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
-        indexed_triangle_set solid;
-        for (const ModelVolume* v : mo->volumes)
-            if (v->is_model_part() && !v->mesh().empty()) {
-                TriangleMesh m(v->mesh());
-                m.transform(to_plane * inst_lin * v->get_matrix(), true);
-                its_merge(solid, m.its);
-            }
-        const CutSurfaceProbe probe = CutSurfaceProbe::drawn(stroke, params, solid);
+        indexed_triangle_set solid      = object_in_plane(mo, m_instance, to_plane);
+        const CutSurfaceProbe probe     = CutSurfaceProbe::drawn(stroke, params, solid);
         if (!probe.valid())
             throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
-        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane);
+        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane, CutSolidTest(std::move(solid)));
     }
 
     // Before the loop below resets every part's painting.

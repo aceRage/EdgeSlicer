@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <libslic3r/AABBMesh.hpp>
 #include <libslic3r/CurvedCut.hpp>
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/DrawCut.hpp>
@@ -423,4 +424,89 @@ TEST_CASE("A flat sheet with a TAC Joint and a Pin is exactly the planar cut", "
         REQUIRE((plane.second[i].min - sheet.second[i].min).norm() < 1e-9);
         REQUIRE((plane.second[i].max - sheet.second[i].max).norm() < 1e-9);
     }
+}
+
+// ------------------------------------------------------------------------ the cross-section (picking)
+
+namespace {
+indexed_triangle_set plane_cube()
+{
+    indexed_triangle_set its = its_make_cube(CUBE, CUBE, CUBE);
+    for (Vec3f& v : its.vertices)
+        v -= Vec3f::Constant(float(0.5 * CUBE));
+    return its;
+}
+bool section_hit(const AABBMesh& tree, const Vec3d& from, const Vec3d& dir)
+{
+    for (const AABBMesh::hit_result& h : tree.query_ray_hits(from, dir))
+        if (h.is_hit())
+            return true;
+    return false;
+}
+} // namespace
+
+TEST_CASE("Curved cut: a pick outside the part's cross-section is refused", "[CutConnectorSurface][CurvedCut]")
+{
+    const CurvedCutSheet       sheet   = gentle_dome(); // 80 mm across, the cube 30 mm
+    const indexed_triangle_set section = cut_surface_section(sheet.sample_sheet(CurvedCutSheet::DefaultSamples), CutSolidTest(plane_cube()), 1.0);
+    REQUIRE(!section.empty());
+    // The section is the sheet INSIDE the cube only, to within one split edge.
+    for (const Vec3f& v : section.vertices) {
+        REQUIRE(std::abs(v.x()) <= 0.5 * CUBE + 1.0);
+        REQUIRE(std::abs(v.y()) <= 0.5 * CUBE + 1.0);
+    }
+    const AABBMesh tree(section);
+    REQUIRE(section_hit(tree, Vec3d(0., 0., 50.), -Vec3d::UnitZ()));    // over the part: picks
+    REQUIRE(section_hit(tree, Vec3d(12., -9., 50.), -Vec3d::UnitZ()));
+    REQUIRE(!section_hit(tree, Vec3d(25., 0., 50.), -Vec3d::UnitZ()));  // the sheet out past the part: no pick
+    REQUIRE(!section_hit(tree, Vec3d(-30., 22., 50.), -Vec3d::UnitZ()));
+
+    // And Cut refuses a connector standing on the sheet out there.
+    Model        model;
+    ModelObject* mo = surface_cube(model);
+    add_tac_joint_volume(mo, surface_tac(curved_cut_sheet_point(sheet, 25., 0.), curved_cut_sheet_frame(sheet, 25., 0.)), "TAC Joint-1");
+    Cut               cut(mo, 0, Transform3d::Identity(), surface_attrs());
+    const std::string msg = refusal_message([&]() { cut.perform_with_curved_sheet(sheet); });
+    INFO(msg);
+    REQUIRE(msg.find("outside the part") != std::string::npos);
+    REQUIRE(mo->volumes.size() == 2);
+}
+
+TEST_CASE("Drawn cut: a pick outside the part's cross-section is refused", "[CutConnectorSurface][DrawCut]")
+{
+    DrawCutStroke stroke = top_arc(40.0, std::asin(15.0 / 40.0));
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    const DrawCutParams        params = through_params(); // 5 mm of extension above the top face
+    const indexed_triangle_set cube   = plane_cube();
+    BoundingBoxf3              bbox;
+    for (const Vec3f& v : cube.vertices)
+        bbox.merge(v.cast<double>());
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bbox, 0.0, &cube);
+    REQUIRE(!cutter.empty());
+    const indexed_triangle_set section = cut_surface_section(cutter, CutSolidTest(plane_cube()), 1.0);
+    REQUIRE(!section.empty());
+    REQUIRE(section.indices.size() < 200000);
+    for (const Vec3f& v : section.vertices)
+        REQUIRE(v.z() <= 0.5 * CUBE + 1.0); // nothing of the extension above the top face
+
+    const AABBMesh tree(section);
+    const double   s = 0.5 * stroke.length();
+    const Vec3d    n = draw_cut_surface_normal(stroke, params, s, 0.0);
+    // Halfway down the strip, inside the part: picks.
+    const Vec3d inside = draw_cut_surface_point(stroke, params, s, 0.5 * CUBE);
+    REQUIRE(section_hit(tree, inside + 10.0 * n, -n));
+    // On the extension, 3 mm above the top face: the strip is there, the part is not - no pick.
+    const Vec3d outside = draw_cut_surface_point(stroke, params, s, -3.0);
+    REQUIRE(outside.z() > 0.5 * CUBE);
+    REQUIRE(!section_hit(tree, outside + 10.0 * n, -n));
+
+    // And Cut refuses a Pin standing on the extension.
+    Model        model;
+    ModelObject* mo = surface_cube(model);
+    add_pushfit_volume(mo, surface_pin(outside, draw_cut_surface_frame(stroke, params, s, -3.0)), "Connector-1");
+    Cut               cut(mo, 0, Transform3d::Identity(), surface_attrs());
+    const std::string msg = refusal_message([&]() { cut.perform_with_draw_stroke(stroke, params); });
+    INFO(msg);
+    REQUIRE((msg.find("outside the part") != std::string::npos || msg.find("not on the cut surface") != std::string::npos));
+    REQUIRE(mo->volumes.size() == 2);
 }
