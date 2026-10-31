@@ -11,6 +11,7 @@
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/CurvedCut.hpp"
 #include "libslic3r/DrawCut.hpp"
+#include "libslic3r/TacJoint.hpp"
 #include "imgui/imgui.h"
 
 namespace Slic3r {
@@ -93,6 +94,14 @@ class GLGizmoCut3D : public GLGizmoBase
     PickingModel m_cone;
     PickingModel m_cube;
     std::map<CutConnectorAttributes, PickingModel> m_shapes;
+    struct TacJointModels
+    {
+        TacJointParams params;
+        PickingModel   connector;
+        GLModel        cutter;
+    };
+    // Each placed joint may have different dimensions/clearances. Keep its own meshes.
+    std::map<size_t, TacJointModels>                 m_tac_joint_models;
     std::vector<std::shared_ptr<SceneRaycasterItem>> m_raycasters;
 
     GLModel m_circle;
@@ -164,6 +173,7 @@ class GLGizmoCut3D : public GLGizmoBase
     // Push-fit Pin connector (tests/design_pushfit_connector.md): the panel's working values,
     // copied into every selected Pin connector on each edit.
     PushFitParams    m_pushfit;
+    TacJointParams   m_tac_joint;
     // The preset selector: 0 S, 1 M, 2 L, 3 Auto, 4 Custom (Auto is a one-shot sizing).
     int              m_pushfit_preset_ui{ 1 };
     bool             m_pushfit_auto_misfit{ false };
@@ -1065,6 +1075,13 @@ protected:
     double flexi_slice_closing_radius() const;
     // Push-fit Pin
     bool   is_pushfit_type() const { return m_connector_type == CutConnectorType::PushFit; }
+    bool   is_tac_joint_type() const { return m_connector_type == CutConnectorType::TacJoint; }
+    bool   tac_joint_mode_supported() const;
+    // Bit mask: scale, side clearance, end clearance, offset. Reset/type changes use all fields.
+    void   sync_tac_joint_params(CutConnectors& connectors, unsigned fields = 0x0f);
+    void   render_tac_joint_inputs(CutConnectors& connectors);
+    void   update_tac_joint_models(const CutConnectors& connectors);
+    bool   tac_joint_outside_body(const CutConnector& connector, const Vec3d& world_pos) const;
     bool   render_pushfit_mm_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
     bool   render_pushfit_checkbox(const wxString& label, bool& value);
     void   render_pushfit_inputs(CutConnectors& connectors);

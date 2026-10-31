@@ -31,6 +31,10 @@ bool has_flexi_joint(const ModelObject* mo);
 // cut_info.pushfit, so the mesh is only for previews and overlap checks.
 ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
 
+// TAC Joint meshes already have their physical dimensions and clearance. Never apply the
+// generic connector radius/height scaling to these reference meshes.
+ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
 // A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
 // from its object frame to the frame the halves' meshes are built in (the source object's frame
 // with the instance's rotation and scale applied, no offset). The assembled pose (C1) and the pin
