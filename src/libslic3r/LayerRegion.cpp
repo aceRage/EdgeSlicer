@@ -113,8 +113,20 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
 {
     const PrintConfig          &print_config = m_layer->object()->print()->config();
     ConfigOptionFloatOrPercent config_width;
-    if (use_initial_layer_width && print_config.initial_layer_line_width.value > 0) {
-        config_width = print_config.initial_layer_line_width;
+    // Per-nozzle process P5: the first-layer width of the process of the nozzle that prints this role, when the job
+    // has per-nozzle processes (nozzle_initial_layer_line_width, empty otherwise: the plate's width as before).
+    const ConfigOptionFloatOrPercent *initial_width = &print_config.initial_layer_line_width;
+    ConfigOptionFloatOrPercent        nozzle_initial_width;
+    if (use_initial_layer_width && !print_config.nozzle_initial_layer_line_width.values.empty()) {
+        const unsigned int filament = this->extruder(role);
+        if (filament >= 1 && filament <= print_config.nozzle_initial_layer_line_width.values.size()) {
+            const FloatOrPercent &w = print_config.nozzle_initial_layer_line_width.values[filament - 1];
+            nozzle_initial_width    = ConfigOptionFloatOrPercent(w.value, w.percent);
+            initial_width           = &nozzle_initial_width;
+        }
+    }
+    if (use_initial_layer_width && initial_width->value > 0) {
+        config_width = *initial_width;
     } else if (role == frExternalPerimeter) {
         config_width = m_region->config().outer_wall_line_width;
     } else if (role == frPerimeter) {
