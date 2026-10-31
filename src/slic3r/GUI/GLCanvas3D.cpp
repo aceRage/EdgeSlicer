@@ -1,4 +1,5 @@
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Airbrush/AirbrushBake.hpp"
 #include "GLCanvas3D.hpp"
 #include "SequentialPrintClearance.hpp"
 #include "slic3r/Utils/ToolbarScaleLogic.hpp"
@@ -7331,6 +7332,16 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
 
     //BBS: notify instance updates to part plater list
     m_selection.notify_instance_update(-1, -1);
+
+    // Edge (Airbrush P3, A4): grain is a printed size, so an airbrushed part re-bakes at its new scale.
+    {
+        std::set<int> objects_done;
+        for (const std::pair<int, int>& i : done)
+            if (objects_done.insert(i.first).second)
+                for (ModelVolume* mv : m_model->objects[i.first]->volumes)
+                    if (mv->airbrush_field && Airbrush::airbrush_rebake_after_scale(*mv))
+                        BOOST_LOG_TRIVIAL(info) << "Airbrush: re-baked '" << mv->name << "' at its new scale";
+    }
 
     // Fixes sinking/flying instances
     for (const std::pair<int, int>& i : done) {
