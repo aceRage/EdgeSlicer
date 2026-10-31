@@ -1479,7 +1479,7 @@ void GLGizmoPainterBase::spread_tick()
 bool GLGizmoPainterBase::on_spread_escape()
 {
     if (m_spread == nullptr)
-        return false;
+        return on_airbrush_escape();
     spread_stop_timer();
     SpreadPress &p = *m_spread;
     if (p.mesh_idx < int(m_triangle_selectors.size()) && m_triangle_selectors[p.mesh_idx].get() == p.selector) {
