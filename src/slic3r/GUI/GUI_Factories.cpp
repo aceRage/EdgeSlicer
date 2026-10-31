@@ -5,6 +5,8 @@
 // cut_target_label() - how "Copy cut to..." names an object in its submenu.
 #include "libslic3r/CutRecipe.hpp"
 #include "libslic3r/QuadRemesh.hpp"
+// Ultra: voxel_ops_available() gates the "Round all edges" entry below.
+#include "libslic3r/MeshRepair.hpp"
 
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
@@ -1184,6 +1186,20 @@ wxMenuItem* MenuFactory::append_menu_item_fix_through_netfabb(wxMenu* menu)
             obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
             return !obj_idxs.empty() || !vol_idxs.empty();
         }, plater());
+
+    // Ultra: "Round all edges" - the Edit gizmo's interim whole-mesh fillet, next to
+    // Repair/Remesh because it is the same voxel round trip with a rounding filter in
+    // the middle. Hidden without OpenVDB, for the same reason the quad remesher is
+    // hidden without QuadriFlow.
+    if (voxel_ops_available()) {
+        append_menu_item(menu, wxID_ANY, _L("Round all edges..."), _L("Fillet every edge of the selected parts by a radius (the part is rebuilt, so painted data is cleared)"),
+            [](wxCommandEvent&) { obj_list()->round_all_edges(); }, "", menu,
+            []() {
+                std::vector<int> obj_idxs, vol_idxs;
+                obj_list()->get_selection_indexes(obj_idxs, vol_idxs);
+                return !obj_idxs.empty() || !vol_idxs.empty();
+            }, plater());
+    }
 
     // Ultra: Phase 2 - the quad remesher, next to Repair/Remesh as the spec asks.
     // Hidden entirely when the build has no QuadriFlow: an entry that can only ever

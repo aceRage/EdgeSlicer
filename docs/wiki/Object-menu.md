@@ -72,7 +72,7 @@ Assemble-view menus stay stock-like — they do **not** get Visibility, Support 
 
 | Situation | What happens |
 |---|---|
-| **Bake slice to mesh / Quad remesh / Edit cut** | On **`feat/ultra-preferences` (staging)** — see dedicated pages. Not on `main` yet. SVG/text gizmo **Bake** is still a different feature. |
+| **Bake slice to mesh / Quad remesh / Round all edges / Edit cut** | On **`feat/ultra-preferences` (staging)** — see dedicated pages. Not on `main` yet. SVG/text gizmo **Bake** is still a different feature. |
 | Hidden objects/parts | Hidden in the 3D view but **still slice/print**. |
 | Clone | There is no Clone *submenu* — one **Clone** item opens a dialog; **Fill** inside that dialog is fill-bed. |
 

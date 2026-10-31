@@ -36,6 +36,7 @@ Tooltip: *Rebuild the selected parts as an even grid of quads at a target face c
 ## Related
 
 - [Repair/Remesh](Repair-Remesh)  
+- [Round all edges](Round-all-edges)  
 - [Object menu](Object-menu)  
 - [Sculpt](Sculpt)  
 - [Home](Home)  

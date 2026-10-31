@@ -124,6 +124,7 @@ On the **Snapmaker U1**, *Unload filaments after print* is a machine setting wit
 - **Scale to build volume** — on the object menu for every printer, with a dialog for uniform or per-axis scaling, an edge gap, a top gap and auto-centre. Non-uniform scaling of a rotated part warns before it shears.
 - **Slice bake** — *Bake slice to mesh…* turns an object's slices back into a solid mesh, one closed prism per layer with zero open edges, so a 0.3 mm fuzzy skin survives a re-slice at 0.12 mm. Bake from the slice contours or from the extrusion paths, replace the object or add it as a new one, with a Resolution control and *Smooth vertical steps*.
 - **Quad remesh** — an optional QuadriFlow quad remesher in the object menu and the Sculpt panel, deterministic run to run; it refuses non-edge-manifold assemblies with a clear message and runs off the UI thread.
+- **Round all edges** — a whole-mesh fillet by radius, with no bottom slab by default, so vertical fillets run to the bed with rounded footprint corners while the base stays flat and sharp.
 - **Mesh booleans** on the Manifold backend (automatic fallback) with a part picker (Union no longer comes back inside-out on mirrored volumes); **Repair/Remesh** asks for a voxel size, keeps the bottom exactly flat and snaps sharp edges back.
 - **Visibility** — Normal / Ghost (X-ray) / Hidden per object or part, with an eye column in the object list.
 - **Move panel align & distribute**, **bottom-referenced Z**, **keep imported Z** (drop-to-bed toggle), double-click to select a part.

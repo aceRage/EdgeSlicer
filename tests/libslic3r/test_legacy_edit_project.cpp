@@ -18,46 +18,25 @@ using namespace Slic3r;
 
 namespace {
 
-// The Edit gizmo (and Round all edges) wrote the result back as an ordinary
-// ModelVolume mesh. Old projects therefore contain no MeshEdit session and no
-// extra zip keys — only a triangle mesh. This helper builds that shape.
+// tests/data/legacy_round_cube_p4.3mf is a REAL pre-P5 project. It was written by
+// the P4 tree (a415f9bf57 + its review fixes, which still had the Edit gizmo,
+// MeshEdit and MeshRound): a 20 mm cube put through round_with_options() with
+// round_by_voxels at r = 2 mm (all other RoundOptions at their defaults), stored
+// with store_bbs_3mf() the same way the GUI saves a project. The mesh tools wrote
+// their result back as an ordinary ModelVolume mesh, so the file holds no
+// mesh-edit session and no extra zip keys - only a triangle mesh. P5 removed the
+// Edit gizmo; this checks such a project still opens with the same geometry.
+const char *FIXTURE = "legacy_round_cube_p4.3mf";
 
-void one_edited_cube(Model &model)
-{
-    ModelObject *object = model.add_object();
-    object->name        = "edit-gizmo-cube";
-    ModelVolume *volume = object->add_volume(make_cube(20., 20., 20.));
-    volume->name        = "pushed-face";
-    object->add_instance();
-}
-
-DynamicPrintConfig project_config()
-{
-    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
-    for (const std::string &key : cfg.keys())
-        if (const ConfigOption *opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
-            cfg.erase(key);
-            cfg.option(key, true);
-        }
-    return cfg;
-}
+// Measured from the fixture's 3D/3dmodel.model when it was generated.
+constexpr size_t FIXTURE_TRIANGLES = 37460;
+constexpr double FIXTURE_VOLUME    = 7828.13; // mm^3; the unrounded cube is 8000
 
 void prepare_temp_dir()
 {
     const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
-}
-
-bool store_project(const std::string &path, Model &model)
-{
-    DynamicPrintConfig cfg = project_config();
-    StoreParams        sp;
-    sp.path     = path;
-    sp.model    = &model;
-    sp.config   = &cfg;
-    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
-    return store_bbs_3mf(sp);
 }
 
 bool load_project(const std::string &path, Model &model)
@@ -96,31 +75,25 @@ bool zip_has_entry_substr(const std::string &zip_path, const std::string &needle
 
 } // namespace
 
-TEST_CASE("A project saved after an Edit-gizmo mesh edit still opens as a mesh", "[LegacyMeshProject][3mf]")
+TEST_CASE("A project saved by the pre-P5 mesh tools still opens as a mesh", "[LegacyMeshProject][3mf]")
 {
     prepare_temp_dir();
-    Model src;
-    one_edited_cube(src);
-    REQUIRE(src.objects.size() == 1);
-    REQUIRE(src.objects.front()->volumes.size() == 1);
-    const double src_volume = TriangleMesh(src.objects.front()->volumes.front()->mesh()).volume();
-    REQUIRE(src_volume > 0.);
-
-    ScopedTemporaryFile file(".3mf");
-    REQUIRE(store_project(file.string(), src));
+    const std::string path = (boost::filesystem::path(TEST_DATA_DIR) / FIXTURE).string();
+    REQUIRE(boost::filesystem::exists(path));
     // The removed tools never wrote a sidecar. A load must not depend on one.
-    REQUIRE_FALSE(zip_has_entry_substr(file.string(), "meshedit"));
-    REQUIRE_FALSE(zip_has_entry_substr(file.string(), "mesh_edit"));
-    REQUIRE_FALSE(zip_has_entry_substr(file.string(), "bevel"));
+    REQUIRE_FALSE(zip_has_entry_substr(path, "meshedit"));
+    REQUIRE_FALSE(zip_has_entry_substr(path, "mesh_edit"));
+    REQUIRE_FALSE(zip_has_entry_substr(path, "bevel"));
 
     Model loaded;
-    REQUIRE(load_project(file.string(), loaded));
+    REQUIRE(load_project(path, loaded));
     REQUIRE(loaded.objects.size() == 1);
     REQUIRE(loaded.objects.front()->volumes.size() == 1);
     const ModelVolume *vol = loaded.objects.front()->volumes.front();
     REQUIRE(vol->is_model_part());
-    REQUIRE_FALSE(vol->mesh().empty());
-    REQUIRE(vol->mesh().its.indices.size() >= 12);
-    REQUIRE(TriangleMesh(vol->mesh()).volume() > 0.);
-    REQUIRE_THAT(TriangleMesh(vol->mesh()).volume(), Catch::Matchers::WithinAbs(src_volume, 1.0));
+    REQUIRE(vol->mesh().its.indices.size() == FIXTURE_TRIANGLES);
+    const double v = TriangleMesh(vol->mesh()).volume();
+    REQUIRE_THAT(v, Catch::Matchers::WithinAbs(FIXTURE_VOLUME, 0.5));
+    // Still the rounded shape, not a plain cube.
+    REQUIRE(v < 8000. - 100.);
 }

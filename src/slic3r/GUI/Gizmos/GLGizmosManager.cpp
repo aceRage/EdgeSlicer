@@ -218,9 +218,12 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             gizmo->set_icon_filename(m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg");
             break;
         case (EType::Edit):
+            // Reserved hole (not in the toolbar). It still needs a real file: an empty name is
+            // skipped by generate_icons_texture() and would shift every later sprite by one.
+            gizmo->set_icon_filename("design_edit.svg");
+            break;
         case (EType::CadFillet):
-            // Edit is a reserved hole (not in the toolbar). CadFillet is also hidden.
-            gizmo->set_icon_filename("reduce_triangles.svg");
+            gizmo->set_icon_filename("design_filletedge.svg"); // not in the toolbar; menu-opened
             break;
 #ifdef SLIC3R_CAD
         case (EType::Primitive):
@@ -275,8 +278,8 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
     m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
-    m_gizmos.emplace_back(new GLGizmoEditRemoved(m_parent, "reduce_triangles.svg", EType::Edit));
-    m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, "reduce_triangles.svg", EType::CadFillet));
+    m_gizmos.emplace_back(new GLGizmoEditRemoved(m_parent, "design_edit.svg", EType::Edit));
+    m_gizmos.emplace_back(new GLGizmoCadFillet(m_parent, "design_filletedge.svg", EType::CadFillet));
 #ifdef SLIC3R_CAD
     // Registered last: Primitive and Sketch are the final entries before Undefined, so
     // omitting them leaves every preceding m_gizmos index (indexed by EType) untouched.

@@ -151,6 +151,7 @@ add_executable(${_TEST_NAME}_tests
 	test_legacy_edit_project.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
+	test_mesh_round.cpp
 	test_quad_remesh.cpp
 	test_meshboolean.cpp
 	test_lay_on_face.cpp
