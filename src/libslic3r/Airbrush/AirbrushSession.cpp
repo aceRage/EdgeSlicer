@@ -30,7 +30,9 @@ void BrushSettings::sanitize()
     radius_mm = clamp_or(radius_mm, AIRBRUSH_RADIUS_MIN, AIRBRUSH_RADIUS_MAX, AIRBRUSH_RADIUS_DEFAULT);
     hardness  = clamp_or(hardness, 0.f, 1.f, AIRBRUSH_HARDNESS_DEFAULT);
     flow      = clamp_or(flow, AIRBRUSH_FLOW_MIN, 1.f, AIRBRUSH_FLOW_DEFAULT);
-    grain_mm  = clamp_or(grain_mm, AIRBRUSH_MIN_GRAIN_WALL_MM, AIRBRUSH_GRAIN_MAX, AIRBRUSH_DEFAULT_GRAIN_MM);
+    grain_mm  = clamp_or(grain_mm, AIRBRUSH_MIN_GRAIN_MM, AIRBRUSH_GRAIN_MAX, AIRBRUSH_DEFAULT_GRAIN_MM);
+    // 0 = Auto; anything else is an explicit nozzle.
+    nozzle_mm = nozzle_mm > 0.f ? clamp_or(nozzle_mm, AIRBRUSH_NOZZLE_MIN, AIRBRUSH_NOZZLE_MAX, 0.f) : 0.f;
 }
 
 std::string BrushSettings::to_string() const
@@ -39,6 +41,8 @@ std::string BrushSettings::to_string() const
     out.imbue(std::locale::classic());
     out << "radius=" << radius_mm << ";hardness=" << hardness << ";flow=" << flow << ";grain=" << grain_mm
         << ";mix=" << (mix_steps ? 1 : 0) << ";seed=" << seed;
+    if (nozzle_mm > 0.f)
+        out << ";nozzle=" << nozzle_mm;
     return out.str();
 }
 
@@ -74,20 +78,24 @@ BrushSettings BrushSettings::from_string(const std::string &s)
             b.grain_mm = v;
         else if (key == "mix")
             b.mix_steps = v != 0.f;
+        else if (key == "nozzle")
+            b.nozzle_mm = v;
     }
     b.sanitize();
     return b;
 }
 
-AirbrushBakeParams bake_params_from(const BrushSettings &brush_in, int base_filament)
+AirbrushBakeParams bake_params_from(const BrushSettings &brush_in, int base_filament, float printer_nozzle_mm)
 {
     BrushSettings brush = brush_in;
     brush.sanitize();
     AirbrushBakeParams p;
-    p.grain_mm      = brush.grain_mm;
-    p.mix_steps     = brush.mix_steps ? AIRBRUSH_DEFAULT_MIX_STEPS : 0;
-    p.seed          = brush.seed;
-    p.base_filament = std::max(0, base_filament);
+    p.grain_mm         = brush.grain_mm;
+    p.mix_steps        = brush.mix_steps ? AIRBRUSH_DEFAULT_MIX_STEPS : 0;
+    p.seed             = brush.seed;
+    p.base_filament    = std::max(0, base_filament);
+    p.design_nozzle_mm = brush.nozzle_mm;
+    airbrush_apply_nozzle_floors(p, airbrush_design_nozzle(p, printer_nozzle_mm));
     return p;
 }
 

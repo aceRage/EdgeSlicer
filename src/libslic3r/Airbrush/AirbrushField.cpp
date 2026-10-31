@@ -4,6 +4,9 @@
 #include "../AABBTreeIndirect.hpp"
 #include "../TriangleMesh.hpp"
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -329,6 +332,147 @@ size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in, std
 }
 
 // =============================================================================================
+// Fills (P3)
+// =============================================================================================
+
+size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys)
+{
+    if (!fn || !(opacity > 0.f) || m_slots.empty())
+        return 0;
+    opacity = std::min(opacity, 1.f);
+    const indexed_triangle_set &its  = surface.its();
+    const float                 step = 0.5f * m_cell;
+
+    // Every cell the surface touches, with the first sample (facet order) that landed in it.
+    struct Probe
+    {
+        Vec3f  p;
+        size_t facet;
+        int    cls;
+    };
+    std::unordered_map<uint64_t, size_t> index;
+    std::vector<std::pair<uint64_t, Probe>> probes;
+    auto visit = [&](const Vec3f &p, size_t f, int cls) {
+        const uint64_t key = key_of(p.cast<double>(), cls);
+        if (index.emplace(key, probes.size()).second)
+            probes.push_back({ key, Probe{ p, f, cls } });
+    };
+    for (size_t f = 0; f < its.indices.size(); ++f) {
+        const int cls = surface.classes()[f];
+        if (cls < 0)
+            continue;
+        const Vec3f v0 = its.vertices[size_t(its.indices[f][0])];
+        const Vec3f v1 = its.vertices[size_t(its.indices[f][1])];
+        const Vec3f v2 = its.vertices[size_t(its.indices[f][2])];
+        // The same facet-frame grid dab() samples, so a fill reaches exactly the cells a brush would.
+        const Vec3f n  = surface.facet_normal(f);
+        Vec3f       e1 = v1 - v0;
+        if (e1.squaredNorm() > 0.f && n.squaredNorm() > 0.f) {
+            e1.normalize();
+            const Vec3f e2 = n.cross(e1);
+            auto to2 = [&](const Vec3f &p) { return Vec2f((p - v0).dot(e1), (p - v0).dot(e2)); };
+            const Vec2f a = to2(v0), b = to2(v1), c = to2(v2);
+            const float det = (b.x() - a.x()) * (c.y() - a.y()) - (c.x() - a.x()) * (b.y() - a.y());
+            if (std::abs(det) > 0.f) {
+                const float tol   = 0.01f * step;
+                const float scale = std::max(std::sqrt(std::abs(det)), 1e-6f);
+                auto inside = [&](const Vec2f &q) {
+                    const float l1 = ((b.x() - q.x()) * (c.y() - q.y()) - (c.x() - q.x()) * (b.y() - q.y())) / det;
+                    const float l2 = ((c.x() - q.x()) * (a.y() - q.y()) - (a.x() - q.x()) * (c.y() - q.y())) / det;
+                    const float l3 = 1.f - l1 - l2;
+                    return l1 * scale >= -tol && l2 * scale >= -tol && l3 * scale >= -tol;
+                };
+                const int i0 = int(std::floor(std::min({ a.x(), b.x(), c.x() }) / step)), i1 = int(std::ceil(std::max({ a.x(), b.x(), c.x() }) / step));
+                const int j0 = int(std::floor(std::min({ a.y(), b.y(), c.y() }) / step)), j1 = int(std::ceil(std::max({ a.y(), b.y(), c.y() }) / step));
+                for (int j = j0; j <= j1; ++j)
+                    for (int i = i0; i <= i1; ++i) {
+                        const Vec2f q(float(i) * step, float(j) * step);
+                        if (inside(q))
+                            visit(v0 + e1 * q.x() + e2 * q.y(), f, cls);
+                    }
+            }
+        }
+        visit((v0 + v1 + v2) / 3.f, f, cls);
+    }
+    std::sort(probes.begin(), probes.end(), [](const auto &l, const auto &r) { return l.first < r.first; });
+
+    // Evaluate in parallel (each cell on its own), then apply in key order.
+    std::vector<Weights> target(probes.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, probes.size(), 1024), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++i) {
+            const Probe &pr = probes[i].second;
+            Coverage     cov {};
+            fn(pr.p, pr.facet, pr.cls, cov);
+            const Cell *old = find(probes[i].first);
+            Weights     w {};
+            uint32_t    sum = 0;
+            for (size_t s = 0; s < AIRBRUSH_MAX_SLOTS; ++s) {
+                const float o = old ? float(old->w[s]) : 0.f;
+                const float t = s < m_slots.size() ? 255.f * std::clamp(cov[s], 0.f, 1.f) : 0.f;
+                const long  v = std::lround(o + opacity * (t - o));
+                w[s]          = uint8_t(std::clamp<long>(v, 0, 255));
+                sum += w[s];
+            }
+            // Rounding may push the total a step past 255: take it off the largest slot.
+            while (sum > 255) {
+                size_t big = 0;
+                for (size_t s = 1; s < AIRBRUSH_MAX_SLOTS; ++s)
+                    if (w[s] > w[big])
+                        big = s;
+                --w[big];
+                --sum;
+            }
+            target[i] = w;
+        }
+    });
+    size_t changed = 0;
+    for (size_t i = 0; i < probes.size(); ++i) {
+        const uint64_t key = probes[i].first;
+        const Cell    *old = find(key);
+        bool           any = false;
+        for (uint8_t v : target[i])
+            any |= v != 0;
+        if (old == nullptr ? any : old->w != target[i]) {
+            set_cell(key, target[i]);
+            ++changed;
+            if (changed_keys)
+                changed_keys->push_back(key);
+        }
+    }
+    return changed;
+}
+
+bool AirbrushField::remap_slots(const std::function<int(int)> &map)
+{
+    if (!map || m_slots.empty())
+        return false;
+    std::vector<int>    new_slots;
+    std::vector<size_t> to(m_slots.size());
+    for (size_t s = 0; s < m_slots.size(); ++s) {
+        int id = map(m_slots[s]);
+        if (id < 1 || id > int(EnforcerBlockerType::ExtruderMax))
+            id = m_slots[s];
+        auto it = std::find(new_slots.begin(), new_slots.end(), id);
+        to[s]   = size_t(it - new_slots.begin());
+        if (it == new_slots.end())
+            new_slots.push_back(id);
+    }
+    bool identity = new_slots.size() == m_slots.size();
+    for (size_t s = 0; identity && s < m_slots.size(); ++s)
+        identity = to[s] == s && new_slots[s] == m_slots[s];
+    if (identity)
+        return false;
+    for (auto &[key, cell] : m_cells) {
+        Weights  w {};
+        for (size_t s = 0; s < m_slots.size(); ++s)
+            w[to[s]] = uint8_t(std::min<uint32_t>(255u, uint32_t(w[to[s]]) + cell.w[s]));
+        cell.w = w;
+    }
+    m_slots = std::move(new_slots);
+    return true;
+}
+
+// =============================================================================================
 // Mesh edits
 // =============================================================================================
 
@@ -438,7 +582,8 @@ namespace {
 
 static const char     BLOB_MAGIC[4]   = { 'E', 'A', 'B', 'F' };
 static const uint16_t BLOB_MAJOR      = 1;
-static const uint16_t BLOB_MINOR      = 0;
+// Minor 1 (P3): an optional fill recipe string after the cells, written only when set.
+static const uint16_t BLOB_MINOR      = 1;
 
 struct Writer
 {
@@ -576,6 +721,8 @@ std::string AirbrushField::to_blob(const BoundingBoxf3 *anchor_override) const
         for (size_t s = 0; s < m_slots.size(); ++s)
             w.out.push_back(char(c.w[s]));
     }
+    if (!m_fill_recipe.empty())
+        w.str(m_fill_recipe);
     return w.out;
 }
 
@@ -677,12 +824,21 @@ std::shared_ptr<AirbrushField> AirbrushField::from_blob(const std::string &blob)
         if (c.sum() > 0)
             f->m_cells.emplace(pk, c);
     }
+    // Minor 1: the fill recipe, when one was written.
+    if (r.ok && r.left() >= 4) {
+        std::string recipe = r.str();
+        if (r.ok)
+            f->m_fill_recipe = std::move(recipe);
+        else
+            r.ok = true;   // a damaged trailer loses the recipe, never the field
+    }
     return r.ok ? f : nullptr;
 }
 
 bool AirbrushField::operator==(const AirbrushField &rhs) const
 {
-    if (m_cell != rhs.m_cell || m_origin != rhs.m_origin || m_slots != rhs.m_slots || m_bake_params != rhs.m_bake_params)
+    if (m_cell != rhs.m_cell || m_origin != rhs.m_origin || m_slots != rhs.m_slots || m_bake_params != rhs.m_bake_params ||
+        m_fill_recipe != rhs.m_fill_recipe)
         return false;
     if (m_anchor.defined != rhs.m_anchor.defined || (m_anchor.defined && (m_anchor.min != rhs.m_anchor.min || m_anchor.max != rhs.m_anchor.max)))
         return false;
