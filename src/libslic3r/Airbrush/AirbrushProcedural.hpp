@@ -9,7 +9,7 @@
 // Every fill is a scalar t(p) over the surface fed through a RAMP of N stops (2..AIRBRUSH_MAX_STOPS),
 // each a filament (or 0 = the part's own colour, i.e. no spray):
 //   * Linear   t = position along start -> end
-//   * Radial   t = distance from the start point / |end - start|, measured OVER THE SURFACE
+//   * Radial   t = surface distance from the start / surface distance of the end, OVER THE SURFACE
 //              (geodesic_distances(): Dijkstra over the mesh edges, exact on the flat patch round
 //              the seed; an approximation that never jumps across a slot)
 //   * Along Z  t = world height between the start and end heights (`up` is the world Z axis in mesh
@@ -74,6 +74,15 @@ struct AirbrushFillRecipe
     uint32_t                  seed     = 1;
     // How much the fill replaces what is there (1) or glazes over it.
     float                     opacity  = 1.f;
+    // Where it goes (hand test 2026-10-31): the whole part, or the brush area - the brush radius
+    // round the drag from start to end (a click: a circle round it), soft at the rim by `hardness`;
+    // for Radial the circle of the drag's radius round the centre. The brush area only takes
+    // facets facing `facing` (the direction back to the viewer), as a spray does. Mesh mm.
+    enum class Area : int { WholePart = 0, Brush = 1 };
+    Area                      area         = Area::WholePart;
+    float                     brush_radius = 4.f;
+    float                     hardness     = 0.5f;
+    Vec3f                     facing       = Vec3f::Zero();
 
     // Stops sorted by position, clamped to 0..1, at most AIRBRUSH_MAX_STOPS, filaments in range.
     // False when fewer than two stops remain.
@@ -114,10 +123,17 @@ float geodesic_at(const indexed_triangle_set &its, const std::vector<float> &ver
 
 // ---- applying a recipe ------------------------------------------------------------------------
 
+// The brush area as a weight 0..1 at a point (1 for the whole part): the dab falloff of the distance
+// to the drag segment (to the centre for Radial). Facing is not part of it (see apply_fill()).
+// `radial_radius`: a Radial gradient's extent over the surface (make_fill_function()).
+float fill_area_weight(const AirbrushFillRecipe &recipe, const Vec3f &p, float radial_radius = 0.f);
+
 // Builds the fill function: adds the stops' filaments to the field's slots (false, with `error`,
 // when that would pass AIRBRUSH_MAX_SLOTS or the recipe is not usable).
+// `radial_radius`, when given, receives a Radial gradient's extent: the surface distance from the
+// start to the end of the drag (the last stop sits there).
 bool make_fill_function(AirbrushField &field, const indexed_triangle_set &its, const AirbrushFillRecipe &recipe,
-                        AirbrushField::FillFunction &out, std::string *error = nullptr);
+                        AirbrushField::FillFunction &out, std::string *error = nullptr, float *radial_radius = nullptr);
 
 // make_fill_function() + AirbrushField::fill() + store the recipe on the field. Returns the number of
 // cells changed, or -1 (with `error`) when the recipe could not be applied.

@@ -208,6 +208,14 @@ struct GLGizmoMmuSegmentation::AirbrushState
     Vec3f                        fill_end   = Vec3f::Zero();
     Transform3d                  fill_trafo = Transform3d::Identity();
     std::string                  fill_error;
+    Vec3f                        fill_facing = Vec3f::Zero();   // back to the viewer, mesh space
+    // Live preview of the drag (hand test 2026-10-31): the part's field as it was at the press, and
+    // that field with the fill applied, drawn as an overlay; baked on release.
+    std::shared_ptr<const Airbrush::AirbrushField>  preview_base;
+    std::shared_ptr<Airbrush::AirbrushField>        preview;
+    std::unordered_map<uint64_t, Chunk>             preview_chunks;
+    Clock::time_point                               preview_t;
+    std::string                                     preview_recipe;
     std::vector<Part>       parts;   // index = model part index (the triangle selector's)
     uint64_t                generation = 1;
 
@@ -290,6 +298,7 @@ GLGizmoMmuSegmentation::AirbrushState &GLGizmoMmuSegmentation::airbrush()
         // P3: the gradient / pattern panel as it was left.
         Airbrush::AirbrushFillRecipe &f = m_airbrush->fill;
         f.stops = Airbrush::two_stops(1, 2);
+        f.area  = Airbrush::AirbrushFillRecipe::Area::Brush;   // hand test 2026-10-31: brush area by default
         if (const AppConfig *cfg = wxGetApp().app_config; cfg != nullptr && cfg->has(AIRBRUSH_FILL_CONFIG_KEY)) {
             Airbrush::AirbrushFillRecipe loaded;
             if (Airbrush::AirbrushFillRecipe::from_string(cfg->get(AIRBRUSH_FILL_CONFIG_KEY), loaded))
@@ -558,26 +567,28 @@ bool GLGizmoMmuSegmentation::airbrush_fill_press(const Vec2d &mouse_position)
     const Camera                  &camera = wxGetApp().plater()->get_camera();
     update_raycast_cache(mouse_position, camera, trafos);
     const int idx = m_rr.mesh_id;
-    if (idx < 0 || idx >= int(trafos.size()) || idx >= int(m_triangle_selectors.size()) || model_part(mo, idx) == nullptr)
+    ModelVolume *mv = model_part(mo, idx);
+    if (idx < 0 || idx >= int(trafos.size()) || idx >= int(m_triangle_selectors.size()) || mv == nullptr)
         return false;   // missed the model: the canvas may rotate the view
     ab.fill_error.clear();
     m_button_down      = Button::Left;
     m_last_mouse_click = Vec2d::Zero();
-    if (ab.mode == AirbrushState::Mode::Pattern) {
-        // A pattern covers the whole part: one click.
-        Airbrush::AirbrushFillRecipe r = ab.fill;
-        r.kind                         = ab.pattern_kind;
-        r.up                           = mesh_up(trafos[size_t(idx)]);
-        // The scale is set in print mm; the field lives in mesh mm.
-        const double scale = std::cbrt(std::abs(trafos[size_t(idx)].linear().determinant()));
-        r.scale_mm         = float(double(r.scale_mm) / std::max(scale, 1e-6));
-        airbrush_apply_recipe(idx, r.to_string(), false);
-        m_parent.set_as_dirty();
-        return true;
-    }
-    ab.fill_mesh  = idx;
-    ab.fill_trafo = trafos[size_t(idx)];
+    // Gradient and Pattern both drag: press = start, release = end (a click: start = end).
+    ab.fill_mesh       = idx;
+    ab.fill_trafo      = trafos[size_t(idx)];
     ab.fill_start = ab.fill_end = m_rr.hit;
+    const Vec3f eye    = (ab.fill_trafo.inverse() * camera.get_position()).cast<float>();
+    const Vec3f to_eye = eye - m_rr.hit;
+    ab.fill_facing     = to_eye.squaredNorm() > 0.f ? Vec3f(to_eye.normalized()) : Vec3f::Zero();
+    // The live preview starts from the field as it is now.
+    auto &p = ensure_part(ab, idx, *mv);
+    if (!p.surface)
+        p.surface = std::make_unique<Airbrush::AirbrushSurface>(p.mesh->its);
+    ab.preview_base = std::make_shared<const Airbrush::AirbrushField>(*p.field);
+    ab.preview.reset();
+    ab.preview_chunks.clear();
+    ab.preview_recipe.clear();
+    airbrush_update_preview(true);
     m_parent.set_as_dirty();
     return true;
 }
@@ -592,24 +603,93 @@ void GLGizmoMmuSegmentation::airbrush_fill_drag(const Vec2d &mouse_position)
     update_raycast_cache(mouse_position, wxGetApp().plater()->get_camera(), trafos);
     if (m_rr.mesh_id == ab.fill_mesh)
         ab.fill_end = m_rr.hit;   // off the part, the end stays where it last was
+    airbrush_update_preview(false);
     m_parent.request_extra_frame();
+}
+
+std::string GLGizmoMmuSegmentation::airbrush_drag_recipe() const
+{
+    const AirbrushState         &ab = *m_airbrush;
+    Airbrush::AirbrushFillRecipe r  = ab.fill;
+    r.kind                          = ab.mode == AirbrushState::Mode::Pattern ? ab.pattern_kind : ab.gradient_kind;
+    r.start                         = ab.fill_start;
+    r.end                           = ab.fill_end;
+    r.up                            = mesh_up(ab.fill_trafo);
+    r.facing                        = ab.fill_facing;
+    // Sizes are set in print mm; the field lives in mesh mm.
+    const double scale = std::max(std::cbrt(std::abs(ab.fill_trafo.linear().determinant())), 1e-6);
+    r.scale_mm         = float(double(r.scale_mm) / scale);
+    r.brush_radius     = float(double(ab.brush.radius_mm) / scale);
+    r.hardness         = ab.brush.hardness;
+    return r.to_string();
+}
+
+void GLGizmoMmuSegmentation::airbrush_update_preview(bool force)
+{
+    if (!m_airbrush)
+        return;
+    AirbrushState &ab = *m_airbrush;
+    if (ab.fill_mesh < 0 || !ab.preview_base || ab.fill_mesh >= int(ab.parts.size()))
+        return;
+    auto &p = ab.parts[size_t(ab.fill_mesh)];
+    if (!p.surface)
+        return;
+    const std::string recipe = airbrush_drag_recipe();
+    if (recipe == ab.preview_recipe)
+        return;
+    // A whole-part preview is redone at most 4 times a second, a brush-area one 12 times.
+    const bool   whole = ab.fill.area == Airbrush::AirbrushFillRecipe::Area::WholePart;
+    const double gap   = whole ? 250. : 80.;
+    if (!force && ms_since(ab.preview_t) < gap)
+        return;
+    Airbrush::AirbrushFillRecipe r;
+    if (!Airbrush::AirbrushFillRecipe::from_string(recipe, r))
+        return;
+    ab.preview_t      = Clock::now();
+    ab.preview_recipe = recipe;
+    auto                  field = std::make_shared<Airbrush::AirbrushField>(*ab.preview_base);
+    std::vector<uint64_t> changed;
+    std::string           error;
+    if (Airbrush::apply_fill(*field, *p.surface, r, &changed, &error) < 0) {
+        // A drag too short for a gradient yet: no preview, no error until the release.
+        ab.preview.reset();
+        ab.preview_chunks.clear();
+        return;
+    }
+    ab.preview = std::move(field);
+    ab.preview_chunks.clear();
+    for (uint64_t key : changed) {
+        auto &chunk = ab.preview_chunks[Airbrush::overlay_chunk_of(key)];
+        chunk.cells.insert(key);
+        chunk.dirty = true;
+    }
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoMmuSegmentation::airbrush_clear_preview()
+{
+    if (!m_airbrush)
+        return;
+    m_airbrush->preview_base.reset();
+    m_airbrush->preview.reset();
+    m_airbrush->preview_chunks.clear();
+    m_airbrush->preview_recipe.clear();
 }
 
 void GLGizmoMmuSegmentation::airbrush_fill_release()
 {
     AirbrushState &ab  = airbrush();
     const int      idx = ab.fill_mesh;
-    ab.fill_mesh       = -1;
     m_button_down      = Button::None;
     m_last_mouse_click = Vec2d::Zero();
-    if (idx < 0)
+    if (idx < 0) {
+        airbrush_clear_preview();
         return;
-    Airbrush::AirbrushFillRecipe r = ab.fill;
-    r.kind                         = ab.gradient_kind;
-    r.start                        = ab.fill_start;
-    r.end                          = ab.fill_end;
-    r.up                           = mesh_up(ab.fill_trafo);
-    airbrush_apply_recipe(idx, r.to_string(), false);
+    }
+    const std::string recipe = airbrush_drag_recipe();
+    ab.fill_mesh             = -1;
+    airbrush_clear_preview();
+    airbrush_apply_recipe(idx, recipe, false);
     m_parent.set_as_dirty();
 }
 
@@ -667,7 +747,7 @@ bool GLGizmoMmuSegmentation::airbrush_cancel_pending()
     if (!m_airbrush)
         return false;
     AirbrushState &ab  = *m_airbrush;
-    bool           any = ab.stroke_mesh >= 0 || ab.fill_mesh >= 0 || ab.baking() || ab.params_dirty;
+    bool           any = ab.stroke_mesh >= 0 || ab.fill_mesh >= 0 || ab.baking() || ab.params_dirty || ab.preview;
     for (const auto &p : ab.parts)
         any |= p.field && p.serial > p.baked_serial;
     if (!any)
@@ -677,6 +757,7 @@ bool GLGizmoMmuSegmentation::airbrush_cancel_pending()
     ab.emitter.release();
     ab.stroke_mesh     = -1;
     ab.fill_mesh       = -1;
+    airbrush_clear_preview();
     ab.params_dirty    = false;
     m_button_down      = Button::None;
     m_last_mouse_click = Vec2d::Zero();
@@ -709,6 +790,7 @@ void GLGizmoMmuSegmentation::airbrush_flush_pending(bool commit)
     // A gradient still being dragged is dropped; strokes and fills already laid are baked and
     // committed, each its own undo step.
     ab.fill_mesh = -1;
+    airbrush_clear_preview();
     if (ab.params_dirty) {
         ab.params_dirty = false;
         airbrush_apply_params_to_object();
@@ -1068,6 +1150,7 @@ void GLGizmoMmuSegmentation::airbrush_reset()
         ab.fill_mesh  = -1;
         m_button_down = Button::None;
     }
+    airbrush_clear_preview();
     if (ab.stroke_mesh >= 0) {
         if (ab.stroke_mesh < int(ab.parts.size()) && ab.parts[size_t(ab.stroke_mesh)].field)
             ab.parts[size_t(ab.stroke_mesh)].field->end_stroke();
@@ -1170,31 +1253,12 @@ void GLGizmoMmuSegmentation::airbrush_render_overlay()
     ModelObject   *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
     if (mo == nullptr)
         return;
-    // P3: the gradient being dragged, as a line from start to end over the model.
-    if (ab.fill_mesh >= 0 && (ab.fill_end - ab.fill_start).squaredNorm() > 0.f) {
-        if (GLShaderProgram *flat = wxGetApp().get_shader("flat")) {
-            const Camera     &cam = wxGetApp().plater()->get_camera();
-            GLModel::Geometry g;
-            g.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
-            g.add_vertex(ab.fill_start);
-            g.add_vertex(ab.fill_end);
-            g.add_line(0, 1);
-            GLModel line;
-            line.init_from(std::move(g));
-            line.set_color(ColorRGBA(1.f, 1.f, 1.f, 1.f));
-            flat->start_using();
-            flat->set_uniform("projection_matrix", cam.get_projection_matrix());
-            flat->set_uniform("view_model_matrix", cam.get_view_matrix() * ab.fill_trafo);
-            glsafe(::glDisable(GL_DEPTH_TEST));
-            line.render();
-            glsafe(::glEnable(GL_DEPTH_TEST));
-            flat->stop_using();
-        }
-    }
-    bool any = false;
+    const bool show_preview = ab.fill_mesh >= 0 && ab.preview && !ab.preview_chunks.empty();
+    bool       any          = show_preview;
     for (const auto &p : ab.parts)
         any |= !p.pending.empty();
-    if (!any)
+    const bool show_line = ab.fill_mesh >= 0 && (ab.fill_end - ab.fill_start).squaredNorm() > 0.f;
+    if (!any && !show_line)
         return;
     GLShaderProgram *shader = wxGetApp().get_shader("flat");
     if (shader == nullptr)
@@ -1207,43 +1271,29 @@ void GLGizmoMmuSegmentation::airbrush_render_overlay()
             return m_extruders_colors[size_t(filament - 1)];
         return ColorRGBA(0.5f, 0.5f, 0.5f, 1.f);
     };
-
-    shader->start_using();
-    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-    glsafe(::glDisable(GL_CULL_FACE));
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-    for (size_t idx = 0; idx < ab.parts.size() && idx < trafos.size(); ++idx) {
-        auto &p = ab.parts[idx];
-        if (p.pending.empty() || !p.field)
-            continue;
-        ModelVolume *mv = model_part(mo, int(idx));
-        if (mv == nullptr || mv->id() != p.volume_id)
-            continue;
-        const ColorRGBA base = color_of(base_filament_of(*mv));
-        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafos[idx]);
-        for (auto &[key, chunk] : p.chunks) {
+    // One part's chunks of `field`, rebuilt where dirty.
+    auto draw_chunks = [&](const Airbrush::AirbrushField &field, std::unordered_map<uint64_t, AirbrushState::Chunk> &chunks, const ColorRGBA &base) {
+        for (auto &[key, chunk] : chunks) {
             if (chunk.dirty) {
                 chunk.models.clear();
                 const std::vector<uint64_t> cells(chunk.cells.begin(), chunk.cells.end());
-                for (Airbrush::OverlayBucket &b : Airbrush::build_overlay_chunk(*p.field, cells)) {
+                for (Airbrush::OverlayBucket &bk : Airbrush::build_overlay_chunk(field, cells)) {
                     GLModel::Geometry g;
                     g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
-                    g.reserve_vertices(b.corners.size());
-                    g.reserve_indices(b.corners.size() / 4 * 6);
-                    for (size_t q = 0; q + 3 < b.corners.size(); q += 4) {
+                    g.reserve_vertices(bk.corners.size());
+                    g.reserve_indices(bk.corners.size() / 4 * 6);
+                    for (size_t q = 0; q + 3 < bk.corners.size(); q += 4) {
                         const unsigned int v = unsigned(g.vertices_count());
                         for (size_t k = 0; k < 4; ++k)
-                            g.add_vertex(b.corners[q + k]);
+                            g.add_vertex(bk.corners[q + k]);
                         g.add_triangle(v, v + 1, v + 2);
                         g.add_triangle(v, v + 2, v + 3);
                     }
                     ColorRGBA c;
-                    if (b.slot < 0 || size_t(b.slot) >= p.field->slots().size())
+                    if (bk.slot < 0 || size_t(bk.slot) >= field.slots().size())
                         c = mix_rgb(base, base, 0.f, 0.75f);
                     else
-                        c = mix_rgb(base, color_of(p.field->slots()[size_t(b.slot)]),
-                                    float(b.level) / float(Airbrush::AIRBRUSH_OVERLAY_LEVELS), 0.85f);
+                        c = mix_rgb(base, color_of(field.slots()[size_t(bk.slot)]), float(bk.level) / float(Airbrush::AIRBRUSH_OVERLAY_LEVELS), 0.85f);
                     auto model = std::make_unique<GLModel>();
                     model->init_from(std::move(g));
                     chunk.models.emplace_back(c, std::move(model));
@@ -1255,9 +1305,82 @@ void GLGizmoMmuSegmentation::airbrush_render_overlay()
                 model->render();
             }
         }
+    };
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    for (size_t idx = 0; idx < ab.parts.size() && idx < trafos.size(); ++idx) {
+        auto &p = ab.parts[idx];
+        if (!p.field)
+            continue;
+        ModelVolume *mv = model_part(mo, int(idx));
+        if (mv == nullptr || mv->id() != p.volume_id)
+            continue;
+        const ColorRGBA base = color_of(base_filament_of(*mv));
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafos[idx]);
+        if (!p.pending.empty())
+            draw_chunks(*p.field, p.chunks, base);
+        // P3: the fill being dragged, on top of what is waiting.
+        if (show_preview && int(idx) == ab.fill_mesh)
+            draw_chunks(*ab.preview, ab.preview_chunks, base);
+    }
+    // The gradient's direction: a line from start to end, drawn through the model.
+    if (show_line) {
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+        g.add_vertex(ab.fill_start);
+        g.add_vertex(ab.fill_end);
+        g.add_line(0, 1);
+        GLModel line;
+        line.init_from(std::move(g));
+        line.set_color(ColorRGBA(1.f, 1.f, 1.f, 1.f));
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * ab.fill_trafo);
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        line.render();
+        glsafe(::glEnable(GL_DEPTH_TEST));
     }
     shader->stop_using();
     ab.overlay_ms_max = std::max(ab.overlay_ms_max, ms_since(t0));
+}
+
+bool GLGizmoMmuSegmentation::render_airbrush_cursor(const std::vector<Transform3d> &trafos)
+{
+    if (!m_airbrush || m_airbrush->mode == AirbrushState::Mode::Spray)
+        return false;
+    AirbrushState &ab    = *m_airbrush;
+    const bool     brush = ab.fill.area == Airbrush::AirbrushFillRecipe::Area::Brush;
+    const float    handle = std::clamp(0.2f * ab.brush.radius_mm, 0.4f, 1.5f);
+    const bool     radial = ab.mode == AirbrushState::Mode::Gradient && ab.gradient_kind == Airbrush::FillKind::Radial;
+    if (ab.fill_mesh >= 0 && ab.fill_mesh < int(trafos.size())) {
+        const Transform3d &t = trafos[size_t(ab.fill_mesh)];
+        // Start and end handles; the line between them is drawn with the overlay.
+        render_cursor_sphere(t, &ab.fill_start, handle, 0.7f);
+        if ((ab.fill_end - ab.fill_start).squaredNorm() > 0.f)
+            render_cursor_sphere(t, &ab.fill_end, handle, 0.7f);
+        if (radial) {
+            // The radial gradient's extent: a ball growing from the centre.
+            const float r = float((t.linear() * (ab.fill_end - ab.fill_start).cast<double>()).norm());
+            if (r > 0.f)
+                render_cursor_sphere(t, &ab.fill_start, r, 0.10f);
+        } else if (brush) {
+            // The brush area: the brush ball at both ends of the drag.
+            render_cursor_sphere(t, &ab.fill_start, ab.brush.radius_mm, 0.10f);
+            if ((ab.fill_end - ab.fill_start).squaredNorm() > 0.f)
+                render_cursor_sphere(t, &ab.fill_end, ab.brush.radius_mm, 0.10f);
+        }
+        return true;
+    }
+    if (m_rr.mesh_id < 0 || m_rr.mesh_id >= int(trafos.size()))
+        return true;
+    // Hovering: the brush footprint for the brush area, a small handle for the whole part.
+    if (brush && !radial)
+        render_cursor_sphere(trafos[size_t(m_rr.mesh_id)], nullptr, ab.brush.radius_mm, 0.14f);
+    else
+        render_cursor_sphere(trafos[size_t(m_rr.mesh_id)], nullptr, handle, 0.5f);
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1303,7 +1426,8 @@ void GLGizmoMmuSegmentation::airbrush_render_fill_panel(float left, float slider
         }
         switch (ab.gradient_kind) {
         case Airbrush::FillKind::Radial:
-            hint(_L("Drag out from the centre: the first stop is at the centre, the last at the end of the drag, measured over the surface."));
+            hint(_L("Drag out from the centre: the first stop is at the centre, the last at the end of the drag, measured over the "
+                    "surface. Before the first stop and past the last one the colour is solid."));
             break;
         case Airbrush::FillKind::AlongZ:
             hint(_L("Drag up or down the part to set the heights of the first and last stops. A click without a drag uses the part's "
@@ -1363,8 +1487,42 @@ void GLGizmoMmuSegmentation::airbrush_render_fill_panel(float left, float slider
             r.seed  = 1u + rd() % 999999u;
             changed = true;
         }
-        hint(ab.pattern_kind == Airbrush::FillKind::Camo ? _L("Click a part to cover it. Camo gives each stop one hard-edged band.") :
-                                                           _L("Click a part to cover it with the pattern."));
+        hint(ab.pattern_kind == Airbrush::FillKind::Camo ? _L("Click or drag on a part to lay the pattern. Camo gives each colour one "
+                                                              "hard-edged band.") :
+                                                           _L("Click or drag on a part to lay the pattern."));
+    }
+
+    // Where it goes (hand test 2026-10-31): the brush area by default, or the whole part.
+    {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Apply to"));
+        ImGui::SameLine(left);
+        const bool brush_area = r.area == Airbrush::AirbrushFillRecipe::Area::Brush;
+        if (m_imgui->radio_button(_L("Brush area"), brush_area) && !brush_area) {
+            r.area  = Airbrush::AirbrushFillRecipe::Area::Brush;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (m_imgui->radio_button(_L("Whole part"), !brush_area) && brush_area) {
+            r.area  = Airbrush::AirbrushFillRecipe::Area::WholePart;
+            changed = true;
+        }
+        if (r.area == Airbrush::AirbrushFillRecipe::Area::Brush) {
+            Airbrush::BrushSettings &b = ab.brush;
+            bool brush_changed = slider_row(m_desc.at("airbrush_radius"), "##airbrush_fill_radius", &b.radius_mm, Airbrush::AIRBRUSH_RADIUS_MIN,
+                                            Airbrush::AIRBRUSH_RADIUS_MAX, "%.1f " + mm, 0.05f);
+            brush_changed |= slider_row(m_desc.at("airbrush_hardness"), "##airbrush_fill_hardness", &b.hardness, 0.f, 1.f, "%.2f", 0.01f);
+            if (brush_changed) {
+                b.sanitize();
+                if (AppConfig *cfg = wxGetApp().app_config)
+                    cfg->set(AIRBRUSH_CONFIG_KEY, b.to_string());
+            }
+            hint(ab.mode == AirbrushState::Mode::Gradient && ab.gradient_kind == Airbrush::FillKind::Radial ?
+                     _L("The radial gradient stays inside the circle of the drag, softened at its rim by Hardness.") :
+                     _L("Only the brush radius around the click or drag gets it, softened at the rim by Hardness, and only the side facing "
+                        "you."));
+        } else
+            hint(_L("Covers the whole part, front and back."));
     }
 
     // The stops: a filament (or the part's own colour) at a position along the ramp.

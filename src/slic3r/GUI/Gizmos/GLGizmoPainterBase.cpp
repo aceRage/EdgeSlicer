@@ -221,8 +221,10 @@ void GLGizmoPainterBase::render_cursor()
         return;
 
     if (m_tool_type == ToolType::AIRBRUSH) {
-        // Edge (Airbrush): a faint ball of the spray radius.
-        render_cursor_sphere(trafo_matrices[m_rr.mesh_id], nullptr, airbrush_cursor_radius(), 0.18f);
+        // Edge (Airbrush): a faint ball of the spray radius, or the mode's own cursor (P3: gradient
+        // handles, a pattern's footprint).
+        if (!render_airbrush_cursor(trafo_matrices))
+            render_cursor_sphere(trafo_matrices[m_rr.mesh_id], nullptr, airbrush_cursor_radius(), 0.18f);
         return;
     }
 

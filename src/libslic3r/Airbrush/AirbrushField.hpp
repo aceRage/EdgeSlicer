@@ -172,7 +172,11 @@ public:
     // found exactly as dab() samples them (half a cell over every facet); `fn` runs once per cell,
     // at the first sample (facet order) that landed in it, so a fill is deterministic. Returns the
     // number of cells changed; `changed_keys` (ascending) as dab().
-    size_t fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys = nullptr);
+    // `mask` (0..1, optional) scales the opacity per cell - the brush area of a fill; 0 leaves the
+    // cell as it is. `facets` (optional) limits the facets visited to those that can be inside it.
+    using FillMask = std::function<float(const Vec3f &p, size_t facet)>;
+    size_t fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys = nullptr,
+                const FillMask *mask = nullptr, const std::vector<size_t> *facets = nullptr);
 
     // ---- filament remap (P3, A1) ----------------------------------------------------------------
     // Every slot's filament id goes through `map` (1-based ids; an id the map sends outside

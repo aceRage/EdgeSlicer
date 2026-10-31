@@ -863,6 +863,231 @@ TEST_CASE("Airbrush P3: a gradient bakes like a stroke, one commit, with a cost"
 }
 
 // =============================================================================================
+// Hand test 2026-10-31: the radial gradient, the brush area
+// =============================================================================================
+
+namespace {
+
+// The same triangles with every vertex repeated per facet (an unwelded mesh: seams everywhere).
+indexed_triangle_set unweld(const indexed_triangle_set &its)
+{
+    indexed_triangle_set out;
+    for (const stl_triangle_vertex_indices &f : its.indices) {
+        const int b = int(out.vertices.size());
+        for (int k = 0; k < 3; ++k)
+            out.vertices.push_back(its.vertices[size_t(f[k])]);
+        out.indices.emplace_back(b, b + 1, b + 2);
+    }
+    return out;
+}
+
+// The weight of `slot` at a point of the sphere of radius `R` at polar angle `theta` (degrees),
+// in the plane y = 0.
+int sphere_weight(const AirbrushField &f, float R, float theta_deg, size_t slot)
+{
+    const float th = theta_deg * float(PI) / 180.f;
+    const Vec3f p(R * std::sin(th), 0.f, R * std::cos(th));
+    Weights     w {};
+    f.sample(p.cast<double>(), surface_class(Vec3f(p.normalized())), w);
+    return w[slot];
+}
+
+} // namespace
+
+TEST_CASE("Airbrush P3: a radial gradient grades monotonically with surface distance", "[Airbrush][AirbrushP3]")
+{
+    const float                R      = 10.f;
+    const indexed_triangle_set sphere = its_make_sphere(R, PI / 60.);
+    // The owner's stops: filament 2 up to 39%, filament 3 from 59%; the drag ends on the equator.
+    AirbrushFillRecipe r;
+    r.kind  = FillKind::Radial;
+    r.stops = { { 2, 0.39f }, { 3, 0.59f } };
+    r.start = Vec3f(0.f, 0.f, R);
+    r.end   = Vec3f(R, 0.f, 0.f);
+
+    AirbrushField welded;
+    {
+        AirbrushSurface surface(sphere);
+        // The radius is the surface distance of the drag's end (a quarter circle), not the chord.
+        AirbrushField::FillFunction fn;
+        AirbrushField               tmp;
+        float                       radius = 0.f;
+        REQUIRE(make_fill_function(tmp, sphere, r, fn, nullptr, &radius));
+        CHECK_THAT(double(radius), WithinAbs(double(R) * PI / 2., 0.08 * double(R) * PI / 2.));
+        REQUIRE(apply_fill(welded, surface, r) > 0);
+    }
+    REQUIRE(welded.slots() == std::vector<int>{ 2, 3 });
+    int prev3 = -1;
+    for (float th = 2.f; th <= 170.f; th += 2.f) {
+        const int w2 = sphere_weight(welded, R, th, 0);
+        const int w3 = sphere_weight(welded, R, th, 1);
+        INFO("theta " << th << " w2 " << w2 << " w3 " << w3);
+        // Filament 3 only grows outwards, filament 2 only shrinks, and together they cover the cell.
+        CHECK(w3 + 3 >= prev3);
+        prev3 = std::max(prev3, w3);
+        CHECK(w2 + w3 >= 250);
+        // Solid filament 2 well inside the first stop, solid filament 3 well past the last one.
+        if (th <= 0.39f * 90.f - 6.f)
+            CHECK(w3 == 0);
+        if (th >= 0.59f * 90.f + 6.f)
+            CHECK(w3 == 255);
+    }
+    // A blend between the stops, not a hard step.
+    const int mid = sphere_weight(welded, R, 0.49f * 90.f, 1);
+    CHECK(mid > 60);
+    CHECK(mid < 195);
+
+    SECTION("an unwelded mesh (seams everywhere) gives the same field")
+    {
+        const indexed_triangle_set loose = unweld(sphere);
+        AirbrushSurface            surface(loose);
+        AirbrushField              f;
+        REQUIRE(apply_fill(f, surface, r) > 0);
+        REQUIRE(f.size() == welded.size());
+        // Equal up to rounding (ties in the distance search may be walked in another order).
+        size_t differ = 0;
+        for (const auto &kv : welded.cells()) {
+            const AirbrushField::Cell *c = f.find(kv.first);
+            bool                       d = c == nullptr;
+            for (size_t k = 0; !d && k < AIRBRUSH_MAX_SLOTS; ++k)
+                d = std::abs(int(c->w[k]) - int(kv.second.w[k])) > 2;
+            differ += d;
+        }
+        CHECK(differ == 0);
+    }
+    SECTION("the bake keeps the order: filament 3's share of the paint grows with the distance")
+    {
+        Model        model;
+        ModelObject *obj = model.add_object();
+        obj->config.set("extruder", 1);
+        ModelVolume *vol = obj->add_volume(TriangleMesh(sphere), ModelVolumeType::MODEL_PART, false);
+        obj->add_instance();
+        vol->airbrush_field = std::make_shared<AirbrushField>(welded);
+        AirbrushBakeParams bp;
+        bp.base_filament = 1;
+        bp.mix_steps     = 0;
+        bp.seed          = 2;
+        bp.grain_mm      = 0.6f;
+        REQUIRE(airbrush_bake_volume(*vol, bp));
+        TriangleSelector sel(vol->mesh());
+        sel.deserialize(vol->mmu_segmentation_facets.get_data(), true);
+        // Painted area per 10 degree ring, per filament.
+        std::array<double, 18> a2 {}, a3 {};
+        auto add = [&](EnforcerBlockerType st, std::array<double, 18> &acc) {
+            const indexed_triangle_set t = sel.get_facets(st);
+            for (const stl_triangle_vertex_indices &f : t.indices) {
+                const Vec3f a = t.vertices[size_t(f[0])], b = t.vertices[size_t(f[1])], c = t.vertices[size_t(f[2])];
+                const Vec3f m = (a + b + c) / 3.f;
+                const float th = std::acos(std::clamp(m.normalized().z(), -1.f, 1.f)) * 180.f / float(PI);
+                acc[std::min<size_t>(17, size_t(th / 10.f))] += 0.5 * double((b - a).cross(c - a).norm());
+            }
+        };
+        add(EnforcerBlockerType::Extruder2, a2);
+        add(EnforcerBlockerType::Extruder3, a3);
+        double prev = -1.;
+        for (size_t ring = 0; ring < 18; ++ring) {
+            const double tot = a2[ring] + a3[ring];
+            if (tot <= 0.)
+                continue;
+            const double share = a3[ring] / tot;
+            INFO("ring " << ring << " share of filament 3 " << share);
+            CHECK(share + 0.08 >= prev);
+            prev = std::max(prev, share);
+        }
+        CHECK(a3[1] < 0.05 * (a2[1] + a3[1]));   // 10-20 degrees: filament 2
+        CHECK(a2[8] < 0.05 * (a2[8] + a3[8]));   // 80-90 degrees: filament 3
+    }
+}
+
+TEST_CASE("Airbrush P3: the brush area limits a gradient or pattern", "[Airbrush][AirbrushP3]")
+{
+    const indexed_triangle_set its = p3_box(20, 20, 10, 1.);
+    AirbrushSurface            surface(its);
+
+    SECTION("a pattern clicked on the top stays inside the brush radius, on the side facing the viewer")
+    {
+        AirbrushFillRecipe r;
+        r.kind         = FillKind::Noise;
+        r.stops        = two_stops(2, 3);
+        r.area         = AirbrushFillRecipe::Area::Brush;
+        r.start = r.end = Vec3f(10.f, 10.f, 10.f);
+        r.brush_radius = 4.f;
+        r.hardness     = 1.f;
+        r.facing       = Vec3f::UnitZ();
+        AirbrushField f;
+        REQUIRE(apply_fill(f, surface, r) > 0);
+        for (const auto &kv : f.cells()) {
+            const Vec3d c = f.center_of(kv.first);
+            CHECK((c - Vec3d(10., 10., 10.)).norm() <= 4.3);
+            CHECK(c.z() > 9.5);   // only the top faces the viewer
+        }
+        // A full-strength cell in the middle.
+        const Weights w = weights_at(f, Vec3f(10.f, 10.f, 10.f), 4);
+        CHECK(int(w[0]) + int(w[1]) >= 250);
+        // The recipe keeps the area.
+        AirbrushFillRecipe back;
+        REQUIRE(AirbrushFillRecipe::from_string(f.fill_recipe(), back));
+        CHECK(back.area == AirbrushFillRecipe::Area::Brush);
+        CHECK(back.brush_radius == 4.f);
+        CHECK(back == r);
+    }
+    SECTION("a soft brush fades the rim")
+    {
+        AirbrushFillRecipe r;
+        r.kind         = FillKind::Linear;
+        r.stops        = two_stops(2, 2);
+        r.area         = AirbrushFillRecipe::Area::Brush;
+        r.start        = Vec3f(4.f, 10.f, 10.f);
+        r.end          = Vec3f(16.f, 10.f, 10.f);
+        r.brush_radius = 4.f;
+        r.hardness     = 0.f;
+        r.facing       = Vec3f::UnitZ();
+        AirbrushField f;
+        REQUIRE(apply_fill(f, surface, r) > 0);
+        const int on_path = weights_at(f, Vec3f(10.f, 10.f, 10.f), 4)[0];
+        const int half    = weights_at(f, Vec3f(10.f, 12.f, 10.f), 4)[0];
+        const int outside = weights_at(f, Vec3f(10.f, 15.f, 10.f), 4)[0];
+        CHECK(on_path > 240);
+        CHECK(half > 60);
+        CHECK(half < 200);
+        CHECK(outside == 0);
+        // Beyond the ends of the drag only the round caps get it.
+        CHECK(weights_at(f, Vec3f(0.5f, 10.f, 10.f), 4)[0] < 40);
+    }
+    SECTION("a radial gradient in the brush area stays inside its circle")
+    {
+        AirbrushFillRecipe r;
+        r.kind     = FillKind::Radial;
+        r.stops    = two_stops(2, 3);
+        r.area     = AirbrushFillRecipe::Area::Brush;
+        r.start    = Vec3f(10.f, 10.f, 10.f);
+        r.end      = Vec3f(14.f, 10.f, 10.f);
+        r.hardness = 1.f;
+        AirbrushField f;
+        REQUIRE(apply_fill(f, surface, r) > 0);
+        for (const auto &kv : f.cells())
+            CHECK((f.center_of(kv.first) - Vec3d(10., 10., 10.)).norm() <= 4.3);
+        CHECK(weights_at(f, Vec3f(10.f, 10.f, 10.f), 4)[0] > 240);
+        CHECK(weights_at(f, Vec3f(13.8f, 10.f, 10.f), 4)[1] > 200);
+    }
+    SECTION("the whole part is still the whole part")
+    {
+        AirbrushFillRecipe r;
+        r.kind     = FillKind::Noise;
+        r.stops    = two_stops(2, 3);
+        r.area     = AirbrushFillRecipe::Area::WholePart;
+        r.start    = Vec3f(10.f, 10.f, 10.f);
+        AirbrushField brush, whole;
+        REQUIRE(apply_fill(whole, surface, r) > 0);
+        r.area         = AirbrushFillRecipe::Area::Brush;
+        r.end          = r.start;
+        r.brush_radius = 4.f;
+        REQUIRE(apply_fill(brush, surface, r) > 0);
+        CHECK(whole.size() > 10 * brush.size());
+    }
+}
+
+// =============================================================================================
 // The owner's hand-test projects (hidden): AIRBRUSH_P3_OUT=<directory>
 // =============================================================================================
 

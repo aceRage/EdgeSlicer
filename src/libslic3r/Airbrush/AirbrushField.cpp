@@ -335,7 +335,8 @@ size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in, std
 // Fills (P3)
 // =============================================================================================
 
-size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys)
+size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys,
+                           const FillMask *mask, const std::vector<size_t> *facets)
 {
     if (!fn || !(opacity > 0.f) || m_slots.empty())
         return 0;
@@ -357,7 +358,11 @@ size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &f
         if (index.emplace(key, probes.size()).second)
             probes.push_back({ key, Probe{ p, f, cls } });
     };
-    for (size_t f = 0; f < its.indices.size(); ++f) {
+    const size_t nfacets = facets ? facets->size() : its.indices.size();
+    for (size_t fi = 0; fi < nfacets; ++fi) {
+        const size_t f = facets ? (*facets)[fi] : fi;
+        if (f >= its.indices.size())
+            continue;
         const int cls = surface.classes()[f];
         if (cls < 0)
             continue;
@@ -400,16 +405,22 @@ size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &f
     std::vector<Weights> target(probes.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, probes.size(), 1024), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t i = range.begin(); i < range.end(); ++i) {
-            const Probe &pr = probes[i].second;
-            Coverage     cov {};
+            const Probe &pr  = probes[i].second;
+            const Cell  *old = find(probes[i].first);
+            // The region (brush area, facing): outside it a cell keeps what it has.
+            const float  op  = mask ? opacity * std::clamp((*mask)(pr.p, pr.facet), 0.f, 1.f) : opacity;
+            if (!(op > 0.f)) {
+                target[i] = old ? old->w : Weights {};
+                continue;
+            }
+            Coverage cov {};
             fn(pr.p, pr.facet, pr.cls, cov);
-            const Cell *old = find(probes[i].first);
-            Weights     w {};
-            uint32_t    sum = 0;
+            Weights  w {};
+            uint32_t sum = 0;
             for (size_t s = 0; s < AIRBRUSH_MAX_SLOTS; ++s) {
                 const float o = old ? float(old->w[s]) : 0.f;
                 const float t = s < m_slots.size() ? 255.f * std::clamp(cov[s], 0.f, 1.f) : 0.f;
-                const long  v = std::lround(o + opacity * (t - o));
+                const long  v = std::lround(o + op * (t - o));
                 w[s]          = uint8_t(std::clamp<long>(v, 0, 255));
                 sum += w[s];
             }

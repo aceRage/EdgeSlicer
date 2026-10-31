@@ -122,6 +122,7 @@ protected:
     bool  on_airbrush_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool control_down) override;
     float airbrush_cursor_radius() const override;
     bool  on_airbrush_escape() override;
+    bool  render_airbrush_cursor(const std::vector<Transform3d> &trafos) override;
 
     std::string get_gizmo_entering_text() const override { return "Entering color painting"; }
     std::string get_gizmo_leaving_text() const override { return "Leaving color painting"; }
@@ -183,6 +184,10 @@ private:
     void airbrush_fill_drag(const Vec2d &mouse_position);
     void airbrush_fill_release();
     bool airbrush_apply_recipe(int part_idx, const std::string &recipe, bool reapply);
+    // The recipe the current drag would apply (mesh space of the dragged part), and its live preview.
+    std::string airbrush_drag_recipe() const;
+    void airbrush_update_preview(bool force);
+    void airbrush_clear_preview();
     void airbrush_render_fill_panel(float left, float sliders_width, float drag_left_width, float max_tooltip_width, float window_width);
     // Cancel strokes and fills waiting for their bake (Esc). True when there were any.
     bool airbrush_cancel_pending();
