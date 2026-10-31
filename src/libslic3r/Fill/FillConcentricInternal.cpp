@@ -25,7 +25,7 @@ void FillConcentricInternal::fill_surface_extrusion(const Surface* surface, cons
         coord_t                loops_count = std::max(bbox_size.x(), bbox_size.y()) / min_spacing + 1;
         Polygons               polygons = to_polygons(expolygon);
 
-        double min_nozzle_diameter = *std::min_element(print_config->nozzle_diameter.values.begin(), print_config->nozzle_diameter.values.end());
+        double min_nozzle_diameter = min_physical_nozzle_diameter(*print_config); // P4: rack nozzles count too
         Arachne::WallToolPathsParams input_params;
         input_params.min_bead_width = 0.85 * min_nozzle_diameter;
         input_params.min_feature_size = 0.25 * min_nozzle_diameter;

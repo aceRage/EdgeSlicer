@@ -567,6 +567,8 @@ set(lisbslic3r_sources
     PrintConfig.hpp
     NozzleProcess.cpp
     NozzleProcess.hpp
+    ToolSlots.cpp
+    ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp

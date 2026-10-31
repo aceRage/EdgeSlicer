@@ -755,6 +755,9 @@ std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase
 // several nozzle variants, DynamicPrintConfig::support_different_extruders) or when filaments outnumber
 // extruders, else the filament's own tool (a toolchanger such as the U1).
 size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count);
+// Whether a machine of `extruder_count` extruders is one of Bambu's grouping machines (H2D / H2C / X2D): at most
+// two extruders whose extruder_variant_list entries name more than one variant between them.
+bool is_bambu_grouping_machine(const ConfigBase &config, size_t extruder_count);
 
 // The index of a process option holding `opt_size` values that filament `filament_idx` (0-based) reads:
 // its extruder's slot for the flow mode get_config_idx(Process) picks when process_extruder_values is
@@ -2301,6 +2304,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Per-nozzle process P2: the 1-based physical extruder (tool) each filament prints on, 0 = its own
     // tool (the filament's index on a toolchanger). Only toolchangers use it (physical_extruder_for_filament).
     ((ConfigOptionInts,                filament_nozzle_assignment))
+    // Per-nozzle process P4 (ToolSlots.hpp): the diameter dimension of the process slot layout, the printer's
+    // opt-in to the per-tool slot model, the physical nozzle declaration, rack nozzle diameters (H2C), the
+    // rack nozzle size per filament, and per-nozzle filament values.
+    ((ConfigOptionFloats,              print_extruder_nozzle_diameter))
+    ((ConfigOptionBool,                tool_slot_model))
+    ((ConfigOptionBool,                support_filament_nozzle_mapping))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_diameter))
+    ((ConfigOptionFloats,              filament_rack_nozzle_diameter))
+    ((ConfigOptionStrings,             filament_nozzle_variants))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))
     ((ConfigOptionPointsGroups,        extruder_printable_area))
@@ -2803,6 +2815,14 @@ size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count
                                       const std::vector<int> &assignment = {});
 // The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
 int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
+// Per-nozzle process P4: the nozzle diameter 1-based `filament_id` prints with: nozzle_diameter of its physical
+// extruder (physical_extruder_for_filament), or the rack nozzle size it is pinned to (filament_rack_nozzle_diameter)
+// when that extruder declares rack nozzle diameters (extruder_rack_nozzle_diameter, H2C). Without rack diameters
+// it is exactly nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id)). ToolSlots.cpp.
+double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// Per-nozzle process P4: the smallest physical nozzle, rack nozzles (extruder_rack_nozzle_diameter) included; the
+// smallest nozzle_diameter when no rack diameters are declared. ToolSlots.cpp.
+double min_physical_nozzle_diameter(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder
@@ -2825,10 +2845,9 @@ bool has_mixed_nozzle_diameters(const ConfigBase &config);
 std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters);
 std::string nozzle_diameter_summary(const ConfigBase &config);
 
-// The nozzle diameter that filament slot `filament_id` (1-based) prints through, resolved via
-// physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
-// per-slot filament preset compatibility rule measures against.
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int), the nozzle diameter filament slot `filament_id`
+// (1-based) prints through, is declared above (per-nozzle process P4: rack-aware). It is what the per-slot filament
+// preset compatibility rule measures against.
 
 // CLI --uptodate_settings / --downward_check: load_config_file() uses
 // ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits.

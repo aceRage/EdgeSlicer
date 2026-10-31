@@ -8,6 +8,7 @@
 #include "../BrimFilament.hpp"
 // Ultra (dual-nozzle): filament->nozzle grouping compute.
 #include "../FilamentGroup.hpp"
+#include "../ToolSlots.hpp"
 #include "../FilamentGroupUtils.hpp"
 #include "../ImageRowWalls.hpp"
 #include "ToolOrderUtils.hpp"
@@ -1517,6 +1518,14 @@ std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintCo
     std::vector<MultiNozzleUtils::NozzleGroupInfo> nozzle_groups;
     auto extruder_nozzle_counts = get_extruder_nozzle_stats(print_config.extruder_nozzle_stats.values);
     for (size_t idx = 0; idx < extruder_nums; ++idx) {
+        // Per-nozzle process P4: an extruder whose rack nozzle diameters are declared (H2C) gets one group per kind
+        // of rack nozzle, so the grouping result carries each nozzle's real diameter.
+        std::vector<std::pair<std::string, std::pair<NozzleVolumeType, int>>> rack;
+        if (rack_nozzle_groups(print_config, idx, rack)) {
+            for (const auto &group : rack)
+                nozzle_groups.emplace_back(group.first, group.second.first, idx, group.second.second);
+            continue;
+        }
         if (idx >= extruder_nozzle_counts.size() || extruder_nozzle_counts[idx].empty()) {
             nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), nozzle_volume_type_at(print_config, idx), idx,
                                        extruder_max_nozzle_count_at(print_config, idx));
@@ -1822,6 +1831,8 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
         }
 
         if (has_multiple_nozzle) {
+            // Per-nozzle process P4: every filament prints with a rack nozzle of the size it was sliced for.
+            pin_rack_nozzle_diameters(print_config, context.nozzle_info.nozzle_list, used_filaments, ret);
             auto result_opt = LayeredNozzleGroupResult::create(ret, context.nozzle_info.nozzle_list, used_filaments);
             if (!result_opt) return LayeredNozzleGroupResult();
             return *result_opt;
@@ -1989,6 +2000,10 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                 m_print, layer_data.layer_filaments, group_mode,
                 layer_data.physical_unprintables, layer_data.geometric_unprintables, layer_data.filament_unprintable_volumes);
             m_print->set_nozzle_group_result(std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(grouping));
+            // Per-nozzle process P4: the geometry was cut for each filament's rack nozzle size; refuse a grouping
+            // that would print it with another size on any layer.
+            if (const std::string mismatch = check_rack_nozzle_diameters(*print_config, grouping); !mismatch.empty())
+                throw Slic3r::SlicingError(mismatch);
             // Ultra (Phase 6): write the 1-based filament->extruder map into the live config so process (wipe
             // tower), the config block, and gcode all route filaments to their assigned nozzle. This is the
             // simple half of BBS's update_filament_maps_to_config; the per-nozzle filament-variant config

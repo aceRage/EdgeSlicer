@@ -1454,7 +1454,7 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].filament_area = float((M_PI/4.f) * pow(config.filament_diameter.get_at(idx), 2)); // all extruders are assumed to have the same filament diameter at this point
     // Mixed nozzle diameters (per-nozzle P2): the nozzle this filament prints through (filament_map on an
     // H2D / H2C), not the extruder with the filament's index.
-    float nozzle_diameter = float(config.nozzle_diameter.get_at(physical_extruder_for_filament(config, unsigned(idx) + 1)));
+    float nozzle_diameter = float(nozzle_diameter_for_filament(config, unsigned(idx) + 1));
     m_filpar[idx].nozzle_diameter = nozzle_diameter;
     m_filpar[idx].max_layer_height = filament_max_layer_height(config, idx);
 

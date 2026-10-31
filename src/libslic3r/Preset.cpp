@@ -1191,6 +1191,7 @@ bool Preset::has_cali_lines(PresetBundle* preset_bundle)
 static std::vector<std::string> s_Preset_print_options {
     "print_extruder_id", "print_extruder_variant", // Ultra (dual-nozzle)
     "process_extruder_values", // per-nozzle process P1: the process keeps separate left / right values
+    "print_extruder_nozzle_diameter", // per-nozzle process P4: the diameter dimension of the slot layout
     "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "enable_order_independent_overlap_carving", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "top_color_penetration_layers", "bottom_color_penetration_layers",
@@ -1274,6 +1275,7 @@ static std::vector<std::string> s_Preset_print_options {
 
 static std::vector<std::string> s_Preset_filament_options {
     "filament_extruder_variant", "filament_self_index", // Ultra (dual-nozzle)
+    "filament_nozzle_variants", // per-nozzle process P4: values per nozzle size / flow / tool
     /*"filament_colour", */ "default_filament_colour","required_nozzle_HRC","filament_diameter", "pellet_flow_coefficient", "filament_type", "filament_soluble", "filament_is_support",
     "filament_max_volumetric_speed",
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_z_offset", "filament_minimal_purge_on_wipe_tower",
@@ -1349,6 +1351,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
     "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
+    "tool_slot_model", "support_filament_nozzle_mapping", "extruder_rack_nozzle_diameter", // per-nozzle process P4
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
     "gcode_skip_config_block", "fan_kickstart", "part_cooling_fan_min_pwm", "fan_speedup_time", "fan_speedup_overhangs",

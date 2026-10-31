@@ -249,6 +249,8 @@ static std::vector<std::string> s_project_options {
     "nozzle_process_presets",
     // Per-nozzle process P2: the nozzle (tool) each filament prints on, on a toolchanger.
     "filament_nozzle_assignment",
+    // Per-nozzle process P4: the rack nozzle size each filament prints with (H2C).
+    "filament_rack_nozzle_diameter",
     // Ultra (dual-nozzle): plate-level filament grouping state.
     "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_map_mode",
     "enable_filament_dynamic_map", "has_filament_switcher", "prime_volume_mode",
@@ -2781,6 +2783,9 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
         assignment->values.erase(assignment->values.begin() + to_del_filament_id);
         assignment->values = filament_nozzle_assignment_stored(std::move(assignment->values));
     }
+    if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter");
+        rack != nullptr && rack->values.size() > to_del_filament_id)
+        rack->values.erase(rack->values.begin() + to_del_filament_id);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
@@ -2810,6 +2815,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     // Per-nozzle process P2: a removed filament's assignment must not come back with a new filament.
     if (auto *assignment = project_config.option<ConfigOptionInts>("filament_nozzle_assignment"); assignment != nullptr && assignment->values.size() > n)
         assignment->values = filament_nozzle_assignment_stored(std::vector<int>(assignment->values.begin(), assignment->values.begin() + n));
+    // Per-nozzle process P4: likewise the rack nozzle size.
+    if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter"); rack != nullptr && rack->values.size() > n)
+        rack->values.resize(n);
     // BBS set new filament color to new_color
     if (old_slot_count < n) {
         if (!new_colors.empty()) {
@@ -2846,6 +2854,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     // Per-nozzle process P2: a removed filament's assignment must not come back with a new filament.
     if (auto *assignment = project_config.option<ConfigOptionInts>("filament_nozzle_assignment"); assignment != nullptr && assignment->values.size() > n)
         assignment->values = filament_nozzle_assignment_stored(std::vector<int>(assignment->values.begin(), assignment->values.begin() + n));
+    // Per-nozzle process P4: likewise the rack nozzle size.
+    if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter"); rack != nullptr && rack->values.size() > n)
+        rack->values.resize(n);
 
     //BBS set new filament color to new_color
     if (old_slot_count < n) {

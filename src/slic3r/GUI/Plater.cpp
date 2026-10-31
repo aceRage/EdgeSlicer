@@ -125,6 +125,7 @@
 #include "libslic3r/MemoryGuardPolicy.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "libslic3r/ColorSplit.hpp"
@@ -25164,6 +25165,31 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
         auto it  = volumes.find(i);
         f.used   = it != volumes.end() && it->second > 0;
         out.push_back(std::move(f));
+    }
+    // Per-nozzle process P4: when the G-code names the tools the filaments were assigned to (filament_output_tools),
+    // the file's "filament k" is tool k. The rows follow the file: row k is the filament printed on tool k, and "As
+    // sliced" already puts it there.
+    {
+        PrintConfig print_config;
+        print_config.apply(full, true);
+        std::vector<unsigned int> used;
+        for (const SendPlateFilament& f : out)
+            if (f.used)
+                used.push_back(unsigned(f.index));
+        const std::vector<int> output_tools = filament_output_tools(print_config, used);
+        if (!output_tools.empty()) {
+            const std::vector<int>         tool_filaments = output_tool_filaments(output_tools);
+            std::vector<SendPlateFilament> per_tool;
+            for (size_t t = 0; t < tool_filaments.size(); ++t) {
+                if (tool_filaments[t] < 0 || size_t(tool_filaments[t]) >= out.size())
+                    continue;
+                SendPlateFilament f = out[size_t(tool_filaments[t])];
+                f.index             = int(t);
+                f.assigned_tool     = int(t);
+                per_tool.push_back(std::move(f));
+            }
+            out = std::move(per_tool);
+        }
     }
     return out;
 }

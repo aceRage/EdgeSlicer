@@ -5573,6 +5573,15 @@ void TabFilament::build()
         optgroup = page->new_optgroup(L("Volumetric speed limitation"), L"param_volumetric_speed");
         optgroup->append_single_option_line("filament_max_volumetric_speed");
 
+        // Per-nozzle process P4 (spec 09-07 "Phase 5"): values this filament takes on particular nozzles, e.g. a hotter
+        // temperature and a higher volumetric speed on a 0.6. Resolved when the print is sliced
+        // (resolve_filament_nozzle_variants), so one preset in two slots of a mixed machine prints right on both.
+        optgroup = page->new_optgroup(L("Values per nozzle (experimental)"), L"param_volumetric_speed");
+        Option variants_option = optgroup->get_option("filament_nozzle_variants");
+        variants_option.opt.full_width = true;
+        variants_option.opt.height     = 60;
+        optgroup->append_single_option_line(variants_option);
+
         //line = { "", "" };
         //line.full_width = 1;
         //line.widget = [this](wxWindow* parent) {

@@ -283,7 +283,7 @@ void PrintObject::_transform_hole_to_polyholes()
     }
     //create a polyhole per id and replace holes points by it.
     for (auto entry : id2layerz2hole) {
-        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(physical_extruder_for_filament(print()->config(), unsigned(std::get<2>(entry.first))))), std::get<4>(entry.first), std::get<5>(entry.first));
+        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(nozzle_diameter_for_filament(print()->config(), unsigned(std::get<2>(entry.first)))), std::get<4>(entry.first), std::get<5>(entry.first));
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
@@ -5813,9 +5813,9 @@ void PrintObject::combine_infill()
 
         // Limit the number of combined layers to the maximum height allowed by this regions' nozzle.
         //FIXME limit the layer height to max_layer_height
-        double nozzle_diameter = this->print()->config().nozzle_diameter.get_at(physical_extruder_for_filament(this->print()->config(), unsigned(region.config().wall_filament.value)));
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(physical_extruder_for_filament(this->print()->config(), unsigned(region.config().sparse_infill_filament.value))));
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(physical_extruder_for_filament(this->print()->config(), unsigned(region.config().solid_infill_filament.value))));
+        double nozzle_diameter = nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().wall_filament.value));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().sparse_infill_filament.value)));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().solid_infill_filament.value)));
         
         //Orca: Limit combination of infill to up to infill_combination_max_layer_height
         const double infill_combination_max_layer_height = region.config().infill_combination_max_layer_height.get_abs_value(nozzle_diameter);
