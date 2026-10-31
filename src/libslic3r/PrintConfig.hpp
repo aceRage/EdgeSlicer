@@ -2820,6 +2820,9 @@ int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozz
 // when that extruder declares rack nozzle diameters (extruder_rack_nozzle_diameter, H2C). Without rack diameters
 // it is exactly nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id)). ToolSlots.cpp.
 double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// Per-nozzle process P4: the smallest physical nozzle, rack nozzles (extruder_rack_nozzle_diameter) included; the
+// smallest nozzle_diameter when no rack diameters are declared. ToolSlots.cpp.
+double min_physical_nozzle_diameter(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder

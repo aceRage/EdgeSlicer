@@ -333,7 +333,7 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("print_extruder_id", new ConfigOptionInts(ids));
         config.set_key_value("print_extruder_variant", new ConfigOptionStrings(variants));
         // Per-nozzle process P4: a new layout has no diameter dimension.
-        config.set_key_value("print_extruder_nozzle_diameter", new ConfigOptionFloats());
+        config.set_key_value("print_extruder_nozzle_diameter", new ConfigOptionFloats({ 0. }));
     }
     // The slicer reads the extruder slots only when asked to; a per-nozzle process whose values equal the
     // plate's changes nothing, so it does not ask.
@@ -430,7 +430,7 @@ bool split_process_per_nozzle(DynamicPrintConfig &process, size_t extruders)
     if (!fits) {
         process.set_key_value("print_extruder_id", new ConfigOptionInts(ids));
         process.set_key_value("print_extruder_variant", new ConfigOptionStrings(variants));
-        process.set_key_value("print_extruder_nozzle_diameter", new ConfigOptionFloats());
+        process.set_key_value("print_extruder_nozzle_diameter", new ConfigOptionFloats({ 0. }));
     }
     process.set_key_value("process_extruder_values", new ConfigOptionBool(true));
     return true;

@@ -174,6 +174,9 @@ TEST_CASE("A filament pinned to a smaller rack nozzle slices at that nozzle's wi
         { "internal_solid_infill_line_width", "100%" },
         { "top_surface_line_width", "100%" },
         { "initial_layer_line_width", "0" },
+        // The brim and skirt take one width for the whole print.
+        { "brim_type", "no_brim" },
+        { "skirt_loops", "0" },
     });
     const PerTool before = per_tool(slice(config));
     REQUIRE(before.widths.count(1) == 1);
@@ -196,15 +199,16 @@ TEST_CASE("Filaments assigned to other tools are named by those tools in the G-c
     DynamicPrintConfig config = two_tools("0.4,0.4");
     config.set_deserialize_strict({ { "nozzle_temperature", "205,225" }, { "nozzle_temperature_initial_layer", "205,225" } });
     const std::string plain = slice(config);
-    CHECK(has_line(plain, R"(^M10[49] S205 T0\b)"));
+    // Without a start G-code that heats the tools, the slicer heats the last printing filament's tool.
     CHECK(has_line(plain, R"(^M10[49] S225 T1\b)"));
 
     // Swap: filament 1 on T2, filament 2 on T1.
     config.option<ConfigOptionInts>("filament_nozzle_assignment", true)->values = { 2, 1 };
     const std::string gcode = slice(config);
-    CHECK(has_line(gcode, R"(^M10[49] S205 T1\b)"));
     CHECK(has_line(gcode, R"(^M10[49] S225 T0\b)"));
-    CHECK_FALSE(has_line(gcode, R"(^M10[49] S205 T0\b)"));
+    CHECK_FALSE(has_line(gcode, R"(^M10[49] S225 T1\b)"));
+    CHECK(has_line(gcode, R"(^T0\b)"));
+    CHECK(has_line(gcode, R"(^T1\b)"));
     // The config block is by tool too, and the assignment is spent.
     CHECK(gcode.find("; nozzle_temperature = 225,205") != std::string::npos);
     CHECK(gcode.find("; filament_nozzle_assignment = ") == std::string::npos);

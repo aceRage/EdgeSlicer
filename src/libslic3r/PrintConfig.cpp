@@ -4570,7 +4570,7 @@ void PrintConfigDef::init_fff_params()
     def->label = "Process slot nozzle diameter";
     def->tooltip = "The nozzle diameter each process slot is for, 0 for any.";
     def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloats {});
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
     def->cli = ConfigOptionDef::nocli;
 
     // Per-nozzle process P4: a printer that opts into the per-tool slot model. Its processes' slot layout
@@ -4609,7 +4609,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Rack nozzle size");
     def->tooltip = L("The diameter of the rack nozzle each filament prints with. 0 means the extruder's nozzle diameter.");
     def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionFloats {});
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
 
     // Per-nozzle process P4 (spec 09-07 "Phase 5", Bambu filament_extruder_variant style): values a filament
     // preset takes on a particular nozzle. One string per filament: "<selector>: key=value, key=value | ...",

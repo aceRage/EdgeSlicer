@@ -320,6 +320,17 @@ double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int fila
     return nozzle_diameter_for_filament(static_cast<const ConfigBase &>(config), filament_id);
 }
 
+double min_physical_nozzle_diameter(const PrintConfig &config)
+{
+    const std::vector<double> &nozzles = config.nozzle_diameter.values;
+    double                     out     = nozzles.empty() ? 0. : *std::min_element(nozzles.begin(), nozzles.end());
+    if (!config.extruder_rack_nozzle_diameter.values.empty())
+        for (const std::vector<RackNozzle> &rack : extruder_rack_nozzles(config))
+            for (const RackNozzle &nozzle : rack)
+                out = std::min(out, nozzle.diameter);
+    return out;
+}
+
 double nozzle_diameter_for_filament_on_layer(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult *group,
                                              unsigned int filament_id, int layer_id)
 {
