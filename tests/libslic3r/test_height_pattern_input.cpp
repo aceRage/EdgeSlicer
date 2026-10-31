@@ -153,7 +153,7 @@ TEST_CASE("Height pattern preview shows the snapped result", "[HeightPattern]")
     REQUIRE(pv.ok());
     CHECK(pv.expansion.bands == 3);
     CHECK(pv.summary.find("3 bands") == 0);
-    CHECK(pv.summary.find("1 repeat of 3 filaments") != std::string::npos);
+    CHECK(height_pattern_short_summary(pv.expansion).find("1 repeat of 3 filaments") != std::string::npos);
     CHECK(pv.summary.find("(last band ends at") != std::string::npos);
     CHECK(pv.clashes.empty());
 

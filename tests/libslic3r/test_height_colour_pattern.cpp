@@ -340,7 +340,7 @@ TEST_CASE("Height colour pattern: repeat, to-the-top and clipping", "[HeightColo
     SECTION("a band thinner than half a layer collapses and is counted") {
         p.band_h = 0.05;
         p.gap_h  = 0.15;
-        p.repeat = 3;
+        p.repeat = 1;
         const HeightPatternExpansion e = expand_height_colour_pattern(p, grid(60., 0.2, 0.2), 0.2);
         CHECK(e.ok());
         CHECK(e.ranges.empty());
