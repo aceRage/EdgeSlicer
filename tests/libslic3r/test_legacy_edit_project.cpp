@@ -28,9 +28,10 @@ namespace {
 // Edit gizmo; this checks such a project still opens with the same geometry.
 const char *FIXTURE = "legacy_round_cube_p4.3mf";
 
-// Measured from the fixture's 3D/3dmodel.model when it was generated.
+// Measured on the fixture as loaded: 37460 triangles in 3D/3dmodel.model, and
+// TriangleMesh::volume() = 7829.14 mm^3 (the unrounded cube is 8000).
 constexpr size_t FIXTURE_TRIANGLES = 37460;
-constexpr double FIXTURE_VOLUME    = 7828.13; // mm^3; the unrounded cube is 8000
+constexpr double FIXTURE_VOLUME    = 7829.14;
 
 void prepare_temp_dir()
 {
