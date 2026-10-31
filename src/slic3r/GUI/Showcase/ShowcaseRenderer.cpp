@@ -1763,6 +1763,23 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 // Realism 1a: the HDR layer's post pass
 // ------------------------------------------------------------------------------------------------
 
+std::string ShowcaseRenderer::export_path_line(bool hdr_drawn, bool has_hdr_layer, bool multisampled, bool wanted, bool refused)
+{
+    if (hdr_drawn)
+        return multisampled ? "HDR (RGBA16F objects layer, multisampled post pass)" : "HDR (RGBA16F objects layer, post pass)";
+    if (has_hdr_layer)
+        return "fallback (the HDR layer was made, but the objects were drawn outside it: toolpaths or the phong shader)";
+    if (refused)
+        return "fallback (the driver refused the RGBA16F layer)";
+    if (!wanted) {
+        const char *v = std::getenv("EDGESLICER_SHOWCASE_NO_HDR");
+        if (v != nullptr && *v != '\0' && *v != '0')
+            return "fallback (EDGESLICER_SHOWCASE_NO_HDR is set)";
+        return "fallback (the post-pass shaders are not loaded)";
+    }
+    return "fallback (no HDR layer)";
+}
+
 bool ShowcaseRenderer::want_hdr() const
 {
     if (m_scene == nullptr)
@@ -2120,6 +2137,7 @@ void ShowcaseRenderer::place_default_camera()
 void ShowcaseRenderer::begin_batch()
 {
     m_batch      = true;
+    m_batch_path_logged = false;
     m_batch_w    = 0;
     m_batch_h    = 0;
     m_batch_msaa = -1;
@@ -2194,12 +2212,15 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     ShowcaseFramebuffers &fb = m_batch ? (m_batch_fb ? *m_batch_fb : *(m_batch_fb = std::make_unique<ShowcaseFramebuffers>())) : local_fb;
     // 1a: the objects' HDR layer when the post pass can run; a driver that refuses the float
     // buffers gets the same plan without it (the objects then tone-map in their shader).
-    bool hdr = want_hdr();
+    const bool wanted_hdr = want_hdr();
+    bool       hdr        = wanted_hdr;
+    bool       hdr_refused = false;
     for (; !reuse;) {
         if (fb.create(plan.internal_width, plan.internal_height, plan.msaa, hdr))
             break;
         if (hdr) {
-            hdr = false;
+            hdr         = false;
+            hdr_refused = true;
             log << "; the HDR layer (RGBA16F) was refused, rendering without the post pass";
         } else if (plan.msaa > 1) {
             plan.msaa = 0;
@@ -2273,6 +2294,13 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     if (m_canvas._is_ssao_enabled()) {
         ensure_fullscreen_quad();
         m_canvas._render_ssao_pass(unsigned(plan.internal_width), unsigned(plan.internal_height));
+    }
+    // Which path the export took, at warning level so a release build's log keeps it (the report
+    // above is info): one line a still, one a video rather than one a frame.
+    if (!m_batch || !m_batch_path_logged) {
+        m_batch_path_logged = m_batch;
+        BOOST_LOG_TRIVIAL(warning) << "Showcase export path: "
+                                   << export_path_line(m_hdr_drawn, fb.has_hdr(), fb.msaa_hdr != 0, wanted_hdr, hdr_refused);
     }
 
     std::vector<uint8_t> pixels(size_t(plan.internal_width) * size_t(plan.internal_height) * 4);
