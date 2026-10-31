@@ -106,7 +106,14 @@ PerTool per_tool(const std::string &gcode)
 
 bool has_line(const std::string &gcode, const std::string &pattern)
 {
-    return std::regex_search(gcode, std::regex(pattern, std::regex::multiline));
+    // Line by line: std::regex::multiline is not in every standard library.
+    const std::regex   re(pattern);
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line))
+        if (std::regex_search(line, re))
+            return true;
+    return false;
 }
 
 } // namespace
