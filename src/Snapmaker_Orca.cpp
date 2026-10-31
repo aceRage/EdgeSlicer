@@ -78,6 +78,7 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -2582,8 +2583,7 @@ int CLI::run(int argc, char **argv)
         }
     }
 
-    if (filament_count == 0)
-        filament_count = load_filament_count;
+    filament_count = cli_filament_slot_count(filament_count, load_filament_count);
 
     if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
     {
@@ -3091,8 +3091,8 @@ int CLI::run(int argc, char **argv)
 
     std::vector<std::string>& different_settings = m_print_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values;
     std::vector<std::string>& inherits_group = m_print_config.option<ConfigOptionStrings>("inherits_group", true)->values;
-    inherits_group.resize(filament_count + 2, std::string());
-    different_settings.resize(filament_count + 2, std::string());
+    resize_cli_preset_slots(inherits_group, filament_count);
+    resize_cli_preset_slots(different_settings, filament_count);
     if (!is_bbl_3mf && !different_process_setting.empty()) {
         different_settings[0] = different_process_setting;
     }
