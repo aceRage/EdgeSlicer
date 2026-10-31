@@ -22,6 +22,7 @@
 #include "libslic3r/SliceBake.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/HeightPatternInput.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "3DScene.hpp"
@@ -528,6 +529,12 @@ void ObjectList::create_objects_ctrl()
         if (type & (itObject | itVolume | itInstance)) {
             if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D())
                 canvas->zoom_to_selection();
+        }
+        else if (type == itInfo && m_objects_model->GetInfoItemType(item) == InfoItemType::HeightPattern) {
+            // Double-click on the pattern's row edits it. Deferred: the dialog rebuilds the rows.
+            const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+            const int pat_id  = m_objects_model->GetHeightPatternId(item);
+            wxGetApp().CallAfter([this, obj_idx, pat_id]() { height_pattern_dialog(obj_idx, pat_id); });
         }
     });
 
@@ -1622,6 +1629,10 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
         if (item)
         {
             const ItemType type = m_objects_model->GetItemType(item);
+            if (type == itInfo && m_objects_model->GetInfoItemType(item) == InfoItemType::HeightPattern) {
+                show_height_pattern_menu(item);
+                return;
+            }
             if (!(type & (itPlate | itObject | itVolume | itInstance)))
                 return;
             if (type & itVolume) {
@@ -2654,6 +2665,11 @@ void ObjectList::del_subobject_item(wxDataViewItem& item)
     wxDataViewItem parent = m_objects_model->GetParent(item);
 
     InfoItemType item_info_type = m_objects_model->GetInfoItemType(item);
+    if ((type & itInfo) && obj_idx != -1 && item_info_type == InfoItemType::HeightPattern) {
+        // Removes the pattern's ranges and rebuilds the rows itself (this item included).
+        height_pattern_remove(obj_idx, m_objects_model->GetHeightPatternId(item));
+        return;
+    }
     if (type & itSettings)
         del_settings_from_config(parent);
     else if (type & itInstanceRoot && obj_idx != -1)
@@ -2722,6 +2738,7 @@ void ObjectList::del_info_item(const int obj_idx, InfoItemType type)
     }
 
     // BBS: remove Sinking
+    case InfoItemType::HeightPattern: return;   // handled by height_pattern_remove()
     case InfoItemType::Undef : assert(false); break;
     }
     cnv->post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -2786,7 +2803,18 @@ void ObjectList::del_layer_from_object(const int obj_idx, const t_layer_height_r
 
 void ObjectList::del_layers_from_object(const int obj_idx)
 {
-    object(obj_idx)->layer_config_ranges.clear();
+    // The Height ranges row only shows the ranges that are not a height colour pattern's output
+    // (those have their own row), so removing it must leave the patterns' ranges alone.
+    ModelObject *mo = object(obj_idx);
+    if (mo->height_colour_patterns.empty())
+        mo->layer_config_ranges.clear();
+    else
+        for (auto it = mo->layer_config_ranges.begin(); it != mo->layer_config_ranges.end();) {
+            if (height_pattern_owns_range(*mo, it->first))
+                ++it;
+            else
+                it = mo->layer_config_ranges.erase(it);
+        }
 
     changed_object(obj_idx);
 }
@@ -3326,6 +3354,13 @@ void ObjectList::layers_editing()
             // BBS: remove snapshot name "Add layers"
             take_snapshot("Add layers");
             ranges[{ 0.0f, 2.0f }].assign_config(get_default_layer_config(obj_idx));
+        } else if (const ModelObject *mo = object(obj_idx);
+                   std::all_of(ranges.begin(), ranges.end(), [mo](const auto &r) { return height_pattern_owns_range(*mo, r.first); })) {
+            // Every range belongs to a height colour pattern, whose rows are not part of the
+            // Height ranges row: start the row with a new range just above the last one.
+            take_snapshot("Add layers");
+            const coordf_t top = ranges.rbegin()->first.second;
+            ranges[{ top, top + 2.0 }].assign_config(get_default_layer_config(obj_idx));
         }
 
         // create layer root item
@@ -3390,6 +3425,15 @@ wxDataViewItem ObjectList::add_layer_root_item(const wxDataViewItem obj_item)
         object(obj_idx)->layer_config_ranges.empty() ||
         printer_technology() == ptSLA)
         return wxDataViewItem(nullptr);
+
+    // A height colour pattern's ranges have their own row; with nothing else there is no
+    // Height ranges row to show (an empty one would never go away).
+    {
+        const ModelObject *mo = object(obj_idx);
+        if (std::all_of(mo->layer_config_ranges.begin(), mo->layer_config_ranges.end(),
+                        [mo](const auto &r) { return height_pattern_owns_range(*mo, r.first); }))
+            return wxDataViewItem(nullptr);
+    }
 
     // create LayerRoot item
     wxDataViewItem layers_item = m_objects_model->AddLayersRoot(obj_item);
@@ -3899,6 +3943,7 @@ void ObjectList::changed_object(const int obj_idx/* = -1*/) const
 void ObjectList::part_selection_changed()
 {
     if (m_extruder_editor) m_extruder_editor->Hide();
+    show_height_pattern_overlay(-1, 0);   // Color Pattern bands only while a pattern row is selected
     int obj_idx = -1;
     int volume_id = -1;
     m_config = nullptr;
@@ -4014,6 +4059,10 @@ void ObjectList::part_selection_changed()
                             gizmos_mgr.open_gizmo(gizmo_type);
                         break;
                     }
+                    case InfoItemType::HeightPattern:
+                        // The pattern's bands are drawn on the object while its row is selected.
+                        show_height_pattern_overlay(obj_idx, m_objects_model->GetHeightPatternId(item));
+                        break;
                     // BBS: remove Sinking
                     //case InfoItemType::Sinking: { break; }
                     default: { break; }
@@ -4402,6 +4451,7 @@ void ObjectList::add_object_to_list(size_t obj_idx, bool call_selection_changed,
 
     // Add layers if it has
     add_layer_root_item(item);
+    add_height_pattern_rows(item);
 
 #ifndef __WXOSX__
     if (call_selection_changed) {
@@ -4839,7 +4889,7 @@ void ObjectList::add_layer_range_after_current(const t_layer_height_range curren
     else if (const std::pair<coordf_t, coordf_t> &next_range = it_next_range->first; current_range.second <= next_range.first)
     {
         const int layer_idx = m_objects_model->GetItemIdByLayerRange(obj_idx, next_range);
-        assert(layer_idx >= 0);
+        assert(layer_idx >= 0 || height_pattern_owns_range(*object(obj_idx), next_range));
         if (layer_idx >= 0)
         {
             if (current_range.second == next_range.first)
@@ -4933,6 +4983,10 @@ void ObjectList::add_layer_item(const t_layer_height_range& range,
 {
     const int obj_idx = m_objects_model->GetObjectIdByItem(layers_item);
     if (obj_idx < 0) return;
+
+    // An untouched output of a height colour pattern is shown by the pattern's own row.
+    if (height_pattern_owns_range(*object(obj_idx), range))
+        return;
 
     const DynamicPrintConfig& config = object(obj_idx)->layer_config_ranges[range].get();
     if (!config.has("extruder"))

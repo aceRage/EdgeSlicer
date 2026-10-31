@@ -40,6 +40,8 @@ uniform float     reflection_lod;
 uniform vec2      viewport_origin;
 uniform vec2      viewport_size;
 uniform vec3      camera_position;
+// G1: 0 = lights on; otherwise the share of the light taken away (1 - the ambient level).
+uniform float     scene_dim;
 
 in vec4 world_pos;
 in vec2 local_pos;
@@ -137,7 +139,7 @@ void main()
     }
     vec3 tint = dot(light_tint, vec3(1.0)) > 0.0 ? mix(vec3(1.0), light_tint, 0.35) : vec3(1.0);
     float lambert = 0.80 + 0.20 * clamp(light_dir.z, 0.0, 1.0);
-    vec3 c = base * tint * lambert * (1.0 - dark);
+    vec3 c = base * tint * lambert * (1.0 - dark) * pow(max(1.0 - scene_dim, 0.0), 1.0 / 2.2);
     // The reflection sits on top of the lit floor.
     c = c * (1.0 - clamp(refl.a, 0.0, 1.0)) + refl.rgb;
     out_color = vec4(clamp(c, 0.0, 1.0), fade);

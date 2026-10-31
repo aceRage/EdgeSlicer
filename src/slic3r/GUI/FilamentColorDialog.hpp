@@ -57,12 +57,23 @@ private:
     void BuildMakeUpUi(wxWindow* parent, wxSizer* sizer, int contentMargin, int contentWidth);
     void SyncMakeUpFromSelection(bool resetSplit);
     void SetColourCount(int count);
+    void SetKind(bool gradient);
+    bool IsGradient() const;
+    int  MaxColours() const;
+    FilamentColor MakeSelection(const std::vector<std::string>& colors) const;
+    void ResizeToContent();
     void SetPercent(int index, int value);
     void SetAngle(double angleDeg);
     void PickChipColour(int index);
     void SelectChip(int index);
     void SetChipColour(int index, const std::string& hex);
     void RefreshMakeUp();
+    // Glow in the dark (G1): the section under the make-up.
+    void BuildGlowUi(wxWindow* parent, wxSizer* sizer, int contentMargin);
+    void SetGlowState(int state);
+    void PickGlowColour();
+    void ResetGlowColour();
+    void RefreshGlow();
     void OpenMoreColorDialog();
     void PlaceNearFilamentPanel();
     void UpdateRoundedShape();
@@ -87,9 +98,32 @@ private:
     std::array<int, 4> _percent { 50, 50, 0, 0 };
     SpinInput* _countSpin { nullptr };
     std::array<SpinInput*, 4> _percentSpin { nullptr, nullptr, nullptr, nullptr };
-    std::array<wxWindow*, 4> _chips { nullptr, nullptr, nullptr, nullptr };
+    std::array<wxWindow*, 5> _chips { nullptr, nullptr, nullptr, nullptr, nullptr };
+    // Gradient filaments (P6): the colours run along the length instead of side by side.
+    bool _gradient { false };
+    bool _uiBuilt { false };
+    int _dialogWidth { 0 };
+    SpinInput* _dwellSpin { nullptr };
+    SpinInput* _transitionSpin { nullptr };
+    wxWindow* _strip { nullptr };
+    wxWindow* _splitButton { nullptr };
+    wxWindow* _gradientButton { nullptr };
+    wxSizer* _makeUpSizer { nullptr };
+    wxSizer* _percentRow { nullptr };
+    wxSizer* _discRow { nullptr };
+    wxSizer* _angleRow { nullptr };
+    wxSizer* _twistRow { nullptr };
+    wxSizer* _cycleRow { nullptr };        // the colour length (dwell) row
+    wxSizer* _transitionRow { nullptr };
+    wxSizer* _stripRow { nullptr };
     SpinInput* _angleSpin { nullptr };
     SpinInput* _twistSpin { nullptr };
+    // Glow in the dark (G1): Automatic / On / Off, the glow colour, the project-wide intensity.
+    std::array<wxWindow*, 3> _glowButtons { nullptr, nullptr, nullptr };
+    wxWindow* _glowChip { nullptr };
+    wxWindow* _glowColourReset { nullptr };
+    wxStaticText* _glowHint { nullptr };
+    SpinInput* _glowIntensitySpin { nullptr };
     ColourSwatchGrid* _palette { nullptr };
     ColourSwatchGrid* _recent { nullptr };
     int _activeChip { 0 };

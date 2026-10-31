@@ -7,6 +7,8 @@
 #
 #   sh tests/showcase/multicolour_stills.sh <install dir> <template.3mf> <out dir> [--size px] [--angle deg]
 #                                           [--photos dir] [--golden dir] [--mesh] [--compare dir] [--dark]
+#                                           [--glow] [--lights-off [ambient]]
+#                                           [--gradient] [--dwell mm] [--transition mm]
 #     <template.3mf>  a project 3MF with project settings (its printer and process are used), e.g. the
 #                     U1 project tests/data/support_corpus/onepart_group.3mf, as golden.sh uses (an H2C
 #                     project slices on the command line but not in the hidden render instance)
@@ -18,6 +20,11 @@
 #     --compare       stills of the same names to show beside these in index.html (e.g. P3's
 #                     tests/p0_multicolour_cc1/p3_stills next to --mesh stills)
 #     --dark          the dark studio backdrop (the stills are otherwise on Studio white)
+#     --glow          glow G1: slot 1 glows (the vibrant version of its colours)
+#     --lights-off    glow G1: the scene's lights out; the optional ambient (default 0.05) is the light left
+#     --gradient      P6: slot 1 is a gradient filament (Snapmaker's Pastel Rainbow palette) instead of a
+#                     dual-colour split; each colour holds for --dwell mm of filament and blends to the next
+#                     over --transition mm (defaults 7000 and 1000; a small shape needs e.g. 100 and 40)
 #
 # Writes <out>/<shape>_<view>.png (+ .log, .report.json) and <out>/index.html.
 
@@ -31,6 +38,10 @@ GOLDEN=
 MESH=
 COMPARE=
 DARK=
+FIXARGS=
+GRADIENT=
+DWELL=7000
+TRANSITION=1000
 ARGS=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -41,7 +52,17 @@ while [ $# -gt 0 ]; do
     --mesh) MESH=1; shift ;;
     --compare) COMPARE=$2; shift 2 ;;
     --dark) DARK=--dark; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    --glow) FIXARGS="$FIXARGS --glow"; shift ;;
+    --lights-off)
+        case "${2:-}" in
+        [0-9]*) FIXARGS="$FIXARGS --lights-off $2"; shift 2 ;;
+        *) FIXARGS="$FIXARGS --lights-off"; shift ;;
+        esac ;;
+
+    --gradient) GRADIENT=--gradient; shift ;;
+    --dwell) DWELL=$2; shift 2 ;;
+    --transition) TRANSITION=$2; shift 2 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) ARGS="$ARGS $1"; shift ;;
     esac
 done
@@ -72,7 +93,8 @@ if [ -n "$MESH" ]; then
     SLICE=
     LABEL=P4
 fi
-"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" $DARK > "$OUT/fixtures.txt" || exit 2
+"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" [ -n "$GRADIENT" ] && LABEL=P6
+"$PY" -I "$HERE/make_multicolour_fixtures.py" "$TEMPLATE" "$OUT/fixtures" --angle "$ANGLE" --source "$SOURCE" --dwell "$DWELL" --transition "$TRANSITION" $GRADIENT $DARK $FIXARGS > "$OUT/fixtures.txt" || exit 2
 
 STATUS=0
 render() {   # exe datadir fixture out
@@ -107,7 +129,8 @@ rel_compare=
 {
     echo "<!doctype html><meta charset=utf-8><title>$LABEL multi-colour stills</title>"
     echo "<style>body{font:14px sans-serif;background:#eee;margin:16px}img{max-width:48%;margin:4px;vertical-align:top}h3{margin:18px 0 4px}</style>"
-    echo "<p>Dual red/yellow silk, slot rotation $ANGLE deg. P0 photos: <a href=\"$rel_photos/\">$rel_photos</a>"
+    if [ -n "$GRADIENT" ]; then echo "<p>Gradient (Pastel Rainbow palette), each colour holds $DWELL mm of filament, then blends over $TRANSITION mm."; else echo "<p>Dual red/yellow silk, slot rotation $ANGLE deg."; fi
+    echo "P0 photos: <a href=\"$rel_photos/\">$rel_photos</a>"
     echo "(07/08 plaques, 09-12 cube, 13-16 cylinder, 01-06 vase).</p>"
     for p in "$OUT"/*.png; do
         n=$(basename "$p")
