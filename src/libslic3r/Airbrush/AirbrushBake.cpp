@@ -754,11 +754,20 @@ AirbrushCost airbrush_estimate_cost(const indexed_triangle_set &its, const Trian
         }
     }
 
-    int loaded = -1;
-    cost.filaments_per_layer.resize(size_t(nlayers));
-    for (int l = 0; l < nlayers; ++l) {
-        const std::set<int> &need = per_layer[size_t(l)];
-        cost.filaments_per_layer[size_t(l)].assign(need.begin(), need.end());
+    std::vector<std::vector<int>> layers(size_t(nlayers));
+    for (int l = 0; l < nlayers; ++l)
+        layers[size_t(l)].assign(per_layer[size_t(l)].begin(), per_layer[size_t(l)].end());
+    return airbrush_cost_from_layers(std::move(layers), params);
+}
+
+AirbrushCost airbrush_cost_from_layers(std::vector<std::vector<int>> per_layer, const AirbrushCostParams &params)
+{
+    AirbrushCost cost;
+    cost.layers = int(per_layer.size());
+    int loaded  = -1;
+    for (std::vector<int> &need : per_layer) {
+        std::sort(need.begin(), need.end());
+        need.erase(std::unique(need.begin(), need.end()), need.end());
         if (need.size() > 1)
             ++cost.multi_tool_layers;
         if (need.empty())
@@ -766,7 +775,8 @@ AirbrushCost airbrush_estimate_cost(const indexed_triangle_set &its, const Trian
         // Start with what is loaded when this layer needs it, then the rest in id order; end on
         // the last one, as the tool ordering does.
         std::vector<int> order;
-        if (need.count(loaded))
+        order.reserve(need.size());
+        if (std::binary_search(need.begin(), need.end(), loaded))
             order.push_back(loaded);
         for (int id : need)
             if (id != loaded)
@@ -777,10 +787,31 @@ AirbrushCost airbrush_estimate_cost(const indexed_triangle_set &its, const Trian
             loaded = id;
         }
     }
-    cost.purge_mm3    = double(cost.swaps) * params.flush_mm3 * params.flush_multiplier;
-    cost.purge_g      = cost.purge_mm3 / 1000. * params.density_g_cm3;
-    cost.swap_seconds = double(cost.swaps) * params.swap_seconds;
+    cost.filaments_per_layer = std::move(per_layer);
+    cost.purge_mm3           = double(cost.swaps) * params.flush_mm3 * params.flush_multiplier;
+    cost.purge_g             = cost.purge_mm3 / 1000. * params.density_g_cm3;
+    cost.swap_seconds        = double(cost.swaps) * params.swap_seconds;
     return cost;
+}
+
+AirbrushCost airbrush_merge_costs(const std::vector<AirbrushCost> &parts, const AirbrushCostParams &params)
+{
+    size_t n = 0;
+    for (const AirbrushCost &c : parts)
+        n = std::max(n, c.filaments_per_layer.size());
+    std::vector<std::vector<int>> layers(n);
+    for (const AirbrushCost &c : parts)
+        for (size_t l = 0; l < c.filaments_per_layer.size(); ++l)
+            layers[l].insert(layers[l].end(), c.filaments_per_layer[l].begin(), c.filaments_per_layer[l].end());
+    return airbrush_cost_from_layers(std::move(layers), params);
+}
+
+AirbrushCostWarning airbrush_cost_warning(const AirbrushCost &cost, double purge_g_limit, double swap_seconds_limit)
+{
+    AirbrushCostWarning w;
+    w.purge = cost.purge_g > purge_g_limit;
+    w.time  = cost.swap_seconds > swap_seconds_limit;
+    return w;
 }
 
 } // namespace Airbrush

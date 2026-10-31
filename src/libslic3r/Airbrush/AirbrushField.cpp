@@ -200,7 +200,7 @@ void AirbrushField::end_stroke()
     m_stroke_dabs = 0;
 }
 
-size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in)
+size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in, std::vector<uint64_t> *changed_keys)
 {
     const bool implicit = !m_stroke_active;
     if (implicit)
@@ -315,6 +315,8 @@ size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in)
         if (old == nullptr ? true : old->w != w) {
             set_cell(key, w);
             ++changed;
+            if (changed_keys)
+                changed_keys->push_back(key);
         }
     }
     if (implicit)
