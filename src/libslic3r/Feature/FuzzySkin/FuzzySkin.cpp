@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <optional>
 #include <random>
 
 #include "libslic3r/Algorithm/LineSplit.hpp"
@@ -23,13 +26,61 @@ using namespace Slic3r;
 
 namespace Slic3r::Feature::FuzzySkin {
 
+// Edge: test-only seed (set_test_random_seed). While set, every fuzzy_polyline() /
+// fuzzy_extrusion_line() call draws from its own generator seeded from the seed and the call's
+// input, so a slice is reproducible whatever thread a layer lands on. Never set by the app.
+static std::atomic<bool>     s_test_seed_set{false};
+static std::atomic<uint64_t> s_test_seed{0};
+static thread_local std::mt19937* t_test_gen = nullptr;
+
+void set_test_random_seed(std::optional<uint64_t> seed)
+{
+    s_test_seed.store(seed.value_or(0));
+    s_test_seed_set.store(seed.has_value());
+}
+
+namespace {
+// Installs the per-call test generator for one fuzz call; does nothing unless a test seed is set.
+class TestSeedScope
+{
+public:
+    TestSeedScope(coordf_t slice_z, const Point& first, size_t n)
+    {
+        if (! s_test_seed_set.load())
+            return;
+        uint64_t z;
+        static_assert(sizeof(z) == sizeof(double));
+        const double zd = double(slice_z);
+        std::memcpy(&z, &zd, sizeof(z));
+        std::seed_seq seq{ uint32_t(s_test_seed.load()), uint32_t(s_test_seed.load() >> 32), uint32_t(z), uint32_t(z >> 32),
+                           uint32_t(first.x()), uint32_t(first.y()), uint32_t(n) };
+        m_gen.seed(seq);
+        m_prev     = t_test_gen;
+        t_test_gen = &m_gen;
+        m_active   = true;
+    }
+    ~TestSeedScope()
+    {
+        if (m_active)
+            t_test_gen = m_prev;
+    }
+    TestSeedScope(const TestSeedScope&)            = delete;
+    TestSeedScope& operator=(const TestSeedScope&) = delete;
+
+private:
+    std::mt19937  m_gen;
+    std::mt19937* m_prev   = nullptr;
+    bool          m_active = false;
+};
+} // namespace
+
 // Produces a random value between 0 and 1. Thread-safe.
 static double random_value() {
     thread_local std::random_device rd;
     // Hash thread ID for random number seed if no hardware rng seed is available
     thread_local std::mt19937 gen(rd.entropy() > 0 ? rd() : std::hash<std::thread::id>()(std::this_thread::get_id()));
     thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
-    return dist(gen);
+    return dist(t_test_gen != nullptr ? *t_test_gen : gen);
 }
 
 class UniformNoise: public noise::module::Module {
@@ -438,6 +489,7 @@ void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkin
     }
 
     std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
+    const TestSeedScope test_seed(slice_z, poly.front(), poly.size());
 
     const double min_dist_between_points = cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
     const double range_random_point_dist = cfg.point_distance / 2.;
@@ -519,6 +571,7 @@ void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice
     }
 
     std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
+    const TestSeedScope test_seed(slice_z, ext_lines.front().p, ext_lines.size());
 
     const double min_dist_between_points = cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
     const double range_random_point_dist = cfg.point_distance / 2.;
