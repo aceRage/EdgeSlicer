@@ -268,6 +268,8 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["airbrush_flow"]                  = _L("Flow");
     m_desc["airbrush_grain"]                 = _L("Grain");
     m_desc["airbrush_seed"]                  = _L("Seed");
+    m_desc["airbrush_cancel_caption"]        = _L("Esc");
+    m_desc["airbrush_cancel"]                = _L("Cancel what has not been baked yet");
 
     // Filament remapping descriptions
     m_desc["perform_remap"]                   = _L("Remap filaments");
@@ -473,7 +475,7 @@ void GLGizmoMmuSegmentation::show_tooltip_information(float caption_max, float x
                 tip_items = {"spread_paint", "erase", "spread_cancel", "smart_fill_angle", "clipping_of_view", "toggle_wireframe"};
                 break;
             case ToolType::AIRBRUSH:
-                tip_items = {"airbrush_paint", "airbrush_erase", "cursor_size", "clipping_of_view", "toggle_wireframe"};
+                tip_items = {"airbrush_paint", "airbrush_erase", "cursor_size", "airbrush_cancel", "clipping_of_view", "toggle_wireframe"};
                 break;
             default:
                 break;
@@ -1738,6 +1740,10 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
     if (!TriangleSelector::build_filament_remap_state_map(m_display_filament_ids, m_extruder_remap, state_map))
         return;
 
+    // Edge (Airbrush P3, A1): sprays still waiting for their bake go in first (their own undo steps),
+    // so the remap below sees every field together with the paint baked from it.
+    airbrush_flush_pending(true);
+
     Plater::TakeSnapshot snapshot(wxGetApp().plater(),
                                   "Remap filament assignments",
                                   UndoRedo::SnapshotType::GizmoAction);
@@ -1793,6 +1799,9 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
 
         // ORCA: No "Filament remapping finished" notification, to reduce UI noise.
         update_model_object();
+        // Edge (Airbrush P3, A1): the colour fields' filament slots follow the paint, so the next
+        // bake does not read the remapped paint as a foreign edit.
+        airbrush_after_remap(mo, state_map);
         m_parent.set_as_dirty();
 
         // ORCA: Refresh used filaments cache
