@@ -15,6 +15,7 @@
 #include "ShowcaseTone.hpp"
 #include "ShowcaseVideo.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <map>
@@ -249,6 +250,13 @@ struct Materials
     // Materials chips, the callout swatch discs and, in P3/P4, the toolpaths and the model). Off =
     // split slots show as plain colours. Written only when off.
     bool                          coextruded_look = true;
+    // Glow-in-the-dark G1 (design section 10): the "lights off" view. Ordinary filaments, the floor and
+    // the backdrop keep only lights_off_ambient of their light (linear, 0 = pitch black); filaments that
+    // glow (the project's filament_glow keys) shine in their glow colour. Written only when on.
+    bool                          lights_off         = false;
+    float                         lights_off_ambient = 0.05f;
+    // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
+    float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
     // The override for a filament, or null when its finish is inferred.
     const Finish *override_for(int filament) const;
@@ -260,7 +268,7 @@ struct Materials
     bool operator==(const Materials &o) const
     {
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
-               coextruded_look == o.coextruded_look;
+               coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };

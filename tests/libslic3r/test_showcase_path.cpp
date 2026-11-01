@@ -834,6 +834,33 @@ TEST_CASE("Toolpath smoothness mapping (D13)", "[Showcase][Path][Toolpaths]")
         REQUIRE(scenes_from_json(scenes_to_json(off), back));
         CHECK_FALSE(back.scenes[0].materials.coextruded_look);
     }
+    SECTION("the lights-off view is off by default and written only when on (glow G1)")
+    {
+        Project plain;
+        plain.ensure_scene_for_plate(0);
+        CHECK_FALSE(plain.scenes[0].materials.lights_off);
+        const json j = json::parse(scenes_to_json(plain));
+        CHECK_FALSE(j["scenes"][0]["materials"].contains("lights_off"));
+        CHECK_FALSE(j["scenes"][0]["materials"].contains("lights_off_ambient"));
+        Project on;
+        Scene  &s = on.ensure_scene_for_plate(0);
+        s.materials.lights_off         = true;
+        s.materials.lights_off_ambient = 0.12f;
+        Project back;
+        REQUIRE(scenes_from_json(scenes_to_json(on), back));
+        CHECK(back.scenes[0].materials.lights_off);
+        CHECK(back.scenes[0].materials.lights_off_ambient == 0.12f);
+        CHECK(back.scenes[0] == on.scenes[0]);
+        // A wild value is clamped; it stays a scene that loads.
+        json wild = json::parse(scenes_to_json(on));
+        wild["scenes"][0]["materials"]["lights_off_ambient"] = 9.0;
+        Project clamped;
+        REQUIRE(scenes_from_json(wild.dump(), clamped));
+        CHECK(clamped.scenes[0].materials.lights_off_ambient == 0.5f);
+        Project older;
+        REQUIRE(scenes_from_json(scenes_to_json(plain), older));
+        CHECK_FALSE(older.scenes[0].materials.lights_off);
+    }
 }
 
 TEST_CASE("S5 video settings in the scene; a video exported as a path", "[Showcase][Path]")
