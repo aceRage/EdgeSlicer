@@ -18,6 +18,9 @@
 #include "RemoteHub.hpp"
 #include "RemoteSend.hpp"
 #include "RemoteSliceV1.hpp"
+#include "LibVGCode/LibVGCodeWrapper.hpp"
+#include <boost/format.hpp>
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/CostOverrides.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "RemoteSnapmaker.hpp"
@@ -123,6 +126,20 @@ static std::string query_param(const std::string& query, const std::string& key)
         pos = amp + 1;
     }
     return "";
+}
+
+// Whether `key` is in the query at all ("options=" names none, a missing key names the default).
+static bool query_has_param(const std::string& query, const std::string& key)
+{
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        if (amp == std::string::npos) amp = query.size();
+        const std::string kv = query.substr(pos, amp - pos);
+        if (kv.substr(0, kv.find('=')) == key) return true;
+        pos = amp + 1;
+    }
+    return false;
 }
 
 static void write_all(tcp::socket& s, const std::string& data)
@@ -907,6 +924,91 @@ static std::string ensure_preview_loaded(int plate)
     return "";
 }
 
+// ---- PR E: preview v2 ----
+
+static_assert(size_t(libvgcode::EGCodeExtrusionRole::COUNT) == 22, "preview_role_ids() follows libvgcode::EGCodeExtrusionRole");
+static_assert(size_t(libvgcode::EOptionType::ToolChanges) == 5, "preview_option_ids() follows libvgcode::EOptionType");
+
+// The view types a phone may colour by: the desktop's own, by their config names, with its labels.
+static nlohmann::json preview_color_by_choices()
+{
+    nlohmann::json choices = nlohmann::json::array();
+    for (const auto& [id, label] : GCodeViewer::default_view_type_choices())
+        if (id != "auto" && id != "last")
+            choices.push_back({ { "id", id }, { "label", label } });
+    return choices;
+}
+
+static std::string preview_color_by_label(const std::string& id)
+{
+    for (const auto& [choice, label] : GCodeViewer::default_view_type_choices())
+        if (choice == id) return label;
+    return id;
+}
+
+static std::string preview_option_label(libvgcode::EOptionType o)
+{
+    switch (o) {
+    case libvgcode::EOptionType::Travels:       return _u8L("Travel");
+    case libvgcode::EOptionType::Wipes:         return _u8L("Wipe");
+    case libvgcode::EOptionType::Retractions:   return _u8L("Retract");
+    case libvgcode::EOptionType::Unretractions: return _u8L("Unretract");
+    case libvgcode::EOptionType::Seams:         return _u8L("Seams");
+    case libvgcode::EOptionType::ToolChanges:   return _u8L("Filament changes");
+    default:                                    return "";
+    }
+}
+
+static std::string hex_of(const libvgcode::Color& c) { return SliceV1::hex_color(c[0], c[1], c[2]); }
+
+// The PC's own preview choices while a phone frame is rendered with its own: applied for the frame,
+// then put back, so a shown window keeps the view type, the moves and the features its user picked.
+class PreviewLookScope
+{
+public:
+    PreviewLookScope(GLCanvas3D* canvas, libvgcode::Viewer& lv, const SliceV1::PreviewLook& look) : m_canvas(canvas), m_lv(lv)
+    {
+        m_type = lv.get_view_type();
+        for (size_t i = 0; i < m_options.size(); ++i) m_options[i] = lv.is_option_visible(libvgcode::EOptionType(i));
+        for (size_t i = 0; i < m_roles.size(); ++i) m_roles[i] = lv.is_extrusion_role_visible(libvgcode::EGCodeExtrusionRole(i));
+        libvgcode::EViewType type;
+        if (!look.color_by.empty() && GCodeViewer::view_type_from_config_name(look.color_by, type) && type != m_type) {
+            lv.set_view_type(type);
+            m_changed = true;
+        }
+        if (look.options_given)
+            for (size_t i = 0; i < m_options.size(); ++i) {
+                const bool want = std::find(look.options.begin(), look.options.end(), SliceV1::preview_option_ids()[i]) != look.options.end();
+                if (want != m_options[i]) { lv.toggle_option_visibility(libvgcode::EOptionType(i)); m_changed = true; }
+            }
+        for (size_t i = 0; i < m_roles.size(); ++i) {
+            const bool want = std::find(look.hide.begin(), look.hide.end(), SliceV1::preview_role_ids()[i]) == look.hide.end();
+            if (want != m_roles[i]) { lv.toggle_extrusion_role_visibility(libvgcode::EGCodeExtrusionRole(i)); m_changed = true; }
+        }
+    }
+    ~PreviewLookScope()
+    {
+        if (!m_changed) return;
+        for (size_t i = 0; i < m_roles.size(); ++i)
+            if (m_lv.is_extrusion_role_visible(libvgcode::EGCodeExtrusionRole(i)) != m_roles[i])
+                m_lv.toggle_extrusion_role_visibility(libvgcode::EGCodeExtrusionRole(i));
+        for (size_t i = 0; i < m_options.size(); ++i)
+            if (m_lv.is_option_visible(libvgcode::EOptionType(i)) != m_options[i])
+                m_lv.toggle_option_visibility(libvgcode::EOptionType(i));
+        if (m_lv.get_view_type() != m_type) m_lv.set_view_type(m_type);
+        m_canvas->set_as_dirty();
+        m_canvas->request_extra_frame();
+    }
+
+private:
+    GLCanvas3D*                                             m_canvas;
+    libvgcode::Viewer&                                      m_lv;
+    libvgcode::EViewType                                    m_type;
+    std::array<bool, 6>                                     m_options {};
+    std::array<bool, size_t(libvgcode::EGCodeExtrusionRole::COUNT)> m_roles {};
+    bool                                                    m_changed { false };
+};
+
 RemoteAccess::ApiResponse RemoteAccess::api_plate_preview(int plate)
 {
     auto out = std::make_shared<nlohmann::json>();
@@ -935,6 +1037,16 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview(int plate)
         j["range"]     = v.get_layers_z_range();
         const BoundingBoxf3& b = v.get_paths_bounding_box();
         j["box"] = { b.min.x(), b.min.y(), b.min.z(), b.max.x(), b.max.y(), b.max.z() };
+        // PR E: what the frames can be coloured by (the desktop's view types, by config name) and the
+        // moves they can show, with the PC's own choice as the default.
+        const libvgcode::Viewer& lv = v.get_libvgcode_viewer();
+        j["color_by"] = { { "current", GCodeViewer::view_type_to_config_name(lv.get_view_type()) }, { "choices", preview_color_by_choices() } };
+        j["options"]  = nlohmann::json::array();
+        for (libvgcode::EOptionType o : lv.get_options()) {
+            const size_t i = size_t(o);
+            if (i < SliceV1::preview_option_ids().size())
+                j["options"].push_back({ { "id", SliceV1::preview_option_ids()[i] }, { "label", preview_option_label(o) }, { "visible", lv.is_option_visible(o) } });
+        }
     }, 60000);
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
@@ -973,8 +1085,16 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_status(int plate)
     return r;
 }
 
-RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const std::string& view_in, int layer, int w, int h, double zoom, double cx, double cy)
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const std::string& view_in, int layer, int w, int h, double zoom, double cx, double cy,
+                                                              const SliceV1::PreviewLook& look)
 {
+    libvgcode::EViewType requested;
+    if (!look.color_by.empty() && !GCodeViewer::view_type_from_config_name(look.color_by, requested)) {
+        ApiResponse r;
+        r.status = 400;
+        r.body   = json_error("unknown color_by: " + look.color_by);
+        return r;
+    }
     static const std::set<std::string> views = { "front", "rear", "left", "right", "top", "bottom", "iso" };
     const std::string view = views.count(view_in) ? view_in : "front";
     w = std::max(64, std::min(2048, w));
@@ -985,7 +1105,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
     auto data = std::make_shared<ThumbnailData>();
     auto err  = std::make_shared<std::string>();
     auto eff  = std::make_shared<double>(1.0);
-    bool ok   = run_on_main([data, err, eff, plate, view, layer, w, h, zoom, cx, cy]() {
+    bool ok   = run_on_main([data, err, eff, plate, view, layer, w, h, zoom, cx, cy, look]() {
         const std::string e = ensure_preview_loaded(plate);
         if (!e.empty()) { *err = e; return; }
         Plater*      plater = wxGetApp().plater();
@@ -994,11 +1114,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
         const std::vector<double>& zs = v.get_layers_zs();
         const int          last  = (int) zs.size() - 1;
         const unsigned int top   = (unsigned int) std::max(0, std::min(last, layer < 0 ? last : layer));
-        const std::array<unsigned int, 2> range = { 0u, top };
+        const std::array<unsigned int, 2> range = { SliceV1::preview_from_layer(look.from, top), top };
         const libvgcode::Interval&        shown = v.get_layers_z_range();
         if (shown[0] != range[0] || shown[1] != range[1]) {
             IMSlider* slider = v.get_layers_slider();
-            slider->SetSelectionSpan(0, (int) top);
+            slider->SetSelectionSpan((int) range[0], (int) top);
             slider->set_as_dirty(false);
             v.set_layers_z_range(range);
             canvas->set_volumes_z_range({ slider->GetLowerValueD(), slider->GetHigherValueD() });
@@ -1010,6 +1130,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
         box.min.z() = std::min(box.min.z(), -1.0);
         const BoundingBoxf3& pb = plater->get_partplate_list().get_plate(plate)->get_bounding_box();
         const BoundingBoxf3  bed(Vec3d(pb.min.x(), pb.min.y(), -1.0), Vec3d(pb.max.x(), pb.max.y(), 0.0));
+        PreviewLookScope scope(canvas, v.get_libvgcode_viewer(), look); // PR E: the phone's colours / moves / features, then the PC's again
         canvas->render_gcode_preview_image(*data, (unsigned int) w, (unsigned int) h, view, box, bed, zoom, cx, cy, eff.get());
     }, 30000);
     ApiResponse r;
@@ -1020,6 +1141,93 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
     r.type    = "image/png";
     r.headers = "X-Preview-Zoom: " + std::to_string(*eff) + "\r\n";
     r.body.assign(static_cast<const char*>(png->data), png->size);
+    return r;
+}
+
+// PR E: the legend of a colouring - the features with their colour, time and share, the filaments
+// with their colour, or a gradient's range and colour stops. Reads only; loads the plate's preview
+// like /preview does.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_legend(int plate, const std::string& color_by, const std::string& hide)
+{
+    auto out    = std::make_shared<nlohmann::json>();
+    auto err    = std::make_shared<std::string>();
+    auto status = std::make_shared<int>(409);
+    const std::vector<std::string> hidden = SliceV1::split_ids(hide);
+    bool ok = run_on_main([out, err, status, plate, color_by, hidden]() {
+        const std::string e = ensure_preview_loaded(plate);
+        if (!e.empty()) { *err = e; *status = e == "no such plate" ? 404 : 409; return; }
+        GCodeViewer&             v  = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        const libvgcode::Viewer& lv = v.get_libvgcode_viewer();
+        libvgcode::EViewType type = lv.get_view_type();
+        if (!color_by.empty() && !GCodeViewer::view_type_from_config_name(color_by, type)) {
+            *err = "unknown color_by: " + color_by; *status = 400; return;
+        }
+        const std::string id = GCodeViewer::view_type_to_config_name(type);
+        nlohmann::json&   j  = *out;
+        j["index"]     = plate;
+        j["result_id"] = v.loaded_result_id();
+        j["color_by"]  = id;
+        j["label"]     = preview_color_by_label(id);
+        if (type == libvgcode::EViewType::FeatureType) {
+            const float total = lv.get_estimated_time();
+            auto share = [total](float t) { return total > 0.f ? std::round(t / total * 1000.f) / 10. : 0.; };
+            j["kind"]  = "discrete";
+            j["items"] = nlohmann::json::array();
+            for (libvgcode::EGCodeExtrusionRole role : lv.get_extrusion_roles()) {
+                const size_t i = size_t(role);
+                if (i >= SliceV1::preview_role_ids().size()) continue;
+                const std::string rid = SliceV1::preview_role_ids()[i];
+                const float       t   = lv.get_extrusion_role_estimated_time(role);
+                j["items"].push_back({ { "id", rid }, { "label", _u8L(ExtrusionEntity::role_to_string(libvgcode::convert(role))) },
+                                       { "color", hex_of(lv.get_extrusion_role_color(role)) }, { "time_s", std::round(t * 100.f) / 100. },
+                                       { "percent", share(t) },
+                                       { "visible", std::find(hidden.begin(), hidden.end(), rid) == hidden.end() } });
+            }
+            const float travel = lv.get_travels_estimated_time();
+            j["travel"] = { { "time_s", std::round(travel * 100.f) / 100. }, { "percent", share(travel) } };
+            j["time_s"] = std::round(total * 100.f) / 100.;
+        } else if (type == libvgcode::EViewType::ColorPrint || type == libvgcode::EViewType::Tool) {
+            j["kind"]  = "discrete";
+            j["items"] = nlohmann::json::array();
+            const libvgcode::Palette& colors = lv.get_tool_colors();
+            for (uint8_t e : lv.get_used_extruders_ids())
+                j["items"].push_back({ { "id", "filament_" + std::to_string(int(e) + 1) }, { "filament", int(e) },
+                                       { "label", (boost::format(_u8L("Filament %1%")) % (int(e) + 1)).str() },
+                                       { "color", e < colors.size() ? hex_of(colors[e]) : std::string("#808080") } });
+        } else {
+            const libvgcode::ColorRange& range = lv.get_color_range(type);
+            std::vector<std::string> palette;
+            for (const libvgcode::Color& c : range.get_palette()) palette.push_back(hex_of(c));
+            j["kind"]     = "gradient";
+            j["gradient"] = SliceV1::gradient_legend(id, range.get_values(), palette);
+        }
+    }, 30000);
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (!err->empty()) { r.status = *status; r.body = json_error(*err); return r; }
+    r.body = out->dump();
+    return r;
+}
+
+// PR E: every layer's Z, height and estimated time (the PC's current time mode), for the phone's
+// layer readout and the bar chart behind its slider.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_layers(int plate)
+{
+    auto out = std::make_shared<nlohmann::json>();
+    auto err = std::make_shared<std::string>();
+    bool ok  = run_on_main([out, err, plate]() {
+        const std::string e = ensure_preview_loaded(plate);
+        if (!e.empty()) { *err = e; return; }
+        GCodeViewer& v = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        nlohmann::json& j = *out;
+        j["index"]     = plate;
+        j["result_id"] = v.loaded_result_id();
+        j["layers"]    = SliceV1::layer_rows(v.get_layers_zs(), v.get_layers_times());
+    }, 30000);
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (!err->empty()) { r.status = *err == "no such plate" ? 404 : 409; r.body = json_error(*err); return r; }
+    r.body = out->dump();
     return r;
 }
 
@@ -3334,9 +3542,11 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area)"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?loose=1]"}, {"description", "arrange that plate like its Arrange icon, or with loose=1 place loose objects: only the printable objects on no plate or over the edge of an unlocked plate move, into free space on the plates there are (a new plate when none has room); every object already on a plate stays where it is and no plate is removed; one that fits on no plate of the printer (too large or too tall) stays where it is and the job ends error naming it; returns {job, plate (-1 = loose), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, place_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate, or with loose=1 when place_count is 0; all=1 (re-arrange every plate) is refused with 400"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/orient"},  {"description", "auto-orient the objects on that plate like its Orient icon; the same job shape as arrange (kind orient)"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview. Sliced: color_by {current, choices [{id, label}]} (the desktop's view types by config name) and options [{id travel|wipe|retract|unretract|seam|tool_change, label, visible}] (the PC's own)"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=][&color_by=][&from={index}][&options=seam,travel][&hide=support,skirt]"}, {"description", "orthographic render of the toolpaths of layers from..layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used. color_by: a color_by choice (400 if unknown), the PC's own when absent; options: the moves to draw (absent: the PC's own); hide: feature ids not drawn. The PC's view type, moves and features are put back after the frame"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview/status"}, {"description", "sliced / slicing / slicing_percent / result_id for that plate, without changing what the PC shows"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview/legend[?color_by=][&hide=]"}, {"description", "the legend of a colouring (the PC's own when absent; 400 if unknown): {index, result_id, color_by, label, kind discrete|gradient}; feature_type: items [{id, label, color, time_s, percent, visible}] + travel {time_s, percent} + time_s; color_print: items [{id filament_N, filament (0-based), label, color}]; gradients: gradient {unit, decimals, min, max, stops [{value, color}]}"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview/layers"}, {"description", "{index, result_id, layers [{z, height, time_s}]}: every layer's top Z, height and estimated time (time_s null when unknown)"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/result"},  {"description", "a sliced plate's results (404 when it is not sliced): {index, result_id, time_s, time_silent_s?, prepare_time_s, layers? (layer count), gcode_bytes?, filaments [{index, preset, type, color, grams, meters, cost, price_per_kg, model_g, support_g, flush_g, tower_g}] (slots that extruded anything), total {grams, meters, cost (filament + machine time), material_cost, machine_cost, flush_grams, filament_changes}, cost {prices_known, machine_rate_known, machine_rate_per_h, material, machine, fees, total_cost, markup, selling_price, has_markup}, warnings [{code, severity info|warning|error, text, object?, z?}]}. The desktop's own figures: the preview's cost panel (your price and rate overrides included, fees and markup as it shows them). Cache-Control: private, no-cache + ETag (If-None-Match answers 304). Plate images (thumbnail.png, preview.png) also carry an ETag, and with ?v={result_id} (non-zero) Cache-Control: private, max-age=86400"} },
             { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1][&plate={index}]: move / rotate / scale one instance like the sidebar (undoable); plate= centres it on that plate (an object on no plate comes back that way); answers {offset, rz, scale, plate, undo_label}"} },
             { {"method", "POST"}, {"path", "/api/objects/printable"},       {"description", "form obj=[&inst=]&on=1|0: the object list's Printable toggle for one instance, or every instance of the object (undoable); answers {obj, inst, printable, plate}"} },
@@ -3460,12 +3670,24 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             return api_plate_layout(num(rest.substr(0, slash), -1));
         if (slash != std::string::npos && rest.substr(slash) == "/preview")
             return api_plate_preview(num(rest.substr(0, slash), -1));
-        if (slash != std::string::npos && rest.substr(slash) == "/preview.png")
+        if (slash != std::string::npos && rest.substr(slash) == "/preview.png") {
+            SliceV1::PreviewLook look; // PR E
+            look.color_by      = query_param(query, "color_by");
+            look.from          = num(query_param(query, "from"), 0);
+            look.options_given = query_has_param(query, "options");
+            look.options       = SliceV1::split_ids(query_param(query, "options"));
+            look.hide          = SliceV1::split_ids(query_param(query, "hide"));
             return cached(api_plate_preview_png(num(rest.substr(0, slash), -1), query_param(query, "view"), num(query_param(query, "layer"), -1),
                                          num(query_param(query, "w"), 800), num(query_param(query, "h"), 800),
-                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5)));
+                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5),
+                                         look));
+        }
         if (slash != std::string::npos && rest.substr(slash) == "/preview/status")
             return api_plate_preview_status(num(rest.substr(0, slash), -1));
+        if (slash != std::string::npos && rest.substr(slash) == "/preview/legend")
+            return api_plate_preview_legend(num(rest.substr(0, slash), -1), query_param(query, "color_by"), query_param(query, "hide"));
+        if (slash != std::string::npos && rest.substr(slash) == "/preview/layers")
+            return api_plate_preview_layers(num(rest.substr(0, slash), -1));
     }
     if (path.compare(0, 8, "/plates/") == 0 && method == "POST") {
         const std::string rest  = path.substr(8);

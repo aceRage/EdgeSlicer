@@ -1168,12 +1168,12 @@ TEST_CASE("arrange: a guarded undo only takes back the step it was told about", 
 
 // ---- PR F: filament settings (EdgeSlicerApp docs/design_native_slice_parity.md section 4) ----
 
-TEST_CASE("filament settings: /pair lists slice_filament_settings, the manifest is v5, the routes are allowed", "[RemoteHub][filament]")
+TEST_CASE("filament settings: /pair lists slice_filament_settings, the manifest is v5 or later, the routes are allowed", "[RemoteHub][filament]")
 {
     const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
     CHECK(std::find(f.begin(), f.end(), "slice_filament_settings") != f.end());
     CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
-    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 5);
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 5);
 
     using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
     CHECK(instance_api_allowed("GET", "/api/settings/filament"));
@@ -1248,4 +1248,94 @@ TEST_CASE("filament settings: when a slot may be removed", "[RemoteHub][filament
     CHECK(r.error == "2 mixed filaments are made from this filament and would be removed with it: confirm=1 to go ahead");
     CHECK(filament_remove_check(1, 3, -1, 1, true).ok());
     CHECK(filament_remove_check(1, 3, 0, 1, false).ok()); // a replacement: the desktop does not ask either
+}
+
+// ---- PR E: preview v2 (EdgeSlicerApp docs/design_native_slice_parity.md section 2.3) ----
+
+TEST_CASE("preview v2: /pair lists slice_preview_v2, the manifest is v6, the routes are allowed", "[RemoteHub][preview_v2]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_preview_v2") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 6);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/plates/0/preview/legend"));
+    CHECK(instance_api_allowed("GET", "/api/plates/12/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/preview/legend"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/x/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/preview/moves"));
+}
+
+TEST_CASE("preview v2: feature and move ids", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(preview_role_ids().size() == 22); // libvgcode::EGCodeExtrusionRole::COUNT, static_asserted in RemoteAccess
+    CHECK(preview_role_index("external_perimeter") == 2);
+    CHECK(preview_role_index("support") == 11);
+    CHECK(preview_role_index("bottom_surface_over_support") == 21);
+    CHECK(preview_role_index("Outer wall") == -1);
+    CHECK(preview_option_ids() == std::vector<std::string> { "travel", "wipe", "retract", "unretract", "seam", "tool_change" });
+    CHECK(preview_option_index("seam") == 4);
+    CHECK(preview_option_index("pause") == -1);
+    CHECK(std::set<std::string>(preview_role_ids().begin(), preview_role_ids().end()).size() == preview_role_ids().size());
+}
+
+TEST_CASE("preview v2: id lists and colours", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(split_ids("seam,travel") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids(" seam , ,travel,seam ") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids("").empty());
+    CHECK(split_ids(",,").empty());
+    CHECK(hex_color(255, 128, 0) == "#FF8000");
+    CHECK(hex_color(0, 0, 0) == "#000000");
+    CHECK(preview_from_layer(-3, 10) == 0u);
+    CHECK(preview_from_layer(4, 10) == 4u);
+    CHECK(preview_from_layer(40, 10) == 10u);
+}
+
+TEST_CASE("preview v2: a gradient legend", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    // the palette colours the bins in value order; stops come out sorted, rounded to the legend's decimals
+    const auto g = gradient_legend("speed", { 20.4f, 60.2f, 100.f, 140.f, 180.f }, { "#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000" });
+    CHECK(g["unit"] == "mm/s");
+    CHECK(g["decimals"] == 0);
+    CHECK(g["min"] == 20.0);
+    CHECK(g["max"] == 180.0);
+    REQUIRE(g["stops"].size() == 5);
+    CHECK(g["stops"][1]["value"] == 60.0);
+    CHECK(g["stops"][1]["color"] == "#00FFFF");
+    // one value: one colour; two values: the palette's ends
+    const auto one = gradient_legend("height", { 0.2f }, { "#0000FF", "#FF0000" });
+    CHECK(one["stops"].size() == 1);
+    CHECK(one["min"] == one["max"]);
+    const auto two = gradient_legend("width", { 0.42f, 0.45f }, { "#0000FF", "#00FF00", "#FF0000" });
+    REQUIRE(two["stops"].size() == 2);
+    CHECK(two["stops"][1]["color"] == "#FF0000");
+    CHECK(two["max"] == 0.45);
+    // nothing detected
+    const auto none = gradient_legend("temperature", {}, { "#0000FF" });
+    CHECK(none["stops"].empty());
+    CHECK(none["min"].is_null());
+    CHECK(gradient_unit("feature_type").empty());
+    CHECK(gradient_decimals("pressure_advance") == 3);
+}
+
+TEST_CASE("preview v2: layer rows", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    const auto rows = layer_rows({ 0.2, 0.4, 0.6000001 }, { 12.345f, 30.f, 29.999f });
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0]["z"] == 0.2);
+    CHECK(rows[0]["height"] == 0.2);
+    CHECK(rows[0]["time_s"] == 12.35);
+    CHECK(rows[2]["z"] == 0.6);
+    CHECK(rows[2]["height"] == 0.2);
+    CHECK(rows[2]["time_s"] == 30.0);
+    // times that do not match the layers are not guessed
+    const auto untimed = layer_rows({ 0.2, 0.4 }, { 5.f });
+    CHECK(untimed[1]["time_s"].is_null());
+    CHECK(layer_rows({}, {}).empty());
 }

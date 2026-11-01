@@ -28,8 +28,9 @@ const std::vector<std::string>& pair_features();
 
 // The instance API's manifest version (GET /api `version`). 3: slice_v1; 4: PR D, arrange (the
 // layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo);
-// 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove).
-constexpr int INSTANCE_API_VERSION = 5;
+// 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove);
+// 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers).
+constexpr int INSTANCE_API_VERSION = 6;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
@@ -259,6 +260,56 @@ std::vector<std::string> slots_after_save_as(std::vector<std::string> before, in
 // the slot whose filament they take instead; `mixed_dependents` mixed filaments are built from it,
 // which the desktop asks about, so they need `confirm`.
 Refusal filament_remove_check(int slot, int slots, int replace, int mixed_dependents, bool confirm);
+
+// ---- PR E: preview v2 (feature "slice_preview_v2") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 2.3: the phone's preview colours the
+// toolpaths by any of the desktop's view types, hides features and moves (travel, seams...), starts
+// at a lower layer, and reads the legend and the per-layer times the PC already holds.
+
+// Stable ids of the G-code viewer's extrusion roles, indexed like libvgcode::EGCodeExtrusionRole
+// (RemoteAccess static_asserts the count), so a legend row and a `hide=` list mean the same feature
+// in every language.
+const std::vector<std::string>& preview_role_ids();
+// The role index of an id, or -1.
+int preview_role_index(const std::string& id);
+
+// Stable ids of the toggleable moves, indexed like libvgcode::EOptionType's first six.
+const std::vector<std::string>& preview_option_ids();
+int preview_option_index(const std::string& id);
+
+// A comma list of ids ("seam,travel"), blanks dropped, each once, in order.
+std::vector<std::string> split_ids(const std::string& list);
+
+// "#RRGGBB" of an 8-bit colour.
+std::string hex_color(unsigned char r, unsigned char g, unsigned char b);
+
+// The unit and the decimals the desktop's legend shows for a gradient view type (its config name):
+// "" and 0 for the discrete ones.
+std::string gradient_unit(const std::string& color_by);
+int gradient_decimals(const std::string& color_by);
+
+// The legend of a gradient: the colour range's bin values and palette (palette[i] colours
+// values[i]; one value is a single colour, two are the palette's ends) as stops ordered by value,
+// with min and max. Rounded to the legend's decimals (one more for layer times under 10 s).
+nlohmann::json gradient_legend(const std::string& color_by, const std::vector<float>& values, const std::vector<std::string>& palette_hex);
+
+// GET /plates/{i}/preview/layers: every layer's top Z, its height (from the layer below, the first
+// from 0) and its estimated time (seconds, 2 decimals; null when the times do not match the layers).
+nlohmann::json layer_rows(const std::vector<double>& zs, const std::vector<float>& times);
+
+// The lower layer of a frame: `from` clamped to 0..top (anything below 0 is 0).
+unsigned int preview_from_layer(int from, unsigned int top);
+
+// How the phone wants one preview frame to look, from preview.png's query. Empty `color_by`: the
+// PC's own; `options_given` false: the PC's own moves; `hide`: roles not drawn.
+struct PreviewLook
+{
+    std::string              color_by;
+    int                      from { 0 };
+    bool                     options_given { false };
+    std::vector<std::string> options;
+    std::vector<std::string> hide;
+};
 
 } // namespace SliceV1
 } // namespace GUI
