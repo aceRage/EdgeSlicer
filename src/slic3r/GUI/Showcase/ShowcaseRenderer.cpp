@@ -2109,6 +2109,8 @@ bool ShowcaseRenderer::ensure_dof_buffers(int w, int h)
 {
     if (m_dof_copy_fbo != 0 && m_dof_w == w && m_dof_h == h)
         return true;
+    // The caller's framebuffer stays bound (making the buffers binds them).
+    ShowcaseTargetState keep;
     release_dof();
     for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
     auto texture = [](GLint internal, GLenum format, GLenum type, int tw, int th) {
@@ -2186,11 +2188,12 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
         m_dof_used = "off (the circle of confusion is under a pixel)";
         return false;
     }
+    // Before the buffers are made: the frame's framebuffer and viewport come back afterwards.
+    ShowcaseTargetState keep;
     if (!ensure_dof_buffers(w, h)) {
         m_dof_used = "off (no buffers)";
         return false;
     }
-    ShowcaseTargetState keep;
     // The finished colour and the depth, copied so the pass can read them while it writes the frame.
     glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo));
     glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_dof_copy_fbo));
@@ -2712,6 +2715,13 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     }
     // 1h-2: depth of field over the finished frame, at the internal (supersampled) size.
     apply_dof(fb, dt);
+    // Where the plate's objects are (the golden fixtures' cameras are written against it).
+    if (const char *dbg = std::getenv("EDGESLICER_SHOWCASE_DEBUG"); dbg != nullptr && *dbg != '\0' && *dbg != '0') {
+        const BoundingBoxf3 ob = objects_box();
+        if (ob.defined)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase export debug: objects box " << ob.min.x() << "," << ob.min.y() << "," << ob.min.z() << " .. "
+                                       << ob.max.x() << "," << ob.max.y() << "," << ob.max.z();
+    }
     if (!m_dof_used.empty())
         log << ", depth of field " << m_dof_used;
     if (m_bg_ground)

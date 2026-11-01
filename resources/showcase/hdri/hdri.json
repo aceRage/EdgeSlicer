@@ -19,7 +19,7 @@
       "authors": "Poly Haven",
       "licence": "CC0 1.0",
       "ground": { "height_mm": 1700, "radius_mm": 60000 },
-      "backdrop_pitch": 18
+      "backdrop_pitch": 30
     },
     {
       "id": "hdri_workshop",

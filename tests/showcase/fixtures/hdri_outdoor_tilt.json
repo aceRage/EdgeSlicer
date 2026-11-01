@@ -13,7 +13,7 @@
         "blur": 0,
         "color1": "#E8E8E8",
         "color2": "#808080",
-        "backdrop_pitch": 18
+        "backdrop_pitch": 30
       },
       "floor": {
         "type": "shadow_catcher",
