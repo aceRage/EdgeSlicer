@@ -46,6 +46,7 @@ enum Protocol : int {
 extern const char* const RULE_HUB;       // "EdgeSlicer"               TCP 13640-13659, the phone hub
 extern const char* const RULE_DISCOVERY; // "EdgeSlicer LAN discovery" UDP 2021,1990, Bambu SSDP
 extern const char* const RULE_WEBRTC;    // "EdgeSlicer WebRTC video"  go2rtc.exe, UDP and TCP 8555-8574
+extern const char* const RULE_MDNS;       // "EdgeSlicer mDNS discovery" UDP 5353, Bonjour browse answers
 extern const char* const RULE_FLASHFORGE; // "EdgeSlicer FlashForge discovery" UDP 18007, the reply port of FlashForge's LAN search
 
 // One firewall rule, as much of it as matters here.

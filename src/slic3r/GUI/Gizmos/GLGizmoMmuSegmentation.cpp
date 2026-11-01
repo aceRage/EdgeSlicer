@@ -75,6 +75,8 @@ void GLGizmoMmuSegmentation::on_opening()
 
 void GLGizmoMmuSegmentation::on_shutdown()
 {
+    // Edge (Airbrush): strokes still waiting for their bake go into the model before the gizmo closes.
+    airbrush_finish_pending();
     m_parent.use_slope(false);
     m_parent.toggle_model_objects_visibility(true);
 }
@@ -211,6 +213,7 @@ bool GLGizmoMmuSegmentation::on_init()
     m_desc["perform"]              = _L("Perform");
 
     m_desc["remove_all"]           = _L("Erase all painting");
+    m_desc["color_pattern"]        = _L("Color Pattern...");
     m_desc["circle"]               = _L("Circle");
     m_desc["sphere"]               = _L("Sphere");
     m_desc["pointer"]              = _L("Triangles");
@@ -253,6 +256,21 @@ bool GLGizmoMmuSegmentation::on_init()
                                                    "completely in another colour stop the spread; a painted line thinner than one "
                                                    "mesh triangle does not.");
 
+    // Edge: Airbrush tool (P2)
+    m_desc["tool_airbrush_tip"]              = _L("Airbrush: hold or drag on the model to spray the selected filament. Holding still builds "
+                                                   "up colour. When you let go, the spray turns into printable specks and steps. Shift erases.");
+    m_desc["airbrush_paint_caption"]         = _L("Hold or drag left mouse button");
+    m_desc["airbrush_paint"]                 = _L("Spray");
+    m_desc["airbrush_erase_caption"]         = shift + _L("Left mouse button");
+    m_desc["airbrush_erase"]                 = _L("Erase spray");
+    m_desc["airbrush_radius"]                = _L("Radius");
+    m_desc["airbrush_hardness"]              = _L("Hardness");
+    m_desc["airbrush_flow"]                  = _L("Flow");
+    m_desc["airbrush_grain"]                 = _L("Grain");
+    m_desc["airbrush_seed"]                  = _L("Seed");
+    m_desc["airbrush_cancel_caption"]        = _L("Esc");
+    m_desc["airbrush_cancel"]                = _L("Cancel what has not been baked yet");
+
     // Filament remapping descriptions
     m_desc["perform_remap"]                   = _L("Remap filaments");
     m_desc["remap"]                           = _L("Remap");
@@ -263,10 +281,7 @@ bool GLGizmoMmuSegmentation::on_init()
     return true;
 }
 
-GLGizmoMmuSegmentation::GLGizmoMmuSegmentation(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
-    : GLGizmoPainterBase(parent, icon_filename, sprite_id), m_current_tool(ImGui::CircleButtonIcon)
-{
-}
+// The constructor and destructor are in GLGizmoMmuSegmentationAirbrush.cpp (the airbrush state is complete there).
 
 void GLGizmoMmuSegmentation::render_painter_gizmo()
 {
@@ -276,6 +291,8 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
     glsafe(::glEnable(GL_DEPTH_TEST));
 
     render_triangles(selection);
+    // Edge (Airbrush): strokes still waiting for their bake, drawn as the field itself.
+    airbrush_render_overlay();
 
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
@@ -457,6 +474,9 @@ void GLGizmoMmuSegmentation::show_tooltip_information(float caption_max, float x
             case ToolType::SPREAD:
                 tip_items = {"spread_paint", "erase", "spread_cancel", "smart_fill_angle", "clipping_of_view", "toggle_wireframe"};
                 break;
+            case ToolType::AIRBRUSH:
+                tip_items = {"airbrush_paint", "airbrush_erase", "cursor_size", "airbrush_cancel", "clipping_of_view", "toggle_wireframe"};
+                break;
             default:
                 break;
         }
@@ -492,13 +512,16 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     const float edge_detect_slider_left = m_imgui->calc_text_size(m_desc.at("edge_detection")).x + m_imgui->scaled(1.f);
     const float gap_area_slider_left = m_imgui->calc_text_size(m_desc.at("gap_area")).x + m_imgui->scaled(1.5f) + space_size;
     const float height_range_slider_left = m_imgui->calc_text_size(m_desc.at("height_range")).x + m_imgui->scaled(2.f);
-    const float spread_slider_left = std::max(m_imgui->calc_text_size(m_desc.at("spread_speed")).x,
-                                              m_imgui->calc_text_size(m_desc.at("spread_max_radius")).x) + m_imgui->scaled(1.5f);
+    const float spread_slider_left = std::max({ m_imgui->calc_text_size(m_desc.at("spread_speed")).x,
+                                                m_imgui->calc_text_size(m_desc.at("spread_max_radius")).x,
+                                                m_imgui->calc_text_size(m_desc.at("airbrush_hardness")).x,
+                                                m_imgui->calc_text_size(m_desc.at("airbrush_radius")).x }) + m_imgui->scaled(1.5f);
 
     const float remove_btn_width = m_imgui->calc_text_size(m_desc.at("remove_all")).x + m_imgui->scaled(1.f);
     const float filter_btn_width = m_imgui->calc_text_size(m_desc.at("perform")).x + m_imgui->scaled(1.f);
     const float remap_btn_width = m_imgui->calc_text_size(m_desc.at("perform_remap")).x + m_imgui->scaled(1.f);
-    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + m_imgui->scaled(2.f);
+    const float pattern_btn_width = m_imgui->calc_text_size(m_desc.at("color_pattern")).x + m_imgui->scaled(1.f);
+    const float buttons_width = remove_btn_width + filter_btn_width + remap_btn_width + pattern_btn_width + m_imgui->scaled(2.f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
     const float color_button_width = m_imgui->calc_text_size(std::string_view{""}).x + m_imgui->scaled(1.75f);
     const size_t total_filament_count = m_extruders_colors.size();
@@ -507,7 +530,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     float caption_max = 0.f;
     float total_text_max = 0.f;
-    for (const auto &t : std::array<std::string, 8>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view", "spread_paint", "spread_cancel"}) {
+    for (const auto &t : std::array<std::string, 9>{"paint", "erase", "cursor_size", "smart_fill_angle", "height_range", "clipping_of_view", "spread_paint", "spread_cancel", "airbrush_paint"}) {
         caption_max = std::max(caption_max, m_imgui->calc_text_size(m_desc[t + "_caption"]).x);
         total_text_max = std::max(total_text_max, m_imgui->calc_text_size(m_desc[t]).x);
     }
@@ -710,15 +733,15 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc.at("tool_type"));
 
-    // Edge: Spread sits after Fill.
-    std::array<wchar_t, 7> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::GapFillIcon };
-    std::array<wchar_t, 7> icons;
+    // Edge: Spread sits after Fill, Airbrush after Spread.
+    std::array<wchar_t, 8> tool_ids;
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::AirbrushPaintIcon, ImGui::GapFillIcon };
+    std::array<wchar_t, 8> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::SpreadPaintDarkIcon, ImGui::GapFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::SpreadPaintDarkIcon, ImGui::AirbrushPaintDarkIcon, ImGui::GapFillDarkIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::GapFillIcon };
-    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), m_desc.at("tool_spread_tip"), _L("Gap Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::SpreadPaintIcon, ImGui::AirbrushPaintIcon, ImGui::GapFillIcon };
+    std::array<wxString, 8> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), m_desc.at("tool_spread_tip"), m_desc.at("tool_airbrush_tip"), _L("Gap Fill") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -1011,6 +1034,35 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         // The radius label next to the cursor while a spread is held.
         render_spread_label();
     }
+    else if (m_current_tool == ImGui::AirbrushPaintIcon) {
+        // Edge: Airbrush (P2). Hold or drag to spray into the colour field; the release bakes it.
+        m_tool_type   = ToolType::AIRBRUSH;
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+        airbrush_render_panel(sliders_left_width, sliders_width, drag_left_width, max_tooltip_width, window_width);
+
+        ImGui::Separator();
+        if (m_c->object_clipper()->get_position() == 0.f) {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("clipping_of_view"));
+        }
+        else {
+            if (m_imgui->button(m_desc.at("reset_direction"))) {
+                wxGetApp().CallAfter([this]() {
+                    m_c->object_clipper()->set_position_by_ratio(-1., false);
+                    });
+            }
+        }
+
+        auto clp_dist = float(m_c->object_clipper()->get_position());
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
+
+        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+    }
     else if (m_current_tool == ImGui::GapFillIcon) {
         m_tool_type = ToolType::GAP_FILL;
         m_cursor_type = TriangleSelector::CursorType::POINTER;
@@ -1025,8 +1077,8 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
     }
 
-    // The axis locks act on brush drags; Spread has no drag, so they are hidden for it.
-    if (m_tool_type != ToolType::SPREAD) {
+    // The axis locks act on brush drags; Spread has no drag and Airbrush lays its own dabs, so both hide them.
+    if (m_tool_type != ToolType::SPREAD && m_tool_type != ToolType::AIRBRUSH) {
         ImGui::Separator();
         if(m_imgui->bbl_checkbox(_L("Vertical"), m_vertical_only)){
             if(m_vertical_only){
@@ -1127,9 +1179,23 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 m_triangle_selectors[idx]->reset();
                 m_triangle_selectors[idx]->request_update_render_data(true);
             }
+        // Edge (Airbrush): the colour fields go with the paint they were baked into.
+        airbrush_clear_fields(mo);
 
         update_model_object();
         m_parent.set_as_dirty();
+    }
+
+    // Shortcut to the Color Pattern dialog (bands by height) for the painted object. The dialog is
+    // modal and rebuilds the object list, so leave the gizmo first and open it once this frame is done.
+    ImGui::SameLine();
+    if (m_imgui->button(m_desc.at("color_pattern"))) {
+        const int obj_idx = m_parent.get_selection().get_object_idx();
+        wxGetApp().CallAfter([obj_idx]() {
+            if (GLCanvas3D *cnv = wxGetApp().plater()->get_view3D_canvas3D())
+                cnv->get_gizmos_manager().reset_all_states();
+            wxGetApp().obj_list()->height_pattern_dialog(obj_idx);
+        });
     }
     ImGui::PopStyleVar(2);
     GizmoImguiEnd();
@@ -1151,7 +1217,15 @@ void GLGizmoMmuSegmentation::update_model_object()
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
     }
 
-    if (updated) {
+    if (updated)
+        notify_paint_changed(mo);
+}
+
+void GLGizmoMmuSegmentation::notify_paint_changed(ModelObject *mo)
+{
+    if (mo == nullptr)
+        return;
+    {
         const size_t num_physical = static_cast<size_t>(std::max(wxGetApp().filaments_cnt(), 0));
         size_t       num_total    = num_physical;
         if (wxGetApp().preset_bundle != nullptr)
@@ -1177,6 +1251,8 @@ void GLGizmoMmuSegmentation::update_model_object()
 
         const ModelObjectPtrs &mos = wxGetApp().model().objects;
         size_t obj_idx = std::find(mos.begin(), mos.end(), mo) - mos.begin();
+        if (obj_idx >= mos.size())
+            return;
         wxGetApp().obj_list()->update_info_items(obj_idx);
         wxGetApp().plater()->get_partplate_list().notify_instance_update(obj_idx, 0);
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
@@ -1251,7 +1327,10 @@ void GLGizmoMmuSegmentation::update_from_model_object(bool first_update)
         prev_extruders_count != int(current_extruder_colors.size()) || current_extruder_colors != m_extruders_colors)
         this->init_extruders_data(current_extruder_colors);
 
+    // Edge (Airbrush): strokes waiting for a bake belonged to the model that was just replaced.
+    this->airbrush_reset();
     this->init_model_triangle_selectors();
+    this->airbrush_sync_from_model();
 
     // ORCA: Refresh cache when model changes
     this->update_used_filaments();
@@ -1661,6 +1740,10 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
     if (!TriangleSelector::build_filament_remap_state_map(m_display_filament_ids, m_extruder_remap, state_map))
         return;
 
+    // Edge (Airbrush P3, A1): sprays still waiting for their bake go in first (their own undo steps),
+    // so the remap below sees every field together with the paint baked from it.
+    airbrush_flush_pending(true);
+
     Plater::TakeSnapshot snapshot(wxGetApp().plater(),
                                   "Remap filament assignments",
                                   UndoRedo::SnapshotType::GizmoAction);
@@ -1716,6 +1799,9 @@ void GLGizmoMmuSegmentation::remap_filament_assignments()
 
         // ORCA: No "Filament remapping finished" notification, to reduce UI noise.
         update_model_object();
+        // Edge (Airbrush P3, A1): the colour fields' filament slots follow the paint, so the next
+        // bake does not read the remapped paint as a foreign edit.
+        airbrush_after_remap(mo, state_map);
         m_parent.set_as_dirty();
 
         // ORCA: Refresh used filaments cache

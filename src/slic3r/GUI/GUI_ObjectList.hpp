@@ -312,6 +312,21 @@ public:
     void                merge_volumes(); // BBS: merge parts to single part
     void                layers_editing();
 
+    // Height colour pattern (HeightColourPattern.hpp, design phase 2) - GUI_ObjectHeightPattern.cpp.
+    // pattern_id 0 = a new pattern for the selected object(s); > 0 = edit that pattern of obj_idx.
+    void                height_pattern_dialog(int obj_idx, int pattern_id = 0);
+    void                height_pattern_remove(int obj_idx, int pattern_id);
+    void                height_pattern_detach(int obj_idx, int pattern_id);
+    void                height_pattern_reset(int obj_idx, int pattern_id);
+    // Rebuild the Height ranges row and the pattern rows of one object from the model.
+    void                refresh_height_pattern_rows(int obj_idx);
+    void                add_height_pattern_rows(const wxDataViewItem obj_item);
+    void                show_height_pattern_menu(const wxDataViewItem &item);
+    // 3D bands of a pattern while its row is selected; pattern_id 0 removes them.
+    void                show_height_pattern_overlay(int obj_idx, int pattern_id);
+    // After a project was opened: say so when a pattern lost filaments or was made for another layer height.
+    void                check_height_patterns_after_load();
+
     void                boolean();    // BBS: Boolean Operation of parts
     wxDataViewItem      add_layer_root_item(const wxDataViewItem obj_item);
     wxDataViewItem      add_settings_item(wxDataViewItem parent_item, const DynamicPrintConfig* config);
