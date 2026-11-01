@@ -45,6 +45,7 @@
 // pulls it in, so it has to be named here.
 #include <libslic3r/FlexiJoint.hpp>
 #include <libslic3r/PushFit.hpp>
+#include <libslic3r/TacJoint.hpp>
 
 namespace Slic3r {
 
@@ -134,7 +135,9 @@ class ModelObject;
 //       older reader clamps an unknown connector type to 0 (Plug), so a v5 build reading a
 //       pin recipe would silently re-cut every pin as a plug. With 6 it refuses the recipe -
 //       the halves load, "Edit cut" is not offered.
-static constexpr int CutRecipeVersion = 6;
+//  7  TAC Joint = 6: versioned reference geometry and independent absolute clearances.
+//     Older readers must refuse the recipe rather than re-cutting TAC as a Plug.
+static constexpr int CutRecipeVersion = 7;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -213,13 +216,14 @@ struct CutRecipeConnector
     FlexiJointParams flexi;
     // Only meaningful for CutConnectorType::PushFit (recipe version 6).
     PushFitParams    pushfit;
+    // Only meaningful for CutConnectorType::TacJoint (recipe version 7).
+    TacJointParams tac_joint;
 
     bool operator==(const CutRecipeConnector& o) const;
     bool operator!=(const CutRecipeConnector& o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle,
-           type, style, shape, flexi, pushfit);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, type, style, shape, flexi, pushfit, tac_joint);
     }
 };
 

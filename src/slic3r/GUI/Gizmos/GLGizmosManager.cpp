@@ -672,6 +672,14 @@ ClippingPlane GLGizmosManager::get_assemble_view_clipping_plane() const
     }
 }
 
+void GLGizmosManager::flush_pending_paint(bool commit)
+{
+    if (m_current != MmSegmentation)
+        return;
+    if (auto *mmu = dynamic_cast<GLGizmoMmuSegmentation *>(m_gizmos[m_current].get()))
+        mmu->airbrush_flush_pending(commit);
+}
+
 bool GLGizmosManager::wants_reslice_supports_on_undo() const
 {
     return false;
