@@ -7946,7 +7946,7 @@ std::vector<double> TabPrinter::project_size_choices() const
     std::vector<double> current = bundle->effective_nozzle_diameters();
     const std::vector<double> preset = bundle->preset_nozzle_diameters();
     current.insert(current.end(), preset.begin(), preset.end());
-    return nozzle_size_choices(current, bundle->printers.diameters_of_selected_printer());
+    return Slic3r::nozzle_size_choices(current, bundle->printers.diameters_of_selected_printer()); // the free function, not Tab::nozzle_size_choices
 }
 
 void TabPrinter::update_project_nozzle_size(size_t extruder)
