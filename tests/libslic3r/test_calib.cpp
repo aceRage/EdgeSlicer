@@ -269,6 +269,55 @@ TEST_CASE("Stringing grid defaults build outward from the other-layers temperatu
     }
 }
 
+TEST_CASE("Stringing grid defaults widen single-temperature, narrow and out-of-limit ranges", "[Calib][TempRetract]")
+{
+    // B2
+    auto check_valid = [](const Calib_Params &p) {
+        std::string err;
+        CHECK(stringing_grid_params_valid(p, 270., &err));
+        CHECK(err.empty());
+        CHECK(p.start <= 350.);
+        CHECK(p.end >= 150.);
+        CHECK(stringing_grid_band_count(p) >= 2);
+        CHECK(stringing_grid_band_count(p) <= 10);
+        CHECK(std::fmod(p.start - p.end, p.step) == Approx(0.).margin(1e-9));
+    };
+    SECTION("single-temperature PPS profile 300/300/300 is centred on 300")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 300., 300., 300., 5.);
+        check_valid(p);
+        CHECK(p.start == Approx(325.));
+        CHECK(p.end == Approx(280.));
+        CHECK(p.start >= 300.);
+        CHECK(p.end <= 300.);
+    }
+    SECTION("range narrower than one step, 222 in 220-224")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 222., 220., 224., 5.);
+        check_valid(p);
+        CHECK(p.start == Approx(247.));
+        CHECK(p.end == Approx(202.));
+    }
+    SECTION("PEEK 420 in 380-460 is clipped to the 350 C limit")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 420., 380., 460., 5.);
+        check_valid(p);
+        CHECK(p.start == Approx(350.));
+        CHECK(p.end == Approx(305.));
+    }
+    SECTION("range partly above the limit stays inside it, 340 in 300-380")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 340., 300., 380., 5.);
+        check_valid(p);
+        CHECK(p.start == Approx(350.));
+        CHECK(p.end == Approx(305.));
+    }
+}
+
 TEST_CASE("Stringing grid defaults fall back to 230/205 on invalid filament temperatures", "[Calib][TempRetract]")
 {
     struct Case { double center, low, high; };
@@ -330,4 +379,33 @@ TEST_CASE("Stringing grid slicer config neutralises filament retraction override
     CHECK(zh->get_at(0) == Approx(0.));
     CHECK(rl->get_at(0));
     CHECK(mt->get_at(0) == Approx(1.));
+}
+
+TEST_CASE("Stringing grid slicer config neutralises plain (non-nullable) filament overrides", "[Calib][TempRetract]")
+{
+    // F12: the same keys stored as the plain vector classes are set too.
+    DynamicPrintConfig print   = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig printer = print;
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_z_hop", new ConfigOptionFloats({0.6, 0.4}));
+    filament.set_key_value("filament_retract_when_changing_layer", new ConfigOptionBools({false, false}));
+    filament.set_key_value("filament_retraction_minimum_travel", new ConfigOptionFloats({5., 3.}));
+    filament.set_key_value("filament_wipe", new ConfigOptionBools({true, true}));
+    REQUIRE_FALSE(filament.optptr("filament_z_hop")->nullable());
+    apply_stringing_grid_slicer_config(print, filament, printer, 1);
+    const auto *zh = filament.option<ConfigOptionFloats>("filament_z_hop");
+    const auto *rl = filament.option<ConfigOptionBools>("filament_retract_when_changing_layer");
+    const auto *mt = filament.option<ConfigOptionFloats>("filament_retraction_minimum_travel");
+    const auto *wp = filament.option<ConfigOptionBools>("filament_wipe");
+    REQUIRE(zh != nullptr);
+    REQUIRE(rl != nullptr);
+    REQUIRE(mt != nullptr);
+    REQUIRE(wp != nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+        CHECK(zh->get_at(i) == Approx(0.));
+        CHECK(rl->get_at(i));
+        CHECK(mt->get_at(i) == Approx(1.));
+    }
+    CHECK(wp->get_at(0));       // only the selected filament's entry is touched
+    CHECK_FALSE(wp->get_at(1));
 }
