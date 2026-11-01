@@ -1087,6 +1087,79 @@ TEST_CASE("Airbrush P3: the brush area limits a gradient or pattern", "[Airbrush
     }
 }
 
+TEST_CASE("Airbrush P3: the live preview and pattern stamps", "[Airbrush][AirbrushP3]")
+{
+    const indexed_triangle_set its = p3_box(20, 20, 10, 1.);
+    AirbrushSurface            surface(its);
+    // A part already sprayed: the whole top half filament 2.
+    AirbrushField sprayed;
+    {
+        AirbrushFillRecipe base;
+        base.kind  = FillKind::AlongZ;
+        base.stops = { { 0, 0.49f }, { 2, 0.51f } };
+        base.start = Vec3f(0.f, 0.f, 0.f);
+        base.end   = Vec3f(0.f, 0.f, 10.f);
+        REQUIRE(apply_fill(sprayed, surface, base) > 0);
+    }
+    AirbrushFillRecipe r;
+    r.kind         = FillKind::Linear;
+    r.stops        = two_stops(3, 3);
+    r.opacity      = 0.5f;
+    r.area         = AirbrushFillRecipe::Area::Brush;
+    r.start        = Vec3f(6.f, 10.f, 10.f);
+    r.end          = Vec3f(14.f, 10.f, 10.f);
+    r.brush_radius = 3.f;
+    r.hardness     = 0.5f;
+    r.facing       = Vec3f::UnitZ();
+
+    SECTION("a preview into an empty field over the real one shows exactly what the fill will do")
+    {
+        AirbrushField         real = sprayed;
+        std::vector<uint64_t> real_changed;
+        REQUIRE(apply_fill(real, surface, r, &real_changed) > 0);
+        AirbrushField         preview = sprayed.empty_like();
+        std::vector<uint64_t> preview_changed;
+        REQUIRE(apply_fill(preview, surface, r, &preview_changed, nullptr, &sprayed) > 0);
+        // The real field is untouched by the preview, and the preview holds only the brush area.
+        CHECK(preview.size() < sprayed.size() / 4);
+        REQUIRE_FALSE(real_changed.empty());
+        for (uint64_t key : real_changed) {
+            const AirbrushField::Cell *a = real.find(key);
+            const AirbrushField::Cell *b = preview.find(key);
+            REQUIRE(a);
+            REQUIRE(b);
+            CHECK(a->w == b->w);
+        }
+    }
+    SECTION("pattern stamps along a stroke stay under the brush and converge (stamping twice changes nothing)")
+    {
+        AirbrushFillRecipe pat = r;
+        pat.kind               = FillKind::Noise;
+        pat.stops              = two_stops(2, 3);
+        pat.opacity            = 1.f;
+        pat.hardness           = 1.f;
+        AirbrushField f        = sprayed;
+        auto stamp = [&](const Vec3f &at) {
+            AirbrushFillRecipe s1 = pat;
+            s1.start = s1.end = at;
+            return apply_fill(f, surface, s1);
+        };
+        for (float x = 6.f; x <= 14.f; x += 0.75f)
+            REQUIRE(stamp(Vec3f(x, 10.f, 10.f)) >= 0);
+        // Outside the stroke the field is as it was.
+        const AirbrushField::Cell *far_cell = f.find(f.key_of(Vec3d(10., 2., 10.), 4));
+        const AirbrushField::Cell *was     = sprayed.find(sprayed.key_of(Vec3d(10., 2., 10.), 4));
+        REQUIRE(far_cell);
+        REQUIRE(was);
+        CHECK(far_cell->w == was->w);
+        // Stamping the same stroke again changes nothing: the pattern is a function of position.
+        size_t again = 0;
+        for (float x = 6.f; x <= 14.f; x += 0.75f)
+            again += size_t(stamp(Vec3f(x, 10.f, 10.f)));
+        CHECK(again == 0);
+    }
+}
+
 // =============================================================================================
 // The owner's hand-test projects (hidden): AIRBRUSH_P3_OUT=<directory>
 // =============================================================================================

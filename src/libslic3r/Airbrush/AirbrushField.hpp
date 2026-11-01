@@ -174,9 +174,13 @@ public:
     // number of cells changed; `changed_keys` (ascending) as dab().
     // `mask` (0..1, optional) scales the opacity per cell - the brush area of a fill; 0 leaves the
     // cell as it is. `facets` (optional) limits the facets visited to those that can be inside it.
+    // `base`, when given, is what the cells blend from instead of this field's own (a live preview
+    // fills an empty_like() field over the real one without copying it).
     using FillMask = std::function<float(const Vec3f &p, size_t facet)>;
     size_t fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys = nullptr,
-                const FillMask *mask = nullptr, const std::vector<size_t> *facets = nullptr);
+                const FillMask *mask = nullptr, const std::vector<size_t> *facets = nullptr, const AirbrushField *base = nullptr);
+    // The same grid, origin, slots and anchor, and no cells.
+    AirbrushField empty_like() const;
 
     // ---- filament remap (P3, A1) ----------------------------------------------------------------
     // Every slot's filament id goes through `map` (1-based ids; an id the map sends outside

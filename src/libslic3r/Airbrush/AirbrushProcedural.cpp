@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <mutex>
 #include <unordered_map>
 #include <limits>
 #include <memory>
@@ -309,6 +311,105 @@ std::vector<float> ramp_weights(const std::vector<GradientStop> &stops, float t,
 // Surface distance
 // =============================================================================================
 
+namespace {
+
+// The last mesh's AABB tree and the last seed's distances (hand test 2026-10-31: a gradient's live
+// preview re-runs the fill many times a second during one drag, on one mesh, from one start).
+struct MeshKey
+{
+    const void *vertices = nullptr;
+    size_t      nv = 0, nf = 0;
+    uint64_t    probe = 0;
+    bool operator==(const MeshKey &r) const { return vertices == r.vertices && nv == r.nv && nf == r.nf && probe == r.probe; }
+};
+MeshKey mesh_key(const indexed_triangle_set &its)
+{
+    MeshKey k;
+    k.vertices = its.vertices.data();
+    k.nv       = its.vertices.size();
+    k.nf       = its.indices.size();
+    // A few vertices hashed in, so a new mesh at a reused address is not mistaken for the old one.
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < its.vertices.size(); i += std::max<size_t>(1, its.vertices.size() / 16))
+        for (int c = 0; c < 3; ++c) {
+            uint32_t bits;
+            std::memcpy(&bits, &its.vertices[i][c], 4);
+            h = (h ^ bits) * 1099511628211ull;
+        }
+    k.probe = h;
+    return k;
+}
+struct DistanceCache
+{
+    MeshKey                                         key;
+    std::shared_ptr<const AABBTreeIndirect::Tree3f> tree;
+    bool                                            has_seed = false;
+    Vec3f                                           seed     = Vec3f::Zero();
+    std::shared_ptr<const std::vector<float>>       dist;
+    std::shared_ptr<const std::vector<char>>        patch;
+};
+std::mutex    g_distance_mutex;
+DistanceCache g_distance_cache;
+
+std::shared_ptr<const AABBTreeIndirect::Tree3f> cached_tree(const indexed_triangle_set &its)
+{
+    const MeshKey key = mesh_key(its);
+    {
+        std::lock_guard<std::mutex> lock(g_distance_mutex);
+        if (g_distance_cache.tree && g_distance_cache.key == key)
+            return g_distance_cache.tree;
+    }
+    auto tree = std::make_shared<const AABBTreeIndirect::Tree3f>(
+        AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices));
+    std::lock_guard<std::mutex> lock(g_distance_mutex);
+    if (!(g_distance_cache.key == key)) {
+        g_distance_cache          = DistanceCache();
+        g_distance_cache.key      = key;
+    }
+    g_distance_cache.tree = tree;
+    return tree;
+}
+
+size_t closest_facet(const indexed_triangle_set &its, const Vec3f &p, bool *ok = nullptr)
+{
+    const auto tree = cached_tree(its);
+    size_t     f    = 0;
+    Vec3f      hit;
+    const bool found = AABBTreeIndirect::squared_distance_to_indexed_triangle_set(its.vertices, its.indices, *tree, p, f, hit) >= 0.f;
+    if (ok)
+        *ok = found;
+    return found ? f : 0;
+}
+
+void cached_distances(const indexed_triangle_set &its, const Vec3f &seed, std::shared_ptr<const std::vector<float>> &dist,
+                      std::shared_ptr<const std::vector<char>> &patch)
+{
+    const MeshKey key = mesh_key(its);
+    {
+        std::lock_guard<std::mutex> lock(g_distance_mutex);
+        if (g_distance_cache.key == key && g_distance_cache.has_seed && g_distance_cache.seed == seed) {
+            dist  = g_distance_cache.dist;
+            patch = g_distance_cache.patch;
+            return;
+        }
+    }
+    auto p = std::make_shared<std::vector<char>>();
+    auto d = std::make_shared<const std::vector<float>>(geodesic_distances(its, seed, p.get()));
+    dist   = d;
+    patch  = p;
+    std::lock_guard<std::mutex> lock(g_distance_mutex);
+    if (!(g_distance_cache.key == key)) {
+        g_distance_cache     = DistanceCache();
+        g_distance_cache.key = key;
+    }
+    g_distance_cache.has_seed = true;
+    g_distance_cache.seed     = seed;
+    g_distance_cache.dist     = dist;
+    g_distance_cache.patch    = patch;
+}
+
+} // namespace
+
 std::vector<float> geodesic_distances(const indexed_triangle_set &its, const Vec3f &seed, std::vector<char> *seed_patch_out)
 {
     const float        INF = std::numeric_limits<float>::infinity();
@@ -351,13 +452,7 @@ std::vector<float> geodesic_distances(const indexed_triangle_set &its, const Vec
         for (int k = 0; k < 3; ++k)
             vf[size_t(cv(f, k))].push_back(int(f));
     // The facet under the seed.
-    size_t seed_facet = 0;
-    {
-        const AABBTreeIndirect::Tree3f tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices);
-        Vec3f                          hit;
-        if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(its.vertices, its.indices, tree, seed, seed_facet, hit) < 0.f)
-            seed_facet = 0;
-    }
+    const size_t seed_facet = closest_facet(its, seed);
     // The flat patch round it, through welded edges: straight-line distances are exact there.
     const Vec3f         n0 = its_face_normal(its, int(seed_facet));
     const Vec3f         p0 = its.vertices[size_t(its.indices[seed_facet][0])];
@@ -535,18 +630,18 @@ bool make_fill_function(AirbrushField &field, const indexed_triangle_set &its, c
         const float chord = (recipe.end - recipe.start).norm();
         if (!(chord > 1e-3f))
             return fail("drag out from the centre to set the radius");
-        auto patch = std::make_shared<std::vector<char>>();
-        auto dist  = std::make_shared<const std::vector<float>>(geodesic_distances(its, recipe.start, patch.get()));
+        std::shared_ptr<const std::vector<float>> dist;
+        std::shared_ptr<const std::vector<char>>  patch;
+        cached_distances(its, recipe.start, dist, patch);
         const Vec3f seed = recipe.start;
         const indexed_triangle_set *pits = &its;
         // The last stop sits where the drag ended, measured over the surface like everything else
         // (the straight chord is shorter on a curved part, which ended the gradient early).
         float radius = chord;
         {
-            const AABBTreeIndirect::Tree3f tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices);
-            size_t                         f_end = 0;
-            Vec3f                          hit;
-            if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(its.vertices, its.indices, tree, recipe.end, f_end, hit) >= 0.f) {
+            bool         found = false;
+            const size_t f_end = closest_facet(its, recipe.end, &found);
+            if (found) {
                 const float g = geodesic_at(its, *dist, *patch, seed, f_end, recipe.end);
                 if (std::isfinite(g) && g > chord)
                     radius = g;
@@ -571,7 +666,7 @@ bool make_fill_function(AirbrushField &field, const indexed_triangle_set &its, c
 }
 
 long apply_fill(AirbrushField &field, const AirbrushSurface &surface, const AirbrushFillRecipe &recipe, std::vector<uint64_t> *changed_keys,
-                std::string *error)
+                std::string *error, const AirbrushField *base)
 {
     AirbrushField::FillFunction fn;
     float                       radial_radius = 0.f;
@@ -599,11 +694,11 @@ long apply_fill(AirbrushField &field, const AirbrushSurface &surface, const Airb
                 return 0.f;
             return fill_area_weight(stored, p, radial_radius);
         };
-        const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys, &mask, &facets);
+        const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys, &mask, &facets, base);
         field.set_fill_recipe(stored.to_string());
         return long(changed);
     }
-    const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys);
+    const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys, nullptr, nullptr, base);
     field.set_fill_recipe(stored.to_string());
     return long(changed);
 }

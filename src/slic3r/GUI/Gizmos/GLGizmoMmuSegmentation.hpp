@@ -188,6 +188,8 @@ private:
     std::string airbrush_drag_recipe() const;
     void airbrush_update_preview(bool force);
     void airbrush_clear_preview();
+    // A Pattern stroke in the brush area: one stamp of the pattern at `at` (mesh space).
+    void airbrush_stamp_pattern(const Vec3f &at);
     void airbrush_render_fill_panel(float left, float sliders_width, float drag_left_width, float max_tooltip_width, float window_width);
     // Cancel strokes and fills waiting for their bake (Esc). True when there were any.
     bool airbrush_cancel_pending();

@@ -137,8 +137,9 @@ bool make_fill_function(AirbrushField &field, const indexed_triangle_set &its, c
 
 // make_fill_function() + AirbrushField::fill() + store the recipe on the field. Returns the number of
 // cells changed, or -1 (with `error`) when the recipe could not be applied.
+// `base`: blend from this field instead of `field` (a live preview into an empty_like() field).
 long apply_fill(AirbrushField &field, const AirbrushSurface &surface, const AirbrushFillRecipe &recipe,
-                std::vector<uint64_t> *changed_keys = nullptr, std::string *error = nullptr);
+                std::vector<uint64_t> *changed_keys = nullptr, std::string *error = nullptr, const AirbrushField *base = nullptr);
 
 } // namespace Airbrush
 } // namespace Slic3r

@@ -335,8 +335,18 @@ size_t AirbrushField::dab(const AirbrushSurface &surface, const Dab &dab_in, std
 // Fills (P3)
 // =============================================================================================
 
+AirbrushField AirbrushField::empty_like() const
+{
+    AirbrushField f(m_cell);
+    f.m_origin      = m_origin;
+    f.m_slots       = m_slots;
+    f.m_anchor      = m_anchor;
+    f.m_bake_params = m_bake_params;
+    return f;
+}
+
 size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys,
-                           const FillMask *mask, const std::vector<size_t> *facets)
+                           const FillMask *mask, const std::vector<size_t> *facets, const AirbrushField *base)
 {
     if (!fn || !(opacity > 0.f) || m_slots.empty())
         return 0;
@@ -406,7 +416,7 @@ size_t AirbrushField::fill(const AirbrushSurface &surface, const FillFunction &f
     tbb::parallel_for(tbb::blocked_range<size_t>(0, probes.size(), 1024), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t i = range.begin(); i < range.end(); ++i) {
             const Probe &pr  = probes[i].second;
-            const Cell  *old = find(probes[i].first);
+            const Cell  *old = base ? base->find(probes[i].first) : find(probes[i].first);
             // The region (brush area, facing): outside it a cell keeps what it has.
             const float  op  = mask ? opacity * std::clamp((*mask)(pr.p, pr.facet), 0.f, 1.f) : opacity;
             if (!(op > 0.f)) {
