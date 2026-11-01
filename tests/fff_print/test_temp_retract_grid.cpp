@@ -325,3 +325,135 @@ TEST_CASE("Raised labels add a label-tower object only when the toggle is on", "
     CHECK(on_g.find("SG_label") != std::string::npos);
     CHECK(on_g.find("SG_col_00") != std::string::npos);
 }
+
+namespace {
+
+bool is_nozzle_temp_cmd(const std::string &line)
+{
+    return line.rfind("M104", 0) == 0 || line.rfind("M109", 0) == 0;
+}
+
+double layer_z_of(const std::string &line)
+{
+    const auto pos = line.find_first_of("0123456789+-.");
+    return pos == std::string::npos ? 0. : std::stod(line.substr(pos));
+}
+
+bool is_layer_z_line(const std::string &line)
+{
+    return line.rfind(";Z:", 0) == 0 || line.rfind("; Z_HEIGHT:", 0) == 0;
+}
+
+} // namespace
+
+TEST_CASE("Band 0 keeps its temperature after the second-layer filament temperature change", "[Calib][TempRetract][Slice]")
+{
+    // Review B1: the layer-2 block used to send M104 S<nozzle_temperature> after band 0 was cached,
+    // so layers 2 .. ~9 mm printed at the filament temperature instead of the band temperature.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"nozzle_temperature_initial_layer", "210"}, {"nozzle_temperature", "200"}});
+    Calib_Params params = small_grid_params();
+    REQUIRE(params.start == Approx(230.));
+    const std::string g = slice_grid(params, config);
+
+    std::string last_temp_cmd;
+    bool        reached = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (is_layer_z_line(line) && layer_z_of(line) > 1.2 + 1e-6) {
+            reached = true;
+            break;
+        }
+        if (is_nozzle_temp_cmd(line))
+            last_temp_cmd = line;
+    }
+    REQUIRE(reached);
+    INFO("last nozzle temperature command before z > 1.2: " << last_temp_cmd);
+    CHECK(last_temp_cmd.find("S230") != std::string::npos);
+    // And nothing between the first layer and band 1 drops back to the filament temperature.
+    bool in_band0 = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (line.rfind("; Calib_TempRetract: band=0", 0) == 0)
+            in_band0 = true;
+        else if (line.rfind("; Calib_TempRetract: band=1", 0) == 0)
+            break;
+        else if (in_band0 && is_nozzle_temp_cmd(line))
+            CHECK(line.find("S230") != std::string::npos);
+    }
+    CHECK(in_band0);
+}
+
+TEST_CASE("The label tower prints with the preset retraction length", "[Calib][TempRetract][Slice]")
+{
+    // Review F3: a non-column object restores the preset length instead of inheriting the last column's.
+    Calib_Params params = small_grid_params();
+    params.print_labels = true;
+    const std::string g = slice_grid(params, grid_print_config());
+    REQUIRE_FALSE(lines_starting_with(g, "; Calib_TempRetract: col=none retract=0.8").empty());
+
+    bool in_label = false;
+    int  checked  = 0;
+    for (const std::string &line : gcode_lines(g)) {
+        if (line.rfind("; Calib_TempRetract: col=none", 0) == 0) {
+            in_label = true;
+            continue;
+        }
+        if (line.rfind("; Calib_TempRetract: col=", 0) == 0 || line.rfind("; Calib_TempRetract: restore", 0) == 0) {
+            in_label = false;
+            continue;
+        }
+        if (in_label && is_retract_move(line)) {
+            CHECK(parse_e(line) == Approx(-0.8).margin(1e-3));
+            ++checked;
+        }
+    }
+    CHECK(checked >= 1);
+}
+
+TEST_CASE("By-object sequence re-runs the temperature bands for every column", "[Calib][TempRetract][Slice]")
+{
+    // Review F7: the per-object hook at the by-object print path. Each column prints all its layers before
+    // the next one, so each column goes through every band at its own retraction length.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"print_sequence", "by object"}, {"extruder_clearance_max_radius", "20"}});
+    const Calib_Params params = small_grid_params();
+    Model              model;
+    make_stringing_grid(model, params);
+    REQUIRE(model.objects.size() == 3);
+    for (size_t i = 0; i < model.objects.size(); ++i)
+        model.objects[i]->instances.front()->set_offset(Vec3d(-100. + 100. * double(i), 0., 0.));
+    const std::string g = slice_model(model, config, &params);
+
+    // Bands: 230, 225 for each of the three columns.
+    const auto bands = parse_band_events(g);
+    REQUIRE(bands.size() == 6);
+    for (size_t i = 0; i < bands.size(); ++i) {
+        CHECK(bands[i].band == int(i % 2));
+        CHECK(bands[i].temp == (i % 2 == 0 ? 230 : 225));
+    }
+
+    // Column order is contiguous (all of col a, then all of col b ...), and retract moves follow the column.
+    const std::regex col_re(R"(; Calib_TempRetract: col=(\d+) retract=([0-9.]+))");
+    std::vector<int> order;
+    double           current_L = -1.;
+    int              matched   = 0;
+    for (const std::string &line : gcode_lines(g)) {
+        std::smatch m;
+        if (std::regex_search(line, m, col_re)) {
+            const int col = std::stoi(m[1]);
+            if (order.empty() || order.back() != col)
+                order.push_back(col);
+            current_L = std::stod(m[2]);
+            CHECK(current_L == Approx(retract_for_column(params, col)));
+            continue;
+        }
+        if (line.rfind("; Calib_TempRetract: restore", 0) == 0)
+            current_L = -1.;
+        if (current_L > 0. && is_retract_move(line)) {
+            CHECK(parse_e(line) == Approx(-current_L).margin(1e-3));
+            ++matched;
+        }
+    }
+    CHECK(order.size() == 3);
+    CHECK(std::set<int>(order.begin(), order.end()) == std::set<int>{0, 1, 2});
+    CHECK(matched >= 3);
+}

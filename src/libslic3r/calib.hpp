@@ -64,7 +64,7 @@ struct Calib_Params
     bool wait_for_temperature  = true;  // M109 at each band change. Lance: default ON.
     bool print_labels          = false; // Raised value labels. PR A core support; dialog is PR B.
 
-    CalibMode mode;
+    CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
 
 // Geometry constants for the temperature × retraction stringing grid.

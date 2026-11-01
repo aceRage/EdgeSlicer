@@ -156,3 +156,38 @@ TEST_CASE("Stringing grid raised labels are optional and default off", "[Calib][
         CHECK(model.objects.back()->instances.front()->get_offset().x() == Approx(-stringing_grid_column_pitch));
     }
 }
+
+TEST_CASE("Stringing grid column names parse strictly", "[Calib][TempRetract]")
+{
+    // Review F5: digits only, to the end of the name.
+    CHECK(stringing_grid_column_from_name("SG_col_00") == 0);
+    CHECK(stringing_grid_column_from_name("SG_col_7") == 7);
+    CHECK(stringing_grid_column_from_name("SG_col_16") == 16);
+    CHECK(stringing_grid_column_from_name("SG_col_3abc") == -1);
+    CHECK(stringing_grid_column_from_name("SG_col_") == -1);
+    CHECK(stringing_grid_column_from_name("SG_col_-1") == -1);
+    CHECK(stringing_grid_column_from_name("SG_col_+2") == -1);
+    CHECK(stringing_grid_column_from_name("SG_col_ 3") == -1);
+    CHECK(stringing_grid_column_from_name("SG_col_3 ") == -1);
+    CHECK(stringing_grid_column_from_name("xSG_col_3") == -1);
+}
+
+TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][TempRetract]")
+{
+    // Review F4/F6: the G-code asks for the band at the middle of a layer and the labels at the middle of
+    // a band, so a layer top at 8.9999 or 9.0 (band boundary 9.0) maps the same way.
+    Calib_Params p;
+    p.mode        = CalibMode::Calib_Temp_Retract_Grid;
+    p.start       = 230.;
+    p.end         = 225.;
+    p.step        = 5.;
+    p.band_height = 8.;
+    p.band_count  = 2;
+    CHECK(Calib_Params().mode == CalibMode::Calib_None); // F8
+    const double h = 0.2;
+    CHECK(temp_retract_band_index(p, 0.5 * (8.9999 + 8.9999 - h)) == 0);
+    CHECK(temp_retract_band_index(p, 0.5 * (9.0 + 9.0 - h)) == 0);
+    CHECK(temp_retract_band_index(p, 0.5 * (9.2 + 9.0)) == 1);
+    CHECK(temp_for_z(p, stringing_grid_base_height + 0.5 * p.band_height) == Approx(230.));
+    CHECK(temp_for_z(p, stringing_grid_base_height + 1.5 * p.band_height) == Approx(225.));
+}

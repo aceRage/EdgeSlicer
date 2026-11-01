@@ -7439,7 +7439,9 @@ LayerResult GCode::process_layer(const Print& print,
         break;
     }
     case CalibMode::Calib_Temp_Retract_Grid: {
-        gcode += this->apply_temp_retract_grid_layer(print, print_z);
+        // Review F4: pick the band from the middle of the layer, not its top, so a layer whose top
+        // lands on a band boundary (8.9999 vs 9.0) always resolves to the same band.
+        gcode += this->apply_temp_retract_grid_layer(print, 0.5 * (print_z + layer.bottom_z()));
         break;
     }
     }
@@ -7497,6 +7499,12 @@ LayerResult GCode::process_layer(const Print& print,
 
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
+        // Review B1: the temperature x retraction grid owns the nozzle temperature from layer 1 on (its band
+        // temperature is sent in the calib switch above and cached per band), so the filament temperature
+        // must not overwrite band 0 here.
+        if (print.calib_mode() == CalibMode::Calib_Temp_Retract_Grid) {
+            // nothing: apply_temp_retract_grid_layer() already set the band temperature
+        } else
         if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
             // Bambu two-extruder printer: M104 T is a PHYSICAL hotend, never "T<filament index>". Only
             // the hotend that is printing is set. The idle one gets its temperature from its own tool
@@ -12280,8 +12288,16 @@ std::string GCode::apply_temp_retract_grid_object(const Print &print, const Prin
     if (mo == nullptr)
         return {};
     const int col = stringing_grid_column_from_name(mo->name);
-    if (col < 0)
-        return {};
+    if (col < 0) {
+        // Review F3: a non-column object (the SG_label tower, or anything else on the plate) prints with
+        // the preset retraction length, not the length of the column printed before it.
+        if (!m_temp_retract_saved_retract)
+            return {};
+        writer().config.retraction_length = m_temp_retract_original;
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=none retract=%g\n", m_temp_retract_original.get_at(0));
+        return buf;
+    }
     const double L = retract_for_column(print.calib_params(), col);
     if (!m_temp_retract_saved_retract) {
         m_temp_retract_original      = writer().config.retraction_length;

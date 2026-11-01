@@ -1088,15 +1088,17 @@ int stringing_grid_column_from_name(const std::string &name)
     const std::string prefix = stringing_grid_column_prefix;
     if (name.rfind(prefix, 0) != 0)
         return -1;
-    try {
-        size_t idx = 0;
-        const int col = std::stoi(name.substr(prefix.size()), &idx);
-        if (idx == 0)
-            return -1;
-        return col;
-    } catch (...) {
+    // Review F5: digits only, to the end of the name ("SG_col_3abc", "SG_col_-1", "SG_col_ 3" are not columns).
+    const std::string digits = name.substr(prefix.size());
+    if (digits.empty() || digits.size() > 4)
         return -1;
+    int col = 0;
+    for (char ch : digits) {
+        if (ch < '0' || ch > '9')
+            return -1;
+        col = col * 10 + (ch - '0');
     }
+    return col;
 }
 
 int temp_retract_band_index(const Calib_Params &params, double z)
@@ -1260,7 +1262,8 @@ TriangleMesh make_stringing_grid_label_tower_mesh(const Calib_Params &params)
     merge_cube_at(mesh, 0., 0., 0., tw, td, height);
     if (params.print_labels) {
         for (int band = 0; band < bands; ++band) {
-            const double      z     = stringing_grid_base_height + band * band_h + 1.0;
+            // Review F6: same rule as the G-code (temp_retract_band_index on the middle of the band).
+            const double      z     = stringing_grid_base_height + (band + 0.5) * band_h;
             const std::string label = format_temp_label(temp_for_z(params, z));
             merge_text(mesh, 0.4, td, stringing_grid_base_height + band * band_h + 1.5, label, stringing_grid_label_height);
         }
