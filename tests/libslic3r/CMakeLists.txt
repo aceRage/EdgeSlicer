@@ -137,6 +137,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
+	test_calib.cpp
 	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
