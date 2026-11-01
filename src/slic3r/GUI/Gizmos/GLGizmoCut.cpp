@@ -9,6 +9,7 @@
 #include <glad/gl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <cmath>
 
@@ -1852,7 +1853,8 @@ void GLGizmoCut3D::apply_side_visibility()
     // (The camera direction flips m_clp_normal for the object clipper, not for
     // the colour clip, so no is_looking_forward() swap belongs here.)
     const SideVisibility upper = non_planar_connector_editing() ? SideVisibility::Hidden : m_upper_visibility;
-    const SideVisibility lower = non_planar_connector_editing() && m_lower_visibility == SideVisibility::Hidden ? SideVisibility::Visible
+    const SideVisibility lower = split_preview_shown() ? SideVisibility::Hidden :
+                                 non_planar_connector_editing() && m_lower_visibility == SideVisibility::Hidden ? SideVisibility::Visible
                                                                                                                 : m_lower_visibility;
     m_parent.set_color_clip_plane_alphas(side_visibility_alpha(upper), side_visibility_alpha(lower));
     // [cutconn] once per change, not per frame.
@@ -1862,6 +1864,7 @@ void GLGizmoCut3D::apply_side_visibility()
         last_logged = state;
         BOOST_LOG_TRIVIAL(info) << "[cutconn] side alphas upper " << side_visibility_alpha(upper) << " lower " << side_visibility_alpha(lower)
                                 << " (editing " << m_connectors_editing << ", non-planar " << non_planar_connector_editing()
+                                << ", split preview " << split_preview_shown()
                                 << ", draw field tex " << m_draw_field_tex << ", draw line " << m_draw_stroke.valid() << ")";
     }
 }
@@ -2030,8 +2033,9 @@ void GLGizmoCut3D::update_curved_section()
 
 void GLGizmoCut3D::render_curved_cap()
 {
-    // Connectors editing too (2026-10-31): the cap is the face connectors are placed on.
-    if (!is_curved_surface() || m_curved_sheet.is_flat())
+    // Connectors editing too (2026-10-31): the cap is the face connectors are placed on - unless
+    // the split preview is up, whose own cut face it is.
+    if (!is_curved_surface() || m_curved_sheet.is_flat() || split_preview_shown())
         return;
 
     // The cap costs a ray per sample, so key it on everything it depends on and
@@ -3930,9 +3934,94 @@ void GLGizmoCut3D::update_draw_surface_raycaster()
     m_draw_surface_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(m_draw_surface_mesh));
 }
 
+void GLGizmoCut3D::update_split_preview()
+{
+    if (!non_planar_connector_editing())
+        return;
+    const bool drawn = is_draw_surface();
+    // Everything the split depends on. The plane is in curved_surface_key(); a drawn line and the
+    // thickness are added here. (Neither can change while connectors are edited, but a cheap key
+    // is safer than assuming so.)
+    size_t key = curved_surface_key();
+    auto   mix = [&key](double d) { key = key * 1000003u + std::hash<double>{}(d); };
+    mix(drawn ? 1.0 : 2.0);
+    mix(double(m_cut_thickness));
+    mix(double(m_cut_thickness_offset));
+    if (drawn) {
+        mix(m_draw_stroke.length());
+        mix(double(m_draw_stroke.path().size()));
+        mix(m_draw_params.depth);
+        mix(m_draw_params.angle_deg);
+        mix(m_draw_params.extension);
+        mix(m_draw_params.through_all ? 1.0 : 0.0);
+    }
+    if (m_split_preview_tried && key == m_split_preview_key)
+        return;
+    m_split_preview_tried = true;
+    m_split_preview_key   = key;
+    m_split_preview_ok    = false;
+    m_split_preview_model.reset();
+
+    indexed_triangle_set mesh;
+    if (!curved_instance_mesh_in_plane(mesh)) {
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: no object mesh, keeping the colour clip";
+        return;
+    }
+    const auto           t0 = std::chrono::steady_clock::now();
+    indexed_triangle_set lower;
+    bool                 ok = false;
+    if (drawn) {
+        DrawCutParams params    = m_draw_params;
+        params.thickness        = double(m_cut_thickness);
+        params.thickness_offset = cut_thickness_offset();
+        DrawCutError err        = DrawCutError::None;
+        ok = draw_cut_split(mesh, m_draw_stroke, params, nullptr, &lower, &err);
+        if (!ok)
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: drawn split failed (" << draw_cut_error_message(err) << ")";
+    } else {
+        ok = curved_cut_split(mesh, m_curved_sheet, nullptr, &lower, CurvedCutSheet::CutSamples, double(m_cut_thickness),
+                              cut_thickness_offset());
+        if (!ok)
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: curved split failed";
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!ok || lower.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: none (" << (lower.empty() ? "empty lower half" : "split failed")
+                                << ", " << ms << " ms), keeping the colour clip";
+        return;
+    }
+    m_split_preview_model.init_from(lower);
+    m_split_preview_ok = m_split_preview_model.is_initialized();
+    apply_side_visibility();
+    m_parent.set_as_dirty();
+    BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: " << (drawn ? "drawn" : "curved") << " lower half, " << lower.indices.size()
+                            << " triangles, " << ms << " ms" << (m_split_preview_ok ? "" : " (GL model failed, keeping the colour clip)");
+}
+
+void GLGizmoCut3D::render_split_preview()
+{
+    if (!split_preview_shown())
+        return;
+    GLShaderProgram* shader = wxGetApp().get_shader("gouraud_light");
+    if (shader == nullptr)
+        return;
+    const Camera&     camera     = wxGetApp().plater()->get_camera();
+    const Transform3d model      = translation_transform(m_plane_center) * m_rotation_m;
+    const Transform3d view_model = camera.get_view_matrix() * model;
+    shader->start_using();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    shader->set_uniform("view_model_matrix", view_model);
+    shader->set_uniform("view_normal_matrix",
+                        (Matrix3d) (camera.get_view_matrix().matrix().block(0, 0, 3, 3) * model.matrix().block(0, 0, 3, 3).inverse().transpose()));
+    shader->set_uniform("emission_factor", 0.f);
+    m_split_preview_model.set_color(LOWER_PART_COLOR);
+    m_split_preview_model.render();
+    shader->stop_using();
+}
+
 void GLGizmoCut3D::render_draw_section()
 {
-    if (!non_planar_connector_editing() || !is_draw_surface())
+    if (!non_planar_connector_editing() || !is_draw_surface() || split_preview_shown())
         return;
     update_draw_surface_raycaster();
     if (!m_draw_section_model.is_initialized())
@@ -6938,6 +7027,8 @@ void GLGizmoCut3D::on_render()
         m_part_selection.render(&m_cut_normal, m_sphere.model);
 
     render_clipper_cut();
+    update_split_preview();
+    render_split_preview();
     render_draw_section();
 
     // 2026-09-20, OWNER REPORT item 4: connectors editing hides the surface so the
@@ -8222,6 +8313,9 @@ void GLGizmoCut3D::set_connectors_editing(bool connectors_editing)
 
     const bool clip = clip_during_connector_editing();
     m_c->object_clipper()->set_behavior(clip, clip, double(m_contour_width));
+    m_split_preview_tried = false;
+    m_split_preview_ok    = false;
+    m_split_preview_model.reset();
     BOOST_LOG_TRIVIAL(info) << "[cutconn] connectors editing " << (m_connectors_editing ? "ON" : "OFF") << ", surface "
                             << (is_draw_surface() ? (m_draw_stroke.valid() ? "Draw (line ok)" : "Draw (no line)") :
                                 is_curved_surface() ? (m_curved_sheet.is_flat() ? "Curved (flat sheet)" : "Curved") : "Flat")

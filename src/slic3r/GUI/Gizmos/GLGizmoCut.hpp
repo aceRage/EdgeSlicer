@@ -307,6 +307,18 @@ class GLGizmoCut3D : public GLGizmoBase
     // Drawn cut: the strip's cross-section with the part, drawn while connectors are placed.
     GLModel m_draw_section_model;
     void    render_draw_section();
+    // 2026-10-31, owner hand test of #811 round 3: while connectors are placed on a curved or
+    // drawn cut, the LOWER HALF is shown as the real split (one boolean, cached until the cut
+    // changes) instead of clipping the whole mesh with the colour field, whose voxel resolution
+    // left a staircase of the hidden half along a drawn line. Falls back to the colour clip when
+    // the split fails.
+    GLModel m_split_preview_model;
+    size_t  m_split_preview_key{ 0 };
+    bool    m_split_preview_ok{ false };
+    bool    m_split_preview_tried{ false };
+    void    update_split_preview();
+    void    render_split_preview();
+    bool    split_preview_shown() const { return m_split_preview_ok && non_planar_connector_editing(); }
     // Connectors are being placed on a curved or drawn surface: the flat clipper must stay out of
     // it, the upper half is hidden (as the flat clipper hides it on a flat cut) and the section
     // of the real surface is shown and picked.
