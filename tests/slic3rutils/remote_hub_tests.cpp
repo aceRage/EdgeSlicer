@@ -1040,7 +1040,7 @@ TEST_CASE("arrange: /pair lists slice_arrange, slice_orient and slice_undo, and 
     for (const char* s : { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" })
         CHECK(has(s));
     CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size()); // no flag twice
-    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 4);
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 4);
 }
 
 TEST_CASE("arrange: why a plate cannot slice", "[RemoteHub][arrange]")
@@ -1164,4 +1164,178 @@ TEST_CASE("arrange: a guarded undo only takes back the step it was told about", 
     CHECK_FALSE(undo_matches("Arrange", "Set Position"));
     CHECK_FALSE(undo_matches("Arrange", ""));
     CHECK_FALSE(undo_matches("Arrange", "arrange"));
+}
+
+// ---- PR F: filament settings (EdgeSlicerApp docs/design_native_slice_parity.md section 4) ----
+
+TEST_CASE("filament settings: /pair lists slice_filament_settings, the manifest is v5 or later, the routes are allowed", "[RemoteHub][filament]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_filament_settings") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 5);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/settings/filament"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament/revert"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament/save"));
+    CHECK(instance_api_allowed("POST", "/api/presets/filament_remove"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/settings/filament/save"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/presets/filament_remove"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/settings/filament/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/settings/printer")); // printer settings stay out
+}
+
+TEST_CASE("filament settings: the slots an edit changes", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::slots_sharing;
+    const std::vector<std::string> slots { "Bambu PLA Basic", "Generic PETG", "Bambu PLA Basic", "Generic PETG", "Bambu PLA Basic" };
+    CHECK(slots_sharing(slots, 0) == std::vector<int> { 0, 2, 4 });
+    CHECK(slots_sharing(slots, 3) == std::vector<int> { 1, 3 });
+    CHECK(slots_sharing({ "Generic PLA" }, 0) == std::vector<int> { 0 });
+    CHECK(slots_sharing(slots, 5).empty());
+    CHECK(slots_sharing(slots, -1).empty());
+}
+
+TEST_CASE("filament settings: which slot the Filament tab may open", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::bind_filament_slot;
+    // nothing unsaved: any slot
+    CHECK(bind_filament_slot(2, 4, 0, false, "Generic PETG", "Bambu PLA Basic").ok());
+    // unsaved edits of the slot's own preset, from this slot or another one using it: they are shared
+    CHECK(bind_filament_slot(0, 4, 0, true, "Bambu PLA Basic", "Bambu PLA Basic").ok());
+    CHECK(bind_filament_slot(2, 4, 0, true, "Bambu PLA Basic", "Bambu PLA Basic").ok());
+    // another preset has unsaved edits: the desktop would ask Save / Discard, the phone is told
+    const auto r = bind_filament_slot(1, 4, 2, true, "Generic PETG", "Bambu PLA Basic");
+    CHECK(r.status == 409);
+    CHECK(r.error == "filament 3 has unsaved changes (Bambu PLA Basic): save or revert them first");
+    // the tab bound to nothing yet holds slot 1's preset
+    CHECK(bind_filament_slot(1, 4, -1, true, "Generic PETG", "Bambu PLA Basic").error.rfind("filament 1 ", 0) == 0);
+    CHECK(bind_filament_slot(4, 4, 0, false, "", "Bambu PLA Basic").status == 404);
+    CHECK(bind_filament_slot(-1, 4, 0, false, "", "Bambu PLA Basic").status == 404);
+}
+
+TEST_CASE("filament settings: the name a save uses and the slots Save as moves", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::filament_save_name;
+    using Slic3r::GUI::SliceV1::slots_after_save_as;
+    CHECK(filament_save_name("", "Bambu PLA Basic @BBL X1C", true) == "Bambu PLA Basic @BBL X1C - Custom");
+    CHECK(filament_save_name("", "My PLA", false) == "My PLA");
+    CHECK(filament_save_name("  Silk PLA 215  ", "My PLA", false) == "Silk PLA 215");
+    CHECK(filament_save_name(" \t ", "My PLA", false) == "My PLA");
+
+    // the desktop renamed every slot that used "My PLA"; Save as is for slot 2 only
+    const std::vector<std::string> before { "My PLA", "Generic PETG", "My PLA" };
+    CHECK(slots_after_save_as(before, 2, "Silk PLA 215") == std::vector<std::string> { "My PLA", "Generic PETG", "Silk PLA 215" });
+    CHECK(slots_after_save_as(before, 7, "Silk PLA 215") == before);
+}
+
+TEST_CASE("filament settings: when a slot may be removed", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::filament_remove_check;
+    CHECK(filament_remove_check(1, 3, -1, 0, false).ok());
+    CHECK(filament_remove_check(1, 3, 0, 0, false).ok());
+    CHECK(filament_remove_check(0, 3, 2, 0, false).ok());
+    CHECK(filament_remove_check(0, 1, -1, 0, false).status == 409); // the last one
+    CHECK(filament_remove_check(3, 3, -1, 0, false).status == 404);
+    CHECK(filament_remove_check(1, 3, 1, 0, false).status == 400); // replaced by itself
+    CHECK(filament_remove_check(1, 3, 3, 0, false).status == 400);
+    CHECK(filament_remove_check(1, 3, -2, 0, false).status == 400); // not a number
+    // mixed filaments made from it: the desktop asks, so the phone confirms
+    const auto r = filament_remove_check(1, 3, -1, 2, false);
+    CHECK(r.status == 409);
+    CHECK(r.error == "2 mixed filaments are made from this filament and would be removed with it: confirm=1 to go ahead");
+    CHECK(filament_remove_check(1, 3, -1, 1, true).ok());
+    CHECK(filament_remove_check(1, 3, 0, 1, false).ok()); // a replacement: the desktop does not ask either
+}
+
+// ---- PR E: preview v2 (EdgeSlicerApp docs/design_native_slice_parity.md section 2.3) ----
+
+TEST_CASE("preview v2: /pair lists slice_preview_v2, the manifest is v6, the routes are allowed", "[RemoteHub][preview_v2]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_preview_v2") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 6);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/plates/0/preview/legend"));
+    CHECK(instance_api_allowed("GET", "/api/plates/12/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/preview/legend"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/x/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/preview/moves"));
+}
+
+TEST_CASE("preview v2: feature and move ids", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(preview_role_ids().size() == 22); // libvgcode::EGCodeExtrusionRole::COUNT, static_asserted in RemoteAccess
+    CHECK(preview_role_index("external_perimeter") == 2);
+    CHECK(preview_role_index("support") == 11);
+    CHECK(preview_role_index("bottom_surface_over_support") == 21);
+    CHECK(preview_role_index("Outer wall") == -1);
+    CHECK(preview_option_ids() == std::vector<std::string> { "travel", "wipe", "retract", "unretract", "seam", "tool_change" });
+    CHECK(preview_option_index("seam") == 4);
+    CHECK(preview_option_index("pause") == -1);
+    CHECK(std::set<std::string>(preview_role_ids().begin(), preview_role_ids().end()).size() == preview_role_ids().size());
+}
+
+TEST_CASE("preview v2: id lists and colours", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(split_ids("seam,travel") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids(" seam , ,travel,seam ") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids("").empty());
+    CHECK(split_ids(",,").empty());
+    CHECK(hex_color(255, 128, 0) == "#FF8000");
+    CHECK(hex_color(0, 0, 0) == "#000000");
+    CHECK(preview_from_layer(-3, 10) == 0u);
+    CHECK(preview_from_layer(4, 10) == 4u);
+    CHECK(preview_from_layer(40, 10) == 10u);
+}
+
+TEST_CASE("preview v2: a gradient legend", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    // the palette colours the bins in value order; stops come out sorted, rounded to the legend's decimals
+    const auto g = gradient_legend("speed", { 20.4f, 60.2f, 100.f, 140.f, 180.f }, { "#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000" });
+    CHECK(g["unit"] == "mm/s");
+    CHECK(g["decimals"] == 0);
+    CHECK(g["min"] == 20.0);
+    CHECK(g["max"] == 180.0);
+    REQUIRE(g["stops"].size() == 5);
+    CHECK(g["stops"][1]["value"] == 60.0);
+    CHECK(g["stops"][1]["color"] == "#00FFFF");
+    // one value: one colour; two values: the palette's ends
+    const auto one = gradient_legend("height", { 0.2f }, { "#0000FF", "#FF0000" });
+    CHECK(one["stops"].size() == 1);
+    CHECK(one["min"] == one["max"]);
+    const auto two = gradient_legend("width", { 0.42f, 0.45f }, { "#0000FF", "#00FF00", "#FF0000" });
+    REQUIRE(two["stops"].size() == 2);
+    CHECK(two["stops"][1]["color"] == "#FF0000");
+    CHECK(two["max"] == 0.45);
+    // nothing detected
+    const auto none = gradient_legend("temperature", {}, { "#0000FF" });
+    CHECK(none["stops"].empty());
+    CHECK(none["min"].is_null());
+    CHECK(gradient_unit("feature_type").empty());
+    CHECK(gradient_decimals("pressure_advance") == 3);
+}
+
+TEST_CASE("preview v2: layer rows", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    const auto rows = layer_rows({ 0.2, 0.4, 0.6000001 }, { 12.345f, 30.f, 29.999f });
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0]["z"] == 0.2);
+    CHECK(rows[0]["height"] == 0.2);
+    CHECK(rows[0]["time_s"] == 12.35);
+    CHECK(rows[2]["z"] == 0.6);
+    CHECK(rows[2]["height"] == 0.2);
+    CHECK(rows[2]["time_s"] == 30.0);
+    // times that do not match the layers are not guessed
+    const auto untimed = layer_rows({ 0.2, 0.4 }, { 5.f });
+    CHECK(untimed[1]["time_s"].is_null());
+    CHECK(layer_rows({}, {}).empty());
 }

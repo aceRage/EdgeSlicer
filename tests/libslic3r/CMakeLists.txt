@@ -193,6 +193,8 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_path.cpp
     test_showcase_tone.cpp
     test_showcase_glsl.cpp
+    test_showcase_hdr.cpp
+    test_showcase_panel_rules.cpp
     test_showcase_skin.cpp
     test_align_math.cpp
     # test_png_io.cpp

@@ -111,6 +111,9 @@ set(lisbslic3r_sources
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseHdr.cpp
+    Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcasePanelRules.hpp
     Showcase/ShowcaseCallouts.cpp
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
@@ -800,6 +803,7 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
     Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
     Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
+    Showcase/ShowcaseHdr.cpp        # file-local hdr_* helpers and a TBB include; kept out of the unity batches
 )
 
 if (SLIC3R_STATIC)

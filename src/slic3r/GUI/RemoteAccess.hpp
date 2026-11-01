@@ -16,6 +16,7 @@
 namespace Slic3r {
 class LoopbackAcceptLoop;
 namespace GUI {
+namespace SliceV1 { struct PreviewLook; }
 
 // This slicer instance's JSON API, on a loopback-only port picked by the OS.
 //
@@ -147,7 +148,10 @@ private:
     ApiResponse api_plate_thumbnail(int plate);
     ApiResponse api_plate_layout(int plate);
     ApiResponse api_plate_preview(int plate);
-    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy);
+    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy,
+                                      const SliceV1::PreviewLook& look);
+    ApiResponse api_plate_preview_legend(int plate, const std::string& color_by, const std::string& hide); // PR E
+    ApiResponse api_plate_preview_layers(int plate);                                                       // PR E
     ApiResponse api_plate_preview_status(int plate);
     // slice_v1 (the app's native Slice tab): results detail and warnings of a sliced plate, and
     // cancelling a running slice job the way the desktop's slicing notification does.
@@ -188,6 +192,12 @@ private:
     ApiResponse api_process_set(const std::string& form_body);
     ApiResponse api_process_revert();
     ApiResponse api_process_save();
+    // PR F: filament settings, per slot
+    ApiResponse api_filament_settings(int slot);
+    ApiResponse api_filament_set(int slot, const std::string& form_body);
+    ApiResponse api_filament_revert(int slot);
+    ApiResponse api_filament_save(int slot, const std::string& name);
+    ApiResponse api_filament_remove(int slot, int replace, bool confirm);
 
     struct Job
     {

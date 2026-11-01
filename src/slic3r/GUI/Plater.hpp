@@ -175,6 +175,9 @@ public:
     void edit_filament();
     // The filament slot the Filament tab edits (0-based), -1 when none was chosen yet.
     int  editing_filament_index() const;
+    // RemoteAccess (phone filament settings): which slot the Filament tab edits, as edit_filament
+    // sets it from the slot menu; -1 while the tab switches presets, so no slot follows it.
+    void set_editing_filament(int index);
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
