@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -327,6 +328,12 @@ void ShowcaseRenderer::release_gl()
         m_env_fallback_texture = 0;
     }
     m_env_key.clear();
+    m_env_is_hdri = false;
+    if (m_hdri_backdrop != 0) {
+        glsafe(::glDeleteTextures(1, &m_hdri_backdrop));
+        m_hdri_backdrop = 0;
+    }
+    m_hdri_backdrop_id.clear();
     if (m_floor_texture != 0) {
         glsafe(::glDeleteTextures(1, &m_floor_texture));
         m_floor_texture = 0;
@@ -519,6 +526,13 @@ RealisticRenderSettings ShowcaseRenderer::render_settings(const DrawTarget &t) c
     rs.ssao              = li.ssao;
     rs.world_light       = li.world_fixed;
     rs.world_light_dir   = Showcase::light_direction(li.azimuth_deg, li.elevation_deg);
+    {
+        // 1h-1: the sun of an HDRI environment is the key light, so the shadow map agrees with the picture.
+        float                sun_az, sun_el;
+        std::array<float, 3> sun_color;
+        if (sun_key(sun_az, sun_el, sun_color))
+            rs.world_light_dir = Showcase::light_direction(sun_az, sun_el);
+    }
     rs.shadow_intensity  = li.shadow_intensity;
     rs.shadow_map_size   = t.shadow_map_size;
     rs.ssao_radius_scale = t.ssao_radius_scale;
@@ -552,7 +566,19 @@ std::vector<Showcase::LightSource> ShowcaseRenderer::scene_lights(const Camera &
         li.azimuth_deg   = float(std::atan2(w.y(), w.x()) * 180. / PI);
         li.elevation_deg = float(std::asin(std::clamp(w.z(), -1., 1.)) * 180. / PI);
     }
-    return Showcase::three_point_lights(li);
+    // 1h-1: the sun of an HDRI environment replaces the key light's direction and colour (the fill
+    // and the rim are placed around it as usual); key_intensity still scales it.
+    float                sun_az, sun_el;
+    std::array<float, 3> sun_color;
+    const bool           sun = sun_key(sun_az, sun_el, sun_color);
+    if (sun) {
+        li.azimuth_deg   = sun_az;
+        li.elevation_deg = sun_el;
+    }
+    std::vector<Showcase::LightSource> lights = Showcase::three_point_lights(li);
+    if (sun && li.key_intensity > 0.f && !lights.empty())
+        lights.front().color = { sun_color[0] * li.key_intensity, sun_color[1] * li.key_intensity, sun_color[2] * li.key_intensity };
+    return lights;
 }
 
 // The object's layers as the slicer will make them (layer height, first layer, a variable layer
@@ -658,12 +684,19 @@ const ShowcaseRenderer::LayerInfo *ShowcaseRenderer::layers_for(int object_idx)
 
 const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
 {
-    if (m_scene == nullptr || m_scene->lighting.environment.empty())
+    if (m_scene == nullptr || m_scene->lighting.environment.empty()) {
+        m_env_is_hdri = false;   // 1h-1: no environment, so no HDRI sun either
         return nullptr;
+    }
     const Showcase::EnvironmentManifest &manifest = showcase_environments();
     const Showcase::EnvironmentInfo     *env      = manifest.find(m_scene->lighting.environment);
-    if (env == nullptr)
+    if (env == nullptr) {
+        // 1h-1: not a baked environment; an HDRI of the same id space?
+        if (const Showcase::HdriInfo *hdri = showcase_hdris().find(m_scene->lighting.environment))
+            return ensure_hdri(*hdri);
+        m_env_is_hdri = false;
         return nullptr;
+    }
     if (m_env_key == env->id)
         return m_env_texture != 0 ? env : nullptr;
     // One environment at a time is kept on the GPU.
@@ -671,6 +704,7 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
         glsafe(::glDeleteTextures(1, &m_env_texture));
         m_env_texture = 0;
     }
+    m_env_is_hdri = false;
     m_env_key = env->id;   // a file that fails is not retried every frame
     ShowcaseImage atlas;
     if (!showcase_load_rgba_file(showcase_environment_path(*env), atlas)) {
@@ -679,6 +713,114 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_environment()
     }
     m_env_texture = showcase_upload_environment(atlas, manifest.face_size, manifest.levels);
     return m_env_texture != 0 ? env : nullptr;
+}
+
+const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_hdri(const Showcase::HdriInfo &hdri)
+{
+    // The sun is taken out of the image-based light only when the key light stands in for it.
+    const bool        remove_sun = m_scene->lighting.sun_from_env;
+    const std::string key        = "hdri:" + hdri.id + (remove_sun ? "+sun" : "");
+    if (m_env_key == key) {
+        m_env_is_hdri = m_env_texture != 0;
+        return m_env_texture != 0 ? &m_hdri_info : nullptr;
+    }
+    if (m_env_texture != 0) {
+        glsafe(::glDeleteTextures(1, &m_env_texture));
+        m_env_texture = 0;
+    }
+    m_env_key     = key;   // a file that fails is not retried every frame
+    m_env_is_hdri = true;
+    m_hdri_sun    = Showcase::HdrSun();
+    m_hdri_sun_removed = false;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    Showcase::HdrImage image;
+    std::string        error;
+    bool               loaded = false;
+    if (hdri.procedural) {
+        image  = Showcase::make_procedural_hdr(hdri.kind, 2048);
+        loaded = !image.empty();
+    } else {
+        loaded = Showcase::load_hdr_file(showcase_hdri_path(hdri), image, &error);
+    }
+    if (!loaded) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be read (" << error
+                                   << "); the scene falls back to its backdrop colours and plain lights";
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    Showcase::HdrBakeOptions options;
+    options.remove_sun = remove_sun;
+    options.face_size  = showcase_environments().face_size;
+    options.levels     = showcase_environments().levels;
+    Showcase::HdrEnvironment baked;
+    if (!Showcase::bake_hdr_environment(image, options, baked)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " has no usable light; falling back to the scene's backdrop colours";
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    ShowcaseImage atlas;
+    atlas.width  = baked.atlas_width;
+    atlas.height = baked.atlas_height;
+    atlas.rgba   = std::move(baked.atlas_rgba);
+    m_env_texture = showcase_upload_environment(atlas, baked.face_size, baked.levels);
+    if (m_env_texture == 0) {
+        m_env_is_hdri = false;
+        return nullptr;
+    }
+    // The sharp panorama for the backdrop, once per HDRI (the sun toggle does not change it).
+    if (m_hdri_backdrop_id != hdri.id || m_hdri_backdrop == 0) {
+        if (m_hdri_backdrop != 0) {
+            glsafe(::glDeleteTextures(1, &m_hdri_backdrop));
+            m_hdri_backdrop = 0;
+        }
+        m_hdri_backdrop    = showcase_upload_equirect(image, baked.scale);
+        m_hdri_backdrop_id = hdri.id;
+        if (m_hdri_backdrop == 0)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be uploaded as a backdrop; its light is used, the backdrop stays blurred";
+    }
+    m_hdri_info          = Showcase::EnvironmentInfo();
+    m_hdri_info.id       = hdri.id;
+    m_hdri_info.name     = hdri.name;
+    m_hdri_info.file     = hdri.file;
+    m_hdri_info.sh       = baked.sh;
+    m_hdri_info.has_sun  = baked.sun.found;
+    m_hdri_info.sun_dir  = baked.sun.dir;
+    m_hdri_info.source   = hdri.source;
+    m_hdri_info.authors  = hdri.authors;
+    m_hdri_info.licence  = hdri.licence;
+    m_hdri_sun           = baked.sun;
+    m_hdri_sun_removed   = remove_sun && baked.sun.found;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // Warning level on purpose: this is the "HDR environment or the fallback" choice the Mac check asks about.
+    std::ostringstream sun_text;
+    if (baked.sun.found)
+        sun_text << "sun found at " << baked.sun.dir[0] << "," << baked.sun.dir[1] << "," << baked.sun.dir[2] << " (share " << baked.sun.share << ")";
+    else
+        sun_text << "no dominant light";
+    BOOST_LOG_TRIVIAL(warning) << "Showcase: HDRI environment " << hdri.id << (hdri.procedural ? " (generated) " : " (" + hdri.file + ") ")
+                               << image.width << "x" << image.height << ", scale " << baked.scale << ", " << sun_text.str()
+                               << (m_hdri_sun_removed ? ", sun used as the key light" : "") << "; prepared in " << int(ms) << " ms";
+    return &m_hdri_info;
+}
+
+bool ShowcaseRenderer::sun_key(float &azimuth_deg, float &elevation_deg, std::array<float, 3> &color) const
+{
+    if (m_scene == nullptr || !m_scene->lighting.sun_from_env || !m_scene->lighting.world_fixed || !m_env_is_hdri || !m_hdri_sun_removed ||
+        !m_hdri_sun.found)
+        return false;
+    const std::array<float, 3> &e = m_hdri_sun.dir;
+    // The environment is turned by env_rotation about +Z, as the shaders do (they rotate a world
+    // direction by -rotation to look the environment up), so the sun in the world is turned by +rotation.
+    const double rot = double(m_scene->lighting.env_rotation_deg) * PI / 180.;
+    const double wx  = std::cos(rot) * double(e[0]) - std::sin(rot) * double(e[1]);
+    const double wy  = std::sin(rot) * double(e[0]) + std::cos(rot) * double(e[1]);
+    azimuth_deg      = float(std::atan2(wy, wx) * 180. / PI);
+    // A sun below the horizon still has to light and shadow something.
+    elevation_deg    = std::max(3.f, float(std::asin(std::clamp(double(e[2]), -1., 1.)) * 180. / PI));
+    color            = { m_hdri_sun.color[0] * m_hdri_sun.key_strength, m_hdri_sun.color[1] * m_hdri_sun.key_strength,
+                         m_hdri_sun.color[2] * m_hdri_sun.key_strength };
+    return true;
 }
 
 bool ShowcaseRenderer::ensure_floor_texture(float &tile_mm, float &roughness)
@@ -862,6 +1004,9 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     const Showcase::EnvironmentInfo *env = mode == 5 ? ensure_environment() : nullptr;
     if (mode == 5 && env == nullptr)
         mode = 1;
+    // 1h-1: an HDRI environment draws its sharp panorama (mode 6) instead of the blurred cube.
+    if (mode == 5 && m_env_is_hdri && m_hdri_backdrop != 0)
+        mode = 6;
 
     const float fw = std::max(1e-6f, (t.frame[2] - t.frame[0]) * float(t.width));
     const float fh = std::max(1e-6f, (t.frame[3] - t.frame[1]) * float(t.height));
@@ -879,7 +1024,7 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     shader->set_uniform("scene_dim", m_scene ? m_scene->materials.scene_dim() : 0.f);   // glow G1: lights off
     // Level 7 of a 4096 px picture is 32 px: very soft, still recognisable.
     shader->set_uniform("image_lod", blur * 7.f);
-    if (mode == 5) {
+    if (mode == 5 || mode == 6) {
         const Camera &camera = wxGetApp().plater()->get_camera();
         const Matrix4d inv_vp = (camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix()).inverse();
         shader->set_uniform("inv_view_projection", inv_vp);
@@ -892,6 +1037,11 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_ENV_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, m_env_texture));
         glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
+    if (mode == 6) {
+        shader->set_uniform("image_tex", 0);
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_hdri_backdrop));
     }
     if (mode == 3) {
         // Fill (cover), fit (contain, the rest in colour 1) or tile (three rows of the picture).
@@ -919,9 +1069,9 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, fit == Showcase::ImageFit::Tile ? GL_REPEAT : GL_CLAMP_TO_EDGE));
     }
     m_canvas.m_background.render();
-    if (mode == 3)
+    if (mode == 3 || mode == 6)
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-    if (mode == 5) {
+    if (mode == 5 || mode == 6) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_ENV_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, 0));
         glsafe(::glActiveTexture(GL_TEXTURE0));
@@ -1664,6 +1814,8 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
 
     update_visibility();
+    // 1h-1: an HDRI environment is loaded (and its sun found) before the render settings and the lights use it.
+    ensure_environment();
     // S5: the layer build-up of this frame: the slice's layers, or the model cut by a plane.
     const bool toolpaths = use_toolpaths();
     m_build_clip_z       = 1e30;
@@ -1774,6 +1926,20 @@ bool ShowcaseRenderer::want_hdr() const
     }();
     return !disabled && wxGetApp().get_shader("showcase_post") != nullptr && wxGetApp().get_shader("showcase_post_ms") != nullptr &&
            wxGetApp().get_shader("showcase_material") != nullptr;
+}
+
+void ShowcaseRenderer::note_hdr_choice(const char *where, bool hdr, const std::string &why)
+{
+    std::string what = hdr ? "HDR objects layer (RGBA16F) + post pass" : "fallback, no HDR layer (objects tone-map in their shader)";
+    if (!hdr && !why.empty())
+        what += ": " + why;
+    // The environment the frame is lit with belongs to the choice: an HDRI one is a different path.
+    what += m_env_is_hdri ? "; lit by an HDRI environment" : "";
+    std::string &last = m_hdr_choice_logged[where];
+    if (last == what)
+        return;
+    last = what;
+    BOOST_LOG_TRIVIAL(warning) << "Showcase: the " << where << " uses the " << what;
 }
 
 void ShowcaseRenderer::draw_post(const ShowcaseFramebuffers &fb)
@@ -2030,6 +2196,7 @@ void ShowcaseRenderer::render_frame()
                 m_live_fb_failed_h = int(vp_h);
                 BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDR buffers for the live view at " << vp_w << "x" << vp_h << " ("
                                            << samples << " samples); drawing without the post pass";
+                note_hdr_choice("live view", false, "float buffers refused at " + std::to_string(vp_w) + "x" + std::to_string(vp_h));
             } else
                 m_live_fb_failed_w = m_live_fb_failed_h = 0;
         }
@@ -2054,8 +2221,12 @@ void ShowcaseRenderer::render_frame()
             glsafe(::glViewport(0, 0, GLsizei(vp_w), GLsizei(vp_h)));
             glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
             present(fb.color);
+            note_hdr_choice("live view", m_hdr_drawn, m_hdr_drawn ? std::string() : "nothing was drawn into the HDR layer");
         } else if (fb.width != 0)
             fb.release();
+    } else {
+        note_hdr_choice("live view", false,
+                        std::getenv("EDGESLICER_SHOWCASE_NO_HDR") != nullptr ? "EDGESLICER_SHOWCASE_NO_HDR is set or the post shaders are missing" : "the post shaders are missing");
     }
     if (!offscreen) {
         // The window's own framebuffer, as before (no HDR layer).
@@ -2253,6 +2424,7 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     dt.scene_fbo         = fb.draw_fbo();
     dt.hdr_fbo           = fb.has_hdr() ? fb.draw_hdr_fbo() : 0;
     log << (fb.has_hdr() ? ", HDR objects layer (RGBA16F) + post pass" : ", no HDR layer");
+    note_hdr_choice("export", fb.has_hdr(), "the float buffers were refused, or the post pass is off (EDGESLICER_SHOWCASE_NO_HDR, missing shaders)");
 
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.draw_fbo()));
     glsafe(::glViewport(0, 0, plan.internal_width, plan.internal_height));

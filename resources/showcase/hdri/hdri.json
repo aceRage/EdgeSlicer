@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hdris": [
+    {
+      "id": "hdri_sky_sun",
+      "name": "Sky with sun (generated)",
+      "procedural": "sky_sun",
+      "source": "generated in code (ShowcaseHdr.cpp)",
+      "authors": "EdgeSlicer",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_studio",
+      "name": "Studio softboxes (generated)",
+      "procedural": "studio",
+      "source": "generated in code (ShowcaseHdr.cpp)",
+      "authors": "EdgeSlicer",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_interior",
+      "name": "Interior window (generated)",
+      "procedural": "interior",
+      "source": "generated in code (ShowcaseHdr.cpp)",
+      "authors": "EdgeSlicer",
+      "licence": "CC0 1.0"
+    }
+  ]
+}

@@ -69,6 +69,33 @@ const Showcase::FloorManifest &showcase_floors()
     return manifest;
 }
 
+const Showcase::HdriManifest &showcase_hdris()
+{
+    static Showcase::HdriManifest manifest;
+    static bool                   loaded = false;
+    if (!loaded) {
+        loaded = true;
+        std::string error;
+        const std::string path = showcase_asset_path(Showcase::HDRI_DIR, Showcase::HDRI_MANIFEST);
+        if (!Showcase::parse_hdri_manifest(showcase_read_text(path), manifest, &error))
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDRI environments (" << path << ": " << error << ")";
+    }
+    return manifest;
+}
+
+std::string showcase_hdri_path(const Showcase::HdriInfo &hdri)
+{
+    return hdri.procedural ? std::string() : showcase_asset_path(Showcase::HDRI_DIR, hdri.file);
+}
+
+wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
+{
+    if (hdri.id == "hdri_sky_sun") return _L("Sky with sun (generated)");
+    if (hdri.id == "hdri_studio") return _L("Studio softboxes (generated)");
+    if (hdri.id == "hdri_interior") return _L("Interior window (generated)");
+    return wxString::FromUTF8(hdri.name);
+}
+
 std::string showcase_environment_path(const Showcase::EnvironmentInfo &env) { return showcase_asset_path(Showcase::ENVIRONMENTS_DIR, env.file); }
 std::string showcase_floor_path(const Showcase::FloorTextureInfo &floor) { return showcase_asset_path(Showcase::FLOORS_DIR, floor.file); }
 
@@ -178,6 +205,37 @@ unsigned int showcase_upload_environment(const ShowcaseImage &atlas, int face_si
     glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, 0));
     // Core since 3.2: filter across the faces' edges (no seams in the blurry levels).
     glsafe(::glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS));
+    return tex;
+}
+
+unsigned int showcase_upload_equirect(const Showcase::HdrImage &image, float scale)
+{
+    if (image.empty() || image.width > 16384)
+        return 0;
+    GLint max_size = 0;
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_size));
+    if (image.width > max_size || image.height > max_size) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: an HDRI of " << image.width << "x" << image.height << " is over this GPU's texture limit (" << max_size << ")";
+        return 0;
+    }
+    // RGBA floats; a half float tops out at 65504 (a sun disc in a photograph is well over that).
+    std::vector<float> rgba(size_t(image.width) * size_t(image.height) * 4);
+    for (size_t i = 0; i < size_t(image.width) * size_t(image.height); ++i) {
+        for (size_t c = 0; c < 3; ++c)
+            rgba[i * 4 + c] = std::min(image.rgb[i * 3 + c] * scale, 60000.f);
+        rgba[i * 4 + 3] = 1.f;
+    }
+    GLuint tex = 0;
+    glsafe(::glGenTextures(1, &tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+    glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 4));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, image.width, image.height, 0, GL_RGBA, GL_FLOAT, rgba.data()));
+    glsafe(::glGenerateMipmap(GL_TEXTURE_2D));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     return tex;
 }
 

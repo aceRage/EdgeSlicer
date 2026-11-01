@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: HDRI sky", "plate_index": 0, "source": "model", "preset_base": "studio_white",
+      "background": { "type": "environment", "blur": 0, "color1": "#E8E8E8", "color2": "#808080" },
+      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.6 },
+      "lighting": { "azimuth": 200, "elevation": 40, "key_intensity": 1, "environment": "hdri_sky_sun", "env_intensity": 0.8,
+                    "env_rotation": 0, "sun_light": true, "shadow_softness": 1 },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

@@ -705,6 +705,9 @@ void ShowcaseView::build_panel()
     envs.Add(_L("None"));
     for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
         envs.Add(showcase_environment_name(e));
+    // 1h-1: the HDRI environments follow the baked ones (their ids share the scene's environment field).
+    for (const Showcase::HdriInfo &h : showcase_hdris().hdris)
+        envs.Add(showcase_hdri_name(h));
     m_environment = choice(envs);
     m_environment->SetToolTip(_L("Light and reflections from a photographed surrounding."));
     row(_L("Environment"), m_environment);
@@ -712,6 +715,10 @@ void ShowcaseView::build_panel()
     row(_L("Environment brightness"), m_env_intensity);
     m_env_rotation = slider(0, 0, 359);
     row(_L("Environment rotation"), m_env_rotation);
+    m_sun_light = new wxCheckBox(m_side, wxID_ANY, _L("Use the environment's sun as the key light"));
+    m_sun_light->SetToolTip(_L("For an HDRI environment: the brightest light in the panorama becomes the key light, so the "
+                               "highlights and the shadows agree with the backdrop. It turns with the environment rotation."));
+    row(_L("Sun"), m_sun_light);
     m_exposure = slider(0, -30, 30);
     m_exposure->SetToolTip(_L("Brightness of the model and the environment, in tenths of a stop."));
     row(_L("Exposure"), m_exposure);
@@ -1191,11 +1198,22 @@ void ShowcaseView::build_panel()
     m_environment->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_environment->GetSelection();
         const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        const std::vector<Showcase::HdriInfo>        &hdris = showcase_hdris().hdris;
         if (sel < 0)
             return;
-        const std::string id = sel == 0 || size_t(sel) > envs.size() ? std::string() : envs[size_t(sel - 1)].id;
-        edit([&id](Showcase::Scene &s) { s.lighting.environment = id; });
+        std::string id;
+        if (sel >= 1 && size_t(sel) <= envs.size())
+            id = envs[size_t(sel - 1)].id;
+        else if (sel >= 1 && size_t(sel) <= envs.size() + hdris.size())
+            id = hdris[size_t(sel) - 1 - envs.size()].id;
+        // Choosing an HDRI turns its sun on as the key light; choosing anything else turns it off.
+        const bool hdri = showcase_hdris().find(id) != nullptr;
+        edit([&id, hdri](Showcase::Scene &s) {
+            s.lighting.environment  = id;
+            s.lighting.sun_from_env = hdri;
+        }, true);
     });
+    m_sun_light->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.sun_from_env = m_sun_light->GetValue(); }); });
     m_env_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         edit([this](Showcase::Scene &s) { s.lighting.env_intensity = float(m_env_intensity->GetValue()) / 100.f; });
     });
@@ -1664,10 +1682,14 @@ void ShowcaseView::sync_controls()
     m_shadow_softness->SetValue(std::clamp(int(std::lround(s.lighting.shadow_softness * 10.f)), 5, 40));
     {
         const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        const std::vector<Showcase::HdriInfo>        &hdris = showcase_hdris().hdris;
         int sel = 0;
         for (size_t i = 0; i < envs.size(); ++i)
             if (envs[i].id == s.lighting.environment)
                 sel = int(i) + 1;
+        for (size_t i = 0; i < hdris.size(); ++i)
+            if (hdris[i].id == s.lighting.environment)
+                sel = int(envs.size() + i) + 1;
         m_environment->SetSelection(sel);
     }
     m_env_intensity->SetValue(int(std::lround(s.lighting.env_intensity * 100.f)));
@@ -1676,6 +1698,7 @@ void ShowcaseView::sync_controls()
         env_rot += 360;
     m_env_rotation->SetValue(env_rot);
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
+    m_sun_light->SetValue(s.lighting.sun_from_env);
     m_tone->SetSelection(s.lighting.tone == Showcase::ToneCurve::Filmic ? 1 : 0);
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
     m_coextruded->SetValue(s.materials.coextruded_look);
@@ -1900,6 +1923,7 @@ void ShowcaseView::update_enabled()
     m_rim_intensity->Enable(editable && s.lighting.rim);
     m_env_intensity->Enable(editable && !s.lighting.environment.empty());
     m_env_rotation->Enable(editable && !s.lighting.environment.empty());
+    m_sun_light->Enable(editable && showcase_hdris().find(s.lighting.environment) != nullptr);
     m_bg_blur->Enable(editable && (image || s.background.type == Showcase::BackgroundType::Environment));
     const bool photo   = s.floor.type == Showcase::FloorType::Texture;
     const bool picture = s.floor.type == Showcase::FloorType::Image;
