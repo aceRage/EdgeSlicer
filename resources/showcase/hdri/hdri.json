@@ -7,7 +7,9 @@
       "file": "studio_small_09_2k.hdr",
       "source": "https://polyhaven.com/a/studio_small_09",
       "authors": "Poly Haven",
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "ground": { "height_mm": 1600, "radius_mm": 6000 },
+      "backdrop_pitch": 8
     },
     {
       "id": "hdri_outdoor",
@@ -15,7 +17,9 @@
       "file": "kloofendal_48d_partly_cloudy_puresky_2k.hdr",
       "source": "https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky",
       "authors": "Poly Haven",
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "ground": { "height_mm": 1700, "radius_mm": 60000 },
+      "backdrop_pitch": 18
     },
     {
       "id": "hdri_workshop",
@@ -23,7 +27,9 @@
       "file": "artist_workshop_2k.hdr",
       "source": "https://polyhaven.com/a/artist_workshop",
       "authors": "Poly Haven",
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "ground": { "height_mm": 1500, "radius_mm": 8000 },
+      "backdrop_pitch": 12
     },
     {
       "id": "hdri_loft",
@@ -31,7 +37,9 @@
       "file": "photo_studio_loft_hall_2k.hdr",
       "source": "https://polyhaven.com/a/photo_studio_loft_hall",
       "authors": "Poly Haven",
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "ground": { "height_mm": 1600, "radius_mm": 10000 },
+      "backdrop_pitch": 15
     },
     {
       "id": "hdri_sunset",
@@ -39,7 +47,9 @@
       "file": "venice_sunset_2k.hdr",
       "source": "https://polyhaven.com/a/venice_sunset",
       "authors": "Poly Haven",
-      "licence": "CC0 1.0"
+      "licence": "CC0 1.0",
+      "ground": { "height_mm": 1700, "radius_mm": 40000 },
+      "backdrop_pitch": 15
     }
   ]
 }

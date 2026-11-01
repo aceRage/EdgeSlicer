@@ -28,6 +28,7 @@
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
 #include "libslic3r/Showcase/ShowcaseHdr.hpp"
+#include "libslic3r/Showcase/ShowcaseLens.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
 #include <array>
@@ -240,6 +241,15 @@ private:
     void            draw_post(const ShowcaseFramebuffers &fb);
     // 1a: the live view's finished frame from its off-screen buffer onto the window.
     void            present(unsigned int color_texture);
+    // 1h-2: depth of field over fb's finished, single-sampled colour (after the post pass and SSAO),
+    // read from its colour and depth. False (and the frame left as it is) when the scene has it off,
+    // the camera is orthographic, the shader is missing or the buffers cannot be made.
+    bool            apply_dof(const ShowcaseFramebuffers &fb, const DrawTarget &t);
+    bool            ensure_dof_buffers(int w, int h);
+    void            release_dof();
+    // 1h-2: the dome of a ground-projected environment (Showcase::ground_dome); false when the scene
+    // does not project its environment onto the ground.
+    bool            scene_ground_dome(Showcase::GroundDome &out) const;
     void            draw_overlay(int vp_w, int vp_h);
     void            ensure_fullscreen_quad();
     void            ensure_floor_model();
@@ -342,6 +352,20 @@ private:
     int                        m_refl_w = 0;
     int                        m_refl_h = 0;
     bool                       m_refl_valid = false;
+    // 1h-2: depth of field: a copy of the colour and depth, and the circles of confusion (RG16F).
+    unsigned int               m_dof_copy_fbo = 0;
+    unsigned int               m_dof_color = 0;
+    unsigned int               m_dof_depth = 0;
+    unsigned int               m_dof_coc_fbo = 0;
+    unsigned int               m_dof_coc = 0;
+    int                        m_dof_w = 0;
+    int                        m_dof_h = 0;
+    bool                       m_dof_failed_logged = false;
+    // What the last apply_dof() did, for the export report ("" = nothing).
+    std::string                m_dof_used;
+    // 1h-2: the last backdrop was projected onto the ground (draw_background), with this dome.
+    bool                       m_bg_ground = false;
+    Showcase::GroundDome       m_bg_dome;
 
     WatermarkProvider          m_watermark_provider;
     unsigned int               m_watermark_version = 1;

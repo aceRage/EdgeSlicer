@@ -21,6 +21,7 @@
 #include "../GLModel.hpp"
 #include "../GLShader.hpp"
 #include "../GUI_App.hpp"
+#include "../I18N.hpp"
 #include "../ImGuiWrapper.hpp"
 #include "../OpenGLManager.hpp"
 #include "../PartPlate.hpp"
@@ -285,7 +286,7 @@ ShowcaseRenderer::~ShowcaseRenderer()
     // them here only while the canvas can still be made current.
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
                         m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
-                        m_callout_texture != 0 || m_live_fb != nullptr;
+                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     for (std::unique_ptr<ShowcaseFramebuffers> *fb : { &m_batch_fb, &m_live_fb })
@@ -371,6 +372,7 @@ void ShowcaseRenderer::release_offscreen()
     }
     m_refl_w = m_refl_h = 0;
     m_contact_valid = m_refl_valid = false;
+    release_dof();
 }
 
 void ShowcaseRenderer::release_layers()
@@ -956,6 +958,7 @@ bool ShowcaseRenderer::ensure_background_texture()
 
 void ShowcaseRenderer::draw_background(const DrawTarget &t)
 {
+    m_bg_ground = false;
     ensure_fullscreen_quad();
     glsafe(::glDisable(GL_DEPTH_TEST));
     glsafe(::glDepthMask(GL_FALSE));
@@ -999,6 +1002,8 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
     case Showcase::BackgroundType::Image: mode = ensure_background_texture() ? 3 : 1; break;
     case Showcase::BackgroundType::Transparent: mode = 4; break;
     case Showcase::BackgroundType::Environment: mode = 5; break;
+    // 1h-2: the photo backplate is the picture filling the frame.
+    case Showcase::BackgroundType::Backplate: mode = ensure_background_texture() ? 3 : 1; break;
     }
     // S2: the environment behind the model; without one, the scene's two colours as a gradient.
     const Showcase::EnvironmentInfo *env = mode == 5 ? ensure_environment() : nullptr;
@@ -1034,6 +1039,24 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         shader->set_uniform("env_exposure", m_scene->lighting.env_intensity * std::exp2(m_scene->lighting.exposure));
         shader->set_uniform("tone_curve", int(m_scene->lighting.tone));
         shader->set_uniform("env_map", SHOWCASE_ENV_UNIT);
+        // 1h-2: projected onto the ground the model stands on, or an infinite panorama, maybe tilted.
+        m_bg_ground = scene_ground_dome(m_bg_dome);
+        shader->set_uniform("ground_on", m_bg_ground);
+        if (m_bg_ground) {
+            shader->set_uniform("ground_center", Vec3d(m_bg_dome.center[0], m_bg_dome.center[1], m_bg_dome.center[2]));
+            shader->set_uniform("ground_radius", float(m_bg_dome.radius));
+            shader->set_uniform("ground_floor_radius", float(m_bg_dome.floor_radius()));
+        }
+        const float pitch = m_scene->background.backdrop_pitch;
+        const bool  tilt  = !m_bg_ground && pitch != 0.f;
+        shader->set_uniform("tilt_on", tilt);
+        if (tilt) {
+            const Vec3d                 fwd = camera.get_dir_forward();
+            const std::array<double, 9> m   = Showcase::backdrop_pitch_matrix(double(pitch), { fwd.x(), fwd.y(), fwd.z() });
+            Matrix3d                    tm;
+            tm << m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8];
+            shader->set_uniform("backdrop_tilt", tm);
+        }
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_ENV_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_CUBE_MAP, m_env_texture));
         glsafe(::glActiveTexture(GL_TEXTURE0));
@@ -1047,7 +1070,7 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         // Fill (cover), fit (contain, the rest in colour 1) or tile (three rows of the picture).
         const float ia = float(m_bg_image_w) / float(std::max(1, m_bg_image_h));
         float sx = 1.f, sy = 1.f;
-        const Showcase::ImageFit fit = m_scene->background.fit;
+        const Showcase::ImageFit fit = type == Showcase::BackgroundType::Backplate ? Showcase::ImageFit::Fill : m_scene->background.fit;
         if (fit == Showcase::ImageFit::Tile) {
             sy = 3.f;
             sx = 3.f * frame_aspect / ia;
@@ -1104,14 +1127,16 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     model.scale(Vec3d(radius, radius, 1.));
 
     const Showcase::Floor &fl = m_scene->floor;
+    // 1h-2: over a ground-projected environment or a photo backplate the floor is a shadow catcher.
+    const Showcase::FloorType ft = Showcase::effective_floor_type(*m_scene);
     int mode = 1;
-    if (fl.type == Showcase::FloorType::Solid)
+    if (ft == Showcase::FloorType::Solid)
         mode = 2;
-    else if (fl.type == Showcase::FloorType::Grid)
+    else if (ft == Showcase::FloorType::Grid)
         mode = 3;
     // S2: a photo floor, plain colour while its picture is missing.
     float tile_mm = 500.f, roughness = 0.2f;
-    if (fl.type == Showcase::FloorType::Texture || fl.type == Showcase::FloorType::Image)
+    if (ft == Showcase::FloorType::Texture || ft == Showcase::FloorType::Image)
         mode = ensure_floor_texture(tile_mm, roughness) ? 4 : 2;
 
     const bool shadows = m_canvas.m_shadow_map_valid && m_canvas.m_shadow_map_texture_id != 0;
@@ -2043,6 +2068,202 @@ void ShowcaseRenderer::present(unsigned int color_texture)
     glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
+// ------------------------------------------------------------------------------------------------
+// Realism 1h-2: the ground-projected environment and depth of field
+// ------------------------------------------------------------------------------------------------
+
+bool ShowcaseRenderer::scene_ground_dome(Showcase::GroundDome &out) const
+{
+    if (m_scene == nullptr || !Showcase::ground_projection_active(*m_scene))
+        return false;
+    // The HDRI's own camera height and room size give the dome's shape; a baked environment has none.
+    double hdri_h = 1600., hdri_r = 16000.;
+    if (const Showcase::HdriInfo *h = showcase_hdris().find(m_scene->lighting.environment)) {
+        hdri_h = h->ground_height_mm;
+        hdri_r = h->ground_radius_mm;
+    }
+    BoundingBoxf3 box = objects_box();
+    if (!box.defined)
+        box = BoundingBoxf3(Vec3d(-50., -50., 0.), Vec3d(50., 50., 50.));
+    out = Showcase::ground_dome(m_scene->background, hdri_h, hdri_r, { box.min.x(), box.min.y(), box.min.z() },
+                                { box.max.x(), box.max.y(), box.max.z() });
+    return out.height > 0. && out.radius > out.height;
+}
+
+void ShowcaseRenderer::release_dof()
+{
+    for (unsigned int *fbo : { &m_dof_copy_fbo, &m_dof_coc_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_dof_color, &m_dof_depth, &m_dof_coc })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    m_dof_w = m_dof_h = 0;
+}
+
+bool ShowcaseRenderer::ensure_dof_buffers(int w, int h)
+{
+    if (m_dof_copy_fbo != 0 && m_dof_w == w && m_dof_h == h)
+        return true;
+    release_dof();
+    for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
+    auto texture = [](GLint internal, GLenum format, GLenum type, int tw, int th) {
+        GLuint tex = 0;
+        glsafe(::glGenTextures(1, &tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, internal, tw, th, 0, format, type, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        return tex;
+    };
+    // Sized formats only (macOS core). The depth copy has the scene's format, so a blit can fill it.
+    m_dof_color = texture(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+    m_dof_depth = texture(GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, w, h);
+    m_dof_coc   = texture(GL_RG16F, GL_RG, GL_HALF_FLOAT, w, h);
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glGenFramebuffers(1, &m_dof_copy_fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_copy_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_dof_color, 0));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, m_dof_depth, 0));
+    glsafe(::glDrawBuffers(1, bufs));
+    bool ok = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glsafe(::glGenFramebuffers(1, &m_dof_coc_fbo));
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_dof_coc, 0));
+    glsafe(::glDrawBuffers(1, bufs));
+    ok = ok && ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE && ::glGetError() != GL_OUT_OF_MEMORY;
+    if (!ok) {
+        release_dof();
+        if (!m_dof_failed_logged)
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no buffers for the depth of field at " << w << "x" << h << "; the frame stays sharp";
+        m_dof_failed_logged = true;
+        return false;
+    }
+    m_dof_w = w;
+    m_dof_h = h;
+    return true;
+}
+
+bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarget &t)
+{
+    m_dof_used.clear();
+    if (m_scene == nullptr || !m_scene->dof.enabled || fb.fbo == 0)
+        return false;
+    GLShaderProgram *dof    = wxGetApp().get_shader("showcase_dof");
+    const Camera    &camera = wxGetApp().plater()->get_camera();
+    if (dof == nullptr) {
+        m_dof_used = "off (the depth of field shader is not loaded)";
+        return false;
+    }
+    if (camera.get_type() != Camera::EType::Perspective) {
+        m_dof_used = "off (orthographic camera)";
+        return false;
+    }
+    const int       w       = fb.width, h = fb.height;
+    const double    frame_h = std::max(1., double(t.frame[3] - t.frame[1]) * double(h));
+    const double    frame_w = std::max(1., double(t.frame[2] - t.frame[0]) * double(w));
+    const Matrix4d &P       = camera.get_projection_matrix().matrix();
+    // The frame's own lens: the projection spans the target, the frame a part of it.
+    const double p11_frame = P(1, 1) * double(h) / frame_h;
+    const Vec3d  eye       = camera.get_position();
+    const Vec3d  fwd       = camera.get_dir_forward();
+    double       focus     = double(m_scene->dof.focus_mm);
+    if (m_scene->dof.focus_on_model) {
+        const BoundingBoxf3 box = objects_box();
+        if (box.defined)
+            focus = (box.center() - eye).dot(fwd);
+    }
+    focus = std::max(focus, std::max(camera.get_near_z(), 1.));
+    const Showcase::DofSetup setup = Showcase::dof_setup(m_scene->dof, p11_frame, frame_w / frame_h, frame_h, focus);
+    if (!setup.active) {
+        m_dof_used = "off (the circle of confusion is under a pixel)";
+        return false;
+    }
+    if (!ensure_dof_buffers(w, h)) {
+        m_dof_used = "off (no buffers)";
+        return false;
+    }
+    ShowcaseTargetState keep;
+    // The finished colour and the depth, copied so the pass can read them while it writes the frame.
+    glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo));
+    glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_dof_copy_fbo));
+    glsafe(::glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST));
+
+    ensure_fullscreen_quad();
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glViewport(0, 0, w, h));
+
+    // Where nothing was drawn: the floor plane, the ground-projected dome, or far away.
+    int bg_mode = 0;
+    if (m_bg_ground)
+        bg_mode = 2;
+    else if (m_scene->background.type == Showcase::BackgroundType::Backplate)
+        bg_mode = 3;   // the photo has its own focus
+    else if (floor_drawn() && Showcase::effective_floor_type(*m_scene) != Showcase::FloorType::None)
+        bg_mode = 1;
+    const Matrix4d inv_vp = (P * camera.get_view_matrix().matrix()).inverse();
+
+    dof->start_using();
+    dof->set_uniform("viewport_size", Vec2f(float(w), float(h)));
+    dof->set_uniform("near_z", float(camera.get_near_z()));
+    dof->set_uniform("far_z", float(camera.get_far_z()));
+    dof->set_uniform("ortho", false);
+    dof->set_uniform("inv_view_projection", inv_vp);
+    dof->set_uniform("camera_position", eye);
+    dof->set_uniform("view_forward", fwd);
+    dof->set_uniform("bg_mode", bg_mode);
+    dof->set_uniform("ground_center", Vec3d(m_bg_dome.center[0], m_bg_dome.center[1], m_bg_dome.center[2]));
+    dof->set_uniform("ground_radius", float(m_bg_dome.radius));
+    dof->set_uniform("ground_floor_radius", float(m_bg_dome.floor_radius()));
+    dof->set_uniform("focus", float(setup.focus));
+    dof->set_uniform("k_px", float(setup.k_px));
+    dof->set_uniform("max_px", float(setup.max_px));
+    dof->set_uniform("taps", setup.taps);
+    dof->set_uniform("depth_tex", 0);
+    dof->set_uniform("color_tex", 1);
+    dof->set_uniform("coc_tex", 2);
+
+    // 1. The circles of confusion.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
+    dof->set_uniform("mode", 0);
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_depth));
+    m_canvas.m_background.render();
+    // 2. The gather, back into the frame.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo));
+    dof->set_uniform("mode", 1);
+    glsafe(::glActiveTexture(GL_TEXTURE1));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_color));
+    glsafe(::glActiveTexture(GL_TEXTURE2));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_coc));
+    m_canvas.m_background.render();
+    for (int unit : { 2, 1, 0 }) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    }
+    dof->stop_using();
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    std::ostringstream used;
+    used << "f/" << m_scene->dof.f_number << " at " << int(std::lround(setup.focus)) << " mm, lens " << int(std::lround(setup.focal_mm))
+         << " mm, far blur " << int(std::lround(std::min(setup.k_px, setup.max_px))) << " px, " << setup.taps << " taps"
+         << (bg_mode == 3 ? ", photo kept sharp" : bg_mode == 2 ? ", ground dome" : bg_mode == 1 ? ", floor plane" : "");
+    m_dof_used = used.str();
+    return true;
+}
+
 void ShowcaseRenderer::ensure_watermark_texture(int frame_w, int frame_h)
 {
     if (!m_watermark_provider || frame_w <= 0 || frame_h <= 0)
@@ -2146,6 +2367,27 @@ void ShowcaseRenderer::draw_overlay(int vp_w, int vp_h)
                          ImVec2(x0 + float(m_wm_rect.x + m_wm_rect.w), y0 + float(m_wm_rect.y + m_wm_rect.h)), ImVec2(0.f, 0.f),
                          ImVec2(1.f, 1.f), IM_COL32(255, 255, 255, int(std::lround(op * 255.f))));
         }
+        // 1h-2: a photo backplate's horizon (where the user put it) and the camera's own, to line them up.
+        // The live view only: never in an export.
+        if (m_scene->background.type == Showcase::BackgroundType::Backplate) {
+            const float hy = y0 + (1.f - std::clamp(m_scene->background.plate_horizon, 0.f, 1.f)) * (y1 - y0);
+            dl->AddLine(ImVec2(x0, hy), ImVec2(x1, hy), IM_COL32(255, 196, 0, 210), 1.5f);
+            dl->AddText(ImVec2(x0 + 6.f, hy - ImGui::GetTextLineHeight() - 2.f), IM_COL32(255, 196, 0, 230), _u8L("Photo horizon").c_str());
+            const Camera &camera = wxGetApp().plater()->get_camera();
+            if (camera.get_type() == Camera::EType::Perspective && f.h > 0) {
+                const double p11   = camera.get_projection_matrix().matrix()(1, 1) * double(vp_h) / double(f.h);
+                const double fov_y = 2. * std::atan(1. / std::max(p11, 1e-6));
+                const double pitch = std::asin(std::clamp(-camera.get_dir_forward().z(), -1., 1.));
+                const double h     = Showcase::horizon_for_pitch(pitch, fov_y);
+                if (h > -0.05 && h < 1.05) {
+                    const float cy = y0 + float(1. - h) * (y1 - y0);
+                    for (float x = x0; x < x1; x += 14.f)
+                        dl->AddLine(ImVec2(x, cy), ImVec2(std::min(x + 8.f, x1), cy), IM_COL32(90, 200, 255, 210), 1.5f);
+                    dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(_u8L("Camera horizon").c_str()).x - 6.f, cy + 2.f), IM_COL32(90, 200, 255, 230),
+                                _u8L("Camera horizon").c_str());
+                }
+            }
+        }
         const std::string label = (boost::format("%1% x %2%") % m_scene->export_settings.width % m_scene->export_settings.height).str();
         const ImVec2      size  = ImGui::CalcTextSize(label.c_str());
         const ImVec2      pos(x1 - size.x - 8.f, y1 + 4.f <= float(vp_h) - size.y ? y1 + 4.f : y1 - size.y - 6.f);
@@ -2234,6 +2476,8 @@ void ShowcaseRenderer::render_frame()
                 ensure_fullscreen_quad();
                 m_canvas._render_ssao_pass(vp_w, vp_h);
             }
+            // 1h-2: depth of field over the finished frame.
+            apply_dof(fb, t);
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(window_fbo)));
             glsafe(::glViewport(0, 0, GLsizei(vp_w), GLsizei(vp_h)));
             glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
@@ -2466,6 +2710,13 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
         ensure_fullscreen_quad();
         m_canvas._render_ssao_pass(unsigned(plan.internal_width), unsigned(plan.internal_height));
     }
+    // 1h-2: depth of field over the finished frame, at the internal (supersampled) size.
+    apply_dof(fb, dt);
+    if (!m_dof_used.empty())
+        log << ", depth of field " << m_dof_used;
+    if (m_bg_ground)
+        log << ", environment projected onto the ground (camera height " << int(std::lround(m_bg_dome.height)) << " mm, dome radius "
+            << int(std::lround(m_bg_dome.radius)) << " mm)";
     // Which path the export took, at warning level so a release build's log keeps it (the report
     // above is info): one line a still, one a video rather than one a frame.
     if (!m_batch || !m_batch_path_logged) {

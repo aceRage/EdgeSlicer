@@ -37,7 +37,7 @@ template<class E, size_t N> bool enum_parse(const std::string &s, E &v, const ch
     return false;
 }
 
-const char *const BACKGROUND_NAMES[] = { "solid", "vertical_gradient", "radial_gradient", "image", "transparent", "environment" };
+const char *const BACKGROUND_NAMES[] = { "solid", "vertical_gradient", "radial_gradient", "image", "transparent", "environment", "backplate" };
 const char *const FIT_NAMES[]        = { "fill", "fit", "tile" };
 const char *const FLOOR_NAMES[]      = { "none", "shadow_catcher", "solid", "grid", "texture", "image" };
 const char *const QUALITY_NAMES[]    = { "draft", "high", "best" };
@@ -45,6 +45,7 @@ const char *const FORMAT_NAMES[]     = { "png", "jpg", "webp" };
 const char *const PROJECTION_NAMES[] = { "perspective", "ortho" };
 const char *const ANCHOR_NAMES[]     = { "top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right" };
 const char *const PRESET_NAMES[]     = { "studio_white", "dark_gradient", "build_plate", "desk_wood", "outdoor" };
+const char *const BOKEH_NAMES[]      = { "draft", "good", "best" };
 
 } // namespace
 
@@ -56,6 +57,7 @@ const char *to_string(ImageFormat v) { return enum_name(v, FORMAT_NAMES); }
 const char *to_string(Projection v) { return enum_name(v, PROJECTION_NAMES); }
 const char *to_string(Anchor v) { return enum_name(v, ANCHOR_NAMES); }
 const char *to_string(PresetId v) { return enum_name(v, PRESET_NAMES); }
+const char *to_string(BokehQuality v) { return enum_name(v, BOKEH_NAMES); }
 bool from_string(const std::string &s, BackgroundType &v) { return enum_parse(s, v, BACKGROUND_NAMES); }
 bool from_string(const std::string &s, ImageFit &v) { return enum_parse(s, v, FIT_NAMES); }
 bool from_string(const std::string &s, FloorType &v) { return enum_parse(s, v, FLOOR_NAMES); }
@@ -64,6 +66,7 @@ bool from_string(const std::string &s, ImageFormat &v) { return enum_parse(s, v,
 bool from_string(const std::string &s, Projection &v) { return enum_parse(s, v, PROJECTION_NAMES); }
 bool from_string(const std::string &s, Anchor &v) { return enum_parse(s, v, ANCHOR_NAMES); }
 bool from_string(const std::string &s, PresetId &v) { return enum_parse(s, v, PRESET_NAMES); }
+bool from_string(const std::string &s, BokehQuality &v) { return enum_parse(s, v, BOKEH_NAMES); }
 
 // ------------------------------------------------------------------------------------------------
 // Colours
@@ -183,7 +186,10 @@ void apply_light_rig(Lighting &li, LightRig rig)
 
 bool Background::operator==(const Background &o) const
 {
-    return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur;
+    return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur &&
+           backdrop_pitch == o.backdrop_pitch && ground == o.ground && ground_height == o.ground_height &&
+           ground_radius == o.ground_radius && ground_scale == o.ground_scale && plate_horizon == o.plate_horizon &&
+           plate_focal == o.plate_focal;
 }
 
 int floor_rotation_snap(double degrees)
@@ -251,7 +257,7 @@ bool Scene::operator==(const Scene &o) const
 {
     return id == o.id && name == o.name && plate_index == o.plate_index && view_frame_height == o.view_frame_height && source == o.source &&
            preset_base == o.preset_base &&
-           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && views == o.views &&
+           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && dof == o.dof && views == o.views &&
            export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
 }
 
@@ -300,7 +306,7 @@ Finish Materials::finish_for(int filament, const std::string &preset_name, const
 std::vector<std::string> Scene::used_images() const
 {
     std::vector<std::string> out;
-    if (background.type == BackgroundType::Image && !background.image.empty())
+    if ((background.type == BackgroundType::Image || background.type == BackgroundType::Backplate) && !background.image.empty())
         out.push_back(background.image);
     if (floor.type == FloorType::Image && !floor.image.empty())
         out.push_back(floor.image);
@@ -742,7 +748,34 @@ json scene_to_json_object(const Scene &s)
     bg["image"]  = s.background.image;
     bg["fit"]    = to_string(s.background.fit);
     bg["blur"]   = s.background.blur;
-    j["background"] = merged(raw, "background", bg);
+    bg["backdrop_pitch"] = s.background.backdrop_pitch;
+    bg["ground"]         = s.background.ground;
+    bg["ground_height"]  = s.background.ground_height;
+    bg["ground_radius"]  = s.background.ground_radius;
+    bg["ground_scale"]   = s.background.ground_scale;
+    bg["plate_horizon"]  = s.background.plate_horizon;
+    bg["plate_focal"]    = s.background.plate_focal;
+    {
+        json out = merged(raw, "background", bg);
+        // 1h-2: only when changed, so an older scene writes back as it was read (and a value set back
+        // to its default is dropped, not kept from what was read).
+        const Background def;
+        if (s.background.backdrop_pitch == def.backdrop_pitch)
+            out.erase("backdrop_pitch");
+        if (s.background.ground == def.ground)
+            out.erase("ground");
+        if (s.background.ground_height == def.ground_height)
+            out.erase("ground_height");
+        if (s.background.ground_radius == def.ground_radius)
+            out.erase("ground_radius");
+        if (s.background.ground_scale == def.ground_scale)
+            out.erase("ground_scale");
+        if (s.background.plate_horizon == def.plate_horizon)
+            out.erase("plate_horizon");
+        if (s.background.plate_focal == def.plate_focal)
+            out.erase("plate_focal");
+        j["background"] = out;
+    }
 
     json fl;
     fl["type"]            = to_string(s.floor.type);
@@ -787,6 +820,18 @@ json scene_to_json_object(const Scene &s)
         j["camera"] = camera_to_json(s.camera, raw.is_object() && raw.contains("camera") ? raw["camera"] : json());
     else
         j.erase("camera");
+
+    // 1h-2: the depth of field, only once changed (an older scene writes back as it was read).
+    if (s.dof != DepthOfField()) {
+        json d;
+        d["enabled"]        = s.dof.enabled;
+        d["f_number"]       = s.dof.f_number;
+        d["focus_on_model"] = s.dof.focus_on_model;
+        d["focus_mm"]       = s.dof.focus_mm;
+        d["quality"]        = to_string(s.dof.quality);
+        j["dof"] = merged(raw, "dof", d);
+    } else
+        j.erase("dof");
 
     json views = json::array();
     for (const CameraView &v : s.views)
@@ -851,6 +896,14 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.background.image  = get_or<std::string>(bg, "image", "");
     s.background.fit    = enum_or(bg, "fit", s.background.fit);
     s.background.blur   = clamp_or(get_or<float>(bg, "blur", s.background.blur), 0.f, 1.f, 0.f);
+    // 1h-2
+    s.background.backdrop_pitch = clamp_or(get_or<float>(bg, "backdrop_pitch", 0.f), -60.f, 60.f, 0.f);
+    s.background.ground         = get_or<bool>(bg, "ground", false);
+    s.background.ground_height  = clamp_or(get_or<float>(bg, "ground_height", 0.f), 0.f, 100000.f, 0.f);
+    s.background.ground_radius  = clamp_or(get_or<float>(bg, "ground_radius", 0.f), 0.f, 1000000.f, 0.f);
+    s.background.ground_scale   = clamp_or(get_or<float>(bg, "ground_scale", 1.f), 0.05f, 20.f, 1.f);
+    s.background.plate_horizon  = clamp_or(get_or<float>(bg, "plate_horizon", 0.5f), -1.f, 2.f, 0.5f);
+    s.background.plate_focal    = clamp_or(get_or<float>(bg, "plate_focal", 50.f), 8.f, 600.f, 50.f);
 
     const json fl             = j.contains("floor") ? j["floor"] : json();
     s.floor.type              = enum_or(fl, "type", s.floor.type);
@@ -891,6 +944,15 @@ bool scene_from_json_object(const json &j, Scene &s)
 
     if (j.contains("camera"))
         s.camera = camera_from_json(j["camera"]);
+    // 1h-2: depth of field (absent = off).
+    if (j.contains("dof") && j["dof"].is_object()) {
+        const json &d        = j["dof"];
+        s.dof.enabled        = get_or<bool>(d, "enabled", false);
+        s.dof.f_number       = clamp_or(get_or<float>(d, "f_number", 2.8f), 1.f, 32.f, 2.8f);
+        s.dof.focus_on_model = get_or<bool>(d, "focus_on_model", true);
+        s.dof.focus_mm       = clamp_or(get_or<float>(d, "focus_mm", 300.f), 1.f, 100000.f, 300.f);
+        s.dof.quality        = enum_or(d, "quality", s.dof.quality);
+    }
     if (j.contains("views") && j["views"].is_array())
         for (const json &v : j["views"]) {
             CameraView c = camera_from_json(v);
