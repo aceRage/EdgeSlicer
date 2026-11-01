@@ -9912,6 +9912,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
         if ((key == "filament_nozzle_assignment" || (boost::starts_with(key, "nozzle_") && boost::ends_with(key, "_line_width"))) &&
             cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0)
             continue;
+        // Per-nozzle process P6: the per-nozzle width table and the widths' nozzle only when set.
+        if ((key == "process_nozzle_line_widths" && print.config().process_nozzle_line_widths.value.empty()) ||
+            (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))
+            continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
             continue;
         // Per-nozzle process P4: its keys only when a job uses them, so every other job's config block stays as it was.
