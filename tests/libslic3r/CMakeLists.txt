@@ -39,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
 	test_spread_paint.cpp
 	test_airbrush.cpp
 	test_airbrush_p2.cpp
+	test_airbrush_p3.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp

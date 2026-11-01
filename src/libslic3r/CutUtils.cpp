@@ -10,6 +10,7 @@
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 #include "ObjectID.hpp"
 #include "AABBMesh.hpp"
 
@@ -981,6 +982,7 @@ Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
         if (!sp)
             continue;
         sp->mesh.transform(instance_matrix * volume->get_matrix(), true);
+        sp->field_to_saved = instance_matrix * volume->get_matrix();
         saved.emplace_back(std::move(sp));
     }
     return saved;
@@ -1010,6 +1012,30 @@ void Cut::finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_p
             for (ModelVolume* volume : object->volumes)
                 if (volume->is_model_part() && !volume->is_cut_connector() && !volume->mesh().empty())
                     volume->restore_painting(saved_painting, true);
+        }
+    }
+
+    // Airbrush P3 (A4): the halves carry the colour field of the part they were cut from - it is
+    // position-keyed - and bake it again on top of the paint remapped above (restore_painting()
+    // remapped only the paint UNDER the airbrush). A half the field does not reach keeps none; a
+    // half copied from an airbrushed part without KeepPaint drops the copy with the paint.
+    for (ModelObject* object : objects) {
+        if (object == nullptr)
+            continue;
+        for (ModelVolume* volume : object->volumes) {
+            if (!volume->is_model_part() || volume->is_cut_connector() || volume->mesh().empty()) {
+                volume->airbrush_field.reset();
+                continue;
+            }
+            volume->airbrush_field.reset();
+            for (const auto& saved_painting : saved_paintings) {
+                if (!saved_painting || !saved_painting->airbrush_field)
+                    continue;
+                const TriangleSelector::TriangleSplittingData base = volume->mmu_segmentation_facets.get_data();
+                if (Airbrush::airbrush_carry_field(*volume, *saved_painting->airbrush_field, saved_painting->mesh.its, saved_painting->mmu,
+                                                   volume->airbrush_saved_to_mesh(*saved_painting), &base))
+                    break;   // one field per part: the first source part that reaches it
+            }
         }
     }
 

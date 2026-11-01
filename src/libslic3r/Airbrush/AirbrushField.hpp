@@ -36,6 +36,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -161,6 +162,37 @@ public:
     void   end_stroke();
     bool   in_stroke() const { return m_stroke_active; }
 
+    // ---- fills (P3: gradients and procedural patterns, AirbrushProcedural.hpp) ---------------
+    // The coverage `fn` wants at a surface point, per slot index (0..1 each, summing to at most 1).
+    // `facet` is the mesh triangle the point lies on.
+    using Coverage     = std::array<float, AIRBRUSH_MAX_SLOTS>;
+    using FillFunction = std::function<void(const Vec3f &p, size_t facet, int cls, Coverage &cov)>;
+    // Moves every surface cell of the whole mesh toward what `fn` wants there: new = old + opacity
+    // * (target - old), so opacity 1 replaces and a lower opacity glazes over strokes. Cells are
+    // found exactly as dab() samples them (half a cell over every facet); `fn` runs once per cell,
+    // at the first sample (facet order) that landed in it, so a fill is deterministic. Returns the
+    // number of cells changed; `changed_keys` (ascending) as dab().
+    // `mask` (0..1, optional) scales the opacity per cell - the brush area of a fill; 0 leaves the
+    // cell as it is. `facets` (optional) limits the facets visited to those that can be inside it.
+    // `base`, when given, is what the cells blend from instead of this field's own (a live preview
+    // fills an empty_like() field over the real one without copying it).
+    using FillMask = std::function<float(const Vec3f &p, size_t facet)>;
+    size_t fill(const AirbrushSurface &surface, const FillFunction &fn, float opacity, std::vector<uint64_t> *changed_keys = nullptr,
+                const FillMask *mask = nullptr, const std::vector<size_t> *facets = nullptr, const AirbrushField *base = nullptr);
+    // The same grid, origin, slots and anchor, and no cells.
+    AirbrushField empty_like() const;
+
+    // ---- filament remap (P3, A1) ----------------------------------------------------------------
+    // Every slot's filament id goes through `map` (1-based ids; an id the map sends outside
+    // 1..ExtruderMax keeps its id). Slots that land on one filament are merged, their weights added.
+    // Returns true when anything changed.
+    bool remap_slots(const std::function<int(int)> &map);
+
+    // The last gradient or pattern applied (AirbrushFillRecipe::to_string()), so "re-apply" can
+    // repeat it (D11). Carried in the blob after the cells (minor version 1; older readers skip it).
+    const std::string &fill_recipe() const { return m_fill_recipe; }
+    void               set_fill_recipe(const std::string &s) { m_fill_recipe = s; }
+
     // ---- mesh edits (D15) -----------------------------------------------------------------------
     // Resample the field through `t` (mesh-space to new mesh-space). Positions move with the mesh,
     // surface classes follow the transformed normals, and a scale above 1 splats each old cell over
@@ -201,6 +233,7 @@ private:
     std::unordered_map<uint64_t, Cell> m_cells;
     BoundingBoxf3                      m_anchor;
     std::string                        m_bake_params;
+    std::string                        m_fill_recipe;
     BakeRecord                         m_record;
 
     struct StrokeCell

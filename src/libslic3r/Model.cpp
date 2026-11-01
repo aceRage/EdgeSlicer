@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/GLTF.hpp"
@@ -1561,6 +1562,13 @@ ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, Triang
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
+    // Airbrush P3 (A4): the boolean drops the paint, but the colour field is position-keyed, so the
+    // spray comes back on the result where it still has surface (over no other paint, as before).
+    if (old_volume->airbrush_field && new_volume->is_model_part()) {
+        const TriangleSelector::TriangleSplittingData none;
+        Airbrush::airbrush_carry_field(*new_volume, *old_volume->airbrush_field, old_volume->mesh().its, old_volume->mmu_segmentation_facets.get_data(),
+                                       new_volume->get_matrix().inverse() * old_volume->get_matrix(), &none);
+    }
 
     // The new volume takes the source's slot; the source is deleted.
     std::swap(this->volumes[src_idx], this->volumes.back());
@@ -2173,6 +2181,8 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->seam_facets.assign(volume->seam_facets);
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
+            // Airbrush P3 (A4): same triangles, same field; a unit conversion below re-bakes it.
+            vol->airbrush_field = volume->airbrush_field;
 
             // Perform conversion only if the target "imperial" state is different from the current one.
             // This check supports conversion of "mixed" set of volumes, each with different "imperial" state.
@@ -2289,6 +2299,9 @@ void ModelVolume::reset_extra_facets()
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
+    // Airbrush P3 (A4): the colour field goes with the paint it was baked into. A caller that keeps
+    // the paint (restore_painting(), Cut::finalize()) carries the field over again.
+    this->airbrush_field.reset();
     // Texture-displacement paint data has no remap-across-topology-change support yet (see
     // build_texture_displacement()'s documented limitation), so it must be dropped here rather
     // than left referring to a mesh that no longer matches it.
@@ -2311,6 +2324,7 @@ std::optional<TriangleSelector::SavedPainting> ModelVolume::save_painting() cons
         sp.seam      = seam_facets.get_data();
         sp.mmu       = mmu_segmentation_facets.get_data();
         sp.fuzzy     = fuzzy_skin_facets.get_data();
+        sp.airbrush_field = airbrush_field;
         return sp;
     }
 
@@ -2341,8 +2355,25 @@ void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPa
     };
     remap_one(saved->supported, supported_facets);
     remap_one(saved->seam,      seam_facets);
-    remap_one(saved->mmu,       mmu_segmentation_facets);
+    // Airbrush P3 (A4): with a colour field, carry only the paint UNDER the airbrush; the specks are
+    // baked again from the field on the new mesh (here, or by Cut::finalize() once every saved part
+    // has been remapped).
+    if (saved->airbrush_field)
+        remap_one(Airbrush::airbrush_paint_under(*saved->airbrush_field, saved->mesh.its.indices.size(), saved->mmu), mmu_segmentation_facets);
+    else
+        remap_one(saved->mmu, mmu_segmentation_facets);
     remap_one(saved->fuzzy,     fuzzy_skin_facets);
+    if (saved->airbrush_field && !keep_existing_paint && is_model_part()) {
+        const TriangleSelector::TriangleSplittingData base = mmu_segmentation_facets.get_data();
+        Airbrush::airbrush_carry_field(*this, *saved->airbrush_field, saved->mesh.its, saved->mmu,
+                                       airbrush_saved_to_mesh(*saved), &base);
+    }
+}
+
+Transform3d ModelVolume::airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const
+{
+    // restore_painting() maps this mesh into the saved frame by its init shift.
+    return Geometry::translation_transform(-mesh().get_init_shift()) * saved.field_to_saved;
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -3262,16 +3293,30 @@ void ModelVolume::mirror(Axis axis)
 // This method could only be called before the meshes of this ModelVolumes are not shared!
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small
         this->calculate_convex_hull();
     else
         const_cast<TriangleMesh*>(m_convex_hull.get())->scale(versor);
+    // Airbrush P3 (A4): the field scales with the mesh and is baked again at the printed grain.
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.scale(versor.cast<double>());
+        Airbrush::airbrush_carry_field(*this, *field, mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(mesh_trafo, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3280,10 +3325,17 @@ void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_le
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    // Airbrush P3 (A4): the field follows the mesh and is baked again.
+    if (field)
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, mesh_trafo, &under);
 }
 
 void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(matrix, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3292,6 +3344,11 @@ void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_hand
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.linear()    = matrix;
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::convert_from_imperial_units()

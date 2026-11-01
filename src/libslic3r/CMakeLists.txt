@@ -248,6 +248,8 @@ set(lisbslic3r_sources
     Airbrush/AirbrushBake.hpp
     Airbrush/AirbrushField.cpp
     Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
     Airbrush/AirbrushSession.cpp
     Airbrush/AirbrushSession.hpp
     Airbrush/BlueNoise.cpp

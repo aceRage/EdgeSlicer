@@ -1110,6 +1110,8 @@ public:
 
     // Remap painting data from previous saved source to this mesh
     void restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, bool keep_existing_paint = false);
+    // Airbrush P3 (A4): the map from a saved painting's field space into this volume's mesh space.
+    Transform3d airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const;
 
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;

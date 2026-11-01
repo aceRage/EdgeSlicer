@@ -11,6 +11,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -30,6 +31,10 @@ std::string AirbrushBakeParams::to_string() const
     ss.imbue(std::locale::classic());
     ss << "grain=" << grain_mm << ";wall_min=" << min_grain_wall_mm << ";top_min=" << min_grain_top_mm << ";flat_cos=" << flat_cos
        << ";steps=" << mix_steps << ";low=" << low_pass_mm << ";min_cov=" << min_coverage << ";seed=" << seed << ";base=" << base_filament;
+    if (design_nozzle_mm > 0.f)
+        ss << ";nozzle=" << design_nozzle_mm;
+    if (print_scale != 1.f)
+        ss << ";pscale=" << print_scale;
     return ss.str();
 }
 
@@ -56,6 +61,8 @@ bool AirbrushBakeParams::from_string(const std::string &s, AirbrushBakeParams &o
         else if (k == "min_cov") vs >> p.min_coverage;
         else if (k == "seed") vs >> p.seed;
         else if (k == "base") vs >> p.base_filament;
+        else if (k == "nozzle") vs >> p.design_nozzle_mm;
+        else if (k == "pscale") vs >> p.print_scale;
         else continue;
         if (vs.fail())
             return false;
@@ -64,7 +71,8 @@ bool AirbrushBakeParams::from_string(const std::string &s, AirbrushBakeParams &o
     // Sanity: anything outside these is a damaged project, not a setting.
     if (!(p.grain_mm > 0.05f && p.grain_mm < 50.f) || !(p.min_grain_wall_mm >= 0.f) || !(p.min_grain_top_mm >= 0.f) ||
         !(p.flat_cos > 0.f && p.flat_cos <= 1.f) || p.mix_steps < 0 || p.mix_steps > 64 || !(p.low_pass_mm >= 0.f) ||
-        p.base_filament < 0 || p.base_filament > int(EnforcerBlockerType::ExtruderMax))
+        p.base_filament < 0 || p.base_filament > int(EnforcerBlockerType::ExtruderMax) ||
+        !(p.design_nozzle_mm >= 0.f && p.design_nozzle_mm <= 5.f) || !(p.print_scale > 1e-4f && p.print_scale < 1e4f))
         return false;
     if (any)
         out = p;
@@ -84,6 +92,37 @@ EffectiveGrain effective_grain(const AirbrushBakeParams &params, bool flat)
     } else
         g.grain_mm = std::max(req, params.min_grain_wall_mm);
     return g;
+}
+
+AirbrushFloors airbrush_floors_for_nozzle(float nozzle_mm)
+{
+    AirbrushFloors f;
+    if (!(nozzle_mm > 0.f) || std::abs(nozzle_mm - AIRBRUSH_REFERENCE_NOZZLE_MM) < 1e-4f)
+        return f;   // exactly the P0 constants
+    const float k = nozzle_mm / AIRBRUSH_REFERENCE_NOZZLE_MM;
+    f.nozzle_mm   = nozzle_mm;
+    f.wall_mm     = std::max(AIRBRUSH_MIN_GRAIN_MM, AIRBRUSH_MIN_GRAIN_WALL_MM * k);
+    f.top_mm      = std::max(AIRBRUSH_MIN_GRAIN_MM, AIRBRUSH_MIN_GRAIN_TOP_MM * k);
+    return f;
+}
+
+float airbrush_design_nozzle(const AirbrushBakeParams &params, float printer_nozzle_mm)
+{
+    if (params.design_nozzle_mm > 0.f)
+        return params.design_nozzle_mm;
+    return printer_nozzle_mm > 0.f ? printer_nozzle_mm : AIRBRUSH_REFERENCE_NOZZLE_MM;
+}
+
+void airbrush_apply_nozzle_floors(AirbrushBakeParams &params, float nozzle_mm)
+{
+    const AirbrushFloors f   = airbrush_floors_for_nozzle(nozzle_mm);
+    params.min_grain_wall_mm = AIRBRUSH_MIN_GRAIN_MM;
+    params.min_grain_top_mm  = f.top_mm;
+}
+
+bool airbrush_grain_below_floor(float grain_mm, float nozzle_mm)
+{
+    return grain_mm < airbrush_floors_for_nozzle(nozzle_mm).wall_mm - 1e-4f;
 }
 
 // =============================================================================================
@@ -328,8 +367,17 @@ struct CellAcc
 // =============================================================================================
 
 AirbrushBakeResult airbrush_bake(const indexed_triangle_set &its, const AirbrushField &field, const TriangleSelector::TriangleSplittingData &current,
-                                 const AirbrushBakeParams &params, const LadderLookup &ladder)
+                                 const AirbrushBakeParams &params_in, const LadderLookup &ladder)
 {
+    // Grain, floors and the low band are print sizes; the bake works in mesh mm.
+    AirbrushBakeParams params = params_in;
+    if (params.print_scale != 1.f && params.print_scale > 0.f) {
+        const float inv          = 1.f / params.print_scale;
+        params.grain_mm          *= inv;
+        params.min_grain_wall_mm *= inv;
+        params.min_grain_top_mm  *= inv;
+        params.low_pass_mm       *= inv;
+    }
     AirbrushBakeResult res;
     const size_t       n = its.indices.size();
     if (n == 0) {
@@ -346,8 +394,8 @@ AirbrushBakeResult airbrush_bake(const indexed_triangle_set &its, const Airbrush
 
     const EffectiveGrain gwall = effective_grain(params, false);
     const EffectiveGrain gtop  = effective_grain(params, true);
-    res.stats.grain_wall_mm    = gwall.grain_mm;
-    res.stats.grain_top_mm     = gtop.grain_mm;
+    res.stats.grain_wall_mm    = gwall.grain_mm * params_in.print_scale;
+    res.stats.grain_top_mm     = gtop.grain_mm * params_in.print_scale;
     res.stats.top_tone_fallback = gtop.tone_fallback;
 
     // Per facet: class, flatness, depth for a leaf a quarter of its grain across.
@@ -691,6 +739,167 @@ bool airbrush_rebake_after_mesh_edit(ModelVolume &volume, const indexed_triangle
     if (stats)
         *stats = r.stats;
     return true;
+}
+
+// =============================================================================================
+// P3: mesh edits outside the gizmo (A4) and filament remap (A1)
+// =============================================================================================
+
+namespace {
+std::mutex                    g_ladder_mutex;
+std::function<LadderLookup()> g_ladder_provider;
+} // namespace
+
+void set_ladder_provider(std::function<LadderLookup()> provider)
+{
+    std::lock_guard<std::mutex> lock(g_ladder_mutex);
+    g_ladder_provider = std::move(provider);
+}
+
+LadderLookup default_ladder()
+{
+    std::function<LadderLookup()> provider;
+    {
+        std::lock_guard<std::mutex> lock(g_ladder_mutex);
+        provider = g_ladder_provider;
+    }
+    return provider ? provider() : LadderLookup();
+}
+
+TriangleSelector::TriangleSplittingData airbrush_paint_under(const AirbrushField &field, size_t facets,
+                                                            const TriangleSelector::TriangleSplittingData &paint)
+{
+    if (field.record().valid() && field.record().facets == uint32_t(facets))
+        return restore_under(paint, field.record());
+    return paint;
+}
+
+bool airbrush_carry_field(ModelVolume &volume, const AirbrushField &field, const indexed_triangle_set &old_its,
+                          const TriangleSelector::TriangleSplittingData &old_paint, const Transform3d &old_to_new,
+                          const TriangleSelector::TriangleSplittingData *base)
+{
+    const indexed_triangle_set &its = volume.mesh().its;
+    if (its.indices.empty() || field.empty()) {
+        volume.airbrush_field.reset();
+        return false;
+    }
+    auto f = std::make_shared<AirbrushField>(field);
+    if (!old_to_new.matrix().isIdentity(1e-12))
+        f->transform(old_to_new);
+    f->record().clear();
+    // Only a field that reaches the new mesh comes along (a cut half takes the cells on its side).
+    {
+        BoundingBoxf3 bb;
+        for (const stl_vertex &v : its.vertices)
+            bb.merge(Vec3d(v.cast<double>()));
+        bb.offset(2. * f->cell_size());
+        bool any = false;
+        for (const auto &kv : f->cells())
+            if (bb.contains(f->center_of(kv.first))) {
+                any = true;
+                break;
+            }
+        if (!any) {
+            volume.airbrush_field.reset();
+            return false;
+        }
+    }
+    TriangleSelector::TriangleSplittingData new_base;
+    if (base != nullptr)
+        new_base = *base;
+    else {
+        const TriangleSelector::TriangleSplittingData old_under = airbrush_paint_under(field, old_its.indices.size(), old_paint);
+        if (!old_under.triangles_to_split.empty())
+            new_base = TriangleSelector::remap_painting(old_its, old_under, its, old_to_new.inverse(), std::nullopt);
+    }
+    AirbrushBakeParams params;
+    if (!AirbrushBakeParams::from_string(field.bake_params(), params))
+        params = AirbrushBakeParams();
+    AirbrushBakeResult r = airbrush_bake(its, *f, new_base, params, default_ladder());
+    if (!r.ok) {
+        volume.airbrush_field.reset();
+        return false;
+    }
+    f->record() = std::move(r.record);
+    f->set_bake_params(params.to_string());
+    f->set_anchor(its);
+    volume.mmu_segmentation_facets.set_data(std::move(r.painting));
+    volume.airbrush_field = std::move(f);
+    return true;
+}
+
+float airbrush_print_scale(const ModelVolume &volume)
+{
+    Transform3d t = volume.get_matrix();
+    if (const ModelObject *mo = volume.get_object(); mo != nullptr && !mo->instances.empty())
+        t = mo->instances.front()->get_matrix() * t;
+    const double det = std::abs(t.linear().determinant());
+    return det > 0. ? float(std::cbrt(det)) : 1.f;
+}
+
+bool airbrush_rebake_after_scale(ModelVolume &volume)
+{
+    if (!volume.airbrush_field || !volume.is_model_part())
+        return false;
+    AirbrushBakeParams params;
+    if (!AirbrushBakeParams::from_string(volume.airbrush_field->bake_params(), params))
+        return false;
+    const float s = airbrush_print_scale(volume);
+    if (std::abs(s - params.print_scale) <= 0.005f * std::max(s, params.print_scale))
+        return false;
+    // Exactly 1 stays 1, so an unscaled part writes the same parameter string as before.
+    params.print_scale = std::abs(s - 1.f) < 1e-5f ? 1.f : s;
+    return airbrush_bake_volume(volume, params, default_ladder());
+}
+
+bool airbrush_after_mesh_replaced(ModelVolume &volume, const indexed_triangle_set &old_its,
+                                  const TriangleSelector::TriangleSplittingData &old_paint)
+{
+    if (!volume.airbrush_field)
+        return false;
+    const std::shared_ptr<const AirbrushField> field = volume.airbrush_field;
+    return airbrush_carry_field(volume, *field, old_its, old_paint, Transform3d::Identity());
+}
+
+std::shared_ptr<AirbrushField> airbrush_remap_field(const AirbrushField &field, const TriangleMesh &mesh,
+                                                    const EnforcerBlockerStateMap &state_map,
+                                                    const TriangleSelector::TriangleSplittingData &new_paint)
+{
+    auto map_id = [&state_map](int id) {
+        return id >= 0 && size_t(id) < state_map.size() ? int(state_map[size_t(id)]) : id;
+    };
+    auto f       = std::make_shared<AirbrushField>(field);
+    bool changed = f->remap_slots(map_id);
+    // The base filament (the "A" end of the ladder) follows the part's filament.
+    AirbrushBakeParams params;
+    if (AirbrushBakeParams::from_string(f->bake_params(), params) && params.base_filament > 0) {
+        const int nb = map_id(params.base_filament);
+        if (nb != params.base_filament && nb > 0) {
+            params.base_filament = nb;
+            f->set_bake_params(params.to_string());
+            changed = true;
+        }
+    }
+    // The under-paint went through the same remap as the paint above it.
+    BakeRecord &rec = f->record();
+    if (rec.valid() && rec.facets == uint32_t(mesh.its.indices.size()) && !rec.under.triangles_to_split.empty()) {
+        TriangleSelector sel(mesh);
+        sel.deserialize(rec.under, false);
+        sel.remap_triangle_state(state_map);
+        TriangleSelector::TriangleSplittingData under = sel.serialize();
+        if (!(under == rec.under)) {
+            rec.under = std::move(under);
+            changed   = true;
+        }
+    }
+    if (rec.valid()) {
+        const uint64_t h = paint_hash(new_paint);
+        if (h != rec.paint_hash) {
+            rec.paint_hash = h;
+            changed        = true;
+        }
+    }
+    return changed ? f : nullptr;
 }
 
 // =============================================================================================

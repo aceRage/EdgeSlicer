@@ -42,6 +42,9 @@ static constexpr float AIRBRUSH_HARDNESS_DEFAULT = 0.3f;
 static constexpr float AIRBRUSH_FLOW_MIN         = 0.01f;
 static constexpr float AIRBRUSH_FLOW_DEFAULT     = 0.2f;
 static constexpr float AIRBRUSH_GRAIN_MAX        = 3.f;
+// The "Printer Nozzle Diameter" override (P3, item B).
+static constexpr float AIRBRUSH_NOZZLE_MIN       = 0.1f;
+static constexpr float AIRBRUSH_NOZZLE_MAX       = 2.f;
 // Dwell dabs per second while the button is held still, and the spacing of drag dabs as a fraction
 // of the radius.
 static constexpr float AIRBRUSH_DAB_RATE_HZ      = 15.f;
@@ -55,9 +58,14 @@ struct BrushSettings
     float    grain_mm   = AIRBRUSH_DEFAULT_GRAIN_MM;
     bool     mix_steps  = true;
     uint32_t seed       = 0;
+    // "Printer Nozzle Diameter" (P3, item B): 0 = Auto (the selected printer's nozzle), else the
+    // nozzle the user paints for. It sets the grain floors the panel shows and the top floor of the
+    // bake; slicing always uses the real nozzle.
+    float    nozzle_mm  = 0.f;
 
-    // Clamp every value into its range. The grain floor is the WALL floor (0.6 mm): a finer top is
-    // the bake's business (tone fallback, P0), and the panel says so.
+    // Clamp every value into its range. The grain goes down to AIRBRUSH_MIN_GRAIN_MM (0.1 mm) for
+    // every nozzle (P3); what the nozzle prints cleanly is a hint, and a finer top is the bake's
+    // business (tone fallback at the nozzle's top floor).
     void sanitize();
     // "radius=4;hardness=0.3;..." with the classic locale, for the app config.
     std::string to_string() const;
@@ -67,7 +75,9 @@ struct BrushSettings
 
 // The bake parameters a volume gets from the brush settings. `base_filament` is the volume's own
 // filament (the "A" end of every mix ladder).
-AirbrushBakeParams bake_params_from(const BrushSettings &brush, int base_filament);
+// `printer_nozzle_mm` is the selected printer's nozzle (used when the brush's nozzle is Auto; <= 0
+// means 0.4). A 0.4 mm nozzle gives the P0 floors exactly.
+AirbrushBakeParams bake_params_from(const BrushSettings &brush, int base_filament, float printer_nozzle_mm = 0.f);
 
 // ---- dabs from a held button (D9) -----------------------------------------------------------
 

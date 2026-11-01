@@ -422,6 +422,11 @@ protected:
     virtual bool  on_airbrush_event(SLAGizmoEventType /*action*/, const Vec2d & /*mouse_position*/, bool /*shift_down*/, bool /*control_down*/) { return false; }
     // The airbrush cursor ball, world mm.
     virtual float airbrush_cursor_radius() const { return -1.f; }
+    // Edge (Airbrush P3): Esc while a spray or a fill waits for its bake cancels it. True when
+    // something was cancelled (the gizmo then stays open).
+    virtual bool  on_airbrush_escape() { return false; }
+    // Edge (Airbrush P3): the cursor of the Gradient / Pattern modes; false draws the spray ball.
+    virtual bool  render_airbrush_cursor(const std::vector<Transform3d> & /*trafos*/) { return false; }
 
     friend class ::Slic3r::GUI::GLGizmoMmuSegmentation;
 };

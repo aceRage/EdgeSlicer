@@ -210,12 +210,12 @@ TEST_CASE("Airbrush P2: brush settings round trip and clamp", "[Airbrush][Airbru
 
     SECTION("out of range and garbage values are clamped or ignored")
     {
-        const BrushSettings c = BrushSettings::from_string("radius=100;hardness=-3;flow=0;grain=0.2;mix=1;seed=7;bogus=9;flow");
+        const BrushSettings c = BrushSettings::from_string("radius=100;hardness=-3;flow=0;grain=0.05;mix=1;seed=7;bogus=9;flow");
         CHECK(c.radius_mm == AIRBRUSH_RADIUS_MAX);
         CHECK(c.hardness == 0.f);
         CHECK(c.flow == AIRBRUSH_FLOW_MIN);
-        // The floor is the wall floor (0.6 mm, P0); tops are the bake's business.
-        CHECK(c.grain_mm == AIRBRUSH_MIN_GRAIN_WALL_MM);
+        // P3 (item B): the grain goes down to 0.1 mm for every nozzle; what the nozzle prints is a hint.
+        CHECK(c.grain_mm == AIRBRUSH_MIN_GRAIN_MM);
         CHECK(c.mix_steps);
         CHECK(c.seed == 7);
         BrushSettings n;

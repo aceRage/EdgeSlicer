@@ -70,6 +70,15 @@ struct AirbrushBakeParams
     uint32_t seed              = 0;
     // The volume's own filament (1-based), the "A" end of every mix ladder. 0 disables the ladder.
     int      base_filament     = 0;
+    // P3 (item B): the "Printer Nozzle Diameter" the part was painted for, in mm; 0 = Auto (the
+    // printer selected when it was baked). Painting only: it sets the floors above through
+    // airbrush_floors_for_nozzle() and the panel's hint. Slicing always uses the real nozzle.
+    // Written only when set, so a P1/P2 string is unchanged.
+    float    design_nozzle_mm  = 0.f;
+    // P3 (item A4, scale): mesh mm -> print mm of the part when it was baked (the cube root of the
+    // instance x volume scale). Grain, floors and low band are print sizes, so the bake works with
+    // them divided by this; scaling a part re-bakes it with the new value. Written only when not 1.
+    float    print_scale       = 1.f;
 
     std::string to_string() const;
     static bool from_string(const std::string &s, AirbrushBakeParams &out);
@@ -85,6 +94,33 @@ struct EffectiveGrain
     bool  tone_fallback = false;
 };
 EffectiveGrain effective_grain(const AirbrushBakeParams &params, bool flat);
+
+// ---- nozzle-aware grain floors (P3, item B) -----------------------------------------------------
+// The grain slider goes down to AIRBRUSH_MIN_GRAIN_MM for every nozzle (a 0.2 mm nozzle with thin
+// lines can print far finer specks than a 0.4). What a nozzle can print cleanly scales with its
+// diameter from the P0 card (0.4 mm nozzle: walls >= 0.6 mm, tops >= 0.8 mm):
+//   walls and slopes: 1.5 x nozzle  - below it the panel warns (specks may merge in slicing), the
+//                                     bake still honours the grain;
+//   tops and bottoms: 2 x nozzle    - below it the bake falls back to tone at this size (P1 rule).
+// A 0.4 mm nozzle gives exactly the P0 constants, so a 0.4 bake is unchanged.
+static constexpr float AIRBRUSH_MIN_GRAIN_MM        = 0.1f;
+static constexpr float AIRBRUSH_REFERENCE_NOZZLE_MM = 0.4f;
+struct AirbrushFloors
+{
+    float nozzle_mm = AIRBRUSH_REFERENCE_NOZZLE_MM;
+    float wall_mm   = AIRBRUSH_MIN_GRAIN_WALL_MM;
+    float top_mm    = AIRBRUSH_MIN_GRAIN_TOP_MM;
+};
+// <= 0 (unknown) means the reference 0.4 mm nozzle.
+AirbrushFloors airbrush_floors_for_nozzle(float nozzle_mm);
+// The nozzle a bake should use: the explicit design nozzle when set, else `printer_nozzle_mm`.
+float airbrush_design_nozzle(const AirbrushBakeParams &params, float printer_nozzle_mm);
+// Bake parameters for `grain_mm` painted for `nozzle_mm`: the wall clamp is the global minimum
+// (the grain is honoured), the top floor is the nozzle's.
+void airbrush_apply_nozzle_floors(AirbrushBakeParams &params, float nozzle_mm);
+// True when `grain_mm` is finer than the nozzle prints cleanly on walls (the panel's hint and the
+// slice-time warning).
+bool airbrush_grain_below_floor(float grain_mm, float nozzle_mm);
 
 // The mix ladder: the state id (a mixed filament) that prints `step` of `steps` of filament_b over
 // filament_a, or <= 0 when there is none. P1 asks; creating the mixed filaments is P4.
@@ -153,6 +189,48 @@ bool airbrush_paint_in_sync(const ModelVolume &volume);
 bool airbrush_rebake_after_mesh_edit(ModelVolume &volume, const indexed_triangle_set &old_its,
                                      const TriangleSelector::TriangleSplittingData &old_paint, const Transform3d &old_to_new,
                                      const AirbrushBakeParams &params, const LadderLookup &ladder = {}, AirbrushBakeStats *stats = nullptr);
+
+// ---- P3 (item A4): mesh edits outside the gizmo -------------------------------------------------
+// The ladder the mesh-edit hooks below bake with. libslic3r has no project; the GUI registers a
+// provider (the project's mixed filaments) once. Without one, mix steps are skipped.
+void         set_ladder_provider(std::function<LadderLookup()> provider);
+LadderLookup default_ladder();
+
+// The paint as it was under the airbrush: `paint` with the record's owned triangles put back to
+// their under-paint (record valid for `facets` triangles), else `paint` itself.
+TriangleSelector::TriangleSplittingData airbrush_paint_under(const AirbrushField &field, size_t facets,
+                                                            const TriangleSelector::TriangleSplittingData &paint);
+
+// `volume` now holds a mesh made from `old_its` (cut, boolean, repair, scale, external edit),
+// `old_to_new` maps old mesh space into the new mesh space, `field` is the field that was on the
+// old mesh and `old_paint` its paint. Carries the field over (transformed) and re-bakes it with the
+// parameters it was baked with, over `base` - the new mesh's paint without the old specks; null
+// takes the old under-paint remapped onto the new mesh. Returns false and leaves the field off the
+// volume when the field covers nothing of the new mesh or the bake fails.
+bool airbrush_carry_field(ModelVolume &volume, const AirbrushField &field, const indexed_triangle_set &old_its,
+                          const TriangleSelector::TriangleSplittingData &old_paint, const Transform3d &old_to_new,
+                          const TriangleSelector::TriangleSplittingData *base = nullptr);
+
+// A volume whose mesh was replaced in place (positions kept): repair, remesh, round edges.
+// `old_mesh` / `old_paint` are what the volume had before. No-op without a field.
+// The print scale of a part (instance 0 x volume, cube root of the determinant).
+float airbrush_print_scale(const ModelVolume &volume);
+// The part was scaled (instance or volume): re-bake it when its print scale moved by more than 0.5%,
+// so specks keep their printed size. False when nothing was done (no field, same scale, or paint
+// edited elsewhere - the gizmo then offers the re-bake).
+bool airbrush_rebake_after_scale(ModelVolume &volume);
+
+bool airbrush_after_mesh_replaced(ModelVolume &volume, const indexed_triangle_set &old_its,
+                                  const TriangleSelector::TriangleSplittingData &old_paint);
+
+// ---- P3 (item A1): filament remap ---------------------------------------------------------------
+// The colour gizmo remapped the filaments (`state_map[old] = new`, the paint already rewritten into
+// `new_paint`). Returns the field with its slots, record under-paint and base filament remapped and
+// its record hash taken from `new_paint`, so the remap does not read as a foreign edit; null when
+// the field needs no change.
+std::shared_ptr<AirbrushField> airbrush_remap_field(const AirbrushField &field, const TriangleMesh &mesh,
+                                                    const EnforcerBlockerStateMap &state_map,
+                                                    const TriangleSelector::TriangleSplittingData &new_paint);
 
 // ---- the cost estimate (D8) ---------------------------------------------------------------------
 

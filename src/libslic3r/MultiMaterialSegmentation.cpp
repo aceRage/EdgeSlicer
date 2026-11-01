@@ -52,6 +52,30 @@ double resolve_outer_wall_line_width(const PrintRegionConfig &region_config, con
     return width.get_abs_value(nozzle_diameter);
 }
 
+float mm_segmentation_run_filter_scale(double nozzle_mm)
+{
+    if (!(nozzle_mm > 0.) || nozzle_mm >= 0.4 - 1e-6)
+        return 1.f;
+    return float(std::clamp(nozzle_mm / 0.4, 0.25, 1.));
+}
+
+double mm_segmentation_finest_nozzle(const PrintObject &print_object)
+{
+    const PrintConfig &config = print_object.print()->config();
+    if (config.nozzle_diameter.values.empty())
+        return 0.;
+    double finest = 0.;
+    for (const unsigned int extruder : print_object.object_extruders()) {
+        const size_t nozzle = physical_extruder_for_filament(config, extruder + 1);
+        if (nozzle >= config.nozzle_diameter.values.size())
+            continue;
+        const double d = config.nozzle_diameter.values[nozzle];
+        if (d > 0. && (finest == 0. || d < finest))
+            finest = d;
+    }
+    return finest;
+}
+
 static inline Point mk_point(const Voronoi::VD::vertex_type *point) { return {coord_t(point->x()), coord_t(point->y())}; }
 
 static inline Point mk_point(const Voronoi::Internal::point_type &point) { return {coord_t(point.x()), coord_t(point.y())}; }
@@ -672,9 +696,9 @@ static std::vector<std::pair<size_t, size_t>> get_segments(const ColoredLines &p
     return segments;
 }
 
-static std::vector<PaintedLine> filter_painted_lines(const Line &line_to_process, const size_t start_idx, const size_t end_idx, const std::vector<PaintedLine> &painted_lines)
+static std::vector<PaintedLine> filter_painted_lines(const Line &line_to_process, const size_t start_idx, const size_t end_idx, const std::vector<PaintedLine> &painted_lines, const float run_scale)
 {
-    const int                filter_eps_value = scale_(0.1f);
+    const int                filter_eps_value = scale_(0.1f * run_scale);
     std::vector<PaintedLine> filtered_lines;
     filtered_lines.emplace_back(painted_lines[start_idx]);
     for (size_t line_idx = start_idx + 1; line_idx <= end_idx; ++line_idx) {
@@ -719,7 +743,7 @@ static std::vector<PaintedLine> filter_painted_lines(const Line &line_to_process
     return filtered_lines;
 }
 
-static std::vector<std::vector<PaintedLine>> post_process_painted_lines(const std::vector<EdgeGrid::Contour> &contours, std::vector<PaintedLine> &&painted_lines)
+static std::vector<std::vector<PaintedLine>> post_process_painted_lines(const std::vector<EdgeGrid::Contour> &contours, std::vector<PaintedLine> &&painted_lines, const float run_scale)
 {
     if (painted_lines.empty())
         return {};
@@ -760,7 +784,7 @@ static std::vector<std::vector<PaintedLine>> post_process_painted_lines(const st
         if (next_painted_line_idx >= painted_lines.size() || painted_lines[curr_painted_line_idx].contour_idx != painted_lines[next_painted_line_idx].contour_idx || painted_lines[curr_painted_line_idx].line_idx != painted_lines[next_painted_line_idx].line_idx) {
             const PaintedLine &start_line      = painted_lines[prev_painted_line_idx];
             const Line        &line_to_process = contours[start_line.contour_idx].get_segment(start_line.line_idx);
-            Slic3r::append(filtered_painted_lines[painted_lines[curr_painted_line_idx].contour_idx], filter_painted_lines(line_to_process, prev_painted_line_idx, curr_painted_line_idx, painted_lines));
+            Slic3r::append(filtered_painted_lines[painted_lines[curr_painted_line_idx].contour_idx], filter_painted_lines(line_to_process, prev_painted_line_idx, curr_painted_line_idx, painted_lines, run_scale));
             prev_painted_line_idx = next_painted_line_idx;
         }
     }
@@ -781,12 +805,13 @@ static bool are_lines_connected(const ColoredLines &colored_lines)
 static ColoredLines colorize_line(const Line &line_to_process,
                                               const size_t              start_idx,
                                               const size_t              end_idx,
-                                              const std::vector<PaintedLine> &painted_contour)
+                                              const std::vector<PaintedLine> &painted_contour,
+                                              const float               run_scale)
 {
     assert(start_idx < painted_contour.size() && end_idx < painted_contour.size() && start_idx <= end_idx);
     assert(std::all_of(painted_contour.begin() + start_idx, painted_contour.begin() + end_idx + 1, [&painted_contour, &start_idx](const auto &p_line) { return painted_contour[start_idx].line_idx == p_line.line_idx; }));
 
-    const int          filter_eps_value = scale_(0.1f);
+    const int          filter_eps_value = scale_(0.1f * run_scale);
     ColoredLines       final_lines;
     const PaintedLine &first_line = painted_contour[start_idx];
     if (double dist_to_start = (first_line.projected_line.a - line_to_process.a).cast<double>().norm(); dist_to_start > filter_eps_value)
@@ -824,7 +849,7 @@ static ColoredLines colorize_line(const Line &line_to_process,
         const ColoredLine &line_2 = final_lines[line_idx - 0];
 
         if (line_0.color == line_2.color && line_0.color != line_1.color)
-            if (line_1.line.length() <= scale_(0.2)) line_1.color = line_0.color;
+            if (line_1.line.length() <= scale_(0.2 * run_scale)) line_1.color = line_0.color;
     }
 
     ColoredLines colored_lines_simple;
@@ -841,13 +866,13 @@ static ColoredLines colorize_line(const Line &line_to_process,
     final_lines = colored_lines_simple;
 
     if (final_lines.size() > 1)
-        if (final_lines.front().color != final_lines[1].color && final_lines.front().line.length() <= scale_(0.2)) {
+        if (final_lines.front().color != final_lines[1].color && final_lines.front().line.length() <= scale_(0.2 * run_scale)) {
             final_lines[1].line.a = final_lines.front().line.a;
             final_lines.erase(final_lines.begin());
         }
 
     if (final_lines.size() > 1)
-        if (final_lines.back().color != final_lines[final_lines.size() - 2].color && final_lines.back().line.length() <= scale_(0.2)) {
+        if (final_lines.back().color != final_lines[final_lines.size() - 2].color && final_lines.back().line.length() <= scale_(0.2 * run_scale)) {
             final_lines[final_lines.size() - 2].line.b = final_lines.back().line.b;
             final_lines.pop_back();
         }
@@ -855,14 +880,14 @@ static ColoredLines colorize_line(const Line &line_to_process,
     return final_lines;
 }
 
-static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
+static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines, const float run_scale) {
     for (size_t line_idx = 2; line_idx < new_lines.size(); ++line_idx) {
         const ColoredLine &line_0 = new_lines[line_idx - 2];
         ColoredLine       &line_1 = new_lines[line_idx - 1];
         const ColoredLine &line_2 = new_lines[line_idx - 0];
 
         if (line_0.color == line_2.color && line_0.color != line_1.color && line_0.color >= 1) {
-            if (line_1.line.length() <= scale_(0.5)) line_1.color = line_0.color;
+            if (line_1.line.length() <= scale_(0.5 * run_scale)) line_1.color = line_0.color;
         }
     }
 
@@ -873,7 +898,7 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
         const ColoredLine &line_3 = new_lines[line_idx - 0];
 
         if (line_0.color == line_3.color && (line_0.color != line_1.color || line_0.color != line_2.color) && line_0.color >= 1 && line_3.color >= 1) {
-            if ((line_1.line.length() + line_2.line.length()) <= scale_(0.5)) {
+            if ((line_1.line.length() + line_2.line.length()) <= scale_(0.5 * run_scale)) {
                 line_1.color = line_0.color;
                 line_2.color = line_0.color;
             }
@@ -900,7 +925,7 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
             double seg0l = segment_length(segments[curr_idx]);
             double seg1l = segment_length(segments[next_idx]);
 
-            if (color0 != color1 && seg0l >= scale_(0.1) && seg1l <= scale_(0.2)) {
+            if (color0 != color1 && seg0l >= scale_(0.1 * run_scale) && seg1l <= scale_(0.2 * run_scale)) {
                 for (size_t seg_start_idx = segments[next_idx].first; seg_start_idx != segments[next_idx].second; seg_start_idx = (seg_start_idx + 1 < new_lines.size()) ? seg_start_idx + 1 : 0)
                     new_lines[seg_start_idx].color = color0;
                 new_lines[segments[next_idx].second].color = color0;
@@ -917,7 +942,7 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
             int    color1 = new_lines[segments[next_idx].first].color;
             double seg1l  = segment_length(segments[next_idx]);
 
-            if (color0 >= 1 && color0 != color1 && seg1l <= scale_(0.2)) {
+            if (color0 >= 1 && color0 != color1 && seg1l <= scale_(0.2 * run_scale)) {
                 for (size_t seg_start_idx = segments[next_idx].first; seg_start_idx != segments[next_idx].second; seg_start_idx = (seg_start_idx + 1 < new_lines.size()) ? seg_start_idx + 1 : 0)
                     new_lines[seg_start_idx].color = color0;
                 new_lines[segments[next_idx].second].color = color0;
@@ -934,7 +959,7 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
             int color1 = new_lines[segments[next_idx].first].color;
             int color2 = new_lines[segments[next_next_idx].first].color;
 
-            if (color0 > 0 && color0 == color2 && color0 != color1 && segment_length(segments[next_idx]) <= scale_(0.5)) {
+            if (color0 > 0 && color0 == color2 && color0 != color1 && segment_length(segments[next_idx]) <= scale_(0.5 * run_scale)) {
                 for (size_t seg_start_idx = segments[next_next_idx].first; seg_start_idx != segments[next_next_idx].second; seg_start_idx = (seg_start_idx + 1 < new_lines.size()) ? seg_start_idx + 1 : 0)
                     new_lines[seg_start_idx].color = color0;
                 new_lines[segments[next_next_idx].second].color = color0;
@@ -944,7 +969,7 @@ static ColoredLines filter_colorized_polygon(ColoredLines &&new_lines) {
     return std::move(new_lines);
 }
 
-static ColoredLines colorize_contour(const EdgeGrid::Contour &contour, const std::vector<PaintedLine> &painted_contour) {
+static ColoredLines colorize_contour(const EdgeGrid::Contour &contour, const std::vector<PaintedLine> &painted_contour, const float run_scale) {
     assert(painted_contour.empty() || std::all_of(painted_contour.begin(), painted_contour.end(), [&painted_contour](const auto &p_line) { return painted_contour.front().contour_idx == p_line.contour_idx; }));
 
     ColoredLines colorized_contour;
@@ -965,7 +990,7 @@ static ColoredLines colorize_contour(const EdgeGrid::Contour &contour, const std
         size_t next_painted_line_idx = curr_painted_line_idx + 1;
         if (next_painted_line_idx >= painted_contour.size() || painted_contour[curr_painted_line_idx].line_idx != painted_contour[next_painted_line_idx].line_idx) {
             const std::vector<PaintedLine> &painted_contour_copy = painted_contour;
-            Slic3r::append(colorized_contour, colorize_line(contour.get_segment(painted_contour[prev_painted_line_idx].line_idx), prev_painted_line_idx, curr_painted_line_idx, painted_contour_copy));
+            Slic3r::append(colorized_contour, colorize_line(contour.get_segment(painted_contour[prev_painted_line_idx].line_idx), prev_painted_line_idx, curr_painted_line_idx, painted_contour_copy, run_scale));
 
             // Appends contour with default color for lines between the current and the next PaintedLine.
             if (next_painted_line_idx < painted_contour.size())
@@ -981,16 +1006,16 @@ static ColoredLines colorize_contour(const EdgeGrid::Contour &contour, const std
         colorized_contour.emplace_back(ColoredLine{contour.get_segment(idx), 0});
 
     assert(!colorized_contour.empty());
-    return filter_colorized_polygon(std::move(colorized_contour));
+    return filter_colorized_polygon(std::move(colorized_contour), run_scale);
 }
 
-static std::vector<ColoredLines> colorize_contours(const std::vector<EdgeGrid::Contour> &contours, const std::vector<std::vector<PaintedLine>> &painted_contours)
+static std::vector<ColoredLines> colorize_contours(const std::vector<EdgeGrid::Contour> &contours, const std::vector<std::vector<PaintedLine>> &painted_contours, const float run_scale)
 {
     assert(contours.size() == painted_contours.size());
     std::vector<ColoredLines> colorized_contours(contours.size());
     for (const std::vector<PaintedLine> &painted_contour : painted_contours) {
         size_t contour_idx              = &painted_contour - &painted_contours.front();
-        colorized_contours[contour_idx] = colorize_contour(contours[contour_idx], painted_contours[contour_idx]);
+        colorized_contours[contour_idx] = colorize_contour(contours[contour_idx], painted_contours[contour_idx], run_scale);
     }
 
     size_t poly_idx = 0;
@@ -3677,7 +3702,8 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                                               const std::vector<float>                                        &segmentation_claim_width_gapfill_off_by_color,
                                                               const bool                                                       segmentation_interlocking_beam,
                                                               const IncludeTopAndBottomLayers                                  include_top_and_bottom_layers,
-                                                              const std::function<void()>                                     &throw_on_cancel_callback)
+                                                              const std::function<void()>                                     &throw_on_cancel_callback,
+                                                              const float                                                      segmentation_run_filter_scale)
 {
     const size_t                          num_layers    = print_object.layers().size();
     std::vector<std::vector<ExPolygons>>  segmented_regions(num_layers);
@@ -3850,7 +3876,7 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                              << std::count_if(painted_lines.begin(), painted_lines.end(), [](const std::vector<PaintedLine> &pl) { return !pl.empty(); });
 
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - layers segmentation in parallel - begin";
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers), [&edge_grids, &input_expolygons, &painted_lines, &segmented_regions, &num_facets_states, &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, num_layers), [&edge_grids, &input_expolygons, &painted_lines, &segmented_regions, &num_facets_states, &throw_on_cancel_callback, segmentation_run_filter_scale](const tbb::blocked_range<size_t> &range) {
         for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
             throw_on_cancel_callback();
             if (!painted_lines[layer_idx].empty()) {
@@ -3858,13 +3884,13 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                 export_painted_lines_to_svg(debug_out_path("0-mm-painted-lines-%d-%d.svg", layer_idx, iRun), {painted_lines[layer_idx]}, input_expolygons[layer_idx]);
 #endif // MM_SEGMENTATION_DEBUG_PAINTED_LINES
 
-                std::vector<std::vector<PaintedLine>> post_processed_painted_lines = post_process_painted_lines(edge_grids[layer_idx].contours(), std::move(painted_lines[layer_idx]));
+                std::vector<std::vector<PaintedLine>> post_processed_painted_lines = post_process_painted_lines(edge_grids[layer_idx].contours(), std::move(painted_lines[layer_idx]), segmentation_run_filter_scale);
 
 #ifdef MM_SEGMENTATION_DEBUG_PAINTED_LINES
                 export_painted_lines_to_svg(debug_out_path("1-mm-painted-lines-post-processed-%d-%d.svg", layer_idx, iRun), post_processed_painted_lines, input_expolygons[layer_idx]);
 #endif // MM_SEGMENTATION_DEBUG_PAINTED_LINES
 
-                std::vector<ColoredLines> color_poly = colorize_contours(edge_grids[layer_idx].contours(), post_processed_painted_lines);
+                std::vector<ColoredLines> color_poly = colorize_contours(edge_grids[layer_idx].contours(), post_processed_painted_lines, segmentation_run_filter_scale);
 
 #ifdef MM_SEGMENTATION_DEBUG_COLORIZED_POLYGONS
                 export_colorized_polygons_to_svg(debug_out_path("2-mm-colorized_polygons-%d-%d.svg", layer_idx, iRun), color_poly, input_expolygons[layer_idx]);
@@ -4180,7 +4206,8 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
     // which is a contract worth reading at the call site rather than deriving.
     const float paint_depth_normal_mm = paint_depth_mode != pdmUnlimited ? max_width : 0.f;
 
-    return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, max_ext_perimeter_width, paint_depth_normal_mm, max_wall_stack_absorb, claim_width_gapfill_off_by_color, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);
+    return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, max_ext_perimeter_width, paint_depth_normal_mm, max_wall_stack_absorb, claim_width_gapfill_off_by_color, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback,
+                                    mm_segmentation_run_filter_scale(mm_segmentation_finest_nozzle(print_object)));
 }
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo
