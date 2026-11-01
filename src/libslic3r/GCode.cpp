@@ -7441,7 +7441,12 @@ LayerResult GCode::process_layer(const Print& print,
     case CalibMode::Calib_Temp_Retract_Grid: {
         // Review F4: pick the band from the middle of the layer, not its top, so a layer whose top
         // lands on a band boundary (8.9999 vs 9.0) always resolves to the same band.
-        gcode += this->apply_temp_retract_grid_layer(print, 0.5 * (print_z + layer.bottom_z()));
+        // F10 (Lance): layer 1 prints at nozzle_temperature_initial_layer like a normal print; band 0
+        // starts at layer 2. By object, every object's first layer goes back to the first-layer temperature.
+        if (first_layer)
+            gcode += this->reset_temp_retract_grid_first_layer(print);
+        else
+            gcode += this->apply_temp_retract_grid_layer(print, 0.5 * (print_z + layer.bottom_z()));
         break;
     }
     }
@@ -7499,8 +7504,8 @@ LayerResult GCode::process_layer(const Print& print,
 
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
-        // Review B1: the temperature x retraction grid owns the nozzle temperature from layer 1 on (its band
-        // temperature is sent in the calib switch above and cached per band), so the filament temperature
+        // Review B1: the temperature x retraction grid owns the nozzle temperature from layer 2 on (band 0
+        // is sent in the calib switch above at the start of layer 2, F10), so the filament temperature
         // must not overwrite band 0 here.
         if (print.calib_mode() == CalibMode::Calib_Temp_Retract_Grid) {
             // nothing: apply_temp_retract_grid_layer() already set the band temperature
@@ -12280,6 +12285,27 @@ std::string GCode::apply_temp_retract_grid_layer(const Print &print, double prin
     return std::string(buf) + writer().set_temperature(unsigned(temp), params.wait_for_temperature, tool);
 }
 
+std::string GCode::reset_temp_retract_grid_first_layer(const Print &print)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    // The first object's first layer is already at the first-layer temperature from the start G-code.
+    if (m_temp_retract_last_band < 0)
+        return {};
+    m_temp_retract_last_band = -1;
+    if (m_writer.extruder() == nullptr)
+        return {};
+    const int filament = int(m_writer.extruder()->id());
+    const int temp     = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
+                                      (unsigned int) filament);
+    if (temp <= 0)
+        return {};
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: first layer temp=%d\n", temp);
+    return std::string(buf) + writer().set_temperature(unsigned(temp), print.calib_params().wait_for_temperature,
+                                                       temperature_tool_for_filament(filament));
+}
+
 std::string GCode::apply_temp_retract_grid_object(const Print &print, const PrintObject &object)
 {
     if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
@@ -12312,7 +12338,9 @@ std::string GCode::apply_temp_retract_grid_object(const Print &print, const Prin
     }
     char buf[96];
     std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=%d retract=%g\n", col, L);
-    return buf;
+    // Review F9: the extruder may still hold the previous column's longer retraction. Give back the
+    // difference now, so the travel into this column is retracted by exactly this column's length.
+    return std::string(buf) + writer().reduce_retraction_to(L);
 }
 
 std::string GCode::restore_temp_retract_grid_retraction(const Print &print)

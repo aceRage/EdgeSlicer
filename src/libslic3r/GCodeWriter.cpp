@@ -1334,6 +1334,24 @@ std::string GCodeWriter::unretract()
     return gcode;
 }
 
+std::string GCodeWriter::reduce_retraction_to(double length)
+{
+    if (m_extruder == nullptr || this->config.use_firmware_retraction)
+        return {};
+    const double held = m_extruder->retracted();
+    if (held <= length + EPSILON)
+        return {};
+    const double restart_extra = m_extruder->restart_extra();
+    m_extruder->extrude(held - length);
+    m_extruder->set_retracted(std::max(0., length), restart_extra);
+    GCodeG1Formatter w;
+    w.emit_e(m_extruder->E());
+    this->seed_formatter_guard(w);
+    w.emit_f(m_extruder->deretract_speed() * 60.);
+    w.emit_comment(GCodeWriter::full_gcode_comment, " ; partial unretract");
+    return w.string();
+}
+
 /*  If this method is called more than once before calling unlift(),
     it will not perform subsequent lifts, even if Z was raised manually
     (i.e. with travel_to_z()) and thus _lifted was reduced. */

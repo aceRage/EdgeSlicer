@@ -1,6 +1,7 @@
 // Combined temperature × retraction stringing grid: G-code hooks are gated on calib_mode().
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <regex>
 #include <set>
@@ -173,8 +174,12 @@ struct RetractState
             held -= parse_e(line);
             return true;
         }
-        if (parse_e(line) > 1e-6)
-            held = 0.;
+        const double e = parse_e(line);
+        if (e > 1e-6) {
+            const bool moves = line.find('X') != std::string::npos || line.find('Y') != std::string::npos;
+            // An E-only move gives back retraction (full or partial unretract); an extrusion clears it.
+            held = moves ? 0. : std::max(0., held - e);
+        }
         return false;
     }
 };
@@ -366,8 +371,9 @@ bool is_layer_z_line(const std::string &line)
 
 } // namespace
 
-TEST_CASE("Band 0 keeps its temperature after the second-layer filament temperature change", "[Calib][TempRetract][Slice]")
+TEST_CASE("Layer 1 prints at the first-layer temperature and band 0 starts at layer 2", "[Calib][TempRetract][Slice]")
 {
+    // F10 (Lance's call): layer 1 keeps nozzle_temperature_initial_layer; band 0's command opens layer 2.
     // Review B1: the layer-2 block used to send M104 S<nozzle_temperature> after band 0 was cached,
     // so layers 2 .. ~9 mm printed at the filament temperature instead of the band temperature.
     DynamicPrintConfig config = grid_print_config();
@@ -387,6 +393,30 @@ TEST_CASE("Band 0 keeps its temperature after the second-layer filament temperat
             last_temp_cmd = line;
     }
     REQUIRE(reached);
+    {
+        // Before band 0: layer 1 (z 0.2) printed, at 210, and nothing above layer 2 yet.
+        std::string before_band0;
+        double      max_z = 0.;
+        bool        found = false;
+        for (const std::string &line : gcode_lines(g)) {
+            if (line.rfind("; Calib_TempRetract: band=0", 0) == 0) {
+                found = true;
+                break;
+            }
+            if (is_layer_z_line(line))
+                max_z = std::max(max_z, layer_z_of(line));
+            if (is_nozzle_temp_cmd(line))
+                before_band0 = line;
+        }
+        REQUIRE(found);
+        INFO("last nozzle temperature command before band 0: " << before_band0);
+        CHECK(before_band0.find("S210") != std::string::npos);
+        CHECK(max_z == Approx(0.2).margin(0.21));
+        CHECK(max_z > 0.1);
+        const auto bands = parse_band_events(g);
+        REQUIRE_FALSE(bands.empty());
+        CHECK(bands[0].cmd.find("S230") != std::string::npos);
+    }
     INFO("last nozzle temperature command before z > 1.2: " << last_temp_cmd);
     CHECK(last_temp_cmd.find("S230") != std::string::npos);
     // And nothing between the first layer and band 1 drops back to the filament temperature.
@@ -448,6 +478,24 @@ TEST_CASE("By-object sequence re-runs the temperature bands for every column", "
     // Bands: 230, 225 for each of the three columns.
     const auto bands = parse_band_events(g);
     REQUIRE(bands.size() == 6);
+    // F10: objects 2 and 3 go back to the first-layer temperature for their layer 1, then band 0 again.
+    {
+        const auto resets = lines_starting_with(g, "; Calib_TempRetract: first layer temp=");
+        CHECK(resets.size() == 2);
+        int  seen_reset = 0;
+        bool expect_b0  = false;
+        for (const std::string &line : gcode_lines(g)) {
+            if (line.rfind("; Calib_TempRetract: first layer temp=", 0) == 0) {
+                ++seen_reset;
+                expect_b0 = true;
+            } else if (line.rfind("; Calib_TempRetract: band=", 0) == 0) {
+                if (expect_b0)
+                    CHECK(line.rfind("; Calib_TempRetract: band=0", 0) == 0);
+                expect_b0 = false;
+            }
+        }
+        CHECK(seen_reset == 2);
+    }
     for (size_t i = 0; i < bands.size(); ++i) {
         CHECK(bands[i].band == int(i % 2));
         CHECK(bands[i].temp == (i % 2 == 0 ? 230 : 225));
@@ -480,4 +528,43 @@ TEST_CASE("By-object sequence re-runs the temperature bands for every column", "
     CHECK(order.size() == 3);
     CHECK(std::set<int>(order.begin(), order.end()) == std::set<int>{0, 1, 2});
     CHECK(matched >= 3);
+}
+
+TEST_CASE("A column switch travels with exactly the new column's retraction", "[Calib][TempRetract][Slice]")
+{
+    // Review F9: going from a longer column (0.6) to a shorter one (0.2) used to keep 0.6 retracted on
+    // the travel into the new column. Now the difference is given back first.
+    const Calib_Params params = small_grid_params();
+    const std::string  g      = slice_grid(params, grid_print_config());
+    REQUIRE_FALSE(lines_starting_with(g, "G1 E").empty());
+
+    const std::regex col_re(R"(; Calib_TempRetract: col=(\d+) retract=([0-9.]+))");
+    RetractState     rs;
+    double           want      = -1.;
+    int              checked   = 0;
+    int              shrinking = 0;
+    double           prev_L    = -1.;
+    for (const std::string &line : gcode_lines(g)) {
+        rs.feed(line);
+        std::smatch m;
+        if (std::regex_search(line, m, col_re)) {
+            want = std::stod(m[2]);
+            if (prev_L > want + 1e-6)
+                ++shrinking;
+            prev_L = want;
+            continue;
+        }
+        const bool travel = line.rfind("G1 ", 0) == 0 && line.find('E') == std::string::npos &&
+                            (line.find('X') != std::string::npos || line.find('Y') != std::string::npos);
+        if (want > 0. && travel) {
+            // First XY travel after the switch: if anything is retracted, it is this column's length.
+            if (rs.held > 1e-6) {
+                CHECK(rs.held == Approx(want).margin(1e-3));
+                ++checked;
+            }
+            want = -1.;
+        }
+    }
+    CHECK(shrinking >= 1);
+    CHECK(checked >= 3);
 }

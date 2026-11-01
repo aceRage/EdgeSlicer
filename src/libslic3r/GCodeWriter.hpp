@@ -161,6 +161,9 @@ public:
     std::string retract(bool before_wipe = false, double retract_length = 0);
     std::string retract_for_toolchange(bool before_wipe = false, double retract_length = 0);
     std::string unretract();
+    // Partially unretract so that at most `length` stays retracted (no-op if less is held, or with
+    // firmware retraction).
+    std::string reduce_retraction_to(double length);
     std::string lift(LiftType lift_type = LiftType::NormalLift, bool spiral_vase = false);
     std::string unlift();
     const Vec3d& get_position() const { return m_pos; }

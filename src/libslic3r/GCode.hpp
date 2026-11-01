@@ -607,6 +607,7 @@ private:
     int                                 m_temp_retract_last_band { -1 };
     std::string                         apply_temp_retract_grid_layer(const Print &print, double print_z);
     std::string                         apply_temp_retract_grid_object(const Print &print, const PrintObject &object);
+    std::string                         reset_temp_retract_grid_first_layer(const Print &print);
     std::string                         restore_temp_retract_grid_retraction(const Print &print);
     // scaled G-code resolution
     double                              m_scaled_resolution;
