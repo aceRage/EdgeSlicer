@@ -187,10 +187,12 @@ const std::string BBS_LAYER_HEIGHTS_PROFILE_FILE = "Metadata/layer_heights_profi
 // unless Model::cad_recipe is non-empty. The pre-rename name is read-only.
 const std::string ORCA_CAD_RECIPE_FILE   = "Metadata/orca_cad.bin";
 const std::string LEGACY_CAD_RECIPE_FILE = "Metadata/SnapOrca_cad.bin";
-// 1 GiB uncompressed: Orca's cap. Combined with CadDocument::validate_recipe_bytes
+// 64 MiB uncompressed (Orca allows 1 GiB). Real recipes are tens of KB (the test fixtures are
+// about 35 KB) and even BRep-heavy imports stay far below this; a smaller cap bounds what a
+// crafted part can make the reader allocate. Combined with CadDocument::validate_recipe_bytes
 // (BoundedBinaryInputArchive parse_only + kMaxRecipeFeatures; BRep strings are read as
 // text, BRepTools::Read is skipped) so a hostile part cannot allocate unbounded or drive OCCT.
-static constexpr mz_uint64 kMaxCadRecipe = mz_uint64(1) << 30;
+static constexpr mz_uint64 kMaxCadRecipe = mz_uint64(64) << 20;
 #endif
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/layer_config_ranges.xml";
 const std::string BRIM_EAR_POINTS_FILE = "Metadata/brim_ear_points.txt";
