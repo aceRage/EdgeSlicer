@@ -745,6 +745,17 @@ void ShowcaseView::build_panel()
     // --- Materials (D4) -----------------------------------------------------------------------
     header(_L("Materials"), "materials");
     begin_grid();
+    // First in the section: it decides whether Layer lines or the smoothing rows apply (a row never
+    // hides behind a row below it).
+    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
+    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
+    wxArrayString sources;
+    sources.Add(_L("Model"));
+    sources.Add(_L("Toolpaths (sliced plate)"));
+    m_source = choice(sources);
+    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
+                            "Slice the plate first; until then the model is shown."));
+    row(_L("Show"), m_source);
     wxArrayString layer_lines;
     layer_lines.Add(_L("Off"));
     layer_lines.Add(_L("Subtle"));
@@ -777,15 +788,6 @@ void ShowcaseView::build_panel()
     m_glow_intensity = slider(100, 0, 300);
     m_glow_intensity->SetToolTip(_L("How strongly every glow filament shines, in percent. Saved with the project; Preview uses it too."));
     row(_L("Glow intensity"), m_glow_intensity);
-    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
-    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
-    wxArrayString sources;
-    sources.Add(_L("Model"));
-    sources.Add(_L("Toolpaths (sliced plate)"));
-    m_source = choice(sources);
-    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
-                            "Slice the plate first; until then the model is shown."));
-    row(_L("Show"), m_source);
     m_smooth_auto = new wxCheckBox(m_side, wxID_ANY, _L("By finish"));
     m_smooth_auto->SetToolTip(_L("Each filament's finish picks how smooth its toolpaths look (silk smoothest, matte least)."));
     m_smooth = slider(60, 0, 100);
