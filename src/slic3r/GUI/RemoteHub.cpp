@@ -6724,6 +6724,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     // PR D (arrange): the instances on no plate. A name, not an index, so it is matched here,
     // before the index check below turns it away.
     if (sub == "/api/plates/loose") return get;
+    if (sub == "/api/plates/add") return post; // PR G: the toolbar's Add plate
     // /api/plates/<index>/<what> and /api/jobs/<id>
     if (sub.compare(0, 12, "/api/plates/") == 0) {
         const std::string  rest  = sub.substr(12);
@@ -6733,6 +6734,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
         if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
         if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
+        if (what == "/delete" || what == "/rename" || what == "/bed_type") return post; // PR G: plate edits
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
                        what == "/preview/legend" || what == "/preview/layers" || // PR E: preview v2
@@ -6796,6 +6798,9 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/objects/transform")             return post;
     if (sub == "/api/objects/printable")             return post; // PR D: the object list's Printable toggle
     if (sub == "/api/undo")                          return post; // PR D: one undo step (expect= guards it)
+    if (sub == "/api/objects/delete")                return post; // PR G: delete an object or one instance
+    if (sub == "/api/objects/duplicate")             return post; // PR G: Clone
+    if (sub == "/api/project/save")                  return post; // PR G: Save project
     if (sub == "/api/printers")                      return get;
     if (sub == "/api/snapmaker/devices")             return get;
     if (sub == "/api/snapmaker/add")                 return post;

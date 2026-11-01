@@ -165,6 +165,15 @@ private:
     ApiResponse api_plate_arrange(int plate, bool loose, bool orient);
     ApiResponse api_object_printable(const std::string& form_body);
     ApiResponse api_undo(const std::string& expect);
+    // PR G (G8-G10, parity section 6.1): plates add / delete / rename / bed type, objects delete /
+    // duplicate and saving the project, each as the PC's own control does it.
+    ApiResponse api_plate_add();
+    ApiResponse api_plate_delete(int plate, const std::string& objects, bool confirm);
+    ApiResponse api_plate_rename(int plate, const std::string& name);
+    ApiResponse api_plate_bed_type(int plate, const std::string& bed_type);
+    ApiResponse api_object_delete(const std::string& form_body);
+    ApiResponse api_object_duplicate(const std::string& form_body);
+    ApiResponse api_project_save();
     // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).
     ApiResponse api_printers(int plate = -1, bool watching = true);
     ApiResponse api_snapmaker_devices();
