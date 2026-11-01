@@ -1482,19 +1482,19 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Choose FIRST, then open: open_tool() titles the card from m_dressup_type, so setting
         // it afterwards left the header reading "Fillet 1" over a chamfer. Nothing in the
         // opener resets the combo, so this order is safe.
-        m_verb_actions["btn:dress#0"] = [this, open_feature] {
+        m_verb_actions["btn:dress#0"] = [this, open_feature, k_dress] {
             if (m_dressup_type) m_dressup_type->SetSelection(0); open_feature(k_dress); };
-        m_verb_actions["btn:dress#1"] = [this, open_feature] {
+        m_verb_actions["btn:dress#1"] = [this, open_feature, k_dress] {
             if (m_dressup_type) m_dressup_type->SetSelection(1); open_feature(k_dress); };
         // Same order for all three families: choose the variant, then open, so the card, its
         // header and the first preview are built for the variant that was picked (a circular
         // pattern used to open showing the linear ghost and gizmo).
         for (int op = 0; op < 3; ++op)
-            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, op] {
+            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, op, k_bool] {
                 if (m_bool_op) m_bool_op->SetSelection(op);   // the variant first, so the card opens on it
                 open_feature(k_bool); };
         for (int t = 0; t < 2; ++t)
-            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, t] {
+            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, t, k_pat] {
                 if (m_pattern_type) m_pattern_type->SetSelection(t);
                 open_feature(k_pat); };
 
@@ -6988,7 +6988,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             mate_ghost = false;
         };
         menu.Bind(wxEVT_MENU_HIGHLIGHT,
-                  [this, cs_a, cs_b, opts, &mate_ghost, drop_ghost](wxMenuEvent& e) {
+                  [this, cs_a, cs_b, opts, &mate_ghost, drop_ghost, mate_base](wxMenuEvent& e) {
             const int i = e.GetMenuId() - (mate_base + 1);
             // Off the palette (a verb row, the header, or nothing) — a stale ghost from the row
             // you just left is worse than none, so it goes as soon as the cursor does.
@@ -6998,7 +6998,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             m_viewport->repaint_now();   // synchronous: the popup owns the loop, a queued repaint is never serviced
         });
 
-        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, drop_ghost](wxCommandEvent& e) {
+        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, drop_ghost, mate_base](wxCommandEvent& e) {
             const int i = e.GetId() - (mate_base + 1);
             if (i < 0 || i >= int(opts.size()) || !opts[i].viable) return;
             drop_ghost();         // the real bodies are about to become the ghost's pose
@@ -7027,14 +7027,14 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
     // status message on screen, and clicking one created nothing at all. The whole mate palette
     // enumerated perfectly and fired nothing. Restricting the range keeps each half to its own ids
     // regardless of bind order.
-    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound](wxMenuEvent& e) {
+    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound, base](wxMenuEvent& e) {
         const int i = e.GetMenuId() - base;
         if (i < 0 || i >= int(bound.size()) || bound[i] == nullptr || bound[i]->hint == nullptr)
             return;
         set_status(StatusKind::Info, wxGetTranslation(wxString::FromUTF8(bound[i]->hint), SLIC3R_APP_KEY));
         m_status->Update();   // the popup owns the loop; without this the line repaints late
     }, base, base + 499);   // 499: the mate section starts at base + 500 (see mate_base)
-    menu.Bind(wxEVT_MENU, [this, &bound](wxCommandEvent& e) {
+    menu.Bind(wxEVT_MENU, [this, &bound, base](wxCommandEvent& e) {
         const int i = e.GetId() - base;
         if (i >= 0 && i < int(bound.size()) && bound[i])
             run_offer_action(bound[i]->action);
