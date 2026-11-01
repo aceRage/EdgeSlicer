@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "hdris": [
+    {
+      "id": "hdri_studio",
+      "name": "Studio softbox",
+      "file": "studio_small_09_2k.hdr",
+      "source": "https://polyhaven.com/a/studio_small_09",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_outdoor",
+      "name": "Outdoor sky with sun",
+      "file": "kloofendal_48d_partly_cloudy_puresky_2k.hdr",
+      "source": "https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_workshop",
+      "name": "Workshop window",
+      "file": "artist_workshop_2k.hdr",
+      "source": "https://polyhaven.com/a/artist_workshop",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_loft",
+      "name": "Loft studio",
+      "file": "photo_studio_loft_hall_2k.hdr",
+      "source": "https://polyhaven.com/a/photo_studio_loft_hall",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_sunset",
+      "name": "Golden hour",
+      "file": "venice_sunset_2k.hdr",
+      "source": "https://polyhaven.com/a/venice_sunset",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    }
+  ]
+}

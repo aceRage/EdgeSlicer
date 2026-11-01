@@ -225,7 +225,7 @@ bool Lighting::operator==(const Lighting &o) const
            key_temperature == o.key_temperature && fill == o.fill && fill_intensity == o.fill_intensity && rim == o.rim &&
            rim_intensity == o.rim_intensity && environment == o.environment && env_intensity == o.env_intensity &&
            env_rotation_deg == o.env_rotation_deg && exposure == o.exposure && shadow_softness == o.shadow_softness &&
-           tone == o.tone;
+           tone == o.tone && sun_from_env == o.sun_from_env;
 }
 
 bool CameraView::operator==(const CameraView &o) const
@@ -780,6 +780,7 @@ json scene_to_json_object(const Scene &s)
     li["exposure"]         = s.lighting.exposure;
     li["shadow_softness"]  = s.lighting.shadow_softness;
     li["tone"]             = to_string(s.lighting.tone);
+    li["sun_light"]        = s.lighting.sun_from_env;
     j["lighting"] = merged(raw, "lighting", li);
 
     if (s.camera.valid)
@@ -886,6 +887,7 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.lighting.exposure         = clamp_or(get_or<float>(li, "exposure", s.lighting.exposure), -3.f, 3.f, 0.f);
     s.lighting.shadow_softness  = clamp_or(get_or<float>(li, "shadow_softness", s.lighting.shadow_softness), 0.5f, 4.f, 1.f);
     s.lighting.tone             = enum_or(li, "tone", s.lighting.tone);
+    s.lighting.sun_from_env     = get_or<bool>(li, "sun_light", s.lighting.sun_from_env);
 
     if (j.contains("camera"))
         s.camera = camera_from_json(j["camera"]);
