@@ -1,0 +1,30 @@
+{
+    "app": {
+        "privacy_policy_isagree": "false",
+        "language": "en_US",
+        "check_for_updates_on_startup": false,
+        "tls_cert_store_accepted": "yes",
+        "tls_accepted_cert_store_location": "/etc/ssl/certs/ca-certificates.crt",
+        "dark_color_mode": "1",
+        "default_page": "1"
+    },
+    "firstguide": {
+        "finish": true
+    },
+    "models": [
+        {
+            "model": "Snapmaker U1",
+            "nozzle_diameter": "0.4",
+            "vendor": "Snapmaker"
+        }
+    ],
+    "filaments": [
+        "Generic PLA @U1 0.4 nozzle",
+        "Generic PETG @U1 0.4 nozzle"
+    ],
+    "presets": {
+        "machine": "Snapmaker U1 (0.4 nozzle)",
+        "print": "0.20mm Standard @Snapmaker U1 (0.4 nozzle)",
+        "filament": "Generic PLA @U1 0.4 nozzle"
+    }
+}
