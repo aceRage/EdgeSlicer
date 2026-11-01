@@ -248,6 +248,8 @@ static std::vector<std::string> s_project_options {
     "nozzle_volume_type",
     // Per-nozzle process P1: the process each physical extruder takes its speeds from.
     "nozzle_process_presets",
+    // Per-nozzle process P8: each tool's unsaved changes to its own process profile.
+    "nozzle_process_edits",
     // Per-nozzle process P2: the nozzle (tool) each filament prints on, on a toolchanger.
     "filament_nozzle_assignment",
     // Per-nozzle process P4: the rack nozzle size each filament prints with (H2C).
@@ -2483,6 +2485,8 @@ std::string PresetBundle::layer_height_key(double layer_height)
 
 void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& preferred_selection/* = PresetPreferences()*/)
 {
+    // Per-nozzle process P8: as in load_config_file_config().
+    this->end_nozzle_tool_view();
     // Ultra: restore the per-layer-height print profile memory (only when the feature is on).
     preferred_print_profiles_by_height.clear();
     if (config.get("prefer_last_print_profile") == "true" && config.has_section("last_print_profiles"))
@@ -2678,7 +2682,7 @@ void PresetBundle::export_selections(AppConfig &config)
 
     config.clear_printer_settings(printer_name);
     config.set_printer_setting(printer_name, PRESET_PRINTER_NAME, printer_name);
-    config.set_printer_setting(printer_name, PRESET_PRINT_NAME, prints.get_selected_preset_name());
+    config.set_printer_setting(printer_name, PRESET_PRINT_NAME, this->plate_print_preset_name()); // P8: the plate's, whichever view the Process tab shows
     // Caught by the assert above in debug builds. In release, reading front() of an
     // empty vector wrote garbage into the app config and could throw during the
     // JSON export, so fall back to an empty name.
@@ -3280,12 +3284,16 @@ bool PresetBundle::set_nozzle_process(size_t extruder, const std::string &name)
     std::vector<std::string> selection = this->nozzle_process_selection();
     if (extruder >= selection.size())
         return false;
+    const bool other_profile = selection[extruder] != name;
     selection[extruder] = name;
     selection           = nozzle_process_stored(std::move(selection));
     auto *opt = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets", true);
     if (opt->values == selection)
         return false;
     opt->values = std::move(selection);
+    // P8: another profile for the tool: its changes were changes to the old one.
+    if (other_profile)
+        this->set_nozzle_process_edits(extruder, DynamicPrintConfig());
     return true;
 }
 
@@ -3301,7 +3309,23 @@ bool PresetBundle::prune_nozzle_processes()
             BOOST_LOG_TRIVIAL(info) << "per-nozzle process: dropping '" << selection[e] << "' for extruder " << e + 1
                                     << " (missing, or not cut for this nozzle any more)";
             selection[e].clear();
+            this->set_nozzle_process_edits(e, DynamicPrintConfig()); // P8: its changes went with it
         }
+    }
+    // P8: no changes for tools the printer does not have.
+    {
+        NozzleProcessEdits edits = this->nozzle_process_edits_map();
+        bool               dropped = false;
+        for (auto it = edits.begin(); it != edits.end();) {
+            const int e = nozzle_tool_id_extruder(it->first);
+            if (e >= 0 && size_t(e) >= selection.size()) {
+                it      = edits.erase(it);
+                dropped = true;
+            } else
+                ++it;
+        }
+        if (dropped)
+            this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings(serialize_nozzle_process_edits(edits)));
     }
     selection = nozzle_process_stored(std::move(selection));
     if (opt->values == selection)
@@ -3327,6 +3351,8 @@ void PresetBundle::restore_nozzle_processes(AppConfig &config, const std::string
     if (!stored.empty())
         unescape_strings_cstyle(stored, names);
     this->project_config.set_key_value("nozzle_process_presets", new ConfigOptionStrings(names));
+    // P8: another printer's tools carry none of these changes.
+    this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings());
     this->prune_nozzle_processes();
 }
 
@@ -3483,28 +3509,309 @@ void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config
 
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
 {
-    const auto *names = out.option<ConfigOptionStrings>("nozzle_process_presets");
-    if (names == nullptr || !has_nozzle_process_presets(out))
+    // Per-nozzle process P8: every tool's own profile (chosen, auto-picked or the plate's) with its changes. A tool whose
+    // effective per-tool values equal the plate's is no source, so a job where every tool follows the plate is untouched.
+    out.set_key_value("nozzle_process_missing", new ConfigOptionInts());
+    if (!supports_nozzle_processes(this->printers.get_edited_preset().config))
         return;
-    std::vector<const DynamicPrintConfig *> sources(names->values.size(), nullptr);
-    for (size_t e = 0; e < names->values.size(); ++e) {
-        if (names->values[e].empty())
+    const size_t extruders = this->effective_nozzle_diameters().size();
+    const DynamicPrintConfig &plate = this->plate_print_preset().config;
+    std::vector<DynamicPrintConfig>         store(extruders);
+    std::vector<const DynamicPrintConfig *> sources(extruders, nullptr);
+    std::vector<int>                        missing;
+    for (size_t e = 0; e < extruders; ++e) {
+        if (!this->nozzle_tool_process_config(e, store[e])) {
+            missing.push_back(int(e) + 1);
             continue;
-        const Preset *preset = this->prints.find_preset(names->values[e], false);
-        if (preset != nullptr && nozzle_process_fits(*preset, e))
-            sources[e] = &preset->config;
-        else
-            BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: '" << names->values[e] << "' for extruder " << e + 1
-                                       << " is missing or not cut for that nozzle; the extruder uses the plate's process";
+        }
+        if (!nozzle_process_diff(store[e], plate).empty())
+            sources[e] = &store[e];
     }
+    if (!missing.empty())
+        out.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
     fill_nozzle_process_slots(out, sources);
 }
+
+// ---- Per-nozzle process P8 ---------------------------------------------------------------------------------------
+
+double PresetBundle::process_nozzle_claim(const Preset &process, const PresetCollection &prints, const PresetCollection &printers)
+{
+    return filament_preset_nozzle_diameter(nozzle_process_binding(process, prints), printers);
+}
+
+std::string PresetBundle::auto_nozzle_process_in(const PresetCollection &prints, const PresetCollection &printers, const std::string &printer_model,
+                                                 double diameter, double plate_layer_height, const std::string &plate_name)
+{
+    std::vector<NozzleProcessCandidate> candidates;
+    for (const Preset &preset : prints.get_presets()) {
+        if (!preset.is_system || preset.is_default || preset.type != Preset::TYPE_PRINT)
+            continue;
+        const double claim = filament_preset_nozzle_diameter(preset, printers);
+        if (!(claim > 0.) || std::abs(claim - diameter) > EPSILON)
+            continue;
+        bool model = false;
+        if (const auto *compatible = preset.config.option<ConfigOptionStrings>("compatible_printers"))
+            for (const std::string &printer_name : compatible->values)
+                if (const Preset *p = printers.find_preset(printer_name, false); p != nullptr && !printer_model.empty() &&
+                                                                                  p->config.opt_string("printer_model") == printer_model) {
+                    model = true;
+                    break;
+                }
+        if (!model)
+            continue;
+        const auto *lh = preset.config.option<ConfigOptionFloat>("layer_height");
+        candidates.push_back({ preset.name, lh != nullptr ? lh->value : 0., true });
+    }
+    return pick_nozzle_process(std::move(candidates), plate_layer_height, plate_name);
+}
+
+std::string PresetBundle::auto_nozzle_process(size_t extruder, bool *missing) const
+{
+    if (missing != nullptr)
+        *missing = false;
+    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
+    if (!supports_nozzle_processes(printer))
+        return std::string();
+    const std::vector<double> nozzles = this->effective_nozzle_diameters();
+    if (extruder >= nozzles.size())
+        return std::string();
+    const Preset &plate = this->plate_print_preset();
+    // The plate's process fits a tool whose size it is made for, or any tool when it is made for no particular size.
+    const double claim = process_nozzle_claim(plate, this->prints, this->printers);
+    if (!(claim > 0.) || std::abs(claim - nozzles[extruder]) < EPSILON)
+        return std::string();
+    const auto       *lh   = plate.config.option<ConfigOptionFloat>("layer_height");
+    const std::string name = auto_nozzle_process_in(this->prints, this->printers, printer.opt_string("printer_model"), nozzles[extruder],
+                                                    lh != nullptr ? lh->value : 0., plate.name);
+    if (name.empty() && missing != nullptr)
+        *missing = true;
+    return name;
+}
+
+NozzleProcessEdits PresetBundle::nozzle_process_edits_map() const { return nozzle_process_edits(this->project_config); }
+
+void PresetBundle::set_nozzle_process_edits(size_t extruder, const DynamicPrintConfig &diff)
+{
+    NozzleProcessEdits edits = this->nozzle_process_edits_map();
+    const std::string  id    = nozzle_tool_id(extruder);
+    if (diff.empty())
+        edits.erase(id);
+    else
+        edits[id] = diff;
+    std::vector<std::string> stored = serialize_nozzle_process_edits(edits);
+    const auto *opt = this->project_config.option<ConfigOptionStrings>("nozzle_process_edits");
+    if (opt == nullptr || opt->values != stored)
+        this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings(std::move(stored)));
+}
+
+PresetBundle::NozzleToolProcess PresetBundle::nozzle_tool_process_info(size_t extruder) const
+{
+    NozzleToolProcess info;
+    const NozzleProcessEdits edits = this->nozzle_process_edits_map();
+    info.edited = edits.count(nozzle_tool_id(extruder)) > 0;
+    if (m_tool_view.extruder == int(extruder)) {
+        // The shown tool: what is selected and edited now.
+        info.name   = this->prints.get_selected_preset_name();
+        info.kind   = m_tool_view.follows_plate ? NozzleToolProcessKind::FollowsPlate :
+                      m_tool_view.auto_picked   ? NozzleToolProcessKind::AutoPicked :
+                                                  NozzleToolProcessKind::Chosen;
+        // A tool that follows the plate is changed when it differs from the plate's process as edited; any other one when
+        // it differs from its saved profile.
+        info.edited = m_tool_view.follows_plate ? !nozzle_process_diff(this->prints.get_edited_preset().config, m_tool_view.plate.config).empty() :
+                                                  this->prints.current_is_dirty();
+        return info;
+    }
+    const std::vector<std::string> selection = this->nozzle_process_selection();
+    if (extruder < selection.size() && !selection[extruder].empty()) {
+        const Preset *preset = this->prints.find_preset(selection[extruder], false);
+        if (preset != nullptr && nozzle_process_fits(*preset, extruder)) {
+            info.kind = NozzleToolProcessKind::Chosen;
+            info.name = selection[extruder];
+            return info;
+        }
+    }
+    bool              missing = false;
+    const std::string picked  = this->auto_nozzle_process(extruder, &missing);
+    info.name = picked.empty() ? this->plate_print_preset_name() : picked;
+    info.kind = missing ? NozzleToolProcessKind::Missing : picked.empty() ? NozzleToolProcessKind::FollowsPlate : NozzleToolProcessKind::AutoPicked;
+    return info;
+}
+
+bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfig &out) const
+{
+    const DynamicPrintConfig &plate = this->plate_print_preset().config;
+    if (m_tool_view.extruder == int(extruder)) {
+        out = nozzle_tool_process(plate, this->prints.get_edited_preset().config, nullptr);
+        return true;
+    }
+    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
+    if (info.kind == NozzleToolProcessKind::Missing) {
+        out = plate;
+        return false;
+    }
+    const NozzleProcessEdits edits = this->nozzle_process_edits_map();
+    const auto               it    = edits.find(nozzle_tool_id(extruder));
+    const DynamicPrintConfig *own  = it != edits.end() ? &it->second : nullptr;
+    const Preset *preset = info.kind == NozzleToolProcessKind::FollowsPlate ? nullptr : this->prints.find_preset(info.name, false);
+    out = nozzle_tool_process(plate, preset != nullptr ? preset->config : plate, own);
+    return true;
+}
+
+std::string PresetBundle::plate_print_preset_name() const
+{
+    return m_tool_view.extruder >= 0 ? m_tool_view.plate.name : this->prints.get_selected_preset_name();
+}
+
+void PresetBundle::apply_plate_keys_to_tool_view()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    DynamicPrintConfig &edited = this->prints.get_edited_preset().config;
+    for (const std::string &key : m_tool_view.plate.config.keys())
+        if (is_plate_process_option(key))
+            if (const ConfigOption *opt = m_tool_view.plate.config.option(key); opt != nullptr) {
+                const ConfigOption *own = edited.option(key);
+                if (own == nullptr || !(*own == *opt))
+                    edited.set_key_value(key, opt->clone());
+            }
+}
+
+void PresetBundle::apply_tool_view_compatibility()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    std::vector<char> fits;
+    for (const Preset &preset : this->prints.get_presets())
+        fits.push_back(preset.is_default ? (preset.is_compatible ? 1 : 0) : (nozzle_process_fits(preset, size_t(m_tool_view.extruder)) ? 1 : 0));
+    size_t i = 0;
+    for (const Preset &preset : this->prints.get_presets())
+        const_cast<Preset &>(preset).is_compatible = fits[i++] != 0;
+}
+
+void PresetBundle::store_tool_view_edits()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    const size_t e = size_t(m_tool_view.extruder);
+    // A tool that follows the plate edits the plate's process as the plate has it; any other tool its own profile.
+    const DynamicPrintConfig &base = m_tool_view.follows_plate ? m_tool_view.plate.config : this->prints.get_selected_preset().config;
+    this->set_nozzle_process_edits(e, nozzle_process_diff(this->prints.get_edited_preset().config, base));
+}
+
+bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
+{
+    if (m_tool_view.extruder == int(extruder))
+        return true;
+    this->end_nozzle_tool_view();
+    if (!supports_nozzle_processes(this->printers.get_edited_preset().config) || extruder >= this->effective_nozzle_diameters().size() ||
+        this->prints.get_selected_idx() == size_t(-1))
+        return false;
+    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
+    const Preset *tool_preset = info.kind == NozzleToolProcessKind::Chosen || info.kind == NozzleToolProcessKind::AutoPicked ?
+                                    this->prints.find_preset(info.name, false) : nullptr;
+    const bool follows = tool_preset == nullptr;
+    const NozzleProcessEdits edits = this->nozzle_process_edits_map();
+    const auto it = edits.find(nozzle_tool_id(extruder));
+
+    m_tool_view.plate         = this->prints.get_edited_preset();
+    m_tool_view.plate_idx     = this->prints.get_selected_idx();
+    m_tool_view.extruder      = int(extruder);
+    m_tool_view.follows_plate = follows;
+    m_tool_view.auto_picked   = info.kind == NozzleToolProcessKind::AutoPicked;
+    this->prints.get_selected_preset().is_dirty = false;
+    if (!follows)
+        this->prints.select_preset_by_name(tool_preset->name, true);
+    // A tool that follows the plate starts from the plate's process as edited; its own changes go on top.
+    DynamicPrintConfig &edited = this->prints.get_edited_preset().config;
+    if (follows)
+        edited = m_tool_view.plate.config;
+    if (it != edits.end())
+        for (const std::string &key : it->second.keys())
+            edited.set_key_value(key, it->second.option(key)->clone());
+    m_tool_view.tool_preset = this->prints.get_selected_preset_name();
+    // The preset list offers the processes that fit the tool's nozzle (its size, this printer model), not the plate's.
+    this->apply_tool_view_compatibility();
+    this->apply_plate_keys_to_tool_view();
+    const std::vector<std::string> plate_keys = plate_process_option_keys();
+    this->prints.set_dirty_ignore(std::set<std::string>(plate_keys.begin(), plate_keys.end()));
+    this->prints.update_dirty();
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: showing " << nozzle_tool_id(extruder) << " with '" << m_tool_view.tool_preset << "'"
+                            << (follows ? " (follows the plate)" : "") << ", plate '" << m_tool_view.plate.name << "' kept aside";
+    return true;
+}
+
+void PresetBundle::end_nozzle_tool_view()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    this->store_tool_view_edits();
+    const int e = m_tool_view.extruder;
+    this->prints.get_selected_preset().is_dirty = false;
+    this->prints.set_dirty_ignore({});
+    // By name: saving the tool's profile may have inserted a preset before the plate's.
+    if (!this->prints.select_preset_by_name(m_tool_view.plate.name, true) && m_tool_view.plate_idx < this->prints.size())
+        this->prints.select_preset(m_tool_view.plate_idx);
+    this->prints.get_edited_preset().config = m_tool_view.plate.config;
+    m_tool_view = NozzleToolView();
+    // The process list offers what fits the printer again (no selection changes).
+    this->update_compatible(PresetSelectCompatibleType::Never);
+    this->prints.update_dirty();
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: back to the plate from T" << e + 1 << ", plate '" << this->prints.get_edited_preset().name << "'";
+}
+
+void PresetBundle::nozzle_tool_view_plate_key_changed(const std::string &key)
+{
+    if (m_tool_view.extruder < 0 || !is_plate_process_option(key))
+        return;
+    if (const ConfigOption *opt = this->prints.get_edited_preset().config.option(key))
+        m_tool_view.plate.config.set_key_value(key, opt->clone());
+}
+
+void PresetBundle::nozzle_tool_view_sync()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    const size_t      e        = size_t(m_tool_view.extruder);
+    const std::string selected = this->prints.get_selected_preset_name();
+    if (selected != m_tool_view.tool_preset) {
+        // Another profile for the tool (picked in the combo, or the shown one saved under a new name).
+        m_tool_view.follows_plate = false;
+        m_tool_view.auto_picked   = false;
+        m_tool_view.tool_preset   = selected;
+        std::vector<std::string> selection = this->nozzle_process_selection();
+        if (e < selection.size()) {
+            selection[e] = selected;
+            auto *opt    = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets", true);
+            opt->values  = nozzle_process_stored(std::move(selection));
+        }
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << nozzle_tool_id(e) << " now uses '" << selected << "'";
+    }
+    this->apply_plate_keys_to_tool_view();
+    this->store_tool_view_edits();
+    this->prints.update_dirty();
+}
+
+void PresetBundle::nozzle_tool_view_before_save()
+{
+    if (m_tool_view.extruder < 0)
+        return;
+    // The saved profile keeps its own plate-wide values (the layer height it was made with...), not the Plate's.
+    DynamicPrintConfig       &edited = this->prints.get_edited_preset().config;
+    const DynamicPrintConfig &own    = m_tool_view.follows_plate ? m_tool_view.plate.config : this->prints.get_selected_preset().config;
+    for (const std::string &key : own.keys())
+        if (is_plate_process_option(key))
+            edited.set_key_value(key, own.option(key)->clone());
+}
+
+void PresetBundle::nozzle_tool_view_after_save() { this->nozzle_tool_view_sync(); }
 
 DynamicPrintConfig PresetBundle::full_fff_config() const
 {
     DynamicPrintConfig out;
     out.apply(FullPrintConfig::defaults());
-    out.apply(this->prints.get_edited_preset().config);
+    // Per-nozzle process P8: the plate's process, also while the Process tab shows a tool's profile.
+    const Preset &plate_preset = this->plate_print_preset();
+    out.apply(plate_preset.config);
     // Add the default filament preset to have the "filament_preset_id" defined.
 	out.apply(this->filaments.default_preset().config);
 	out.apply(this->printers.get_edited_preset().config);
@@ -3522,17 +3829,17 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
     //BBS: add logic for settings check between different system presets
     std::vector<std::string> different_settings;
     std::string different_print_settings, different_printer_settings;
-    compatible_printers_condition.emplace_back(this->prints.get_edited_preset().compatible_printers_condition());
+    compatible_printers_condition.emplace_back(plate_preset.compatible_printers_condition());
 
-    const ConfigOptionStrings* compatible_printers =  (const_cast<PresetBundle*>(this))->prints.get_edited_preset().config.option<ConfigOptionStrings>("compatible_printers", false);
+    const ConfigOptionStrings* compatible_printers =  plate_preset.config.option<ConfigOptionStrings>("compatible_printers");
     if (compatible_printers)
         print_compatible_printers = compatible_printers->values;
     //BBS: add logic for settings check between different system presets
-    std::string print_inherits = this->prints.get_edited_preset().inherits();
+    std::string print_inherits = plate_preset.inherits();
     inherits                     .emplace_back(print_inherits);
-    const Preset* print_parent_preset =  this->prints.get_selected_preset_parent();
+    const Preset* print_parent_preset =  this->prints.get_preset_parent(plate_preset);
     if (print_parent_preset) {
-        std::vector<std::string> dirty_options = this->prints.dirty_options_without_option_list(&(this->prints.get_edited_preset()), print_parent_preset, ignore_settings_list, false);
+        std::vector<std::string> dirty_options = this->prints.dirty_options_without_option_list(&plate_preset, print_parent_preset, ignore_settings_list, false);
         if (!dirty_options.empty()) {
             different_print_settings = Slic3r::escape_strings_cstyle(dirty_options);
         }
@@ -3736,7 +4043,7 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
         if(opt->value < 1 || opt->value > int(num_filaments))
             opt->value = 1;
     }
-    out.option<ConfigOptionString >("print_settings_id",    true)->value  = this->prints.get_selected_preset_name();
+    out.option<ConfigOptionString >("print_settings_id",    true)->value  = this->plate_print_preset_name();
     out.option<ConfigOptionStrings>("filament_settings_id", true)->values = this->filament_presets;
     out.option<ConfigOptionString >("printer_settings_id",  true)->value  = this->printers.get_selected_preset_name();
     out.option<ConfigOptionStrings>("filament_ids", true)->values = filament_ids;
@@ -3923,6 +4230,9 @@ void PresetBundle::restore_selection(const Selection &selection)
 // is_external == false on if called from ConfigWizard
 void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config, Semver file_version, bool selected, bool is_custom_defined)
 {
+    // Per-nozzle process P8: a project or config file replaces the plate's process; a tool's profile shown in the Process tab
+    // is put back first.
+    this->end_nozzle_tool_view();
     PrinterTechnology printer_technology = Preset::printer_technology(config);
 
     auto clear_compatible_printers = [](DynamicPrintConfig& config){
@@ -4208,6 +4518,9 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // process on every nozzle, not whatever the previous project chose.
         if (!config.has("nozzle_process_presets"))
             this->project_config.set_key_value("nozzle_process_presets", new ConfigOptionStrings());
+        // Per-nozzle process P8: and no tool carries changes of its own.
+        if (!config.has("nozzle_process_edits"))
+            this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings());
         // Per-nozzle process P2: likewise every filament prints on its own nozzle in an older project.
         if (!config.has("filament_nozzle_assignment"))
             this->project_config.set_key_value("filament_nozzle_assignment", new ConfigOptionInts());
@@ -6024,6 +6337,16 @@ std::vector<std::string> PresetBundle::apply_print_settings_carry(const PrintSet
 
 void PresetBundle::update_compatible(PresetSelectCompatibleType select_other_print_if_incompatible, PresetSelectCompatibleType select_other_filament_if_incompatible)
 {
+    // Per-nozzle process P8: while the Process tab shows a tool's profile (often cut for another nozzle size than the
+    // printer preset's), it stays selected; a printer switch ends the view before it gets here.
+    if (m_tool_view.extruder >= 0)
+        select_other_print_if_incompatible = PresetSelectCompatibleType::Never;
+    // ... and its process list keeps offering what fits the tool, whichever way this returns.
+    struct ToolViewCompatibility
+    {
+        PresetBundle *bundle;
+        ~ToolViewCompatibility() { bundle->apply_tool_view_compatibility(); }
+    } tool_view_compatibility{ this };
     const Preset					&printer_preset					    = this->printers.get_edited_preset();
 	const PresetWithVendorProfile    printer_preset_with_vendor_profile = this->printers.get_preset_with_vendor_profile(printer_preset);
 

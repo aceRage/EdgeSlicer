@@ -12,6 +12,7 @@
 
 #include "PrintConfig.hpp"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -193,6 +194,75 @@ bool resolve_nozzle_line_widths(DynamicPrintConfig &config);
 ConfigOptionFloatOrPercent initial_layer_line_width_for_filament(const PrintConfig &config, unsigned int filament);
 // The default width of 1-based `filament`: its entry of nozzle_line_width, else `object_width` (the object's line_width).
 ConfigOptionFloatOrPercent line_width_for_filament(const PrintConfig &config, const ConfigOptionFloatOrPercent &object_width, unsigned int filament);
+
+// ---- Per-nozzle process P8: a whole process profile per tool (owner design 2026-11-01) ----
+//
+// The Process tab leads with [Plate] [T1 0.4] [T2 0.6] ... Every tool has a process profile of its own:
+//   - the one chosen for it (nozzle_process_presets, P1's key: one name per physical extruder), or
+//   - none chosen: the plate's process when that is made for the tool's nozzle size (or for no particular size), else the
+//     printer's system process for that size, picked automatically (pick_nozzle_process); when there is none the tool is
+//     listed in nozzle_process_missing and slicing is refused (nozzle_process_missing_error).
+// A tool's unsaved changes to its profile are a project key too (nozzle_process_edits, keyed by tool id).
+//
+// Which keys a tool's profile supplies (is_per_tool_process_option): the speed / acceleration / jerk keys (P1 slots), the line
+// widths (P2 / P6 stamping) and every region setting (nozzle_region_option_keys: walls, infill, top / bottom, ironing, fuzzy
+// skin, flow ratios...; stamped per role filament like the widths). Every other process key is plate-wide
+// (is_plate_process_option): layer heights, print sequence, prime tower, supports, brim / skirt, seams, slow-down... The
+// Plate entry edits those; a tool shows the Plate's values for them and an edit there writes the Plate's value.
+
+// The generic id of a tool in nozzle_process_edits: "T1".."Tn" (1-based physical extruder). Rack slots (P9) can get ids
+// of their own without changing the format.
+std::string nozzle_tool_id(size_t extruder);
+// The 0-based extruder of a "T<n>" id, -1 for any other id.
+int         nozzle_tool_id_extruder(const std::string &id);
+// The tool as messages name it: "T1", or "Left (T1)" / "Right (T2)" on Bambu's two-extruder machines.
+std::string nozzle_tool_name(const ConfigBase &config, size_t extruder);
+
+// The process region settings a tool's profile supplies besides speeds and widths, sorted.
+const std::vector<std::string> &nozzle_region_option_keys();
+bool                            is_nozzle_region_option(const std::string &key);
+// Whether a process key comes from the tool's own profile (speeds, widths, region settings).
+bool                            is_per_tool_process_option(const std::string &key);
+// Whether a process key is plate-wide: one value for the whole plate, edited on Plate.
+bool                            is_plate_process_option(const std::string &key);
+// Every plate-wide process key, sorted (the PR's list; tests).
+std::vector<std::string>        plate_process_option_keys();
+
+// Tool id -> the tool's unsaved changes (per-tool keys only).
+using NozzleProcessEdits = std::map<std::string, DynamicPrintConfig>;
+NozzleProcessEdits       parse_nozzle_process_edits(const std::vector<std::string> &entries);
+NozzleProcessEdits       nozzle_process_edits(const ConfigBase &config);
+// The stored form: one entry per tool with changes, "T2\nkey = value\n...", keys sorted.
+std::vector<std::string> serialize_nozzle_process_edits(const NozzleProcessEdits &edits);
+// The per-tool keys whose value in `edited` differs from `base`.
+DynamicPrintConfig       nozzle_process_diff(const DynamicPrintConfig &edited, const DynamicPrintConfig &base);
+// A tool's effective process: `base` (its profile) with `edits` applied to its per-tool keys, and the plate-wide keys from
+// `plate`.
+DynamicPrintConfig       nozzle_tool_process(const DynamicPrintConfig &plate, const DynamicPrintConfig &base, const DynamicPrintConfig *edits);
+
+// A process that may be picked automatically for a tool (one cut for its nozzle size and printer).
+struct NozzleProcessCandidate
+{
+    std::string name;
+    double      layer_height{ 0. };
+    bool        system{ false };
+};
+// The automatic choice: system presets first, then the layer height nearest the plate's, then the plate's quality word
+// ("Standard", "Strength"...), then "Standard", then by name. Empty when there is no candidate.
+std::string pick_nozzle_process(std::vector<NozzleProcessCandidate> candidates, double plate_layer_height, const std::string &plate_name);
+
+// Writes nozzle_region_values of a full config: for each filament the region settings of its tool's process (nullptr = the
+// plate's) for every region key some tool's process sets differently from the plate; empty when none does. Called by
+// fill_nozzle_process_slots(). Returns whether any key differs.
+bool fill_nozzle_region_values(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
+// Stamps nozzle_region_values into the region's settings, each key through the filament of its role: top / bottom / solid /
+// bridge / ironing settings through the solid infill filament, other infill settings through the sparse infill filament,
+// everything else through the wall filament.
+void stamp_nozzle_region_values(PrintRegionConfig &config);
+
+// Validation messages that name the tool, its size and the setting (owner design E).
+std::string nozzle_layer_height_error(const ConfigBase &config, unsigned int filament_id, bool first_layer, double layer_height, double nozzle);
+std::string nozzle_process_missing_error(const ConfigBase &config, size_t extruder);
 
 } // namespace Slic3r
 

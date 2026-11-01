@@ -1856,6 +1856,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsOrPercents,     nozzle_skeleton_infill_line_width))
     // Per-nozzle process P6: the bridge width, the same way.
     ((ConfigOptionFloatsOrPercents,     nozzle_bridge_line_width))
+    // Per-nozzle process P8: per FILAMENT (index filament - 1), the region keys the process of the filament's tool
+    // gives ("key = value" lines, nozzle_region_option_keys()); empty without per-tool processes
+    // (stamp_nozzle_region_values in region_config_from_model_volume).
+    ((ConfigOptionStrings,              nozzle_region_values))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
@@ -2305,6 +2309,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Per-nozzle process P1: the process preset chosen for each physical extruder ("" = the plate's
     // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
     ((ConfigOptionStrings,             nozzle_process_presets))
+    // Per-nozzle process P8: each tool's unsaved changes to its process ("T2" then "key = value" lines, one entry per
+    // tool) and the 1-based tools that need a process of their own and have none (Print::validate refuses them).
+    ((ConfigOptionStrings,             nozzle_process_edits))
+    ((ConfigOptionInts,                nozzle_process_missing))
     ((ConfigOptionBool,                process_extruder_values))
     // Per-nozzle process P6: explicit line widths per nozzle size / tool, and the nozzle the process's mm widths are for.
     ((ConfigOptionString,              process_nozzle_line_widths))

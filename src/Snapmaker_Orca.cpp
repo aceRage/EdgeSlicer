@@ -630,6 +630,19 @@ struct NamedPresets
         return t == Preset::TYPE_PRINTER ? b.printers : t == Preset::TYPE_PRINT ? b.prints : b.filaments;
     }
 
+    // Per-nozzle process P8: the vendor bundle that lists a system preset (its prints and printers decide which process
+    // fits which nozzle size), or nullptr.
+    PresetBundle* bundle_with(const std::string& name, Preset::Type t)
+    {
+        build_index();
+        for (const auto& kv : vendor_index)
+            if (kv.second[type_slot(t)].count(name))
+                if (PresetBundle* b = vendor_bundle(kv.first))
+                    if (collection(*b, t).find_preset(name) != nullptr)
+                        return b;
+        return nullptr;
+    }
+
     // System preset: full (inherits-flattened) config from the vendor bundle that lists the name.
     const Preset* find_system(const std::string& name, Preset::Type t)
     {
@@ -3679,24 +3692,84 @@ int CLI::run(int argc, char **argv)
     // process each physical extruder takes its speeds, accelerations and jerk from. Copy them into the
     // extruders' slots of the process keys, as the GUI's full_config() does. A name that cannot be found
     // leaves that extruder as the project / plate has it (a project already carries the copied values).
-    if (const std::vector<std::string> nozzle_process_names = nozzle_process_preset_names(m_print_config); !nozzle_process_names.empty()) {
-        const auto &names = m_print_config.option<ConfigOptionStrings>("nozzle_process_presets")->values;
-        std::vector<DynamicPrintConfig>         nozzle_process_store(names.size());
-        std::vector<const DynamicPrintConfig *> nozzle_process_sources(names.size(), nullptr);
-        for (size_t e = 0; e < names.size(); ++e) {
-            if (names[e].empty())
-                continue;
-            std::string filament_id_unused;
-            if (const Preset *preset = named_presets().find_system(names[e], Preset::TYPE_PRINT)) {
-                nozzle_process_store[e] = preset->config;
-                nozzle_process_sources[e] = &nozzle_process_store[e];
-            } else if (named_presets().find_user(names[e], Preset::TYPE_PRINT, nozzle_process_store[e], filament_id_unused)) {
-                nozzle_process_sources[e] = &nozzle_process_store[e];
-            } else {
-                BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << names[e] << "' for extruder " << e + 1 << " not found";
-                boost::nowide::cerr << "per-nozzle process: preset not found: " << names[e] << std::endl;
+    //
+    // Per-nozzle process P8: every tool takes its whole profile (speeds, widths, region settings) from its own process: the
+    // one named for it, else the plate's when that is made for the tool's nozzle size (or for no size), else the system
+    // process of that size picked automatically (as the GUI does). The project's per-tool changes (nozzle_process_edits) go
+    // on top. A tool with no fitting process is listed in nozzle_process_missing, which Print::validate refuses.
+    if (supports_nozzle_processes(m_print_config)) {
+        const std::vector<double> nozzles = effective_nozzle_diameters(m_print_config);
+        std::vector<std::string>  names;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("nozzle_process_presets"))
+            names = opt->values;
+        names.resize(nozzles.size());
+        const NozzleProcessEdits edits = nozzle_process_edits(m_print_config);
+
+        // The plate's process: the size it is made for, and the vendor bundle to pick other sizes' processes from.
+        std::string plate_name = m_config.opt_string("process_preset", true);
+        auto config_string = [this](const char *key) {
+            const auto *opt = m_print_config.option<ConfigOptionString>(key);
+            return opt != nullptr ? opt->value : std::string();
+        };
+        if (plate_name.empty())
+            plate_name = config_string("print_settings_id");
+        PresetBundle *plate_bundle = nullptr;
+        double        plate_claim  = 0.;
+        {
+            std::string system_name = plate_name;
+            if (named_presets().find_system(system_name, Preset::TYPE_PRINT) == nullptr) {
+                // A user process: the system process it inherits.
+                DynamicPrintConfig user;
+                std::string        filament_id_unused;
+                system_name.clear();
+                if (!plate_name.empty() && named_presets().find_user(plate_name, Preset::TYPE_PRINT, user, filament_id_unused))
+                    if (const auto *inherits = user.option<ConfigOptionString>("inherits"))
+                        system_name = inherits->value;
             }
+            if (!system_name.empty())
+                if (const Preset *sys = named_presets().find_system(system_name, Preset::TYPE_PRINT))
+                    if ((plate_bundle = named_presets().bundle_with(system_name, Preset::TYPE_PRINT)) != nullptr)
+                        plate_claim = PresetBundle::process_nozzle_claim(*sys, plate_bundle->prints, plate_bundle->printers);
         }
+        const double plate_lh = m_print_config.option<ConfigOptionFloat>("layer_height") != nullptr ? m_print_config.opt_float("layer_height") : 0.;
+
+        std::vector<DynamicPrintConfig>         nozzle_process_store(nozzles.size());
+        std::vector<const DynamicPrintConfig *> nozzle_process_sources(nozzles.size(), nullptr);
+        std::vector<int>                        missing;
+        for (size_t e = 0; e < nozzles.size(); ++e) {
+            DynamicPrintConfig base;
+            bool               has_base = false;
+            std::string        filament_id_unused;
+            std::string        name = names[e];
+            if (name.empty() && plate_claim > 0. && std::abs(plate_claim - nozzles[e]) > EPSILON && plate_bundle != nullptr) {
+                name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
+                                                           nozzles[e], plate_lh, plate_name);
+                if (name.empty()) {
+                    missing.push_back(int(e) + 1);
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits T" << e + 1 << " (" << nozzles[e] << " mm)";
+                    boost::nowide::cerr << "per-nozzle process: no process fits T" << e + 1 << " (" << nozzles[e] << " mm)" << std::endl;
+                    continue;
+                }
+                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: T" << e + 1 << " (" << nozzles[e] << " mm) uses '" << name << "' (picked)";
+                boost::nowide::cout << "per-nozzle process: T" << e + 1 << " (" << nozzles[e] << " mm) uses '" << name << "', picked for its size" << std::endl;
+            }
+            if (!name.empty()) {
+                if (const Preset *preset = named_presets().find_system(name, Preset::TYPE_PRINT)) {
+                    base     = preset->config;
+                    has_base = true;
+                } else if (named_presets().find_user(name, Preset::TYPE_PRINT, base, filament_id_unused)) {
+                    has_base = true;
+                } else {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << name << "' for extruder " << e + 1 << " not found";
+                    boost::nowide::cerr << "per-nozzle process: preset not found: " << name << std::endl;
+                }
+            }
+            const auto it = edits.find(nozzle_tool_id(e));
+            nozzle_process_store[e] = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            if (!nozzle_process_diff(nozzle_process_store[e], m_print_config).empty())
+                nozzle_process_sources[e] = &nozzle_process_store[e];
+        }
+        m_print_config.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
         if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources))
             BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filled the extruder slots of the process keys";
     }

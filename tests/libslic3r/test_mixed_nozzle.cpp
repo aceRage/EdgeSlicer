@@ -234,7 +234,7 @@ SCENARIO("Mixed nozzle (a): one object's fine nozzle does not clamp another obje
         // "Layer height cannot exceed nozzle diameter." even though its own nozzle is 0.6.
         const std::string message = validate_message(model, config);
         INFO(message);
-        REQUIRE(message.find("Layer height cannot exceed nozzle diameter") == std::string::npos);
+        REQUIRE(message.find("is too high") == std::string::npos);
     }
 }
 
@@ -251,7 +251,8 @@ SCENARIO("Mixed nozzle (a): an object still cannot out-run its own nozzle", "[Mi
     {
         const std::string message = validate_message(model, config);
         INFO(message);
-        REQUIRE(message.find("Layer height cannot exceed nozzle diameter") != std::string::npos);
+        // Per-nozzle process P8: the message names the tool, its size and the setting.
+        REQUIRE(message.find("T2 has a 0.2 mm nozzle; layer height 0.3 mm is too high (max 0.2 mm)") != std::string::npos);
     }
 }
 

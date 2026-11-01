@@ -4609,6 +4609,25 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     if (config.outer_wall_filament.value > (int) num_extruders)
         config.outer_wall_filament.value = 0;
     clamp_exturder_to_default(config.solid_infill_filament, num_extruders);
+    // Per-nozzle process P8: every other region setting from the process of the tool that prints the role (no-op without
+    // per-tool processes). A setting made on the object, part, modifier or layer range still wins over the tool's process.
+    if (!config.nozzle_region_values.values.empty()) {
+        stamp_nozzle_region_values(config);
+        auto reapply_region = [&config](const DynamicPrintConfig &src) {
+            for (const std::string &key : src.keys())
+                if (is_nozzle_region_option(key))
+                    if (ConfigOption *dst = config.option(key); dst != nullptr)
+                        if (const ConfigOption *opt = src.option(key); opt != nullptr && opt->type() == dst->type())
+                            dst->set(opt);
+        };
+        if (volume.is_model_part())
+            reapply_region(volume.get_object()->config.get());
+        reapply_region(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_region(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_region(*layer_range_config);
+    }
     if (config.sparse_infill_density.value < 0.00011f)
         // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
         // See GH issue #5910.

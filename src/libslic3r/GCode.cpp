@@ -9912,6 +9912,11 @@ void GCode::append_full_config(const Print& print, std::string& str)
         if ((key == "filament_nozzle_assignment" || (boost::starts_with(key, "nozzle_") && boost::ends_with(key, "_line_width"))) &&
             cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0)
             continue;
+        // Per-nozzle process P8: the per-filament region values are internal (the values they stand for are in the moves);
+        // the tools' own changes only when a tool has some; the missing list never (such a job is refused).
+        if (key == "nozzle_region_values" || key == "nozzle_process_missing" ||
+            (key == "nozzle_process_edits" && cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0))
+            continue;
         // Per-nozzle process P6: the per-nozzle width table and the widths' nozzle only when set.
         if ((key == "process_nozzle_line_widths" && print.config().process_nozzle_line_widths.value.empty()) ||
             (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))

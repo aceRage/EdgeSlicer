@@ -3,14 +3,30 @@
 #include "NozzleProcess.hpp"
 #include "NozzleOverride.hpp"
 
+#include "I18N.hpp"
 #include "PrintConfig.hpp"
+#include "Preset.hpp"
 #include "ToolSlots.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <functional>
+#include <map>
 #include <memory>
+#include <set>
+#include <sstream>
+#include <tuple>
 
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
+
+#ifndef L
+#define L(s) Slic3r::I18N::translate(s)
+#endif
 
 namespace Slic3r {
 
@@ -393,6 +409,8 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 
     // Per-nozzle process P2: the line widths of each filament's nozzle process.
     fill_nozzle_line_widths(config, sources);
+    // Per-nozzle process P8: and every other region setting of it (walls, infill, top / bottom, ironing...).
+    fill_nozzle_region_values(config, sources);
 
     if (!keep) {
         config.set_key_value("print_extruder_id", new ConfigOptionInts(ids));
@@ -967,6 +985,351 @@ ConfigOptionFloatOrPercent line_width_for_filament(const PrintConfig &config, co
     if (const FloatOrPercent *w = nozzle_width_at(config.nozzle_line_width, int(filament)))
         return ConfigOptionFloatOrPercent(w->value, w->percent);
     return object_width;
+}
+
+// ---- Per-nozzle process P8: a whole process profile per tool -------------------------------------------------------
+
+std::string nozzle_tool_id(size_t extruder) { return "T" + std::to_string(extruder + 1); }
+
+int nozzle_tool_id_extruder(const std::string &id)
+{
+    if (id.size() < 2 || id[0] != 'T')
+        return -1;
+    for (size_t i = 1; i < id.size(); ++i)
+        if (!std::isdigit(static_cast<unsigned char>(id[i])))
+            return -1;
+    const int n = std::atoi(id.c_str() + 1);
+    return n >= 1 ? n - 1 : -1;
+}
+
+std::string nozzle_tool_name(const ConfigBase &config, size_t extruder)
+{
+    const auto  *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    const size_t count   = nozzles != nullptr ? nozzles->size() : 0;
+    if (count == 2 && is_bambu_grouping_machine(config, 2))
+        return std::string(extruder == 0 ? "Left" : "Right") + " (" + nozzle_tool_id(extruder) + ")";
+    return nozzle_tool_id(extruder);
+}
+
+namespace {
+
+// The keys that route a region's roles to filaments: plate-wide, they decide which tool prints what.
+bool is_region_routing_key(const std::string &key)
+{
+    return key == "wall_filament" || key == "outer_wall_filament" || key == "sparse_infill_filament" || key == "solid_infill_filament";
+}
+
+// Process keys that describe a profile rather than set a value: neither shown as Plate nor taken per tool.
+bool is_process_meta_key(const std::string &key)
+{
+    static const std::set<std::string> keys { "inherits", "compatible_printers", "compatible_printers_condition", "print_settings_id",
+                                              "print_extruder_id", "print_extruder_variant", "print_extruder_nozzle_diameter",
+                                              "process_extruder_values", "process_flow_support", "version", "setting_id", "from",
+                                              "name", "print_compatible_printers" };
+    return keys.count(key) > 0;
+}
+
+enum class RegionRole { Wall, Sparse, Solid };
+
+// The role whose filament a region key is taken from (stamp_nozzle_region_values): top / bottom / solid / bridge /
+// ironing settings from the solid infill filament, other infill settings from the sparse infill filament, the rest
+// (walls, seams, fuzzy skin, overhangs, flow) from the wall filament.
+RegionRole region_key_role(const std::string &key)
+{
+    if (key == "only_one_wall_top" || key == "min_width_top_surface" || key == "top_bottom_infill_wall_overlap")
+        return RegionRole::Wall;
+    if (boost::starts_with(key, "top_") || boost::starts_with(key, "bottom_") || key.find("solid") != std::string::npos ||
+        key.find("bridge") != std::string::npos || boost::starts_with(key, "ironing") || key == "infill_complete_top")
+        return RegionRole::Solid;
+    if (key.find("infill") != std::string::npos || boost::starts_with(key, "lightning_") || boost::starts_with(key, "lateral_lattice") ||
+        boost::starts_with(key, "gyroid") || boost::starts_with(key, "fill_") || boost::starts_with(key, "skin_") ||
+        boost::starts_with(key, "skeleton_") || boost::starts_with(key, "locked_") || boost::starts_with(key, "adaptive_infill"))
+        return RegionRole::Sparse;
+    return RegionRole::Wall;
+}
+
+std::string serialize_option_lines(const ConfigBase &config, const std::vector<std::string> &keys)
+{
+    std::string out;
+    for (const std::string &key : keys)
+        if (const ConfigOption *opt = config.option(key)) {
+            if (!out.empty())
+                out += '\n';
+            out += key + " = " + opt->serialize();
+        }
+    return out;
+}
+
+// "key = value" lines into `out` (unknown keys and values that do not parse are skipped).
+void parse_option_lines(const std::string &text, ConfigBase &out, const std::function<bool(const std::string &)> &accept = nullptr)
+{
+    std::istringstream in(text);
+    std::string        line;
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const size_t eq = line.find(" = ");
+        if (eq == std::string::npos)
+            continue;
+        std::string key = line.substr(0, eq);
+        boost::algorithm::trim(key);
+        if (key.empty() || print_config_def.get(key) == nullptr || (accept && !accept(key)))
+            continue;
+        try {
+            out.set_deserialize_nothrow(key, line.substr(eq + 3), ctxt);
+        } catch (const std::exception &) {
+        }
+    }
+}
+
+} // namespace
+
+const std::vector<std::string> &nozzle_region_option_keys()
+{
+    static const std::vector<std::string> keys = [] {
+        const std::vector<std::string> &print_options = Preset::print_options();
+        const std::set<std::string>     process(print_options.begin(), print_options.end());
+        std::vector<std::string>        out;
+        for (const std::string &key : PrintRegionConfig().keys()) {
+            if (process.count(key) == 0 || is_region_routing_key(key) || boost::starts_with(key, "nozzle_") ||
+                is_per_nozzle_process_option(key) || is_nozzle_width_key(key) || is_process_meta_key(key))
+                continue;
+            out.push_back(key);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }();
+    return keys;
+}
+
+bool is_nozzle_region_option(const std::string &key)
+{
+    const auto &keys = nozzle_region_option_keys();
+    return std::binary_search(keys.begin(), keys.end(), key);
+}
+
+bool is_per_tool_process_option(const std::string &key)
+{
+    return is_per_nozzle_process_option(key) || is_nozzle_width_key(key) || is_nozzle_region_option(key) ||
+           key == "line_width_nozzle_diameter" || key == "process_nozzle_line_widths";
+}
+
+bool is_plate_process_option(const std::string &key)
+{
+    if (is_per_tool_process_option(key) || is_process_meta_key(key))
+        return false;
+    static const std::set<std::string> process(Preset::print_options().begin(), Preset::print_options().end());
+    return process.count(key) > 0;
+}
+
+std::vector<std::string> plate_process_option_keys()
+{
+    std::vector<std::string> out;
+    for (const std::string &key : Preset::print_options())
+        if (is_plate_process_option(key))
+            out.push_back(key);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+NozzleProcessEdits parse_nozzle_process_edits(const std::vector<std::string> &entries)
+{
+    NozzleProcessEdits out;
+    for (const std::string &entry : entries) {
+        const size_t nl = entry.find('\n');
+        std::string  id = entry.substr(0, nl);
+        boost::algorithm::trim(id);
+        if (id.empty())
+            continue;
+        DynamicPrintConfig values;
+        if (nl != std::string::npos)
+            parse_option_lines(entry.substr(nl + 1), values, [](const std::string &key) { return is_per_tool_process_option(key); });
+        if (!values.empty())
+            out[id] = std::move(values);
+    }
+    return out;
+}
+
+NozzleProcessEdits nozzle_process_edits(const ConfigBase &config)
+{
+    const auto *opt = dynamic_cast<const ConfigOptionStrings *>(config.option("nozzle_process_edits"));
+    return opt != nullptr ? parse_nozzle_process_edits(opt->values) : NozzleProcessEdits();
+}
+
+std::vector<std::string> serialize_nozzle_process_edits(const NozzleProcessEdits &edits)
+{
+    std::vector<std::string> out;
+    for (const auto &[id, values] : edits) {
+        if (values.empty())
+            continue;
+        std::vector<std::string> keys = values.keys();
+        std::sort(keys.begin(), keys.end());
+        out.push_back(id + "\n" + serialize_option_lines(values, keys));
+    }
+    return out;
+}
+
+DynamicPrintConfig nozzle_process_diff(const DynamicPrintConfig &edited, const DynamicPrintConfig &base)
+{
+    DynamicPrintConfig out;
+    for (const std::string &key : edited.keys()) {
+        if (!is_per_tool_process_option(key))
+            continue;
+        const ConfigOption *a = edited.option(key);
+        const ConfigOption *b = base.option(key);
+        if (a != nullptr && (b == nullptr || !(*a == *b)))
+            out.set_key_value(key, a->clone());
+    }
+    return out;
+}
+
+DynamicPrintConfig nozzle_tool_process(const DynamicPrintConfig &plate, const DynamicPrintConfig &base, const DynamicPrintConfig *edits)
+{
+    DynamicPrintConfig out = base;
+    if (edits != nullptr)
+        for (const std::string &key : edits->keys())
+            if (is_per_tool_process_option(key))
+                out.set_key_value(key, edits->option(key)->clone());
+    // The plate-wide keys are the plate's, whatever the tool's profile holds.
+    for (const std::string &key : plate.keys())
+        if (is_plate_process_option(key))
+            out.set_key_value(key, plate.option(key)->clone());
+    return out;
+}
+
+namespace {
+// The quality word of a process name ("0.20mm Standard @Snapmaker U1 (0.4 nozzle)" -> "Standard").
+std::string process_quality_word(const std::string &name)
+{
+    const size_t mm = name.find("mm ");
+    const size_t at = name.find(" @");
+    if (mm == std::string::npos || at == std::string::npos || at <= mm + 3)
+        return std::string();
+    return name.substr(mm + 3, at - mm - 3);
+}
+} // namespace
+
+std::string pick_nozzle_process(std::vector<NozzleProcessCandidate> candidates, double plate_layer_height, const std::string &plate_name)
+{
+    if (candidates.empty())
+        return std::string();
+    const std::string word = process_quality_word(plate_name);
+    auto rank = [&](const NozzleProcessCandidate &c) {
+        return std::make_tuple(c.system ? 0 : 1, int(std::lround(std::abs(c.layer_height - plate_layer_height) * 1000.)),
+                               (!word.empty() && process_quality_word(c.name) == word) ? 0 : 1,
+                               process_quality_word(c.name) == "Standard" ? 0 : 1, c.name);
+    };
+    return std::min_element(candidates.begin(), candidates.end(),
+                            [&](const NozzleProcessCandidate &a, const NozzleProcessCandidate &b) { return rank(a) < rank(b); })
+        ->name;
+}
+
+bool fill_nozzle_region_values(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources)
+{
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    // The keys some tool's process sets to another value than the plate: every filament's entry carries all of
+    // them, so a region a modifier moves to another filament is stamped completely.
+    std::vector<std::string> keys;
+    for (const std::string &key : nozzle_region_option_keys()) {
+        const ConfigOption *plate = config.option(key);
+        if (plate == nullptr)
+            continue;
+        for (const DynamicPrintConfig *src : sources)
+            if (src != nullptr)
+                if (const ConfigOption *own = src->option(key); own != nullptr && own->type() == plate->type() && !(*own == *plate)) {
+                    keys.push_back(key);
+                    break;
+                }
+    }
+    auto *opt = new ConfigOptionStrings();
+    if (!keys.empty()) {
+        opt->values.assign(count, std::string());
+        for (size_t f = 0; f < count; ++f) {
+            const size_t              e   = nozzle_for_filament(config, unsigned(f + 1));
+            const DynamicPrintConfig *src = e < sources.size() ? sources[e] : nullptr;
+            std::string               text;
+            for (const std::string &key : keys) {
+                const ConfigOption *value = src != nullptr ? src->option(key) : nullptr;
+                if (value == nullptr || value->type() != config.option(key)->type())
+                    value = config.option(key);
+                if (!text.empty())
+                    text += '\n';
+                text += key + " = " + value->serialize();
+            }
+            opt->values[f] = std::move(text);
+        }
+    }
+    config.set_key_value("nozzle_region_values", opt);
+    return !keys.empty();
+}
+
+void stamp_nozzle_region_values(PrintRegionConfig &c)
+{
+    const std::vector<std::string> &entries = c.nozzle_region_values.values;
+    if (entries.empty())
+        return;
+    // The filament of each role, as PrintRegion::extruder() resolves it (stamp_nozzle_line_widths).
+    const int wall   = c.wall_filament.value;
+    const int sparse = c.sparse_infill_filament.value;
+    const int solid  = std::abs(c.sparse_infill_density.value - 100.) < EPSILON ? sparse : c.solid_infill_filament.value;
+    std::map<int, DynamicPrintConfig> parsed;
+    auto values_of = [&](int filament) -> const DynamicPrintConfig * {
+        if (filament < 1 || size_t(filament) > entries.size())
+            return nullptr;
+        auto it = parsed.find(filament);
+        if (it == parsed.end()) {
+            DynamicPrintConfig values;
+            parse_option_lines(entries[size_t(filament - 1)], values, [](const std::string &key) { return is_nozzle_region_option(key); });
+            it = parsed.emplace(filament, std::move(values)).first;
+        }
+        return &it->second;
+    };
+    std::set<std::string> keys;
+    for (int f : { wall, sparse, solid })
+        if (const DynamicPrintConfig *values = values_of(f))
+            for (const std::string &key : values->keys())
+                keys.insert(key);
+    for (const std::string &key : keys) {
+        const RegionRole          role   = region_key_role(key);
+        const DynamicPrintConfig *values = values_of(role == RegionRole::Wall ? wall : role == RegionRole::Sparse ? sparse : solid);
+        ConfigOption             *dst    = c.option(key);
+        if (values == nullptr || dst == nullptr)
+            continue;
+        if (const ConfigOption *src = values->option(key); src != nullptr && src->type() == dst->type())
+            dst->set(src);
+    }
+}
+
+std::string nozzle_layer_height_error(const ConfigBase &config, unsigned int filament_id, bool first_layer, double layer_height, double nozzle)
+{
+    const auto *nozzles   = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    const bool  several   = nozzles != nullptr && nozzles->size() >= 2;
+    const std::string what = first_layer ? L("first layer height") : L("layer height");
+    char h[32], n[32];
+    snprintf(h, sizeof(h), "%g", std::round(layer_height * 1000.) / 1000.);
+    snprintf(n, sizeof(n), "%g", std::round(nozzle * 1000.) / 1000.);
+    if (!several)
+        return (boost::format(L("The nozzle is %1% mm; %2% %3% mm is too high (max %1% mm). Lower the %2%, or use a larger nozzle.")) % n % what % h)
+            .str();
+    const std::string tool = nozzle_tool_name(config, nozzle_for_filament(config, filament_id));
+    return (boost::format(L("%1% has a %2% mm nozzle; %3% %4% mm is too high (max %2% mm). Lower it on Plate, or change %1%'s nozzle.")) % tool % n %
+            what % h)
+        .str();
+}
+
+std::string nozzle_process_missing_error(const ConfigBase &config, size_t extruder)
+{
+    const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_diameter"));
+    char        n[32];
+    snprintf(n, sizeof(n), "%g", nozzles != nullptr ? std::round(nozzles->get_at(extruder) * 1000.) / 1000. : 0.);
+    const std::string tool = nozzle_tool_name(config, extruder);
+    return (boost::format(L("%1% has a %2% mm nozzle, and neither the plate's process nor any process of this printer is made for "
+                            "%2% mm nozzles. Choose a process for %1% on the Process tab, or change %1%'s nozzle.")) %
+            tool % n)
+        .str();
 }
 
 } // namespace Slic3r

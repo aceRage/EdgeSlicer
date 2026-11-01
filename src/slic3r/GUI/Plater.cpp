@@ -4734,8 +4734,18 @@ void Sidebar::search()
     p->searcher.search();
 }
 
-void Sidebar::jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category)
+void Sidebar::jump_to_option(const std::string& opt_key_in, Preset::Type type, const std::wstring& category)
 {
+    // Per-nozzle process P8 (owner design E): "outer_wall_line_width@T2" is that setting in T2's own process.
+    std::string opt_key = opt_key_in;
+    int         tool    = -1;
+    if (const size_t at = opt_key.find('@'); at != std::string::npos) {
+        tool    = nozzle_tool_id_extruder(opt_key.substr(at + 1));
+        opt_key = opt_key.substr(0, at);
+    }
+    if (type == Preset::TYPE_PRINT && tool >= 0)
+        if (auto* print_tab = dynamic_cast<TabPrint*>(wxGetApp().get_tab(Preset::TYPE_PRINT)))
+            print_tab->show_tool(tool);
     //const Search::Option& opt = p->searcher.get_option(opt_key, type);
     if (type == Preset::TYPE_PRINT) {
         auto tab = dynamic_cast<TabPrintModel*>(wxGetApp().params_panel()->get_current_tab());
@@ -4831,7 +4841,11 @@ void Sidebar::on_nozzle_sizes_changed()
     if (bundle == nullptr)
         return;
     bundle->remember_nozzle_diameter_override(*wxGetApp().app_config);
-    // Per-nozzle processes (Speeds from) are cut for a nozzle size.
+    // Per-nozzle process P8: the Process tab shows the Plate again (a tool's profile depends on its size).
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+            tab_print->show_tool(-1);
+    // Per-nozzle processes are cut for a nozzle size.
     bundle->prune_nozzle_processes();
     update_nozzle_settings(false);
     update_filament_nozzle_summary();

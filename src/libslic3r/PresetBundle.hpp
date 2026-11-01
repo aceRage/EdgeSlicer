@@ -6,6 +6,7 @@
 #include "FilamentColorLibrary.hpp"
 #include "enum_bitmask.hpp"
 #include "MixedFilament.hpp"
+#include "NozzleProcess.hpp"
 
 #include <memory>
 #include <functional>
@@ -714,7 +715,72 @@ public:
     // model keeps the project's sizes, cut to its extruder count.
     void                        update_nozzle_diameter_override_for_printer(AppConfig &config);
 
+    // ---- Per-nozzle process P8: a whole process profile per tool (NozzleProcess.hpp "P8") ----
+    // Every tool of a printer that takes per-nozzle processes has a process profile: the one chosen for it
+    // (nozzle_process_presets), else the plate's process when that is made for the tool's size, else the system process
+    // of that size picked automatically. Its unsaved changes are project_config "nozzle_process_edits".
+    //
+    // How the tool's profile is chosen, for the Process tab's selector and the slicing config.
+    enum class NozzleToolProcessKind { FollowsPlate, Chosen, AutoPicked, Missing };
+    struct NozzleToolProcess
+    {
+        NozzleToolProcessKind kind{ NozzleToolProcessKind::FollowsPlate };
+        std::string           name; // the profile's preset name (the plate's for FollowsPlate / Missing)
+        bool                  edited{ false }; // the tool carries unsaved changes
+    };
+    NozzleToolProcess           nozzle_tool_process_info(size_t extruder) const;
+    // The tool's effective process config (its profile, its changes, the plate-wide keys from the Plate). False for a tool
+    // with Missing (out = the plate's).
+    bool                        nozzle_tool_process_config(size_t extruder, DynamicPrintConfig &out) const;
+    // The system process picked for a tool whose size the plate's process is not made for; "" when the plate's process fits
+    // the tool or no process of that size exists (`missing` tells which).
+    std::string                 auto_nozzle_process(size_t extruder, bool *missing = nullptr) const;
+    // The same rule on any preset collections (the CLI's vendor bundle): the system process of `prints` cut for a
+    // `printer_model` printer with a `diameter` nozzle, nearest the plate's layer height.
+    static std::string          auto_nozzle_process_in(const PresetCollection &prints, const PresetCollection &printers, const std::string &printer_model,
+                                                       double diameter, double plate_layer_height, const std::string &plate_name);
+    // The nozzle size a process is made for (its printers' printer_variant), 0 when none or several.
+    static double               process_nozzle_claim(const Preset &process, const PresetCollection &prints, const PresetCollection &printers);
+    // The tools' unsaved changes.
+    NozzleProcessEdits          nozzle_process_edits_map() const;
+    void                        set_nozzle_process_edits(size_t extruder, const DynamicPrintConfig &diff);
+
+    // The Process tab's tool view. While a tool is shown, `prints` has the tool's profile selected and edited (with the Plate's
+    // plate-wide values, which the dirty comparison ignores); the plate's own edited preset is kept aside and is what
+    // full_config(), export_selections() and the plate-preset readers below use.
+    // -1 = the Plate is shown.
+    int                         nozzle_tool_view() const { return m_tool_view.extruder; }
+    bool                        begin_nozzle_tool_view(size_t extruder);
+    void                        end_nozzle_tool_view();
+    // The plate's process preset (edited), whichever view the Process tab shows.
+    const Preset &              plate_print_preset() const { return m_tool_view.extruder >= 0 ? m_tool_view.plate : this->prints.get_edited_preset(); }
+    std::string                 plate_print_preset_name() const;
+    // The tool view: a plate-wide key was edited; it is the Plate's value (shared by every tool).
+    void                        nozzle_tool_view_plate_key_changed(const std::string &key);
+    // The tool view: after another preset was selected for the tool, or the shown one was saved: the tool now uses it, its
+    // changes are the edited preset's; the plate-wide keys show the Plate's values again.
+    void                        nozzle_tool_view_sync();
+    // The tool view, around saving the tool's profile: the plate-wide keys take the profile's own values for the saved file,
+    // then the Plate's again.
+    void                        nozzle_tool_view_before_save();
+    void                        nozzle_tool_view_after_save();
+
 private:
+    struct NozzleToolView
+    {
+        int         extruder{ -1 };
+        Preset      plate;            // the plate's edited preset, kept aside
+        size_t      plate_idx{ size_t(-1) };
+        std::string tool_preset;      // the preset selected for the tool when the view began (or last synced)
+        bool        follows_plate{ false };
+        bool        auto_picked{ false };
+    };
+    NozzleToolView              m_tool_view;
+    void                        apply_plate_keys_to_tool_view();
+    // While a tool is shown, the process list offers what fits the tool's nozzle (its size, this printer model).
+    void                        apply_tool_view_compatibility();
+    void                        store_tool_view_edits();
+
     void                        restore_nozzle_processes(AppConfig &config, const std::string &printer_name);
     // The printer the per-nozzle selection was last restored for or loaded with (a project).
     std::string                 m_nozzle_process_printer;

@@ -116,6 +116,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_editing.cpp
 	test_nozzle_widths.cpp
 	test_nozzle_override.cpp
+	test_nozzle_tool_process.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp

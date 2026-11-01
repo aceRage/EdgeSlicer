@@ -4529,6 +4529,34 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionStrings {});
 
+    // Per-nozzle process P8 (NozzleProcess.hpp): project-level. Each tool's unsaved changes to its own process
+    // profile, one entry per tool: the tool id ("T2") on the first line, then "key = value" lines. Ids are generic
+    // so rack slots can be added later without a format change.
+    def = this->add("nozzle_process_edits", coStrings);
+    def->label = "Process changes per nozzle";
+    def->tooltip = "Unsaved changes each nozzle's process profile carries in this project.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P8: filled while the slicing config is assembled. The 1-based tools whose nozzle size the
+    // plate's process is not made for and for which no process of that size exists; Print::validate refuses a job
+    // that prints with one of them. Internal.
+    def = this->add("nozzle_process_missing", coInts);
+    def->label = "Nozzles without a process";
+    def->tooltip = "Nozzles whose size no process fits (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P8: per filament, the region settings of its tool's process ("key = value" lines). Internal.
+    def = this->add("nozzle_region_values", coStrings);
+    def->label = "Region settings per filament";
+    def->tooltip = "Region settings per filament from the process of its nozzle (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
     // A process preset key: true once the user split the process's speeds per nozzle (left / right on the
     // Speed page). fill_nozzle_process_slots() also sets it in the slicing config when a per-nozzle process
     // brings values of its own. False - every system profile, every older preset - means every extruder

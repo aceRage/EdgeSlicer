@@ -533,6 +533,9 @@ protected:
     // Adjusts m_options_list (the modified / system markers) before the fields are decorated.
     virtual void adjust_options_list() {}
     void on_nozzle_size_segment(int index);
+    // Per-nozzle process P8 (owner bug F): select the page titled `title` again when something rebuilt the page list and
+    // left another page shown.
+    void select_page_by_title(const wxString& title);
 
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);
@@ -574,14 +577,31 @@ public:
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
 	// Per-nozzle process P2: the Speed page header's note lists the filaments on each nozzle; refresh it after a
 	// filament's nozzle assignment changed.
-	void		refresh_nozzle_header() { refresh_nozzle_controls(); }
+	void		refresh_nozzle_header() { refresh_nozzle_controls(); refresh_tool_selector(); }
+
+	// Per-nozzle process P8: the [Plate] [T1 0.4] [T2 0.6] ... selector that leads the Process tab. Selecting a tool shows its
+	// own process profile in the preset combo and on every page (PresetBundle::begin_nozzle_tool_view).
+	void		refresh_tool_selector();
+	// Show the Plate (-1) or tool `extruder`'s profile. False when the printer takes no per-tool processes.
+	bool		show_tool(int extruder);
 
 private:
-	// Per-nozzle process P6: the Line width group's "Line widths per nozzle" line (a summary and the table button).
-	wxSizer*	nozzle_widths_create_widget(wxWindow* parent);
-	void		edit_nozzle_widths_table(wxWindow* parent);
-	void		update_nozzle_widths_note();
-	wxStaticText*	m_nozzle_widths_note = nullptr;
+	// Per-nozzle process P8.
+	wxPanel*				m_tool_panel        = nullptr;
+	wxBoxSizer*				m_tool_row          = nullptr;
+	SegmentedToggle*		m_tool_selector     = nullptr;
+	Button*					m_tool_expand_btn   = nullptr;
+	wxStaticText*			m_tool_note         = nullptr;
+	std::vector<wxString>	m_tool_labels;
+	bool					m_tools_expanded    = false; // the user opened the selector on a printer whose tools all match
+	bool					m_tool_marks_shown  = false; // the plate-wide fields carry the "(Plate)" mark
+	void					create_tool_selector();
+	std::vector<wxString>	tool_selector_labels() const;
+	bool					tool_selector_expanded() const;
+	wxString				tool_selector_note() const;
+	// On Plate (selector open): the per-tool fields are greyed out. On a tool: the plate-wide fields carry "(Plate)".
+	void					apply_tool_field_states();
+	void					mark_plate_fields(bool on);
 
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;

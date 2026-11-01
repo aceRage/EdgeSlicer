@@ -78,7 +78,6 @@
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
-#include "ProcessNozzleWidthsDialog.hpp"
 #include "CostsDialog.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
@@ -1224,6 +1223,10 @@ std::vector<wxString> Tab::nozzle_switch_labels() const
     const DynamicPrintConfig printer = m_preset_bundle->printer_config_with_project_sizes();
     if (!supports_nozzle_processes(printer))
         return labels;
+    // Per-nozzle process P8: each nozzle has its own process profile (the selector at the top of the tab), so the Speed page
+    // switches nozzles only for a process split per nozzle or per nozzle size (older presets and projects), to edit or link it.
+    if (m_config == nullptr || !(process_nozzles_split(*m_config) || process_has_diameter_slots(*m_config)))
+        return labels;
     const std::vector<double>& nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter")->values;
     int        extruder_count = 0;
     // Bambu's two-extruder machines (H2D, H2C, X2D) name their nozzles; logical extruder 0 is the left one.
@@ -1471,7 +1474,7 @@ void Tab::refresh_nozzle_controls()
         // Always shown, so it can be found: disabled with the reason, in visible text, when it cannot act.
         const bool can_act = control == NozzleSplitControl::Split || control == NozzleSplitControl::Link;
         if (control == NozzleSplitControl::OwnProcess) {
-            const wxString reason = format_wxstr(_L("%1% uses its own process. Set \"Speeds from\" to \"Use Global Setting\" to edit its values separately."), nozzle);
+            const wxString reason = format_wxstr(_L("%1% uses its own process profile: select %1% at the top of the Process tab to edit it."), nozzle);
             view->nozzle_apply_btn->SetToolTip(reason);
             if (view->nozzle_note != nullptr) {
                 // Wrapped, not shortened: the reason must be readable in a narrow sidebar.
@@ -1708,6 +1711,9 @@ void Tab::refresh_flow_variant_view()
             row2->Add(combo, 1, wxALIGN_CENTER_VERTICAL);
             m_flow_variant_view->nozzle_process_combo = combo;
             host_vsizer->Add(row2, 0, wxEXPAND | wxTOP, FromDIP(6));
+            // Per-nozzle process P8: "Speeds from" is replaced by each nozzle's own process profile (the selector at the top
+            // of the tab); the row stays built for the code that reads it, never shown.
+            host_vsizer->Show(row2, false);
 
             // Row 3: the mode button on a row of its own, left-aligned, so no width can push it out of view;
             // the mode label beside it.
@@ -2579,6 +2585,14 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         return;
     if (m_config != nullptr)
         maybe_dual_write_flow_variant(opt_key);
+    // Per-nozzle process P8: while a tool is shown, a plate-wide setting is the Plate's (shared by every tool), and the tool's
+    // own changes are kept in the project.
+    if (m_type == Preset::TYPE_PRINT && m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0) {
+        const std::string key = opt_key.substr(0, opt_key.find('#'));
+        if (is_plate_process_option(key))
+            m_preset_bundle->nozzle_tool_view_plate_key_changed(key);
+        m_preset_bundle->nozzle_tool_view_sync();
+    }
 
     if (wxGetApp().plater() == nullptr) {
         return;
@@ -3401,6 +3415,8 @@ void TabPrint::build()
     if (m_presets == nullptr)
         m_presets = &m_preset_bundle->prints;
     load_initial_data();
+    // Per-nozzle process P8: [Plate] [T1 0.4] ... leads the Process tab.
+    create_tool_selector();
 
     auto page = add_options_page(L("Quality"), "custom-gcode_quality"); // ORCA: icon only visible on placeholders
         auto optgroup = page->new_optgroup(L("Layer height"), L"param_layer_height");
@@ -3417,14 +3433,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("internal_solid_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("support_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("bridge_line_width","quality_settings_line_width");
-        // Per-nozzle process P6: the widths each nozzle of a mixed-nozzle printer prints with, and the table that sets
-        // them per nozzle size (or per tool when the process is edited per nozzle).
-        if (m_type == Preset::TYPE_PRINT) {
-            Line nozzle_widths_line = Line{ "", "" };
-            nozzle_widths_line.full_width = 1;
-            nozzle_widths_line.widget = [this](wxWindow* parent) { return nozzle_widths_create_widget(parent); };
-            optgroup->append_line(nozzle_widths_line);
-        }
+        // Per-nozzle process P8: the P6 "Line widths per nozzle" table is retired. Each tool's widths come from its own
+        // process (the selector at the top of this tab); an older project's process_nozzle_line_widths is still read.
 
         optgroup = page->new_optgroup(L("Seam"), L"param_seam");
         optgroup->append_single_option_line("seam_position", "quality_settings_seam#seam-position");
@@ -4040,88 +4050,225 @@ void TabPrint::reload_config()
     refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     Tab::reload_config();
-    update_nozzle_widths_note();
 }
 
-// ---- Per-nozzle process P6: line widths per nozzle -------------------------------------------------------------
+// ---- Per-nozzle process P8: [Plate] [T1 0.4] [T2 0.6] ... at the top of the Process tab ---------------------------
 
-wxSizer* TabPrint::nozzle_widths_create_widget(wxWindow* parent)
+static wxString plate_field_mark() { return " (" + _L("Plate") + ")"; }
+
+void TabPrint::create_tool_selector()
 {
-    const int em     = em_unit(parent);
-    auto*     vsizer = new wxBoxSizer(wxVERTICAL);
-    m_nozzle_widths_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
-    m_nozzle_widths_note->SetFont(wxGetApp().normal_font());
-    vsizer->Add(m_nozzle_widths_note, 0, wxEXPAND);
-    auto* btn = new Button(parent, _L("Line widths per nozzle") + dots);
-    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
-    btn->SetToolTip(_L("Every line width each nozzle size prints with, in one table: set a width for one nozzle size (or one "
-                       "nozzle, when the nozzles are edited separately), and see the width every other nozzle gets."));
-    btn->Bind(wxEVT_BUTTON, [this, parent](wxCommandEvent&) { edit_nozzle_widths_table(parent); });
-    vsizer->Add(btn, 0, wxTOP, em / 2);
-    update_nozzle_widths_note();
-    return vsizer;
+    if (m_type != Preset::TYPE_PRINT || m_tool_panel != nullptr || m_main_sizer == nullptr)
+        return;
+    m_tool_panel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    m_tool_panel->SetBackgroundColour(m_top_panel != nullptr ? m_top_panel->GetBackgroundColour() : *wxWHITE);
+    auto* vsizer = new wxBoxSizer(wxVERTICAL);
+    m_tool_row   = new wxBoxSizer(wxHORIZONTAL);
+    vsizer->Add(m_tool_row, 0, wxEXPAND);
+    m_tool_expand_btn = new Button(m_tool_panel, _L("Process per nozzle") + dots);
+    m_tool_expand_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    m_tool_expand_btn->SetToolTip(_L("Give each nozzle a process profile of its own: walls, infill, line widths, speeds and the other "
+                                     "settings that can differ per nozzle. Layer height, supports, prime tower and the other plate-wide "
+                                     "settings stay shared."));
+    m_tool_expand_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        m_tools_expanded = true;
+        wxGetApp().CallAfter([this]() { refresh_tool_selector(); toggle_options(); });
+    });
+    m_tool_row->Add(m_tool_expand_btn, 0, wxALIGN_CENTER_VERTICAL);
+    m_tool_note = new wxStaticText(m_tool_panel, wxID_ANY, wxEmptyString);
+    m_tool_note->SetFont(Label::Body_12);
+    m_tool_note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
+    m_tool_note->SetMinSize(wxSize(FromDIP(40), -1));
+    vsizer->Add(m_tool_note, 0, wxEXPAND | wxTOP, FromDIP(4));
+    m_tool_panel->SetSizer(vsizer);
+    // First in the tab: the selector leads, the preset combo below it shows the selected entry's profile.
+    m_main_sizer->Insert(0, m_tool_panel, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(SidebarProps::ContentMargin()));
+    m_tool_panel->Hide();
 }
 
-void TabPrint::update_nozzle_widths_note()
+std::vector<wxString> TabPrint::tool_selector_labels() const
 {
-    if (m_nozzle_widths_note == nullptr || m_config == nullptr || m_preset_bundle == nullptr)
-        return;
-    DynamicPrintConfig config = m_preset_bundle->printer_config_with_project_sizes(); // P7: the project's nozzle sizes
-    config.apply(*m_config, true);
-    const std::vector<double> sizes = printer_nozzle_sizes(config);
-    const auto*               text  = m_config->option<ConfigOptionString>("process_nozzle_line_widths");
-    size_t                    set   = 0;
-    if (text != nullptr)
-        for (const FilamentNozzleVariant& v : parse_filament_nozzle_variants(text->value))
-            set += v.values.size();
-    wxString note;
-    if (sizes.size() < 2)
-        note = _L("One nozzle size: the widths above apply to every nozzle.");
-    else {
-        wxString list;
-        for (double d : sizes)
-            list += (list.empty() ? "" : " + ") + from_u8(format_nozzle_diameter_word(d));
-        note = format_wxstr(_L("Nozzles %1% mm: widths in %% follow each nozzle, widths in mm are scaled from %2% mm."), list,
-                            format_nozzle_diameter_word(line_width_reference_diameter(config)));
-    }
-    if (set > 0)
-        note += " " + format_wxstr(_L("%1% width(s) set per nozzle."), set);
-    m_nozzle_widths_note->SetLabel(note);
-    m_nozzle_widths_note->SetToolTip(note);
-    if (m_nozzle_widths_note->GetParent() != nullptr && m_nozzle_widths_note->GetParent()->GetClientSize().x > em_unit(this) * 10)
-        m_nozzle_widths_note->Wrap(m_nozzle_widths_note->GetParent()->GetClientSize().x - em_unit(this) * 2);
+    std::vector<wxString> labels;
+    if (m_type != Preset::TYPE_PRINT || m_preset_bundle == nullptr)
+        return labels;
+    const DynamicPrintConfig printer = m_preset_bundle->printer_config_with_project_sizes(); // P7: the project's sizes
+    if (!supports_nozzle_processes(printer))
+        return labels;
+    const std::vector<double>& nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter")->values;
+    int        extruder_count = 0;
+    const bool sided          = nozzles.size() == 2 && printer.support_different_extruders(extruder_count);
+    labels.push_back(_L("Plate"));
+    for (size_t e = 0; e < nozzles.size(); ++e)
+        labels.push_back((sided ? (e == 0 ? _L("Left") : _L("Right")) : wxString::Format("T%d", int(e + 1))) + " " +
+                         from_u8(format_diameter_to_str(nozzles[e])));
+    return labels;
 }
 
-void TabPrint::edit_nozzle_widths_table(wxWindow* parent)
+bool TabPrint::tool_selector_expanded() const
 {
-    if (m_config == nullptr || m_preset_bundle == nullptr)
-        return;
-    const auto*       text_opt  = m_config->option<ConfigOptionString>("process_nozzle_line_widths");
-    const std::string text      = text_opt != nullptr ? text_opt->value : std::string();
-    const auto*       ref_opt   = m_config->option<ConfigOptionFloat>("line_width_nozzle_diameter");
-    const double      reference = ref_opt != nullptr ? ref_opt->value : 0.;
-    ProcessNozzleWidthsDialog dlg(parent, *m_config, m_preset_bundle->printer_config_with_project_sizes()); // P7
-    if (dlg.ShowModal() != wxID_OK)
-        return;
-    const std::string result         = dlg.text();
-    const double      result_ref     = std::max(0., dlg.reference_diameter());
-    bool              changed        = false;
-    if (result != text) {
-        m_config->set_key_value("process_nozzle_line_widths", new ConfigOptionString(result));
-        Tab::on_value_change("process_nozzle_line_widths", boost::any(result));
-        changed = true;
+    if (m_preset_bundle == nullptr)
+        return false;
+    if (m_tools_expanded || m_preset_bundle->nozzle_tool_view() >= 0)
+        return true;
+    // Collapsed (owner design G) while every nozzle has the same size and follows the plate's process unchanged.
+    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
+    if (has_mixed_nozzle_diameters(nozzles))
+        return true;
+    for (size_t e = 0; e < nozzles.size(); ++e) {
+        const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
+        if (info.kind != PresetBundle::NozzleToolProcessKind::FollowsPlate || info.edited)
+            return true;
     }
-    if (std::abs(result_ref - reference) > 1e-9) {
-        m_config->set_key_value("line_width_nozzle_diameter", new ConfigOptionFloat(result_ref));
-        Tab::on_value_change("line_width_nozzle_diameter", boost::any(result_ref));
-        changed = true;
+    return false;
+}
+
+wxString TabPrint::tool_selector_note() const
+{
+    if (m_preset_bundle == nullptr)
+        return wxString();
+    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
+    const int                 view    = m_preset_bundle->nozzle_tool_view();
+    auto tool_label = [this](size_t e) {
+        return (e + 1 < m_tool_labels.size() ? m_tool_labels[e + 1] : wxString::Format("T%d", int(e + 1)));
+    };
+    using Kind = PresetBundle::NozzleToolProcessKind;
+    if (view < 0) {
+        // Plate: what every tool prints with.
+        wxString note = _L("Plate: settings shared by every nozzle (layer height, supports, prime tower, brim...). The settings each "
+                           "nozzle takes from its own process are greyed out here; select a nozzle above to edit them.");
+        for (size_t e = 0; e < nozzles.size(); ++e) {
+            const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
+            wxString what = info.kind == Kind::FollowsPlate ? _L("the plate's process") :
+                            info.kind == Kind::Missing      ? _L("no process fits this nozzle size: slicing is refused") :
+                                                              from_u8(info.name) + (info.kind == Kind::AutoPicked ? " (" + _L("picked for its size") + ")" : wxString());
+            if (info.edited && info.kind != Kind::Missing)
+                what += " *";
+            note += "\n" + tool_label(e) + ": " + what;
+        }
+        return note;
     }
-    if (!changed)
+    const size_t                          e    = size_t(view);
+    const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
+    wxString note = info.kind == Kind::FollowsPlate ?
+        format_wxstr(_L("%1% uses the plate's process. Choose another process for it in the list above."), tool_label(e)) :
+        format_wxstr(_L("%1% uses its own process."), tool_label(e));
+    if (m_preset_bundle->nozzle_tool_process_info(e).kind == Kind::AutoPicked)
+        note = format_wxstr(_L("%1% uses \"%2%\", picked for its nozzle size."), tool_label(e), from_u8(info.name));
+    note += " " + format_wxstr(_L("Settings marked%1% are shared with the Plate: changing them here changes them for every nozzle."),
+                               plate_field_mark());
+    return note;
+}
+
+void TabPrint::refresh_tool_selector()
+{
+    if (m_type != Preset::TYPE_PRINT)
         return;
-    update_dirty();
-    update_nozzle_widths_note();
-    update_changed_ui();
-    m_parent->Layout();
+    create_tool_selector();
+    if (m_tool_panel == nullptr || m_preset_bundle == nullptr)
+        return;
+    const std::vector<wxString> labels = tool_selector_labels();
+    const bool                  available = !labels.empty();
+    // The shown tool went away (another printer, fewer tools): back to the Plate.
+    if (const int view = m_preset_bundle->nozzle_tool_view(); view >= 0 && (!available || size_t(view) + 1 >= labels.size())) {
+        m_preset_bundle->end_nozzle_tool_view();
+        load_current_preset();
+    }
+    if (!available)
+        m_tools_expanded = false;
+    const bool expanded = available && tool_selector_expanded();
+    if (labels != m_tool_labels || m_tool_selector == nullptr) {
+        if (m_tool_selector != nullptr) {
+            m_tool_row->Detach(m_tool_selector);
+            m_tool_selector->Destroy();
+            m_tool_selector = nullptr;
+        }
+        m_tool_labels = labels;
+        if (available) {
+            m_tool_selector = new SegmentedToggle(m_tool_panel, labels, m_preset_bundle->nozzle_tool_view() + 1, SegmentedToggle::Style::Pill);
+            m_tool_selector->SetToolTip(_L("Plate: the settings shared by every nozzle. A nozzle: its own process profile, shown in the "
+                                           "list below and on every page."));
+            m_tool_selector->bindSelectionCallback([this](int index) {
+                // The toggle's own click is still running: switch after it returns.
+                wxGetApp().CallAfter([this, index]() { show_tool(index - 1); });
+            });
+            m_tool_row->Insert(0, m_tool_selector, 0, wxALIGN_CENTER_VERTICAL);
+        }
+    }
+    if (m_tool_selector != nullptr) {
+        m_tool_selector->setSelected(m_preset_bundle->nozzle_tool_view() + 1);
+        m_tool_selector->Show(expanded);
+    }
+    m_tool_expand_btn->Show(available && !expanded);
+    const wxString note = expanded ? tool_selector_note() : wxString();
+    m_tool_note->SetLabel(note);
+    m_tool_note->SetToolTip(note);
+    if (m_tool_panel->GetClientSize().x > FromDIP(60))
+        m_tool_note->Wrap(m_tool_panel->GetClientSize().x - FromDIP(8));
+    m_tool_note->Show(!note.empty());
+    m_tool_panel->Show(available);
+    mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
+    m_tool_panel->Layout();
+    Layout();
+}
+
+bool TabPrint::show_tool(int extruder)
+{
+    if (m_type != Preset::TYPE_PRINT || m_preset_bundle == nullptr)
+        return false;
+    if (extruder == m_preset_bundle->nozzle_tool_view())
+        return true;
+    if (extruder < 0)
+        m_preset_bundle->end_nozzle_tool_view();
+    else if (!m_preset_bundle->begin_nozzle_tool_view(size_t(extruder))) {
+        refresh_tool_selector();
+        return false;
+    }
+    // The tool's profile (or the plate's again) is now the selected and edited process: reload everything from it.
+    load_current_preset();
+    refresh_tool_selector();
+    if (wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->update_project_dirty_from_presets();
+    return true;
+}
+
+void TabPrint::mark_plate_fields(bool on)
+{
+    if (on == m_tool_marks_shown)
+        return;
+    m_tool_marks_shown = on;
+    const wxString mark = plate_field_mark();
+    for (const PageShp& page : m_pages)
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
+            bool changed = false;
+            for (const auto& option : group->opt_map()) {
+                if (!is_plate_process_option(option.second.first))
+                    continue;
+                Line* line = group->get_line(option.first);
+                if (line == nullptr || line->label.IsEmpty())
+                    continue;
+                const bool marked = line->label.EndsWith(mark);
+                if (on && !marked)
+                    line->set_label(line->label + mark);
+                else if (!on && marked)
+                    line->set_label(line->label.Left(line->label.length() - mark.length()));
+                changed |= on != marked;
+            }
+            if (changed && group->custom_ctrl != nullptr)
+                group->custom_ctrl->Refresh();
+        }
+}
+
+void TabPrint::apply_tool_field_states()
+{
+    if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr || m_preset_bundle == nullptr || m_tool_panel == nullptr)
+        return;
+    // On Plate, with the selector open: the per-tool settings are each nozzle's, not the plate's; not editable here.
+    if (m_preset_bundle->nozzle_tool_view() >= 0 || m_tool_selector == nullptr || !m_tool_selector->IsShown() || !m_tool_panel->IsShown())
+        return;
+    for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
+        for (const auto& option : group->opt_map())
+            if (is_per_tool_process_option(option.second.first))
+                toggle_option(option.second.first, false, option.second.second);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4586,6 +4733,8 @@ void TabPrint::toggle_options()
 
     // Per-nozzle process P1.
     disable_fields_of_nozzle_process();
+    // Per-nozzle process P8: Plate / tool field states.
+    apply_tool_field_states();
 }
 
 void TabPrint::update()
@@ -4638,7 +4787,6 @@ void TabPrint::clear_pages()
 
     m_recommended_thin_wall_thickness_description_line = nullptr;
     m_top_bottom_shell_thickness_explanation = nullptr;
-    m_nozzle_widths_note = nullptr; // P6: owned by the page
 
     // Ultra (support sets): the page owns these windows, so drop the pointers with it. The three
     // icon buttons registered themselves in Tab::m_scaled_buttons for the DPI / dark-mode passes,
@@ -7418,9 +7566,12 @@ if (is_marlin_flavor)
                             double d = 0.;
                             if (sel > 0 && size_t(sel - 1) < sizes.size())
                                 d = sizes[size_t(sel - 1)];
-                            wxGetApp().CallAfter([extruder_idx, d]() {
+                            // P8 (owner bug F): keep this extruder's page shown after the sizes changed everywhere.
+                            const wxString shown_page = m_active_page != nullptr ? m_active_page->title() : wxString();
+                            wxGetApp().CallAfter([this, extruder_idx, d, shown_page]() {
                                 if (wxGetApp().plater() != nullptr)
                                     wxGetApp().plater()->sidebar().set_tool_nozzle_size(int(extruder_idx), d);
+                                wxGetApp().CallAfter([this, shown_page]() { select_page_by_title(shown_page); });
                             });
                         });
                         combo->Bind(wxEVT_DESTROY, [this, extruder_idx, combo](wxWindowDestroyEvent& evt) {
@@ -7445,6 +7596,15 @@ if (is_marlin_flavor)
                     // to leaving the others alone. On a single-extruder multi-material printer
                     // every filament goes through the SAME physical nozzle, so a per-extruder
                     // diameter is meaningless and the old forced sync is kept unchanged.
+                    // Per-nozzle process P8 (owner bug F): the updates below can rebuild the extruder pages (the per-variant
+                    // field layout follows the nozzle sizes) and the sidebar, which used to leave Extruder 1 shown. Show
+                    // the page that was shown once they are done.
+                    if (opt_key.find("nozzle_diameter") != std::string::npos && m_active_page != nullptr) {
+                        const wxString shown_page = m_active_page->title();
+                        wxGetApp().CallAfter([this, shown_page]() {
+                            wxGetApp().CallAfter([this, shown_page]() { select_page_by_title(shown_page); });
+                        });
+                    }
                     if (m_extruders_count > 1 && opt_key.find("nozzle_diameter") != std::string::npos)
                     {
                         SuppressBackgroundProcessingUpdate sbpu;
@@ -8283,6 +8443,10 @@ void Tab::reactive_preset_combo_box()
 void Tab::load_current_preset()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<boost::format(": enter");
+    // Per-nozzle process P8: a tool's profile shown after another preset was selected for it: the tool uses that one now,
+    // and the plate-wide settings show the Plate's values again.
+    if (m_type == Preset::TYPE_PRINT && m_preset_bundle != nullptr && m_preset_bundle->nozzle_tool_view() >= 0)
+        m_preset_bundle->nozzle_tool_view_sync();
     const Preset& preset = m_presets->get_edited_preset();
 
     update_btns_enabling();
@@ -8387,11 +8551,28 @@ void Tab::load_current_preset()
         init_options_list();
         update_visibility();
         update_changed_ui();
+        // Per-nozzle process P8.
+        if (m_type == Preset::TYPE_PRINT)
+            if (auto* print_tab = dynamic_cast<TabPrint*>(this))
+                print_tab->refresh_tool_selector();
     }
 #if 0
     );
 #endif
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<<boost::format(": exit");
+}
+
+void Tab::select_page_by_title(const wxString& title)
+{
+    if (title.IsEmpty() || (m_active_page != nullptr && m_active_page->title() == title))
+        return;
+    const wxString shown = translate_category(title, m_type);
+    for (int item = 0; item < int(m_tabctrl->GetCount()); ++item)
+        if (m_tabctrl->GetItemText(item) == shown) {
+            BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: page '" << into_u8(title) << "' shown again after a rebuild";
+            m_tabctrl->SelectItem(item);
+            return;
+        }
 }
 
 //Regerenerate content of the page tree.
@@ -8502,6 +8683,11 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
 {
     BOOST_LOG_TRIVIAL(info) << boost::format("select preset, name %1%, delete_current %2%")
         %preset_name %delete_current;
+    // Per-nozzle process P8: another printer brings its own tools; the Process tab shows the Plate again first, so the
+    // printer switch sees (and may replace) the plate's process.
+    if (m_type == Preset::TYPE_PRINTER)
+        if (auto* print_tab = dynamic_cast<TabPrint*>(wxGetApp().get_tab(Preset::TYPE_PRINT)))
+            print_tab->show_tool(-1);
     if (preset_name.empty()) {
         if (delete_current) {
             // Find an alternate preset to be selected after the current preset is deleted.
@@ -9408,7 +9594,13 @@ void Tab::save_preset(std::string name /*= ""*/, bool detach, bool save_to_proje
         _current_printer = const_cast<Preset*>(&wxGetApp().preset_bundle->printers.get_selected_preset_base());
     }
     // Save the preset into Slic3r::data_dir / presets / section_name / preset_name.json
+    // Per-nozzle process P8: a tool's profile is saved with its own plate-wide values (its layer height...), not the Plate's.
+    const bool tool_view = m_type == Preset::TYPE_PRINT && m_preset_bundle->nozzle_tool_view() >= 0;
+    if (tool_view)
+        m_preset_bundle->nozzle_tool_view_before_save();
     m_presets->save_current_preset(name, detach, save_to_project, nullptr, _current_printer, project_printers);
+    if (tool_view)
+        m_preset_bundle->nozzle_tool_view_after_save();
 
     //BBS create new settings
     new_preset = m_presets->find_preset(name, false, true);
