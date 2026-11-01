@@ -322,6 +322,8 @@ public:
     void                refresh_height_pattern_rows(int obj_idx);
     void                add_height_pattern_rows(const wxDataViewItem obj_item);
     void                show_height_pattern_menu(const wxDataViewItem &item);
+    // 3D bands of a pattern while its row is selected; pattern_id 0 removes them.
+    void                show_height_pattern_overlay(int obj_idx, int pattern_id);
     // After a project was opened: say so when a pattern lost filaments or was made for another layer height.
     void                check_height_patterns_after_load();
 

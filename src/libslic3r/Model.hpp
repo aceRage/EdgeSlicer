@@ -22,6 +22,7 @@
 #include "ImageFill.hpp"
 #include "FlexiJoint.hpp"
 #include "PushFit.hpp"
+#include "TacJoint.hpp"
 #include "CutRecipe.hpp"
 #include "HeightColourPattern.hpp"
 #include "CostPricing.hpp"
@@ -257,27 +258,36 @@ enum class CutMode : int {
 };
 
 enum class CutConnectorType : int {
-    Plug
-    , Dowel
-    , Snap
-    , Undef
+    Plug,
+    Dowel,
+    Snap,
+    Undef
     // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef so the values of
     // the three original types are untouched. Since phase 3 a flexi connector DOES reach a 3MF
     // - a project saved with the joint placed but not yet cut carries it, and its parameters,
     // in Metadata/cut_information.xml - so the 3MF reader's type range check bounds against
     // this enumerator rather than against Undef.
-    , FlexiJoint
+    ,
+    FlexiJoint
     // Push-fit "Pin": a separate printed pin pushed into a generated hole in each half
     // (tests/design_pushfit_connector.md). Appended after FlexiJoint so no stored value moves;
     // 3 is deliberately avoided (BambuStudio's Thread). The 3MF readers bound the type against
-    // this enumerator, so keep PushFit LAST.
-    , PushFit
+    // the last enumerator.
+    ,
+    PushFit
+    // Versioned reference-mesh joint, appended so existing project enum values stay unchanged.
+    ,
+    TacJoint
 };
 
 inline bool is_flexi_connector_type(CutConnectorType t) { return t == CutConnectorType::FlexiJoint; }
 inline bool is_pushfit_connector_type(CutConnectorType t) { return t == CutConnectorType::PushFit; }
+inline bool is_tac_joint_connector_type(CutConnectorType t) { return t == CutConnectorType::TacJoint; }
 // A connector that becomes a separate object of its own (CreateDowels): the Dowel and the Pin.
-inline bool is_separate_pin_connector_type(CutConnectorType t) { return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit; }
+inline bool is_separate_pin_connector_type(CutConnectorType t)
+{
+    return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit || t == CutConnectorType::TacJoint;
+}
 
 enum class CutConnectorStyle : int {
     Prism
@@ -344,6 +354,7 @@ struct CutConnector
     FlexiJointParams flexi;
     // Only meaningful when attribs.type == CutConnectorType::PushFit.
     PushFitParams    pushfit;
+    TacJointParams   tac_joint;
 
     CutConnector()
         : pos(Vec3d::Zero()), rotation_m(Transform3d::Identity()), radius(5.f), height(10.f), radius_tolerance(0.f), height_tolerance(0.1f), z_angle(0.f)
@@ -355,14 +366,18 @@ struct CutConnector
 
     CutConnector(const CutConnector& rhs) :
         CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs)
-    { flexi = rhs.flexi; pushfit = rhs.pushfit; }
+    {
+        flexi     = rhs.flexi;
+        pushfit   = rhs.pushfit;
+        tac_joint = rhs.tac_joint;
+    }
 
     bool operator==(const CutConnector& other) const;
 
     bool operator!=(const CutConnector& other) const { return !(other == (*this)); }
 
     template<class Archive> inline void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit, tac_joint);
     }
 };
 
@@ -942,6 +957,7 @@ public:
         // Only meaningful when connector_type == CutConnectorType::PushFit: the cut builds the
         // pin and both holes from these.
         PushFitParams       pushfit;
+        TacJointParams      tac_joint;
 
         CutInfo() = default;
         CutInfo(CutConnectorType type, float rad_tolerance, float h_tolerance, bool processed = false) :
@@ -958,9 +974,10 @@ public:
 
         bool is_flexi_joint() const { return is_connector && is_flexi_connector_type(connector_type); }
         bool is_pushfit() const { return is_connector && is_pushfit_connector_type(connector_type); }
+        bool is_tac_joint() const { return is_connector && is_tac_joint_connector_type(connector_type); }
 
         template<class Archive> inline void serialize(Archive& ar) {
-            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit);
+            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit, tac_joint);
         }
     };
     CutInfo             cut_info;

@@ -102,6 +102,8 @@ set(lisbslic3r_sources
     FlexiJoint.hpp
     PushFit.cpp
     PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp

@@ -52,6 +52,18 @@
 #define _L(s) Slic3r::I18N::translate(s)
 
 namespace Slic3r {
+bool CutConnectorAttributes::operator==(const CutConnectorAttributes& other) const
+{
+    return type == other.type && style == other.style && shape == other.shape;
+}
+
+bool CutConnector::operator==(const CutConnector& other) const
+{
+    return pos == other.pos && rotation_m.matrix() == other.rotation_m.matrix() && radius == other.radius && height == other.height &&
+           radius_tolerance == other.radius_tolerance && height_tolerance == other.height_tolerance && z_angle == other.z_angle &&
+           attribs == other.attribs && flexi == other.flexi && pushfit == other.pushfit && tac_joint == other.tac_joint;
+}
+
 const std::vector<std::string> CONST_FILAMENTS = {
     "", "4", "8", "0C", "1C", "2C", "3C", "4C", "5C", "6C", "7C", "8C", "9C", "AC", "BC", "CC", "DC",
 }; // 5                           10                            15    16

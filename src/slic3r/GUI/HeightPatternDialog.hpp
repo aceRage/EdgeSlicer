@@ -14,6 +14,7 @@
 
 #include "libslic3r/HeightPatternInput.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,13 @@ struct HeightPatternDialogContext
     int                        other_plate_objects = 0;
     // True when those objects are not the same height as this one.
     bool                       other_heights_differ = false;
+    // Phase 3: what the change-count line needs (the object's own filament, the project's purge table).
+    HeightPatternChangeInput   change_input;
+    // Phase 3: the pattern's bands the user has edited by hand (edit mode), for the note under the list.
+    std::vector<HeightPatternBandDiff> hand_edits;
+    // Phase 3: called with the snapped ranges on every change (empty when the input is not usable), so the
+    // 3D view can draw the bands live.
+    std::function<void(const std::vector<HeightPatternRange> &)> on_preview;
 };
 
 struct HeightPatternDialogResult
@@ -95,6 +103,9 @@ private:
     ::TextInput *m_gap_input     = nullptr;
     ::TextInput *m_repeat_input  = nullptr;
     ::CheckBox *m_to_top_cb     = nullptr;
+    ::TextInput *m_seq_gap_input = nullptr;
+    ::ComboBox *m_seq_gap_mode  = nullptr;
+    ::ComboBox *m_seq_gap_filament = nullptr;
     ::ComboBox *m_gap_mode      = nullptr;
     ::ComboBox *m_gap_filament  = nullptr;
     ::Label *m_gap_filament_label = nullptr;
@@ -103,6 +114,8 @@ private:
     ::Label *m_clash_text    = nullptr;
     ::Label *m_error_text    = nullptr;
     ::Label *m_note_text     = nullptr;
+    ::Label *m_change_text   = nullptr;
+    ::Label *m_edits_text    = nullptr;
     ::Button *m_ok_button     = nullptr;
     HeightPatternSwatches *m_palette  = nullptr;
     HeightPatternSwatches *m_sequence = nullptr;

@@ -3897,6 +3897,7 @@ void GLCanvas3D::render(bool only_init)
     }
 
     _render_sequential_clearance();
+    _render_color_pattern_overlay();
 #if ENABLE_RENDER_SELECTION_CENTER
     _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER
@@ -11176,6 +11177,86 @@ void GLCanvas3D::_render_selection()
 
     if (!m_gizmos.is_running())
         m_selection.render(scale_factor);
+}
+
+void GLCanvas3D::set_color_pattern_overlay(int object_idx, std::vector<ColorPatternSlab> slabs)
+{
+    m_color_pattern_overlay.object_idx = object_idx;
+    m_color_pattern_overlay.slabs      = std::move(slabs);
+    set_as_dirty();
+}
+
+void GLCanvas3D::clear_color_pattern_overlay()
+{
+    if (m_color_pattern_overlay.object_idx < 0 && m_color_pattern_overlay.slabs.empty())
+        return;
+    m_color_pattern_overlay.object_idx = -1;
+    m_color_pattern_overlay.slabs.clear();
+    set_as_dirty();
+}
+
+// Translucent bands in the filament colours over the object's bounding box, at the snapped Z values.
+// They are drawn after the objects with depth test on and depth write off, so the object shows
+// through and the bands do not hide each other. Light and dark themes use the same colours: the
+// filament colours are the information, and the alpha keeps them readable on either background.
+void GLCanvas3D::_render_color_pattern_overlay()
+{
+    ColorPatternOverlay& ov = m_color_pattern_overlay;
+    if (ov.object_idx < 0 || ov.slabs.empty() || m_model == nullptr || ov.object_idx >= int(m_model->objects.size()))
+        return;
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    if (!ov.box.is_initialized()) {
+        GLModel::Geometry g;
+        g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3 };
+        g.color  = { 1.0f, 1.0f, 1.0f, 0.4f };
+        const Vec3f corners[8] = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 } };
+        for (const Vec3f& c : corners)
+            g.add_vertex(c);
+        const unsigned int tris[12][3] = { { 0, 2, 1 }, { 0, 3, 2 }, { 4, 5, 6 }, { 4, 6, 7 }, { 0, 1, 5 }, { 0, 5, 4 },
+                                           { 1, 2, 6 }, { 1, 6, 5 }, { 2, 3, 7 }, { 2, 7, 6 }, { 3, 0, 4 }, { 3, 4, 7 } };
+        for (const auto& t : tris)
+            g.add_triangle(t[0], t[1], t[2]);
+        ov.box.init_from(std::move(g));
+    }
+
+    const ModelObject* mo = m_model->objects[size_t(ov.object_idx)];
+    const Camera& camera  = wxGetApp().plater()->get_camera();
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+
+    constexpr double grow = 0.3;   // mm, so the band is seen all round the object
+    for (size_t inst = 0; inst < mo->instances.size(); ++inst) {
+        const BoundingBoxf3 bb = mo->instance_bounding_box(inst);
+        if (!bb.defined)
+            continue;
+        for (const ColorPatternSlab& s : ov.slabs) {
+            if (!(s.hi > s.lo))
+                continue;
+            const Vec3d size(bb.size().x() + 2. * grow, bb.size().y() + 2. * grow, s.hi - s.lo);
+            const Vec3d origin(bb.min.x() - grow, bb.min.y() - grow, bb.min.z() + s.lo);
+            Transform3d model = Transform3d::Identity();
+            model.translate(origin);
+            model.scale(size);
+            shader->set_uniform("view_model_matrix", camera.get_view_matrix() * model);
+            ov.box.set_color(s.color);
+            ov.box.render();
+        }
+    }
+
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    shader->stop_using();
 }
 
 void GLCanvas3D::_render_sequential_clearance()

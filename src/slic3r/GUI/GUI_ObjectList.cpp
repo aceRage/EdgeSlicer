@@ -3944,6 +3944,7 @@ void ObjectList::changed_object(const int obj_idx/* = -1*/) const
 void ObjectList::part_selection_changed()
 {
     if (m_extruder_editor) m_extruder_editor->Hide();
+    show_height_pattern_overlay(-1, 0);   // Color Pattern bands only while a pattern row is selected
     int obj_idx = -1;
     int volume_id = -1;
     m_config = nullptr;
@@ -4059,6 +4060,10 @@ void ObjectList::part_selection_changed()
                             gizmos_mgr.open_gizmo(gizmo_type);
                         break;
                     }
+                    case InfoItemType::HeightPattern:
+                        // The pattern's bands are drawn on the object while its row is selected.
+                        show_height_pattern_overlay(obj_idx, m_objects_model->GetHeightPatternId(item));
+                        break;
                     // BBS: remove Sinking
                     //case InfoItemType::Sinking: { break; }
                     default: { break; }

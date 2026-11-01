@@ -685,11 +685,45 @@ bool bbs_is_valid_object_type(const std::string& type)
 }
 
 namespace Slic3r {
-
-static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
+// A missing attribute uses the documented default. A present but malformed numeric
+// attribute must reach validation as invalid, never quietly turn into that default.
+static TacJointParams bbs_read_tac_joint(const pt::ptree& tree)
 {
-    for (const char* key : {"filament_colour", "filament_settings_id",
-                             "filament_ids", "default_filament_colour"}) {
+    return tac_joint_from_attributes([&tree](const std::string& name) -> std::optional<double> {
+        if (!tree.get_optional<std::string>("<xmlattr>." + name))
+            return std::nullopt;
+        if (const auto value = tree.get_optional<double>("<xmlattr>." + name))
+            return *value;
+        return std::numeric_limits<double>::quiet_NaN();
+    });
+}
+
+static bool bbs_tac_recipe_pose_valid(const pt::ptree& tree)
+{
+    for (const char* field : {"x", "y", "z", "z_angle"}) {
+        const std::string path = std::string("<xmlattr>.") + field;
+        if (tree.get_optional<std::string>(path)) {
+            const auto value = tree.get_optional<double>(path);
+            if (!value || !std::isfinite(*value))
+                return false;
+        }
+    }
+    if (const auto matrix = tree.get_optional<std::string>("<xmlattr>.rotation")) {
+        std::istringstream stream(*matrix);
+        double             value;
+        for (int i = 0; i < 16; ++i)
+            if (!(stream >> value) || !std::isfinite(value))
+                return false;
+        stream >> std::ws;
+        if (!stream.eof())
+            return false;
+    }
+    return true;
+}
+
+static size_t physical_filament_count_from_project_config(const DynamicPrintConfig& config)
+{
+    for (const char* key : {"filament_colour", "filament_settings_id", "filament_ids", "default_filament_colour"}) {
         if (const auto* opt = config.option<ConfigOptionStrings>(key); opt && !opt->values.empty())
             return opt->values.size();
     }
@@ -1077,6 +1111,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // the file, the defaults stand.
                 bool             has_pushfit{ false };
                 PushFitParams    pushfit;
+                TacJointParams   tac_joint;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -2463,7 +2498,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // a 3MF (a project saved with the joint placed but not yet cut), so the
                     // bound is the last enumerator instead - still a range check on untrusted
                     // file content, just one that covers the whole enum.
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::PushFit)) {
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::TacJoint)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
@@ -2477,6 +2512,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
                     if (connector.has_pushfit)
                         model_object->volumes[connector.volume_id]->cut_info.pushfit = connector.pushfit;
+                    if (connector.type == int(CutConnectorType::TacJoint))
+                        model_object->volumes[connector.volume_id]->cut_info.tac_joint = connector.tac_joint;
                 }
             }
 
@@ -3019,6 +3056,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 connector.processed   = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_pushfit = true;
                             }
+                            if (connector.type == int(CutConnectorType::TacJoint)) {
+                                connector.tac_joint                 = bbs_read_tac_joint(connector_tree);
+                                const TacJointValidation validation = tac_joint_validate(connector.tac_joint);
+                                if (!validation.valid) {
+                                    add_error("Invalid TAC Joint metadata: " + validation.message);
+                                    continue; // Keep the baked volume, without unsafe regenerative metadata.
+                                }
+                                connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -3339,12 +3385,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     const int type  = ct.get<int>("<xmlattr>.type", 0);
                     const int style = ct.get<int>("<xmlattr>.style", 0);
                     const int shape = ct.get<int>("<xmlattr>.shape", 0);
-                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::PushFit)) ? type  : 0;
+                    // Preserve an unknown type until recipe validation rejects it: never
+                    // silently reopen a newer connector as a Plug.
+                    rc.type  = type;
                     rc.style = (style >= 0 && style <= int(CutConnectorStyle::Undef))     ? style : 0;
                     rc.shape = (shape >= 0 && shape <= int(CutConnectorShape::Undef))     ? shape : 0;
                     // The Flexi joint's own parameters, when this is one. Same defaulting
                     // rule as cut_information.xml: every field falls back to the
                     // FlexiJointParams default, and the counts that drive loops are clamped.
+                    if (rc.type == int(CutConnectorType::TacJoint)) {
+                        rc.tac_joint = bbs_read_tac_joint(ct);
+                        if (!bbs_tac_recipe_pose_valid(ct))
+                            rc.z_angle = std::numeric_limits<float>::quiet_NaN();
+                    }
                     if (rc.type == int(CutConnectorType::PushFit))
                         rc.pushfit = pushfit_from_attributes([&ct](const std::string& name) -> std::optional<double> {
                             if (boost::optional<double> v = ct.get_optional<double>("<xmlattr>." + name))
@@ -8680,7 +8733,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // with a differently shaped joint. Let such an object through as well.
             const bool carries_flexi = std::any_of(object->volumes.begin(), object->volumes.end(),
                                                    [](const ModelVolume* v) { return v->cut_info.is_flexi_joint(); });
-            if (!object->is_cut() && !carries_flexi)
+            const bool carries_tac   = std::any_of(object->volumes.begin(), object->volumes.end(),
+                                                 [](const ModelVolume* v) { return v->cut_info.is_tac_joint(); });
+            if (!object->is_cut() && !carries_flexi && !carries_tac)
                 continue;
             pt::ptree& obj_tree = tree.add("objects.object", "");
 
@@ -8699,7 +8754,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 ++volume_idx;
                 // is_cut_connector() also demands is_processed; an unprocessed Flexi joint is
                 // exactly the case that has to be written, so admit it too.
-                if (volume->is_cut_connector() || volume->cut_info.is_flexi_joint()) {
+                if (volume->is_cut_connector() || volume->cut_info.is_flexi_joint() || volume->cut_info.is_tac_joint()) {
                     pt::ptree& connectors_tree = obj_tree.add("connectors.connector", "");
                     connectors_tree.put("<xmlattr>.volume_id",   volume_idx);
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
@@ -8708,6 +8763,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // The push-fit Pin: its holes and the pin object are rebuilt from these by a
                     // re-cut, and a reopened project shows them in the panel. Pin volumes only, so
                     // nothing changes in a file without pins.
+                    if (volume->cut_info.is_tac_joint()) {
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        for (const auto& [name, value] : tac_joint_attributes(volume->cut_info.tac_joint))
+                            connectors_tree.put("<xmlattr>." + name, value);
+                    }
                     if (volume->cut_info.is_pushfit()) {
                         connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
                         for (const auto& [name, value] : pushfit_attributes(volume->cut_info.pushfit))
@@ -9873,6 +9933,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     ct.put("<xmlattr>.type",        c.type);
                     ct.put("<xmlattr>.style",       c.style);
                     ct.put("<xmlattr>.shape",       c.shape);
+                    if (c.type == int(CutConnectorType::TacJoint))
+                        for (const auto& [name, value] : tac_joint_attributes(c.tac_joint))
+                            ct.put("<xmlattr>." + name, value);
                     // The push-fit Pin (recipe version 6), only for pins.
                     if (c.type == int(CutConnectorType::PushFit))
                         for (const auto& [name, value] : pushfit_attributes(c.pushfit))

@@ -203,7 +203,7 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
 
     // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint,
     // and the push-fit Pin (PushFit = 5) comes after Flexi.
-    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi"), _u8L("Pin") };
+    m_connector_types = {_u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi"), _u8L("Pin"), _u8L("TAC Joint")};
 
     m_pushfit_presets = { _u8L("S"), _u8L("M"), _u8L("L"), _u8L("Auto"), _u8L("Custom") };
     // NOTE: indexed by PushFitCutout / PushFitPose.
@@ -862,20 +862,48 @@ void GLGizmoCut3D::render_move_center_input(int axis)
     }
 }
 
-bool GLGizmoCut3D::render_connect_type_radio_button(CutConnectorType type)
+bool GLGizmoCut3D::render_connect_type_combo()
 {
-    ImGui::SameLine(type == CutConnectorType::Plug ? m_label_width : 0);
-    ImGui::PushItemWidth(m_control_width);
-    const bool clicked = ImGui::RadioButton(m_connector_types[size_t(type)].c_str(), m_connector_type == type);
-    if (type == CutConnectorType::PushFit && ImGui::IsItemHovered())
-        m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
-                         ImGui::GetFontSize() * 20.0f);
-    if (clicked) {
-        m_connector_type = type;
-//        update_connector_shape();
-        return true;
+    // The enum has an unused Undef slot (empty label), which is skipped here.
+    static const CutConnectorType types[] = {CutConnectorType::Plug,      CutConnectorType::Dowel,
+                                             CutConnectorType::Snap,      CutConnectorType::PushFit,
+                                             CutConnectorType::FlexiJoint, CutConnectorType::TacJoint};
+
+    // Width of the widest translated label, plus the frame padding and the arrow button.
+    float widest = 0.f;
+    for (CutConnectorType t : types)
+        widest = std::max(widest, m_imgui->calc_text_size(m_connector_types[size_t(t)]).x);
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float combo_width = std::max(m_control_width, widest + 2.f * style.FramePadding.x + ImGui::GetFrameHeight());
+
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(combo_width);
+    // m_connector_type is Undef while the selected connectors have mixed types: show an empty preview then.
+    const char *preview = m_connector_type != CutConnectorType::Undef ? m_connector_types[size_t(m_connector_type)].c_str() : "";
+
+    bool changed = false;
+    if (ImGui::BeginCombo("##connector_type", preview)) {
+        for (CutConnectorType t : types) {
+            const bool unsupported = t == CutConnectorType::TacJoint && !tac_joint_mode_supported();
+            m_imgui->disabled_begin(unsupported);
+            const bool clicked = ImGui::Selectable(m_connector_types[size_t(t)].c_str(), m_connector_type == t);
+            m_imgui->disabled_end();
+            if (t == CutConnectorType::PushFit && ImGui::IsItemHovered())
+                m_imgui->tooltip(_L("Push-fit pin: printed separately, lying flat, and pushed into holes in both halves"),
+                                 ImGui::GetFontSize() * 20.0f);
+            else if (unsupported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                m_imgui->tooltip(_L("TAC Joint requires a flat, planar cut."), ImGui::GetFontSize() * 20.0f);
+            if (clicked && !unsupported && t != m_connector_type) {
+                if (t == CutConnectorType::TacJoint || m_connector_type == CutConnectorType::TacJoint)
+                    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "TAC Joint", UndoRedo::SnapshotType::GizmoAction);
+                m_connector_type = t;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
     }
-    return false;
+    ImGui::PopItemWidth();
+    return changed;
 }
 
 void GLGizmoCut3D::render_connect_mode_radio_button(CutConnectorMode mode)
@@ -5531,6 +5559,7 @@ void GLGizmoCut3D::on_load(cereal::BinaryInputArchive& ar)
     int   groove_count = m_groove_count;
     float groove_gap   = m_groove_gap;
     ar(groove_count, groove_gap);
+    ar(m_tac_joint, m_connector_angle, m_connector_type);
 
     m_start_dragging_m = m_rotation_m;
 
@@ -5571,6 +5600,7 @@ void GLGizmoCut3D::on_save(cereal::BinaryOutputArchive& ar) const
         m_ar_plane_center, m_start_dragging_m,
         m_groove.depth, m_groove.width, m_groove.flaps_angle, m_groove.angle, m_groove.depth_tolerance, m_groove.width_tolerance);
     ar(m_groove_count, m_groove_gap);
+    ar(m_tac_joint, m_connector_angle, m_connector_type);
 }
 
 std::string GLGizmoCut3D::on_get_name() const
@@ -5746,9 +5776,16 @@ void GLGizmoCut3D::on_register_raycasters_for_picking()
 
     if (m_connectors_editing) {
         if (CommonGizmosDataObjects::SelectionInfo* si = m_c->selection_info()) {
+            if (!si->model_object())
+                return;
             const CutConnectors& connectors = si->model_object()->cut_connectors;
-            for (int i = 0; i < int(connectors.size()); ++i)
-                m_raycasters.emplace_back(m_parent.add_raycaster_for_picking(SceneRaycaster::EType::Gizmo, i + m_connectors_group_id, *(m_shapes[connectors[i].attribs]).mesh_raycaster, Transform3d::Identity()));
+            update_tac_joint_models(connectors);
+            for (int i = 0; i < int(connectors.size()); ++i) {
+                PickingModel& shape = connectors[i].attribs.type == CutConnectorType::TacJoint ? m_tac_joint_models[size_t(i)].connector :
+                                                                                                 m_shapes[connectors[i].attribs];
+                m_raycasters.emplace_back(m_parent.add_raycaster_for_picking(SceneRaycaster::EType::Gizmo, i + m_connectors_group_id,
+                                                                             *shape.mesh_raycaster, Transform3d::Identity()));
+            }
         }
     }
     else if (!cut_line_processing()) {
@@ -5815,6 +5852,8 @@ void GLGizmoCut3D::update_raycasters_for_picking_transform()
         if (!si) 
             return;
         const ModelObject* mo = si->model_object();
+        if (!mo)
+            return;
         const CutConnectors& connectors = mo->cut_connectors;
         if (connectors.empty())
             return;
@@ -5829,6 +5868,14 @@ void GLGizmoCut3D::update_raycasters_for_picking_transform()
 
         for (size_t i = 0; i < connectors.size(); ++i) {
             const CutConnector& connector = connectors[i];
+
+            if (connector.attribs.type == CutConnectorType::TacJoint) {
+                if (i < m_raycasters.size())
+                    m_raycasters[i]->set_transform(translation_transform(connector.pos + instance_offset + sla_shift * Vec3d::UnitZ()) *
+                                                   connector_rotation_m(connector.pos) *
+                                                   rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
+                continue;
+            }
 
             float height = connector.height;
             // recalculate connector position to world position
@@ -6786,14 +6833,22 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
 
     m_imgui->text(m_labels_map["Type"]);
     ImGuiWrapper::push_radio_style();
-    bool type_changed = render_connect_type_radio_button(CutConnectorType::Plug);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::Dowel);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::Snap);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::PushFit);
-    type_changed     |= render_connect_type_radio_button(CutConnectorType::FlexiJoint);
+    const bool was_tac_joint = is_tac_joint_type();
+    const bool type_changed = render_connect_type_combo();
     if (type_changed)
         apply_selected_connectors([this, &connectors] (size_t idx) { connectors[idx].attribs.type = CutConnectorType(m_connector_type); });
+    if (type_changed && was_tac_joint && !is_tac_joint_type() && !is_pushfit_type() && !is_flexi_joint_type())
+        update_raycasters_for_picking();
     ImGuiWrapper::pop_radio_style();
+
+    if (is_tac_joint_type()) {
+        if (type_changed)
+            sync_tac_joint_params(connectors);
+        render_tac_joint_inputs(connectors);
+        ImGui::Separator();
+        render_connectors_window_footer(x, y);
+        return;
+    }
 
     if (is_flexi_joint_type()) {
         if (type_changed)
@@ -7684,6 +7739,209 @@ void GLGizmoCut3D::render_pushfit_inputs(CutConnectors& connectors)
     ImGui::PopTextWrapPos();
 }
 
+// ------------------------------------------------------------------------ TAC Joint UI
+
+bool GLGizmoCut3D::tac_joint_mode_supported() const
+{
+    return CutMode(m_mode) == CutMode::cutPlanar && m_surface_mode == CutSurfaceMode::Flat && !m_part_selection.valid();
+}
+
+void GLGizmoCut3D::sync_tac_joint_params(CutConnectors& connectors, unsigned fields)
+{
+    for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+        if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint) {
+            CutConnector& c = connectors[idx];
+            if (fields == 0x0f)
+                c.tac_joint = m_tac_joint;
+            else {
+                if (fields & 0x01)
+                    c.tac_joint.scale = m_tac_joint.scale;
+                if (fields & 0x02)
+                    c.tac_joint.clearance = m_tac_joint.clearance;
+                if (fields & 0x04)
+                    c.tac_joint.end_clearance = m_tac_joint.end_clearance;
+                if (fields & 0x08)
+                    c.tac_joint.offset = m_tac_joint.offset;
+            }
+            // These two legacy fields are only conservative overlap extents. TAC meshes
+            // are already in millimetres and never receive the generic connector scale.
+            c.radius           = 0.5f * std::hypot(4.09f * c.tac_joint.scale + 2.f * c.tac_joint.clearance,
+                                         3.34f * c.tac_joint.scale + 2.f * c.tac_joint.clearance);
+            c.height           = 11.f * c.tac_joint.scale;
+            c.radius_tolerance = c.height_tolerance = 0.f;
+            c.attribs.style                         = CutConnectorStyle::Prism;
+            c.attribs.shape                         = CutConnectorShape::Circle;
+        }
+    update_raycasters_for_picking();
+    check_and_update_connectors_state();
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
+{
+    // Read the selected model every frame, including after undo/redo of the same index.
+    // Editing updates that model immediately, so this does not discard an in-progress edit.
+    for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+        if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint) {
+            m_tac_joint       = connectors[idx].tac_joint;
+            m_connector_angle = connectors[idx].z_angle;
+            break;
+        }
+
+    auto input = [this](const wxString& label, float& value, float lo, float hi, const char* format, const wxString& tooltip,
+                        float step = 0.01f) {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(label);
+        ImGui::SameLine(m_label_width);
+        ImGui::PushItemWidth(0.65f * float(m_editing_window_width));
+        float             edited  = value;
+        const std::string id      = "##tac_joint_" + into_u8(label);
+        const bool        changed = ImGui::BBLDragFloat(id.c_str(), &edited, step, lo, hi, format);
+        if (ImGui::IsItemActivated())
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), "TAC Joint: " + into_u8(label), UndoRedo::SnapshotType::GizmoAction);
+        if (ImGui::IsItemHovered() && !tooltip.IsEmpty())
+            m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 25.f);
+        ImGui::PopItemWidth();
+        if (!changed || !std::isfinite(edited))
+            return false;
+        value = std::clamp(edited, lo, hi);
+        return true;
+    };
+
+    bool     changed        = false;
+    unsigned changed_fields = 0;
+    float    size_percent   = 100.f * m_tac_joint.scale;
+    if (input(_L("Size (%)"), size_percent, 10.f, 1000.f, "%.1f %%", _L("Scale the connector. Clearances remain in millimetres."), 0.5f)) {
+        m_tac_joint.scale = size_percent * 0.01f;
+        changed_fields |= 0x01;
+        changed = true;
+    }
+    m_imgui->text(format_wxstr(_L("Connector: %1$.2f x %2$.2f x %3$.2f mm"), 4.09 * m_tac_joint.scale, 3.34 * m_tac_joint.scale,
+                               11. * m_tac_joint.scale));
+
+    if (input(_L("Side clearance"), m_tac_joint.clearance, 0.f, 5.f, "%.3f mm",
+              _L("Nominal clearance per side. Adjusts the cutter dimensions; it is not a constant surface offset around every "
+                 "curve. The 0.12 mm default preserves the original cutter.")))
+        changed_fields |= 0x02;
+    if (input(_L("End clearance"), m_tac_joint.end_clearance, 0.f, 5.f, "%.3f mm",
+              _L("Clearance per end. The 0.30 mm default preserves the original cutter.")))
+        changed_fields |= 0x04;
+    const float half_length = 5.5f * m_tac_joint.scale;
+    if (input(_L("Cut offset"), m_tac_joint.offset, -half_length, half_length, "%.3f mm",
+              _L("Move the connector along the cut normal. Both halves must retain a positive insertion depth.")))
+        changed_fields |= 0x08;
+    double face_lo = 0., face_hi = 0.;
+    cut_thickness_faces(face_lo, face_hi);
+    m_imgui->text(format_wxstr(_L("Insertion A: %1$.2f mm; B: %2$.2f mm"), double(half_length + m_tac_joint.offset) - face_hi,
+                               double(half_length - m_tac_joint.offset) + face_lo));
+
+    float degrees = m_connector_angle * float(180. / PI);
+    if (input(_L("Rotation"), degrees, 0.f, 360.f, "%.1f°", _L("Rotate the asymmetric profile about the cut normal."), 0.5f)) {
+        m_connector_angle = degrees * float(PI / 180.);
+        for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+            if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint)
+                connectors[idx].z_angle = m_connector_angle;
+        changed = true;
+    }
+    if (m_imgui->button(_L("Reset TAC Joint"))) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Reset TAC Joint"), UndoRedo::SnapshotType::GizmoAction);
+        m_tac_joint       = TacJointParams{};
+        changed_fields    = 0x0f;
+        m_connector_angle = 0.f;
+        for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
+            if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint)
+                connectors[idx].z_angle = 0.f;
+        changed = true;
+    }
+    if (changed || changed_fields != 0)
+        sync_tac_joint_params(connectors, changed_fields);
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
+    if (m_part_selection.valid())
+        m_imgui->text_colored(
+            ImGuiWrapper::COL_ORANGE_LIGHT,
+            _L("TAC Joint does not support individual part selection. Start a new planar cut without assigning individual parts."));
+    else if (!tac_joint_mode_supported())
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("TAC Joint requires a flat, planar cut."));
+    const TacJointValidation validation = tac_joint_validate(m_tac_joint, face_lo, face_hi);
+    if (!validation.valid)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(validation.message));
+    m_imgui->text(_L("The connector is printed as a separate object. The blue outline shows its matching cutter."));
+    ImGui::PopTextWrapPos();
+}
+
+void GLGizmoCut3D::update_tac_joint_models(const CutConnectors& connectors)
+{
+    // Called only after unregistering the scene's picking items: replacing a mesh must
+    // never leave the scene holding a pointer to its old MeshRaycaster.
+    for (auto it = m_tac_joint_models.begin(); it != m_tac_joint_models.end();)
+        if (it->first >= connectors.size() || connectors[it->first].attribs.type != CutConnectorType::TacJoint)
+            it = m_tac_joint_models.erase(it);
+        else
+            ++it;
+    for (size_t idx = 0; idx < connectors.size(); ++idx) {
+        const CutConnector& c = connectors[idx];
+        if (c.attribs.type != CutConnectorType::TacJoint)
+            continue;
+        TacJointModels& cached = m_tac_joint_models[idx];
+        if (cached.connector.mesh_raycaster && cached.params == c.tac_joint)
+            continue;
+        indexed_triangle_set pin, cutter;
+        try {
+            pin    = tac_joint_connector_mesh(c.tac_joint);
+            cutter = tac_joint_cutter_mesh(c.tac_joint);
+        } catch (const std::exception&) {
+            // Malformed external parameters remain invalid and cannot be cut. A default
+            // red marker keeps the definition selectable so it can be reset or deleted.
+            pin    = tac_joint_connector_mesh(TacJointParams{});
+            cutter = tac_joint_cutter_mesh(TacJointParams{});
+        }
+        cached.params = c.tac_joint;
+        cached.connector.reset();
+        cached.connector.model.init_from(pin);
+        cached.connector.mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(pin)));
+        cached.cutter.reset();
+        cached.cutter.init_from(cutter);
+    }
+}
+
+bool GLGizmoCut3D::tac_joint_outside_body(const CutConnector& connector, const Vec3d& world_pos) const
+{
+    // The cutter has to stay in the actual solid, not merely its bounding box.
+    // Sample its vertices and triangle centres against the selected solid volumes.
+    const indexed_triangle_set cutter = tac_joint_cutter_mesh(connector.tac_joint);
+    const Transform3d          frame  = translation_transform(world_pos) * connector_rotation_m(connector.pos) *
+                              rotation_transform(-connector.z_angle * Vec3d::UnitZ());
+    const Selection&                                     selection = m_parent.get_selection();
+    std::vector<std::pair<const AABBMesh*, Transform3d>> solids;
+    for (unsigned int idx : selection.get_volume_idxs()) {
+        const GLVolume* volume = selection.get_volume(idx);
+        if (!volume->is_modifier && volume->mesh_raycaster)
+            solids.emplace_back(&volume->mesh_raycaster->get_aabb_mesh(), volume->world_matrix().inverse() * frame);
+    }
+    double lo = 0., hi = 0.;
+    cut_thickness_faces(lo, hi);
+    const Vec3d direction = Vec3d(0.371, 0.529, 0.763).normalized();
+    auto        inside    = [&](const Vec3f& sample) {
+        // The removed kerf contains no material and needs no pocket.
+        if (sample.z() > lo && sample.z() < hi)
+            return true;
+        for (const auto& solid : solids) {
+            const Vec3d p = solid.second * sample.cast<double>();
+            if (solid.first->query_ray_hit(p, direction).is_inside() || solid.first->squared_distance(p) < 1e-8)
+                return true;
+        }
+        return false;
+    };
+    for (const Vec3f& v : cutter.vertices)
+        if (!inside(v))
+            return true;
+    for (const auto& face : cutter.indices)
+        if (!inside((cutter.vertices[face[0]] + cutter.vertices[face[1]] + cutter.vertices[face[2]]) / 3.f))
+            return true;
+    return false;
+}
+
 void GLGizmoCut3D::render_build_size()
 {
     double              koef     = m_imperial_units ? GizmoObjectManipulation::mm_to_in : 1.0;
@@ -7973,6 +8231,9 @@ void GLGizmoCut3D::render_flip_plane_button(bool disable_pred /*=false*/)
 void GLGizmoCut3D::mirror_cut(CutMirrorAxis axis)
 {
     const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo && std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
+                          [](const CutConnector& c) { return c.attribs.type == CutConnectorType::TacJoint; }))
+        return;
 
     Vec3d instance_offset = Vec3d::Zero();
     if (mo && !mo->instances.empty())
@@ -8013,14 +8274,16 @@ void GLGizmoCut3D::mirror_cut(CutMirrorAxis axis)
 // with SameLine between, no icons, so they read as one group.
 void GLGizmoCut3D::render_mirror_buttons()
 {
+    const ModelObject* mo      = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    const bool         has_tac = mo && std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
+                                           [](const CutConnector& c) { return c.attribs.type == CutConnectorType::TacJoint; });
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Mirror cut") + ": ");
     ImGui::SameLine();
 
-    // Always enabled (design point 4). There is no state in which mirroring is
-    // meaningless: a plane with no surface mirrors to the plane on the other
-    // side, which is exactly what a user asking for "the same cut on the other
-    // half" means.
+    // A reflection changes the handedness of the asymmetric reference meshes.
+    // TAC supports rotation, but has no mirrored reference asset.
+    m_imgui->disabled_begin(has_tac);
     if (m_imgui->button(_L("X"), _L("Mirror the whole cut - plane, surface and connectors - about the object's centre on the world X axis")))
         mirror_cut(CutMirrorAxis::X);
     ImGui::SameLine();
@@ -8029,6 +8292,9 @@ void GLGizmoCut3D::render_mirror_buttons()
     ImGui::SameLine();
     if (m_imgui->button(_L("Z"), _L("Mirror the whole cut - plane, surface and connectors - about the object's centre on the world Z axis")))
         mirror_cut(CutMirrorAxis::Z);
+    m_imgui->disabled_end();
+    if (has_tac)
+        m_imgui->text(_L("Mirroring is unavailable with TAC Joint. Use connector rotation instead."));
 }
 void GLGizmoCut3D::add_vertical_scaled_interval(float interval)
 {
@@ -8530,7 +8796,7 @@ void GLGizmoCut3D::validate_connector_settings()
         m_connector_size = 2.5f;
     if (m_connector_size_tolerance < 0.f)
         m_connector_size_tolerance = 0.f;
-    if (m_connector_angle < 0.f || m_connector_angle > float(PI) )
+    if (m_connector_angle < 0.f || m_connector_angle > float(is_tac_joint_type() ? 2. * PI : PI))
         m_connector_angle = 0.f;
 
     if (m_connector_type == CutConnectorType::Undef)
@@ -8620,6 +8886,30 @@ void GLGizmoCut3D::init_input_window_data(CutConnectors &connectors)
 
 void GLGizmoCut3D::render_input_window_warning() const
 {
+    if (const auto* si = m_c ? m_c->selection_info() : nullptr)
+        if (const ModelObject* mo = si->model_object())
+            for (const CutConnector& c : mo->cut_connectors)
+                if (c.attribs.type == CutConnectorType::TacJoint) {
+                    if (std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
+                                    [](const CutConnector& other) { return other.attribs.type == CutConnectorType::FlexiJoint; })) {
+                        m_imgui->text(_L("TAC Joint cannot be combined with Flexi connectors in the same cut."));
+                        break;
+                    }
+                    if (!tac_joint_mode_supported()) {
+                        m_imgui->text(m_part_selection.valid() ?
+                                          _L("TAC Joint does not support individual part selection. Start a new planar cut without "
+                                             "assigning individual parts.") :
+                                          _L("TAC Joint requires a flat, planar cut. Remove these connectors or switch to a flat cut."));
+                        break;
+                    }
+                    double lo = 0., hi = 0.;
+                    cut_thickness_faces(lo, hi);
+                    const TacJointValidation validation = tac_joint_validate(c.tac_joint, lo, hi);
+                    if (!validation.valid) {
+                        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, wxString("TAC Joint: ") + _L(validation.message));
+                        break;
+                    }
+                }
     if (! m_invalid_connectors_idxs.empty()) {
         wxString out = /*wxString(ImGui::WarningMarkerSmall)*/ _L("Warning") + ": " + _L("Invalid connectors detected") + ":";
         if (m_info_stats.outside_cut_contour > size_t(0))
@@ -8745,7 +9035,18 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
     indexed_triangle_set mesh;
     auto& vertices = mesh.vertices;
 
-    if (cur_connector.attribs.type == CutConnectorType::FlexiJoint) {
+    if (cur_connector.attribs.type == CutConnectorType::TacJoint) {
+        mesh = tac_joint_cutter_mesh(cur_connector.tac_joint);
+        // Test the asymmetric cutter's projection, including face centres between
+        // existing samples, instead of the legacy circular connector footprint.
+        vertices.reserve(vertices.size() + mesh.indices.size());
+        for (const auto& face : mesh.indices) {
+            const Vec3f mid = (vertices[face[0]] + vertices[face[1]] + vertices[face[2]]) / 3.f;
+            vertices.push_back(mid);
+        }
+        its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector) *
+                                rotation_transform(-cur_connector.z_angle * Vec3d::UnitZ()));
+    } else if (cur_connector.attribs.type == CutConnectorType::FlexiJoint) {
         // A FLEXI joint is not a disc. The hinge is a long thin rectangle along its own axis;
         // the chain link is the slot its two loops sweep through the plane. Testing either
         // against a CIRCLE of radius flexi_outer_extent() - the distance to the farthest corner
@@ -8773,8 +9074,7 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
         // PHASE 4: on a curved cut the footprint is laid out in the SHEET's tangent
         // plane at the connector, not in the cut plane - see the projection below.
         its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
-    }
-    else {
+    } else {
         const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
         const int   sectorCount = shape == CutConnectorShape::Triangle  ? 3 :
                                   shape == CutConnectorShape::Square    ? 4 :
@@ -8820,17 +9120,31 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
 
 bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& connectors, const Vec3d cur_pos)
 {
+    const CutConnector& cur_connector = connectors[idx];
+    const bool          tac           = cur_connector.attribs.type == CutConnectorType::TacJoint;
+    if (tac) {
+        double lo = 0., hi = 0.;
+        cut_thickness_faces(lo, hi);
+        if (!tac_joint_mode_supported() || !tac_joint_validate(cur_connector.tac_joint, lo, hi).valid)
+            return true;
+    }
     if (is_outside_of_cut_contour(idx, connectors, cur_pos))
         return true;
 
-    const CutConnector& cur_connector = connectors[idx];    
-
-    const Transform3d matrix = translation_transform(cur_pos) * connector_rotation_m(cur_connector) *
-                               scale_transform(Vec3f(cur_connector.radius, cur_connector.radius, cur_connector.height).cast<double>());
-    const BoundingBoxf3 cur_tbb = m_shapes[cur_connector.attribs].model.get_bounding_box().transformed(matrix);
+    const Transform3d frame = translation_transform(cur_pos) * connector_rotation_m(cur_connector);
+    BoundingBoxf3     cur_tbb;
+    if (tac) {
+        const Transform3d matrix = frame * rotation_transform(-cur_connector.z_angle * Vec3d::UnitZ());
+        for (const Vec3f& vertex : tac_joint_cutter_mesh(cur_connector.tac_joint).vertices)
+            cur_tbb.merge(matrix * vertex.cast<double>());
+    } else {
+        const Transform3d matrix = frame *
+                                   scale_transform(Vec3f(cur_connector.radius, cur_connector.radius, cur_connector.height).cast<double>());
+        cur_tbb = m_shapes[cur_connector.attribs].model.get_bounding_box().transformed(matrix);
+    }
 
     // check if connector's bounding box is inside the object's bounding box
-    if (!m_bounding_box.contains(cur_tbb)) {
+    if (!m_bounding_box.contains(cur_tbb) || (tac && tac_joint_outside_body(cur_connector, cur_pos))) {
         m_info_stats.outside_bb++;
         return true;
     }
@@ -8937,6 +9251,20 @@ void GLGizmoCut3D::render_connectors()
 
     ColorRGBA render_color = CONNECTOR_DEF_COLOR;
 
+    // Model undo/redo can replace connector parameters without going through a UI field.
+    // Refresh the per-definition cache and its registered raycasters before rendering.
+    for (size_t i = 0; i < connectors.size(); ++i)
+        if (connectors[i].attribs.type == CutConnectorType::TacJoint) {
+            const auto cached = m_tac_joint_models.find(i);
+            if (cached == m_tac_joint_models.end() || !(cached->second.params == connectors[i].tac_joint)) {
+                on_unregister_raycasters_for_picking();
+                update_tac_joint_models(connectors);
+                on_register_raycasters_for_picking();
+                check_and_update_connectors_state();
+                break;
+            }
+        }
+
     const ModelInstance* mi = mo->instances[inst_id];
     const Vec3d& instance_offset = mi->get_offset();
     const double sla_shift       = double(m_c->selection_info()->get_sla_shift());
@@ -8967,6 +9295,21 @@ void GLGizmoCut3D::render_connectors()
             render_color = is_separate_pin_connector_type(connector.attribs.type) ? SELECTED_DOWEL_COLOR : SELECTED_PLAG_COLOR;
 
         const Camera& camera = wxGetApp().plater()->get_camera();
+        if (connector.attribs.type == CutConnectorType::TacJoint) {
+            const Transform3d transform = camera.get_view_matrix() * translation_transform(pos) * connector_rotation_m(connector.pos) *
+                                          rotation_transform(-connector.z_angle * Vec3d::UnitZ());
+            TacJointModels& meshes = m_tac_joint_models.at(i);
+            render_model(meshes.connector.model, render_color, transform);
+            if (m_connectors_editing) {
+                ::glEnable(GL_BLEND);
+                ::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                ::glDepthMask(GL_FALSE);
+                render_model(meshes.cutter, ColorRGBA(0.3f, 0.65f, 1.f, 0.22f), transform);
+                ::glDepthMask(GL_TRUE);
+                ::glDisable(GL_BLEND);
+            }
+            continue;
+        }
         if (connector.attribs.type  == CutConnectorType::Dowel &&
             connector.attribs.style == CutConnectorStyle::Prism) {
             if (m_connectors_editing) {
@@ -9012,9 +9355,19 @@ bool GLGizmoCut3D::can_perform_cut() const
     // A Pin whose parameters do not make a printable pin blocks the cut (the panel says why).
     if (m_c->selection_info() != nullptr)
         if (const ModelObject* mo = m_c->selection_info()->model_object())
-            for (const CutConnector& c : mo->cut_connectors)
+            for (const CutConnector& c : mo->cut_connectors) {
                 if (c.attribs.type == CutConnectorType::PushFit && !pushfit_validate(c.pushfit, double(flexi_nozzle_diameter())).empty())
                     return false;
+                if (c.attribs.type == CutConnectorType::TacJoint) {
+                    if (std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
+                                    [](const CutConnector& other) { return other.attribs.type == CutConnectorType::FlexiJoint; }))
+                        return false;
+                    double lo = 0., hi = 0.;
+                    cut_thickness_faces(lo, hi);
+                    if (!tac_joint_mode_supported() || !tac_joint_validate(c.tac_joint, lo, hi).valid)
+                        return false;
+                }
+            }
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         return has_valid_groove();
@@ -9124,21 +9477,18 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
             if (connector.attribs.type == CutConnectorType::FlexiJoint) {
                 // The flexi bodies straddle the cut plane by construction: no centre shift.
                 // The kerf reaches them through the joint's own gap, not here.
-            }
-            else if (connector.attribs.type == CutConnectorType::PushFit) {
+            } else if (connector.attribs.type == CutConnectorType::PushFit || connector.attribs.type == CutConnectorType::TacJoint) {
                 // The pin straddles the cut by construction and the cut builds it (and its
                 // holes, each from its own face) across the kerf: no centre shift, no length
                 // change. It becomes an object of its own, like a Dowel.
                 dowels_count ++;
-            }
-            else if (connector.attribs.type == CutConnectorType::Dowel) {
+            } else if (connector.attribs.type == CutConnectorType::Dowel) {
                 if (connector.attribs.style == CutConnectorStyle::Prism)
                     connector.height *= 2;
                 // Symmetric about the plane, so it only has to get longer.
                 connector.height += float(kerf);
                 dowels_count ++;
-            }
-            else {
+            } else {
                 // calculate shift of the connector center regarding to the position on the cut plane
                 // With a kerf the body starts at the lower face and is `kerf` longer,
                 // so its centre lands at face_lo + height/2 rather than at height/2.
@@ -10537,6 +10887,8 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
 {
     if (!m_connectors_editing)
         return false;
+    if (is_tac_joint_type() && !tac_joint_mode_supported())
+        return false;
 
     Vec3d pos;
     Vec3d pos_world;
@@ -10550,20 +10902,28 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
 
         const bool flexi = is_flexi_joint_type();
         const bool pin   = is_pushfit_type();
+        const bool tac   = is_tac_joint_type();
         connectors.emplace_back(pos, connector_rotation_m(pos),
-                                flexi ? flexi_outer_extent(m_flexi)      : pin ? 0.5f * m_pushfit.diameter : m_connector_size * 0.5f,
-                                flexi ? flexi_protrusion_height(m_flexi) : pin ? m_pushfit.length_upper + m_pushfit.length_lower : m_connector_depth_ratio,
-                                m_connector_size_tolerance * 0.5f, m_connector_depth_ratio_tolerance,
-                                m_connector_angle,
-                                CutConnectorAttributes( CutConnectorType(m_connector_type),
-                                                        (flexi || pin) ? CutConnectorStyle::Prism  : CutConnectorStyle(m_connector_style),
-                                                        (flexi || pin) ? CutConnectorShape::Circle : CutConnectorShape(m_connector_shape_id)));
+                                flexi ? flexi_outer_extent(m_flexi) :
+                                pin   ? 0.5f * m_pushfit.diameter :
+                                        m_connector_size * 0.5f,
+                                flexi ? flexi_protrusion_height(m_flexi) :
+                                pin   ? m_pushfit.length_upper + m_pushfit.length_lower :
+                                        m_connector_depth_ratio,
+                                m_connector_size_tolerance * 0.5f, m_connector_depth_ratio_tolerance, m_connector_angle,
+                                CutConnectorAttributes(CutConnectorType(m_connector_type),
+                                                       (flexi || pin || tac) ? CutConnectorStyle::Prism :
+                                                                               CutConnectorStyle(m_connector_style),
+                                                       (flexi || pin || tac) ? CutConnectorShape::Circle :
+                                                                               CutConnectorShape(m_connector_shape_id)));
         if (flexi)
             connectors.back().flexi = m_flexi;
         if (pin)
             connectors.back().pushfit = m_pushfit;
         m_selected.push_back(true);
         m_selected_count = 1;
+        if (tac)
+            sync_tac_joint_params(connectors);
         assert(m_selected.size() == connectors.size());
         update_raycasters_for_picking();
         m_parent.set_as_dirty();
@@ -10739,6 +11099,9 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
 {
     indexed_triangle_set connector_mesh;
 
+    if (connector_attributes.type == CutConnectorType::TacJoint)
+        return tac_joint_connector_mesh(m_tac_joint);
+
     int   sectorCount{ 1 };
     switch (CutConnectorShape(connector_attributes.shape)) {
     case CutConnectorShape::Triangle:
@@ -10804,6 +11167,10 @@ void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& conn
         }
         if (connector.attribs.type == CutConnectorType::PushFit) {
             add_pushfit_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
+        if (connector.attribs.type == CutConnectorType::TacJoint) {
+            add_tac_joint_volume(mo, connector, "TAC Joint-" + std::to_string(++connector_id));
             continue;
         }
         TriangleMesh mesh = TriangleMesh(get_connector_mesh(connector.attribs));

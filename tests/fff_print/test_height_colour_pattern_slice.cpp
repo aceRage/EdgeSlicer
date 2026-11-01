@@ -189,6 +189,7 @@ HeightColourPattern two_band_pattern()
     p.start_z  = 4.;
     p.band_h   = 4.;
     p.gap_h    = 4.;
+    p.seq_gap_h = 4.;   // one filament: every boundary is a sequence boundary
     p.repeat   = 2;
     p.sequence = { 2 };
     return p;
