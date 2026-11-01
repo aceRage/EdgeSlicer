@@ -1,6 +1,7 @@
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
+#include "NozzleProcess.hpp"
 #include "ToolSlots.hpp"
 #include <cstdlib>
 #include <cstdio>
@@ -601,6 +602,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // (resolve_filament_nozzle_variants), which invalidate what they change; the physical nozzle declaration
         // is a G-code line.
         "filament_nozzle_variants",
+        // Per-nozzle process P6: they reach the slicer as the nozzle_*_line_width arrays they resolve to.
+        "process_nozzle_line_widths",
+        "line_width_nozzle_diameter",
         "support_filament_nozzle_mapping",
         //BBS
         "additional_cooling_fan_speed",
@@ -999,6 +1003,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         } else if (
                opt_key == "initial_layer_line_width"
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
+            || opt_key == "nozzle_line_width" // per-nozzle process P6
             || opt_key == "min_layer_height"
             || opt_key == "max_layer_height"
             //|| opt_key == "resolution"
@@ -3473,7 +3478,8 @@ double Print::skirt_first_layer_height() const
 
 Flow Print::brim_flow() const
 {
-    ConfigOptionFloatOrPercent width = m_config.initial_layer_line_width;
+    // Per-nozzle process P6: the first-layer width of the brim filament's nozzle (P5 deferred item).
+    ConfigOptionFloatOrPercent width = initial_layer_line_width_for_filament(m_config, unsigned(m_print_regions.front()->config().wall_filament.value));
     if (width.value <= 0)
         width = m_print_regions.front()->config().inner_wall_line_width;
     if (width.value <= 0)
@@ -3496,9 +3502,12 @@ Flow Print::skirt_flow() const
 {
 
     // Orca: fall back to m_config if no objects are present
-    ConfigOptionFloatOrPercent width = m_config.initial_layer_line_width;
+    // Per-nozzle process P6: the first-layer / default width of the skirt filament's nozzle (P5 deferred item).
+    // Support "0 = current filament" reads the first extruder's nozzle below, which filament 1 prints on.
+    const unsigned int skirt_filament = m_objects.empty() ? 1u : unsigned(std::max(1, m_objects.front()->config().support_filament.value));
+    ConfigOptionFloatOrPercent width = initial_layer_line_width_for_filament(m_config, skirt_filament);
     if (width.value <= 0)
-        width = m_objects.empty() ? m_config.initial_layer_line_width : m_objects.front()->config().line_width;
+        width = m_objects.empty() ? m_config.initial_layer_line_width : line_width_for_filament(m_config, m_objects.front()->config().line_width, skirt_filament);
 
     /* We currently use a random object's support material extruder.
        While this works for most cases, we should probably consider all of the support material

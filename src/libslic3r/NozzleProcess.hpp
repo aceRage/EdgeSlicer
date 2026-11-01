@@ -137,6 +137,63 @@ bool split_process_per_diameter(DynamicPrintConfig &process, std::vector<double>
 // preset) when it is not split by size itself, else one value per flow mode. Returns false when not split by size.
 bool link_process_diameters(DynamicPrintConfig &process, double from, const ConfigBase *reference = nullptr);
 
+// ---- Per-nozzle process P6: every line width correct per nozzle on mixed-nozzle printers ----
+//
+// The width a role gets on a nozzle, in order of precedence:
+//   1. The nozzle's own process ("Speeds from", nozzle_process_presets): that process's widths, as it has them (P2),
+//      plus that process's own table entries (2.) for the nozzle. The nozzle's process is its process, for widths as
+//      for speeds: the plate process's values for that nozzle, split per nozzle or per size, are not used (the Speed
+//      page locks them for such a nozzle).
+//   2. An explicit per-nozzle value of the plate process: process_nozzle_line_widths, the "Line widths per nozzle"
+//      table. Entries use the filament_nozzle_variants selectors ("0.6: outer_wall_line_width=0.62 | T2: ..."); the
+//      most specific one wins (tool and size, then tool, then size).
+//   3. The plate's value: a percentage (or 0 = auto) resolves against the nozzle that prints the role, as always.
+//   4. An absolute (mm) value on a printer with nozzles of two or more sizes is scaled by
+//      nozzle diameter / line_width_reference_diameter(), the size the process's widths were made for.
+//      A 0 role width stands for line_width and follows it. initial_layer_line_width 0 ("the role widths") and
+//      bridge_line_width 0 ("auto") keep their meaning.
+// On a printer with one nozzle size and no table entries nothing is resolved, so the G-code is unchanged.
+
+// The process width keys resolved per nozzle: the Line width group, plus the locked-zag skin / skeleton widths.
+const std::vector<std::string> &nozzle_width_option_keys();
+// The nozzle diameter a process's absolute widths were made for: line_width_nozzle_diameter when set (> 0), else the
+// first number of the printer's printer_variant ("0.4", "0.4+0.6": the nozzle the printer preset, and so the
+// processes made for it, is for), else the first extruder's nozzle_diameter. 0 when none is known.
+double line_width_reference_diameter(const ConfigBase &config);
+// The value process_nozzle_line_widths gives `key` on 1-based tool `tool` (0 = unknown) with a `diameter` nozzle;
+// false when no entry matches.
+bool process_nozzle_width_override(const ConfigBase &process, const std::string &key, int tool, double diameter, FloatOrPercent &out);
+// The text with the entry of exactly this selector (1-based tool or 0, diameter or 0) setting `key` to `value`; an empty
+// `value` removes it.
+std::string set_process_nozzle_width(const std::string &text, int tool, double diameter, const std::string &key, const std::string &value);
+// Every problem of a process_nozzle_line_widths text (unknown keys, values that are not widths, flow-type selectors);
+// empty when it is valid.
+std::vector<std::string> validate_process_nozzle_line_widths(const std::string &text);
+// Why `value` is not a width for the table ("0.62", "105%", >= 0), or empty when it is one.
+std::string validate_nozzle_width_value(const std::string &value);
+
+enum class NozzleWidthSource {
+    Plate,    // the plate process's value as it is (a percentage, auto, or the reference size's own value)
+    Scaled,   // the plate's absolute value scaled to the nozzle's size
+    Override, // an entry of process_nozzle_line_widths
+};
+struct NozzleWidth
+{
+    FloatOrPercent    value{ 0., false };
+    NozzleWidthSource source{ NozzleWidthSource::Plate };
+};
+// The width `key` takes on 1-based tool `tool` (0 = any) with a `diameter` nozzle under the plate process of `config`
+// (process and printer keys): rules 2-4 above. The Tab shows it as the effective value of a nozzle.
+NozzleWidth nozzle_width_for(const ConfigBase &config, const std::string &key, int tool, double diameter);
+// Print::apply: rules 1-4 per filament into the nozzle_*_line_width arrays of a full print config (rule 1 keeps the
+// entries fill_nozzle_line_widths wrote for a filament whose nozzle has its own process). When no filament's width
+// changes the arrays are left as they are and false is returned.
+bool resolve_nozzle_line_widths(DynamicPrintConfig &config);
+// The first-layer width of 1-based `filament`: its entry of nozzle_initial_layer_line_width, else the plate's.
+ConfigOptionFloatOrPercent initial_layer_line_width_for_filament(const PrintConfig &config, unsigned int filament);
+// The default width of 1-based `filament`: its entry of nozzle_line_width, else `object_width` (the object's line_width).
+ConfigOptionFloatOrPercent line_width_for_filament(const PrintConfig &config, const ConfigOptionFloatOrPercent &object_width, unsigned int filament);
+
 } // namespace Slic3r
 
 #endif // slic3r_NozzleProcess_hpp_

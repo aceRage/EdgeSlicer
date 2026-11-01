@@ -4555,7 +4555,9 @@ void PrintConfigDef::init_fff_params()
                              "nozzle_internal_solid_infill_line_width", "nozzle_top_surface_line_width",
                              "nozzle_support_line_width",
                              // P5
-                             "nozzle_skin_infill_line_width", "nozzle_skeleton_infill_line_width", "nozzle_initial_layer_line_width" }) {
+                             "nozzle_skin_infill_line_width", "nozzle_skeleton_infill_line_width", "nozzle_initial_layer_line_width",
+                             // P6: also filled when the nozzles differ in size (resolve_nozzle_line_widths)
+                             "nozzle_bridge_line_width", "nozzle_line_width" }) {
         def = this->add(key, coFloatsOrPercents);
         def->label = key;
         def->tooltip = "Line width per filament from the per-nozzle process of its nozzle (internal).";
@@ -4563,6 +4565,28 @@ void PrintConfigDef::init_fff_params()
         def->set_default_value(new ConfigOptionFloatsOrPercents {});
         def->cli = ConfigOptionDef::nocli;
     }
+
+    // Per-nozzle process P6 (NozzleProcess.hpp): process keys. Explicit line widths per nozzle size or tool
+    // ("Line widths per nozzle" table), in the filament_nozzle_variants format:
+    // "0.6: outer_wall_line_width=0.62, inner_wall_line_width=0.65 | T2: support_line_width=0.5".
+    def = this->add("process_nozzle_line_widths", coString);
+    def->label = L("Line widths per nozzle");
+    def->tooltip = L("Line widths for particular nozzle sizes or tools. A width not set here follows the width above: a "
+                     "percentage of the nozzle diameter as it is, a width in mm scaled to the nozzle's size when the printer "
+                     "has nozzles of different sizes.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+    def->cli = ConfigOptionDef::nocli;
+
+    def = this->add("line_width_nozzle_diameter", coFloat);
+    def->label = L("Widths made for nozzle");
+    def->sidetext = "mm";
+    def->tooltip = L("The nozzle diameter this process's line widths in mm were made for. On a printer with nozzles of "
+                     "different sizes they are scaled from it to each nozzle. 0 means the printer preset's nozzle size.");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     // Per-nozzle process P4 (tests/design_per_nozzle_process.md "P4: Generic N-tool"): the diameter dimension of
     // the process slot layout. One entry per print_extruder_id / print_extruder_variant slot: the nozzle

@@ -145,10 +145,20 @@ const std::vector<std::pair<std::string, std::string>> &nozzle_line_width_keys()
         // P5: the locked-zag infill's skin and skeleton widths.
         { "nozzle_skin_infill_line_width", "skin_infill_line_width" },
         { "nozzle_skeleton_infill_line_width", "skeleton_infill_line_width" },
+        // P6: the bridge width (0 = auto keeps its meaning: no line_width fallback).
+        { "nozzle_bridge_line_width", "bridge_line_width" },
         { "nozzle_support_line_width", "support_line_width" },
     };
     return keys;
 }
+
+namespace {
+// A 0 of these widths means "line_width"; a 0 bridge width means auto and a 0 first-layer width "the role widths".
+bool zero_width_is_line_width(const std::string &width_key)
+{
+    return width_key != "bridge_line_width" && width_key != "initial_layer_line_width" && width_key != "line_width";
+}
+} // namespace
 
 size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
@@ -168,15 +178,29 @@ bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const
     const size_t count     = filaments != nullptr ? filaments->size() : 0;
     // Per filament: the process of the nozzle it prints on, nullptr for the plate's.
     std::vector<const DynamicPrintConfig *> per_filament(count, nullptr);
+    std::vector<int>                        tool_of(count, 0);
+    std::vector<double>                     diameter_of(count, 0.);
     bool any = false;
     for (size_t f = 0; f < count; ++f) {
         const size_t e = nozzle_for_filament(config, unsigned(f + 1));
+        tool_of[f]     = int(e) + 1;
+        diameter_of[f] = nozzle_diameter_for_filament(config, unsigned(f + 1));
         if (e < sources.size() && sources[e] != nullptr) {
             per_filament[f] = sources[e];
             any = true;
         }
     }
-    for (const auto &[array_key, width_key] : nozzle_line_width_keys()) {
+    // A source process's value of `width_key` for filament f: its own table entry for the nozzle (P6), else its value.
+    auto source_width = [&](const DynamicPrintConfig &src, const std::string &width_key, size_t f, FloatOrPercent &out) {
+        if (process_nozzle_width_override(src, width_key, tool_of[f], diameter_of[f], out))
+            return true;
+        if (const auto *width = src.option<ConfigOptionFloatOrPercent>(width_key)) {
+            out = FloatOrPercent{ width->value, width->percent };
+            return true;
+        }
+        return false;
+    };
+    auto fill_array = [&](const std::string &array_key, const std::string &width_key) {
         auto *opt = new ConfigOptionFloatsOrPercents();
         if (any) {
             // A filament on a nozzle without a process of its own keeps the plate's width (0 = line_width, as
@@ -186,31 +210,33 @@ bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const
             opt->values.assign(count, plate_width);
             for (size_t f = 0; f < count; ++f) {
                 const DynamicPrintConfig *src = per_filament[f];
-                if (src == nullptr)
+                if (src == nullptr) {
+                    // P6: rules 2-4 (the plate's table, scaling) for a nozzle without a process of its own.
+                    opt->values[f] = nozzle_width_for(config, width_key, tool_of[f], diameter_of[f]).value;
                     continue;
-                const auto *width = src->option<ConfigOptionFloatOrPercent>(width_key);
-                if (width == nullptr || width->value == 0.)
-                    width = src->option<ConfigOptionFloatOrPercent>("line_width"); // a 0 role width means line_width
-                if (width != nullptr && width->value > 0.)
-                    opt->values[f] = FloatOrPercent{ width->value, width->percent };
+                }
+                FloatOrPercent width{ 0., false };
+                const bool     has = source_width(*src, width_key, f, width);
+                if (!zero_width_is_line_width(width_key)) {
+                    // P5: the first-layer width keeps 0 ("the role widths"); P6: so does the bridge width (auto) and
+                    // line_width itself.
+                    if (has)
+                        opt->values[f] = width;
+                    continue;
+                }
+                if (!has || width.value == 0.)
+                    if (!source_width(*src, "line_width", f, width)) // a 0 role width means line_width
+                        continue;
+                if (width.value > 0.)
+                    opt->values[f] = width;
             }
         }
         config.set_key_value(array_key, opt);
-    }
-    // P5: the first-layer width. Unlike a role width, 0 keeps its meaning ("the role widths"), so a filament whose
-    // nozzle process leaves it at 0 prints its first layer with that process's role widths.
-    {
-        auto *opt = new ConfigOptionFloatsOrPercents();
-        if (any) {
-            const auto *plate = config.option<ConfigOptionFloatOrPercent>("initial_layer_line_width");
-            opt->values.assign(count, plate != nullptr ? FloatOrPercent{ plate->value, plate->percent } : FloatOrPercent{ 0., false });
-            for (size_t f = 0; f < count; ++f)
-                if (const DynamicPrintConfig *src = per_filament[f]; src != nullptr)
-                    if (const auto *width = src->option<ConfigOptionFloatOrPercent>("initial_layer_line_width"))
-                        opt->values[f] = FloatOrPercent{ width->value, width->percent };
-        }
-        config.set_key_value("nozzle_initial_layer_line_width", opt);
-    }
+    };
+    for (const auto &[array_key, width_key] : nozzle_line_width_keys())
+        fill_array(array_key, width_key);
+    fill_array("nozzle_initial_layer_line_width", "initial_layer_line_width");
+    fill_array("nozzle_line_width", "line_width"); // P6: the skirt's fallback width
     return any;
 }
 
@@ -270,6 +296,8 @@ void stamp_nozzle_line_widths(PrintRegionConfig &c)
     // P5: the locked-zag skin and skeleton are sparse infill.
     stamp_width(c.skin_infill_line_width, c.nozzle_skin_infill_line_width, sparse);
     stamp_width(c.skeleton_infill_line_width, c.nozzle_skeleton_infill_line_width, sparse);
+    // P6: bridges are solid infill (LayerRegion::bridging_flow takes the solid infill filament's nozzle).
+    stamp_width(c.bridge_line_width, c.nozzle_bridge_line_width, solid);
 }
 
 void stamp_nozzle_line_widths(PrintObjectConfig &c)
@@ -321,6 +349,14 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         if (sources[e] != nullptr)
             source_layouts[e] = SlotLayout::of(*sources[e]);
 
+    // P6: a plate process split by nozzle size (P5 diameter slots) keeps giving a nozzle without a process of its own
+    // its size's values; the new per-extruder layout below has no diameter dimension, so they are copied per extruder.
+    // Before, such a nozzle fell back to the flow-mode column (the first size's values).
+    std::unique_ptr<DynamicPrintConfig> by_size;
+    if (!keep && process_has_diameter_slots(config))
+        by_size = std::make_unique<DynamicPrintConfig>(config);
+    const auto *head_sizes = config.option<ConfigOptionFloats>("nozzle_diameter");
+
     for (const std::string &key : per_nozzle_process_options()) {
         auto *opt = dynamic_cast<ConfigOptionVectorBase *>(config.option(key));
         if (opt == nullptr || opt->size() == 0)
@@ -337,6 +373,13 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
                 const auto *src_vec = dynamic_cast<const ConfigOptionVectorBase *>(src->option(key));
                 if (src_vec != nullptr && src_vec->size() > 0 && src_vec->type() == opt->type()) {
                     opt->set_at(src_vec, s, source_layouts[e].index(src_vec->size(), e, mode));
+                    continue;
+                }
+            }
+            if (by_size && head_sizes != nullptr) {
+                const int size_slot = process_diameter_slot(*by_size, key, head_sizes->get_at(e), mode);
+                if (size_slot >= 0 && size_t(size_slot) < plate_vec->size()) {
+                    opt->set_at(plate_vec, s, size_t(size_slot));
                     continue;
                 }
             }
@@ -678,6 +721,250 @@ std::string nozzle_process_value(const DynamicPrintConfig &config, const std::st
     const SlotLayout layout = SlotLayout::of(config);
     const size_t     idx    = layout.index(opt->size(), extruder, high_flow ? fvtHighFlow : fvtStandard);
     return opt->vserialize()[idx];
+}
+
+// ---- Per-nozzle process P6 ----------------------------------------------------------------------------------------
+
+const std::vector<std::string> &nozzle_width_option_keys()
+{
+    static const std::vector<std::string> keys { "line_width",
+                                                 "initial_layer_line_width",
+                                                 "outer_wall_line_width",
+                                                 "inner_wall_line_width",
+                                                 "top_surface_line_width",
+                                                 "sparse_infill_line_width",
+                                                 "internal_solid_infill_line_width",
+                                                 "support_line_width",
+                                                 "bridge_line_width",
+                                                 "skin_infill_line_width",
+                                                 "skeleton_infill_line_width" };
+    return keys;
+}
+
+namespace {
+
+bool is_nozzle_width_key(const std::string &key)
+{
+    const auto &keys = nozzle_width_option_keys();
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+bool parse_width(const std::string &text, FloatOrPercent &out)
+{
+    std::string s = text;
+    s.erase(0, s.find_first_not_of(" \t"));
+    s.erase(s.find_last_not_of(" \t") + 1);
+    if (s.empty())
+        return false;
+    bool percent = false;
+    if (s.back() == '%') {
+        percent = true;
+        s.pop_back();
+    }
+    try {
+        size_t       used  = 0;
+        const double value = std::stod(s, &used);
+        if (used != s.size() || !std::isfinite(value) || value < 0.)
+            return false;
+        out = FloatOrPercent{ value, percent };
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string process_nozzle_width_text(const ConfigBase &config)
+{
+    if (const auto *opt = dynamic_cast<const ConfigOptionString *>(config.option("process_nozzle_line_widths")))
+        return opt->value;
+    return std::string();
+}
+
+bool same_width(const FloatOrPercent &a, const FloatOrPercent &b) { return a.percent == b.percent && std::abs(a.value - b.value) < 1e-9; }
+
+} // namespace
+
+double line_width_reference_diameter(const ConfigBase &config)
+{
+    if (const auto *opt = dynamic_cast<const ConfigOptionFloat *>(config.option("line_width_nozzle_diameter")); opt != nullptr && opt->value > 0.)
+        return opt->value;
+    if (const auto *variant = dynamic_cast<const ConfigOptionString *>(config.option("printer_variant")); variant != nullptr) {
+        // "0.4", "0.4+0.6": the first number.
+        const std::string &v     = variant->value;
+        const size_t       start = v.find_first_of("0123456789.");
+        if (start != std::string::npos) {
+            const size_t end = v.find_first_not_of("0123456789.", start);
+            try {
+                const double d = std::stod(v.substr(start, end == std::string::npos ? std::string::npos : end - start));
+                if (d > 0.05 && d < 3.)
+                    return d;
+            } catch (...) {
+            }
+        }
+    }
+    if (const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_diameter")); nozzles != nullptr && !nozzles->values.empty())
+        return nozzles->values.front();
+    return 0.;
+}
+
+bool process_nozzle_width_override(const ConfigBase &process, const std::string &key, int tool, double diameter, FloatOrPercent &out)
+{
+    const std::string text = process_nozzle_width_text(process);
+    if (text.empty())
+        return false;
+    int best = -1;
+    for (const FilamentNozzleVariant &v : parse_filament_nozzle_variants(text)) {
+        if (v.flow_mode >= 0)
+            continue; // widths do not vary per flow type (validate_process_nozzle_line_widths names it)
+        if (v.tool > 0 && v.tool != tool)
+            continue;
+        if (v.diameter > 0. && !(diameter > 0. && same_nozzle_diameter(v.diameter, diameter)))
+            continue;
+        if (v.tool == 0 && !(v.diameter > 0.))
+            continue;
+        const int score = (v.tool > 0 ? 2 : 0) + (v.diameter > 0. ? 1 : 0);
+        if (score <= best)
+            continue;
+        for (const auto &[k, value] : v.values) {
+            FloatOrPercent w;
+            if (k == key && parse_width(value, w)) {
+                out  = w;
+                best = score;
+            }
+        }
+    }
+    return best >= 0;
+}
+
+std::string set_process_nozzle_width(const std::string &text, int tool, double diameter, const std::string &key, const std::string &value)
+{
+    return set_filament_nozzle_value(text, tool, diameter, -1, key, value);
+}
+
+std::string validate_nozzle_width_value(const std::string &value)
+{
+    FloatOrPercent w;
+    if (!parse_width(value, w))
+        return "\"" + value + "\" is not a line width: a width in mm (0.62) or a percentage of the nozzle diameter (105%).";
+    if (!w.percent && w.value > 5.)
+        return "\"" + value + "\" mm is wider than any nozzle can print.";
+    if (w.percent && w.value > 1000.)
+        return "\"" + value + "\" is wider than any nozzle can print.";
+    return std::string();
+}
+
+std::vector<std::string> validate_process_nozzle_line_widths(const std::string &text)
+{
+    std::vector<std::string> errors;
+    for (const FilamentNozzleVariant &v : parse_filament_nozzle_variants(text, &errors)) {
+        if (v.flow_mode >= 0)
+            errors.emplace_back("Line widths do not differ per flow type: " + format_filament_nozzle_selector(v.tool, v.diameter, v.flow_mode));
+        if (v.tool == 0 && !(v.diameter > 0.))
+            errors.emplace_back("An entry needs a tool or a nozzle size.");
+        for (const auto &[key, value] : v.values) {
+            if (!is_nozzle_width_key(key))
+                errors.emplace_back("\"" + key + "\" is not a line width setting.");
+            else if (const std::string problem = validate_nozzle_width_value(value); !problem.empty())
+                errors.emplace_back(key + ": " + problem);
+        }
+    }
+    return errors;
+}
+
+NozzleWidth nozzle_width_for(const ConfigBase &config, const std::string &key, int tool, double diameter)
+{
+    NozzleWidth out;
+    const auto *plate = dynamic_cast<const ConfigOptionFloatOrPercent *>(config.option(key));
+    if (plate != nullptr)
+        out.value = FloatOrPercent{ plate->value, plate->percent };
+    // 2. The table.
+    if (FloatOrPercent w; process_nozzle_width_override(config, key, tool, diameter, w)) {
+        out.value  = w;
+        out.source = NozzleWidthSource::Override;
+        return out;
+    }
+    // A 0 role width stands for line_width: it follows line_width's value for the nozzle when that changes.
+    if (out.value.value == 0. && zero_width_is_line_width(key)) {
+        const NozzleWidth lw = nozzle_width_for(config, "line_width", tool, diameter);
+        if (lw.source != NozzleWidthSource::Plate)
+            return lw;
+        return out;
+    }
+    // 3. A percentage or auto resolves against the nozzle as it is.
+    if (out.value.percent || !(out.value.value > 0.) || !(diameter > 0.))
+        return out;
+    // 4. An absolute width on a printer with several nozzle sizes, for a nozzle of another size than the process's.
+    if (printer_nozzle_sizes(config).size() < 2)
+        return out;
+    const double reference = line_width_reference_diameter(config);
+    if (!(reference > 0.) || same_nozzle_diameter(reference, diameter))
+        return out;
+    out.value.value = std::round(out.value.value * diameter / reference * 10000.) / 10000.;
+    out.source      = NozzleWidthSource::Scaled;
+    return out;
+}
+
+bool resolve_nozzle_line_widths(DynamicPrintConfig &config)
+{
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    if (count == 0)
+        return false;
+    // Nothing to resolve on one nozzle size without table entries: the job slices as it always did.
+    if (printer_nozzle_sizes(config).size() < 2 && process_nozzle_width_text(config).empty())
+        return false;
+
+    // Rule 1: a job with per-nozzle processes had its arrays written by fill_nozzle_line_widths, which applies rules
+    // 2-4 to the filaments without a process of their own already.
+    if (const auto *filled = dynamic_cast<const ConfigOptionFloatsOrPercents *>(config.option("nozzle_outer_wall_line_width"));
+        filled != nullptr && filled->values.size() == count)
+        return false;
+    std::vector<int>    tool_of(count, 0);
+    std::vector<double> diameter_of(count, 0.);
+    for (size_t f = 0; f < count; ++f) {
+        tool_of[f]     = int(nozzle_for_filament(config, unsigned(f + 1))) + 1;
+        diameter_of[f] = nozzle_diameter_for_filament(config, unsigned(f + 1));
+    }
+
+    std::vector<std::pair<std::string, std::string>> arrays = nozzle_line_width_keys();
+    arrays.emplace_back("nozzle_initial_layer_line_width", "initial_layer_line_width");
+    arrays.emplace_back("nozzle_line_width", "line_width");
+
+    bool                                             changed = false;
+    std::vector<std::vector<FloatOrPercent>>         values(arrays.size());
+    for (size_t a = 0; a < arrays.size(); ++a) {
+        const auto &[array_key, width_key] = arrays[a];
+        const auto *plate                  = config.option<ConfigOptionFloatOrPercent>(width_key);
+        const FloatOrPercent plate_width   = plate != nullptr ? FloatOrPercent{ plate->value, plate->percent } : FloatOrPercent{ 0., false };
+        values[a].assign(count, plate_width);
+        for (size_t f = 0; f < count; ++f) {
+            const NozzleWidth w = nozzle_width_for(config, width_key, tool_of[f], diameter_of[f]);
+            values[a][f]        = w.value;
+            changed |= !same_width(w.value, plate_width);
+        }
+    }
+    if (!changed)
+        return false;
+    for (size_t a = 0; a < arrays.size(); ++a) {
+        auto *opt   = new ConfigOptionFloatsOrPercents();
+        opt->values = std::move(values[a]);
+        config.set_key_value(arrays[a].first, opt);
+    }
+    return true;
+}
+
+ConfigOptionFloatOrPercent initial_layer_line_width_for_filament(const PrintConfig &config, unsigned int filament)
+{
+    if (const FloatOrPercent *w = nozzle_width_at(config.nozzle_initial_layer_line_width, int(filament)))
+        return ConfigOptionFloatOrPercent(w->value, w->percent);
+    return config.initial_layer_line_width;
+}
+
+ConfigOptionFloatOrPercent line_width_for_filament(const PrintConfig &config, const ConfigOptionFloatOrPercent &object_width, unsigned int filament)
+{
+    if (const FloatOrPercent *w = nozzle_width_at(config.nozzle_line_width, int(filament)))
+        return ConfigOptionFloatOrPercent(w->value, w->percent);
+    return object_width;
 }
 
 } // namespace Slic3r

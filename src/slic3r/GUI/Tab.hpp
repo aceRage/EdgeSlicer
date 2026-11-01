@@ -577,6 +577,12 @@ public:
 	void		refresh_nozzle_header() { refresh_nozzle_controls(); }
 
 private:
+	// Per-nozzle process P6: the Line width group's "Line widths per nozzle" line (a summary and the table button).
+	wxSizer*	nozzle_widths_create_widget(wxWindow* parent);
+	void		edit_nozzle_widths_table(wxWindow* parent);
+	void		update_nozzle_widths_note();
+	wxStaticText*	m_nozzle_widths_note = nullptr;
+
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line = nullptr;
 	ogStaticText*	m_top_bottom_shell_thickness_explanation = nullptr;
 

@@ -267,6 +267,9 @@ SCENARIO("Mixed nozzle (c): a feature may not out-width its own nozzle", "[Mixed
         auto *outer   = config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width");
         outer->value   = 0.62;
         outer->percent = false;
+        // Per-nozzle process P6: a width in mm made for the 0.6 is scaled to the 0.2 (0.207), which is accepted; a
+        // 0.62 asked for the 0.2 nozzle explicitly is what validation still refuses.
+        config.set_key_value("process_nozzle_line_widths", new ConfigOptionString("0.2: outer_wall_line_width=0.62"));
 
         Model model;
         add_cube(model, "cube.stl");

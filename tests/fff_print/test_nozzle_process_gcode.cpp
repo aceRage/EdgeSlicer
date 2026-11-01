@@ -214,7 +214,7 @@ TEST_CASE("A 0.6 nozzle with a 0.6 process prints the 0.6 process's widths", "[N
     const DynamicPrintConfig plate = mixed_two_tool_config();
     const auto               base  = widths_per_tool(slice(plate));
     REQUIRE(base.count(1) == 1);
-    CHECK(base.at(1).count("0.62") == 0); // without a per-nozzle process T1 prints the plate's 0.42
+    CHECK(base.at(1).count("0.62") == 0); // without a per-nozzle process T1 prints the plate's 0.42 scaled (P6)
 
     const DynamicPrintConfig p06    = process_06();
     DynamicPrintConfig       filled = plate;
@@ -228,7 +228,9 @@ TEST_CASE("A 0.6 nozzle with a 0.6 process prints the 0.6 process's widths", "[N
     CHECK(widths.at(0).count("0.62") == 0);
     CHECK(widths.at(0) == base.at(0)); // T0 (no process of its own) is untouched
     CHECK(gcode.find("; nozzle_outer_wall_line_width = ") != std::string::npos);
-    CHECK(slice(plate).find("; nozzle_outer_wall_line_width = ") == std::string::npos);
+    // Per-nozzle process P6: without a process of its own the 0.6 tool prints the plate's 0.42 scaled to its size.
+    CHECK(base.at(1).count("0.63") == 1);
+    CHECK(base.at(0).count("0.42") == 1);
 }
 
 TEST_CASE("A filament assigned to the 0.6 tool slices for that tool", "[NozzleProcess][GCode][Assignment]")
