@@ -388,6 +388,44 @@ indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, co
     return out;
 }
 
+indexed_triangle_set curved_cut_face_of(const indexed_triangle_set& half, const CurvedCutSheet& sheet, double face_offset, double tol)
+{
+    indexed_triangle_set out;
+    tol = std::max(1e-4, tol);
+    auto on_face = [&](const Vec3f& v) {
+        return std::abs(double(v.z()) - sheet.evaluate_local(double(v.x()), double(v.y())) - face_offset) <= tol;
+    };
+    std::vector<int> remap(half.vertices.size(), -1);
+    for (const Vec3i32& f : half.indices) {
+        const Vec3f& a = half.vertices[f[0]];
+        const Vec3f& b = half.vertices[f[1]];
+        const Vec3f& c = half.vertices[f[2]];
+        if (!on_face(a) || !on_face(b) || !on_face(c))
+            continue;
+        // Along the sheet, not a wall of the part that happens to touch it: the face's normal is
+        // within ~25 degrees of the sheet's there (either sign - the halves face opposite ways).
+        Vec3d n = (c - a).cast<double>().cross((b - a).cast<double>());
+        if (n.norm() < 1e-12)
+            continue;
+        n.normalize();
+        const Vec3f  centre = (a + b + c) / 3.f;
+        const Vec3d  sn     = curved_cut_sheet_normal(sheet, double(centre.x()), double(centre.y()));
+        if (std::abs(n.dot(sn)) < 0.9)
+            continue;
+        Vec3i32 g;
+        for (int k = 0; k < 3; ++k) {
+            int& r = remap[size_t(f[k])];
+            if (r < 0) {
+                r = int(out.vertices.size());
+                out.vertices.push_back(half.vertices[f[k]]);
+            }
+            g[k] = r;
+        }
+        out.indices.push_back(g);
+    }
+    return out;
+}
+
 // The same radius from a connector VOLUME, as Cut sees it: the plain kinds carry their size in
 // the volume's scale, which is measured here in the connector's own (unscaled) frame.
 static double connector_volume_footprint_radius(const ModelVolume& volume)

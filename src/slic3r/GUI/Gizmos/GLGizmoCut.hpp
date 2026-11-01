@@ -319,6 +319,10 @@ class GLGizmoCut3D : public GLGizmoBase
     void    update_split_preview();
     void    render_split_preview();
     bool    split_preview_shown() const { return m_split_preview_ok && non_planar_connector_editing(); }
+    // Curved: the split preview's own cut face (in the world), the click target while the preview
+    // is shown - it is the face the user sees, which runs on past the sheet's control grid.
+    TriangleMesh                   m_split_cap_mesh;
+    std::unique_ptr<MeshRaycaster> m_split_cap_raycaster;
     // Connectors are being placed on a curved or drawn surface: the flat clipper must stay out of
     // it, the upper half is hidden (as the flat clipper hides it on a flat cut) and the section
     // of the real surface is shown and picked.

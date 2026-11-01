@@ -132,6 +132,13 @@ private:
 // parts of the sheet or the drawn strip that hang outside it.
 indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, const CutSolidTest& object, double max_edge);
 
+// THE CUT FACE of a half a curved cut produced (curved_cut_split()), in the plane frame: its
+// triangles that lie on the sheet offset by `face_offset` (the half's own kerf face), to within
+// `tol` mm, and face along the sheet. This is exactly the face the user sees on that half -
+// including where the cut runs on past the sheet's control grid, which the sheet's own sample
+// mesh does not cover - so it is what a click on that face has to be tested against.
+indexed_triangle_set curved_cut_face_of(const indexed_triangle_set& half, const CurvedCutSheet& sheet, double face_offset, double tol = 0.2);
+
 // Append the NEGATIVE_VOLUME that carries a flexi joint into `mo` before the cut runs.
 // The volume's mesh is the male body; Cut regenerates both bodies from cut_info.flexi, so
 // the mesh is only there for previews and for "does it intersect the contour" checks.

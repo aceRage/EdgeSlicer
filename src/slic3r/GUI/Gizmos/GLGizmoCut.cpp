@@ -2261,14 +2261,20 @@ bool GLGizmoCut3D::unproject_on_curved_sheet(const Vec2d& mouse_position, Vec3d&
     // the sheet where it goes through the part - and nowhere else. No fallback to the flat
     // plane, and no hit on the sheet out past the part: a miss places nothing.
     if (m_connectors_editing) {
-        update_curved_section();
-        if (!m_curved_section_raycaster) {
-            BOOST_LOG_TRIVIAL(info) << "[cutconn] pick curved section: miss (no section - the sheet does not cross the part)";
-            return false;
-        }
         Vec3d hit_w;
-        if (!pick_open_surface(*m_curved_section_raycaster, mouse_position, hit_w, "curved section"))
-            return false;
+        if (split_preview_shown() && m_split_cap_raycaster) {
+            // The face the user sees (the split preview's own cut face).
+            if (!pick_open_surface(*m_split_cap_raycaster, mouse_position, hit_w, "curved cut face (split preview)"))
+                return false;
+        } else {
+            update_curved_section();
+            if (!m_curved_section_raycaster) {
+                BOOST_LOG_TRIVIAL(info) << "[cutconn] pick curved section: miss (no section - the sheet does not cross the part)";
+                return false;
+            }
+            if (!pick_open_surface(*m_curved_section_raycaster, mouse_position, hit_w, "curved section"))
+                return false;
+        }
         const Vec3f hit_f = hit_w.cast<float>();
         Vec3d hit_d = hit_f.cast<double>();
         if (const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info(); sel && sel->model_object() && sel->get_active_instance() >= 0) {
@@ -3961,6 +3967,8 @@ void GLGizmoCut3D::update_split_preview()
     m_split_preview_key   = key;
     m_split_preview_ok    = false;
     m_split_preview_model.reset();
+    m_split_cap_raycaster.reset();
+    m_split_cap_mesh.clear();
 
     indexed_triangle_set mesh;
     if (!curved_instance_mesh_in_plane(mesh)) {
@@ -3992,6 +4000,20 @@ void GLGizmoCut3D::update_split_preview()
     }
     m_split_preview_model.init_from(lower);
     m_split_preview_ok = m_split_preview_model.is_initialized();
+    if (m_split_preview_ok && !drawn) {
+        // Round 5 (owner hand test of #811, 2026-11-01): the click target is the face the user sees,
+        // the split's own cut face - not the sheet's sample grid, which stops at the control grid
+        // while the cut (and so the visible face) runs on past it.
+        double face_lo = 0.0, face_hi = 0.0;
+        cut_thickness_faces(face_lo, face_hi);
+        indexed_triangle_set face = curved_cut_face_of(lower, m_curved_sheet, face_lo);
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: curved cut face for picking, " << face.indices.size() << " triangles";
+        if (!face.empty()) {
+            its_transform(face, translation_transform(m_plane_center) * m_rotation_m);
+            m_split_cap_mesh      = TriangleMesh(std::move(face));
+            m_split_cap_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(m_split_cap_mesh));
+        }
+    }
     apply_side_visibility();
     m_parent.set_as_dirty();
     BOOST_LOG_TRIVIAL(info) << "[cutconn] split preview: " << (drawn ? "drawn" : "curved") << " lower half, " << lower.indices.size()
@@ -8316,6 +8338,8 @@ void GLGizmoCut3D::set_connectors_editing(bool connectors_editing)
     m_split_preview_tried = false;
     m_split_preview_ok    = false;
     m_split_preview_model.reset();
+    m_split_cap_raycaster.reset();
+    m_split_cap_mesh.clear();
     BOOST_LOG_TRIVIAL(info) << "[cutconn] connectors editing " << (m_connectors_editing ? "ON" : "OFF") << ", surface "
                             << (is_draw_surface() ? (m_draw_stroke.valid() ? "Draw (line ok)" : "Draw (no line)") :
                                 is_curved_surface() ? (m_curved_sheet.is_flat() ? "Curved (flat sheet)" : "Curved") : "Flat")
@@ -9418,6 +9442,7 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
         const Vec3d local  = (translation_transform(m_plane_center) * m_rotation_m).inverse() * lifted;
         if (!m_section_object.empty() && !m_section_object.contains(local)) {
             m_info_stats.outside_cut_contour++;
+            BOOST_LOG_TRIVIAL(info) << "[cutconn] connector " << idx << " placed but INVALID - its point is outside the part";
             return true;
         }
         return false;
@@ -9535,6 +9560,10 @@ bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& co
     // footprint to be close enough to its own plane. Cut refuses it otherwise; this says so first.
     if (const std::optional<CutConnectorFit> fit = connector_surface_fit(cur_connector); fit && !fit->fits()) {
         m_info_stats.not_flat_enough++;
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] connector " << idx << " placed but INVALID - not flat enough: the surface strays "
+                                << fit->deviation << " mm from its plane over a footprint of radius "
+                                << cut_connector_footprint_radius(cur_connector) << " mm (limit " << CutConnectorMaxSurfaceDeviation
+                                << " mm)" << (fit->on_surface ? "" : ", or its axis does not meet the surface");
         return true;
     }
 
@@ -11415,6 +11444,7 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
         assert(m_selected.size() == connectors.size());
         update_raycasters_for_picking();
         m_parent.set_as_dirty();
+        BOOST_LOG_TRIVIAL(info) << "[cutconn] connector " << (connectors.size() - 1) << " added at " << pos.transpose();
         check_and_update_connectors_state();
 
         return true;

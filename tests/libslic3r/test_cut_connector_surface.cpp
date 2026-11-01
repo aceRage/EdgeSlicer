@@ -510,3 +510,36 @@ TEST_CASE("Drawn cut: a pick outside the part's cross-section is refused", "[Cut
     REQUIRE((msg.find("outside the part") != std::string::npos || msg.find("not on the cut surface") != std::string::npos));
     REQUIRE(mo->volumes.size() == 2);
 }
+
+TEST_CASE("Curved cut: the split's own cut face is pickable past the sheet's control grid", "[CutConnectorSurface][CurvedCut]")
+{
+    // A sheet whose control grid (16 mm across) is smaller than the part (30 mm): the cut runs on
+    // past the grid, and that is the face the user sees and clicks.
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(8.0);
+    sheet.at(2, 2) = 2.0;
+    const indexed_triangle_set cube = plane_cube();
+    indexed_triangle_set       lower;
+    REQUIRE(curved_cut_split(cube, sheet, nullptr, &lower));
+    REQUIRE(!lower.empty());
+
+    const indexed_triangle_set face = curved_cut_face_of(lower, sheet, 0.0);
+    REQUIRE(!face.empty());
+    REQUIRE(face.indices.size() < lower.indices.size()); // the face, not the whole half
+    const AABBMesh face_tree(face);
+    for (const Vec3d& p : { Vec3d(0.37, 0.53, 50.), Vec3d(5.3, -4.1, 50.), Vec3d(12.3, 9.1, 50.), Vec3d(-13.7, -12.2, 50.) })
+        REQUIRE(section_hit(face_tree, p, -Vec3d::UnitZ()));
+    // Off the part: nothing.
+    REQUIRE(!section_hit(face_tree, Vec3d(20.3, 0.4, 50.), -Vec3d::UnitZ()));
+    // The sheet's own sample mesh stops at its grid, so the old pick target missed out there.
+    const indexed_triangle_set grid_section = cut_surface_section(sheet.sample_sheet(CurvedCutSheet::DefaultSamples), CutSolidTest(plane_cube()), 1.0);
+    const AABBMesh             grid_tree(grid_section);
+    REQUIRE(!section_hit(grid_tree, Vec3d(12.3, 9.1, 50.), -Vec3d::UnitZ()));
+
+    // With a kerf the lower half's face sits half the thickness below the sheet.
+    indexed_triangle_set lower_kerf;
+    REQUIRE(curved_cut_split(cube, sheet, nullptr, &lower_kerf, CurvedCutSheet::CutSamples, 1.0));
+    const indexed_triangle_set face_kerf = curved_cut_face_of(lower_kerf, sheet, -0.5);
+    REQUIRE(!face_kerf.empty());
+    REQUIRE(section_hit(AABBMesh(face_kerf), Vec3d(12.3, 9.1, 50.), -Vec3d::UnitZ()));
+}
