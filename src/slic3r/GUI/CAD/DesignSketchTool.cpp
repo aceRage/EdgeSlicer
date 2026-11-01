@@ -11131,9 +11131,12 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             evt.ShiftDown() || std::atoi(wxGetApp().app_config->get("left_mouse_drag_action").c_str()) == 0;
         if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending && (left_drag_sweeps || m_rubber.is_dragging())) {
             if (!m_rubber.is_dragging()) {
+                // Inside the click budget the gesture is already a sweep (Shift, or left-drag given
+                // to selection), so keep it away from the camera. Returning false here let the
+                // canvas orbit for the first few pixels and then hand over to the band.
                 if (std::max(std::abs(evt.GetX() - m_pick_press_x),
                              std::abs(evt.GetY() - m_pick_press_y)) <= 8)
-                    return false;                    // still inside the click budget
+                    return true;                     // still inside the click budget
                 m_rubber.start_dragging(Vec2d(m_pick_press_x, m_pick_press_y),
                                         GLSelectionRectangle::Select);
             }
