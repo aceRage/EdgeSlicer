@@ -4,6 +4,8 @@
 #include "Model.hpp"
 #include "Flow.hpp"
 #include "TriangleMesh.hpp"
+#include "I18N.hpp"
+#include "format.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1097,38 +1099,59 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
         return false;
     };
     if (params.start < 150. || params.start > 350. || params.end < 150. || params.end > 350.)
-        return fail("Temperature must be between 150 and 350 C");
+        return fail(_u8L("Temperature must be between 150 and 350 C"));
     if (params.end > params.start)
-        return fail("Start temperature must be >= end temperature");
+        return fail(_u8L("Start temperature must be >= end temperature"));
     if (params.step < 1. || params.step > 20.)
-        return fail("Temperature step must be between 1 and 20 C");
+        return fail(_u8L("Temperature step must be between 1 and 20 C"));
+    // F5: the temperature range must be a whole number of steps, so every band is an exact step.
+    {
+        const double steps = (params.start - params.end) / params.step;
+        if (std::abs(steps - std::round(steps)) > 1e-6)
+            return fail(_u8L("The temperature range must be a multiple of the temperature step"));
+    }
     const int bands = stringing_grid_band_count(params);
     if (bands < 2 || bands > 10)
-        return fail("Band count must be between 2 and 10");
+        return fail(_u8L("Band count must be between 2 and 10"));
     const double band_h = params.band_height > 0. ? params.band_height : 8.;
     if (band_h < 5. || band_h > 20.)
-        return fail("Band height must be between 5 and 20 mm");
+        return fail(_u8L("Band height must be between 5 and 20 mm"));
     if (double(bands) * band_h > 150.)
-        return fail("Total height must be <= 150 mm");
+        return fail(_u8L("Total height must be <= 150 mm"));
     if (params.retract_lengths.empty()) {
         if (params.retract_start < 0. || params.retract_start > 10. || params.retract_end < 0. || params.retract_end > 10.)
-            return fail("Retraction must be between 0 and 10 mm");
+            return fail(_u8L("Retraction must be between 0 and 10 mm"));
         if (params.retract_end < params.retract_start)
-            return fail("Retraction end must be >= start");
+            return fail(_u8L("Retraction end must be >= start"));
         if (params.retract_step <= 0.)
-            return fail("Retraction step must be > 0");
+            return fail(_u8L("Retraction step must be > 0"));
     }
     const int cols     = stringing_grid_column_count(params);
     const int max_cols = std::min(17, stringing_grid_max_columns(bed_width));
     if (cols < 2)
-        return fail("Column count must be at least 2");
+        return fail(_u8L("Column count must be at least 2"));
     // Over 17 columns, or more than fit the bed, both report the max so the dialog can show it.
     if (cols > max_cols) {
-        std::ostringstream os;
-        os << "Grid does not fit the bed (max " << max_cols << " columns at 12 mm pitch)";
-        return fail(os.str());
+        return fail(Slic3r::format(_u8L("Grid does not fit the bed (max %1% columns at 12 mm pitch)"), max_cols));
     }
     return true;
+}
+
+void stringing_grid_default_params(Calib_Params &params)
+{
+    // B1: fixed defaults from the approved plan. The filament's nozzle_temperature_range can span
+    // more than 10 bands (240/190 at 5 C = 11), so it is not used to seed the dialog.
+    params                      = Calib_Params();
+    params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
+    params.start                = 230.;
+    params.end                  = 205.;
+    params.step                 = 5.;
+    params.band_height          = 8.;
+    params.retract_start        = 0.2;
+    params.retract_end          = 1.6;
+    params.retract_step         = 0.2;
+    params.print_labels         = false;
+    params.wait_for_temperature = true;
 }
 
 double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
@@ -1172,6 +1195,16 @@ void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
     if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_retract_restart_extra");
         opt && !opt->values.empty())
         opt->values[size_t(std::min(idx, int(opt->values.size()) - 1))] = 0.;
+    // F6: filament-level overrides win over the printer values forced above; neutralise them the same way.
+    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_z_hop"))
+        for (auto &v : opt->values)
+            v = 0.;
+    if (auto *opt = filament_config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer"))
+        for (auto &v : opt->values)
+            v = true;
+    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_retraction_minimum_travel"))
+        for (auto &v : opt->values)
+            v = 1.;
 }
 
 std::string stringing_grid_column_name(int column)

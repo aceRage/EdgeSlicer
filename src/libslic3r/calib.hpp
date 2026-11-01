@@ -93,6 +93,8 @@ int                  stringing_grid_column_from_name(const std::string &name);
 int                  temp_retract_band_index(const Calib_Params &params, double z);
 // F11: band Z is measured from the object's first printed layer bottom (after raft).
 // first_printed_layer_bottom is object.layers().front()->bottom_z() after slicing.
+// B1: fixed stringing-grid dialog defaults (230/205 C, step 5, 8 mm bands, 0.2-1.6 mm by 0.2).
+void                 stringing_grid_default_params(Calib_Params &params);
 double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
 double               temp_for_z(const Calib_Params &params, double z);
 double               retract_for_column(const Calib_Params &params, int column);

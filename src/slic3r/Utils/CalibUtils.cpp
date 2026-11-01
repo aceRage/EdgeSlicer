@@ -118,7 +118,7 @@ std::string get_calib_mode_name(CalibMode cali_mode, int stage)
     case CalibMode::Calib_Temp_Retract_Grid:
         return calib_temp_retract_grid_mode_name;
     default:
-        assert(false);
+        // F9: reachable from send_to_print; callers map an empty name to "unknown_calib_mode".
         return "";
     }
 }
@@ -219,6 +219,12 @@ static bool check_nozzle_diameter_and_type(const DynamicPrintConfig &full_config
         return false;
 
     return true;
+}
+
+static std::string get_calib_mode_name_or_unknown(CalibMode cali_mode, int stage)
+{
+    std::string name = get_calib_mode_name(cali_mode, stage);
+    return name.empty() ? std::string("unknown_calib_mode") : name;
 }
 
 CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_stage)
@@ -1044,55 +1050,6 @@ void CalibUtils::calib_retraction(const CalibInfo &calib_info, wxString &error_m
     send_to_print(calib_info, error_message);
 }
 
-void CalibUtils::calib_temp_retraction(const CalibInfo &calib_info, wxString &error_message)
-{
-    const Calib_Params &params = calib_info.params;
-    if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
-        return;
-
-    Model model;
-    make_stringing_grid(model, params);
-
-    DynamicPrintConfig print_config    = calib_info.print_prest->config;
-    DynamicPrintConfig filament_config = calib_info.filament_prest->config;
-    DynamicPrintConfig printer_config  = calib_info.printer_prest->config;
-    const int          filament_idx    = std::max(params.extruder_id, 0);
-
-    apply_stringing_grid_slicer_config(print_config, filament_config, printer_config, filament_idx);
-    filament_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(calib_info.bed_type));
-
-    auto *max_lh = printer_config.option<ConfigOptionFloats>("max_layer_height");
-    if (max_lh && !max_lh->values.empty() && max_lh->values[0] < 0.2)
-        max_lh->values[0] = 0.2;
-
-    for (ModelObject *obj : model.objects) {
-        obj->config.set_key_value("extruder", new ConfigOptionInt(filament_idx + 1));
-        obj->config.set_key_value("wall_loops", new ConfigOptionInt(2));
-        obj->config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
-        obj->config.set_key_value("bottom_shell_layers", new ConfigOptionInt(3));
-        obj->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
-        obj->config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
-        obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
-        obj->config.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spAligned));
-        obj->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
-        obj->config.set_key_value("enable_support", new ConfigOptionBool(false));
-        obj->config.set_key_value("raft_layers", new ConfigOptionInt(0));
-        obj->ensure_on_bed();
-    }
-
-    DynamicPrintConfig full_config;
-    full_config.apply(FullPrintConfig::defaults());
-    full_config.apply(print_config);
-    full_config.apply(filament_config);
-    full_config.apply(printer_config);
-
-    process_and_store_3mf(&model, full_config, params, error_message);
-    if (!error_message.empty())
-        return;
-
-    send_to_print(calib_info, error_message);
-}
-
 int CalibUtils::get_selected_calib_idx(const std::vector<PACalibResult> &pa_calib_values, int cali_idx) {
     for (int i = 0; i < pa_calib_values.size(); ++i) {
         if(pa_calib_values[i].cali_idx == cali_idx)
@@ -1287,7 +1244,7 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     {  // before send
         json j;
         // F12: persist / log the mode by name, never as an int.
-        j["print"]["cali_mode"]       = get_calib_mode_name(calib_info.params.mode, flow_ratio_mode);
+        j["print"]["cali_mode"]       = get_calib_mode_name_or_unknown(calib_info.params.mode, flow_ratio_mode);
         j["print"]["start"]           = calib_info.params.start;
         j["print"]["end"]             = calib_info.params.end;
         j["print"]["step"]            = calib_info.params.step;
@@ -1384,7 +1341,7 @@ void CalibUtils::send_to_print(const CalibInfo &calib_info, wxString &error_mess
     print_job->task_use_ams = select_ams == "[254]" ? false : true;
 
     CalibMode cali_mode       = calib_info.params.mode;
-    print_job->m_project_name = get_calib_mode_name(cali_mode, flow_ratio_mode);
+    print_job->m_project_name = get_calib_mode_name_or_unknown(cali_mode, flow_ratio_mode);
     print_job->set_calibration_task(true);
 
     print_job->sdcard_state = (int) obj_->get_sdcard_state();

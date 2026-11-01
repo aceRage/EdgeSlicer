@@ -128,11 +128,13 @@ class TempRetract_Calibration_Dlg : public DPIDialog
 public:
     TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater);
     ~TempRetract_Calibration_Dlg();
+    int  ShowModal() override;
     void on_dpi_changed(const wxRect &suggested_rect) override;
 
 protected:
     virtual void on_start(wxCommandEvent &event);
     void         update_summary();
+    void         reset_to_defaults();
     bool         read_params(Calib_Params &params, wxString *error) const;
     double       bed_width() const;
 

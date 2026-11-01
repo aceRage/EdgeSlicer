@@ -990,19 +990,10 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     SetForegroundColour(wxColour("#363636"));
     SetFont(Label::Body_14);
 
-    unsigned long start_temp = 230;
-    unsigned long end_temp   = 205;
-    if (const auto *bundle = wxGetApp().preset_bundle) {
-        const auto &fc = bundle->filaments.get_edited_preset().config;
-        if (const auto *hi = fc.option<ConfigOptionInts>("nozzle_temperature_range_high"); hi && !hi->values.empty() && hi->values[0] > 0)
-            start_temp = (unsigned long) hi->values[0];
-        if (const auto *lo = fc.option<ConfigOptionInts>("nozzle_temperature_range_low"); lo && !lo->values.empty() && lo->values[0] > 0)
-            end_temp = (unsigned long) lo->values[0];
-        if (end_temp > start_temp) {
-            start_temp = 230;
-            end_temp   = 205;
-        }
-    }
+    Calib_Params defaults;
+    stringing_grid_default_params(defaults);
+    const unsigned long start_temp = (unsigned long) defaults.start;
+    const unsigned long end_temp   = (unsigned long) defaults.end;
 
     wxBoxSizer *v_sizer = new wxBoxSizer(wxVERTICAL);
     SetSizer(v_sizer);
@@ -1098,6 +1089,32 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
 }
 
 TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
+
+void TempRetract_Calibration_Dlg::reset_to_defaults()
+{
+    Calib_Params p;
+    stringing_grid_default_params(p);
+    m_tiStartTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.start)));
+    m_tiEndTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.end)));
+    m_tiTempStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.step));
+    m_tiBandHeight->GetTextCtrl()->SetValue(wxString::FromDouble(p.band_height));
+    m_tiRetractStart->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_start));
+    m_tiRetractEnd->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_end));
+    m_tiRetractStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_step));
+    m_cbLabels->SetValue(p.print_labels);
+    m_cbWaitTemp->SetValue(p.wait_for_temperature);
+}
+
+int TempRetract_Calibration_Dlg::ShowModal()
+{
+    // F8: the dialog is cached by MainFrame; re-seed the defaults and re-validate against the
+    // current printer (bed width) and filament every time it opens.
+    reset_to_defaults();
+    update_summary();
+    Layout();
+    Fit();
+    return DPIDialog::ShowModal();
+}
 
 double TempRetract_Calibration_Dlg::bed_width() const
 {

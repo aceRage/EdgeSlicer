@@ -2,6 +2,7 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "libslic3r/Model.hpp"
@@ -238,4 +239,66 @@ TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][Te
     CHECK(temp_retract_band_index(p, 0.5 * (9.2 + 9.0)) == 1);
     CHECK(temp_for_z(p, stringing_grid_base_height + 0.5 * p.band_height) == Approx(230.));
     CHECK(temp_for_z(p, stringing_grid_base_height + 1.5 * p.band_height) == Approx(225.));
+}
+
+TEST_CASE("Stringing grid defaults are fixed and valid for a 240/190 PLA profile", "[Calib][TempRetract]")
+{
+    // B1: Snapmaker PLA has nozzle_temperature_range 190..240 (11 bands at 5 C). The dialog
+    // defaults must not follow that range.
+    DynamicPrintConfig filament = DynamicPrintConfig::full_print_config();
+    filament.set_deserialize_strict({{"nozzle_temperature_range_low", "190"}, {"nozzle_temperature_range_high", "240"}});
+    Calib_Params p;
+    stringing_grid_default_params(p);
+    CHECK(p.start == Approx(230.));
+    CHECK(p.end == Approx(205.));
+    CHECK(p.step == Approx(5.));
+    CHECK_FALSE(p.print_labels);
+    CHECK(p.wait_for_temperature);
+    CHECK(p.mode == CalibMode::Calib_Temp_Retract_Grid);
+    CHECK(stringing_grid_band_count(p) == 6);
+    std::string err;
+    CHECK(stringing_grid_params_valid(p, 270., &err));
+    CHECK(err.empty());
+
+    Calib_Params ranged = p;
+    ranged.start        = 240.;
+    ranged.end          = 190.;
+    CHECK_FALSE(stringing_grid_params_valid(ranged, 270.));
+}
+
+TEST_CASE("Stringing grid rejects a temperature range that is not a whole number of steps", "[Calib][TempRetract]")
+{
+    // F5: temp_for_z must never land between steps.
+    Calib_Params p = grid_params();
+    p.end          = 207.;
+    std::string err;
+    CHECK_FALSE(stringing_grid_params_valid(p, 270., &err));
+    CHECK(err.find("multiple") != std::string::npos);
+    p.end = 205.;
+    CHECK(stringing_grid_params_valid(p, 270.));
+    for (int b = 0; b < stringing_grid_band_count(p); ++b) {
+        const double t = temp_for_z(p, stringing_grid_base_height + (b + 0.5) * p.band_height);
+        CHECK(std::fmod(p.start - t, p.step) == Approx(0.).margin(1e-9));
+    }
+}
+
+TEST_CASE("Stringing grid slicer config neutralises filament retraction overrides", "[Calib][TempRetract]")
+{
+    // F6
+    DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig filament = print;
+    DynamicPrintConfig printer  = print;
+    filament.set_deserialize_strict({{"filament_z_hop", "0.6"},
+                                     {"filament_retract_when_changing_layer", "0"},
+                                     {"filament_retraction_minimum_travel", "5"}});
+    apply_stringing_grid_slicer_config(print, filament, printer, 0);
+    const auto *zh = filament.option<ConfigOptionFloatsNullable>("filament_z_hop");
+    const auto *rl = filament.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    const auto *mt = filament.option<ConfigOptionFloatsNullable>("filament_retraction_minimum_travel");
+    REQUIRE(zh != nullptr);
+    REQUIRE(rl != nullptr);
+    REQUIRE(mt != nullptr);
+    CHECK(zh->get_at(0) == Approx(0.));
+    CHECK(rl->get_at(0));
+    CHECK(mt->get_at(0) == Approx(1.));
 }
