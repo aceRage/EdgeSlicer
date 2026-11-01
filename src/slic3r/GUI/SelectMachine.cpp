@@ -3,6 +3,7 @@
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
@@ -1292,7 +1293,8 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
     if (opt_nozzle_volume_type)
         for (size_t i = 0; i < opt_nozzle_volume_type->size(); ++i)
             volume_types.push_back(opt_nozzle_volume_type->get_at(i));
-    nozzles_info = BambuSendMapping::nozzles_info(opt_nozzle_diameters->values, volume_types);
+    // Per-nozzle process P7: the sizes this project gives the nozzles, which the job was sliced for.
+    nozzles_info = BambuSendMapping::nozzles_info(preset_bundle->effective_nozzle_diameters(), volume_types);
     return true;
 }
 
@@ -1420,7 +1422,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
             for (const auto& nz : group_result->get_nozzles_for_filament(fila.id))
                 in.filament_nozzles.push_back({ fila.id, nz.extruder_id, nz.group_id, nz.diameter, nz.volume_type });
     in.physical_extruder_map = printer_physical_extruder_map();
-    in.preset_diameters      = opt_nozzle_diameters->values;
+    in.preset_diameters      = preset_bundle->effective_nozzle_diameters(); // P7: the project's nozzle sizes
     if (auto* nvt = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
         for (int v : nvt->values)
             in.preset_volumes.push_back(NozzleVolumeType(v));
@@ -2020,6 +2022,9 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter, f
     {
         return false;
     }
+    // Per-nozzle process P7: compare the sizes the job was sliced for (the project's), not the printer preset's.
+    ConfigOptionFloats effective_diameters(preset_bundle->effective_nozzle_diameters());
+    opt_nozzle_diameters = &effective_diameters;
 
     const std::vector<Extder>& extders = obj_->m_extder_data.extders;
     if (extders.empty())
@@ -2283,7 +2288,28 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
     {
         float nozzle_diameter = 0;
         float printer_nozzle_diameter = 0;
-        if (!is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
+        // Per-nozzle process P7: a printer with a nozzle rack (H2C) swaps nozzles itself, so the mounted nozzle being
+        // another size is no mismatch - a size the printer has on none of the extruder's nozzles is, and refuses the
+        // send, as a slice for a size its rack lacks is refused (P4).
+        const bool rack_printer = obj_->has_nozzle_rack();
+        if (rack_printer) {
+            const std::vector<double> sliced = wxGetApp().preset_bundle->effective_nozzle_diameters();
+            std::vector<size_t>       used;
+            for (int e : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (e >= 1)
+                    used.push_back(size_t(e - 1));
+            const auto missing = rack_nozzle_size_mismatches(sliced, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()), used);
+            if (!missing.empty()) {
+                has_slice_warnings = true;
+                is_printing_block  = true;
+                confirm_text.push_back(ConfirmBeforeSendInfo(
+                    wxString::Format(_L("This job was sliced for nozzle sizes the printer does not have on that extruder: %s. "
+                                        "Change the nozzle sizes in the Prepare sidebar (or sync them from the printer) and slice again."),
+                                     from_u8(describe_nozzle_size_mismatches(missing))),
+                    ConfirmBeforeSendInfo::InfoLevel::Warning));
+            }
+        }
+        if (!rack_printer && !is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
         {
             has_slice_warnings = true;
             // is_printing_block  = true;  # Removed to allow nozzle overrides (to support non-standard nozzles)

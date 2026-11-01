@@ -162,6 +162,14 @@ public:
     void update_filament_nozzle_summary();
     // Per-nozzle process P5: pin 0-based filament `filament` to rack nozzle size `diameter` (0 = its extruder's nozzle).
     void set_filament_rack_pin(size_t filament, double diameter);
+    // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
+    // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).
+    void set_tool_nozzle_size(int tool, double diameter);
+    // After the project's nozzle sizes changed: remembered for the printer model, the sidebar, the filament lists, the
+    // Tabs and the slice follow.
+    void on_nozzle_sizes_changed();
+    // "Sync nozzle sizes from printer" for a Bambu printer: the sizes the selected printer reports become the project's.
+    void sync_nozzle_sizes_from_bambu_printer();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);

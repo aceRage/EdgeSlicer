@@ -1,6 +1,7 @@
 // Per-nozzle process P1 - see NozzleProcess.hpp.
 
 #include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
 
 #include "PrintConfig.hpp"
 #include "ToolSlots.hpp"
@@ -590,9 +591,9 @@ std::vector<double> printer_nozzle_sizes(const ConfigBase &printer_config)
         if (d > 0. && std::none_of(out.begin(), out.end(), [d](double s) { return same_nozzle_diameter(s, d); }))
             out.push_back(d);
     };
-    if (const auto *nozzles = dynamic_cast<const ConfigOptionFloats *>(printer_config.option("nozzle_diameter")))
-        for (double d : nozzles->values)
-            add(d);
+    // Per-nozzle process P7: the sizes the extruders carry in the project.
+    for (double d : effective_nozzle_diameters(printer_config))
+        add(d);
     for (const std::vector<RackNozzle> &rack : extruder_rack_nozzles(printer_config))
         for (const RackNozzle &nozzle : rack)
             add(nozzle.diameter);
@@ -894,7 +895,8 @@ NozzleWidth nozzle_width_for(const ConfigBase &config, const std::string &key, i
     if (out.value.percent || !(out.value.value > 0.) || !(diameter > 0.))
         return out;
     // 4. An absolute width on a printer with several nozzle sizes, for a nozzle of another size than the process's.
-    if (printer_nozzle_sizes(config).size() < 2)
+    //    P7: also on a printer with one size when this project overrides a nozzle size (the process is for the preset's).
+    if (printer_nozzle_sizes(config).size() < 2 && !has_nozzle_diameter_override(config))
         return out;
     const double reference = line_width_reference_diameter(config);
     if (!(reference > 0.) || same_nozzle_diameter(reference, diameter))
@@ -911,7 +913,7 @@ bool resolve_nozzle_line_widths(DynamicPrintConfig &config)
     if (count == 0)
         return false;
     // Nothing to resolve on one nozzle size without table entries: the job slices as it always did.
-    if (printer_nozzle_sizes(config).size() < 2 && process_nozzle_width_text(config).empty())
+    if (printer_nozzle_sizes(config).size() < 2 && process_nozzle_width_text(config).empty() && !has_nozzle_diameter_override(config))
         return false;
 
     // Rule 1: a job with per-nozzle processes had its arrays written by fill_nozzle_line_widths, which applies rules

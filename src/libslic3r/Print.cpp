@@ -818,7 +818,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "print_extruder_nozzle_diameter"
             || opt_key == "tool_slot_model"
             || opt_key == "extruder_rack_nozzle_diameter"
-            || opt_key == "filament_rack_nozzle_diameter") {
+            || opt_key == "filament_rack_nozzle_diameter"
+            // Per-nozzle process P7: an overridden nozzle size (Print::apply wrote it into nozzle_diameter already).
+            || opt_key == "nozzle_diameter_override") {
             // Snapmaker: switching a filament's flow variant changes the values read out of
             // flow-variant arrays without the arrays themselves changing.
             invalidated |= this->invalidate_all_steps();

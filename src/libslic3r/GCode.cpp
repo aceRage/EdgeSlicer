@@ -9846,7 +9846,7 @@ static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::s
         const auto *opt = cfg.option<ConfigOptionBool>(key);
         return opt == nullptr || !opt->value;
     }
-    if (key == "print_extruder_nozzle_diameter" || key == "filament_rack_nozzle_diameter") {
+    if (key == "print_extruder_nozzle_diameter" || key == "filament_rack_nozzle_diameter" || key == "nozzle_diameter_override") {
         const auto *opt = cfg.option<ConfigOptionFloats>(key);
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](double v) { return !(v > 0.); });
     }

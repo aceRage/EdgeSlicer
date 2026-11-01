@@ -100,6 +100,7 @@ using namespace nlohmann;
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ProjectConfigFill.hpp"
 #include <algorithm>
 #include <array>
@@ -6520,7 +6521,7 @@ int CLI::run(int argc, char **argv)
         const ConfigOptionFloats* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
         if (nozzle_diameter_option)
-            nozzle_diameter_str = nozzle_diameter_option->serialize();
+            nozzle_diameter_str = ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).serialize(); // P7: overridden sizes
 
         for (int i = 0; i < plate_data_list.size(); i++) {
             PlateData *plate_data = plate_data_list[i];
@@ -7103,7 +7104,7 @@ int CLI::run(int argc, char **argv)
             // get nozzle diameter
             auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
             if (opt_nozzle_diameters != nullptr)
-                plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
+                plate_bbox->nozzle_diameter = float(ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).get_at(plate_bbox->first_extruder)); // P7
 
             auto objects = print->objects();
             auto orig = part_plate->get_origin();

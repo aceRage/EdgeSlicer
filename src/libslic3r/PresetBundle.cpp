@@ -7,6 +7,7 @@
 #include "FilamentColorLibrary.hpp"
 #include "PrintConfig.hpp"
 #include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
 #include "LocalesUtils.hpp"
@@ -251,6 +252,8 @@ static std::vector<std::string> s_project_options {
     "filament_nozzle_assignment",
     // Per-nozzle process P4: the rack nozzle size each filament prints with (H2C).
     "filament_rack_nozzle_diameter",
+    // Per-nozzle process P7: the nozzle size each extruder carries in this project.
+    "nozzle_diameter_override",
     // Ultra (dual-nozzle): plate-level filament grouping state.
     "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_map_mode",
     "enable_filament_dynamic_map", "has_filament_switcher", "prime_volume_mode",
@@ -3217,10 +3220,11 @@ bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) c
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
     if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
         return false;
-    const auto *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
-    if (nozzles == nullptr || extruder >= nozzles->values.size())
+    // Per-nozzle process P7: the size the extruder carries in this project.
+    const std::vector<double> nozzles = this->effective_nozzle_diameters();
+    if (extruder >= nozzles.size())
         return false;
-    const double nozzle = nozzles->values[extruder];
+    const double nozzle = nozzles[extruder];
 
     const Preset &binding  = nozzle_process_binding(process, this->prints);
     const double  diameter = filament_preset_nozzle_diameter(binding, this->printers); // the same rule for any preset
@@ -3387,10 +3391,94 @@ std::string PresetBundle::filament_nozzle_assignment_summary() const
         if (!out.empty())
             out += ", ";
         out += std::to_string(f + 1) + " > T" + std::to_string(tool);
-        if (nozzles != nullptr && has_mixed_nozzle_diameters(nozzles->values))
-            out += " " + format_diameter_to_str(nozzles->get_at(size_t(tool - 1)));
+        if (const std::vector<double> sizes = this->effective_nozzle_diameters(); nozzles != nullptr && has_mixed_nozzle_diameters(sizes) &&
+                                                                                  size_t(tool - 1) < sizes.size())
+            out += " " + format_diameter_to_str(sizes[size_t(tool - 1)]);
     }
     return out;
+}
+
+// ---- Per-nozzle process P7: each tool's nozzle size ---------------------------------------------------------
+
+std::vector<double> PresetBundle::preset_nozzle_diameters() const
+{
+    if (const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
+        return nozzles->values;
+    return {};
+}
+
+// Per-nozzle process P7: the key the app config remembers a printer's nozzle sizes under.
+static std::string nozzle_override_model_key(const PresetCollection &printers)
+{
+    const auto *model = printers.get_edited_preset().config.option<ConfigOptionString>("printer_model");
+    if (model != nullptr && !model->value.empty())
+        return model->value;
+    return printers.get_selected_preset_name();
+}
+
+DynamicPrintConfig PresetBundle::printer_config_with_project_sizes() const
+{
+    DynamicPrintConfig out = this->printers.get_edited_preset().config;
+    if (const auto *opt = this->project_config.option<ConfigOptionFloats>(NOZZLE_DIAMETER_OVERRIDE_KEY)) {
+        out.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY, opt->clone());
+        apply_nozzle_diameter_override(out);
+    }
+    return out;
+}
+
+std::vector<double> PresetBundle::effective_nozzle_diameters() const
+{
+    return nozzle_diameters_with_override(this->preset_nozzle_diameters(), nozzle_diameter_override_values(this->project_config));
+}
+
+bool PresetBundle::has_nozzle_diameter_override() const
+{
+    // Only entries for extruders the printer has count.
+    const std::vector<double> preset = this->preset_nozzle_diameters();
+    const std::vector<double> stored = nozzle_diameter_override_stored(nozzle_diameter_override_values(this->project_config), preset);
+    return std::any_of(stored.begin(), stored.end(), [](double v) { return v > 0.; });
+}
+
+bool PresetBundle::set_nozzle_diameter_override(const std::vector<double> &values)
+{
+    const std::vector<double> stored = nozzle_diameter_override_stored(values, this->preset_nozzle_diameters());
+    auto *opt = this->project_config.option<ConfigOptionFloats>(NOZZLE_DIAMETER_OVERRIDE_KEY, true);
+    if (opt->values == stored)
+        return false;
+    opt->values = stored;
+    return true;
+}
+
+bool PresetBundle::set_tool_nozzle_diameter(size_t tool, double diameter)
+{
+    return this->set_nozzle_diameter_override(
+        Slic3r::set_tool_nozzle_diameter(nozzle_diameter_override_values(this->project_config), this->preset_nozzle_diameters(), tool, diameter));
+}
+
+void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
+{
+    const std::string model = nozzle_override_model_key(this->printers);
+    if (model.empty())
+        return;
+    const std::vector<double> stored = nozzle_diameter_override_stored(nozzle_diameter_override_values(this->project_config),
+                                                                       this->preset_nozzle_diameters());
+    config.set("nozzle_diameter_override", model, serialize_nozzle_diameter_override(stored));
+}
+
+void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config)
+{
+    const std::string model = nozzle_override_model_key(this->printers);
+    if (model != m_nozzle_override_model) {
+        m_nozzle_override_model = model;
+        std::vector<double> values;
+        if (!model.empty() && config.has("nozzle_diameter_override", model))
+            values = parse_nozzle_diameter_override(config.get("nozzle_diameter_override", model));
+        this->project_config.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY,
+                                           new ConfigOptionFloats(nozzle_diameter_override_stored(values, this->preset_nozzle_diameters())));
+        return;
+    }
+    // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders.
+    this->set_nozzle_diameter_override(nozzle_diameter_override_values(this->project_config));
 }
 
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
@@ -4123,8 +4211,12 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // Per-nozzle process P2: likewise every filament prints on its own nozzle in an older project.
         if (!config.has("filament_nozzle_assignment"))
             this->project_config.set_key_value("filament_nozzle_assignment", new ConfigOptionInts());
+        // Per-nozzle process P7: likewise every extruder has the printer preset's nozzle size.
+        if (!config.has(NOZZLE_DIAMETER_OVERRIDE_KEY))
+            this->project_config.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY, new ConfigOptionFloats{ 0. });
         this->project_config.apply_only(config, s_project_options);
         m_nozzle_process_printer = this->printers.get_selected_preset_name();
+        m_nozzle_override_model  = nozzle_override_model_key(this->printers);
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
         // Older projects can carry mixed_filament_definitions that no longer match the

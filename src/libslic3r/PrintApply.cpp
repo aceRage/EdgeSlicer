@@ -3,6 +3,7 @@
 #include "Print.hpp"
 #include "ToolSlots.hpp"
 #include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
 #include "GCode/WipeTowerEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -1503,6 +1504,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
+    // Per-nozzle process P7: the nozzle size each tool carries in this project (nozzle_diameter_override) becomes its
+    // nozzle_diameter before anything reads it. No-op without an override.
+    apply_nozzle_diameter_override(new_full_config);
     // Per-nozzle process P4: a filament's values for the nozzle it prints on (filament_nozzle_variants) become its
     // own values, so every reader and the G-code's config block see what is printed.
     resolve_filament_nozzle_variants(new_full_config);

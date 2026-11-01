@@ -4637,6 +4637,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
 
+    // Per-nozzle process P7 (NozzleOverride.hpp): the nozzle size each extruder really carries, set per project
+    // (Prepare sidebar, Printer settings > Extruder N), one value per extruder; 0 = the printer preset's nozzle_diameter.
+    def = this->add("nozzle_diameter_override", coFloats);
+    def->label = L("Nozzle size in this project");
+    def->tooltip = L("The nozzle diameter each extruder carries in this project, without changing the printer preset. "
+                     "0 means the printer preset's nozzle diameter.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
+
     // Per-nozzle process P4 (spec 09-07 "Phase 5", Bambu filament_extruder_variant style): values a filament
     // preset takes on a particular nozzle. One string per filament: "<selector>: key=value, key=value | ...",
     // the selector a nozzle diameter ("0.6"), a flow type ("high_flow") and/or a tool ("T2"), e.g.
