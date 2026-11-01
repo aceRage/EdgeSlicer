@@ -1870,6 +1870,37 @@ public:
     std::vector<std::string> md_name;
     std::vector<std::string> md_value;
 
+#ifdef SLIC3R_CAD
+    // Opaque CAD feature-tree recipe bytes (CadDocument::serialize_recipe()), round-tripped
+    // through the 3MF as Metadata/orca_cad.bin. Empty for non-CAD projects; compiled out when
+    // SLIC3R_CAD is OFF so the Model layout matches today's.
+    //
+    // Decode ONLY through CadDocument::deserialize_recipe (or validate_recipe_bytes for a
+    // parse-only structural check). Never feed these bytes to a raw cereal archive: the
+    // framed v5+ layout, length caps, and Import BRep restore live in CadDocument. CadRecipe
+    // is a byte bag with no cereal serialize, so accidental ar(cad_recipe) does not compile.
+    struct CadRecipe {
+        CadRecipe() = default;
+        CadRecipe& operator=(std::string b) { m_bytes = std::move(b); return *this; }
+
+        void               clear() { m_bytes.clear(); }
+        bool               empty() const { return m_bytes.empty(); }
+        const std::string& bytes() const { return m_bytes; }
+        const char*        data() const { return m_bytes.data(); }
+        size_t             size() const { return m_bytes.size(); }
+        size_t             length() const { return m_bytes.size(); }
+
+        bool operator==(const std::string& o) const { return m_bytes == o; }
+        bool operator!=(const std::string& o) const { return m_bytes != o; }
+        bool operator==(const CadRecipe& o) const { return m_bytes == o.m_bytes; }
+        bool operator!=(const CadRecipe& o) const { return m_bytes != o.m_bytes; }
+
+    private:
+        std::string m_bytes;
+    };
+    CadRecipe cad_recipe;
+#endif
+
     void SetDesigner(std::string designer, std::string designer_user_id) {
         if (design_info == nullptr) {
             design_info = std::make_shared<ModelDesignInfo>();

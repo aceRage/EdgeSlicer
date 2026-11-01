@@ -45,9 +45,12 @@ class BoundedBinaryInputArchive
     : public cereal::InputArchive<BoundedBinaryInputArchive, cereal::AllowEmptyClassElision>
 {
 public:
-    BoundedBinaryInputArchive(std::istream& stream, uint64_t total_bytes)
+    // parse_only: the framed/v4 feature loaders still read the Import BRep *string*, but they
+    // skip BRepTools::Read. validate_recipe_bytes uses that so untrusted 3MF bytes cannot drive
+    // OCCT. deserialize_recipe constructs archives with parse_only=false and restores shapes.
+    BoundedBinaryInputArchive(std::istream& stream, uint64_t total_bytes, bool parse_only = false)
         : cereal::InputArchive<BoundedBinaryInputArchive, cereal::AllowEmptyClassElision>(this)
-        , m_stream(stream), m_total(total_bytes) {}
+        , m_stream(stream), m_total(total_bytes), m_parse_only(parse_only) {}
 
     void loadBinary(void* const data, std::streamsize size)
     {
@@ -68,10 +71,13 @@ public:
             throw RecipeLengthError();
     }
 
+    bool parse_only() const { return m_parse_only; }
+
 private:
     std::istream& m_stream;
     uint64_t      m_total;
     uint64_t      m_pos{0};
+    bool          m_parse_only{false};
 };
 
 template<class T>

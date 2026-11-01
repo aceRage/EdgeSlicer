@@ -207,10 +207,12 @@ if (TARGET OpenVDB::openvdb)
 endif()
 
 # Parametric Design/CAD kernel tests. Built only when SLIC3R_CAD is ON (they include
-# libslic3r/CAD and link SLVS via libslic3r). Recipe/B-rep fixtures live in test_caddocument.cpp.
+# libslic3r/CAD and link SLVS via libslic3r). Recipe/B-rep fixtures live in test_caddocument.cpp;
+# 3MF recipe save/load is test_cad_recipe_3mf.cpp.
 if (SLIC3R_CAD)
     target_sources(${_TEST_NAME}_tests PRIVATE
         test_caddocument.cpp
+        test_cad_recipe_3mf.cpp
         test_sketchconstraints.cpp
         test_sketchedit.cpp
         test_sketchprofile.cpp

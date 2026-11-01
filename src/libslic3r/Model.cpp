@@ -120,6 +120,10 @@ Model& Model::assign_copy(const Model &rhs)
     this->md_name = rhs.md_name;
     this->md_value = rhs.md_value;
 
+#ifdef SLIC3R_CAD
+    this->cad_recipe = rhs.cad_recipe;
+#endif
+
     // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
     this->image_assets = rhs.image_assets;
     this->showcase     = rhs.showcase;
@@ -158,6 +162,9 @@ Model& Model::assign_copy(Model &&rhs)
     this->mk_version = rhs.mk_version;
     this->md_name = rhs.md_name;
     this->md_value = rhs.md_value;
+#ifdef SLIC3R_CAD
+    this->cad_recipe = std::move(rhs.cad_recipe);
+#endif
     this->backup_path = std::move(rhs.backup_path);
     this->object_backup_id_map = std::move(rhs.object_backup_id_map);
     this->next_object_backup_id = rhs.next_object_backup_id;
@@ -1291,6 +1298,12 @@ void Model::load_from(Model& model)
     mk_version = model.mk_version;
     md_name = model.md_name;
     md_value = model.md_value;
+#ifdef SLIC3R_CAD
+    // Plater calls Model::load_from() to move a loaded 3MF's metadata onto the live model
+    // (and New Project clears it with an empty Model). Without this the recipe would die
+    // between load_bbs_3mf and the GUI.
+    cad_recipe = std::move(model.cad_recipe);
+#endif
     model.design_info.reset();
     model.model_info.reset();
     model.profile_info.reset();
