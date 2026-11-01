@@ -8,6 +8,12 @@
 #include <set>
 #include <stdexcept>
 
+// Marks the validation messages for gettext; the gizmo shows them through _L(). Saved and
+// restored round this file so a unity-build neighbour keeps its own L().
+#pragma push_macro("L")
+#undef L
+#define L(s) (s)
+
 namespace Slic3r {
 namespace {
 
@@ -84,17 +90,17 @@ Vec3d cutter_factors(const TacJointParams& p)
 TacJointValidation validate_scalars(const TacJointParams& p)
 {
     if (p.version != 1)
-        return {false, "Unsupported TAC Joint reference version."};
+        return {false, L("Unsupported TAC Joint reference version.")};
     if (!std::isfinite(p.scale) || !std::isfinite(p.clearance) || !std::isfinite(p.end_clearance) || !std::isfinite(p.offset))
-        return {false, "TAC Joint parameters must be finite."};
+        return {false, L("TAC Joint parameters must be finite.")};
     if (p.scale <= 0 || p.clearance < 0 || p.end_clearance < 0)
-        return {false, "TAC Joint size must be positive and clearances must be nonnegative."};
+        return {false, L("TAC Joint size must be positive and clearances must be nonnegative.")};
     const Vec3d factors          = cutter_factors(p);
     const Vec3d extent           = reference().cutter_box.size().cwiseProduct(factors);
     const Vec3d connector_extent = reference().connector_box.size() * double(p.scale);
     if ((extent.array() <= 1e-5).any() || (connector_extent.array() <= 1e-5).any() || (extent.array() > 1e6).any() ||
         std::abs(double(p.offset)) > 1e6)
-        return {false, "TAC Joint dimensions are outside the supported numerical range."};
+        return {false, L("TAC Joint dimensions are outside the supported numerical range.")};
     return {true, {}};
 }
 
@@ -186,13 +192,13 @@ TacJointValidation tac_joint_validate(const TacJointParams& p, double kerf_lo, d
     if (!scalars.valid)
         return scalars;
     if (!std::isfinite(kerf_lo) || !std::isfinite(kerf_hi) || kerf_lo > kerf_hi)
-        return {false, "TAC Joint cut gap must have finite, ordered boundaries."};
+        return {false, L("TAC Joint cut gap must have finite, ordered boundaries.")};
     const auto& box = reference().connector_box;
     if (double(p.scale) * box.min.z() + p.offset >= kerf_lo - ENGAGEMENT_EPSILON ||
         double(p.scale) * box.max.z() + p.offset <= kerf_hi + ENGAGEMENT_EPSILON)
-        return {false, "TAC Joint needs positive engagement in both retained parts. Reduce the offset or cut gap."};
+        return {false, L("TAC Joint needs positive engagement in both retained parts. Reduce the offset or cut gap.")};
     if (!cached_contains_connector(p))
-        return {false, "TAC Joint cutter intersects the connector profile. Increase the side or end clearance."};
+        return {false, L("TAC Joint cutter intersects the connector profile. Increase the side or end clearance.")};
     return {true, {}};
 }
 
@@ -251,3 +257,6 @@ TacJointParams tac_joint_from_attributes(const std::function<std::optional<doubl
 }
 
 } // namespace Slic3r
+
+#undef L
+#pragma pop_macro("L")

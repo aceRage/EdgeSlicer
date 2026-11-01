@@ -103,6 +103,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tac_joint_persistence.cpp
 	test_tac_joint.cpp
 	test_tac_joint_cut.cpp
+	test_cut_connector_surface.cpp
 	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
