@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/calib.hpp"
@@ -417,6 +418,33 @@ TEST_CASE("Layer 1 prints at the first-layer temperature and band 0 starts at la
         REQUIRE_FALSE(bands.empty());
         CHECK(bands[0].cmd.find("S230") != std::string::npos);
     }
+    {
+        // F14: last nozzle-temp command before the first Z move above 0.2 mm is S210.
+        std::string last_temp;
+        bool        saw_layer1 = false;
+        bool        found_z    = false;
+        for (const std::string &line : gcode_lines(g)) {
+            if (is_nozzle_temp_cmd(line))
+                last_temp = line;
+            if (is_layer_z_line(line) && std::abs(layer_z_of(line) - 0.2) < 0.05)
+                saw_layer1 = true;
+            if (!saw_layer1)
+                continue;
+            if ((line.rfind("G1", 0) == 0 || line.rfind("G0", 0) == 0) && line.find('Z') != std::string::npos) {
+                const auto zpos = line.find('Z');
+                try {
+                    const double z = std::stod(line.substr(zpos + 1));
+                    if (z > 0.2 + 1e-6) {
+                        found_z = true;
+                        break;
+                    }
+                } catch (...) {}
+            }
+        }
+        REQUIRE(found_z);
+        INFO("last nozzle temperature command before first z>0.2 move: " << last_temp);
+        CHECK(last_temp.find("S210") != std::string::npos);
+    }
     INFO("last nozzle temperature command before z > 1.2: " << last_temp_cmd);
     CHECK(last_temp_cmd.find("S230") != std::string::npos);
     // And nothing between the first layer and band 1 drops back to the filament temperature.
@@ -567,4 +595,105 @@ TEST_CASE("A column switch travels with exactly the new column's retraction", "[
     }
     CHECK(shrinking >= 1);
     CHECK(checked >= 3);
+}
+
+TEST_CASE("A 0 mm retraction column keeps restart extra", "[Calib][TempRetract][Slice]")
+{
+    // F13: reduce_retraction_to(0) used to drop retract_restart_extra via set_retracted(0).
+    GCodeWriter writer;
+    writer.config.set_deserialize_strict({{"gcode_flavor", "marlin"},
+                                          {"use_relative_e_distances", "1"},
+                                          {"use_firmware_retraction", "0"},
+                                          {"retraction_length", "0.8"},
+                                          {"retract_restart_extra", "0.1"},
+                                          {"retraction_speed", "30"},
+                                          {"deretraction_speed", "30"}});
+    writer.set_extruders({0});
+    writer.set_extruder(0);
+    writer.retract();
+    REQUIRE(writer.extruder()->retracted() == Approx(0.8));
+    REQUIRE(writer.extruder()->restart_extra() == Approx(0.1));
+    const std::string g = writer.reduce_retraction_to(0.);
+    CHECK_FALSE(g.empty());
+    CHECK(writer.extruder()->retracted() == Approx(0.));
+    CHECK(writer.extruder()->restart_extra() == Approx(0.1));
+}
+
+TEST_CASE("Raft layers hold first-layer temp; band 0 starts at object layer 2", "[Calib][TempRetract][Slice]")
+{
+    // F11: raft_layers > 0 shifts absolute print_z. Layer 1 of the object still holds
+    // the first-layer temperature; band 0 opens on the object's second printed layer.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"raft_layers", "2"},
+                                   {"nozzle_temperature_initial_layer", "210"},
+                                   {"nozzle_temperature", "200"},
+                                   {"enable_support", "0"}});
+    const Calib_Params params = small_grid_params();
+    const std::string  g      = slice_grid(params, config);
+
+    std::set<double> object_z_before_band0;
+    double           current_z = 0.;
+    std::string      last_temp;
+    bool             found_band0 = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (is_layer_z_line(line))
+            current_z = layer_z_of(line);
+        if (is_nozzle_temp_cmd(line))
+            last_temp = line;
+        if (line.rfind("; Calib_TempRetract: band=0", 0) == 0) {
+            found_band0 = true;
+            break;
+        }
+        if (line.rfind("; Calib_TempRetract: col=", 0) == 0)
+            object_z_before_band0.insert(current_z);
+    }
+    REQUIRE(found_band0);
+    REQUIRE(object_z_before_band0.size() == 1);
+    CHECK(last_temp.find("S210") != std::string::npos);
+
+    const auto bands = parse_band_events(g);
+    REQUIRE_FALSE(bands.empty());
+    CHECK(bands[0].temp == 230);
+    const double first_object_z = *object_z_before_band0.begin();
+    // Band 1 is ~9 mm up the object, not 9 mm including the raft.
+    if (bands.size() >= 2)
+        CHECK(bands[1].z - first_object_z == Approx(stringing_grid_base_height + params.band_height - 0.2).margin(0.4));
+}
+
+TEST_CASE("Nonzero z_offset does not steal layer 1 from the first-layer temperature", "[Calib][TempRetract][Slice]")
+{
+    // F11: z_offset shifts G1 Z and can break first-layer detection that keys on bottom_z ~= 0.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"z_offset", "0.4"},
+                                   {"nozzle_temperature_initial_layer", "210"},
+                                   {"nozzle_temperature", "200"}});
+    const Calib_Params params = small_grid_params();
+    const std::string  g      = slice_grid(params, config);
+
+    std::set<double> object_z_before_band0;
+    double           current_z = 0.;
+    std::string      last_temp;
+    bool             found_band0 = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (is_layer_z_line(line))
+            current_z = layer_z_of(line);
+        if (is_nozzle_temp_cmd(line))
+            last_temp = line;
+        if (line.rfind("; Calib_TempRetract: band=0", 0) == 0) {
+            found_band0 = true;
+            break;
+        }
+        if (line.rfind("; Calib_TempRetract: col=", 0) == 0)
+            object_z_before_band0.insert(current_z);
+    }
+    REQUIRE(found_band0);
+    REQUIRE(object_z_before_band0.size() == 1);
+    CHECK(last_temp.find("S210") != std::string::npos);
+
+    const auto bands = parse_band_events(g);
+    REQUIRE(bands.size() == 2);
+    CHECK(bands[0].temp == 230);
+    CHECK(bands[1].temp == 225);
+    // Comment Z is object-space (no z_offset); band 1 still opens at the 9 mm object boundary.
+    CHECK(bands[1].z == Approx(stringing_grid_base_height + params.band_height).margin(0.21));
 }

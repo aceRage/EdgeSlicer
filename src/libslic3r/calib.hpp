@@ -83,16 +83,32 @@ static constexpr const char *stringing_grid_label_name       = "SG_label";
 
 int                  stringing_grid_band_count(const Calib_Params &params);
 std::vector<double>  stringing_grid_retract_schedule(const Calib_Params &params);
+int                  stringing_grid_column_count(const Calib_Params &params);
 int                  stringing_grid_max_columns(double bed_width);
 bool                 stringing_grid_columns_fit(int columns, double bed_width);
+double               stringing_grid_bed_width(const ConfigBase &printer_config);
+bool                 stringing_grid_params_valid(const Calib_Params &params, double bed_width, std::string *error = nullptr);
 std::string          stringing_grid_column_name(int column);
 int                  stringing_grid_column_from_name(const std::string &name);
 int                  temp_retract_band_index(const Calib_Params &params, double z);
+// F11: band Z is measured from the object's first printed layer bottom (after raft).
+// first_printed_layer_bottom is object.layers().front()->bottom_z() after slicing.
+double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
 double               temp_for_z(const Calib_Params &params, double z);
 double               retract_for_column(const Calib_Params &params, int column);
 TriangleMesh         make_stringing_grid_column_mesh(const Calib_Params &params, int column);
 TriangleMesh         make_stringing_grid_label_tower_mesh(const Calib_Params &params);
 void                 make_stringing_grid(Model &model, const Calib_Params &params);
+
+// Persisted name for Calib_Temp_Retract_Grid. Never serialize CalibMode as an int (F12).
+static constexpr const char *calib_temp_retract_grid_mode_name = "temp_retract_grid_calib_mode";
+
+// Forced slicer settings for the stringing grid. Raft is disabled: band Z is relative
+// to the object's first printed layer, and a raft would only add unused layers (F11).
+void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
+                                        DynamicPrintConfig &filament_config,
+                                        DynamicPrintConfig &printer_config,
+                                        int                 filament_idx);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.

@@ -1063,6 +1063,11 @@ std::vector<double> stringing_grid_retract_schedule(const Calib_Params &params)
     return out;
 }
 
+int stringing_grid_column_count(const Calib_Params &params)
+{
+    return int(stringing_grid_retract_schedule(params).size());
+}
+
 int stringing_grid_max_columns(double bed_width)
 {
     const double usable = bed_width - 2. * stringing_grid_bed_margin - stringing_grid_prime_tower_size;
@@ -1074,6 +1079,98 @@ int stringing_grid_max_columns(double bed_width)
 bool stringing_grid_columns_fit(int columns, double bed_width)
 {
     return columns >= 2 && columns <= stringing_grid_max_columns(bed_width);
+}
+
+double stringing_grid_bed_width(const ConfigBase &printer_config)
+{
+    const auto *pts = printer_config.option<ConfigOptionPoints>("printable_area");
+    if (pts == nullptr || pts->values.size() < 2)
+        return 270.;
+    return get_extents(pts->values).size().x();
+}
+
+bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, std::string *error)
+{
+    auto fail = [&](const std::string &msg) {
+        if (error)
+            *error = msg;
+        return false;
+    };
+    if (params.start < 150. || params.start > 350. || params.end < 150. || params.end > 350.)
+        return fail("Temperature must be between 150 and 350 C");
+    if (params.end > params.start)
+        return fail("Start temperature must be >= end temperature");
+    if (params.step < 1. || params.step > 20.)
+        return fail("Temperature step must be between 1 and 20 C");
+    const int bands = stringing_grid_band_count(params);
+    if (bands < 2 || bands > 10)
+        return fail("Band count must be between 2 and 10");
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    if (band_h < 5. || band_h > 20.)
+        return fail("Band height must be between 5 and 20 mm");
+    if (double(bands) * band_h > 150.)
+        return fail("Total height must be <= 150 mm");
+    if (params.retract_lengths.empty()) {
+        if (params.retract_start < 0. || params.retract_start > 10. || params.retract_end < 0. || params.retract_end > 10.)
+            return fail("Retraction must be between 0 and 10 mm");
+        if (params.retract_end < params.retract_start)
+            return fail("Retraction end must be >= start");
+        if (params.retract_step <= 0.)
+            return fail("Retraction step must be > 0");
+    }
+    const int cols     = stringing_grid_column_count(params);
+    const int max_cols = std::min(17, stringing_grid_max_columns(bed_width));
+    if (cols < 2 || cols > 17)
+        return fail("Column count must be between 2 and 17");
+    if (cols > max_cols) {
+        std::ostringstream os;
+        os << "Grid does not fit the bed (max " << max_cols << " columns at 12 mm pitch)";
+        return fail(os.str());
+    }
+    return true;
+}
+
+double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
+{
+    return print_z - first_printed_layer_bottom;
+}
+
+void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
+                                        DynamicPrintConfig &filament_config,
+                                        DynamicPrintConfig &printer_config,
+                                        int                 filament_idx)
+{
+    print_config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    print_config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+    print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("raft_layers", new ConfigOptionInt(0));
+    print_config.set_key_value("enable_support", new ConfigOptionBool(false));
+    print_config.set_key_value("reduce_crossing_wall", new ConfigOptionBool(false));
+
+    printer_config.set_key_value("use_firmware_retraction", new ConfigOptionBool(false));
+    printer_config.set_key_value("resonance_avoidance", new ConfigOptionBool(false));
+    if (auto *opt = printer_config.option<ConfigOptionBools>("wipe"))
+        for (auto &v : opt->values)
+            v = false;
+    if (auto *opt = printer_config.option<ConfigOptionBools>("retract_when_changing_layer"))
+        for (auto &v : opt->values)
+            v = true;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("retraction_minimum_travel"))
+        for (auto &v : opt->values)
+            v = 1.;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("z_hop"))
+        for (auto &v : opt->values)
+            v = 0.;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("retract_restart_extra"))
+        for (auto &v : opt->values)
+            v = 0.;
+
+    const int idx = std::max(filament_idx, 0);
+    if (auto *opt = filament_config.option<ConfigOptionBoolsNullable>("filament_wipe"); opt && !opt->values.empty())
+        opt->values[size_t(std::min(idx, int(opt->values.size()) - 1))] = false;
+    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_retract_restart_extra");
+        opt && !opt->values.empty())
+        opt->values[size_t(std::min(idx, int(opt->values.size()) - 1))] = 0.;
 }
 
 std::string stringing_grid_column_name(int column)

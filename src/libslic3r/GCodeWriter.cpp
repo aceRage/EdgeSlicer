@@ -1344,6 +1344,10 @@ std::string GCodeWriter::reduce_retraction_to(double length)
     const double restart_extra = m_extruder->restart_extra();
     m_extruder->extrude(held - length);
     m_extruder->set_retracted(std::max(0., length), restart_extra);
+    // F13: set_retracted(0, extra) drops restart extra. A 0 mm column must keep the
+    // same restart extra as the other columns so the next unretract stays consistent.
+    if (length <= EPSILON && restart_extra > EPSILON)
+        m_extruder->retract(0., restart_extra);
     GCodeG1Formatter w;
     w.emit_e(m_extruder->E());
     this->seed_formatter_guard(w);

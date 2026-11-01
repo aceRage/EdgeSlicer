@@ -2,8 +2,10 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <string>
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/calib.hpp"
 
@@ -170,6 +172,52 @@ TEST_CASE("Stringing grid column names parse strictly", "[Calib][TempRetract]")
     CHECK(stringing_grid_column_from_name("SG_col_ 3") == -1);
     CHECK(stringing_grid_column_from_name("SG_col_3 ") == -1);
     CHECK(stringing_grid_column_from_name("xSG_col_3") == -1);
+}
+
+TEST_CASE("Stringing grid band Z is relative to the first printed layer", "[Calib][TempRetract]")
+{
+    // F11: raft and z_offset shift absolute print_z. Band 0 still starts at the object's
+    // first-layer height (1 mm base), measured from the first printed layer bottom.
+    const Calib_Params params = grid_params();
+    CHECK(temp_retract_relative_z(0.4, 0.) == Approx(0.4));
+    CHECK(temp_retract_relative_z(1.9, 1.5) == Approx(0.4));
+    CHECK(temp_retract_relative_z(0.8, 0.4) == Approx(0.4));
+
+    const double raft_bottom = 1.5;
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(raft_bottom + 0.3, raft_bottom)) == 0);
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(raft_bottom + 9.0, raft_bottom)) == 1);
+    CHECK(temp_for_z(params, temp_retract_relative_z(raft_bottom + 9.0, raft_bottom)) == Approx(225.));
+
+    const double z_off_bottom = 0.4;
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(z_off_bottom + 0.3, z_off_bottom)) == 0);
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(z_off_bottom + 9.0, z_off_bottom)) == 1);
+}
+
+TEST_CASE("Stringing grid dialog defaults validate and 18 columns do not fit", "[Calib][TempRetract]")
+{
+    Calib_Params params = grid_params();
+    CHECK(stringing_grid_column_count(params) == 8);
+    CHECK(stringing_grid_params_valid(params, 270.));
+    CHECK(calib_temp_retract_grid_mode_name == std::string("temp_retract_grid_calib_mode"));
+
+    params.retract_end  = 3.6;
+    params.retract_step = 0.2;
+    CHECK(stringing_grid_column_count(params) == 18);
+    std::string err;
+    CHECK_FALSE(stringing_grid_params_valid(params, 270., &err));
+    CHECK(err.find("max") != std::string::npos);
+}
+
+TEST_CASE("Stringing grid slicer config disables raft and the prime tower", "[Calib][TempRetract]")
+{
+    DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig filament = print;
+    DynamicPrintConfig printer  = print;
+    apply_stringing_grid_slicer_config(print, filament, printer, 0);
+    CHECK(print.opt_int("raft_layers") == 0);
+    CHECK_FALSE(print.opt_bool("enable_prime_tower"));
+    CHECK(print.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByLayer);
+    CHECK_FALSE(printer.opt_bool("use_firmware_retraction"));
 }
 
 TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][TempRetract]")
