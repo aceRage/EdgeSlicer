@@ -93,6 +93,8 @@ wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
     if (hdri.id == "hdri_studio") return _L("Studio softbox (HDRI)");
     if (hdri.id == "hdri_outdoor") return _L("Outdoor sky with sun (HDRI)");
     if (hdri.id == "hdri_workshop") return _L("Workshop window (HDRI)");
+    if (hdri.id == "hdri_loft") return _L("Loft studio (HDRI)");
+    if (hdri.id == "hdri_sunset") return _L("Golden hour (HDRI)");
     return wxString::FromUTF8(hdri.name);
 }
 

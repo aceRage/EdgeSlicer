@@ -2445,7 +2445,6 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     dt.scene_fbo         = fb.draw_fbo();
     dt.hdr_fbo           = fb.has_hdr() ? fb.draw_hdr_fbo() : 0;
     log << (fb.has_hdr() ? ", HDR objects layer (RGBA16F) + post pass" : ", no HDR layer");
-    note_hdr_choice("export", fb.has_hdr(), "the float buffers were refused, or the post pass is off (EDGESLICER_SHOWCASE_NO_HDR, missing shaders)");
 
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.draw_fbo()));
     glsafe(::glViewport(0, 0, plan.internal_width, plan.internal_height));

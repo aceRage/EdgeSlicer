@@ -24,6 +24,22 @@
       "source": "https://polyhaven.com/a/artist_workshop",
       "authors": "Poly Haven",
       "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_loft",
+      "name": "Loft studio",
+      "file": "photo_studio_loft_hall_2k.hdr",
+      "source": "https://polyhaven.com/a/photo_studio_loft_hall",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_sunset",
+      "name": "Golden hour",
+      "file": "venice_sunset_2k.hdr",
+      "source": "https://polyhaven.com/a/venice_sunset",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
     }
   ]
 }
