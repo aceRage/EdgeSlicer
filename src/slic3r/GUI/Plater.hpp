@@ -60,6 +60,9 @@ enum class ConversionType : int;
 class Ams;
 
 using ModelInstancePtrs = std::vector<ModelInstance*>;
+#ifdef SLIC3R_CAD
+class BackgroundSlicingProcess; // Slic3r::, not GUI::
+#endif
 
 
 namespace UndoRedo {
@@ -882,6 +885,10 @@ public:
 
     const Camera& get_camera() const;
     Camera& get_camera();
+#ifdef SLIC3R_CAD
+    // DesignCanvas borrows the plater process: GLCanvas3D dereferences it every frame.
+    BackgroundSlicingProcess& background_process();
+#endif
 
     //BBS: partplate list related functions
     PartPlateList& get_partplate_list();

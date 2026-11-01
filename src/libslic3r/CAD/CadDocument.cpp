@@ -40,6 +40,7 @@
 #include <functional>
 #include <exception>
 #include <cstdint>
+#include <atomic>
 #include <cereal/cereal.hpp>
 #include <cereal/details/helpers.hpp>
 #include <gp_Pln.hxx>
@@ -266,17 +267,55 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
     std::vector<Token> tokens;
     size_t i = 0;
     bool prev_was_val = false; // tracked for unary-minus detection
+    // German locale: a single comma between digits of a number ("2,5") is a decimal mark,
+    // except DIRECTLY inside a function call's parentheses, where a comma is always the
+    // argument separator (max(1,5) has two arguments). Grouping parentheses do not change
+    // that: (2,5+1)*2 is 7. Ambiguous forms are rejected rather than read as a prefix:
+    //  - a number mixing '.' and ',' or carrying two commas ("1.000,5", "1,000,5");
+    //  - exactly three digits after the comma ("1,000", "12,500"), which reads as a
+    //    thousands separator. 1-2 or 4+ fractional digits are accepted ("1,25", "1,2500").
+    std::vector<bool> paren_is_call;   // one entry per open '(': true = function call
+    auto digit_at = [&](size_t k) { return k < src.size() && isdigit((unsigned char)src[k]); };
     while (i < src.size()) {
         char c = src[i];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { ++i; continue; }
-        if (c == '(') { tokens.push_back({Token::LParen, "("}); ++i; prev_was_val = false; continue; }
-        if (c == ')') { tokens.push_back({Token::RParen, ")"}); ++i; prev_was_val = true; continue; }
+        if (c == '(') {
+            paren_is_call.push_back(!tokens.empty() && tokens.back().type == Token::Id);
+            tokens.push_back({Token::LParen, "("}); ++i; prev_was_val = false; continue;
+        }
+        if (c == ')') {
+            if (!paren_is_call.empty()) paren_is_call.pop_back();
+            tokens.push_back({Token::RParen, ")"}); ++i; prev_was_val = true; continue;
+        }
         if (c == ',') { tokens.push_back({Token::Comma, ","}); ++i; prev_was_val = false; continue; }
         if (isdigit(c) || c == '.') {
             size_t start = i;
-            while (i < src.size() && (isdigit(src[i]) || src[i] == '.')) ++i;
+            int dots = 0, commas = 0;
+            while (i < src.size()) {
+                const char d = src[i];
+                if (isdigit((unsigned char)d)) { ++i; continue; }
+                if (d == '.') { ++dots; ++i; continue; }
+                if (d == ',' && (paren_is_call.empty() || !paren_is_call.back()) && i > start &&
+                    digit_at(i - 1) && digit_at(i + 1)) {
+                    size_t k = i + 1;
+                    while (digit_at(k)) ++k;
+                    if (k - (i + 1) == 3)
+                        throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
+                    ++commas; ++i; continue;
+                }
+                break;
+            }
             Token t{Token::Num, src.substr(start, i - start)};
-            t.num = std::stod(t.val);
+            if (commas > 0 && (commas > 1 || dots > 0))
+                throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
+            if (dots > 1)
+                throw std::runtime_error(_u8L("bad number in expression"));
+            for (char& ch : t.val)
+                if (ch == ',') ch = '.';
+            size_t used = 0;
+            t.num = std::stod(t.val, &used);
+            if (used != t.val.size())
+                throw std::runtime_error(_u8L("bad number in expression"));
             tokens.push_back(t);
             prev_was_val = true;
             continue;
@@ -4411,15 +4450,15 @@ std::string brep_to_string(const TopoDS_Shape& s)
     return oss.str();
 }
 
-static int g_brep_from_string_calls = 0;
+static std::atomic<int> g_brep_from_string_calls{0};
 
-void reset_brep_from_string_calls() { g_brep_from_string_calls = 0; }
-int  brep_from_string_calls() { return g_brep_from_string_calls; }
+void reset_brep_from_string_calls() { g_brep_from_string_calls.store(0); }
+int  brep_from_string_calls() { return g_brep_from_string_calls.load(); }
 
 TopoDS_Shape brep_from_string(const std::string& d)
 {
     if (d.empty()) return {};
-    ++g_brep_from_string_calls;
+    g_brep_from_string_calls.fetch_add(1);
     std::istringstream iss(d);
     TopoDS_Shape s;
     BRep_Builder b;
@@ -4678,10 +4717,30 @@ static bool parse_recipe_blob(CadDocument&                                  doc,
     }
 }
 
+uint32_t CadDocument::newer_recipe_version(const std::string& blob)
+{
+    try {
+        std::istringstream iss(blob);
+        BoundedBinaryInputArchive ar(iss, blob.size(), true);
+        uint32_t v = 0;
+        ar(v);
+        if (v > ORCA_CAD_RECIPE_VERSION && v <= kMaxFutureRecipeVersion)
+            return v;
+    } catch (...) {
+    }
+    return 0;
+}
+
 bool CadDocument::validate_recipe_bytes(const std::string& blob, std::string* error)
 {
     CadDocument tmp;
-    const bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr, true);
+    bool ok = parse_recipe_blob(tmp, blob, nullptr, nullptr, true);
+    // A recipe from a NEWER Design tab cannot be parsed here, but it is not corrupt: keep its
+    // bytes untouched on Model::cad_recipe so the next save writes them back. The Design tab
+    // opens it read-only (DesignPanel::m_recipe_read_only). Garbage whose first word is not a
+    // plausible version stays rejected.
+    if (!ok && newer_recipe_version(blob) != 0)
+        ok = true;
     if (error != nullptr)
         *error = tmp.error;
     return ok;

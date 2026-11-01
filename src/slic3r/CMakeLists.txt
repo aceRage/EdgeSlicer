@@ -1153,6 +1153,30 @@ set(SLIC3R_GUI_SOURCES
     GUI/ThirdPartyFilamentMapPanel.hpp
 )
 
+# Design/CAD tab GUI (OrcaSlicer @3610d8bb). Compiled only when SLIC3R_CAD is ON so a CAD-OFF
+# libslic3r_gui is the same sources as before this port. MCP (McpControl) is deferred to P4.
+if (SLIC3R_CAD)
+    list(APPEND SLIC3R_GUI_SOURCES
+        GUI/AuiMgr.cpp
+        GUI/AuiMgr.hpp
+        GUI/CadLazy.hpp
+        GUI/CAD/DesignPanel.cpp
+        GUI/CAD/DesignPanel.hpp
+        GUI/CAD/DesignRowList.cpp
+        GUI/CAD/DesignRowList.hpp
+        GUI/CAD/DesignTextDialog.cpp
+        GUI/CAD/DesignTextDialog.hpp
+        GUI/CAD/DesignCanvas.cpp
+        GUI/CAD/DesignCanvas.hpp
+        GUI/CAD/DesignSketchTool.cpp
+        GUI/CAD/DesignSketchTool.hpp
+        GUI/CAD/DesignOffer.hpp
+        GUI/CAD/DesignInteraction.hpp
+        GUI/CAD/SketchInlineEditor.cpp
+        GUI/CAD/SketchInlineEditor.hpp
+    )
+endif ()
+
 add_subdirectory(GUI/DeviceTab)
 
 if (WIN32)
@@ -1329,6 +1353,17 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
     GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
 )
+if (SLIC3R_CAD AND SLIC3R_UNITY_BUILD)
+    set_source_files_properties(
+        GUI/AuiMgr.cpp
+        GUI/CAD/DesignPanel.cpp
+        GUI/CAD/DesignSketchTool.cpp
+        GUI/CAD/DesignCanvas.cpp
+        GUI/CAD/DesignRowList.cpp
+        GUI/CAD/DesignTextDialog.cpp
+        GUI/CAD/SketchInlineEditor.cpp
+        PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+endif ()
 if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD)
     # A unity build repeats the debug info of the shared headers once per batch instead of once per
     # source file, and /Zc:inline leaves unreferenced inline functions and data out of the objects

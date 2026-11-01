@@ -44,6 +44,9 @@
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
+#ifdef SLIC3R_CAD
+#include "slic3r/GUI/CAD/DesignPanel.hpp"
+#endif
 #include "RemoteAccess.hpp"
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
@@ -452,7 +455,12 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     //BBS
     Bind(EVT_SELECT_TAB, [this](wxCommandEvent&evt) {
         TabPosition pos = (TabPosition)evt.GetInt();
+#ifdef SLIC3R_CAD
+        // Design is sentinel 100, not a notebook index; select_tab maps it through FindPage.
+        select_tab(size_t(pos));
+#else
         m_tabpanel->SetSelection(pos);
+#endif
     });
 
     // Profiling aid for the lazily built tabs: with ORCA_STARTUP_PROFILE_OPEN_TABS set to
@@ -1204,6 +1212,10 @@ void MainFrame::shutdown(bool isRecreate)
         // Cleanup of canvases' volumes needs to be done here or a crash may happen on some Linux Debian flavours
         m_plater->reset_canvas_volumes();
     }
+#ifdef SLIC3R_CAD
+    if (DesignPanel* design = DesignPanel::if_built())
+        design->shutdown();
+#endif
 
     // Weird things happen as the Paint messages are floating around the windows being destructed.
     // Avoid the Paint messages by hiding the main window.
@@ -1339,6 +1351,49 @@ LazyPanelHolder* MainFrame::make_printers_holder()
     });
 }
 
+#ifdef SLIC3R_CAD
+LazyPanelHolder* MainFrame::make_design_holder()
+{
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=DesignPanel", [this](wxWindow* parent) -> wxWindow* {
+        auto* panel = new DesignPanel(parent);
+        apply_theme_to_lazy_panel(panel);
+        return panel;
+    });
+}
+
+DesignPanel* MainFrame::shown_design_panel() const
+{
+    DesignPanel* design = DesignPanel::if_built();
+    return (design != nullptr && m_design_holder != nullptr && m_design_holder->IsShownOnScreen()) ? design : nullptr;
+}
+
+void MainFrame::set_undo_redo_enabled(bool undo, bool redo)
+{
+#ifndef __APPLE__
+    if (m_topbar)
+        m_topbar->EnableUndoRedo(undo, redo);
+#endif
+}
+
+void MainFrame::ensure_design_tab_last()
+{
+    if (m_design_holder == nullptr || m_tabpanel == nullptr)
+        return;
+    const int idx = m_tabpanel->FindPage(m_design_holder);
+    const int last = int(m_tabpanel->GetPageCount()) - 1;
+    if (idx == wxNOT_FOUND) {
+        m_design_holder->Show(false);
+        m_tabpanel->AddPage(m_design_holder, _L("Design"), std::string("tab_design_active"), std::string("tab_design_active"), false);
+        return;
+    }
+    if (idx != last) {
+        m_tabpanel->RemovePage(idx);
+        m_design_holder->Show(false);
+        m_tabpanel->AddPage(m_design_holder, _L("Design"), std::string("tab_design_active"), std::string("tab_design_active"), false);
+    }
+}
+#endif
+
 LazyPanelHolder* MainFrame::make_project_holder()
 {
     return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=ProjectPanel", [this](wxWindow* parent) -> wxWindow* {
@@ -1455,12 +1510,29 @@ void MainFrame::init_tabpanel() {
             //monitor
         }
 #ifndef __APPLE__
+#ifdef SLIC3R_CAD
+        if (m_design_holder != nullptr && panel == m_design_holder) {
+            if (DesignPanel* d = DesignPanel::ensure())
+                d->update_undo_redo_buttons();
+        } else
+#endif
         if (sel == tp3DEditor) {
             m_topbar->EnableUndoRedoItems();
         }
         else {
             m_topbar->DisableUndoRedoItems();
         }
+#endif
+
+#ifdef SLIC3R_CAD
+        if (m_design_holder != nullptr && panel == m_design_holder) {
+            if (m_design_holder)
+                m_design_holder->realize();
+            if (DesignPanel* d = DesignPanel::ensure())
+                d->on_tab_shown();
+        }
+        if (DesignPanel* design = DesignPanel::if_built(); design != nullptr && panel != m_design_holder)
+            design->on_tab_hidden();
 #endif
 
         // Notify WCP page state change subscribers
@@ -1616,6 +1688,14 @@ void MainFrame::init_tabpanel() {
         m_calibration_holder = make_calibration_holder();
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
     }
+#ifdef SLIC3R_CAD
+    // Appended after Calibration so Home=0 and Prepare=1 stay the notebook indices they were.
+    if (wxGetApp().is_enable_cad_feature() && wxGetApp().is_editor()) {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=DesignPanel(deferred)");
+        m_design_holder = make_design_holder();
+        m_tabpanel->AddPage(m_design_holder, _L("Design"), std::string("tab_design_active"), std::string("tab_design_active"), false);
+    }
+#endif
 
     if (m_plater) {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=initial_config");
@@ -1674,6 +1754,9 @@ void MainFrame::show_device(bool bBBLPrinter) {
         // with TabPosition::tpCalibration.
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
                                std::string("tab_calibration_active"), false);
+#ifdef SLIC3R_CAD
+        ensure_design_tab_last();
+#endif
 
 #ifdef _MSW_DARK_MODE
         wxGetApp().UpdateDarkUIWin(this);
@@ -1702,6 +1785,9 @@ void MainFrame::show_device(bool bBBLPrinter) {
         m_printer_view->Show(false);
         m_tabpanel->InsertPage(device_page_position(), m_printer_view, _L("Device"), std::string("tab_monitor_active"),
                                std::string("tab_monitor_active"));
+#ifdef SLIC3R_CAD
+        ensure_design_tab_last();
+#endif
     }
 }
 
@@ -1728,6 +1814,9 @@ void MainFrame::show_flashforge_device()
     m_ff_device->Show(false);
     m_tabpanel->InsertPage(device_page_position(), m_ff_device, _L("Device"), std::string("tab_monitor_active"),
                            std::string("tab_monitor_active"));
+#ifdef SLIC3R_CAD
+    ensure_design_tab_last();
+#endif
     static_cast<FFDeviceTab*>(m_ff_device)->OnActivate();
 #ifdef _MSW_DARK_MODE
     wxGetApp().UpdateDarkUIWin(this);
@@ -2723,6 +2812,9 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
         m_multi_machine->msw_rescale();
     if(m_calibration)
         m_calibration->msw_rescale();
+#ifdef SLIC3R_CAD
+    DesignPanel::when_built([](DesignPanel& design) { design.msw_rescale(); });
+#endif
 
     // BBS
 #if 0
@@ -2796,6 +2888,9 @@ void MainFrame::on_sys_color_changed()
         m_printer_view->sys_color_changed(); // its Storage tab
     if(m_calibration)
         m_calibration->on_sys_color_changed();
+#ifdef SLIC3R_CAD
+    DesignPanel::when_built([](DesignPanel& design) { design.on_sys_color_changed(); });
+#endif
     // update Tabs
     for (auto tab : wxGetApp().tabs_list)
         tab->sys_color_changed();
@@ -3304,12 +3399,28 @@ void MainFrame::init_menubar_as_editor()
 #ifndef __APPLE__
         // BBS undo
         append_menu_item(editMenu, wxID_ANY, _L("Undo") + "\t" + ctrl + "Z",
-            _L("Undo"), [this](wxCommandEvent&) { m_plater->undo(); },
-            "menu_undo", nullptr, [this](){return m_plater->can_undo(); }, this);
+            _L("Undo"), [this](wxCommandEvent&) {
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(false); return; }
+#endif
+                m_plater->undo(); },
+            "menu_undo", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(false);
+#endif
+                return m_plater->can_undo(); }, this);
         // BBS redo
         append_menu_item(editMenu, wxID_ANY, _L("Redo") + "\t" + ctrl + "Y",
-            _L("Redo"), [this](wxCommandEvent&) { m_plater->redo(); },
-            "menu_redo", nullptr, [this](){return m_plater->can_redo(); }, this);
+            _L("Redo"), [this](wxCommandEvent&) {
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(true); return; }
+#endif
+                m_plater->redo(); },
+            "menu_redo", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(true);
+#endif
+                return m_plater->can_redo(); }, this);
         editMenu->AppendSeparator();
         // BBS Cut TODO
         append_menu_item(editMenu, wxID_ANY, _L("Cut") + "\t" + ctrl + "X",
@@ -3356,8 +3467,15 @@ void MainFrame::init_menubar_as_editor()
                 if (handle_key_event(e)) {
                     return;
                 }
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(false); return; }
+#endif
                 m_plater->undo(); },
-            "", nullptr, [this](){return m_plater->can_undo(); }, this);
+            "", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(false);
+#endif
+                return m_plater->can_undo(); }, this);
         // BBS redo
         append_menu_item(editMenu, wxID_ANY, _L("Redo") + sep + ctrl_t + "Y",
             _L("Redo"), [this, handle_key_event](wxCommandEvent&) {
@@ -3368,8 +3486,15 @@ void MainFrame::init_menubar_as_editor()
                 if (handle_key_event(e)) {
                     return;
                 }
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(true); return; }
+#endif
                 m_plater->redo(); },
-            "", nullptr, [this](){return m_plater->can_redo(); }, this);
+            "", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(true);
+#endif
+                return m_plater->can_redo(); }, this);
         editMenu->AppendSeparator();
         // BBS Cut TODO
         append_menu_item(editMenu, wxID_ANY, _L("Cut") + sep + ctrl_t + "X",
@@ -3556,6 +3681,10 @@ void MainFrame::init_menubar_as_editor()
             viewMenu, wxID_ANY, _L("Reset Window Layout"), _L("Reset to default window layout"),
             [this](wxCommandEvent&) { m_plater->reset_window_layout(); }, "", this,
             [this]() {
+#ifdef SLIC3R_CAD
+                if (shown_design_panel() != nullptr)
+                    return true;
+#endif
                 return (m_tabpanel->GetSelection() == TabPosition::tp3DEditor || m_tabpanel->GetSelection() == TabPosition::tpPreview) &&
                        m_plater->is_sidebar_enabled();
             },
@@ -4493,6 +4622,16 @@ bool MainFrame::open_printer_device_page(const std::string& id, const PrintersMo
 void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
 {
     //bool tabpanel_was_hidden = false;
+#ifdef SLIC3R_CAD
+    if (tab == size_t(tpDesign)) {
+        if (m_design_holder == nullptr)
+            return;
+        const int idx = m_tabpanel->FindPage(m_design_holder);
+        if (idx == wxNOT_FOUND)
+            return;
+        tab = size_t(idx);
+    }
+#endif
 
     // Controls on page are created on active page of active tab now.
     // We should select/activate tab before its showing to avoid an UI-flickering
