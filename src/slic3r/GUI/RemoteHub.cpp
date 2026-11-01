@@ -6735,6 +6735,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
+                       what == "/preview/legend" || what == "/preview/layers" || // PR E: preview v2
                        what == "/result"); // slice_v1: results detail and warnings
     }
     if (sub.compare(0, 10, "/api/jobs/") == 0) {
@@ -6811,6 +6812,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/settings/process")              return get || post;
     if (sub == "/api/settings/process/revert")       return post;
     if (sub == "/api/settings/process/save")         return post;
+    if (sub == "/api/settings/filament")             return get || post; // PR F: index= in the query
+    if (sub == "/api/settings/filament/revert")      return post;
+    if (sub == "/api/settings/filament/save")        return post;
+    if (sub == "/api/presets/filament_remove")       return post;
     if (sub == "/api/archive")                       return get;
     return false;
 }

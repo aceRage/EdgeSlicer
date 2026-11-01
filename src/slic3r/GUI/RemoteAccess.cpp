@@ -18,6 +18,9 @@
 #include "RemoteHub.hpp"
 #include "RemoteSend.hpp"
 #include "RemoteSliceV1.hpp"
+#include "LibVGCode/LibVGCodeWrapper.hpp"
+#include <boost/format.hpp>
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/CostOverrides.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "RemoteSnapmaker.hpp"
@@ -123,6 +126,20 @@ static std::string query_param(const std::string& query, const std::string& key)
         pos = amp + 1;
     }
     return "";
+}
+
+// Whether `key` is in the query at all ("options=" names none, a missing key names the default).
+static bool query_has_param(const std::string& query, const std::string& key)
+{
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        if (amp == std::string::npos) amp = query.size();
+        const std::string kv = query.substr(pos, amp - pos);
+        if (kv.substr(0, kv.find('=')) == key) return true;
+        pos = amp + 1;
+    }
+    return false;
 }
 
 static void write_all(tcp::socket& s, const std::string& data)
@@ -907,6 +924,91 @@ static std::string ensure_preview_loaded(int plate)
     return "";
 }
 
+// ---- PR E: preview v2 ----
+
+static_assert(size_t(libvgcode::EGCodeExtrusionRole::COUNT) == 22, "preview_role_ids() follows libvgcode::EGCodeExtrusionRole");
+static_assert(size_t(libvgcode::EOptionType::ToolChanges) == 5, "preview_option_ids() follows libvgcode::EOptionType");
+
+// The view types a phone may colour by: the desktop's own, by their config names, with its labels.
+static nlohmann::json preview_color_by_choices()
+{
+    nlohmann::json choices = nlohmann::json::array();
+    for (const auto& [id, label] : GCodeViewer::default_view_type_choices())
+        if (id != "auto" && id != "last")
+            choices.push_back({ { "id", id }, { "label", label } });
+    return choices;
+}
+
+static std::string preview_color_by_label(const std::string& id)
+{
+    for (const auto& [choice, label] : GCodeViewer::default_view_type_choices())
+        if (choice == id) return label;
+    return id;
+}
+
+static std::string preview_option_label(libvgcode::EOptionType o)
+{
+    switch (o) {
+    case libvgcode::EOptionType::Travels:       return _u8L("Travel");
+    case libvgcode::EOptionType::Wipes:         return _u8L("Wipe");
+    case libvgcode::EOptionType::Retractions:   return _u8L("Retract");
+    case libvgcode::EOptionType::Unretractions: return _u8L("Unretract");
+    case libvgcode::EOptionType::Seams:         return _u8L("Seams");
+    case libvgcode::EOptionType::ToolChanges:   return _u8L("Filament changes");
+    default:                                    return "";
+    }
+}
+
+static std::string hex_of(const libvgcode::Color& c) { return SliceV1::hex_color(c[0], c[1], c[2]); }
+
+// The PC's own preview choices while a phone frame is rendered with its own: applied for the frame,
+// then put back, so a shown window keeps the view type, the moves and the features its user picked.
+class PreviewLookScope
+{
+public:
+    PreviewLookScope(GLCanvas3D* canvas, libvgcode::Viewer& lv, const SliceV1::PreviewLook& look) : m_canvas(canvas), m_lv(lv)
+    {
+        m_type = lv.get_view_type();
+        for (size_t i = 0; i < m_options.size(); ++i) m_options[i] = lv.is_option_visible(libvgcode::EOptionType(i));
+        for (size_t i = 0; i < m_roles.size(); ++i) m_roles[i] = lv.is_extrusion_role_visible(libvgcode::EGCodeExtrusionRole(i));
+        libvgcode::EViewType type;
+        if (!look.color_by.empty() && GCodeViewer::view_type_from_config_name(look.color_by, type) && type != m_type) {
+            lv.set_view_type(type);
+            m_changed = true;
+        }
+        if (look.options_given)
+            for (size_t i = 0; i < m_options.size(); ++i) {
+                const bool want = std::find(look.options.begin(), look.options.end(), SliceV1::preview_option_ids()[i]) != look.options.end();
+                if (want != m_options[i]) { lv.toggle_option_visibility(libvgcode::EOptionType(i)); m_changed = true; }
+            }
+        for (size_t i = 0; i < m_roles.size(); ++i) {
+            const bool want = std::find(look.hide.begin(), look.hide.end(), SliceV1::preview_role_ids()[i]) == look.hide.end();
+            if (want != m_roles[i]) { lv.toggle_extrusion_role_visibility(libvgcode::EGCodeExtrusionRole(i)); m_changed = true; }
+        }
+    }
+    ~PreviewLookScope()
+    {
+        if (!m_changed) return;
+        for (size_t i = 0; i < m_roles.size(); ++i)
+            if (m_lv.is_extrusion_role_visible(libvgcode::EGCodeExtrusionRole(i)) != m_roles[i])
+                m_lv.toggle_extrusion_role_visibility(libvgcode::EGCodeExtrusionRole(i));
+        for (size_t i = 0; i < m_options.size(); ++i)
+            if (m_lv.is_option_visible(libvgcode::EOptionType(i)) != m_options[i])
+                m_lv.toggle_option_visibility(libvgcode::EOptionType(i));
+        if (m_lv.get_view_type() != m_type) m_lv.set_view_type(m_type);
+        m_canvas->set_as_dirty();
+        m_canvas->request_extra_frame();
+    }
+
+private:
+    GLCanvas3D*                                             m_canvas;
+    libvgcode::Viewer&                                      m_lv;
+    libvgcode::EViewType                                    m_type;
+    std::array<bool, 6>                                     m_options {};
+    std::array<bool, size_t(libvgcode::EGCodeExtrusionRole::COUNT)> m_roles {};
+    bool                                                    m_changed { false };
+};
+
 RemoteAccess::ApiResponse RemoteAccess::api_plate_preview(int plate)
 {
     auto out = std::make_shared<nlohmann::json>();
@@ -935,6 +1037,16 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview(int plate)
         j["range"]     = v.get_layers_z_range();
         const BoundingBoxf3& b = v.get_paths_bounding_box();
         j["box"] = { b.min.x(), b.min.y(), b.min.z(), b.max.x(), b.max.y(), b.max.z() };
+        // PR E: what the frames can be coloured by (the desktop's view types, by config name) and the
+        // moves they can show, with the PC's own choice as the default.
+        const libvgcode::Viewer& lv = v.get_libvgcode_viewer();
+        j["color_by"] = { { "current", GCodeViewer::view_type_to_config_name(lv.get_view_type()) }, { "choices", preview_color_by_choices() } };
+        j["options"]  = nlohmann::json::array();
+        for (libvgcode::EOptionType o : lv.get_options()) {
+            const size_t i = size_t(o);
+            if (i < SliceV1::preview_option_ids().size())
+                j["options"].push_back({ { "id", SliceV1::preview_option_ids()[i] }, { "label", preview_option_label(o) }, { "visible", lv.is_option_visible(o) } });
+        }
     }, 60000);
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
@@ -973,8 +1085,16 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_status(int plate)
     return r;
 }
 
-RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const std::string& view_in, int layer, int w, int h, double zoom, double cx, double cy)
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const std::string& view_in, int layer, int w, int h, double zoom, double cx, double cy,
+                                                              const SliceV1::PreviewLook& look)
 {
+    libvgcode::EViewType requested;
+    if (!look.color_by.empty() && !GCodeViewer::view_type_from_config_name(look.color_by, requested)) {
+        ApiResponse r;
+        r.status = 400;
+        r.body   = json_error("unknown color_by: " + look.color_by);
+        return r;
+    }
     static const std::set<std::string> views = { "front", "rear", "left", "right", "top", "bottom", "iso" };
     const std::string view = views.count(view_in) ? view_in : "front";
     w = std::max(64, std::min(2048, w));
@@ -985,7 +1105,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
     auto data = std::make_shared<ThumbnailData>();
     auto err  = std::make_shared<std::string>();
     auto eff  = std::make_shared<double>(1.0);
-    bool ok   = run_on_main([data, err, eff, plate, view, layer, w, h, zoom, cx, cy]() {
+    bool ok   = run_on_main([data, err, eff, plate, view, layer, w, h, zoom, cx, cy, look]() {
         const std::string e = ensure_preview_loaded(plate);
         if (!e.empty()) { *err = e; return; }
         Plater*      plater = wxGetApp().plater();
@@ -994,11 +1114,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
         const std::vector<double>& zs = v.get_layers_zs();
         const int          last  = (int) zs.size() - 1;
         const unsigned int top   = (unsigned int) std::max(0, std::min(last, layer < 0 ? last : layer));
-        const std::array<unsigned int, 2> range = { 0u, top };
+        const std::array<unsigned int, 2> range = { SliceV1::preview_from_layer(look.from, top), top };
         const libvgcode::Interval&        shown = v.get_layers_z_range();
         if (shown[0] != range[0] || shown[1] != range[1]) {
             IMSlider* slider = v.get_layers_slider();
-            slider->SetSelectionSpan(0, (int) top);
+            slider->SetSelectionSpan((int) range[0], (int) top);
             slider->set_as_dirty(false);
             v.set_layers_z_range(range);
             canvas->set_volumes_z_range({ slider->GetLowerValueD(), slider->GetHigherValueD() });
@@ -1010,6 +1130,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
         box.min.z() = std::min(box.min.z(), -1.0);
         const BoundingBoxf3& pb = plater->get_partplate_list().get_plate(plate)->get_bounding_box();
         const BoundingBoxf3  bed(Vec3d(pb.min.x(), pb.min.y(), -1.0), Vec3d(pb.max.x(), pb.max.y(), 0.0));
+        PreviewLookScope scope(canvas, v.get_libvgcode_viewer(), look); // PR E: the phone's colours / moves / features, then the PC's again
         canvas->render_gcode_preview_image(*data, (unsigned int) w, (unsigned int) h, view, box, bed, zoom, cx, cy, eff.get());
     }, 30000);
     ApiResponse r;
@@ -1020,6 +1141,93 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_png(int plate, const s
     r.type    = "image/png";
     r.headers = "X-Preview-Zoom: " + std::to_string(*eff) + "\r\n";
     r.body.assign(static_cast<const char*>(png->data), png->size);
+    return r;
+}
+
+// PR E: the legend of a colouring - the features with their colour, time and share, the filaments
+// with their colour, or a gradient's range and colour stops. Reads only; loads the plate's preview
+// like /preview does.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_legend(int plate, const std::string& color_by, const std::string& hide)
+{
+    auto out    = std::make_shared<nlohmann::json>();
+    auto err    = std::make_shared<std::string>();
+    auto status = std::make_shared<int>(409);
+    const std::vector<std::string> hidden = SliceV1::split_ids(hide);
+    bool ok = run_on_main([out, err, status, plate, color_by, hidden]() {
+        const std::string e = ensure_preview_loaded(plate);
+        if (!e.empty()) { *err = e; *status = e == "no such plate" ? 404 : 409; return; }
+        GCodeViewer&             v  = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        const libvgcode::Viewer& lv = v.get_libvgcode_viewer();
+        libvgcode::EViewType type = lv.get_view_type();
+        if (!color_by.empty() && !GCodeViewer::view_type_from_config_name(color_by, type)) {
+            *err = "unknown color_by: " + color_by; *status = 400; return;
+        }
+        const std::string id = GCodeViewer::view_type_to_config_name(type);
+        nlohmann::json&   j  = *out;
+        j["index"]     = plate;
+        j["result_id"] = v.loaded_result_id();
+        j["color_by"]  = id;
+        j["label"]     = preview_color_by_label(id);
+        if (type == libvgcode::EViewType::FeatureType) {
+            const float total = lv.get_estimated_time();
+            auto share = [total](float t) { return total > 0.f ? std::round(t / total * 1000.f) / 10. : 0.; };
+            j["kind"]  = "discrete";
+            j["items"] = nlohmann::json::array();
+            for (libvgcode::EGCodeExtrusionRole role : lv.get_extrusion_roles()) {
+                const size_t i = size_t(role);
+                if (i >= SliceV1::preview_role_ids().size()) continue;
+                const std::string rid = SliceV1::preview_role_ids()[i];
+                const float       t   = lv.get_extrusion_role_estimated_time(role);
+                j["items"].push_back({ { "id", rid }, { "label", _u8L(ExtrusionEntity::role_to_string(libvgcode::convert(role))) },
+                                       { "color", hex_of(lv.get_extrusion_role_color(role)) }, { "time_s", std::round(t * 100.f) / 100. },
+                                       { "percent", share(t) },
+                                       { "visible", std::find(hidden.begin(), hidden.end(), rid) == hidden.end() } });
+            }
+            const float travel = lv.get_travels_estimated_time();
+            j["travel"] = { { "time_s", std::round(travel * 100.f) / 100. }, { "percent", share(travel) } };
+            j["time_s"] = std::round(total * 100.f) / 100.;
+        } else if (type == libvgcode::EViewType::ColorPrint || type == libvgcode::EViewType::Tool) {
+            j["kind"]  = "discrete";
+            j["items"] = nlohmann::json::array();
+            const libvgcode::Palette& colors = lv.get_tool_colors();
+            for (uint8_t e : lv.get_used_extruders_ids())
+                j["items"].push_back({ { "id", "filament_" + std::to_string(int(e) + 1) }, { "filament", int(e) },
+                                       { "label", (boost::format(_u8L("Filament %1%")) % (int(e) + 1)).str() },
+                                       { "color", e < colors.size() ? hex_of(colors[e]) : std::string("#808080") } });
+        } else {
+            const libvgcode::ColorRange& range = lv.get_color_range(type);
+            std::vector<std::string> palette;
+            for (const libvgcode::Color& c : range.get_palette()) palette.push_back(hex_of(c));
+            j["kind"]     = "gradient";
+            j["gradient"] = SliceV1::gradient_legend(id, range.get_values(), palette);
+        }
+    }, 30000);
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (!err->empty()) { r.status = *status; r.body = json_error(*err); return r; }
+    r.body = out->dump();
+    return r;
+}
+
+// PR E: every layer's Z, height and estimated time (the PC's current time mode), for the phone's
+// layer readout and the bar chart behind its slider.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_preview_layers(int plate)
+{
+    auto out = std::make_shared<nlohmann::json>();
+    auto err = std::make_shared<std::string>();
+    bool ok  = run_on_main([out, err, plate]() {
+        const std::string e = ensure_preview_loaded(plate);
+        if (!e.empty()) { *err = e; return; }
+        GCodeViewer& v = wxGetApp().plater()->get_preview_canvas3D()->get_gcode_viewer();
+        nlohmann::json& j = *out;
+        j["index"]     = plate;
+        j["result_id"] = v.loaded_result_id();
+        j["layers"]    = SliceV1::layer_rows(v.get_layers_zs(), v.get_layers_times());
+    }, 30000);
+    ApiResponse r;
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (!err->empty()) { r.status = *err == "no such plate" ? 404 : 409; r.body = json_error(*err); return r; }
+    r.body = out->dump();
     return r;
 }
 
@@ -2388,8 +2596,12 @@ RemoteAccess::ApiResponse RemoteAccess::api_presets()
             f["value"] = bundle->filament_presets[i];
             f["color"] = (colors && i < colors->values.size()) ? colors->values[i] : "";
             f["type"]  = filament_type_of(*bundle, bundle->filament_presets[i]); // slice_v1
+            // PR F: the slot's preset has unsaved edits (every slot using it shares them).
+            f["dirty"] = bundle->filaments.current_is_dirty() && bundle->filament_presets[i] == bundle->filaments.get_edited_preset().name;
             j["filaments"].push_back(f);
         }
+        if (Tab* ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT); ftab && ftab->get_combo_box())
+            j["filament_editing"] = std::max(0, ftab->get_combo_box()->get_filament_idx()); // PR F: the slot the Filament tab edits
         // The sidebar's nozzle notebook: the visible variants of this printer model, and the
         // one in use (Sidebar::update_nozzle_settings reads printer_variant, not nozzle_diameter).
         nlohmann::json nozzles;
@@ -2590,98 +2802,138 @@ static const char* mode_name(ConfigOptionMode m)
     return m == comSimple ? "simple" : m == comAdvanced ? "advanced" : "develop";
 }
 
-static nlohmann::json process_state_json()
+// The Process tab's presets, or (PR F) the Filament tab's.
+static PresetCollection& settings_presets(Preset::Type type)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    return type == Preset::TYPE_FILAMENT ? bundle->filaments : bundle->prints;
+}
+
+static nlohmann::json settings_state_json(Preset::Type type)
 {
     nlohmann::json j;
-    PresetBundle* bundle = wxGetApp().preset_bundle;
-    const Preset& edited = bundle->prints.get_edited_preset();
+    PresetCollection& presets = settings_presets(type);
+    const Preset&     edited  = presets.get_edited_preset();
     j["preset"]    = edited.name;
     j["is_system"] = edited.is_system;
-    j["dirty"]     = bundle->prints.current_dirty_options();
+    j["dirty"]     = presets.current_dirty_options();
     return j;
 }
 
-// The Process tab's pages / option groups / lines, with the definition, current value and the
+static nlohmann::json process_state_json() { return settings_state_json(Preset::TYPE_PRINT); }
+
+// PR F: a slot's filament settings state - the process shape plus the slot and every slot that
+// uses the same preset (one edited copy changes all of them).
+static nlohmann::json filament_state_json(int slot)
+{
+    nlohmann::json j = settings_state_json(Preset::TYPE_FILAMENT);
+    j["index"]       = slot;
+    j["shared_by"]   = SliceV1::slots_sharing(wxGetApp().preset_bundle->filament_presets, slot);
+    // The current plate's bed type (its own, else the project's) and the filament keys that hold
+    // its first-layer and other-layer bed temperatures, so the phone's quick settings show the
+    // plate in use. Absent when the printer has no bed types.
+    if (Plater* plater = wxGetApp().plater()) {
+        const BedType bed = plater->get_partplate_list().get_curr_plate()->get_bed_type(true);
+        const std::string first = get_bed_temp_1st_layer_key(bed), other = get_bed_temp_key(bed);
+        if (bed != btDefault && !first.empty() && !other.empty()) {
+            const ConfigOptionDef* def   = print_config_def.get("curr_bed_type");
+            std::string            label = ConfigOptionEnum<BedType>(bed).serialize();
+            for (size_t i = 0; def && i < def->enum_values.size() && i < def->enum_labels.size(); ++i)
+                if (def->enum_values[i] == label) { label = _(def->enum_labels[i]).ToUTF8().data(); break; }
+            j["bed_type"]      = label;
+            j["bed_temp_keys"] = {first, other};
+        }
+    }
+    return j;
+}
+
+// A settings tab's pages / option groups / lines, with the definition, current value and the
 // last-saved value of every option — the phone renders exactly the slicer's layout from this.
+static void settings_pages_json(Tab* tab, Preset::Type type, nlohmann::json& j)
+{
+    PresetCollection&         presets = settings_presets(type);
+    const DynamicPrintConfig& edited  = presets.get_edited_preset().config;
+    const DynamicPrintConfig& saved   = presets.get_selected_preset().config;
+    std::set<std::string> dirty;
+    for (const std::string& k : presets.current_dirty_options()) dirty.insert(k);
+    j["pages"] = nlohmann::json::array();
+    for (const PageShp& page : tab->get_pages()) {
+        nlohmann::json jp;
+        jp["title"]  = page->title().ToUTF8().data();
+        jp["groups"] = nlohmann::json::array();
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
+            nlohmann::json jg;
+            jg["title"] = group->title.ToUTF8().data();
+            jg["lines"] = nlohmann::json::array();
+            for (const Line& line : group->get_lines()) {
+                if (line.is_separator()) continue;
+                nlohmann::json jl;
+                jl["label"]   = line.label.ToUTF8().data();
+                jl["tooltip"] = line.label_tooltip.ToUTF8().data();
+                jl["options"] = nlohmann::json::array();
+                for (const Option& opt : line.get_options()) {
+                    std::string key = opt.opt_id;
+                    int         idx = -1;
+                    const size_t hash = key.find('#');
+                    if (hash != std::string::npos) { idx = std::atoi(key.c_str() + hash + 1); key = key.substr(0, hash); }
+                    const ConfigOption* cur = edited.option(key);
+                    if (!cur) continue;
+                    const ConfigOption* sav = saved.option(key);
+                    const ConfigOptionDef& def = opt.opt;
+                    nlohmann::json jo;
+                    jo["key"]     = key;
+                    if (idx >= 0) jo["index"] = idx;
+                    jo["label"]   = _(def.label).ToUTF8().data();
+                    jo["tooltip"] = _(def.tooltip).ToUTF8().data();
+                    jo["type"]    = option_type_name(def.type);
+                    jo["unit"]    = _(def.sidetext).ToUTF8().data();
+                    jo["mode"]    = mode_name(def.mode);
+                    jo["readonly"] = def.readonly || opt.readonly;
+                    // ConfigOptionDef min/max are floats since Orca #11915 (unset = -/+FLT_MAX). Send whole
+                    // numbers as integers and the rest rounded, so 0.01f goes out as 0.01, not 0.0099999998.
+                    auto limit_json = [](float v) -> nlohmann::json {
+                        const double d = std::round(double(v) * 1e6) / 1e6;
+                        if (d == std::floor(d) && std::abs(d) < 1e15) return (long long) d;
+                        return d;
+                    };
+                    if (def.min > -FLT_MAX) jo["min"] = limit_json(def.min);
+                    if (def.max < FLT_MAX) jo["max"] = limit_json(def.max);
+                    if (!def.enum_values.empty()) {
+                        jo["enum"] = nlohmann::json::array();
+                        for (size_t e = 0; e < def.enum_values.size(); ++e) {
+                            nlohmann::json je;
+                            je["value"] = def.enum_values[e];
+                            je["label"] = e < def.enum_labels.size() ? _(def.enum_labels[e]).ToUTF8().data() : def.enum_values[e];
+                            jo["enum"].push_back(je);
+                        }
+                    }
+                    jo["value"] = cur->serialize();
+                    jo["saved"] = sav ? sav->serialize() : "";
+                    jo["dirty"] = dirty.count(key) > 0;
+                    jl["options"].push_back(jo);
+                }
+                if (!jl["options"].empty())
+                    jg["lines"].push_back(jl);
+            }
+            if (!jg["lines"].empty())
+                jp["groups"].push_back(jg);
+        }
+        if (!jp["groups"].empty())
+            j["pages"].push_back(jp);
+    }
+}
+
+// The Process tab (settings_pages_json).
 RemoteAccess::ApiResponse RemoteAccess::api_process_settings()
 {
     auto out = std::make_shared<nlohmann::json>();
     bool ok  = run_on_main([out]() {
-        nlohmann::json& j      = *out;
-        PresetBundle*   bundle = wxGetApp().preset_bundle;
-        Tab*            tab    = wxGetApp().get_tab(Preset::TYPE_PRINT);
+        nlohmann::json& j   = *out;
+        Tab*            tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
         if (!tab) return;
-        j        = process_state_json();
+        j         = process_state_json();
         j["mode"] = mode_name(wxGetApp().get_mode());
-        const DynamicPrintConfig& edited = bundle->prints.get_edited_preset().config;
-        const DynamicPrintConfig& saved  = bundle->prints.get_selected_preset().config;
-        std::set<std::string> dirty;
-        for (const std::string& k : bundle->prints.current_dirty_options()) dirty.insert(k);
-        j["pages"] = nlohmann::json::array();
-        for (const PageShp& page : tab->get_pages()) {
-            nlohmann::json jp;
-            jp["title"]  = page->title().ToUTF8().data();
-            jp["groups"] = nlohmann::json::array();
-            for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
-                nlohmann::json jg;
-                jg["title"] = group->title.ToUTF8().data();
-                jg["lines"] = nlohmann::json::array();
-                for (const Line& line : group->get_lines()) {
-                    if (line.is_separator()) continue;
-                    nlohmann::json jl;
-                    jl["label"]   = line.label.ToUTF8().data();
-                    jl["tooltip"] = line.label_tooltip.ToUTF8().data();
-                    jl["options"] = nlohmann::json::array();
-                    for (const Option& opt : line.get_options()) {
-                        std::string key = opt.opt_id;
-                        int         idx = -1;
-                        const size_t hash = key.find('#');
-                        if (hash != std::string::npos) { idx = std::atoi(key.c_str() + hash + 1); key = key.substr(0, hash); }
-                        const ConfigOption* cur = edited.option(key);
-                        if (!cur) continue;
-                        const ConfigOption* sav = saved.option(key);
-                        const ConfigOptionDef& def = opt.opt;
-                        nlohmann::json jo;
-                        jo["key"]     = key;
-                        if (idx >= 0) jo["index"] = idx;
-                        jo["label"]   = _(def.label).ToUTF8().data();
-                        jo["tooltip"] = _(def.tooltip).ToUTF8().data();
-                        jo["type"]    = option_type_name(def.type);
-                        jo["unit"]    = _(def.sidetext).ToUTF8().data();
-                        jo["mode"]    = mode_name(def.mode);
-                        jo["readonly"] = def.readonly || opt.readonly;
-                        // ConfigOptionDef min/max are floats since Orca #11915 (unset = -/+FLT_MAX). Send whole
-                        // numbers as integers and the rest rounded, so 0.01f goes out as 0.01, not 0.0099999998.
-                        auto limit_json = [](float v) -> nlohmann::json {
-                            const double d = std::round(double(v) * 1e6) / 1e6;
-                            if (d == std::floor(d) && std::abs(d) < 1e15) return (long long) d;
-                            return d;
-                        };
-                        if (def.min > -FLT_MAX) jo["min"] = limit_json(def.min);
-                        if (def.max < FLT_MAX) jo["max"] = limit_json(def.max);
-                        if (!def.enum_values.empty()) {
-                            jo["enum"] = nlohmann::json::array();
-                            for (size_t e = 0; e < def.enum_values.size(); ++e) {
-                                nlohmann::json je;
-                                je["value"] = def.enum_values[e];
-                                je["label"] = e < def.enum_labels.size() ? _(def.enum_labels[e]).ToUTF8().data() : def.enum_values[e];
-                                jo["enum"].push_back(je);
-                            }
-                        }
-                        jo["value"] = cur->serialize();
-                        jo["saved"] = sav ? sav->serialize() : "";
-                        jo["dirty"] = dirty.count(key) > 0;
-                        jl["options"].push_back(jo);
-                    }
-                    if (!jl["options"].empty())
-                        jg["lines"].push_back(jl);
-                }
-                if (!jg["lines"].empty())
-                    jp["groups"].push_back(jg);
-            }
-            if (!jp["groups"].empty())
-                j["pages"].push_back(jp);
-        }
+        settings_pages_json(tab, Preset::TYPE_PRINT, j);
     });
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); }
@@ -2690,9 +2942,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_settings()
     return r;
 }
 
-// Apply key=value pairs (form-encoded, serialized option values) to the edited process
-// preset, exactly like typing them into the Process tab; the preset becomes "modified".
-RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_body)
+// A form body's key=value pairs, decoded, in order.
+static std::vector<std::pair<std::string, std::string>> form_pairs(const std::string& form_body)
 {
     std::vector<std::pair<std::string, std::string>> pairs;
     size_t pos = 0;
@@ -2705,6 +2956,14 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_
             pairs.emplace_back(percent_decode(kv.substr(0, eq)), percent_decode(kv.substr(eq + 1)));
         pos = amp + 1;
     }
+    return pairs;
+}
+
+// Apply key=value pairs (form-encoded, serialized option values) to the edited process
+// preset, exactly like typing them into the Process tab; the preset becomes "modified".
+RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_body)
+{
+    const std::vector<std::pair<std::string, std::string>> pairs = form_pairs(form_body);
     ApiResponse r;
     if (pairs.empty()) { r.status = 404; r.body = json_error("no key=value pairs"); return r; }
     auto result = std::make_shared<std::pair<int, std::string>>(500, "");
@@ -2774,6 +3033,193 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_save()
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); }
     else       r.body = state->dump();
+    return r;
+}
+
+// ------------------------------------------------ filament settings (PR F) ----
+// The Process tab's routes over the Filament tab, for one slot at a time. The tab is one editor
+// bound to one slot (the sidebar's Edit on a slot binds it); its edits are one copy of a preset,
+// shared by every slot using that preset.
+
+// Point the Filament tab at `slot` the way the sidebar's Edit does (Sidebar::edit_filament,
+// PlaterPresetComboBox::switch_to_tab), without its Save / Discard question for the edits of
+// another preset: SliceV1::bind_filament_slot refuses those (409) instead. GUI thread.
+static SliceV1::Refusal open_filament_slot(int slot)
+{
+    Sidebar&      sb     = wxGetApp().sidebar();
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    Tab*          tab    = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+    if (!tab) return { 404, "no filament tab" };
+    const int          slots = (int) std::min(sb.combos_filament().size(), bundle->filament_presets.size());
+    TabPresetComboBox* combo = tab->get_combo_box();
+    const int          bound = combo && combo->get_filament_idx() >= 0 ? combo->get_filament_idx() : 0;
+    const std::string  want  = slot >= 0 && slot < slots ? bundle->filament_presets[slot] : std::string();
+    SliceV1::Refusal   r     = SliceV1::bind_filament_slot(slot, slots, bound, tab->current_preset_is_dirty(), want,
+                                                           bundle->filaments.get_edited_preset().name);
+    if (!r.ok()) return r;
+    if (want != bundle->filaments.get_selected_preset_name()) {
+        // No slot follows the tab while it opens another preset (Sidebar::update_presets would
+        // otherwise give the slot it last edited this one).
+        sb.set_editing_filament(-1);
+        if (!tab->select_preset(want)) return { 409, "the slicer did not open " + want };
+    }
+    if (combo) combo->set_filament_idx(slot);
+    sb.set_editing_filament(slot);
+    return {};
+}
+
+// An error answer (Response: RemoteAccess::ApiResponse, private to it, so named by the caller).
+template<class Response> static Response refused(int status, const std::string& error)
+{
+    Response r;
+    r.status = status;
+    r.body   = json_error(error);
+    return r;
+}
+
+// GET settings/filament?index=: the Process schema's shape for the slot's preset, plus `index` and
+// `shared_by`.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_settings(int slot)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto out    = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, out, slot]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        nlohmann::json& j = *out;
+        j         = filament_state_json(slot);
+        j["mode"] = mode_name(wxGetApp().get_mode());
+        settings_pages_json(wxGetApp().get_tab(Preset::TYPE_FILAMENT), Preset::TYPE_FILAMENT, j);
+    }, 30000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = out->dump();
+    return r;
+}
+
+// POST settings/filament?index= with key=value pairs: like typing them into the Filament tab for
+// that slot. Only the filament preset's own settings are taken.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_set(int slot, const std::string& form_body)
+{
+    const std::vector<std::pair<std::string, std::string>> pairs = form_pairs(form_body);
+    if (pairs.empty()) return refused<ApiResponse>(404, "no key=value pairs");
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot, pairs]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        const DynamicPrintConfig& edited = wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+        DynamicPrintConfig        cfg;
+        for (const auto& kv : pairs) {
+            if (!print_config_def.has(kv.first)) { *result = { 404, "unknown setting: " + kv.first }; return; }
+            if (!edited.has(kv.first)) { *result = { 404, "not a filament setting: " + kv.first }; return; }
+            try {
+                cfg.set_deserialize_strict(kv.first, kv.second);
+            } catch (const std::exception& e) {
+                *result = { 400, "bad value for " + kv.first + ": " + e.what() };
+                return;
+            }
+        }
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->load_config(cfg);
+        wxGetApp().plater()->on_config_change(cfg);
+        *state = filament_state_json(slot);
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+RemoteAccess::ApiResponse RemoteAccess::api_filament_revert(int slot)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->on_roll_back_value(false); // "reset all settings to the last saved preset"
+        wxGetApp().plater()->on_config_change(wxGetApp().preset_bundle->full_config());
+        *state = filament_state_json(slot);
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+// POST settings/filament/save?index=[&name=]: under the same name (a system preset to its
+// "<name> - Custom" shadow, as the process save; every slot using the preset follows, as on the
+// desktop), or with `name` as a new preset for this slot only (Save as).
+RemoteAccess::ApiResponse RemoteAccess::api_filament_save(int slot, const std::string& name)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot, name]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        PresetBundle*     bundle  = wxGetApp().preset_bundle;
+        Tab*              tab     = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+        const Preset&     edited  = bundle->filaments.get_edited_preset();
+        const std::string old     = edited.name;
+        const std::string to      = SliceV1::filament_save_name(name, old, edited.is_system);
+        const bool        save_as = to != SliceV1::filament_save_name("", old, edited.is_system);
+        if (save_as) {
+            // A name that is taken would need the desktop's overwrite question: refused.
+            if (const Preset* taken = bundle->filaments.find_preset(to, false); taken && taken->name != old) {
+                *result = { 409, "a filament preset named " + to + " already exists" };
+                return;
+            }
+        } else if (!edited.is_dirty) {
+            *state = filament_state_json(slot); // nothing to save
+            return;
+        }
+        const std::vector<std::string> before = bundle->filament_presets;
+        // An explicit name: SavePresetDialog is never constructed.
+        tab->save_preset(to);
+        if (save_as) {
+            const std::vector<std::string> after = SliceV1::slots_after_save_as(before, slot, to);
+            for (size_t i = 0; i < after.size() && i < bundle->filament_presets.size(); ++i)
+                bundle->set_filament_preset(i, after[i]);
+            wxGetApp().sidebar().update_presets(Preset::TYPE_FILAMENT);
+            bundle->export_selections(*wxGetApp().app_config);
+        }
+        *state = filament_state_json(slot);
+    }, 30000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+// POST presets/filament_remove?index=[&replace=][&confirm=1]: the slot menu's Delete
+// (Sidebar::delete_filament). Objects using the slot take `replace`'s filament, or the first one.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_remove(int slot, int replace, bool confirm)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "" });
+    auto count  = std::make_shared<size_t>(0);
+    bool ok     = run_on_main([result, count, slot, replace, confirm]() {
+        Plater*       plater = wxGetApp().plater();
+        Sidebar&      sb     = wxGetApp().sidebar();
+        PresetBundle* bundle = wxGetApp().preset_bundle;
+        if (plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
+        const int slots = (int) std::min(sb.combos_filament().size(), bundle->filament_presets.size());
+        const int mixed = slot >= 0 && slot < slots ? (int) bundle->mixed_filaments.mixed_filaments_using_physical((unsigned) slot + 1).size() : 0;
+        *result = SliceV1::filament_remove_check(slot, slots, replace, mixed, confirm);
+        if (!result->ok()) return;
+        // The mixed-filament question was asked above (confirm=1), so the desktop does not ask it.
+        sb.delete_filament((size_t) slot, replace, true);
+        *count = bundle->filament_presets.size();
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    nlohmann::json j;
+    j["filaments"] = *count;
+    ApiResponse r;
+    r.body = j.dump();
     return r;
 }
 
@@ -3096,9 +3542,11 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area)"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?loose=1]"}, {"description", "arrange that plate like its Arrange icon, or with loose=1 place loose objects: only the printable objects on no plate or over the edge of an unlocked plate move, into free space on the plates there are (a new plate when none has room); every object already on a plate stays where it is and no plate is removed; one that fits on no plate of the printer (too large or too tall) stays where it is and the job ends error naming it; returns {job, plate (-1 = loose), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, place_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate, or with loose=1 when place_count is 0; all=1 (re-arrange every plate) is refused with 400"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/orient"},  {"description", "auto-orient the objects on that plate like its Orient icon; the same job shape as arrange (kind orient)"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview. Sliced: color_by {current, choices [{id, label}]} (the desktop's view types by config name) and options [{id travel|wipe|retract|unretract|seam|tool_change, label, visible}] (the PC's own)"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=][&color_by=][&from={index}][&options=seam,travel][&hide=support,skirt]"}, {"description", "orthographic render of the toolpaths of layers from..layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used. color_by: a color_by choice (400 if unknown), the PC's own when absent; options: the moves to draw (absent: the PC's own); hide: feature ids not drawn. The PC's view type, moves and features are put back after the frame"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview/status"}, {"description", "sliced / slicing / slicing_percent / result_id for that plate, without changing what the PC shows"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview/legend[?color_by=][&hide=]"}, {"description", "the legend of a colouring (the PC's own when absent; 400 if unknown): {index, result_id, color_by, label, kind discrete|gradient}; feature_type: items [{id, label, color, time_s, percent, visible}] + travel {time_s, percent} + time_s; color_print: items [{id filament_N, filament (0-based), label, color}]; gradients: gradient {unit, decimals, min, max, stops [{value, color}]}"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/preview/layers"}, {"description", "{index, result_id, layers [{z, height, time_s}]}: every layer's top Z, height and estimated time (time_s null when unknown)"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/result"},  {"description", "a sliced plate's results (404 when it is not sliced): {index, result_id, time_s, time_silent_s?, prepare_time_s, layers? (layer count), gcode_bytes?, filaments [{index, preset, type, color, grams, meters, cost, price_per_kg, model_g, support_g, flush_g, tower_g}] (slots that extruded anything), total {grams, meters, cost (filament + machine time), material_cost, machine_cost, flush_grams, filament_changes}, cost {prices_known, machine_rate_known, machine_rate_per_h, material, machine, fees, total_cost, markup, selling_price, has_markup}, warnings [{code, severity info|warning|error, text, object?, z?}]}. The desktop's own figures: the preview's cost panel (your price and rate overrides included, fees and markup as it shows them). Cache-Control: private, no-cache + ETag (If-None-Match answers 304). Plate images (thumbnail.png, preview.png) also carry an ETag, and with ?v={result_id} (non-zero) Cache-Control: private, max-age=86400"} },
             { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1][&plate={index}]: move / rotate / scale one instance like the sidebar (undoable); plate= centres it on that plate (an object on no plate comes back that way); answers {offset, rz, scale, plate, undo_label}"} },
             { {"method", "POST"}, {"path", "/api/objects/printable"},       {"description", "form obj=[&inst=]&on=1|0: the object list's Printable toggle for one instance, or every instance of the object (undoable); answers {obj, inst, printable, plate}"} },
@@ -3128,6 +3576,12 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/settings/process"},       {"description", "form body key=value[&key=value…] (serialized option values); applies like typing into the tab, returns preset/dirty state"} },
             { {"method", "POST"}, {"path", "/api/settings/process/revert"}, {"description", "reset all settings to the last saved preset"} },
             { {"method", "POST"}, {"path", "/api/settings/process/save"},  {"description", "save modifications under the same name (system presets save to '<name> - Custom')"} },
+            // PR F (slice_filament_settings): the Filament tab, one slot at a time
+            { {"method", "GET"},  {"path", "/api/settings/filament?index={slot}"}, {"description", "the Filament tab for that slot's preset, in the Process tab's shape, plus index, shared_by (every slot using the same preset: one edited copy changes them all) and, when the printer has bed types, bed_type (the current plate's) and bed_temp_keys [first layer, other layers]; 409 while another preset has unsaved changes there"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament?index={slot}"}, {"description", "form body key=value[&key=value…] of that preset's own settings; applies like typing into the Filament tab, returns the state"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament/revert?index={slot}"}, {"description", "reset that slot's preset to its last saved values"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament/save?index={slot}[&name={new}]"}, {"description", "save under the same name (a system preset to '<name> - Custom'; the slots using it follow), or with name as a new preset for this slot only; 409 when that name is taken"} },
+            { {"method", "POST"}, {"path", "/api/presets/filament_remove?index={slot}[&replace={slot}][&confirm=1]"}, {"description", "remove a filament slot like its Delete; objects using it take replace's filament (else the first); 409 for the last slot, or without confirm=1 when mixed filaments are made from it; answers {filaments}"} },
             { {"method", "GET"},  {"path", "/api/archive[?printer={id}]"}, {"description", "the G-code archive (Preferences > Ultra > Store G-Code Files): every file this PC has sent to a printer while it was on, newest first, as {enabled, max, records}. Each record is {id, time, file, sent_name, size, sha256, printer {id, kind bambu|snapmaker|printhost|connect, name, model}, plate, plate_name, project_title, filaments [{index, type, colour, grams}], estimated_time_s, estimated_weight_g, source desktop|phone, mode upload|print, has_thumbnail, exists (its file is still on disk), mapping (the toolhead mapping a Snapmaker send used, in the wire form /send takes) and spoolman_deduct (a Spoolman deduction was asked for)} - names and sizes only, never a path on the PC. `printer` filters by the printer id a send used"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}"},        {"description", "one record, the same fields a row of /api/archive carries plus `exists` (its file is still on disk)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "the plate preview stored with that record"} },
@@ -3181,6 +3635,20 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     }
     if (path == "/presets/filament_add" && method == "POST")
         return api_filament_add();
+    // PR F: filament settings, per slot (index= in the query; the settings in the form body).
+    if (path == "/settings/filament" || path == "/settings/filament/revert" || path == "/settings/filament/save" ||
+        path == "/presets/filament_remove") {
+        auto get = [&](const char* k) { std::string v = query_param(query, k); return v.empty() ? query_param(body, k) : v; };
+        const int slot = num(get("index"), -1);
+        if (path == "/settings/filament" && method == "GET") return api_filament_settings(slot);
+        if (path == "/settings/filament" && method == "POST") return api_filament_set(slot, body);
+        if (path == "/settings/filament/revert" && method == "POST") return api_filament_revert(slot);
+        if (path == "/settings/filament/save" && method == "POST") return api_filament_save(slot, get("name"));
+        if (path == "/presets/filament_remove" && method == "POST") {
+            const std::string replace = get("replace");
+            return api_filament_remove(slot, replace.empty() ? -1 : num(replace, -2), get("confirm") == "1");
+        }
+    }
     if (path == "/plates" && method == "GET")
         return api_plates();
     if (path == "/plates/loose" && method == "GET")
@@ -3202,12 +3670,24 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             return api_plate_layout(num(rest.substr(0, slash), -1));
         if (slash != std::string::npos && rest.substr(slash) == "/preview")
             return api_plate_preview(num(rest.substr(0, slash), -1));
-        if (slash != std::string::npos && rest.substr(slash) == "/preview.png")
+        if (slash != std::string::npos && rest.substr(slash) == "/preview.png") {
+            SliceV1::PreviewLook look; // PR E
+            look.color_by      = query_param(query, "color_by");
+            look.from          = num(query_param(query, "from"), 0);
+            look.options_given = query_has_param(query, "options");
+            look.options       = SliceV1::split_ids(query_param(query, "options"));
+            look.hide          = SliceV1::split_ids(query_param(query, "hide"));
             return cached(api_plate_preview_png(num(rest.substr(0, slash), -1), query_param(query, "view"), num(query_param(query, "layer"), -1),
                                          num(query_param(query, "w"), 800), num(query_param(query, "h"), 800),
-                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5)));
+                                         numd(query_param(query, "zoom"), 1.0), numd(query_param(query, "cx"), 0.5), numd(query_param(query, "cy"), 0.5),
+                                         look));
+        }
         if (slash != std::string::npos && rest.substr(slash) == "/preview/status")
             return api_plate_preview_status(num(rest.substr(0, slash), -1));
+        if (slash != std::string::npos && rest.substr(slash) == "/preview/legend")
+            return api_plate_preview_legend(num(rest.substr(0, slash), -1), query_param(query, "color_by"), query_param(query, "hide"));
+        if (slash != std::string::npos && rest.substr(slash) == "/preview/layers")
+            return api_plate_preview_layers(num(rest.substr(0, slash), -1));
     }
     if (path.compare(0, 8, "/plates/") == 0 && method == "POST") {
         const std::string rest  = path.substr(8);

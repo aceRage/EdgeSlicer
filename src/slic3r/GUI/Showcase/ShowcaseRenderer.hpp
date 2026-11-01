@@ -27,8 +27,10 @@
 #include "libslic3r/RealisticRenderSettings.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
+#include "libslic3r/Showcase/ShowcaseHdr.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -228,6 +230,9 @@ private:
     // 1a: whether this frame can use the HDR layer and the post pass (the shaders are there, and
     // EDGESLICER_SHOWCASE_NO_HDR is not set).
     bool            want_hdr() const;
+    // 1h-1 (the Mac check asked for it in 1a): says at warning level, once per change, whether `where`
+    // ("live view" or "export") draws with the HDR objects layer + post pass or falls back, and why.
+    void            note_hdr_choice(const char *where, bool hdr, const std::string &why);
     // The export's path in one line for the log: HDR with its post pass, or the fallback and why.
     static std::string export_path_line(bool hdr_drawn, bool has_hdr_layer, bool multisampled, bool wanted, bool refused);
     // 1a: tone-maps fb's HDR layer over the bound single-sampled scene buffer (per sample when fb is
@@ -269,6 +274,13 @@ private:
     GLModel        *mc_smooth_model(const ModelVolume &mv);
     // The scene's environment as a cube map; null when there is none (no manifest, no file).
     const Showcase::EnvironmentInfo *ensure_environment();
+    // 1h-1: an HDRI environment (ShowcaseHdr.hpp) loaded, baked into the same atlas + SH lighting as a
+    // bundled environment, and its sharp panorama uploaded for the backdrop. Null (and a warning in
+    // the log) when the file cannot be read: the scene then falls back to its backdrop colours.
+    const Showcase::EnvironmentInfo *ensure_hdri(const Showcase::HdriInfo &hdri);
+    // 1h-1: the key light taken from the HDRI's sun (angles in degrees, turned by the environment
+    // rotation; the colour times its strength). False when the scene does not use it or none was found.
+    bool            sun_key(float &azimuth_deg, float &elevation_deg, std::array<float, 3> &color) const;
     bool            ensure_floor_texture(float &tile_mm, float &roughness);
     // The lights the material and the floor use (D14, or the editing headlight when not fixed).
     std::vector<Showcase::LightSource> scene_lights(const Camera &camera) const;
@@ -307,6 +319,15 @@ private:
     std::string                m_toolpath_prelude;
     bool                       m_toolpath_prelude_read = false;
     std::string                m_env_key;
+    // 1h-1: the HDRI environment in m_env_texture, if any.
+    bool                       m_env_is_hdri = false;
+    Showcase::EnvironmentInfo  m_hdri_info;
+    Showcase::HdrSun           m_hdri_sun;
+    bool                       m_hdri_sun_removed = false;   // the sun was taken out of the light (sun_from_env)
+    unsigned int               m_hdri_backdrop = 0;          // RGBA16F panorama, scaled like the atlas
+    std::string                m_hdri_backdrop_id;
+    // Warning-level log of the HDR path choices (changes only).
+    std::map<std::string, std::string> m_hdr_choice_logged;
     unsigned int               m_floor_texture = 0;
     std::string                m_floor_key;
     float                      m_floor_tile_mm = 500.f;

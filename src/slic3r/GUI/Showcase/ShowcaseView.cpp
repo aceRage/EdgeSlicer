@@ -560,6 +560,17 @@ void ShowcaseView::build_panel()
     auto named_choice = [this, em]() { return new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxSize(12 * em, -1)); };
     auto slider = [this](int value, int lo, int hi) { return new wxSlider(m_side, wxID_ANY, value, lo, hi); };
     auto picker = [this]() { return new wxColourPickerCtrl(m_side, wxID_ANY, *wxWHITE); };
+    // The scene's one environment, listed twice: in Background (the backdrop) and in Light (the lighting
+    // behind a colour, gradient or picture backdrop). The baked ones, then the bundled HDRIs.
+    auto env_choice = [choice]() {
+        wxArrayString envs;
+        envs.Add(_L("None"));
+        for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
+            envs.Add(showcase_environment_name(e));
+        for (const Showcase::HdriInfo &h : showcase_hdris().hdris)
+            envs.Add(showcase_hdri_name(h));
+        return choice(envs);
+    };
 
     m_notice = new wxStaticText(m_side, wxID_ANY, "");
     m_notice->Hide();
@@ -596,6 +607,9 @@ void ShowcaseView::build_panel()
     m_bg_type = choice(bg_types);
     m_bg_type->SetToolTip(_L("Environment: the scene's lighting environment behind the model, softened by Blur."));
     row(_L("Type"), m_bg_type);
+    m_environment = env_choice();
+    m_environment->SetToolTip(_L("The surrounding shown behind the model. It also lights the model and shows in its reflections."));
+    row(_L("Environment"), m_environment);
     m_bg_color1 = picker();
     row(_L("Colour"), m_bg_color1);
     m_bg_color2 = picker();
@@ -701,17 +715,20 @@ void ShowcaseView::build_panel()
     grid->Add(m_rim_intensity, 1, wxEXPAND);
     m_shadow_softness = slider(10, 5, 40);
     row(_L("Shadow softness"), m_shadow_softness);
-    wxArrayString envs;
-    envs.Add(_L("None"));
-    for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
-        envs.Add(showcase_environment_name(e));
-    m_environment = choice(envs);
-    m_environment->SetToolTip(_L("Light and reflections from a photographed surrounding."));
-    row(_L("Environment"), m_environment);
+    // 1h-1: the HDRI environments follow the baked ones (their ids share the scene's environment field).
+    // Shown while the backdrop is not the environment; with the Environment backdrop the Background
+    // section's picker is this same value.
+    m_light_env = env_choice();
+    m_light_env->SetToolTip(_L("Light and reflections from a photographed surrounding, behind the colour, gradient or picture."));
+    row(_L("Lighting environment"), m_light_env);
     m_env_intensity = slider(70, 0, 300);
     row(_L("Environment brightness"), m_env_intensity);
     m_env_rotation = slider(0, 0, 359);
     row(_L("Environment rotation"), m_env_rotation);
+    m_sun_light = new wxCheckBox(m_side, wxID_ANY, _L("Use the environment's sun as the key light"));
+    m_sun_light->SetToolTip(_L("For an HDRI environment: the brightest light in the panorama becomes the key light, so the "
+                               "highlights and the shadows agree with the backdrop. It turns with the environment rotation."));
+    row(_L("Sun"), m_sun_light);
     m_exposure = slider(0, -30, 30);
     m_exposure->SetToolTip(_L("Brightness of the model and the environment, in tenths of a stop."));
     row(_L("Exposure"), m_exposure);
@@ -728,6 +745,17 @@ void ShowcaseView::build_panel()
     // --- Materials (D4) -----------------------------------------------------------------------
     header(_L("Materials"), "materials");
     begin_grid();
+    // First in the section: it decides whether Layer lines or the smoothing rows apply (a row never
+    // hides behind a row below it).
+    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
+    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
+    wxArrayString sources;
+    sources.Add(_L("Model"));
+    sources.Add(_L("Toolpaths (sliced plate)"));
+    m_source = choice(sources);
+    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
+                            "Slice the plate first; until then the model is shown."));
+    row(_L("Show"), m_source);
     wxArrayString layer_lines;
     layer_lines.Add(_L("Off"));
     layer_lines.Add(_L("Subtle"));
@@ -760,15 +788,6 @@ void ShowcaseView::build_panel()
     m_glow_intensity = slider(100, 0, 300);
     m_glow_intensity->SetToolTip(_L("How strongly every glow filament shines, in percent. Saved with the project; Preview uses it too."));
     row(_L("Glow intensity"), m_glow_intensity);
-    // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
-    // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
-    wxArrayString sources;
-    sources.Add(_L("Model"));
-    sources.Add(_L("Toolpaths (sliced plate)"));
-    m_source = choice(sources);
-    m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
-                            "Slice the plate first; until then the model is shown."));
-    row(_L("Show"), m_source);
     m_smooth_auto = new wxCheckBox(m_side, wxID_ANY, _L("By finish"));
     m_smooth_auto->SetToolTip(_L("Each filament's finish picks how smooth its toolpaths look (silk smoothest, matte least)."));
     m_smooth = slider(60, 0, 100);
@@ -1046,6 +1065,7 @@ void ShowcaseView::build_panel()
     }
 
     m_side->SetSizer(root);
+    index_panel_rows();
     // S5c: the panel's width is that of its widest row, folded or not, so it never jumps.
     m_side_content_w = root->CalcMin().x;
     apply_panel_sections();
@@ -1188,14 +1208,26 @@ void ShowcaseView::build_panel()
     m_shadow_softness->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         edit([this](Showcase::Scene &s) { s.lighting.shadow_softness = float(m_shadow_softness->GetValue()) / 10.f; });
     });
-    m_environment->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
-        const int sel = m_environment->GetSelection();
+    for (wxChoice *envc : { m_environment, m_light_env })
+    envc->Bind(wxEVT_CHOICE, [this, envc](wxCommandEvent &) {
+        const int sel = envc->GetSelection();
         const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        const std::vector<Showcase::HdriInfo>        &hdris = showcase_hdris().hdris;
         if (sel < 0)
             return;
-        const std::string id = sel == 0 || size_t(sel) > envs.size() ? std::string() : envs[size_t(sel - 1)].id;
-        edit([&id](Showcase::Scene &s) { s.lighting.environment = id; });
+        std::string id;
+        if (sel >= 1 && size_t(sel) <= envs.size())
+            id = envs[size_t(sel - 1)].id;
+        else if (sel >= 1 && size_t(sel) <= envs.size() + hdris.size())
+            id = hdris[size_t(sel) - 1 - envs.size()].id;
+        // Choosing an HDRI turns its sun on as the key light; choosing anything else turns it off.
+        const bool hdri = showcase_hdris().find(id) != nullptr;
+        edit([&id, hdri](Showcase::Scene &s) {
+            s.lighting.environment  = id;
+            s.lighting.sun_from_env = hdri;
+        }, true);
     });
+    m_sun_light->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) { edit([this](Showcase::Scene &s) { s.lighting.sun_from_env = m_sun_light->GetValue(); }); });
     m_env_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         edit([this](Showcase::Scene &s) { s.lighting.env_intensity = float(m_env_intensity->GetValue()) / 100.f; });
     });
@@ -1664,11 +1696,16 @@ void ShowcaseView::sync_controls()
     m_shadow_softness->SetValue(std::clamp(int(std::lround(s.lighting.shadow_softness * 10.f)), 5, 40));
     {
         const std::vector<Showcase::EnvironmentInfo> &envs = showcase_environments().environments;
+        const std::vector<Showcase::HdriInfo>        &hdris = showcase_hdris().hdris;
         int sel = 0;
         for (size_t i = 0; i < envs.size(); ++i)
             if (envs[i].id == s.lighting.environment)
                 sel = int(i) + 1;
+        for (size_t i = 0; i < hdris.size(); ++i)
+            if (hdris[i].id == s.lighting.environment)
+                sel = int(envs.size() + i) + 1;
         m_environment->SetSelection(sel);
+        m_light_env->SetSelection(sel);
     }
     m_env_intensity->SetValue(int(std::lround(s.lighting.env_intensity * 100.f)));
     int env_rot = int(std::lround(s.lighting.env_rotation_deg)) % 360;
@@ -1676,6 +1713,7 @@ void ShowcaseView::sync_controls()
         env_rot += 360;
     m_env_rotation->SetValue(env_rot);
     m_exposure->SetValue(std::clamp(int(std::lround(s.lighting.exposure * 10.f)), -30, 30));
+    m_sun_light->SetValue(s.lighting.sun_from_env);
     m_tone->SetSelection(s.lighting.tone == Showcase::ToneCurve::Filmic ? 1 : 0);
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
     m_coextruded->SetValue(s.materials.coextruded_look);
@@ -1886,7 +1924,7 @@ void ShowcaseView::update_enabled()
 
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
-                                                          m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
+                                                          m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment, m_light_env,
                                                           m_exposure, m_tone, m_coextruded, m_lights_off, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
@@ -1900,6 +1938,7 @@ void ShowcaseView::update_enabled()
     m_rim_intensity->Enable(editable && s.lighting.rim);
     m_env_intensity->Enable(editable && !s.lighting.environment.empty());
     m_env_rotation->Enable(editable && !s.lighting.environment.empty());
+    m_sun_light->Enable(editable && showcase_hdris().find(s.lighting.environment) != nullptr);
     m_bg_blur->Enable(editable && (image || s.background.type == Showcase::BackgroundType::Environment));
     const bool photo   = s.floor.type == Showcase::FloorType::Texture;
     const bool picture = s.floor.type == Showcase::FloorType::Image;
@@ -1964,6 +2003,169 @@ void ShowcaseView::update_enabled()
     m_co_style_delete->Enable(co_on && m_callout_styles.match(co.style) != nullptr);
 
     update_video_enabled();
+    apply_row_visibility();
+}
+
+// ------------------------------------------------------------------------------------------------
+// Rows that do not apply are hidden (Showcase::panel_visibility); their values stay as they are.
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+const void *row_key(wxWindow *w) { return static_cast<const void *>(w); }
+const void *row_key(wxSizer *s) { return static_cast<const void *>(s); }
+} // namespace
+
+void ShowcaseView::index_panel_rows()
+{
+    m_rows.clear();
+    for (size_t i = 0; i < m_sections.size(); ++i) {
+        if (m_sections[i].body == nullptr)
+            continue;
+        const wxSizerItemList &items = m_sections[i].body->GetChildren();
+        for (wxSizerItemList::compatibility_iterator node = items.GetFirst(); node; node = node->GetNext()) {
+            wxSizerItem *item = node->GetData();
+            // A full-width item of the section (a button row, a hint): the row is the item itself.
+            const void *key = item->GetSizer() != nullptr ? row_key(item->GetSizer()) : (item->GetWindow() != nullptr ? row_key(item->GetWindow()) : nullptr);
+            if (key != nullptr) {
+                PanelRow r;
+                r.a       = item;
+                r.section = int(i);
+                m_rows[key] = r;
+            }
+            // A grid of label + control rows: a row is two cells, found by either of them. The materials
+            // grid is rebuilt with the project's filaments, so it is left alone.
+            auto *grid = dynamic_cast<wxFlexGridSizer *>(item->GetSizer());
+            if (grid == nullptr || grid == m_mat_grid)
+                continue;
+            const wxSizerItemList &cells = grid->GetChildren();
+            for (wxSizerItemList::compatibility_iterator cell = cells.GetFirst(); cell; cell = cell->GetNext()) {
+                wxSizerItem *left  = cell->GetData();
+                cell               = cell->GetNext();
+                wxSizerItem *right = cell ? cell->GetData() : nullptr;
+                PanelRow     r;
+                r.a       = left;
+                r.b       = right;
+                r.section = int(i);
+                for (wxSizerItem *it : { left, right }) {
+                    if (it == nullptr)
+                        continue;
+                    if (it->GetWindow() != nullptr)
+                        m_rows[row_key(it->GetWindow())] = r;
+                    else if (it->GetSizer() != nullptr)
+                        m_rows[row_key(it->GetSizer())] = r;
+                }
+                if (!cell)
+                    break;
+            }
+        }
+    }
+}
+
+bool ShowcaseView::show_row(const void *key, bool show)
+{
+    auto it = m_rows.find(key);
+    if (it == m_rows.end())
+        return false;
+    const PanelRow &r = it->second;
+    // A folded section keeps its rows hidden; opening it runs the rules again.
+    if (r.section >= 0 && size_t(r.section) < m_sections.size() && m_sections[size_t(r.section)].collapsed)
+        return false;
+    bool changed = false;
+    for (wxSizerItem *item : { r.a, r.b })
+        if (item != nullptr && item->IsShown() != show) {
+            item->Show(show);
+            changed = true;
+        }
+    return changed;
+}
+
+void ShowcaseView::apply_row_visibility()
+{
+    if (m_side == nullptr || m_rows.empty())
+        return;
+    const Showcase::Scene &s    = scene();
+    const bool             hdri = showcase_hdris().find(s.lighting.environment) != nullptr;
+    const Showcase::PanelVisibility v = Showcase::panel_visibility(s, hdri);
+
+    bool changed = false;
+    auto set = [&](wxWindow *w, bool on) {
+        if (w != nullptr)
+            changed |= show_row(row_key(w), on);
+    };
+    // For a control that sits in a sizer of its own (a row of buttons).
+    auto set_box = [&](wxWindow *w, bool on) {
+        if (w != nullptr && w->GetContainingSizer() != nullptr)
+            changed |= show_row(row_key(w->GetContainingSizer()), on);
+    };
+
+    // Background
+    set(m_environment, v.bg_environment);
+    set(m_bg_color1, v.bg_colour1);
+    set(m_bg_color2, v.bg_colour2);
+    set(m_bg_image, v.bg_image);
+    set(m_bg_fit, v.bg_fit);
+    set(m_bg_blur, v.bg_blur);
+    // Floor
+    set(m_floor_color, v.floor_colour);
+    set(m_floor_shadow, v.floor_shadow);
+    set(m_floor_grid, v.floor_grid);
+    set(m_floor_texture, v.floor_photo);
+    set(m_floor_image, v.floor_picture);
+    set(m_floor_rotation, v.floor_orientation);
+    set(m_floor_flip, v.floor_orientation);
+    set(m_floor_tile, v.floor_orientation);
+    set(m_floor_reflection, v.floor_reflection);
+    set(m_floor_contact, v.floor_contact);
+    // Light
+    set(m_light_azimuth, v.light_direction);
+    set(m_light_elevation, v.light_direction);
+    set(m_shadow_darkness, v.light_shadow_dark);
+    set(m_light_env, v.light_environment);
+    set(m_env_intensity, v.light_env_levels);
+    set(m_env_rotation, v.light_env_levels);
+    set(m_sun_light, v.light_sun);
+    // Materials
+    set(m_layer_lines, v.mat_layer_lines);
+    set(m_smooth_auto, v.mat_toolpath);
+    set(m_lights_ambient, v.mat_light_left);
+    // Callouts
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_once, m_co_style, m_co_font, m_co_size, m_co_leader,
+                                                          m_co_auto_colors, m_co_list, m_co_hint })
+        set(w, v.co_detail);
+    set_box(m_co_style_save, v.co_detail);
+    set_box(m_co_edit, v.co_detail);
+    set_box(m_co_regenerate, v.co_detail);
+    if (!m_co_fields.empty())
+        set_box(m_co_fields.front(), v.co_detail);
+    set(m_co_text, v.co_plain_colours);
+    set(m_co_line, v.co_plain_colours);
+    set(m_co_bg, v.co_box);
+    set(m_co_bg_opacity, v.co_box);
+    set(m_co_separator, v.co_separator);
+    // Video
+    set(m_vid_co_motion, v.vid_co_position);
+    set(m_vid_co_appear, v.vid_co_appearance);
+    set_box(m_vid_build_infill, v.vid_build_parts);
+    // Export
+    const bool custom = m_size->GetSelection() == SHOWCASE_SIZE_COUNT;
+    set(m_width, custom);
+    set(m_height, custom);
+    // Watermark
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_wm_presets, m_wm_text, m_wm_font, m_wm_color, m_wm_anchor, m_wm_size,
+                                                          m_wm_opacity, m_wm_margin })
+        set(w, v.wm_detail);
+    set_box(m_wm_logo, v.wm_detail);
+    set_box(m_wm_preset_delete, v.wm_detail);
+
+    if (!changed)
+        return;
+    // The panel follows its rows and stays where it was scrolled to.
+    int x = 0, y = 0;
+    m_side->GetViewStart(&x, &y);
+    m_side->Layout();
+    fit_side_width();
+    m_side->Scroll(x, y);
+    m_side->Refresh();
 }
 
 // ------------------------------------------------------------------------------------------------
