@@ -15,9 +15,436 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <array>
+#include <cmath>
+#include <limits>
+
+// Marks the user-facing messages Cut throws for gettext; the gizmo translates them with _L().
+#ifndef L
+#define L(s) (s)
+#endif
+
 namespace Slic3r {
 
 using namespace Geometry;
+
+// ---------------------------------------------------------------------------- connector fit
+
+CutSurfaceProbe CutSurfaceProbe::plane(double thickness, CutThicknessOffset offset)
+{
+    CutSurfaceProbe p;
+    p.m_kind = Kind::Plane;
+    if (thickness > 0.0)
+        curved_cut_thickness_faces(thickness, offset, p.m_face_lo, p.m_face_hi);
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::curved(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
+{
+    CutSurfaceProbe p = plane(thickness, offset);
+    p.m_kind  = Kind::Curved;
+    p.m_sheet = sheet;
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::drawn(const DrawCutStroke& stroke, const DrawCutParams& params, const indexed_triangle_set& mesh)
+{
+    CutSurfaceProbe p;
+    p.m_kind   = Kind::Drawn;
+    p.m_closed = stroke.is_closed();
+    if (!stroke.valid() || mesh.empty())
+        return p;
+    BoundingBoxf3 bbox;
+    for (const Vec3f& v : mesh.vertices)
+        bbox.merge(v.cast<double>());
+    // The same solids draw_cut_split() builds: the mid one (offset 0) is the surface the
+    // connector stands on, the two offset ones are the halves' own faces when there is a kerf.
+    auto mid = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, 0.0, &mesh));
+    if (mid->empty())
+        return p;
+    p.m_cutter_mid  = mid;
+    p.m_cutter_tree = std::make_shared<AABBMesh>(*mid);
+    if (params.thickness > 0.0) {
+        curved_cut_thickness_faces(params.thickness, params.thickness_offset, p.m_face_lo, p.m_face_hi);
+        auto lo = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, p.m_face_lo, &mesh));
+        auto hi = std::make_shared<indexed_triangle_set>(draw_cut_cutter_solid(stroke, params, bbox, p.m_face_hi, &mesh));
+        if (!lo->empty() && !hi->empty()) {
+            p.m_cutter_lo = lo;
+            p.m_cutter_hi = hi;
+        }
+    }
+    return p;
+}
+
+CutSurfaceProbe CutSurfaceProbe::drawn_from_cutter(indexed_triangle_set cutter, bool closed)
+{
+    CutSurfaceProbe p;
+    p.m_kind   = Kind::Drawn;
+    p.m_closed = closed;
+    if (cutter.empty())
+        return p;
+    auto mid        = std::make_shared<indexed_triangle_set>(std::move(cutter));
+    p.m_cutter_mid  = mid;
+    p.m_cutter_tree = std::make_shared<AABBMesh>(*mid);
+    return p;
+}
+
+bool CutSurfaceProbe::valid() const
+{
+    return m_kind != Kind::Drawn || (m_cutter_mid && m_cutter_tree);
+}
+
+bool CutSurfaceProbe::is_upper_mid(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() > 0.0;
+    case Kind::Curved: return p.z() > m_sheet.evaluate_local(p.x(), p.y());
+    case Kind::Drawn:  return m_cutter_mid && draw_cut_classify_upper(*m_cutter_mid, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::is_upper(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() > m_face_hi;
+    case Kind::Curved: return p.z() - m_sheet.evaluate_local(p.x(), p.y()) > m_face_hi;
+    case Kind::Drawn:
+        // draw_cut_split(): an open stroke's upper half is outside the HI solid, a closed
+        // stroke's (the plug) is inside the LO one.
+        if (!m_cutter_lo || !m_cutter_hi)
+            return is_upper_mid(p);
+        return draw_cut_classify_upper(m_closed ? *m_cutter_lo : *m_cutter_hi, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::is_lower(const Vec3d& p) const
+{
+    switch (m_kind) {
+    case Kind::Plane:  return p.z() < m_face_lo;
+    case Kind::Curved: return p.z() - m_sheet.evaluate_local(p.x(), p.y()) < m_face_lo;
+    case Kind::Drawn:
+        if (!m_cutter_mid)
+            return false;
+        if (!m_cutter_lo || !m_cutter_hi)
+            return !is_upper_mid(p);
+        return !draw_cut_classify_upper(m_closed ? *m_cutter_hi : *m_cutter_lo, m_closed, p);
+    }
+    return false;
+}
+
+bool CutSurfaceProbe::surface_along(const Vec3d& p, const Vec3d& dir, double reach, double& t) const
+{
+    t = 0.0;
+    if (!(reach > 0.0) || !p.allFinite() || !dir.allFinite())
+        return false;
+    switch (m_kind) {
+    case Kind::Plane:
+        if (std::abs(dir.z()) < 1e-12)
+            return false;
+        t = -p.z() / dir.z();
+        return std::abs(t) <= reach;
+    case Kind::Curved: {
+        // g(t) is the height of the point over the sheet. Walk outwards from t = 0 in both
+        // directions and bisect the first bracket found, which is the nearest crossing.
+        auto g = [&](double s) {
+            const Vec3d q = p + s * dir;
+            return q.z() - m_sheet.evaluate_local(q.x(), q.y());
+        };
+        const double g0 = g(0.0);
+        if (g0 == 0.0)
+            return true;
+        constexpr int steps = 96;
+        const double  step  = reach / double(steps);
+        double        best  = std::numeric_limits<double>::max();
+        for (int sign : { 1, -1 }) {
+            double a = 0.0, ga = g0;
+            for (int k = 1; k <= steps; ++k) {
+                const double b  = sign * step * double(k);
+                const double gb = g(b);
+                if ((ga < 0.0) != (gb < 0.0)) {
+                    double lo = a, hi = b, glo = ga;
+                    for (int it = 0; it < 60; ++it) {
+                        const double m  = 0.5 * (lo + hi);
+                        const double gm = g(m);
+                        if ((gm < 0.0) == (glo < 0.0)) { lo = m; glo = gm; }
+                        else hi = m;
+                    }
+                    const double root = 0.5 * (lo + hi);
+                    if (std::abs(root) < std::abs(best))
+                        best = root;
+                    break;
+                }
+                a = b; ga = gb;
+            }
+        }
+        if (best == std::numeric_limits<double>::max())
+            return false;
+        t = best;
+        return true;
+    }
+    case Kind::Drawn: {
+        if (!m_cutter_tree)
+            return false;
+        // Every crossing of the whole segment, from its far end: the cutter solid has closure
+        // faces far away, the nearest crossing is the strip under the connector.
+        const Vec3d src  = p - reach * dir;
+        double      best = std::numeric_limits<double>::max();
+        for (const AABBMesh::hit_result& h : m_cutter_tree->query_ray_hits(src, dir)) {
+            if (!h.is_hit())
+                continue;
+            const double s = h.distance() - reach;
+            if (std::abs(s) <= reach && std::abs(s) < std::abs(best))
+                best = s;
+        }
+        if (best == std::numeric_limits<double>::max())
+            return false;
+        t = best;
+        return true;
+    }
+    }
+    return false;
+}
+
+CutConnectorFit cut_connector_fit(const CutSurfaceProbe& probe, const Transform3d& frame, double footprint_radius, double axial_reach)
+{
+    CutConnectorFit fit;
+    fit.deviation = std::numeric_limits<double>::infinity();
+    if (!probe.valid() || !frame.matrix().allFinite())
+        return fit;
+    const Vec3d  origin = frame.translation();
+    const Matrix3d rot  = frame.linear();
+    Vec3d        axis   = rot.col(2);
+    if (axis.norm() < 1e-9)
+        return fit;
+    axis.normalize();
+
+    const double radius = std::max(0.0, footprint_radius);
+    // Far enough to find the surface under a footprint tilted well past what is allowed, so a
+    // bad fit is measured (and reported) rather than missed.
+    const double reach = std::max(5.0, 3.0 * radius + probe.thickness()) + std::max(0.0, axial_reach);
+
+    double t0 = 0.0;
+    if (!probe.surface_along(origin, axis, reach, t0))
+        return fit;
+    const Vec3d centre = origin + t0 * axis;
+
+    // Which way is up: one step each way along the axis from the point ON the surface.
+    constexpr double side_step = 0.3;
+    const bool up_pos = probe.is_upper_mid(centre + side_step * axis);
+    const bool up_neg = probe.is_upper_mid(centre - side_step * axis);
+    if (up_pos == up_neg)
+        return fit;
+    fit.on_surface    = true;
+    fit.upper_along_z = up_pos;
+    fit.centre_offset = t0;
+    const Vec3d up    = up_pos ? axis : Vec3d(-axis);
+
+    // The footprint: its centre and two rings, every point in the connector's own plane.
+    double deviation = 0.0;
+    if (radius > 0.0) {
+        constexpr int sectors = 24;
+        for (double ring : { 0.5, 1.0 })
+            for (int k = 0; k < sectors; ++k) {
+                const double a = 2.0 * PI * double(k) / double(sectors);
+                const Vec3d  q = origin + rot * Vec3d(ring * radius * std::cos(a), ring * radius * std::sin(a), 0.0);
+                double       t = 0.0;
+                if (!probe.surface_along(q, axis, reach, t))
+                    return fit; // part of the footprint is off the surface: deviation stays infinite
+                deviation = std::max(deviation, std::abs(t - t0));
+            }
+    }
+    fit.deviation = deviation;
+
+    // The halves' faces at the centre, along `up`. Without a kerf both are the surface.
+    double hi_c = 0.0, lo_c = 0.0;
+    if (probe.thickness() > 0.0) {
+        const double span = 2.0 * probe.thickness() + 1.0;
+        auto boundary = [&](const Vec3d& dir, auto inside) {
+            // From the surface outwards along `dir`: where the half's material starts.
+            double a = 0.0, b = span;
+            if (inside(centre + a * dir))
+                return 0.0;
+            if (!inside(centre + b * dir))
+                return span;
+            for (int it = 0; it < 40; ++it) {
+                const double m = 0.5 * (a + b);
+                if (inside(centre + m * dir)) b = m; else a = m;
+            }
+            return 0.5 * (a + b);
+        };
+        hi_c = boundary(up, [&](const Vec3d& q) { return probe.is_upper(q); });
+        lo_c = -boundary(Vec3d(-up), [&](const Vec3d& q) { return probe.is_lower(q); });
+    }
+    // The origin sits -t0 along `up` from the centre whichever way the frame is turned (Cut turns
+    // it over about the centre), so the faces, measured from the origin, are these.
+    fit.face_lo = lo_c + t0;
+    fit.face_hi = hi_c + t0;
+    return fit;
+}
+
+static double its_xy_radius(const indexed_triangle_set& its)
+{
+    double r2 = 0.0;
+    for (const Vec3f& v : its.vertices)
+        r2 = std::max(r2, double(v.x()) * double(v.x()) + double(v.y()) * double(v.y()));
+    return std::sqrt(r2);
+}
+
+static double pushfit_footprint_radius(const PushFitParams& p)
+{
+    return std::max(its_xy_radius(pushfit_hole_mesh(p, PushFitSide::Upper)), its_xy_radius(pushfit_hole_mesh(p, PushFitSide::Lower)));
+}
+
+static double tac_joint_footprint_radius(const TacJointParams& p)
+{
+    try {
+        return its_xy_radius(tac_joint_cutter_mesh(p));
+    } catch (const std::invalid_argument&) {
+        return 0.0; // invalid parameters are refused by tac_joint_validate() anyway
+    }
+}
+
+double cut_connector_footprint_radius(const CutConnector& connector)
+{
+    switch (connector.attribs.type) {
+    case CutConnectorType::FlexiJoint: return 0.0;
+    case CutConnectorType::PushFit:    return pushfit_footprint_radius(connector.pushfit);
+    case CutConnectorType::TacJoint:   return tac_joint_footprint_radius(connector.tac_joint);
+    default:                           return double(connector.radius) + double(std::max(0.f, connector.radius_tolerance));
+    }
+}
+
+CutSolidTest::CutSolidTest(indexed_triangle_set solid)
+{
+    if (solid.empty())
+        return;
+    auto its = std::make_shared<indexed_triangle_set>(std::move(solid));
+    m_its    = its;
+    m_tree   = std::make_shared<AABBMesh>(*its);
+}
+
+bool CutSolidTest::contains(const Vec3d& p) const
+{
+    if (!m_tree || !p.allFinite())
+        return false;
+    // Parity along a direction no axis-aligned or cut-aligned face lies in, counted from the
+    // point outwards: odd means inside.
+    static const Vec3d dir = Vec3d(0.5772156649, 0.7071067812, 0.4142135624).normalized();
+    size_t ahead = 0;
+    for (const AABBMesh::hit_result& h : m_tree->query_ray_hits(p, dir))
+        if (h.is_hit() && h.distance() > 0.0)
+            ++ahead;
+    return (ahead & 1) != 0;
+}
+
+indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, const CutSolidTest& object, double max_edge)
+{
+    indexed_triangle_set out;
+    if (surface.empty() || object.empty())
+        return out;
+    max_edge          = std::max(0.05, max_edge);
+    const double max2 = max_edge * max_edge;
+
+    // Longest-edge bisection: a long thin strip triangle (a whole ruling of a drawn cut) splits
+    // along its length only, so it costs tens of triangles rather than a full grid.
+    using Tri = std::array<Vec3d, 3>;
+    std::vector<Tri> stack;
+    auto keep = [&](const Tri& t) {
+        if (!object.contains((t[0] + t[1] + t[2]) / 3.0))
+            return;
+        const int base = int(out.vertices.size());
+        for (const Vec3d& v : t)
+            out.vertices.emplace_back(v.cast<float>());
+        out.indices.emplace_back(base, base + 1, base + 2);
+    };
+    for (const Vec3i32& f : surface.indices) {
+        stack.push_back(Tri{ surface.vertices[f[0]].cast<double>(), surface.vertices[f[1]].cast<double>(),
+                             surface.vertices[f[2]].cast<double>() });
+        while (!stack.empty()) {
+            const Tri t = stack.back();
+            stack.pop_back();
+            int    longest = 0;
+            double len2    = -1.0;
+            for (int e = 0; e < 3; ++e) {
+                const double l = (t[(e + 1) % 3] - t[e]).squaredNorm();
+                if (l > len2) {
+                    len2    = l;
+                    longest = e;
+                }
+            }
+            // The stack bound only guards a degenerate input; a real triangle never gets near it.
+            if (len2 <= max2 || stack.size() > 4096) {
+                keep(t);
+                continue;
+            }
+            const int   a = longest, b = (longest + 1) % 3, c = (longest + 2) % 3;
+            const Vec3d m = 0.5 * (t[a] + t[b]);
+            stack.push_back(Tri{ t[a], m, t[c] });
+            stack.push_back(Tri{ m, t[b], t[c] });
+        }
+    }
+    return out;
+}
+
+indexed_triangle_set curved_cut_face_of(const indexed_triangle_set& half, const CurvedCutSheet& sheet, double face_offset, double tol)
+{
+    indexed_triangle_set out;
+    tol = std::max(1e-4, tol);
+    auto on_face = [&](const Vec3f& v) {
+        return std::abs(double(v.z()) - sheet.evaluate_local(double(v.x()), double(v.y())) - face_offset) <= tol;
+    };
+    std::vector<int> remap(half.vertices.size(), -1);
+    for (const Vec3i32& f : half.indices) {
+        const Vec3f& a = half.vertices[f[0]];
+        const Vec3f& b = half.vertices[f[1]];
+        const Vec3f& c = half.vertices[f[2]];
+        if (!on_face(a) || !on_face(b) || !on_face(c))
+            continue;
+        // Along the sheet, not a wall of the part that happens to touch it: the face's normal is
+        // within ~25 degrees of the sheet's there (either sign - the halves face opposite ways).
+        Vec3d n = (c - a).cast<double>().cross((b - a).cast<double>());
+        if (n.norm() < 1e-12)
+            continue;
+        n.normalize();
+        const Vec3f  centre = (a + b + c) / 3.f;
+        const Vec3d  sn     = curved_cut_sheet_normal(sheet, double(centre.x()), double(centre.y()));
+        if (std::abs(n.dot(sn)) < 0.9)
+            continue;
+        Vec3i32 g;
+        for (int k = 0; k < 3; ++k) {
+            int& r = remap[size_t(f[k])];
+            if (r < 0) {
+                r = int(out.vertices.size());
+                out.vertices.push_back(half.vertices[f[k]]);
+            }
+            g[k] = r;
+        }
+        out.indices.push_back(g);
+    }
+    return out;
+}
+
+// The same radius from a connector VOLUME, as Cut sees it: the plain kinds carry their size in
+// the volume's scale, which is measured here in the connector's own (unscaled) frame.
+static double connector_volume_footprint_radius(const ModelVolume& volume)
+{
+    const ModelVolume::CutInfo& info = volume.cut_info;
+    if (info.connector_type == CutConnectorType::PushFit)
+        return pushfit_footprint_radius(info.pushfit);
+    if (info.connector_type == CutConnectorType::TacJoint)
+        return tac_joint_footprint_radius(info.tac_joint);
+    const Transform3d m   = volume.get_matrix();
+    const Matrix3d    rot = Transformation(m).get_matrix_no_scaling_factor().linear();
+    const Matrix3d    lin = rot.transpose() * m.linear();
+    double r2 = 0.0;
+    for (const Vec3f& v : volume.mesh().its.vertices) {
+        const Vec3d q = lin * v.cast<double>();
+        r2 = std::max(r2, q.x() * q.x() + q.y() * q.y());
+    }
+    return std::sqrt(r2) + double(std::max(0.f, info.radius_tolerance));
+}
 
 static void apply_tolerance(ModelVolume* vol)
 {
@@ -111,8 +538,15 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
 // mm in the connector frame (pushfit_hole_mesh, measured from that half's own cut face), and the
 // pin object gets the pin built in its print pose. The generic apply_tolerance() never touches a
 // pin. `face_lo` / `face_hi` are the kerf faces along the connector axis (0 without a kerf).
+//
+// `relief` >= 0 is a curved or drawn cut: the cut surface strays up to that far (mm, along the
+// axis) from the connector's own plane over the hole's footprint, so a half can keep a thin
+// rim of material across the pin's path just outside its own face. Each half then also gets a
+// short cylinder, the hole's mouth width, from its face out through that rim. A planar cut
+// passes -1 and gets exactly the holes it always got.
 static void process_pushfit_cut(ModelVolume* volume, ModelObjectCutAttributes attributes, ModelObject* upper,
-                                ModelObject* lower, std::vector<CutSeparatePart>& separate, double face_lo, double face_hi)
+                                ModelObject* lower, std::vector<CutSeparatePart>& separate, double face_lo, double face_hi,
+                                double relief = -1.0)
 {
     const PushFitParams& p       = volume->cut_info.pushfit;
     const double         kerf_lo = std::max(0.0, -face_lo);
@@ -149,6 +583,19 @@ static void process_pushfit_cut(ModelVolume* volume, ModelObjectCutAttributes at
             return;
         TriangleMesh hole(pushfit_hole_mesh(p, side, side == PushFitSide::Upper ? kerf_hi : kerf_lo));
         add_cut_volume(hole, half, volume, frame, suffix, ModelVolumeType::NEGATIVE_VOLUME);
+        if (relief < 0.0)
+            return;
+        // The mouth relief: from just inside this half's own hole, back across its face by the
+        // surface's deviation, at the width of the hole's mouth flare.
+        constexpr double overlap = 0.1;
+        const bool   up     = side == PushFitSide::Upper;
+        const double radius = 0.5 * double(p.diameter) + double(up ? p.clearance_upper : p.clearance_lower) +
+                              std::max(0.0, double(p.mouth_chamfer));
+        const double z0     = up ? kerf_hi - relief - overlap : -kerf_lo - overlap;
+        const double height = relief + 2.0 * overlap;
+        TriangleMesh mouth_mesh(its_make_cylinder(radius, height, 2.0 * PI / 64.0));
+        mouth_mesh.translate(0.f, 0.f, float(z0));
+        add_cut_volume(mouth_mesh, half, volume, frame, std::string(suffix) + "_mouth", ModelVolumeType::NEGATIVE_VOLUME);
     };
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         add_hole(upper, PushFitSide::Upper, "_A");
@@ -164,7 +611,8 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
                                   ModelObject*                  lower,
                                   std::vector<CutSeparatePart>& separate,
                                   double                        face_lo,
-                                  double                        face_hi)
+                                  double                        face_hi,
+                                  bool                          full_sockets = false)
 {
     const TacJointParams& params = volume->cut_info.tac_joint;
     const Transform3d     frame  = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
@@ -196,6 +644,15 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
         if (!half)
             return;
         indexed_triangle_set clipped;
+        if (full_sockets) {
+            // A curved or drawn cut: the cut face is not the connector's own plane, so a socket
+            // clipped at that plane would leave a sliver of each half inside the connector. The
+            // full cutter is the space the connector occupies; removing it from either half is
+            // correct whatever shape the surface has inside the footprint.
+            TriangleMesh hole(cutter);
+            add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
+            return;
+        }
         if (top)
             cut_mesh(cutter, float(face_hi) - mouth_overlap, &clipped, nullptr);
         else
@@ -211,18 +668,23 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
 
 static void process_connector_cut(  ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                     ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
-                                    std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0)
+                                    std::vector<CutSeparatePart>& dowels, double face_lo = 0.0, double face_hi = 0.0,
+                                    double non_planar_relief = -1.0)
 {
+    // `non_planar_relief` >= 0 marks a curved or drawn cut (see prepare_non_planar_connectors()):
+    // it is how far the cut surface strays from the connector's own plane over its footprint.
+    // A planar cut passes -1 and takes exactly the branches it always took.
+    const bool non_planar = non_planar_relief >= 0.0;
     assert(volume->cut_info.is_connector);
     volume->cut_info.set_processed();
 
     if (volume->cut_info.connector_type == CutConnectorType::TacJoint) {
-        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi);
+        process_tac_joint_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi, non_planar);
         return;
     }
 
     if (volume->cut_info.connector_type == CutConnectorType::PushFit) {
-        process_pushfit_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi);
+        process_pushfit_cut(volume, attributes, upper, lower, dowels, face_lo, face_hi, non_planar_relief);
         return;
     }
 
@@ -278,6 +740,23 @@ static void process_connector_cut(  ModelVolume* volume, const Transform3d& inst
 
         // Cut the dowel
         apply_tolerance(volume);
+
+        if (non_planar) {
+            // A curved or drawn cut: halving the dowel at the flat plane (below) would put the
+            // split where the cut is not. Each half gets the WHOLE dowel as its hole instead; the
+            // part of it outside that half's material removes nothing.
+            auto add_whole = [&](ModelObject* half, const char* suffix) {
+                if (half == nullptr)
+                    return;
+                TriangleMesh whole(volume->mesh());
+                add_cut_volume(whole, half, volume, volume->get_matrix(), suffix, volume->type());
+            };
+            if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+                add_whole(upper, "_A");
+            if (attributes.has(ModelObjectCutAttribute::KeepLower))
+                add_whole(lower, "_B");
+            return;
+        }
 
         // Perform cut
         TriangleMesh upper_mesh, lower_mesh;
@@ -750,7 +1229,7 @@ static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::str
 const ModelObjectPtrs& Cut::perform_with_flexi_joints()
 {
     if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint requires a planar cut without a Flexi joint.");
+        throw std::invalid_argument(L("TAC Joint cannot be combined with a Flexi joint in the same cut."));
     using namespace Geometry;
 
     ModelObject* mo = m_model.objects.front();
@@ -899,6 +1378,108 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     return m_model.objects;
 }
 
+// ---------------------------------------------------------------------------- connectors, curved / drawn
+
+// What process_connector_cut() needs for one connector on a curved or drawn cut: the halves'
+// faces along its axis (from its origin) and how far the surface strays under its footprint.
+struct NonPlanarConnector
+{
+    double face_lo{ 0.0 };
+    double face_hi{ 0.0 };
+    double relief{ 0.0 };
+};
+using NonPlanarConnectors = std::map<const ModelVolume*, NonPlanarConnector>;
+
+static bool is_unprocessed_rigid_connector(const ModelVolume* v)
+{
+    return !v->is_model_part() && v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_flexi_joint();
+}
+
+// Checks every unprocessed connector of `mo` (flexi joints take their own path) against the cut
+// surface, BEFORE anything is cloned, so a refusal leaves no partial cut behind:
+//   - off the surface, or standing where the surface strays more than
+//     CutConnectorMaxSurfaceDeviation from its own plane over its footprint: refused;
+//   - +Z pointing into the LOWER half: turned over about the point where its axis meets the
+//     surface, so its plug / hole / pin halves land in the halves they are meant for;
+//   - a TAC Joint: its fit and engagement validated at the faces it really gets.
+// `inverse_cut_matrix` takes the connector volumes (and the halves) into the cut plane's frame.
+static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const CutSurfaceProbe& probe, const Transform3d& inverse_cut_matrix,
+                                                         const CutSolidTest& object)
+{
+    NonPlanarConnectors out;
+    for (ModelVolume* volume : mo->volumes) {
+        if (!is_unprocessed_rigid_connector(volume))
+            continue;
+        const Transform3d matrix = volume->get_matrix();
+        if (!matrix.matrix().allFinite())
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        const Transform3d     unscaled = Transformation(matrix).get_matrix_no_scaling_factor();
+        // How far the origin can sit off the surface along the axis: the body's own half length.
+        const Matrix3d to_own = unscaled.linear().transpose() * matrix.linear();
+        double         axial  = 0.0;
+        for (const Vec3f& v : volume->mesh().its.vertices)
+            axial = std::max(axial, std::abs((to_own * v.cast<double>()).z()));
+        const CutConnectorFit fit = cut_connector_fit(probe, inverse_cut_matrix * unscaled, connector_volume_footprint_radius(*volume), axial);
+        if (!fit.on_surface)
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        // Where its axis meets the cut has to be INSIDE the part: a sheet or a drawn strip reaches
+        // well past the object, and a connector out there would only make holes in nothing.
+        {
+            const Transform3d in_plane = inverse_cut_matrix * unscaled;
+            Vec3d             axis     = in_plane.linear().col(2);
+            axis.normalize();
+            if (!object.empty() && !object.contains(in_plane.translation() + fit.centre_offset * axis))
+                throw std::invalid_argument(L("A connector is outside the part's cross-section on the cut surface. "
+                                              "Place it where the cut goes through the part."));
+        }
+        if (!fit.fits()) {
+            BOOST_LOG_TRIVIAL(warning) << "Cut: connector " << volume->name << " refused, the cut surface strays " << fit.deviation
+                                       << " mm from its plane over its footprint (limit " << CutConnectorMaxSurfaceDeviation << " mm)";
+            throw std::invalid_argument(L("A connector stands where the cut surface curves too much under it. Move it to a flatter "
+                                          "spot, use a smaller connector, or flatten the surface there."));
+        }
+        if (volume->cut_info.is_tac_joint()) {
+            const auto validation = tac_joint_validate(volume->cut_info.tac_joint, fit.face_lo, fit.face_hi);
+            if (!validation.valid)
+                throw std::invalid_argument(validation.message);
+        }
+        if (!fit.upper_along_z) {
+            // Turned over about the surface point: the origin moves to its mirror image there and
+            // the frame turns half a turn about its own X, so +Z points into the upper half.
+            Vec3d axis = unscaled.linear().col(2);
+            axis.normalize();
+            const Vec3d origin = matrix.translation();
+            const Vec3d centre = origin + fit.centre_offset * axis;
+            Transform3d flipped = Transform3d::Identity();
+            flipped.linear()    = matrix.linear();
+            flipped             = translation_transform(2.0 * centre - origin) * flipped * rotation_transform(PI * Vec3d::UnitX());
+            volume->set_transformation(flipped);
+        }
+        out[volume] = NonPlanarConnector{ fit.face_lo, fit.face_hi, fit.deviation };
+    }
+    return out;
+}
+
+// The object's model parts, merged, in the cut plane's frame (the frame the sheet, the stroke and
+// the probe live in).
+static indexed_triangle_set object_in_plane(const ModelObject* mo, int instance, const Transform3d& to_plane)
+{
+    indexed_triangle_set solid;
+    const Transform3d inst_lin = mo->instances[instance]->get_transformation().get_matrix_no_offset();
+    for (const ModelVolume* v : mo->volumes)
+        if (v->is_model_part() && !v->mesh().empty()) {
+            TriangleMesh m(v->mesh());
+            m.transform(to_plane * inst_lin * v->get_matrix(), true);
+            its_merge(solid, m.its);
+        }
+    return solid;
+}
+
+static bool has_unprocessed_rigid_connector(const ModelObject* mo)
+{
+    return std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume* v) { return is_unprocessed_rigid_connector(v); });
+}
+
 // ---------------------------------------------------------------------------- curved cut
 
 // The curved counterpart of process_volume_cut(): same frame, same output shape,
@@ -964,9 +1545,6 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     if (sheet.is_flat())
         return perform_with_plane(thickness, offset);
 
-    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint supports planar cuts only.");
-
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
@@ -986,6 +1564,19 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     ModelObject* mo = m_model.objects.front();
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - start";
+
+    // Connectors (all but the flexi kinds, handled above): checked against the sheet, turned the
+    // right way up and given the faces they really get - before anything is cloned, so a refused
+    // connector leaves the cut untouched and retryable.
+    NonPlanarConnectors connector_faces;
+    if (has_unprocessed_rigid_connector(mo)) {
+        if (!std::isfinite(thickness))
+            throw std::invalid_argument(L("The cut thickness must be a finite number."));
+        const Transformation cut_trafo = Transformation(m_cut_matrix);
+        const Transform3d    to_plane  = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
+        connector_faces = prepare_non_planar_connectors(mo, CutSurfaceProbe::curved(sheet, std::max(0.0, thickness), offset), to_plane,
+                                                        CutSolidTest(object_in_plane(mo, m_instance, to_plane)));
+    }
 
     // Before the loop below resets every part's painting.
     const SavedPaintings saved_paintings = save_paintings(mo);
@@ -1012,25 +1603,22 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     // solids and their pockets are built by exactly the same helper the flat cut
     // uses, and the tilt rides in through the volume's transform.
     //
-    // The one place the sheet does matter is the DOWEL, which is cut in half so
-    // that each half goes to its own object. process_connector_cut() slices it
-    // with the flat cut_mesh(), which is the RIGHT thing here: the dowel's own
-    // frame is already the sheet's frame, so "flat, in the dowel's frame" IS
-    // "tangent to the sheet at the dowel". See process_connector_curved_cut().
-    // The kerf faces along the cut normal, for the push-fit pin (its holes are measured from
-    // each half's own face and the pin spans the kerf).
-    double kerf_face_lo = 0.0, kerf_face_hi = 0.0;
-    if (thickness > 0.0)
-        curved_cut_thickness_faces(thickness, offset, kerf_face_lo, kerf_face_hi);
-
+    // 2026-10-31: what the sheet does change is measured per connector by
+    // prepare_non_planar_connectors() above - the halves' faces along the connector's own axis,
+    // and how far the sheet strays from its plane over its footprint - and handed to
+    // process_connector_cut(), which then gives the Dowel and the TAC Joint whole sockets and
+    // the Pin a mouth relief instead of halving them at a plane the cut is not on.
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
-            else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, kerf_face_lo, kerf_face_hi);
+            else {
+                const auto it = connector_faces.find(volume);
+                const NonPlanarConnector f = it != connector_faces.end() ? it->second : NonPlanarConnector{};
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, f.face_lo, f.face_hi, f.relief);
+            }
         }
         else if (!volume->mesh().empty())
             process_solid_part_curved_cut(volume, instance_matrix, m_cut_matrix, m_attributes, sheet, upper, lower, thickness, offset);
@@ -1072,9 +1660,10 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         // frame, so it comes out standing along the surface normal at its (u,v),
         // and reset_instance_transformation() puts it flat on the bed for
         // printing exactly the way the flat path does.
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
-            add_separate_parts(dowels, cut_object_ptrs);
     }
+    // As on the flat path (PR 801), the separate parts come out with "keep as parts" too.
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";
 
@@ -1139,8 +1728,6 @@ static void process_solid_part_draw_cut(ModelVolume* volume, const Transform3d& 
 
 const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params)
 {
-    if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint supports planar cuts only.");
     // There is no "zero stroke" that degenerates to the flat cut the way a zero
     // sheet does - an empty stroke is simply no cut - so unlike
     // perform_with_curved_sheet() there is nothing to route back into
@@ -1171,6 +1758,23 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - start";
 
+    // Connectors (all but the flexi kinds, handled above): checked against the drawn strip,
+    // turned the right way up and given the faces they really get - before anything is cloned,
+    // so a refused connector leaves the cut untouched and retryable. The strip is built against
+    // the whole object in the plane frame, as draw_cut_split() builds it against each part.
+    NonPlanarConnectors connector_faces;
+    if (has_unprocessed_rigid_connector(mo)) {
+        if (!std::isfinite(params.thickness))
+            throw std::invalid_argument(L("The cut thickness must be a finite number."));
+        const Transformation cut_trafo  = Transformation(m_cut_matrix);
+        const Transform3d    to_plane   = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
+        indexed_triangle_set solid      = object_in_plane(mo, m_instance, to_plane);
+        const CutSurfaceProbe probe     = CutSurfaceProbe::drawn(stroke, params, solid);
+        if (!probe.valid())
+            throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
+        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane, CutSolidTest(std::move(solid)));
+    }
+
     // Before the loop below resets every part's painting.
     const SavedPaintings saved_paintings = save_paintings(mo);
 
@@ -1188,18 +1792,20 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
-    // PHASE 1 SHIPS CONNECTOR-FREE on the drawn surface (the gizmo's panel does not
-    // offer them), but the loop keeps the curved path's shape so a connector volume
-    // that reached here some other way is still processed rather than dropped -
-    // which is also what phase 2 will need once the drawn surface grows a frame.
+    // Connectors on the drawn surface (phase 2 in the gizmo; 2026-10-31 here): each one takes
+    // the faces and the relief prepare_non_planar_connectors() measured on the strip, exactly as
+    // on a curved cut.
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
-            else
-                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
+            else {
+                const auto it = connector_faces.find(volume);
+                const NonPlanarConnector f = it != connector_faces.end() ? it->second : NonPlanarConnector{};
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels, f.face_lo, f.face_hi, f.relief);
+            }
         }
         else if (!volume->mesh().empty())
             process_solid_part_draw_cut(volume, instance_matrix, m_cut_matrix, m_attributes, stroke, params, upper, lower);
@@ -1235,10 +1841,10 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
         post_process(upper, lower, cut_object_ptrs);
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
-
-        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
-            add_separate_parts(dowels, cut_object_ptrs);
     }
+    // As on the flat and curved paths, the separate parts come out with "keep as parts" too.
+    if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty())
+        add_separate_parts(dowels, cut_object_ptrs);
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_draw_stroke - end";
 
@@ -1264,7 +1870,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
             const Vec3d       axis  = local.linear() * Vec3d::UnitZ();
             if (!local.matrix().allFinite() || !std::isfinite(thickness) || (axis - Vec3d::UnitZ()).norm() > 1e-4 ||
                 std::abs(local.translation().z()) > 1e-3)
-                throw std::invalid_argument("TAC Joint must stand on the planar cut surface.");
+                throw std::invalid_argument(L("TAC Joint must stand on the planar cut surface."));
         }
     }
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
@@ -1423,7 +2029,7 @@ static void merge_solid_parts_inside_object(ModelObjectPtrs& objects)
 const ModelObjectPtrs& Cut::perform_by_contour(const ModelObject* src_object, std::vector<Part> parts, int dowels_count)
 {
     if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint does not support individual part selection.");
+        throw std::invalid_argument(L("TAC Joint does not support individual part selection."));
     ModelObject* cut_mo = m_model.objects.front();
 
     // C1: PartSelection's pieces keep the object's own frame (the instance is not baked into them,
@@ -1533,7 +2139,7 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove&       groove,
                                                 bool                keep_as_parts /* = false*/)
 {
     if (!m_model.objects.empty() && has_tac_joint(m_model.objects.front()))
-        throw std::invalid_argument("TAC Joint does not support groove cuts.");
+        throw std::invalid_argument(L("TAC Joint does not support groove cuts."));
     ModelObject* cut_mo = m_model.objects.front();
     // The gizmo caps the count (20); a recipe or a caller asking for none still gets one dovetail.
     groove_count = std::max(1, groove_count);
