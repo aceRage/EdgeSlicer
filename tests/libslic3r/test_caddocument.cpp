@@ -2248,6 +2248,48 @@ TEST_CASE("deserialize_recipe rejects truncated or oversized length fields", "[C
     }
 }
 
+TEST_CASE("BoundedBinaryInputArchive sizes a vector by its element size before allocating", "[CadDocument]")
+{
+    auto blob_of = [](auto&& write) {
+        std::ostringstream oss;
+        {
+            cereal::BinaryOutputArchive ar(oss);
+            write(ar);
+        }
+        return oss.str();
+    };
+    auto read_into = [](const std::string& blob, auto& out) {
+        std::istringstream iss(blob);
+        BoundedBinaryInputArchive ar(iss, blob.size());
+        ar(out);
+    };
+    SECTION("a double vector round-trips") {
+        const std::vector<double> src{1.5, -2.25, 1e300};
+        std::vector<double> got;
+        read_into(blob_of([&](auto& ar) { ar(src); }), got);
+        CHECK(got == src);
+    }
+    SECTION("a double count that fits at one byte per element but not at eight") {
+        // 1000 bytes follow the size tag: enough for the 1-byte floor of the size tag check,
+        // an eighth of what 1000 doubles need. Must fail before the vector allocates.
+        std::string blob = blob_of([](auto& ar) { ar(cereal::make_size_tag(cereal::size_type(1000))); });
+        blob.append(1000, '\0');
+        std::vector<double> got;
+        CHECK_THROWS_AS(read_into(blob, got), RecipeLengthError);
+        CHECK(got.capacity() == 0);
+    }
+    SECTION("a string vector with a lying count allocates only for what is there") {
+        std::string blob = blob_of([](auto& ar) {
+            ar(cereal::make_size_tag(cereal::size_type(100)));
+            ar(std::string("x"));
+        });
+        blob.append(100 - (blob.size() - sizeof(cereal::size_type)), '\0');   // passes the 1-byte floor
+        std::vector<std::string> got;
+        CHECK_THROWS(read_into(blob, got));
+        CHECK(got.size() < 100);
+    }
+}
+
 TEST_CASE("deserialize_recipe rejects older version with error", "[CadDocument]")
 {
     CadDocument doc;

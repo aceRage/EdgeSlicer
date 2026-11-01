@@ -13,12 +13,15 @@
 #include <cereal/cereal.hpp>
 #include <cereal/archives/binary.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace Slic3r {
 
@@ -91,11 +94,43 @@ inline void CEREAL_SERIALIZE_FUNCTION_NAME(BoundedBinaryInputArchive& ar, cereal
 }
 
 // The one place every container learns its size: check it before the container acts on it.
+// This is the 1-byte-per-element floor; it does not know the element type. std::vector, the one
+// container here that allocates all its elements before reading them, gets its own load below,
+// which accounts for sizeof(T).
 template<class T>
 inline void CEREAL_SERIALIZE_FUNCTION_NAME(BoundedBinaryInputArchive& ar, cereal::SizeTag<T>& t)
 {
     ar(t.size);
     ar.check_len(static_cast<uint64_t>(t.size));
+}
+
+// std::vector for this archive (more specialised than cereal's generic vector loads, so it wins
+// overload resolution; same wire format). cereal resizes to the declared count first, i.e.
+// allocates count * sizeof(T) while the size tag was only checked at one byte per element: a
+// corrupt count could ask for 8x (double) to 24x (Vec3d) the bytes the blob holds.
+//  - arithmetic T: every element is exactly sizeof(T) bytes on the wire, so the count is checked
+//    at sizeof(T) each before the resize;
+//  - any other T (strings, structs): the wire size of an element is not known up front, so the
+//    vector grows as elements actually arrive and a lying count fails at the end of the data,
+//    having allocated only for what was really there.
+template<class T, class A>
+inline typename std::enable_if<!std::is_same<T, bool>::value, void>::type
+CEREAL_LOAD_FUNCTION_NAME(BoundedBinaryInputArchive& ar, std::vector<T, A>& vec)
+{
+    cereal::size_type n = 0;
+    ar(cereal::make_size_tag(n));
+    if constexpr (std::is_arithmetic<T>::value) {
+        ar.check_len(static_cast<uint64_t>(n), sizeof(T));
+        vec.resize(static_cast<std::size_t>(n));
+        ar(cereal::binary_data(vec.data(), static_cast<std::size_t>(n) * sizeof(T)));
+    } else {
+        vec.clear();
+        vec.reserve(static_cast<std::size_t>(std::min<uint64_t>(static_cast<uint64_t>(n), 1024)));
+        for (cereal::size_type i = 0; i < n; ++i) {
+            vec.emplace_back();
+            ar(vec.back());
+        }
+    }
 }
 
 template<class T>

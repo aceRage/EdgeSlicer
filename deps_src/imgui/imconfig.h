@@ -216,6 +216,9 @@ namespace ImGui
     // Edge: the Spread paint tool
     const wchar_t SpreadPaintIcon          = 0x0845;
     const wchar_t SpreadPaintDarkIcon      = 0x0846;
+    // Edge: the Airbrush paint tool
+    const wchar_t AirbrushPaintIcon        = 0x0847;
+    const wchar_t AirbrushPaintDarkIcon    = 0x0848;
 
     // Orca
     const wchar_t PlayButton           = 0x0850;
