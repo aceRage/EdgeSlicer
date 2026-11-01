@@ -11127,8 +11127,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             if (update_solid_hover(canvas, evt)) canvas.set_as_dirty();
             return false;
         }
-        const bool left_drag_sweeps =
-            evt.ShiftDown() || std::atoi(wxGetApp().app_config->get("left_mouse_drag_action").c_str()) == 0;
+        // Only Shift sweeps. "left_mouse_drag_action" is not a preference this build defines, so
+        // reading it gave "" -> 0 -> "sweep" for every plain drag and took the orbit away.
+        const bool left_drag_sweeps = evt.ShiftDown();
         if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending && (left_drag_sweeps || m_rubber.is_dragging())) {
             if (!m_rubber.is_dragging()) {
                 // Inside the click budget the gesture is already a sweep (Shift, or left-drag given
