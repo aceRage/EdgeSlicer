@@ -2540,6 +2540,8 @@ void Layer::make_ironing()
         // Calibration ramp is a percent of layer height, not of filament_ironing_flow (the labels are absolute %).
         double calib_height_per_percent = default_layer_height * 0.01 * f->spacing / nozzle_dmr;
         // Two disjoint ironed tops (the front/rear bands): reverse the rear ramp so bed tilt can be compared.
+        // The rear band is found by Y position alone, so any other ironed top in a Calib_Ironing_Flow print
+        // behind the frontmost one would also be reversed; the calibration model is the only object expected.
         const bool calib_has_mirror = calib_ironing_flow && ironing_areas.size() >= 2;
         coord_t    calib_front_y    = 0;
         if (calib_has_mirror) {

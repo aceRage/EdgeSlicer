@@ -21783,7 +21783,7 @@ static bool update_ironing_flow_names(Model& model, const Print* print, bool sli
 
 void Plater::calib_ironing_flow(const Calib_Params& params)
 {
-    const auto calib_ironing_flow_name = wxString::Format(L"Ironing flow test");
+    const wxString calib_ironing_flow_name = from_u8(ironing_flow_object_name);
     new_project(false, false, calib_ironing_flow_name);
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
     if (params.mode != CalibMode::Calib_Ironing_Flow)

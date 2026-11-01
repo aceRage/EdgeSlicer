@@ -1627,7 +1627,7 @@ IroningFlow_Test_Dlg::IroningFlow_Test_Dlg(wxWindow* parent, wxWindowID id, Plat
         _L("The front band irons from the minimum flow on the left to the maximum on the right. A second band "
            "behind it ramps the other way so you can tell ironing flow from bed tilt: if the best-looking region "
            "is at the same flow % on both bands, trust that value. If they disagree, level the bed and reprint.\n\n"
-           "The plate sits on extra solid layers so a height error of about 0.05 mm is less likely to swamp the "
+           "The plate sits on extra solid layers so small bed height errors are less likely to show on the "
            "ironed surface. Run this after flow-ratio calibration. Check the result in reflected light: the "
            "optimum hides the surface lines without roughness from overextrusion. Lower values look matte; "
            "higher ones look glossier."),
@@ -1679,9 +1679,12 @@ void IroningFlow_Test_Dlg::on_start(wxCommandEvent& event) {
         msg_dlg.ShowModal();
         return;
     }
-    // The band plus 5 mm at each end. Two 15 mm bands plus a 4 mm valley and the labels sit in Y.
-    const double       length = m_params.step + 10.;
-    const double       depth  = 15. + 4. + 15. + 20.;
+    // The band plus 5 mm at each end. In Y: two 15 mm bands and a 4 mm valley, then in front of them the
+    // scale (2 mm marks, 1 mm gap, labels up to 15 mm long), a 1 mm gap, the dividing line (nozzle wide,
+    // at least 0.5 mm) and the 7 mm name strip, as built by ironing_flow_calib_mesh().
+    const double       length     = m_params.step + 10.;
+    const double       line_width = std::max(0.5, wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0));
+    const double       depth      = 15. + 4. + 15. + (2. + 1. + 15.) + 1. + line_width + 7.;
     const BoundingBoxf bed    = get_extents(wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionPoints>("printable_area")->values);
     if (length > bed.size().x() - 10.) {
         // TRN: The placeholders are the length of the ironed band, the length of the whole test and the longest band that fits, in mm.
