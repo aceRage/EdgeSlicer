@@ -2,27 +2,27 @@
   "version": 1,
   "hdris": [
     {
-      "id": "hdri_sky_sun",
-      "name": "Sky with sun (generated)",
-      "procedural": "sky_sun",
-      "source": "generated in code (ShowcaseHdr.cpp)",
-      "authors": "EdgeSlicer",
-      "licence": "CC0 1.0"
-    },
-    {
       "id": "hdri_studio",
-      "name": "Studio softboxes (generated)",
-      "procedural": "studio",
-      "source": "generated in code (ShowcaseHdr.cpp)",
-      "authors": "EdgeSlicer",
+      "name": "Studio softbox",
+      "file": "studio_small_09_2k.hdr",
+      "source": "https://polyhaven.com/a/studio_small_09",
+      "authors": "Poly Haven",
       "licence": "CC0 1.0"
     },
     {
-      "id": "hdri_interior",
-      "name": "Interior window (generated)",
-      "procedural": "interior",
-      "source": "generated in code (ShowcaseHdr.cpp)",
-      "authors": "EdgeSlicer",
+      "id": "hdri_outdoor",
+      "name": "Outdoor sky with sun",
+      "file": "kloofendal_48d_partly_cloudy_puresky_2k.hdr",
+      "source": "https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0"
+    },
+    {
+      "id": "hdri_workshop",
+      "name": "Workshop window",
+      "file": "artist_workshop_2k.hdr",
+      "source": "https://polyhaven.com/a/artist_workshop",
+      "authors": "Poly Haven",
       "licence": "CC0 1.0"
     }
   ]

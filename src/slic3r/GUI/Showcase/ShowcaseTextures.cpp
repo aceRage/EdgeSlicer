@@ -90,9 +90,9 @@ std::string showcase_hdri_path(const Showcase::HdriInfo &hdri)
 
 wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
 {
-    if (hdri.id == "hdri_sky_sun") return _L("Sky with sun (generated)");
-    if (hdri.id == "hdri_studio") return _L("Studio softboxes (generated)");
-    if (hdri.id == "hdri_interior") return _L("Interior window (generated)");
+    if (hdri.id == "hdri_studio") return _L("Studio softbox (HDRI)");
+    if (hdri.id == "hdri_outdoor") return _L("Outdoor sky with sun (HDRI)");
+    if (hdri.id == "hdri_workshop") return _L("Workshop window (HDRI)");
     return wxString::FromUTF8(hdri.name);
 }
 

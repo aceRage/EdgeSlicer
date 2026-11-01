@@ -1,30 +1,21 @@
 # Showcase HDRI environments
 
 Sharp 2k equirectangular panoramas (Radiance `.hdr`) that light the model and fill the backdrop of
-the Showcase tab (`hdri.json` lists them; `src/libslic3r/Showcase/ShowcaseHdr.*` loads and bakes
-them). A file entry looks like
+the Showcase tab. `hdri.json` lists them; `src/libslic3r/Showcase/ShowcaseHdr.*` loads and bakes
+them. All three are Poly Haven assets under CC0 1.0 (public domain, attribution not required;
+https://polyhaven.com/license), the same sources `resources/textures/showcase/environments/README.md`
+lists for the baked 128 px environments. Owner approved bundling them on 2026-11-01 (design D-R2);
+the files are our own copies, never fetched from the Poly Haven API (D-R3).
 
-    { "id": "hdri_studio", "name": "Studio softboxes", "file": "studio_small_09_2k.hdr",
-      "source": "https://polyhaven.com/a/studio_small_09", "authors": "Poly Haven", "licence": "CC0 1.0" }
+| Id | File | Source page | Licence | Bytes | SHA-256 |
+|---|---|---|---|---|---|
+| `hdri_studio` | `studio_small_09_2k.hdr` | https://polyhaven.com/a/studio_small_09 | CC0 1.0 | 6,312,947 | `36724313c0fc66dab126ff90f081b85a0b1ef47be65eda1417bd20b033f0573f` |
+| `hdri_outdoor` (has a sun) | `kloofendal_48d_partly_cloudy_puresky_2k.hdr` | https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky | CC0 1.0 | 5,451,493 | `5244534e9cf5b606f2ff513aa00ddb161b0a4826ffd88a0d3bd03ac29247d198` |
+| `hdri_workshop` (window light) | `artist_workshop_2k.hdr` | https://polyhaven.com/a/artist_workshop | CC0 1.0 | 6,756,758 | `09e871a2f2bb34395a6c21c9bea78b0e5d9cd3abff4d6da47c547da373342159` |
 
-and a generated one has `"procedural": "sky_sun" | "studio" | "interior"` instead of `"file"`.
+About 18.5 MB in all. `.gitattributes` marks `*.hdr` binary.
 
-## Status (design D-R2, D-R3)
-
-The three entries in `hdri.json` are generated in code (no file): stand-ins so the loader, the
-prefilter, the sun light and the controls can be built and tested without fetching anything. The
-photographs below are proposed to replace them; **nothing has been downloaded yet**. They are the
-same Poly Haven CC0 sources `resources/textures/showcase/environments/README.md` already lists
-for the baked 128 px environments, now as the sharp 2k originals.
-
-| Slot | File | Source page | Licence | 2k size (estimate) |
-|---|---|---|---|---|
-| Studio | `studio_small_09_2k.hdr` | https://polyhaven.com/a/studio_small_09 | CC0 1.0 | about 5-7 MB |
-| Outdoor (has a sun) | `kloofendal_48d_partly_cloudy_puresky_2k.hdr` | https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky | CC0 1.0 | about 5-7 MB |
-| Interior-ish (window light) | `artist_workshop_2k.hdr` | https://polyhaven.com/a/artist_workshop | CC0 1.0 | about 5-7 MB |
-
-Sizes are estimates from the design document (a 2k RGBE `.hdr` is ~5-7 MB), not measured.
-Downloads for these come from our own mirror (the edgeslicer-deps release assets), never from the
-Poly Haven API (D-R3). When the files are added: put them in this folder, replace the three generated
-entries (or add the files next to them), and add the three ids' names to `showcase_hdri_name()` in
-`src/slic3r/GUI/Showcase/ShowcaseTextures.cpp`.
+A file entry in `hdri.json` has `id`, `name`, `file`, `source`, `authors`, `licence`. An entry may
+instead have `"procedural": "sky_sun" | "studio" | "interior"` (a panorama generated in code); the
+unit tests use those generators and none is listed in the shipped manifest. If a listed file is missing
+or unreadable the renderer logs a warning and the scene falls back to its backdrop colours.

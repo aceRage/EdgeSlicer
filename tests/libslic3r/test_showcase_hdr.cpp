@@ -382,13 +382,13 @@ TEST_CASE("Showcase HDR: sun_from_env is saved with the scene and off by default
     CHECK_FALSE(Lighting().sun_from_env);
     Project p;
     Scene &s = p.ensure_scene_for_plate(0, PresetId::DeskWood);
-    s.lighting.environment  = "hdri_sky_sun";
+    s.lighting.environment  = "hdri_outdoor";
     s.lighting.sun_from_env = true;
     Project back;
     REQUIRE(scenes_from_json(scenes_to_json(p), back));
     REQUIRE(back.scenes.size() == 1);
     CHECK(back.scenes[0].lighting.sun_from_env);
-    CHECK(back.scenes[0].lighting.environment == "hdri_sky_sun");
+    CHECK(back.scenes[0].lighting.environment == "hdri_outdoor");
     CHECK(back.scenes[0] == s);
     // It takes part in equality (so the live view re-renders when it changes).
     Lighting a, b;
