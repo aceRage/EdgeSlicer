@@ -383,6 +383,7 @@ private:
     wxSlider                *m_env_intensity = nullptr;
     wxSlider                *m_env_rotation = nullptr;
     wxSlider                *m_exposure = nullptr;
+    wxCheckBox              *m_sun_light = nullptr;   // 1h-1: an HDRI's sun as the key light
     wxChoice                *m_tone = nullptr;   // realism 1a: the post pass's tone curve
     wxSlider                *m_shadow_softness = nullptr;
     wxChoice                *m_layer_lines = nullptr;
