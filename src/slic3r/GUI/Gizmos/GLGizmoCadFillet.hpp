@@ -23,7 +23,7 @@ namespace GUI {
 class MeshRaycaster;
 
 // Exact CAD edits of one part: fillet, chamfer and shell on the part's B-rep (libslic3r
-// BRep/CadEdit.hpp).
+// BRep/CadEdit.hpp), as opposed to the Edit gizmo's bevel, which works on the triangles.
 //
 // FLOW
 //   * Sourcing. On opening, the part's CAD body is found: the one it already carries (a
@@ -41,7 +41,8 @@ class MeshRaycaster;
 //     stays attached to the volume so the next operation stacks on it and STEP export writes
 //     it exactly. A failure leaves the model untouched and says why in the panel.
 //
-// Not in the toolbar: opened from the part's right-click menu, the way Simplify is opened.
+// Not in the toolbar: opened from the part's right-click menu or the Edit gizmo's panel, the
+// way Simplify is opened.
 class GLGizmoCadFillet : public GLGizmoBase
 {
 public:

@@ -92,13 +92,12 @@ public:
         Simplify,
         BrimEars,
         Sculpt,
-        // Reserved. The mesh Edit gizmo (face push/pull, feature-edge bevel) was
-        // removed in Design-tab Phase 5. The enumerator stays so CadFillet and the
-        // Design-tab launchers keep their values. A hidden placeholder occupies the
-        // matching m_gizmos slot.
+        // Ultra: CAD-like direct mesh editing (face push/pull, feature-edge
+        // chain selection). Appended AFTER Sculpt so the existing EType
+        // values and the m_gizmos order they index are untouched.
         Edit,
         // Exact B-rep fillet / chamfer / shell of a CAD part (GLGizmoCadFillet). Not in the
-        // toolbar: opened from the part's context menu, the way Simplify is opened.
+        // toolbar: opened from the part's context menu and from the Edit gizmo.
         CadFillet,
 #ifdef SLIC3R_CAD
         // Design-tab launchers. Appended AFTER CadFillet so existing EType values (and the
@@ -114,11 +113,6 @@ public:
         //Hollow,
         Undefined,
     };
-
-    // Design-tab P5: do not renumber. Edit is a reserved hole so later values stay put.
-    static_assert(Sculpt == 17, "GLGizmosManager::EType values must stay stable");
-    static_assert(Edit == 18, "GLGizmosManager::EType::Edit is a reserved slot");
-    static_assert(CadFillet == 19, "GLGizmosManager::EType::CadFillet follows Edit");
 
 private:
     struct Layout

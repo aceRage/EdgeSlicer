@@ -235,6 +235,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/FacetPicker.hpp
     GUI/Gizmos/GLGizmoSeam.cpp
     GUI/Gizmos/GLGizmoSeam.hpp
+    GUI/Gizmos/GLGizmoEdit.cpp
+    GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoCadFillet.cpp
     GUI/Gizmos/GLGizmoCadFillet.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
@@ -355,6 +357,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/InstanceCheck.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
+    GUI/Jobs/BevelJob.cpp
+    GUI/Jobs/BevelJob.hpp
     GUI/Jobs/BindJob.cpp
     GUI/Jobs/BindJob.hpp
     GUI/Jobs/BoostThreadWorker.cpp

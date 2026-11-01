@@ -3,10 +3,10 @@
 
 // Ultra: "Round all edges" - the interim, whole-mesh fillet.
 //
-// WHY THIS EXISTS, and what it is NOT. It is not a selected-edge bevel: exact
-// fillets on chosen edges are the CAD Fillet gizmo / Design tab's job (the old mesh
-// Edit gizmo and its MeshEdit bevel were removed in Design tab P5). This module is a
-// one-liner: it rounds EVERY convex and concave edge of a part
+// WHY THIS EXISTS, and what it is NOT. The Edit gizmo's real bevel (phase 2,
+// MeshEdit.hpp) operates on a SELECTED feature-edge chain and inserts exact
+// geometry. That is the tool people actually want. This module is the interim
+// one-liner that ships first: it rounds EVERY convex and concave edge of a part
 // at once, by a morphological round trip through the signed distance field, and
 // it rebuilds the whole mesh to do it.
 //

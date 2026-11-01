@@ -444,7 +444,7 @@ class GLGizmoCut3D : public GLGizmoBase
     // DrawCutParams::depth.
     //
     // 2026-09-15, owner item 2: the SLIDER runs 0..20 mm with a numeric field beside
-    // it, the slider-plus-field pattern. The slider used to run to
+    // it, the pattern the Edit gizmo's bevel width uses. The slider used to run to
     // the bounding box diagonal, which on a big part put every useful value in the
     // first few pixels of the track. A value past 20 is still reachable by typing,
     // which is what DrawDepthMax is for.

@@ -462,6 +462,8 @@ set(lisbslic3r_sources
     Measure.cpp
     Measure.hpp
     MeasureUtils.hpp
+    MeshEdit.cpp
+    MeshEdit.hpp
     MeshSculpt.cpp
     MeshSculpt.hpp
     MeshRemesh.cpp
