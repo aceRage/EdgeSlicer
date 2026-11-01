@@ -26,6 +26,10 @@ namespace SliceV1 {
 // "slice_v1" alone and degrades inside the native flow on the others (design section 4).
 const std::vector<std::string>& pair_features();
 
+// The instance API's manifest version (GET /api `version`). 3: slice_v1; 4: PR D, arrange (the
+// layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo).
+constexpr int INSTANCE_API_VERSION = 4;
+
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
 {
@@ -174,6 +178,49 @@ std::string cached_state_problem(const CachedPrinter& c, double max_age_s = CACH
 // plate's filaments with no target, no targets, the reason as a plate-level problem (code = the
 // reason) and a hint, can_send false, source "none", needs_live true, ams_age_s (null unknown).
 nlohmann::json no_state_sheet(const std::vector<SheetFilament>& filaments, const std::string& reason, double age_s);
+
+// ---- PR D: arrange (features "slice_arrange", "slice_orient", "slice_undo") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 5: why a plate cannot slice, so the app
+// can offer the fix (Arrange, Print them, Show on PC) instead of guessing.
+
+// One instance registered on a plate (PartPlate's obj_to_instance_set), as that plate sees it.
+struct PlateInstance
+{
+    bool outside { false };   // in the plate's instance_outside_set: not wholly on the printable area
+    bool printable { true };  // ModelInstance::printable, the object list's Printable toggle
+    bool off_plate { false }; // outside and not touching the plate at all (an arrange can leave one registered
+                              // to the plate it was taken from): the slice leaves it out, it does not stop it
+};
+
+// Why the PC will not slice this plate, "" when nothing on the plate stops it:
+//   "empty"          nothing is on the plate
+//   "outside"        a printable instance hangs over the edge (the PC greys Slice out: "An object is
+//                    laid over the plate boundaries", even when other objects are inside), or the only
+//                    printable ones are off the plate; Arrange fixes it
+//   "locked"         the same on a locked plate, which Arrange leaves alone: only the PC can unlock it
+//   "not_printable"  every instance on the plate is set not to print
+// Instances that are registered to no plate at all are counted apart (/plates/loose).
+std::string plate_blocked(const std::vector<PlateInstance>& instances, bool locked);
+// "" as JSON null, anything else as the string.
+nlohmann::json blocked_json(const std::string& reason);
+
+// "Place loose objects" (POST /api/plates/{i}/arrange?loose=1, /api/plates place_count): how many
+// instances it places - the printable ones not wholly on their unlocked plate, and the printable ones
+// on no plate (loose_printable). Everything else stays where it is, so 0 means there is nothing to do.
+int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std::vector<bool>& locked, int loose_printable);
+
+// What Place loose objects (ArrangeJob::prepare_loose) does with one instance, the same rule
+// place_count counts: Place it into free space, leave it to Stay where it is (wholly on its plate,
+// or on a plate the person locked), or Skip it (set not to print and not on a plate). `user_locked`
+// is the person's lock only: the arrange also locks, for its own run, a plate whose print sequence
+// is not the project's, and what hangs over that plate's edge is still placed (onto another plate).
+enum class LooseRoute { Place, Stay, Skip };
+LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bool printable);
+
+// POST /api/undo?expect=: whether the PC's next undo step may be taken. An empty `expect` takes
+// whatever it is; otherwise it must name the topmost undo snapshot exactly, so a phone's Undo after
+// an Arrange never undoes something a person did at the PC in the meantime.
+bool undo_matches(const std::string& expect, const std::string& top);
 
 } // namespace SliceV1
 } // namespace GUI

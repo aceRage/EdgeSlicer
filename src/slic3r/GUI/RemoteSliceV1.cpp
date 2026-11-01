@@ -23,8 +23,12 @@ const std::vector<std::string>& pair_features()
     // slice_v1: the contract (result + cancel + presets type + instances progress + cache headers);
     // slice_result / slice_cancel: the two sub-features the app checks one by one;
     // slice_send_preview: POST /plates/{i}/send/preview and ams_mapping on a plate send;
-    // slice_preview_live: that preview never selects / connects a Bambu printer without live=1.
-    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" };
+    // slice_preview_live: that preview never selects / connects a Bambu printer without live=1;
+    // slice_arrange: PR D - the layout lists overhanging instances, /plates/loose, `blocked` on
+    // /plates, arrange one plate or all, the printable toggle and transform plate=;
+    // slice_orient: POST /plates/{i}/orient; slice_undo: POST /undo.
+    static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live",
+                                                "slice_arrange", "slice_orient", "slice_undo" };
     return f;
 }
 
@@ -434,6 +438,50 @@ nlohmann::json no_state_sheet(const std::vector<SheetFilament>& filaments, const
     j["options"]     = nlohmann::json::object();
     j["unload_at_end"] = nullptr;
     return j;
+}
+
+// ---- PR D: arrange ----
+
+std::string plate_blocked(const std::vector<PlateInstance>& instances, bool locked)
+{
+    if (instances.empty()) return "empty";
+    bool inside = false, overhang = false, off = false; // of the printable instances
+    for (const PlateInstance& i : instances)
+        if (i.printable) (!i.outside ? inside : i.off_plate ? off : overhang) = true;
+    // An overhanging printable object stops the plate even next to printable ones (the canvas
+    // disables Slice on a partly-outside instance), so it is checked first. One wholly off the
+    // plate is only left out of the slice - a problem when nothing printable is left.
+    if (overhang) return locked ? "locked" : "outside";
+    if (inside) return "";
+    if (off) return locked ? "locked" : "outside";
+    return "not_printable";
+}
+
+nlohmann::json blocked_json(const std::string& reason)
+{
+    return reason.empty() ? nlohmann::json(nullptr) : nlohmann::json(reason);
+}
+
+int place_count(const std::vector<std::vector<PlateInstance>>& plates, const std::vector<bool>& locked, int loose_printable)
+{
+    int n = loose_printable;
+    for (size_t i = 0; i < plates.size(); ++i)
+        if (i >= locked.size() || !locked[i])
+            for (const PlateInstance& p : plates[i])
+                if (p.printable && p.outside) ++n;
+    return n;
+}
+
+LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bool printable)
+{
+    const bool loose = !on_plate || !wholly_on_plate;
+    if (!loose || (on_plate && user_locked)) return LooseRoute::Stay;
+    return printable ? LooseRoute::Place : (on_plate ? LooseRoute::Stay : LooseRoute::Skip);
+}
+
+bool undo_matches(const std::string& expect, const std::string& top)
+{
+    return expect.empty() || expect == top;
 }
 
 } // namespace SliceV1

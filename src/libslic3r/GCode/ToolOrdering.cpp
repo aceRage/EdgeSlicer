@@ -411,7 +411,7 @@ static double calc_max_layer_height(const PrintConfig &config, double max_object
 // (print->config().print_sequence == PrintSequence::ByObject is true).
 ToolOrdering::ToolOrdering(const PrintObject &object, unsigned int first_extruder, bool prime_multi_material)
 {
-    m_is_BBL_printer = object.print()->is_BBL_printer();
+    m_wipe_tower_type1 = object.print()->wipe_tower_type() == WipeTowerType::Type1;
     m_print_full_config = &object.print()->full_print_config();
     m_print_config_ptr = &object.print()->config();
     m_print_object_ptr = &object;
@@ -479,7 +479,7 @@ bool ToolOrdering::insert_wipe_tower_extruder()
 // (print->config().print_sequence == PrintSequence::ByObject is false).
 ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool prime_multi_material)
 {
-    m_is_BBL_printer = print.is_BBL_printer();
+    m_wipe_tower_type1 = print.wipe_tower_type() == WipeTowerType::Type1;
     m_print_full_config = &print.full_print_config();
     m_print_config_ptr = &print.config();
     // Ultra (dual-nozzle): non-const handle so reorder_extruders_for_minimum_flush_volume can store the
@@ -822,6 +822,19 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
             layer_tools.extruders.push_back(extruder_interface);
+        // EdgeSlicer (support interface interlock): woven body stripes with a "don't care" support
+        // filament print with the first non-interface extruder on the layer (GCode.cpp). On a support
+        // layer that holds nothing else, that would be the interface filament itself, and the weave
+        // would be all interface. Schedule the object's own (body-coloured) filament there.
+        if (support_layer->interlock_woven && object.config().support_filament.value == 0) {
+            const unsigned int iface = unsigned(object.config().support_interface_filament.value);
+            // object_extruders() is 0-based; this collection phase is 1-based.
+            for (unsigned int e : object.object_extruders())
+                if (e + 1 != iface && ! object.print()->config().filament_soluble.get_at(e)) {
+                    layer_tools.extruders.push_back(e + 1);
+                    break;
+                }
+        }
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);
@@ -2020,7 +2033,7 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     const unsigned int number_of_extruders = (unsigned int) (sqrt(flush_matrix.size()) + EPSILON);
     // Extract purging volumes for each extruder pair:
     std::vector<std::vector<float>> wipe_volumes;
-    if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_is_BBL_printer) {
+    if ((print_config->purge_in_prime_tower && print_config->single_extruder_multi_material) || m_wipe_tower_type1) {
         for (unsigned int i = 0; i < number_of_extruders; ++i)
             wipe_volumes.push_back( std::vector<float>(flush_matrix.begin() + i * number_of_extruders,
                                                        flush_matrix.begin() + (i + 1) * number_of_extruders));
@@ -2526,6 +2539,10 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                         break;
 
                     auto &entities = this_support_layer->support_fills.entities;
+                    // EdgeSlicer (support interface interlock, design D5): no purge into the support
+                    // body of a layer with woven stripes. Always false with the feature off.
+                    if (this_support_layer->interlock_woven)
+                        support_overriddable = false;
                     if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {

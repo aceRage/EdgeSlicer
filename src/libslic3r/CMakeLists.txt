@@ -102,6 +102,8 @@ set(lisbslic3r_sources
     FlexiJoint.hpp
     PushFit.cpp
     PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
@@ -113,6 +115,14 @@ set(lisbslic3r_sources
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
     Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
+    Showcase/MultiColourGlsl.cpp
+    Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
@@ -163,6 +173,10 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
+    HeightPatternInput.cpp
+    HeightPatternInput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -623,6 +637,8 @@ set(lisbslic3r_sources
     Slicing.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
+    Support/SupportInterlock.cpp
+    Support/SupportInterlock.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp

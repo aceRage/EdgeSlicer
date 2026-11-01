@@ -1486,6 +1486,9 @@ bool PrintObject::invalidate_state_by_config_options(
             // re-run posSupportMaterial exactly like a support_interface_filament change.
             || opt_key == "support_filament_matching"
             || opt_key == "support_interface_not_for_body"
+            || opt_key == "support_interface_interlock"
+            || opt_key == "support_interface_interlock_layers"
+            || opt_key == "support_interface_interlock_beam_lines"
             || opt_key == "support_interface_spacing"
             || opt_key == "support_bottom_interface_spacing" //BBS
             || opt_key == "support_base_pattern"

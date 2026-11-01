@@ -51,6 +51,18 @@
 #define _L(s) Slic3r::I18N::translate(s)
 
 namespace Slic3r {
+bool CutConnectorAttributes::operator==(const CutConnectorAttributes& other) const
+{
+    return type == other.type && style == other.style && shape == other.shape;
+}
+
+bool CutConnector::operator==(const CutConnector& other) const
+{
+    return pos == other.pos && rotation_m.matrix() == other.rotation_m.matrix() && radius == other.radius && height == other.height &&
+           radius_tolerance == other.radius_tolerance && height_tolerance == other.height_tolerance && z_angle == other.z_angle &&
+           attribs == other.attribs && flexi == other.flexi && pushfit == other.pushfit && tac_joint == other.tac_joint;
+}
+
 const std::vector<std::string> CONST_FILAMENTS = {
     "", "4", "8", "0C", "1C", "2C", "3C", "4C", "5C", "6C", "7C", "8C", "9C", "AC", "BC", "CC", "DC",
 }; // 5                           10                            15    16
@@ -1359,6 +1371,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->brim_points                 = rhs.brim_points;
     this->layer_config_ranges         = rhs.layer_config_ranges;
+    this->height_colour_patterns      = rhs.height_colour_patterns;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
@@ -1402,6 +1415,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->brim_points                 = std::move(brim_points);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
+    this->height_colour_patterns      = std::move(rhs.height_colour_patterns);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);

@@ -37,6 +37,8 @@
 #include "slic3r/GUI/OptionsGroup.hpp"
 #include "wxExtensions.hpp"
 #include "PresetComboBoxes.hpp"
+#include "FilamentColorUtils.hpp"
+#include "libslic3r/Showcase/MultiColourFilament.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include <wx/wupdlock.h>
 
@@ -2000,8 +2002,23 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
     }
 
-    if(opt_key == "purge_in_prime_tower")
+    // Orca #12781: the Process tab's WipeTower2-only options follow wipe_tower_type too.
+    if(opt_key == "purge_in_prime_tower" || opt_key == "wipe_tower_type")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
+
+    // The Type 1 tower purges only the prime volume itself; the flush volume reaches the nozzle
+    // through the change-filament G-code's {flush_length} placeholders. Say so when this printer's
+    // template has none, since colours would then bleed. Informational only: the choice stands.
+    if (m_type == Preset::TYPE_PRINTER && opt_key == "wipe_tower_type" && m_config->has("wipe_tower_type") &&
+        m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type1 &&
+        m_config->has("change_filament_gcode") &&
+        m_config->opt_string("change_filament_gcode").find("flush_length") == std::string::npos) {
+        MessageDialog(wxGetApp().plater(),
+                      _L("Type 1 purges through the printer's change filament G-code (flush_length). "
+                         "This printer's change filament G-code does not use it, so only the prime volume is purged "
+                         "and colours may bleed. Type 2 is recommended unless you add the flush to that G-code."),
+                      _L("Wipe tower type"), wxICON_WARNING | wxOK).ShowModal();
+    }
 
     if (m_type == Preset::TYPE_PRINT && opt_key == "dithering_local_z_mode") {
         const bool local_z_enabled = boost::any_cast<bool>(value);
@@ -2084,7 +2101,8 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
     }
 
-    if(opt_key == "purge_in_prime_tower")
+    // Orca #12781: the Process tab's WipeTower2-only options follow wipe_tower_type too.
+    if(opt_key == "purge_in_prime_tower" || opt_key == "wipe_tower_type")
         wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
 
 
@@ -3082,6 +3100,11 @@ void TabPrint::build()
         // GUI widget the option's coType calls for.
         optgroup->append_single_option_line("support_filament_matching");
         optgroup->append_single_option_line("support_interface_not_for_body", "support_settings_filament#avoid-interface-filament-for-base");
+        // EdgeSlicer: support interface interlock (woven band). Shown only with a separate interface
+        // filament, see ConfigManipulation::toggle_print_fff_options.
+        optgroup->append_single_option_line("support_interface_interlock");
+        optgroup->append_single_option_line("support_interface_interlock_layers");
+        optgroup->append_single_option_line("support_interface_interlock_beam_lines");
 
         optgroup = page->new_optgroup(L("Support ironing"), L"param_ironing");
         optgroup->append_single_option_line("support_ironing", "support_settings_ironing");
@@ -3179,6 +3202,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_rib_width", "multimaterial_settings_prime_tower#rib-width");
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
+        optgroup->append_single_option_line("wipe_tower_sparse_layers_combination", "multimaterial_settings_prime_tower#combine-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
         optgroup->append_single_option_line("wipe_tower_stagger_toolchange_start", "multimaterial_settings_prime_tower#stagger-toolchange-start");
         // Tower interface options (per-filament values on the filament Multimaterial page).
@@ -4879,6 +4903,14 @@ void TabFilament::build()
         //optgroup->append_single_option_line("filament_colour");
         optgroup->append_single_option_line("required_nozzle_HRC");
         optgroup->append_single_option_line("default_filament_colour");
+        {
+            // A full-width line, like the price note: OG_CustomCtrl draws a labelled line from its
+            // first option, so a labelled line with only a widget crashed when the page showed.
+            Line makeup_line = Line{ "", "" };
+            makeup_line.full_width = 1;
+            makeup_line.widget = [this](wxWindow* parent) { return makeup_create_widget(parent); };
+            optgroup->append_line(makeup_line);
+        }
         optgroup->append_single_option_line("filament_diameter");
 
         optgroup->append_single_option_line("filament_density");
@@ -5263,6 +5295,7 @@ void TabFilament::reload_config()
     this->compatible_widget_reload(m_compatible_prints);
     Tab::reload_config();
     update_price_note();
+    update_makeup_note();
 }
 
 wxSizer* TabFilament::price_note_create_widget(wxWindow* parent)
@@ -5290,6 +5323,73 @@ wxSizer* TabFilament::price_note_create_widget(wxWindow* parent)
     vsizer->Add(hsizer, 0);
     update_price_note();
     return vsizer;
+}
+
+wxSizer* TabFilament::makeup_create_widget(wxWindow* parent)
+{
+    const int em = em_unit(parent);
+    auto* hsizer = new wxBoxSizer(wxHORIZONTAL);
+    auto* label = new wxStaticText(parent, wxID_ANY, _L("Colour make-up") + ":");
+    label->SetFont(wxGetApp().normal_font());
+    label->SetToolTip(_L("The colours, proportions and rotation of the filament slot being edited. "
+                         "Visual only: it changes how the print looks in Showcase and Preview, not the G-code."));
+    hsizer->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em);
+    m_makeup_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    m_makeup_note->SetFont(wxGetApp().normal_font());
+    hsizer->Add(m_makeup_note, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+    auto* btn = new Button(parent, _L("Edit") + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(_L("Open the colour dialog of this filament slot, with the colour make-up editor"));
+    btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        Sidebar& sidebar = wxGetApp().sidebar();
+        const int slot = sidebar.editing_filament_index();
+        auto& combos = sidebar.combos_filament();
+        if (slot >= 0 && size_t(slot) < combos.size())
+            combos[size_t(slot)]->ChangeExtruderColor();
+        update_makeup_note();
+    });
+    hsizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+    update_makeup_note();
+    return hsizer;
+}
+
+void TabFilament::update_makeup_note()
+{
+    if (m_makeup_note == nullptr)
+        return;
+    wxString text;
+    const int slot = wxGetApp().sidebar().editing_filament_index();
+    const DynamicPrintConfig& project = m_preset_bundle->project_config;
+    if (slot < 0)
+        text = _L("Choose a filament in the sidebar to see its colour make-up.");
+    else {
+        const FilamentColor color = FilamentColorUtils::GetFilamentColorFromConfig(&project, size_t(slot), "#26A69A");
+        const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&project, size_t(slot));
+        if (color.NormalizedMode() == FilamentColorMode::Gradient)
+            text = wxString::Format(_L("Filament %d: gradient, %d colours, %d mm + %d mm transition"), slot + 1,
+                                    int(color.colors.size()), int(std::lround(MultiColour::gradient_dwell_mm(makeUp.dwell))),
+                                    int(std::lround(MultiColour::gradient_transition_mm(makeUp.transition))));
+        else if (color.colors.size() < 2)
+            text = wxString::Format(_L("Filament %d: one colour"), slot + 1);
+        else {
+            const int count = std::min<int>(int(color.colors.size()), MultiColour::MAX_COLOURS);
+            const auto share = MultiColour::parse_split(makeUp.split, count);
+            const auto percent = MultiColour::quantize_percent(share, count);
+            wxString parts;
+            for (int i = 0; i < count; ++i)
+                parts += (i == 0 ? wxString() : wxString("/")) + wxString::Format("%d%%", percent[size_t(i)]);
+            text = wxString::Format(_L("Filament %d: %d colours, %s, rotation %d\xC2\xB0"), slot + 1, count, parts,
+                                    int(std::lround(makeUp.angle)));
+            if (makeUp.twist != 0.)
+                text += wxString::Format(_L(", twist %d\xC2\xB0/m"), int(std::lround(makeUp.twist)));
+        }
+    }
+    if (m_makeup_note->GetLabel() == text)
+        return;
+    m_makeup_note->SetLabel(text);
+    m_makeup_note->SetToolTip(text);
+    if (wxWindow* parent = m_makeup_note->GetParent())
+        parent->Layout();
 }
 
 void TabFilament::update_price_note()
@@ -5514,6 +5614,7 @@ void TabFilament::update()
 
     update_description_lines();
     update_price_note();
+    update_makeup_note();
     //BBS: GUI refactor
     //Layout();
     m_parent->Layout();
@@ -5533,6 +5634,7 @@ void TabFilament::clear_pages()
     m_volumetric_speed_description_line = nullptr;
 	m_cooling_description_line = nullptr;
     m_price_note = nullptr;
+    m_makeup_note = nullptr;
 
     //BBS: GUI refactor
     m_overrides_options.clear();
@@ -6167,6 +6269,7 @@ if (is_marlin_flavor)
         optgroup->append_single_option_line("manual_filament_change", "semm#manual-filament-change");
 
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
+        optgroup->append_single_option_line("wipe_tower_type", "semm#wipe-tower-type");
         optgroup->append_single_option_line("purge_in_prime_tower", "semm");
         optgroup->append_single_option_line("enable_filament_ramming", "semm");
         optgroup->append_single_option_line("tool_change_on_wipe_tower", "semm");
@@ -6704,6 +6807,11 @@ void TabPrinter::toggle_options()
     }
 
     if (m_active_page->title() == L("Multimaterial")) {
+        // Orca #12781: Bambu Lab printers always use the Type 1 tower, so they never see the choice.
+        // The ramming / loading options below drive the Type 2 tower (WipeTower2) only.
+        toggle_line("wipe_tower_type", !is_BBL_printer);
+        const bool supports_wipe_tower_2 = !is_BBL_printer && m_config->opt_enum<WipeTowerType>("wipe_tower_type") == WipeTowerType::Type2;
+
         // SoftFever: hide specific settings for BBL printer
         for (auto el : {
                  "enable_filament_ramming",
@@ -6713,7 +6821,7 @@ void TabPrinter::toggle_options()
                  "extra_loading_move",
                  "high_current_on_filament_swap",
              })
-            toggle_option(el, !is_BBL_printer);
+            toggle_option(el, supports_wipe_tower_2);
 
         auto bSEMM = m_config->opt_bool("single_extruder_multi_material");
         if (!bSEMM && m_config->opt_bool("manual_filament_change")) {
@@ -6723,15 +6831,15 @@ void TabPrinter::toggle_options()
         }
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
-        toggle_option("purge_in_prime_tower", bSEMM && !is_BBL_printer);
+        toggle_option("purge_in_prime_tower", bSEMM && supports_wipe_tower_2);
 
         // Orca #13703: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
-        // using the Type 2 wipe tower (here: every non-BBL printer). SEMM already always travels to the tower
+        // using the Type 2 wipe tower. SEMM already always travels to the tower
         // as part of the purge, so the option is irrelevant there.
         const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
-        toggle_option("tool_change_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
+        toggle_option("tool_change_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
         // Orca #15144: same scope as the option above.
-        toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && !is_BBL_printer && extruders_count > 1);
+        toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
     }
     wxString extruder_number;
     long val = 1;
@@ -7460,6 +7568,10 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
                     oldFlushVolumesVector = flushVector->values;
 
+                // Multi-colour P1: update_selections() re-sizes the slots to the target printer's count,
+                // so the visual-only keys (split / angle / twist) are kept like filament_multi_colors.
+                const DynamicPrintConfig oldVisualOnly = visual_only_snapshot(projectConfig);
+
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
@@ -7467,6 +7579,7 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
                 projectConfig.option<ConfigOptionInts>("filament_colour_mode", true)->values = oldFilamentColourModes;
+                visual_only_restore(projectConfig, oldVisualOnly, oldFilamentCount);
 
                 if (ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
                     flushMatrix->values = oldFlushVolumesMatrix;

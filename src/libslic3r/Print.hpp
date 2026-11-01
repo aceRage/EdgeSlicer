@@ -1345,6 +1345,14 @@ public:
     // step was skipped (N2: drag object or tower, change clearance, change z_offset).
     void                        select_final_purge_variant();
     const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
+    // Orca/BambuStudio: the 0-based physical filaments the first layer prints with (first_layer = true), or the
+    // whole print (false). Set when the skirt and brim are made.
+    void set_slice_used_filaments(const std::vector<unsigned int> &first_layer_used_filaments, const std::vector<unsigned int> &used_filaments)
+    {
+        m_slice_used_filaments_first_layer = first_layer_used_filaments;
+        m_slice_used_filaments             = used_filaments;
+    }
+    std::vector<unsigned int>   get_slice_used_filaments(bool first_layer) const { return first_layer ? m_slice_used_filaments_first_layer : m_slice_used_filaments; }
 
     bool                        enable_timelapse_print() const;
 
@@ -1405,6 +1413,10 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    // Orca #12781: the wipe tower generator this print uses. Bambu Lab printers always get Type1;
+    // the rest follow wipe_tower_type (default Type2). Same rule as resolve_wipe_tower_type(), plus
+    // the GUI's vendor flag.
+    WipeTowerType wipe_tower_type() const;
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
     void set_calib_params(const Calib_Params& params);
@@ -1526,6 +1538,8 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    std::vector<unsigned int>               m_slice_used_filaments;
+    std::vector<unsigned int>               m_slice_used_filaments_first_layer;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

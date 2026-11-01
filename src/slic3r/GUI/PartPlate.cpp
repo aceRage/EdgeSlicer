@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <vector>
 #include <string>
 #include <regex>
@@ -1874,9 +1875,11 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 
 bool wipe_tower_rotation_supported()
 {
-    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), which picks the generator.
+    // The same vendor flag BackgroundSlicingProcess hands Print::is_BBL_printer(), plus the printer's
+    // wipe_tower_type (Orca #12781): only WipeTower2 (Type 2) rotates.
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    return bundle != nullptr && !bundle->is_bbl_vendor();
+    return bundle != nullptr && !bundle->is_bbl_vendor() &&
+           resolve_wipe_tower_type(bundle->printers.get_edited_preset().config) == WipeTowerType::Type2;
 }
 
 double gui_wipe_tower_rotation_deg(const DynamicPrintConfig &config)
@@ -1974,7 +1977,39 @@ Vec2d PartPlate::wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, doubl
 	return WipeTower::move_box_inside_polygon(tower, bed, scaled<coord_t>(margin)).cast<double>();
 }
 
-arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects) const
+Polygons PartPlate::wipe_tower_obstacles(const DynamicPrintConfig &config) const
+{
+	Polygons obstacles;
+	if (m_model == nullptr)
+		return obstacles;
+	for (const auto &[obj_id, instance_id] : obj_to_instance_set) {
+		if (!valid_instance(obj_id, instance_id))
+			continue;
+		const ModelObject   *object   = m_model->objects[obj_id];
+		const ModelInstance *instance = object->instances[instance_id];
+		if (!instance->printable)
+			continue;
+		// A sinking object counts its whole outline, the part below the bed included.
+		Polygon hull = object->convex_hull_2d(instance->get_matrix());
+		if (hull.size() < 3)
+			continue;
+		hull.translate(-scaled(m_origin.x()), -scaled(m_origin.y()));
+		// An object's own setting wins over the print preset's.
+		auto option_of = [&object, &config](const char *key) {
+			const ConfigOption *opt = object->config.option(key);
+			return opt != nullptr ? opt : config.option(key);
+		};
+		// An auto brim is only sized while slicing, so it is taken at the brim width option too.
+		const ConfigOption *brim_type  = option_of("brim_type");
+		const ConfigOption *brim_width = option_of("brim_width");
+		const double brim = brim_type != nullptr && brim_width != nullptr && brim_type->getInt() != static_cast<int>(btNoBrim) ? brim_width->getFloat() : 0.;
+		append(obstacles, offset(hull, static_cast<float>(scaled(brim + WIPE_TOWER_MARGIN))));
+	}
+	return obstacles;
+}
+
+arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size, bool use_global_objects,
+                                                            WipeTowerRelocation *relocation) const
 {
 	float x = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_x"))->get_at(plate_index);
 	float y = dynamic_cast<const ConfigOptionFloats*>(config.option("wipe_tower_y"))->get_at(plate_index);
@@ -2028,10 +2063,41 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 		// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
 		// of bounds - snap it onto the bound; only far-out positions get the comfort re-place.
 		const float tol = 5.f;
-		if (x < x_lo - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
-		else                                  x = std::clamp(x, x_lo, x_hi);
-		if (y < y_lo - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
-		else                                  y = std::clamp(y, y_lo, y_hi);
+		const float saved_x = x, saved_y = y;
+		const bool  replace_x = x < x_lo - tol || x > x_hi + tol;
+		const bool  replace_y = y < y_lo - tol || y > y_hi + tol;
+		x = replace_x ? std::clamp(x, x_lo_c, x_hi_c) : std::clamp(x, x_lo, x_hi);
+		y = replace_y ? std::clamp(y, y_lo_c, y_hi_c) : std::clamp(y, y_lo, y_hi);
+		// Orca #16728: a re-placed tower keeps clear of every object and its brim where the plate has
+		// room. The re-placed spot stands when it is clear; otherwise the clear spot nearest the saved
+		// position, keeping the comfort margin where the plate leaves room for it. A tower snapped
+		// back onto the bound it was dropped past is the user's own placement and is not moved.
+		if (relocation != nullptr && (replace_x || replace_y)) {
+			relocation->moved = true;
+			// The footprint turns about its anchor as the tower does.
+			Polygon tower({ {scaled(-wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(-wp_brim_width)},
+			                {scaled(w + wp_brim_width), scaled(depth + wp_brim_width)},
+			                {scaled(-wp_brim_width), scaled(depth + wp_brim_width)} });
+			if (std::abs(angle) > EPSILON)
+				tower.rotate(Geometry::deg2rad(angle));
+			const Polygons objects = wipe_tower_obstacles(config);
+			const Point    placed(scaled(x), scaled(y));
+			if (!nearest_clear_wipe_tower_anchor(BoundingBox(placed, placed), tower, objects, placed)) {
+				const Point saved(scaled(saved_x), scaled(saved_y));
+				std::optional<Point> clear = nearest_clear_wipe_tower_anchor(
+					BoundingBox(Point(scaled(x_lo_c), scaled(y_lo_c)), Point(scaled(x_hi_c), scaled(y_hi_c))), tower, objects, saved);
+				if (!clear)
+					clear = nearest_clear_wipe_tower_anchor(BoundingBox(Point(scaled(x_lo), scaled(y_lo)), Point(scaled(x_hi), scaled(y_hi))),
+					                                        tower, objects, saved);
+				if (clear) {
+					x = float(unscaled(clear->x()));
+					y = float(unscaled(clear->y()));
+				} else {
+					relocation->overlaps_objects = true;
+				}
+			}
+		}
 		// Orca #15146: the box clamps above still allow a corner a delta or hexagonal bed does not have.
 		fit_prime_tower_onto_bed(config, x, y, w, depth, wp_brim_width, angle, WIPE_TOWER_MARGIN);
     wt_pos(0) = x;
@@ -5067,6 +5133,19 @@ int PartPlateList::notify_instance_removed(int obj_id, int instance_id)
 	}
 
 	if (instance_id == -1) {
+		// The object's other instances go with it, and may sit on other plates: left in place,
+		// update_object_index below would renumber them onto the previous object.
+		std::set<int> other_instances;
+		for (PartPlate* p : m_plate_list)
+			for (const std::pair<int, int>& obj_inst : p->obj_to_instance_set)
+				if (obj_inst.first == obj_id)
+					other_instances.insert(obj_inst.second);
+		for (const std::pair<int, int>& obj_inst : unprintable_plate.obj_to_instance_set)
+			if (obj_inst.first == obj_id)
+				other_instances.insert(obj_inst.second);
+		for (int other_instance : other_instances)
+			notify_instance_removed(obj_id, other_instance);
+
 		//update all the obj_ids which is bigger
 		for (unsigned int i = 0; i < (unsigned int)m_plate_list.size(); ++i)
 		{

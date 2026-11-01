@@ -144,6 +144,12 @@ static t_config_enum_values s_keys_map_NoiseType {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NoiseType)
 
+static t_config_enum_values s_keys_map_WipeTowerType {
+    { "type1",          int(WipeTowerType::Type1) },
+    { "type2",          int(WipeTowerType::Type2) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerType)
+
 static t_config_enum_values s_keys_map_FuzzySkinMode {
     { "displacement",   int(FuzzySkinMode::Displacement) },
     { "extrusion",      int(FuzzySkinMode::Extrusion) },
@@ -2810,6 +2816,96 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->set_default_value(new ConfigOptionInts{ 0 });
 
+    // Multi-colour (coextruded) filaments, P1 (tests/design_multicolour_filament_view.md, 4.1).
+    // Per slot, next to filament_multi_colors, and visual only: Print::apply() strips them
+    // (visual_only_option_keys()), so they never reach the slicer, the G-code or a re-slice.
+    // Deliberately not in the static PrintConfig, so print_config_diffs and the placeholder
+    // parser cannot see them either.
+    def = this->add("filament_colour_split", coStrings);
+    def->label = L("Colour proportions");
+    def->tooltip = L("Visual only. How much of the strand each colour of a multi-colour filament takes, in percent, "
+                     "'|'-separated in the order of the colours. Empty means an equal split.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    def = this->add("filament_colour_angle", coFloats);
+    def->label = L("Colour rotation");
+    def->tooltip = L("Visual only. Which way the first colour of a multi-colour filament faces, in degrees "
+                     "anticlockwise from the printer's front, seen from above.");
+    def->sidetext = u8"°"; // degrees, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -360;
+    def->max = 360;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
+    def = this->add("filament_colour_twist", coFloats);
+    def->label = L("Colour twist");
+    def->tooltip = L("Visual only. How far a multi-colour filament turns while it is extruded, in degrees per metre "
+                     "of filament. 0 means it does not turn.");
+    def->sidetext = u8"°/m"; // degrees per metre, don't need translation
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -3600;
+    def->max = 3600;
+    def->set_default_value(new ConfigOptionFloats{ 0. });
+
+    // Glow-in-the-dark filaments, G1 (tests/design_multicolour_filament_view.md section 10). The same
+    // rules as the three keys above: visual only, project-only, stripped at Print::apply().
+    def = this->add("filament_glow", coInts);
+    def->label = L("Glow in the dark");
+    def->tooltip = L("Visual only. Whether this filament glows in the dark in the lights-off views of Showcase and "
+                     "Preview. -1 follows the preset (on for a preset whose name or type contains \"Glow\"), 0 is off, 1 is on.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInts{ -1 });
+
+    def = this->add("filament_glow_colour", coStrings);
+    def->label = L("Glow colour");
+    def->tooltip = L("Visual only. The colour a glow-in-the-dark filament shines in, as #RRGGBB. Empty means a more vibrant "
+                     "version of the filament's own colour.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionStrings{ "" });
+
+    // One value for the whole project (not per slot): how strongly every glow filament shines.
+    def = this->add("filament_glow_intensity", coFloat);
+    def->label = L("Glow intensity");
+    def->tooltip = L("Visual only. How strongly all glow-in-the-dark filaments shine in the lights-off views, in percent.");
+    def->sidetext = "%";
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = 0;
+    def->max = 300;
+    def->set_default_value(new ConfigOptionFloat(100.));
+    // P6: gradient filaments. Visual only like the three above: a gradient holds each colour for `dwell`
+    // mm of filament, then blends to the next over `transition` mm. A negative value (the default) means
+    // MultiColour::GRADIENT_DWELL_MM_DEFAULT / GRADIENT_TRANSITION_MM_DEFAULT.
+    def = this->add("filament_gradient_dwell", coFloats);
+    def->label = L("Gradient colour length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament each colour holds before "
+                     "it starts changing to the next one. A negative value means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ -1. });
+
+    def = this->add("filament_gradient_transition", coFloats);
+    def->label = L("Gradient transition length");
+    def->tooltip = L("Visual only. For a gradient filament: how many millimetres of filament the change from one colour "
+                     "to the next takes. A negative value means the default.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->min = -1;
+    def->max = 100000;
+    def->set_default_value(new ConfigOptionFloats{ -1. });
+
     def           = this->add("thumb0", coStrings);
     def->label    = L("small thumb");
     def->tooltip  = L("first small thumb");
@@ -3727,13 +3823,17 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically. "
+                     "The value is sent both as ACCEL_TO_DECEL and as the equivalent MINIMUM_CRUISE_RATIO "
+                     "(1 - accel_to_decel factor), which replaced it in newer Klipper and overrides minimum_cruise_ratio in printer.cfg.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBools { true });
     
     def = this->add("accel_to_decel_factor", coPercents);
     def->label = L("accel_to_decel");
-    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration.");
+    def->tooltip = L("Klipper's max_accel_to_decel will be adjusted to this %% of acceleration. "
+                     "Newer Klipper gets it as minimum_cruise_ratio = 1 - this value (50%% sends ACCEL_TO_DECEL = half the acceleration "
+                     "and MINIMUM_CRUISE_RATIO=0.5).");
     def->sidetext = "%";
     def->min = 1;
     def->max = 100;
@@ -6902,7 +7002,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("seam_gap", coFloatOrPercent);
     def->label = L("Seam gap");
     def->tooltip = L("In order to reduce the visibility of the seam in a closed loop extrusion, the loop is interrupted and shortened by a specified amount.\n"
-                     "This amount can be specified in millimeters or as a percentage of the current extruder diameter. The default value for this parameter is 10%.");
+                     "This amount can be specified in millimeters or as a percentage of the nozzle diameter. The default value for this parameter is 10%.");
     def->sidetext = L("mm or %");
     def->min = 0;
     def->mode = comAdvanced;
@@ -7372,6 +7472,23 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Orca #12781. Bambu Lab printers always use Type 1 and never show the option; every other
+    // printer defaults to Type 2, which is what they sliced with before the option existed.
+    def = this->add("wipe_tower_type", coEnum);
+    def->label = L("Wipe tower type");
+    def->tooltip = L("Choose the wipe tower implementation for multi-material prints. "
+                     "Type 1 suits printers that cut the filament and purge the old one into the tower, as Bambu Lab printers do. "
+                     "Type 1 purges through your printer's change filament G-code (flush_length); if that G-code doesn't use it, "
+                     "only the prime volume is purged and there is no ramming. "
+                     "Type 2 suits MMU, ramming and tool-changer setups, and is the safe choice for most printers.");
+    def->enum_keys_map = &ConfigOptionEnum<WipeTowerType>::get_enum_values();
+    def->enum_values.emplace_back("type1");
+    def->enum_values.emplace_back("type2");
+    def->enum_labels.emplace_back(L("Type 1"));
+    def->enum_labels.emplace_back(L("Type 2"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<WipeTowerType>(WipeTowerType::Type2));
+
     def = this->add("purge_in_prime_tower", coBool);
     def->label = L("Purge in prime tower");
     def->tooltip = L("Purge remaining filament into prime tower.");
@@ -7432,6 +7549,21 @@ void PrintConfigDef::init_fff_params()
                     "so the tower ends up below the model and the toolhead has to reach down to it. "
                     "Layouts where that would collide with an already printed object are rejected. "
                     "Has no effect with smooth timelapse, which needs a tower on every layer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Orca #15841.
+    def = this->add("wipe_tower_sparse_layers_combination", coBool);
+    def->label = L("Combine sparse layers");
+    def->tooltip = L("If enabled, consecutive layers on which the prime tower has no filament change are printed as a single "
+                     "thicker tower layer instead of one thin layer each, the same way infill combination merges sparse infill. "
+                     "The merged layer is printed at the top of the run, at the height of everything it covers.\n\n"
+                     "Only whole layers are merged, and never past the maximum layer height of the nozzle printing the tower "
+                     "(three quarters of the nozzle diameter when that is left at 0). Two or more layers therefore have to fit "
+                     "under that limit before anything changes at all: at a 0.2 mm layer height under a 0.3 mm maximum nothing "
+                     "is merged, while at 0.1 mm three layers become one.\n\n"
+                     "Unlike \"No sparse layers\" the tower keeps following the model, so the toolhead never has to reach down to it. "
+                     "Has no effect with \"No sparse layers\" or smooth timelapse, which needs a tower on every layer.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -7659,6 +7791,45 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Avoid using support interface filament to print support base if possible.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(true));
+
+    // EdgeSlicer: support interface interlock ("woven band"), phase 1.
+    // tests/design_support_interface_interlock.md, owner decisions D1-D7 (2026-10-26).
+    def = this->add("support_interface_interlock", coBool);
+    def->label    = L("Interlock interface with support body");
+    def->category = L("Support");
+    def->tooltip  = L("When the support interface is printed in a different filament from the support body, "
+                      "weave the interface layers under the top one into the body: they are cut into stripes "
+                      "that alternate the body and the interface filament, and each layer's stripes are turned "
+                      "90 degrees from the layer below. The interface then cannot peel off the body. "
+                      "The top interface layer, the one that touches the model, is not changed.\n"
+                      "Applies to the top interfaces of normal and tree supports (all tree styles). Needs at least one top "
+                      "interface layer more than the woven layers. Not used when \"Support Filament Matching\" is on.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_interface_interlock_layers", coInt);
+    def->label    = L("Woven layers");
+    def->category = L("Support");
+    def->tooltip  = L("Number of interface layers under the top one that are woven into the support body. "
+                      "Top interface layers must be at least this plus one.\n"
+                      "With exactly one more top interface layer, the bottom (bonding) layer is woven too, "
+                      "which adds about 2 filament changes per height where a support roof starts on "
+                      "single-nozzle printers. With two or more extra layers and a non-soluble interface the weave adds no filament changes.");
+    def->sidetext = L("layers");
+    def->min      = 2;
+    def->max      = 4;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
+
+    def = this->add("support_interface_interlock_beam_lines", coInt);
+    def->label    = L("Stripe width");
+    def->category = L("Support");
+    def->tooltip  = L("Width of each woven stripe, in support lines. Islands narrower than two stripes are not woven.");
+    def->sidetext = L("lines");
+    def->min      = 1;
+    def->max      = 4;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(2));
 
     def = this->add("support_line_width", coFloatOrPercent);
     def->label = L("Support");
@@ -8804,7 +8975,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: on Bambu Lab printers the brim then grows with the tower height (8 mm from 100 mm up), on other printers the prime tower gets no brim.");
+    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: the brim then grows with the tower height (8 mm from 100 mm up).");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
@@ -10954,6 +11125,121 @@ const std::vector<std::string>& part_support_keys()
     return s_keys;
 }
 
+const std::set<std::string>& visual_only_option_keys()
+{
+    // Multi-colour filaments P1, glow (G1), gradient dwell and transition lengths (P6).
+    // filament_glow_intensity is one value for the project; the others are one per filament slot.
+    static const std::set<std::string> s_keys {
+        "filament_colour_split",
+        "filament_colour_angle",
+        "filament_colour_twist",
+        "filament_glow",
+        "filament_glow_colour",
+        "filament_glow_intensity",
+        "filament_gradient_dwell",
+        "filament_gradient_transition",
+    };
+    return s_keys;
+}
+
+namespace {
+
+// One visual-only vector option, whatever its element type, through its typed values vector.
+template<typename Fn>
+bool visit_visual_only_vector(ConfigOption *opt, Fn &&fn)
+{
+    if (opt == nullptr || !opt->is_vector())
+        return false;
+    if (auto *v = dynamic_cast<ConfigOptionStrings*>(opt)) { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionFloats*>(opt))  { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionPercents*>(opt)){ fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionInts*>(opt))    { fn(v->values); return true; }
+    if (auto *v = dynamic_cast<ConfigOptionBools*>(opt))   { fn(v->values); return true; }
+    assert(false); // a new visual-only vector type: add it above
+    return false;
+}
+
+} // namespace
+
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        // A key for the whole project (filament_glow_intensity) is not per slot.
+        if (def == nullptr || def->default_value.get() == nullptr || !def->default_value->is_vector())
+            continue;
+        auto *opt = dynamic_cast<ConfigOptionVectorBase*>(config.option(key, true));
+        if (opt == nullptr)
+            continue;
+        // New slots take the definition's default (the first element of the default vector), not a
+        // copy of slot 1 as ConfigOptionVector::resize() would give them.
+        const size_t old_size = opt->size();
+        opt->resize(n, def->default_value.get());
+        for (size_t i = old_size; i < n; ++i)
+            opt->set_at(def->default_value.get(), i, 0);
+    }
+}
+
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index)
+{
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [index](auto &values) {
+            if (index < values.size())
+                values.erase(values.begin() + index);
+        });
+}
+
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to)
+{
+    if (from == to)
+        return;
+    for (const std::string &key : visual_only_option_keys())
+        visit_visual_only_vector(config.option(key), [from, to](auto &values) {
+            if (from >= values.size() || to >= values.size())
+                return;
+            auto value = values[from];
+            values.erase(values.begin() + from);
+            values.insert(values.begin() + to, value);
+        });
+}
+
+void strip_visual_only_options(DynamicPrintConfig &config)
+{
+    for (const std::string &key : visual_only_option_keys())
+        config.erase(key);
+}
+
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config)
+{
+    DynamicPrintConfig snapshot;
+    for (const std::string &key : visual_only_option_keys())
+        if (const ConfigOption *opt = config.option(key))
+            snapshot.set_key_value(key, opt->clone());
+    return snapshot;
+}
+
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n)
+{
+    for (const std::string &key : visual_only_option_keys()) {
+        if (const ConfigOption *opt = snapshot.option(key))
+            config.set_key_value(key, opt->clone());
+        else
+            config.erase(key);
+    }
+    visual_only_resize_slots(config, n);
+}
+
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors)
+{
+    const auto *multi = config.option<ConfigOptionStrings>("filament_multi_colors");
+    auto       *split = config.option<ConfigOptionStrings>("filament_colour_split");
+    if (multi == nullptr || split == nullptr)
+        return;
+    for (size_t i = 0; i < split->values.size() && i < multi->values.size(); ++i)
+        if (i >= old_multi_colors.size() || old_multi_colors[i] != multi->values[i])
+            split->values[i].clear();
+}
+
 DynamicPrintConfig DynamicPrintConfig::full_print_config()
 {
 	return DynamicPrintConfig((const PrintRegionConfig&)FullPrintConfig::defaults());
@@ -12617,7 +12903,7 @@ TemperaturesConfigDef::TemperaturesConfigDef()
 
     new_def("bed_temperature", coInts, "Bed temperature", "Vector of bed temperatures for each extruder/filament.")
     new_def("bed_temperature_initial_layer", coInts, "Initial layer bed temperature", "Vector of initial layer bed temperatures for each extruder/filament. Provides the same value as first_layer_bed_temperature.")
-    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of used filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over all used extruders/filaments.")
+    new_def("bed_temperature_initial_layer_single", coInt, "Initial layer bed temperature (max of first-layer filaments)", "Initial layer bed temperature for a mixed print. This value is the maximum initial layer bed temperature over the filaments printed on the first layer.")
     new_def("chamber_temperature", coInts, "Chamber temperature", "Vector of chamber temperatures for each extruder/filament.")
     new_def("overall_chamber_temperature", coInt, "Overall chamber temperature", "Overall chamber temperature. This value is the maximum chamber temperature of any extruder/filament used.")
     new_def("first_layer_bed_temperature", coInts, "First layer bed temperature", "Vector of first layer bed temperatures for each extruder/filament. Provides the same value as bed_temperature_initial_layer.")

@@ -814,6 +814,12 @@ json scene_to_json_object(const Scene &s)
     // S5: only when set, so an S4 scene writes back as it was read.
     if (s.materials.toolpath_smoothness >= 0.f)
         ma["toolpath_smoothness"] = s.materials.toolpath_smoothness;
+    if (!s.materials.coextruded_look)
+        ma["coextruded_look"] = false;
+    if (s.materials.lights_off) {
+        ma["lights_off"]         = true;
+        ma["lights_off_ambient"] = s.materials.lights_off_ambient;
+    }
     j["materials"] = merged(raw, "materials", ma);
 
     j["callouts"] = callouts_to_json(s.callouts, raw.is_object() && raw.contains("callouts") ? raw["callouts"] : json());
@@ -906,6 +912,9 @@ bool scene_from_json_object(const json &j, Scene &s)
         const double sm               = get_or<double>(ma, "toolpath_smoothness", -1.);
         s.materials.toolpath_smoothness = std::isfinite(sm) && sm >= 0. ? float(std::min(1., sm)) : -1.f;
     }
+    s.materials.coextruded_look = get_or<bool>(ma, "coextruded_look", true);
+    s.materials.lights_off         = get_or<bool>(ma, "lights_off", false);
+    s.materials.lights_off_ambient = clamp_or(get_or<float>(ma, "lights_off_ambient", 0.05f), 0.f, 0.5f, 0.05f);
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);

@@ -118,6 +118,8 @@ void EnsureFilamentColorFieldsAligned(DynamicPrintConfig &config)
     const size_t oldMultiCount = multiColors->values.size();
     multiColors->resize(targetCount);
     modes->resize(targetCount);
+    // The visual-only multi-colour keys (split, angle, twist) follow the same slots.
+    visual_only_resize_slots(config, targetCount);
 
     for (size_t i = 0; i < targetCount; ++i)
     {
@@ -179,6 +181,7 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
 {
     EraseStringOptionAt(config, "filament_multi_colors", index);
     EraseIntOptionAt(config, "filament_colour_mode", index);
+    visual_only_erase_slot(config, index);
     EnsureFilamentColorFieldsAligned(config);
 }
 
@@ -217,6 +220,16 @@ static std::vector<std::string> s_project_options {
     "filament_colour",
     "filament_multi_colors",
     "filament_colour_mode",
+    // Multi-colour filaments: visual only, stripped at Print::apply (visual_only_option_keys()).
+    "filament_colour_split",
+    "filament_colour_angle",
+    "filament_colour_twist",
+    // Glow-in-the-dark (G1), visual only as well.
+    "filament_glow",
+    "filament_glow_colour",
+    "filament_glow_intensity",
+    "filament_gradient_dwell",
+    "filament_gradient_transition",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",
@@ -2875,10 +2888,15 @@ unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
     if (filament_presets.empty())
         return 0;
     this->filament_presets = filament_presets;
+    // The slots' colours as they were, so a slot whose colours the sync replaced starts with an equal split.
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = project_config.option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
     ConfigOptionStrings *filament_color = project_config.option<ConfigOptionStrings>("filament_colour");
     filament_color->resize(filament_presets.size());
     filament_color->values = filament_colors;
     EnsureFilamentColorFieldsAligned(project_config);
+    reset_colour_split_where_colours_changed(project_config, old_multi_colors);
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets();
     return filament_presets.size();
@@ -3831,6 +3849,11 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         }
 
         // 4) Load the project config values (the per extruder wipe matrix etc).
+        // A file without the visual-only multi-colour keys (an older project, a Bambu 3MF) loads their
+        // defaults, not what the previous project had: apply_only() keeps a key the file lacks.
+        for (const std::string &key : visual_only_option_keys())
+            if (!config.has(key))
+                this->project_config.erase(key);
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
@@ -4939,6 +4962,10 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             };
 
             color_opt->values.resize(num_filaments, "#26A69A");
+            // filament_colour was just resized to the physical count; multi_colors / colour_mode
+            // must follow. Swatches read those two fields first, so a leftover tail (filament
+            // remove, or a same-count geometry-only 3MF) would otherwise keep stale colors.
+            EnsureFilamentColorFieldsAligned(this->project_config);
             this->mixed_filaments.auto_generate(color_opt->values);
 
             int   gradient_mode = get_mixed_mode(false) ? 1 : 0;

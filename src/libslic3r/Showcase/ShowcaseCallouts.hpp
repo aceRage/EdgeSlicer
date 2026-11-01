@@ -312,6 +312,11 @@ struct LabelFilament
     double                   price    = -1.;
     bool                     mixed    = false;
     std::string              mixed_parts;   // a mixed filament: "PLA Basic 60% + PLA Matte 40%"
+    // Multi-colour P2: a coextruded slot's make-up (filament_colour_split / _angle), set when the
+    // scene shows the coextruded look. The swatch then becomes a split disc.
+    bool                     coextruded = false;
+    std::string              split;
+    double                   angle_deg = 0.;
 };
 
 // The UI-language words a label uses.
@@ -328,6 +333,9 @@ struct CalloutLabel
     std::string              title;        // brand + product (or the user's first line)
     std::string              color_name;   // shown after the title
     std::vector<std::string> swatches;     // empty without the swatch field
+    bool                     swatch_disc = false;   // multi-colour P2: draw the swatch as a pie with these proportions
+    std::string              swatch_split;
+    double                   swatch_angle_deg = 0.;
     std::string              hex;
     std::string              details;      // type · finish · weight · price · from height
     std::string              note;

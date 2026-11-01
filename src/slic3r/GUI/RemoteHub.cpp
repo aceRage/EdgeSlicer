@@ -6721,6 +6721,9 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     auto is_index = [](const std::string& s) {
         return !s.empty() && s.size() <= 9 && s.find_first_not_of("0123456789") == std::string::npos;
     };
+    // PR D (arrange): the instances on no plate. A name, not an index, so it is matched here,
+    // before the index check below turns it away.
+    if (sub == "/api/plates/loose") return get;
     // /api/plates/<index>/<what> and /api/jobs/<id>
     if (sub.compare(0, 12, "/api/plates/") == 0) {
         const std::string  rest  = sub.substr(12);
@@ -6729,6 +6732,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         const std::string what = rest.substr(slash);
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
         if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
+        if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
                        what == "/result"); // slice_v1: results detail and warnings
@@ -6789,6 +6793,8 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/project/open")                  return post;
     if (sub == "/api/plates")                        return get;
     if (sub == "/api/objects/transform")             return post;
+    if (sub == "/api/objects/printable")             return post; // PR D: the object list's Printable toggle
+    if (sub == "/api/undo")                          return post; // PR D: one undo step (expect= guards it)
     if (sub == "/api/printers")                      return get;
     if (sub == "/api/snapmaker/devices")             return get;
     if (sub == "/api/snapmaker/add")                 return post;

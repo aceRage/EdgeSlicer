@@ -12,6 +12,8 @@ add_executable(${_TEST_NAME}_tests
 	test_mass_limited_acceleration.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
+	test_multicolour_visual_only.cpp
+	test_height_colour_pattern_slice.cpp
 	test_cost_pricing_slice.cpp
 	test_gcodeprocessor.cpp
 	test_gcode_timing.cpp
@@ -34,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_material.cpp
 	test_support_overhang_highlight.cpp
 	test_support_groups.cpp
+	test_support_interlock.cpp
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_fuzzy_skin_zero_distance.cpp
@@ -41,6 +44,7 @@ add_executable(${_TEST_NAME}_tests
 	test_overlap_carving.cpp
 	test_perimeters.cpp
 	test_seam_position.cpp
+	test_seam_overhang_outer.cpp
 	test_seam_part_joints.cpp
 	test_seam_autopaint.cpp
 	test_slice_bake.cpp
@@ -65,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
 	test_wipe.cpp
 	test_wipe_tower.cpp
 	test_adaptive_pa.cpp
+	test_adaptive_pressure_advance.cpp
 	test_extruder_variant_arrays.cpp
 	test_filament_map_roundtrip.cpp
 	test_core_guards.cpp

@@ -962,9 +962,15 @@ void MenuFactory::append_menu_items_add_volume(wxMenu* menu)
 
 wxMenuItem* MenuFactory::append_menu_item_layers_editing(wxMenu* menu)
 {
-    return append_menu_item(menu, wxID_ANY, _L("Height range Modifier"), "",
+    wxMenuItem *height_range = append_menu_item(menu, wxID_ANY, _L("Height range Modifier"), "",
         [](wxCommandEvent&) { obj_list()->layers_editing(); wxGetApp().params_panel()->switch_to_object(); }, "height_range_modifier", menu,
         []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+    // Right under it: the same bands, generated from a start / band / gap / repeat description.
+    append_menu_item(menu, wxID_ANY, _L("Color Pattern..."),
+        _L("Color bands of the object by height: start, band height, gap, repeat and a filament sequence"),
+        [](wxCommandEvent&) { obj_list()->height_pattern_dialog(-1); }, "height_range_modifier", menu,
+        []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+    return height_range;
 }
 
 wxMenuItem* MenuFactory::append_menu_item_settings(wxMenu* menu_)
@@ -3022,7 +3028,7 @@ void MenuFactory::append_menu_item_drop(wxMenu* menu)
             if (plater()->canvas3D()->get_canvas_type() != GLCanvas3D::ECanvasType::CanvasView3D)
                 return false;
             else {
-                return (plater()->get_view3D_canvas3D()->get_selection().get_bounding_box().min.z() != 0);
+                return plater()->get_view3D_canvas3D()->get_selection().can_drop();
             } //disable if model is on the bed / not in View3D
         }, m_parent);
 }

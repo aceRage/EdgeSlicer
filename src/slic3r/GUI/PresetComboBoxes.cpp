@@ -29,6 +29,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/FilamentSyncMatch.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -150,8 +151,24 @@ wxBitmap* GetFilamentColorPickerBitmap(const DynamicPrintConfig& config,
     const int colorModeValue = ConfigIntAt(config, "filament_colour_mode", filamentIdx);
     const FilamentColorMode colorMode = FilamentColorModeFromConfig(colorModeValue);
     const std::string label = filamentIdx >= 0 ? std::to_string(filamentIdx + 1) : std::string();
+    const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&config, size_t(std::max(filamentIdx, 0)));
     return FilamentColorUtils::GetFilamentColorIcon(multiColors, colorMode, fallbackColor, label,
-                                                    std::max(1, size.GetWidth()), std::max(1, size.GetHeight()));
+                                                    std::max(1, size.GetWidth()), std::max(1, size.GetHeight()),
+                                                    wxNullColour, &makeUp.split, makeUp.angle);
+}
+
+// The make-up of a slot for the colour dialog, with whether its preset looks like a glow filament (G1).
+FilamentColorUtils::ColourMakeUp GetDialogMakeUp(const DynamicPrintConfig& config, size_t slot, const std::string& presetName)
+{
+    FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&config, slot);
+    std::string type;
+    if (wxGetApp().preset_bundle != nullptr)
+        if (const Preset* preset = wxGetApp().preset_bundle->filaments.find_preset(presetName, false, true))
+            if (const ConfigOptionStrings* t = preset->config.option<ConfigOptionStrings>("filament_type"))
+                if (!t->values.empty())
+                    type = t->values.front();
+    makeUp.glowSuggested = Glow::suggests_glow(presetName, type);
+    return makeUp;
 }
 
 } // namespace
@@ -1329,11 +1346,11 @@ void PlaterPresetComboBox::ChangeExtruderColor()
     {
         const FilamentColorMode currentMode = FilamentColorModeFromConfig(currentModeValue);
         const FilamentColor currentColor = FilamentColor::FromMultiColors(currentMultiColors, currentMode, currentColorHex);
-        FilamentColorDialog dialog(this, filament, currentColor);
+        FilamentColorDialog dialog(this, filament, currentColor, GetDialogMakeUp(config, size_t(m_filament_idx), filamentPresetName));
 
         if (dialog.ShowModal() == wxID_OK)
         {
-            ApplyFilamentColor(dialog.Selection());
+            ApplyFilamentColor(dialog.Selection(), &dialog.MakeUp());
         }
         return;
     }
@@ -1347,40 +1364,22 @@ void PlaterPresetComboBox::SelectLegacyFilamentColor()
         return;
 
     DynamicPrintConfig& config = wxGetApp().preset_bundle->project_config;
-    wxColour current_color(ConfigStringAt(config, "filament_colour", m_filament_idx));
-    if (!current_color.IsOk())
-        current_color = wxColour(0, 0, 0);
 
-    m_clrData.SetColour(current_color);
-    m_clrData.SetChooseFull(true);
-    m_clrData.SetChooseAlpha(false);
-
-    std::vector<std::string> custom_colors;
-    if (wxGetApp().app_config != nullptr)
-        custom_colors = wxGetApp().app_config->get_custom_color_from_config();
-
-    const int custom_count = std::min(static_cast<int>(custom_colors.size()), CUSTOM_COLOR_COUNT);
-    for (int i = 0; i < custom_count; ++i)
-        m_clrData.SetCustomColour(i, string_to_wxColor(custom_colors[i]));
-
-    wxColourDialog dialog(this, &m_clrData);
-    dialog.SetTitle(_L("Please choose the filament color"));
-    if (dialog.ShowModal() != wxID_OK)
-        return;
-
-    m_clrData = dialog.GetColourData();
-    if (custom_colors.size() != CUSTOM_COLOR_COUNT)
-        custom_colors.resize(CUSTOM_COLOR_COUNT);
-    for (int i = 0; i < CUSTOM_COLOR_COUNT; ++i)
-        custom_colors[i] = color_to_string(m_clrData.GetCustomColour(i));
-    if (wxGetApp().app_config != nullptr)
-        wxGetApp().app_config->save_custom_color_to_config(custom_colors);
-
-    const std::string selected_color = m_clrData.GetColour().GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
-    ApplyFilamentColor(FilamentColor::FromMultiColors("", FilamentColorMode::Segment, selected_color));
+    // Any other filament: the colour dialog without a library, so a plain colour, a few
+    // colours (a coextruded multi-colour filament) and their make-up can be set on every slot
+    // (multi-colour P2). The chips and "Other Colors" pick colours as the system dialog did.
+    const FilamentColor current = FilamentColor::FromMultiColors(
+        ConfigStringAt(config, "filament_multi_colors", m_filament_idx),
+        FilamentColorModeFromConfig(ConfigIntAt(config, "filament_colour_mode", m_filament_idx)),
+        ConfigStringAt(config, "filament_colour", m_filament_idx));
+    FilamentColorInfo noLibraryEntry;
+    FilamentColorDialog dialog(this, noLibraryEntry, current,
+                               GetDialogMakeUp(config, size_t(m_filament_idx), CurrentFilamentPresetName()));
+    if (dialog.ShowModal() == wxID_OK)
+        ApplyFilamentColor(dialog.Selection(), &dialog.MakeUp());
 }
 
-void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
+void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData, const FilamentColorUtils::ColourMakeUp* makeUp)
 {
     if (m_filament_idx < 0 || wxGetApp().preset_bundle == nullptr)
         return;
@@ -1413,12 +1412,23 @@ void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
             filament_extruder_map.erase(m_filament_idx);
     }
 
+    // Multi-colour P1: a slot given new colours starts with an equal split (design 4.5).
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = config->option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
+
     DynamicPrintConfig new_config = *config;
     new_config.set_key_value("filament_colour", filament_colors);
     new_config.set_key_value("filament_multi_colors", filament_multi_colors);
     new_config.set_key_value("filament_colour_mode", filament_colour_modes);
+    if (makeUp != nullptr)
+        FilamentColorUtils::SetColourMakeUp(new_config, index, *makeUp);
 
     config->apply(new_config);
+    reset_colour_split_where_colours_changed(*config, old_multi_colors);
+    // The editor's proportions, rotation and twist (visual only) win over the reset above.
+    if (makeUp != nullptr)
+        FilamentColorUtils::SetColourMakeUp(*config, index, *makeUp);
     wxGetApp().plater()->update_project_dirty_from_presets();
     if (wxGetApp().app_config != nullptr)
         wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);

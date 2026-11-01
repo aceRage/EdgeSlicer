@@ -25,6 +25,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/RealisticRenderSettings.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
@@ -38,6 +39,9 @@
 class wxMouseEvent;
 
 namespace Slic3r {
+
+class ModelVolume;
+
 namespace GUI {
 
 struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
@@ -211,7 +215,12 @@ private:
     void            draw_floor(const DrawTarget &t);
     void            draw_objects();
     // S5: the plate's toolpaths through Preview's viewer (the toolpath source, the build-up).
-    bool            draw_toolpaths();
+    // 1b: `material` lights them with showcase_material's model (toolpath_material_program()),
+    // `hdr` then writes linear light for the post pass instead of tone-mapped sRGB.
+    bool            draw_toolpaths(bool material = false, bool hdr = false);
+    // 1b: libvgcode's segments program with the material model as its prelude (built on first use;
+    // 0 when it does not build, when EDGESLICER_SHOWCASE_CLASSIC_TOOLPATHS is set, or without a slice).
+    unsigned int    toolpath_material_program();
     bool            use_toolpaths() const;
     // S2: the objects through showcase_material; false when that shader is not there. 1a: `hdr`
     // writes linear light for the post pass instead of tone-mapped sRGB.
@@ -242,9 +251,22 @@ private:
         unsigned int texture = 0;     // mode 2: R32F tops
         int          count  = 0;
         int          width  = 0;
+        // 1c: the top and bottom skins' settings from the object's config (the silk tangent),
+        // without the instance's rotation (added per draw); valid when `skin`.
+        bool                   skin = false;
+        Showcase::SkinSettings skin_top;
+        Showcase::SkinSettings skin_bottom;
+        // Multi-colour P4: the skin's line spacing and the wall direction (mesh mode), and the
+        // object's solid volume per mm of height (its twist's stand-in for the filament length).
+        MultiColour::MeshSkin  mc_skin;
+        float                  volume_per_mm = 0.f;
     };
     const LayerInfo *layers_for(int object_idx);
     void            release_layers();
+    // Multi-colour P4: the volume's mesh with per-corner smooth normals (faces under 30 degrees apart
+    // share them), so a coextruded colour follows a curved surface instead of each triangle. Cached
+    // with the layers; null for an empty mesh.
+    GLModel        *mc_smooth_model(const ModelVolume &mv);
     // The scene's environment as a cube map; null when there is none (no manifest, no file).
     const Showcase::EnvironmentInfo *ensure_environment();
     bool            ensure_floor_texture(float &tile_mm, float &roughness);
@@ -274,7 +296,16 @@ private:
     // S2
     std::map<int, LayerInfo>   m_layers;
     bool                       m_layers_valid = false;
+    // P4: mc_smooth_model()'s cache, by (ModelVolume id, its mesh).
+    std::map<std::pair<size_t, const void *>, std::shared_ptr<GLModel>> m_mc_smooth;
     unsigned int               m_env_texture = 0;
+    // 1b: a black 1x1 cube on the toolpaths' environment unit when the scene has no environment
+    // (libvgcode's program keeps a samplerCube there; macOS wants a complete texture on it).
+    unsigned int               m_env_fallback_texture = 0;
+    // 1b: the toolpaths' prelude (showcase_material.fs's shared block + showcase_toolpath.glsl),
+    // read once; empty when it could not be put together.
+    std::string                m_toolpath_prelude;
+    bool                       m_toolpath_prelude_read = false;
     std::string                m_env_key;
     unsigned int               m_floor_texture = 0;
     std::string                m_floor_key;
@@ -320,6 +351,10 @@ private:
     int                        m_live_fb_failed_w = 0, m_live_fb_failed_h = 0;
     // 1a: the last draw_scene() put objects into the HDR layer (the post pass has work).
     bool                       m_hdr_drawn = false;
+    // 1b: how the last draw_scene() lit the toolpaths ("material, HDR layer", "material, tone-mapped
+    // in the shader", "Preview lighting"; empty = no toolpaths), for the export report.
+    std::string                m_toolpath_lighting;
+    bool                       m_toolpath_prelude_logged = false;
     int                        m_batch_w = 0, m_batch_h = 0, m_batch_msaa = -1;
 
     // S3

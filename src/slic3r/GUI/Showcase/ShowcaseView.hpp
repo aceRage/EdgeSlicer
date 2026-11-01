@@ -386,6 +386,12 @@ private:
     wxChoice                *m_tone = nullptr;   // realism 1a: the post pass's tone curve
     wxSlider                *m_shadow_softness = nullptr;
     wxChoice                *m_layer_lines = nullptr;
+    wxCheckBox              *m_coextruded = nullptr;   // multi-colour P2: the scene's coextruded look
+    // Glow-in-the-dark G1: the lights-off view (scene), how much light is left in it, and the glow
+    // intensity (a project-wide visual-only key, filament_glow_intensity).
+    wxCheckBox              *m_lights_off = nullptr;
+    wxSlider                *m_lights_ambient = nullptr;
+    wxSlider                *m_glow_intensity = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
     std::string              m_mat_signature;

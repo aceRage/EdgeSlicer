@@ -62,6 +62,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/BitmapComboBox.hpp
     GUI/BonjourDialog.cpp
     GUI/BonjourDialog.hpp
+    GUI/CrealityDiscoveryDialog.cpp
+    GUI/CrealityDiscoveryDialog.hpp
     GUI/calib_dlg.cpp
     GUI/calib_dlg.hpp
     GUI/Calibration.cpp
@@ -92,6 +94,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
     GUI/FillBedDialog.hpp
+    GUI/HeightPatternDialog.cpp
+    GUI/HeightPatternDialog.hpp
+    GUI/GUI_ObjectHeightPattern.cpp
     GUI/RemeshDialog.cpp
     GUI/RemeshDialog.hpp
     GUI/RoundDialog.cpp
@@ -484,6 +489,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp
     GUI/FilamentColorDialog.hpp
+    GUI/FilamentColourPicker.cpp
+    GUI/FilamentColourPicker.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
     GUI/OG_CustomCtrl.cpp
@@ -975,6 +982,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/ColorSpaceConvert.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
+    Utils/CrealityHostDiscovery.cpp
+    Utils/CrealityHostDiscovery.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
     Utils/ElegooCanvas.cpp
@@ -1308,6 +1317,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/HeightPatternDialog.cpp                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/MediaPlayCtrl.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/ParamsPanel.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/Preferences.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
@@ -1352,7 +1362,7 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${SLIC3R_GUI_SOURCES})
 encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
-target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)

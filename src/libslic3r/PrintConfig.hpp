@@ -22,6 +22,7 @@
 #include "BoundingBox.hpp"
 #include "PaintDepth.hpp"
 #include <algorithm>
+#include <set>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -73,6 +74,14 @@ enum class NoiseType {
     RidgedMulti,
     Voronoi,
     Ripple,
+};
+
+// Orca #12781: which wipe tower generator a printer uses. Type1 is the Bambu Lab planner
+// (WipeTower), Type2 is WipeTower2. Bambu Lab printers always get Type1 whatever the config says;
+// Print::wipe_tower_type() and resolve_wipe_tower_type() apply that rule.
+enum class WipeTowerType {
+    Type1 = 0,
+    Type2 = 1,
 };
 
 enum PrintHostType {
@@ -994,6 +1003,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopSurfaceExpansionDirection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CenterOfSurfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -1129,6 +1139,36 @@ extern const PrintConfigDef print_config_def;
 // include Print.hpp.
 // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.5.
 const std::vector<std::string>& part_support_keys();
+
+// Keys the slicer must never see: visual only (Showcase, Preview look, swatches). Every one is a
+// per-filament-slot project option (s_project_options) kept in step with filament_multi_colors.
+// Print::apply() erases them before it compares or stores anything, and GCode::append_full_config()
+// bans them from the config block as a second guard, so they can never change G-code or invalidate
+// a slice. Not in the static PrintConfig. tests/design_multicolour_filament_view.md 4.2 / 6.1.
+// A later visual-only key (glow G1, the gradient cycle length of P6) joins this list and is then
+// stripped, banned, resized, erased and moved with the others without further code.
+const std::set<std::string>& visual_only_option_keys();
+inline bool is_visual_only_option(const std::string &key) { return visual_only_option_keys().count(key) != 0; }
+
+// The slot helpers for the visual-only keys (PresetBundle calls them next to filament_multi_colors).
+// Each works on every vector key of visual_only_option_keys(), whatever its type.
+// Size every visual-only key to n slots, creating a missing key and filling new slots with the default.
+void visual_only_resize_slots(DynamicPrintConfig &config, size_t n);
+// Remove slot index from every visual-only key that has it.
+void visual_only_erase_slot(DynamicPrintConfig &config, size_t index);
+// Move slot from to position to (the others shift), in every visual-only key that has both.
+void visual_only_move_slot(DynamicPrintConfig &config, size_t from, size_t to);
+// Erase every visual-only key (what Print::apply() does to the config it is handed).
+void strip_visual_only_options(DynamicPrintConfig &config);
+// Copy every visual-only key the config holds (a printer switch saves them before update_selections()
+// re-sizes the slots, as it saves filament_multi_colors).
+DynamicPrintConfig visual_only_snapshot(const DynamicPrintConfig &config);
+// Put a snapshot back (keys it lacks are erased) and size the keys to n slots.
+void visual_only_restore(DynamicPrintConfig &config, const DynamicPrintConfig &snapshot, size_t n);
+// A slot whose colours were replaced (AMS sync, the colour picker, a recommended palette) starts again
+// with an equal split; its angle and twist stay, as they belong to the feed path (design 4.5). Compares
+// filament_multi_colors now with old_multi_colors, slot by slot.
+void reset_colour_split_where_colours_changed(DynamicPrintConfig &config, const std::vector<std::string> &old_multi_colors);
 
 class StaticPrintConfig;
 
@@ -1561,6 +1601,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 support_filament))
     ((ConfigOptionFloatOrPercent,      support_line_width))
     ((ConfigOptionBool,                support_interface_not_for_body))
+    // EdgeSlicer: support interface interlock (woven band under the top contact layer).
+    ((ConfigOptionBool,                support_interface_interlock))
+    ((ConfigOptionInt,                 support_interface_interlock_layers))
+    ((ConfigOptionInt,                 support_interface_interlock_beam_lines))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
     // Chameleon: when enabled, support material matches the filament of the model
@@ -2082,6 +2126,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,              toolchange_cyclic_order))
     ((ConfigOptionBool,                toolchange_cyclic_first_layer))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
+    ((ConfigOptionBool,                wipe_tower_sparse_layers_combination))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
     ((ConfigOptionString,              process_change_extrusion_role_gcode))
@@ -2139,6 +2184,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_multitool_ramming_flow))
     ((ConfigOptionFloats,              filament_stamping_loading_speed))
     ((ConfigOptionFloats,              filament_stamping_distance))
+    ((ConfigOptionEnum<WipeTowerType>, wipe_tower_type))
     ((ConfigOptionBool,                purge_in_prime_tower))
     ((ConfigOptionBool,                enable_filament_ramming))
     ((ConfigOptionBool,                tool_change_on_wipe_tower))

@@ -173,6 +173,8 @@ public:
     void add_custom_filament(wxColour new_col);
     void scroll_filament_area_to_bottom();
     void edit_filament();
+    // The filament slot the Filament tab edits (0-based), -1 when none was chosen yet.
+    int  editing_filament_index() const;
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
@@ -191,6 +193,8 @@ public:
     void show_sync_filament_dialog();
     // Elegoo Centauri Carbon 1: the CANVAS trays into the same sync dialog (ElegooCanvasUI.hpp).
     void show_canvas_sync_dialog();
+    // Creality K-series CFS: boxsInfo slots into the same sync dialog (MixedFilamentManager).
+    void show_cfs_sync_dialog();
     // The colour-matching dialog and the project update both syncs share.
     void apply_machine_filament_sync(std::vector<FilamentData>& machineFilamentList, bool canvas_generic = false);
     // Point the "Filaments" row's sync button at the sync that fits the current
@@ -783,6 +787,7 @@ public:
     void show_uv_editor(bool show);
 
     void arrange();
+    void arrange_loose(); // EdgeSlicer: place only loose instances (remote hub)
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions

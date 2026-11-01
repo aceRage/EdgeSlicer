@@ -5,6 +5,9 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
+	test_multicolour_filament.cpp
+	test_multicolour_glsl.cpp
+	test_glow_filament.cpp
 	test_connect_filament_maps.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
@@ -57,6 +60,8 @@ add_executable(${_TEST_NAME}_tests
 	test_draw_cut.cpp
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
+	test_height_colour_pattern.cpp
+	test_height_pattern_input.cpp
 	test_cut_paint.cpp
 	test_cut_groove.cpp
 	test_config_include.cpp
@@ -92,6 +97,9 @@ add_executable(${_TEST_NAME}_tests
 	test_flexi_joint.cpp
 	test_pushfit.cpp
 	test_pushfit_cut.cpp
+	test_tac_joint_persistence.cpp
+	test_tac_joint.cpp
+	test_tac_joint_cut.cpp
 	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
@@ -145,6 +153,7 @@ add_executable(${_TEST_NAME}_tests
 	test_slice_compare.cpp
 	test_stl.cpp
 	test_support_set.cpp
+	test_support_interlock.cpp
 	test_mesh_edit.cpp
 	test_mesh_sculpt.cpp
 	test_mesh_remesh.cpp
@@ -178,6 +187,8 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_video.cpp
     test_showcase_path.cpp
     test_showcase_tone.cpp
+    test_showcase_glsl.cpp
+    test_showcase_skin.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

@@ -1523,6 +1523,7 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_z_pos(0.f)
     , m_bridging(float(config.wipe_tower_bridging))
     , m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config))
+    , m_sparse_layers_combined(wipe_tower_sparse_layers_combined(config))
     , m_gcode_flavor(config.gcode_flavor)
     , m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool)))
     , m_infill_speed(float(get_value_at(config, default_region_config.sparse_infill_speed, ConfigFlowDomain::Process, initial_tool)))
@@ -1685,6 +1686,7 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_extra_loading_move                 = o.m_extra_loading_move;
     m_bridging                           = o.m_bridging;
     m_sparse_layers_skipped              = o.m_sparse_layers_skipped;
+    m_sparse_layers_combined             = o.m_sparse_layers_combined;
     m_set_extruder_trimpot               = o.m_set_extruder_trimpot;
     m_adhesion                           = o.m_adhesion;
     m_gcode_flavor                       = o.m_gcode_flavor;
@@ -1767,6 +1769,7 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
         pow(config.filament_diameter.get_at(idx), 2)); // all extruders are assumed to have the same filament diameter at this point
     float nozzle_diameter         = float(config.nozzle_diameter.get_at(idx));
     m_filpar[idx].nozzle_diameter = nozzle_diameter; // to be used in future with (non-single) multiextruder MM
+    m_filpar[idx].max_layer_height = WipeTower::filament_max_layer_height(config, idx);
 
     float max_vol_speed = float(
         get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, filament_id));
@@ -2431,8 +2434,8 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
         }
     }
     if (is_first_layer()) {
-        // Edge: prime_tower_brim_width is the brim itself (no auto brim on WipeTower2); the run-in
-        // reserve (#119) widens the first-layer envelope the same way get_brim_width() reports it.
+        // Edge: the brim (an auto -1 is resolved in plan_tower(), Orca #11831); the run-in reserve
+        // (#119) widens the first-layer envelope the same way get_brim_width() reports it.
         const float brim = std::max(std::max(0.f, m_wipe_tower_brim_width), m_run_in_reserve);
         min_x -= brim;
         max_x += brim;
@@ -2910,7 +2913,8 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
             // Non-first layer + chamfer enabled: apply gradual reduction
             // Calculate distance from first layer with tool changes
             size_t current_idx = m_layer_info - m_plan.begin();
-            int    dist_to_1st = (int) current_idx - (int) m_first_layer_idx;
+            // Edge (OD16 review): in printed layers, so a combined tower steps one loop per printed layer.
+            int    dist_to_1st = wipe_tower_printed_layer_distance(m_plan, m_first_layer_idx, current_idx);
 
             // Validate m_first_layer_idx to prevent invalid index access
             // A layer below the first one with tool changes has no chamfer either: a negative
@@ -2945,9 +2949,13 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         const std::vector<TowerInterface::GapPoint> loop_gaps = interface_gaps_of_layer();
         for (int i = 0; i < loops_num; ++i) {
             poly   = offset(poly, scale_(spacing)).front();
-            m_outer_wall[m_z_pos].push_back(to_polyline(poly));
-            // Orca #15035: the brim and conflict checks read it at the tower position, like the G-code.
-            m_outer_wall[m_z_pos].back().translate(Point::new_scale(m_rib_offset.x(), m_rib_offset.y()));
+            // Edge (OD16 review): a layer folded into a later one prints nothing, so the conflict checker
+            // and the object brim must not see a wall at its z.
+            if (! m_layer_info->combined_away) {
+                m_outer_wall[m_z_pos].push_back(to_polyline(poly));
+                // Orca #15035: the brim and conflict checks read it at the tower position, like the G-code.
+                m_outer_wall[m_z_pos].back().translate(Point::new_scale(m_rib_offset.x(), m_rib_offset.y()));
+            }
             if (! loop_gaps.empty()) {
                 Polygon   inserted;
                 Polylines pieces = TowerInterface::cut_wall_gaps(poly, loop_gaps, 2.5f * m_perimeter_width, inserted);
@@ -2983,7 +2991,9 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
 
     // Ask our writer about how much material was consumed.
     // Skip this in case the layer is sparse and config option to not print sparse layers is enabled.
-    if (!m_sparse_layers_skipped || toolchanges_on_layer || first_layer) {
+    // Orca #15841: a folded layer prints nothing, so it consumes nothing and adds no height of its own.
+    const bool combined_away = m_layer_info != m_plan.end() && m_layer_info->combined_away;
+    if ((!m_sparse_layers_skipped || toolchanges_on_layer || first_layer) && !combined_away) {
         if (m_current_tool < m_used_filament_length.size())
             m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
         m_current_height += m_layer_info->height;
@@ -3295,6 +3305,13 @@ void WipeTower2::plan_tower()
                 m_plan[i].depth = this_layer_depth;
         }
     }
+
+    // Orca #11831: prime_tower_brim_width -1 is the "auto" brim, sized from the tower height as
+    // WipeTower (Type1) and estimate_wipe_tower_footprint() do. Resolved here, once the height is
+    // known and before the first layer lays the brim; this generator used to read -1 as no brim at
+    // all while the plate preview and the clearance checks reserved the auto brim.
+    if (m_wipe_tower_brim_width < 0.f)
+        m_wipe_tower_brim_width = WipeTower::get_auto_brim_by_height(m_wipe_tower_height);
 }
 
 void WipeTower2::save_on_last_wipe()
@@ -3581,6 +3598,37 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     if (m_plan.empty())
         return;
 
+    // Orca #15841: before planning, since the layer heights this rewrites feed the extrusion flow of
+    // every later pass. Edge: a layer with Local-Z tool changes or reserve slots purges at its own z
+    // just like a nominal tool change, so it is not sparse; and a Local-Z tool change leaves its new
+    // filament loaded too (the nominal ones of the layer follow it, see the loop below).
+    if (m_sparse_layers_combined) {
+        auto tool_after = [](const WipeTowerInfo &layer, size_t tool) -> size_t {
+            if (! layer.tool_changes.empty())
+                return layer.tool_changes.back().new_tool;
+            if (! layer.local_z_tool_changes.empty())
+                return layer.local_z_tool_changes.back().new_tool;
+            return tool;
+        };
+        size_t start_tool = m_current_tool;
+        for (const WipeTowerInfo &layer : m_plan) {
+            if (! layer.local_z_tool_changes.empty()) {
+                start_tool = layer.local_z_tool_changes.front().old_tool;
+                break;
+            }
+            if (! layer.tool_changes.empty()) {
+                start_tool = layer.tool_changes.front().old_tool;
+                break;
+            }
+        }
+        combine_sparse_wipe_tower_plan(
+            m_plan, m_filpar, m_first_layer_idx, start_tool,
+            [](const WipeTowerInfo &layer) {
+                return layer.tool_changes.empty() && layer.local_z_tool_changes.empty() && layer.local_z_reserve_slot_count == 0;
+            },
+            tool_after);
+    }
+
     plan_tower();
 
     if (m_wall_type == int(WipeTowerWallType::wtwRib)) {
@@ -3687,6 +3735,10 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
             } else
                 layer_result[idx] = merge_tcr(layer_result[idx], finish_layer_tcr);
         }
+
+        if (layer.combined_away)
+            for (WipeTower::ToolChangeResult &tcr : layer_result)
+                tcr.combined_away = true;
 
         result.emplace_back(std::move(layer_result));
         local_z_result.emplace_back(std::move(local_z_layer_result));
