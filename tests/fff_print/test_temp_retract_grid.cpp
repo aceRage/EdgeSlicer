@@ -159,6 +159,26 @@ bool is_retract_move(const std::string &line)
     return parse_e(line) < -1e-6;
 }
 
+// Tracks how much filament is held retracted. Extruder::retract() only tops up the difference to the
+// current length, so after an object switch the first retract move can be partial; the total is what counts.
+struct RetractState
+{
+    double held = 0.;
+    // Returns true if the line was a retract move; held is then the total retracted amount.
+    bool feed(const std::string &line)
+    {
+        if (line.rfind("G1 ", 0) != 0 || line.find('E') == std::string::npos)
+            return false;
+        if (is_retract_move(line)) {
+            held -= parse_e(line);
+            return true;
+        }
+        if (parse_e(line) > 1e-6)
+            held = 0.;
+        return false;
+    }
+};
+
 std::string strip_volatile_gcode(const std::string &gcode)
 {
     std::ostringstream out;
@@ -390,9 +410,11 @@ TEST_CASE("The label tower prints with the preset retraction length", "[Calib][T
     const std::string g = slice_grid(params, grid_print_config());
     REQUIRE_FALSE(lines_starting_with(g, "; Calib_TempRetract: col=none retract=0.8").empty());
 
-    bool in_label = false;
-    int  checked  = 0;
+    bool        in_label = false;
+    int         checked  = 0;
+    RetractState rs;
     for (const std::string &line : gcode_lines(g)) {
+        const bool retract = rs.feed(line);
         if (line.rfind("; Calib_TempRetract: col=none", 0) == 0) {
             in_label = true;
             continue;
@@ -401,8 +423,8 @@ TEST_CASE("The label tower prints with the preset retraction length", "[Calib][T
             in_label = false;
             continue;
         }
-        if (in_label && is_retract_move(line)) {
-            CHECK(parse_e(line) == Approx(-0.8).margin(1e-3));
+        if (in_label && retract) {
+            CHECK(rs.held == Approx(0.8).margin(1e-3));
             ++checked;
         }
     }
@@ -436,7 +458,9 @@ TEST_CASE("By-object sequence re-runs the temperature bands for every column", "
     std::vector<int> order;
     double           current_L = -1.;
     int              matched   = 0;
+    RetractState     rs;
     for (const std::string &line : gcode_lines(g)) {
+        const bool  retract = rs.feed(line);
         std::smatch m;
         if (std::regex_search(line, m, col_re)) {
             const int col = std::stoi(m[1]);
@@ -448,8 +472,8 @@ TEST_CASE("By-object sequence re-runs the temperature bands for every column", "
         }
         if (line.rfind("; Calib_TempRetract: restore", 0) == 0)
             current_L = -1.;
-        if (current_L > 0. && is_retract_move(line)) {
-            CHECK(parse_e(line) == Approx(-current_L).margin(1e-3));
+        if (current_L > 0. && retract) {
+            CHECK(rs.held == Approx(current_L).margin(1e-3));
             ++matched;
         }
     }
