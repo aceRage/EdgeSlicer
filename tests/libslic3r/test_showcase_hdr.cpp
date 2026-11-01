@@ -315,13 +315,15 @@ TEST_CASE("Showcase HDR: the sun is taken out of the light only when asked, once
     REQUIRE(without_sun.sun.found);
     // The same scale either way (the sky's brightness does not change with the toggle) ...
     CHECK_THAT(without_sun.scale, WithinAbs(with_sun.scale, 1e-6 * with_sun.scale));
-    CHECK_THAT(sh_peak_luminance(with_sun.sh), WithinAbs(1.0, 2e-3));
+    // ... set by the sky's own light (the sun is out of it), so the sun-in version is brighter.
+    CHECK_THAT(sh_peak_luminance(without_sun.sh), WithinAbs(1.0, 2e-3));
+    CHECK(sh_peak_luminance(with_sun.sh) > 1.5f);
     // ... but the light that faced the sun is smaller without it, and the sun's texel no longer stands out.
     const V3 toward = with_sun.sun.dir;
     CHECK(luma(eval_sh(without_sun.sh, toward)) < 0.7f * luma(eval_sh(with_sun.sh, toward)));
     const float peak_with    = luma(atlas_lookup(with_sun, 0, toward));
     const float peak_without = luma(atlas_lookup(without_sun, 0, toward));
-    CHECK(peak_without < 0.5f * peak_with);
+    CHECK(peak_without < 0.8f * peak_with);   // the atlas clamps the sun at 16; the glow around it stays
     // The key light's strength is kept in a range that always reads.
     CHECK(with_sun.sun.key_strength >= 0.5f);
     CHECK(with_sun.sun.key_strength <= 1.5f);

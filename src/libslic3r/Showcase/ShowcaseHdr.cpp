@@ -953,10 +953,19 @@ bool bake_hdr_environment(const HdrImage &image, const HdrBakeOptions &options, 
 
     std::vector<uint8_t> mask;
     HdrSun sun = hdr_find_sun(image, &mask);
-    // One scale for the whole panorama, from its full light (the sun included), so that choosing to
-    // take the sun out does not change the sky's brightness.
+    // One scale for the whole panorama, whether or not the sun is taken out, so that the toggle does not
+    // change the sky's brightness. With a sun it is the sky's peak diffuse light that is set to the
+    // target: a sun a hundred times brighter than the sky would otherwise leave the sky (and the
+    // backdrop) nearly black. The sun's share is then carried by the key light's strength.
     const std::array<std::array<float, 3>, 9> sh_full = project_hdr_sh(image);
-    const float peak = sh_peak_luminance(sh_full);
+    float peak = sh_peak_luminance(sh_full);
+    if (sun.found) {
+        HdrImage sky = image;
+        hdr_remove_region(sky, mask);
+        const float sky_peak = sh_peak_luminance(project_hdr_sh(sky));
+        if (sky_peak > 0.f && std::isfinite(sky_peak))
+            peak = sky_peak;
+    }
     if (!(peak > 0.f) || !std::isfinite(peak))
         return false;
     const float k = options.target_peak / peak;
