@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <libslic3r/AABBMesh.hpp>
 #include <libslic3r/CurvedCut.hpp>
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/DrawCut.hpp>
@@ -526,4 +527,122 @@ TEST_CASE("Flat kerf cut: a Dowel is as long as its base length plus the kerf", 
         REQUIRE(count_holes(res[0], CutConnectorType::Dowel) == 1);
         REQUIRE(count_holes(res[1], CutConnectorType::Dowel) == 1);
     }
+}
+
+// ------------------------------------------------------------------------ the cross-section (picking)
+
+namespace {
+indexed_triangle_set plane_cube()
+{
+    indexed_triangle_set its = its_make_cube(CUBE, CUBE, CUBE);
+    for (Vec3f& v : its.vertices)
+        v -= Vec3f::Constant(float(0.5 * CUBE));
+    return its;
+}
+bool section_hit(const AABBMesh& tree, const Vec3d& from, const Vec3d& dir)
+{
+    for (const AABBMesh::hit_result& h : tree.query_ray_hits(from, dir))
+        if (h.is_hit())
+            return true;
+    return false;
+}
+} // namespace
+
+TEST_CASE("Curved cut: a pick outside the part's cross-section is refused", "[CutConnectorSurface][CurvedCut]")
+{
+    const CurvedCutSheet       sheet   = gentle_dome(); // 80 mm across, the cube 30 mm
+    const indexed_triangle_set section = cut_surface_section(sheet.sample_sheet(CurvedCutSheet::DefaultSamples), CutSolidTest(plane_cube()), 1.0);
+    REQUIRE(!section.empty());
+    // The section is the sheet INSIDE the cube only, to within one split edge.
+    for (const Vec3f& v : section.vertices) {
+        REQUIRE(std::abs(v.x()) <= 0.5 * CUBE + 1.0);
+        REQUIRE(std::abs(v.y()) <= 0.5 * CUBE + 1.0);
+    }
+    const AABBMesh tree(section);
+    REQUIRE(section_hit(tree, Vec3d(0.37, 0.53, 50.), -Vec3d::UnitZ())); // over the part: picks (off the sample grid lines)
+    REQUIRE(section_hit(tree, Vec3d(12.3, -9.1, 50.), -Vec3d::UnitZ()));
+    REQUIRE(!section_hit(tree, Vec3d(25.3, 0.4, 50.), -Vec3d::UnitZ()));  // the sheet out past the part: no pick
+    REQUIRE(!section_hit(tree, Vec3d(-30.3, 22.1, 50.), -Vec3d::UnitZ()));
+
+    // And Cut refuses a connector standing on the sheet out there.
+    Model        model;
+    ModelObject* mo = surface_cube(model);
+    add_tac_joint_volume(mo, surface_tac(curved_cut_sheet_point(sheet, 25., 0.), curved_cut_sheet_frame(sheet, 25., 0.)), "TAC Joint-1");
+    Cut               cut(mo, 0, Transform3d::Identity(), surface_attrs());
+    const std::string msg = refusal_message([&]() { cut.perform_with_curved_sheet(sheet); });
+    INFO(msg);
+    REQUIRE(msg.find("outside the part") != std::string::npos);
+    REQUIRE(mo->volumes.size() == 2);
+}
+
+TEST_CASE("Drawn cut: a pick outside the part's cross-section is refused", "[CutConnectorSurface][DrawCut]")
+{
+    DrawCutStroke stroke = top_arc(40.0, std::asin(15.0 / 40.0));
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    const DrawCutParams        params = through_params(); // 5 mm of extension above the top face
+    const indexed_triangle_set cube   = plane_cube();
+    BoundingBoxf3              bbox;
+    for (const Vec3f& v : cube.vertices)
+        bbox.merge(v.cast<double>());
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bbox, 0.0, &cube);
+    REQUIRE(!cutter.empty());
+    const indexed_triangle_set section = cut_surface_section(cutter, CutSolidTest(plane_cube()), 1.0);
+    REQUIRE(!section.empty());
+    REQUIRE(section.indices.size() < 200000);
+    for (const Vec3f& v : section.vertices)
+        REQUIRE(v.z() <= 0.5 * CUBE + 1.0); // nothing of the extension above the top face
+
+    const AABBMesh tree(section);
+    const double   s = 0.5 * stroke.length();
+    const Vec3d    n = draw_cut_surface_normal(stroke, params, s, 0.0);
+    // Halfway down the strip, inside the part: picks.
+    const Vec3d inside = draw_cut_surface_point(stroke, params, s, 0.5 * CUBE);
+    REQUIRE(section_hit(tree, inside + 10.0 * n, -n));
+    // On the extension, 3 mm above the top face: the strip is there, the part is not - no pick.
+    const Vec3d outside = draw_cut_surface_point(stroke, params, s, -3.0);
+    REQUIRE(outside.z() > 0.5 * CUBE);
+    REQUIRE(!section_hit(tree, outside + 10.0 * n, -n));
+
+    // And Cut refuses a Pin standing on the extension.
+    Model        model;
+    ModelObject* mo = surface_cube(model);
+    add_pushfit_volume(mo, surface_pin(outside, draw_cut_surface_frame(stroke, params, s, -3.0)), "Connector-1");
+    Cut               cut(mo, 0, Transform3d::Identity(), surface_attrs());
+    const std::string msg = refusal_message([&]() { cut.perform_with_draw_stroke(stroke, params); });
+    INFO(msg);
+    REQUIRE((msg.find("outside the part") != std::string::npos || msg.find("not on the cut surface") != std::string::npos));
+    REQUIRE(mo->volumes.size() == 2);
+}
+
+TEST_CASE("Curved cut: the split's own cut face is pickable past the sheet's control grid", "[CutConnectorSurface][CurvedCut]")
+{
+    // A sheet whose control grid (16 mm across) is smaller than the part (30 mm): the cut runs on
+    // past the grid, and that is the face the user sees and clicks.
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(8.0);
+    sheet.at(2, 2) = 2.0;
+    const indexed_triangle_set cube = plane_cube();
+    indexed_triangle_set       lower;
+    REQUIRE(curved_cut_split(cube, sheet, nullptr, &lower));
+    REQUIRE(!lower.empty());
+
+    const indexed_triangle_set face = curved_cut_face_of(lower, sheet, 0.0);
+    REQUIRE(!face.empty());
+    REQUIRE(face.indices.size() < lower.indices.size()); // the face, not the whole half
+    const AABBMesh face_tree(face);
+    for (const Vec3d& p : { Vec3d(0.37, 0.53, 50.), Vec3d(5.3, -4.1, 50.), Vec3d(12.3, 9.1, 50.), Vec3d(-13.7, -12.2, 50.) })
+        REQUIRE(section_hit(face_tree, p, -Vec3d::UnitZ()));
+    // Off the part: nothing.
+    REQUIRE(!section_hit(face_tree, Vec3d(20.3, 0.4, 50.), -Vec3d::UnitZ()));
+    // The sheet's own sample mesh stops at its grid, so the old pick target missed out there.
+    const indexed_triangle_set grid_section = cut_surface_section(sheet.sample_sheet(CurvedCutSheet::DefaultSamples), CutSolidTest(plane_cube()), 1.0);
+    const AABBMesh             grid_tree(grid_section);
+    REQUIRE(!section_hit(grid_tree, Vec3d(12.3, 9.1, 50.), -Vec3d::UnitZ()));
+
+    // With a kerf the lower half's face sits half the thickness below the sheet.
+    indexed_triangle_set lower_kerf;
+    REQUIRE(curved_cut_split(cube, sheet, nullptr, &lower_kerf, CurvedCutSheet::CutSamples, 1.0));
+    const indexed_triangle_set face_kerf = curved_cut_face_of(lower_kerf, sheet, -0.5);
+    REQUIRE(!face_kerf.empty());
+    REQUIRE(section_hit(AABBMesh(face_kerf), Vec3d(12.3, 9.1, 50.), -Vec3d::UnitZ()));
 }
