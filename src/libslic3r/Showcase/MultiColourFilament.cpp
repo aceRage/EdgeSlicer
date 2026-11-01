@@ -385,6 +385,60 @@ std::array<int, MAX_COLOURS> quantize_percent(const std::array<float, MAX_COLOUR
     return q;
 }
 
+float gradient_dwell_mm(double stored)
+{
+    if (!std::isfinite(stored) || stored < 0.)
+        return GRADIENT_DWELL_MM_DEFAULT;
+    return float(std::min(stored, double(GRADIENT_LENGTH_MM_MAX)));
+}
+
+float gradient_transition_mm(double stored)
+{
+    if (!std::isfinite(stored) || stored < 0.)
+        return GRADIENT_TRANSITION_MM_DEFAULT;
+    return float(std::min(stored, double(GRADIENT_LENGTH_MM_MAX)));
+}
+
+float Filament::gradient_cycle_mm() const
+{
+    return float(std::max(gradient_stops, 1)) * std::max(dwell_mm + transition_mm, 1.f);
+}
+
+float Filament::gradient_dwell_fraction() const
+{
+    const float run = dwell_mm + transition_mm;
+    return run < 1.f ? 0.f : std::clamp(dwell_mm / run, 0.f, 1.f);
+}
+
+RGB Filament::gradient_colour(float filament_length_m) const
+{
+    if (!is_gradient())
+        return colour[0];
+    const float t   = wrap_turns(filament_length_m * 1000.f / gradient_cycle_mm()) * float(gradient_stops);
+    const int   i   = std::min(int(std::floor(t)), gradient_stops - 1);
+    const float r   = t - float(i);                        // 0..1 through this stop's dwell + transition
+    const float dwell = gradient_dwell_fraction();
+    if (r < dwell)
+        return gradient[size_t(i)];
+    return mix(gradient[size_t(i)], gradient[size_t((i + 1) % gradient_stops)], (r - dwell) / (1.f - dwell));
+}
+
+std::vector<RGB> resample_cyclic_palette(const std::vector<RGB> &palette, int count)
+{
+    std::vector<RGB> out;
+    if (palette.empty() || count < 1)
+        return out;
+    const size_t n = palette.size();
+    if (n == size_t(count))
+        return palette;
+    for (int k = 0; k < count; ++k) {
+        const double pos = double(k) * double(n) / double(count);
+        const size_t i   = std::min(size_t(std::floor(pos)), n - 1);
+        out.push_back(mix(palette[i], palette[(i + 1) % n], float(pos - double(i))));
+    }
+    return out;
+}
+
 Filament from_config(const ConfigBase &config, size_t slot)
 {
     Filament f;
@@ -394,11 +448,16 @@ Filament from_config(const ConfigBase &config, size_t slot)
         have_primary = parse_hex(*c, primary);
 
     std::vector<RGB> colours;
+    std::vector<RGB> palette;   // every colour (up to 16), for a gradient; colours keeps the first MAX_COLOURS
     if (const std::string *multi = string_at(config, "filament_multi_colors", slot); multi != nullptr && !multi->empty())
         for (const std::string &part : split_bar(*multi)) {
             RGB c;
-            if (parse_hex(part, c) && int(colours.size()) < MAX_COLOURS)
+            if (!parse_hex(part, c))
+                continue;
+            if (int(colours.size()) < MAX_COLOURS)
                 colours.push_back(c);
+            if (palette.size() < 16)
+                palette.push_back(c);
         }
 
     int mode = 0;
@@ -414,6 +473,26 @@ Filament from_config(const ConfigBase &config, size_t slot)
         f.n = int(colours.size());
         for (int i = 0; i < f.n; ++i)
             f.colour[i] = srgb_to_linear(colours[i]);
+    }
+
+    if (mode == 1 && palette.size() >= 2) {
+        // A gradient (P6): the palette runs along the length. Split data stays n = 1 as before.
+        std::vector<RGB> linear;
+        for (const RGB &c : palette)
+            linear.push_back(srgb_to_linear(c));
+        const std::vector<RGB> stops = resample_cyclic_palette(linear, std::min<int>(int(linear.size()), GRADIENT_MAX_STOPS));
+        f.gradient_stops = int(stops.size());
+        for (size_t i = 0; i < stops.size(); ++i)
+            f.gradient[i] = stops[i];
+        double dwell = -1., transition = -1.;   // negative = the default
+        if (const auto *c = dynamic_cast<const ConfigOptionFloats*>(config.option("filament_gradient_dwell"));
+            c != nullptr && slot < c->values.size())
+            dwell = c->values[slot];
+        if (const auto *c = dynamic_cast<const ConfigOptionFloats*>(config.option("filament_gradient_transition"));
+            c != nullptr && slot < c->values.size())
+            transition = c->values[slot];
+        f.dwell_mm      = gradient_dwell_mm(dwell);
+        f.transition_mm = gradient_transition_mm(transition);
     }
 
     const std::string *split = string_at(config, "filament_colour_split", slot);

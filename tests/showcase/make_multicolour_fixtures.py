@@ -8,17 +8,31 @@ objects are replaced by the shape, slot 1 becomes a dual-colour red/yellow silk,
 the photos they are compared with are in tests/p0_multicolour_cc1 (the owner's CC1 prints).
 
     python -I make_multicolour_fixtures.py <template.3mf> <out dir> [--angle DEG] [--colors "#RRGGBB|#RRGGBB"]
+                                           [--source toolpaths|model] [--dark] [--glow] [--lights-off [AMBIENT]]
+                                           [--source toolpaths|model] [--dark] [--gradient] [--dwell MM] [--transition MM]
 
 Writes <out dir>/<shape>_<view>.3mf and lists them on stdout, one per line.
 
 --angle is the slot's rotation (filament_colour_angle, D3: where the middle of colour 1 faces,
 anticlockwise from the printer's front seen from above). The default, -45, puts the boundary at the
 front-right corner, as on the P0 cube (front face red, right face yellow); set it from the pen mark.
+
+--source is the scene's source: "toolpaths" (P3, the default) or "model" (P4, Showcase mesh mode: the
+coextruded look without a slice). --dark uses the dark studio backdrop and floor instead of Studio white.
+
+--glow (glow-in-the-dark, G1) sets slot 1 to glow (filament_glow = 1, the default vibrant glow colour,
+filament_glow_intensity 100). --lights-off puts the scene's lights out (materials.lights_off), leaving AMBIENT
+(default 0.05) of the light to the filaments, the floor and the backdrop.
+--gradient (P6) makes slot 1 a gradient filament instead (filament_colour_mode 1): the five colours of
+Snapmaker's "Pastel Rainbow" unless --colors is given: each colour holds for --dwell mm of filament and
+blends to the next over --transition mm (defaults 7000 and 1000, the real-spool defaults; small shapes
+use only a metre or so of filament, so pass e.g. --dwell 100 --transition 40 to see the bands on them).
 """
 import argparse
 import json
 import math
 import os
+import re
 import sys
 import zipfile
 
@@ -59,6 +73,23 @@ def cylinder(r, h, segments=180):
     return v, t
 
 
+BUNNY_3MF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "resources", "handy_models",
+                         "Stanford_Bunny.3mf")
+
+
+def bunny(scale=0.5):
+    """The Stanford bunny from resources/handy_models, scaled (60 mm long at 0.5), z from 0, centred."""
+    with zipfile.ZipFile(BUNNY_3MF) as z:
+        text = z.read("3D/3dmodel.model").decode("utf-8")
+    v = [(float(x) * scale, float(y) * scale, float(zz) * scale)
+         for x, y, zz in re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"', text)]
+    t = [(int(a), int(b), int(c)) for a, b, c in re.findall(r'<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"', text)]
+    cx = (min(p[0] for p in v) + max(p[0] for p in v)) / 2.0
+    cy = (min(p[1] for p in v) + max(p[1] for p in v)) / 2.0
+    z0 = min(p[2] for p in v)
+    return [(p[0] - cx, p[1] - cy, p[2] - z0) for p in v], t
+
+
 # ---- the shapes of the P0 print (tests/p0_multicolour_cc1/NOTES.md) and their settings ----
 
 SHAPES = {
@@ -73,6 +104,9 @@ SHAPES = {
     "vase30": (lambda: cylinder(15.0, 40.0), {"spiral_mode": "1", "wall_loops": "1", "top_shell_layers": "0",
                                                "top_shell_thickness": "0", "sparse_infill_density": "0%",
                                                "enable_support": "0"}),
+    # The owner's #783 hand test: curved tops are stacked walls in the toolpaths, not skin stripes.
+    # Red / green / blue tri-colour. Supports off: the stills compare the bunny's own surfaces.
+    "bunny": (bunny, {"enable_support": "0"}, "#D7261E|#2BA84A|#1F5FD1"),
 }
 
 # Views: three-quarter (Showcase's own default framing), straight down, and from the back left.
@@ -82,6 +116,7 @@ VIEWS = {
     "plaque_monotonic_0": ["top", "threequarter"],
     "plaque_rectilinear_45": ["top", "threequarter"],
     "vase30": ["threequarter", "top", "backleft"],
+    "bunny": ["threequarter", "backleft"],
 }
 FRAME_HEIGHT = 1080
 
@@ -176,6 +211,13 @@ def main(argv):
     ap.add_argument("--angle", type=float, default=-45.0)
     ap.add_argument("--colors", default="#D7261E|#F5BE1B")
     ap.add_argument("--twist", type=float, default=0.0)
+    ap.add_argument("--source", choices=["toolpaths", "model"], default="toolpaths")
+    ap.add_argument("--dark", action="store_true")
+    ap.add_argument("--glow", action="store_true")
+    ap.add_argument("--lights-off", nargs="?", const=0.05, type=float, default=None)
+    ap.add_argument("--gradient", action="store_true")
+    ap.add_argument("--dwell", type=float, default=7000.0)
+    ap.add_argument("--transition", type=float, default=1000.0)
     a = ap.parse_args(argv[1:])
 
     with zipfile.ZipFile(a.template) as z:
@@ -183,9 +225,12 @@ def main(argv):
     base_settings = json.loads(template[SETTINGS_ENTRY].decode("utf-8"))
     os.makedirs(a.out, exist_ok=True)
     cx, cy = bed_centre(base_settings)
-    first = a.colors.split("|")[0]
 
-    for shape, (make_mesh, overrides) in SHAPES.items():
+    for shape, entry in SHAPES.items():
+        make_mesh, overrides = entry[0], entry[1]
+        colors = entry[2] if len(entry) > 2 else a.colors
+        if a.gradient:
+            colors = a.colors if a.colors != "#D7261E|#F5BE1B" else "#64C5D9|#8CB1DF|#CB95D0|#D7BFAA|#C6D4C0"
         mesh = make_mesh()
         xs = [p[0] for p in mesh[0]]
         zs = [p[2] for p in mesh[0]]
@@ -201,20 +246,34 @@ def main(argv):
             keys = [k for k in diffs[0].split(";") if k]
             keys += [k for k in overrides if k not in keys]
             diffs[0] = ";".join(sorted(keys))
-        set_slot0(settings, "filament_colour", first)
-        set_slot0(settings, "filament_multi_colors", a.colors)
-        set_slot0(settings, "filament_colour_mode", "0")
+        set_slot0(settings, "filament_colour", colors.split("|")[0])
+        set_slot0(settings, "filament_multi_colors", colors)
+        set_slot0(settings, "filament_colour_mode", "1" if a.gradient else "0")
+        if a.gradient:
+            set_slot0(settings, "filament_gradient_dwell", "%g" % a.dwell)
+            set_slot0(settings, "filament_gradient_transition", "%g" % a.transition)
         set_slot0(settings, "filament_colour_split", "")
         set_slot0(settings, "filament_colour_angle", ("%g" % a.angle))
         set_slot0(settings, "filament_colour_twist", ("%g" % a.twist))
+        if a.glow:
+            set_slot0(settings, "filament_glow", "1")
+            set_slot0(settings, "filament_glow_colour", "")
+            settings["filament_glow_intensity"] = "100"
         for view in VIEWS[shape]:
             name = "%s_%s" % (shape, view)
-            scene = {"id": "plate1", "name": "P3 multi-colour: " + name, "plate_index": 0, "source": "toolpaths",
+            scene = {"id": "plate1", "name": ("P6 gradient" if a.gradient else "P3" if a.source == "toolpaths" else "P4") + " multi-colour: " + name, "plate_index": 0, "source": a.source,
                      "preset_base": "studio_white", "view_frame_height": FRAME_HEIGHT,
                      "background": {"type": "radial_gradient", "color1": "#FFFFFF", "color2": "#D9DCE1"},
                      "floor": {"type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.45},
                      "materials": {"filaments": [{"slot": 1, "finish": "silk"}]},
                      "export": {"width": 1920, "height": 1080, "quality": "high", "format": "png"}}
+            if a.lights_off is not None:
+                scene["materials"]["lights_off"] = True
+                scene["materials"]["lights_off_ambient"] = a.lights_off
+            if a.dark:
+                scene["preset_base"] = "dark_gradient"
+                scene["background"] = {"type": "vertical_gradient", "color1": "#3A3D42", "color2": "#0B0C0E"}
+                scene["floor"] = {"type": "shadow_catcher", "color": "#1A1B1E", "shadow_strength": 0.6}
             cam = camera(view, (cx, cy), extent, height)
             if cam is not None:
                 scene["camera"] = cam

@@ -11,6 +11,7 @@
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "IMSlider.hpp"
 #include "GLModel.hpp"
 #include "I18N.hpp"
@@ -311,6 +312,37 @@ private:
     unsigned int m_showcase_mc_program = 0;
     bool         m_showcase_mc_failed  = false;
     // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
+    // Multi-colour P5 (tests/design_multicolour_filament_view.md 7.4): the Preview toggle "Show
+    // coextruded colours", kept in the app config ("preview_multicolour"), on by default (a saved untick keeps it off). It colours
+    // the Tool and Color Print views' toolpaths by the split slots' make-up, through the same shader
+    // functions as Showcase. The slot table is rebuilt only when the project's values change.
+    bool                      m_preview_multicolour = true;
+    bool                      m_preview_multicolour_read = false;
+    bool                      m_preview_mc_volume = false;     // the extruded-volume buffer is ours (twist)
+    std::string               m_preview_mc_signature;
+    std::vector<float>        m_preview_mc_diameters;
+    MultiColour::UniformTable m_preview_mc_table;
+    bool                      m_preview_mc_has_split = false;  // a slot the G-code uses is a split one
+    bool                      m_preview_mc_has_twist = false;
+    bool preview_multicolour_enabled();
+    void refresh_preview_multicolour_table();
+    void apply_preview_multicolour();
+    bool preview_multicolour_view() const;
+    // Glow in the dark G1 (tests/design_multicolour_filament_view.md section 10): the legend's "Lights off
+    // (glow)" toggle, shown in the Tool view when a slot the G-code uses glows. Session only, off by default.
+    // Preview has no shader of its own for it: the tool colours (and the split slots' table) are swapped
+    // for their lights-off versions on the CPU and put back when the toggle goes off.
+    bool                      m_preview_lights_off = false;
+    bool                      m_preview_lights_applied = false;     // m_preview_saved_tool_colors is the palette to put back
+    std::string               m_preview_lights_key;                 // what the applied colours were made from
+    libvgcode::Palette        m_preview_saved_tool_colors;
+    std::string               m_preview_glow_signature;
+    std::vector<Glow::Slot>   m_preview_glow_slots;
+    float                     m_preview_glow_intensity = 1.f;
+    bool                      m_preview_has_glow = false;           // a slot the G-code uses glows
+    bool preview_glow_view() const;
+    void refresh_preview_glow();
+    void apply_preview_lights_off();
 
 public:
     GCodeViewer();
@@ -435,6 +467,15 @@ public:
     void set_view_type(libvgcode::EViewType type) {
         m_viewer.set_view_type(type);
     }
+    // Multi-colour P5: the benchmark behind EDGESLICER_PREVIEW_MC_BENCH (GLCanvas3D::bench_preview_multicolour)
+    // turns the toggle and the Tool view on or off without touching the app config.
+    void bench_preview_multicolour(bool on) {
+        m_viewer.set_view_type(libvgcode::EViewType::Tool);
+        m_preview_multicolour_read = true;
+        m_preview_multicolour      = on;
+    }
+    size_t bench_vertices_count() const { return m_viewer.get_vertices_count(); }
+    bool   bench_multicolour_active() const { return m_viewer.is_multicolour_preview_active(); }
     // ORCA (#15769): select a view type in the preview combo box and apply it
     void select_view_type(libvgcode::EViewType type);
     // ORCA: apply the "preview_default_view_type" preference, see the definition for the supported values

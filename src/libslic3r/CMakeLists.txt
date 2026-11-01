@@ -102,6 +102,8 @@ set(lisbslic3r_sources
     FlexiJoint.hpp
     PushFit.cpp
     PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
@@ -119,6 +121,8 @@ set(lisbslic3r_sources
     Showcase/MultiColourFilament.hpp
     Showcase/MultiColourGlsl.cpp
     Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
     Showcase/ShowcaseTone.cpp
     Showcase/ShowcaseTone.hpp
     Showcase/ShowcaseWebP.cpp
@@ -169,6 +173,10 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
+    HeightPatternInput.cpp
+    HeightPatternInput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -236,6 +244,16 @@ set(lisbslic3r_sources
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp
     FillBedPack.hpp
+    Airbrush/AirbrushBake.cpp
+    Airbrush/AirbrushBake.hpp
+    Airbrush/AirbrushField.cpp
+    Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
+    Airbrush/AirbrushSession.cpp
+    Airbrush/AirbrushSession.hpp
+    Airbrush/BlueNoise.cpp
+    Airbrush/BlueNoise.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp

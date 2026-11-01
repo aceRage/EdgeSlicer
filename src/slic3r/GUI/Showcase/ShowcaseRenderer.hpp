@@ -25,6 +25,7 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/RealisticRenderSettings.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
@@ -38,6 +39,9 @@
 class wxMouseEvent;
 
 namespace Slic3r {
+
+class ModelVolume;
+
 namespace GUI {
 
 struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differently (LNK2001)
@@ -224,6 +228,8 @@ private:
     // 1a: whether this frame can use the HDR layer and the post pass (the shaders are there, and
     // EDGESLICER_SHOWCASE_NO_HDR is not set).
     bool            want_hdr() const;
+    // The export's path in one line for the log: HDR with its post pass, or the fallback and why.
+    static std::string export_path_line(bool hdr_drawn, bool has_hdr_layer, bool multisampled, bool wanted, bool refused);
     // 1a: tone-maps fb's HDR layer over the bound single-sampled scene buffer (per sample when fb is
     // multisampled).
     void            draw_post(const ShowcaseFramebuffers &fb);
@@ -250,9 +256,17 @@ private:
         bool                   skin = false;
         Showcase::SkinSettings skin_top;
         Showcase::SkinSettings skin_bottom;
+        // Multi-colour P4: the skin's line spacing and the wall direction (mesh mode), and the
+        // object's solid volume per mm of height (its twist's stand-in for the filament length).
+        MultiColour::MeshSkin  mc_skin;
+        float                  volume_per_mm = 0.f;
     };
     const LayerInfo *layers_for(int object_idx);
     void            release_layers();
+    // Multi-colour P4: the volume's mesh with per-corner smooth normals (faces under 30 degrees apart
+    // share them), so a coextruded colour follows a curved surface instead of each triangle. Cached
+    // with the layers; null for an empty mesh.
+    GLModel        *mc_smooth_model(const ModelVolume &mv);
     // The scene's environment as a cube map; null when there is none (no manifest, no file).
     const Showcase::EnvironmentInfo *ensure_environment();
     bool            ensure_floor_texture(float &tile_mm, float &roughness);
@@ -282,6 +296,8 @@ private:
     // S2
     std::map<int, LayerInfo>   m_layers;
     bool                       m_layers_valid = false;
+    // P4: mc_smooth_model()'s cache, by (ModelVolume id, its mesh).
+    std::map<std::pair<size_t, const void *>, std::shared_ptr<GLModel>> m_mc_smooth;
     unsigned int               m_env_texture = 0;
     // 1b: a black 1x1 cube on the toolpaths' environment unit when the scene has no environment
     // (libvgcode's program keeps a samplerCube there; macOS wants a complete texture on it).
@@ -326,6 +342,8 @@ private:
 
     // S4
     bool                       m_batch = false;
+    // A video logs its export path once, on its first frame (render_export).
+    bool                       m_batch_path_logged = false;
     std::unique_ptr<ShowcaseFramebuffers> m_batch_fb;
     // 1a: the live view's off-screen buffers (the window's size and sample count), and the size
     // they could not be made at (not retried every frame).
