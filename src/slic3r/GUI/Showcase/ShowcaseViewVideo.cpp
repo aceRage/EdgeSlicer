@@ -343,14 +343,31 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
         m_vid_key_update->SetToolTip(_L("Sets the selected keyframe to the view as it is now."));
         m_vid_key_goto   = new wxButton(m_side, wxID_ANY, _L("Go to"));
         m_vid_key_delete = new wxButton(m_side, wxID_ANY, _L("Delete"));
+        auto *spacer = new wxStaticText(m_side, wxID_ANY, "");
+        grid->Add(spacer);
+        m_vid_key_rows.push_back(spacer);
+#ifdef __WXOSX__
+        // macOS: two buttons a line, a full em apart, as the path file's row below (its rounded push
+        // buttons draw past their frames, and four side by side are wider than the value column).
+        for (wxButton *b : { m_vid_key_add, m_vid_key_update, m_vid_key_goto, m_vid_key_delete })
+            b->SetMinSize(b->GetBestSize());
+        buttons->Add(m_vid_key_add, 0, wxRIGHT, em);
+        buttons->Add(m_vid_key_update, 0);
+        grid->Add(buttons);
+        auto *second = new wxBoxSizer(wxHORIZONTAL);
+        second->Add(m_vid_key_goto, 0, wxRIGHT, em);
+        second->Add(m_vid_key_delete, 0);
+        auto *spacer2 = new wxStaticText(m_side, wxID_ANY, "");
+        grid->Add(spacer2);
+        grid->Add(second, 0, wxTOP, em / 4);
+        m_vid_key_rows.push_back(spacer2);
+#else
         buttons->Add(m_vid_key_add, 0, wxRIGHT, em / 2);
         buttons->Add(m_vid_key_update, 0, wxRIGHT, em / 2);
         buttons->Add(m_vid_key_goto, 0, wxRIGHT, em / 2);
         buttons->Add(m_vid_key_delete, 0);
-        auto *spacer = new wxStaticText(m_side, wxID_ANY, "");
-        grid->Add(spacer);
         grid->Add(buttons);
-        m_vid_key_rows.push_back(spacer);
+#endif
         for (wxWindow *w : std::initializer_list<wxWindow *>{ m_vid_key_add, m_vid_key_update, m_vid_key_goto, m_vid_key_delete })
             m_vid_key_rows.push_back(w);
     }
@@ -367,12 +384,26 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
                                          "--showcase-render."));
         m_vid_path_clear = new wxButton(m_side, wxID_ANY, _L("Clear timeline"));
         m_vid_path_clear->SetToolTip(_L("Removes the imported path's timed changes; the keyframes stay."));
+        auto *l = new wxStaticText(m_side, wxID_ANY, _L("Path file"));
+        grid->Add(l, 0, wxALIGN_CENTER_VERTICAL);
+#ifdef __WXOSX__
+        // macOS: the three buttons overlapped in the panel's value column - its rounded push buttons
+        // draw their bezel past the frame wx lays out, and the three side by side were wider than the
+        // column at the default panel width. Import and Export share the row, a full em apart;
+        // "Clear timeline" goes on the next line, under them. Each keeps at least its own best size.
+        for (wxButton *b : { m_vid_path_import, m_vid_path_export, m_vid_path_clear })
+            b->SetMinSize(b->GetBestSize());
+        buttons->Add(m_vid_path_import, 0, wxRIGHT, em);
+        buttons->Add(m_vid_path_export, 0);
+        grid->Add(buttons);
+        grid->AddSpacer(0);
+        grid->Add(m_vid_path_clear, 0, wxTOP, em / 4);
+#else
         buttons->Add(m_vid_path_import, 0, wxRIGHT, em / 2);
         buttons->Add(m_vid_path_export, 0, wxRIGHT, em / 2);
         buttons->Add(m_vid_path_clear, 0);
-        auto *l = new wxStaticText(m_side, wxID_ANY, _L("Path file"));
-        grid->Add(l, 0, wxALIGN_CENTER_VERTICAL);
         grid->Add(buttons);
+#endif
         m_vid_path_info = new wxStaticText(m_side, wxID_ANY, "");
         grid->AddSpacer(0);
         grid->Add(m_vid_path_info, 1, wxEXPAND);

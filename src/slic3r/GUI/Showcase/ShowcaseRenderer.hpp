@@ -233,6 +233,8 @@ private:
     // 1h-1 (the Mac check asked for it in 1a): says at warning level, once per change, whether `where`
     // ("live view" or "export") draws with the HDR objects layer + post pass or falls back, and why.
     void            note_hdr_choice(const char *where, bool hdr, const std::string &why);
+    // The export's path in one line for the log: HDR with its post pass, or the fallback and why.
+    static std::string export_path_line(bool hdr_drawn, bool has_hdr_layer, bool multisampled, bool wanted, bool refused);
     // 1a: tone-maps fb's HDR layer over the bound single-sampled scene buffer (per sample when fb is
     // multisampled).
     void            draw_post(const ShowcaseFramebuffers &fb);
@@ -361,6 +363,8 @@ private:
 
     // S4
     bool                       m_batch = false;
+    // A video logs its export path once, on its first frame (render_export).
+    bool                       m_batch_path_logged = false;
     std::unique_ptr<ShowcaseFramebuffers> m_batch_fb;
     // 1a: the live view's off-screen buffers (the window's size and sample count), and the size
     // they could not be made at (not retried every frame).
