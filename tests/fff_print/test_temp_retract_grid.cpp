@@ -648,13 +648,15 @@ TEST_CASE("Raft layers hold first-layer temp; band 0 starts at object layer 2", 
             object_z_before_band0.insert(current_z);
     }
     REQUIRE(found_band0);
-    REQUIRE(object_z_before_band0.size() == 1);
+    // Column markers also appear on the 2 raft layers (support is printed per column object);
+    // those keep the first-layer temperature too. The top Z is the object's first layer.
+    REQUIRE(object_z_before_band0.size() == 3);
     CHECK(last_temp.find("S210") != std::string::npos);
 
     const auto bands = parse_band_events(g);
     REQUIRE_FALSE(bands.empty());
     CHECK(bands[0].temp == 230);
-    const double first_object_z = *object_z_before_band0.begin();
+    const double first_object_z = *object_z_before_band0.rbegin();
     // Band 1 is ~9 mm up the object, not 9 mm including the raft.
     if (bands.size() >= 2)
         CHECK(bands[1].z - first_object_z == Approx(stringing_grid_base_height + params.band_height - 0.2).margin(0.4));

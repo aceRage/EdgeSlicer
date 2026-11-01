@@ -1120,8 +1120,9 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
     }
     const int cols     = stringing_grid_column_count(params);
     const int max_cols = std::min(17, stringing_grid_max_columns(bed_width));
-    if (cols < 2 || cols > 17)
-        return fail("Column count must be between 2 and 17");
+    if (cols < 2)
+        return fail("Column count must be at least 2");
+    // Over 17 columns, or more than fit the bed, both report the max so the dialog can show it.
     if (cols > max_cols) {
         std::ostringstream os;
         os << "Grid does not fit the bed (max " << max_cols << " columns at 12 mm pitch)";
