@@ -26,8 +26,14 @@ namespace GUI {
 class PrintHostDevicesDialog : public DPIDialog
 {
 public:
-    PrintHostDevicesDialog(wxWindow* parent, DynamicPrintConfig* config, const std::string& model_key, const wxString& model_label);
+    // allow_preset_switch: the Creality search may offer to select the found printer's own preset
+    // (only when nothing else is editing the current preset, i.e. not opened from the host editor).
+    PrintHostDevicesDialog(wxWindow* parent, DynamicPrintConfig* config, const std::string& model_key, const wxString& model_label,
+                           bool allow_preset_switch = false);
     ~PrintHostDevicesDialog() override = default;
+
+    // The printer preset to select once this dialog has closed, "" for none.
+    const std::string& preset_to_select() const { return m_preset_to_select; }
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
@@ -46,6 +52,8 @@ private:
     // The old single-address editor (PhysicalPrinterDialog), behind an explicit click. Nothing
     // else opens it any more: the sidebar's connection icon lands on this list instead.
     void on_edit_connection();
+    // Creality K-series: search the LAN and add the printer picked (CrealityDiscoveryDialog).
+    void on_find();
     void update_buttons();
     // The device the row is on, false when nothing is selected.
     bool selected(PrintHostDevices::Device& out) const;
@@ -54,9 +62,12 @@ private:
     std::string                             m_model_key;
     std::vector<PrintHostDevices::Device>   m_devices;
     std::string                             m_last_used;
+    bool                                    m_allow_preset_switch { false };
+    std::string                             m_preset_to_select;
 
     wxDataViewListCtrl* m_list { nullptr };
     Button*             m_btn_add { nullptr };
+    Button*             m_btn_find { nullptr };
     Button*             m_btn_edit { nullptr };
     Button*             m_btn_remove { nullptr };
     Button*             m_btn_test { nullptr };

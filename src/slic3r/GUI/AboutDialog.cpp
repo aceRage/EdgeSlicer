@@ -128,6 +128,12 @@ void CopyrightsDialog::fill_entries()
         { "Real-Time DXT1/DXT5 C compression library",      "",      "https://github.com/Cyan4973/RygsDXTc" },
         { "SemVer",                                         "",      "https://semver.org" },
         { "Shinyprofiler",                                  "",      "https://code.google.com/p/shinyprofiler" },
+#ifdef SLIC3R_CAD
+        // libslvs, the sketch constraint solver of the Design tab, linked statically only when the
+        // build has SLIC3R_CAD on. GPL-3.0 (compatible with EdgeSlicer's AGPL-3.0, section 13);
+        // notice in resources/licenses/SolveSpace-libslvs-NOTICE.txt.
+        { "SolveSpace (libslvs, GPL-3.0)",                  "",      "https://solvespace.com" },
+#endif
         { "SuperSlicer",                                    "",      "https://github.com/supermerill/SuperSlicer" },
         { "TBB",                                            "",      "https://www.intel.cn/content/www/cn/zh/developer/tools/oneapi/onetbb.html" },
         { "wxWidgets",                                      "",      "https://www.wxwidgets.org" },

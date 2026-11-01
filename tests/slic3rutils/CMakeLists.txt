@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
+    creality_discovery_tests.cpp
     qidi_send_policy_tests.cpp
     slot_send_policy_tests.cpp
     printhost_error_tests.cpp
@@ -19,6 +20,7 @@ add_executable(${_TEST_NAME}_tests
     hub_quit_tests.cpp
     web_load_retry_tests.cpp
     webview2_args_tests.cpp
+    webview2_userdata_tests.cpp
     device_page_load_tests.cpp
     flutter_web_bundle_tests.cpp
     home_tab_tests.cpp
@@ -91,6 +93,7 @@ add_executable(${_TEST_NAME}_tests
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
+    change_opt_value_tests.cpp
     app_update_check_tests.cpp
     bambu_studio_launcher_tests.cpp
     bambu_connect_tests.cpp

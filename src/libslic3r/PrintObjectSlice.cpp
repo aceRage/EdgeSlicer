@@ -18,6 +18,7 @@
 #include "FDMHollowing.hpp"
 #include "MixedFilament.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 #include "Print.hpp"
 #include "SVG.hpp"
 //BBS
@@ -5365,6 +5366,30 @@ void PrintObject::slice_volumes()
                 L("An object's XY size compensation will not be used because it is also color-painted.\nXY Size "
                   "compensation cannot be combined with color-painting."));
             BOOST_LOG_TRIVIAL(info) << "xy compensation will not work for object " << this->model_object()->name << " for multi filament.";
+        }
+
+        // Airbrush P3 (item B): the grain was chosen for a nozzle (the "Printer Nozzle Diameter" in
+        // the painting panel, or the printer selected then). Slicing always uses the real nozzle;
+        // when an airbrushed part's grain is finer than it prints cleanly, say so (never blocks).
+        {
+            const double nozzle = mm_segmentation_finest_nozzle(*this);
+            for (const ModelVolume *mv : volumes) {
+                if (!mv->is_model_part() || !mv->airbrush_field || mv->mmu_segmentation_facets.empty())
+                    continue;
+                Airbrush::AirbrushBakeParams bp;
+                if (!Airbrush::AirbrushBakeParams::from_string(mv->airbrush_field->bake_params(), bp))
+                    continue;
+                if (nozzle > 0. && Airbrush::airbrush_grain_below_floor(bp.grain_mm, float(nozzle))) {
+                    const Airbrush::AirbrushFloors f = Airbrush::airbrush_floors_for_nozzle(float(nozzle));
+                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                        Slic3r::format(_u8L("Object %1%: part \"%2%\" is airbrushed with a %3% mm grain, finer than the %4% mm nozzle "
+                                            "prints cleanly on walls (about %5% mm). Some specks will merge or disappear."),
+                                       this->model_object()->name, mv->name, std::round(bp.grain_mm * 100.f) / 100.f,
+                                       std::round(nozzle * 100.) / 100., std::round(f.wall_mm * 100.f) / 100.f),
+                        PrintStateBase::SlicingAirbrushGrainBelowNozzle);
+                    break;
+                }
+            }
         }
 
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";
