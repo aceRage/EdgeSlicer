@@ -53,7 +53,7 @@ DynamicPrintConfig grid_print_config()
                                    {"sparse_infill_density", "0"},
                                    {"skirt_loops", "0"},
                                    {"brim_type", "no_brim"},
-                                   {"print_sequence", "by_layer"},
+                                   {"print_sequence", "by layer"},
                                    {"enable_prime_tower", "0"},
                                    {"use_firmware_retraction", "0"},
                                    {"use_relative_e_distances", "1"},
