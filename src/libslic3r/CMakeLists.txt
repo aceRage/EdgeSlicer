@@ -246,6 +246,16 @@ set(lisbslic3r_sources
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp
     FillBedPack.hpp
+    Airbrush/AirbrushBake.cpp
+    Airbrush/AirbrushBake.hpp
+    Airbrush/AirbrushField.cpp
+    Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
+    Airbrush/AirbrushSession.cpp
+    Airbrush/AirbrushSession.hpp
+    Airbrush/BlueNoise.cpp
+    Airbrush/BlueNoise.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp

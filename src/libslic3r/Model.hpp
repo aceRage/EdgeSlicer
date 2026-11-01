@@ -28,6 +28,7 @@
 #include "CostPricing.hpp"
 #include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
+#include "Airbrush/AirbrushField.hpp"
 #include "TextureDisplacement.hpp"
 
 //BBS: add bbs 3mf
@@ -1109,6 +1110,8 @@ public:
 
     // Remap painting data from previous saved source to this mesh
     void restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, bool keep_existing_paint = false);
+    // Airbrush P3 (A4): the map from a saved painting's field space into this volume's mesh space.
+    Transform3d airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const;
 
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
@@ -1129,6 +1132,12 @@ public:
     // (fillet, chamfer, shell, "Convert to CAD body") produced or sourced one. Only trusted while
     // the mesh still matches its fingerprint: use BRep::attached_cad_body(), not this directly.
     std::shared_ptr<const BRep::CadBody> cad_body;
+
+    // Airbrush (Airbrush/AirbrushField.hpp): the colour field this volume's MMU paint is baked
+    // from, or null. Immutable and shared like cad_body; a change replaces the pointer. Written to
+    // the 3MF as Metadata/airbrush/field_<n>.bin, never in a Bambu-compatible export, and carried
+    // through the undo stack as its blob.
+    std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
 
     // A parent object owning this modifier volume.
     ModelObject*        get_object() const { return this->object; }
@@ -1367,7 +1376,7 @@ private:
         texture_displacement_options(other.texture_displacement_options),
         texture_uv(other.texture_uv),
         cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
-        cad_body(other.cad_body)
+        cad_body(other.cad_body), airbrush_field(other.airbrush_field)
     {
 		assert(this->id().valid());
         assert(this->config.id().valid());
@@ -1390,7 +1399,11 @@ private:
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
         name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
-        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
+        // D15: the field is position-keyed and survives a split or cut; its bake record (facet indices
+        // of the old mesh) is stale now, so airbrush_bake() refuses it until
+        // airbrush_rebake_after_mesh_edit() has run on the new mesh.
+        airbrush_field(other.airbrush_field)
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
@@ -1475,6 +1488,14 @@ private:
             ar(cad_body);
         else
             cad_body.reset();
+        bool has_airbrush = false;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            std::string blob;
+            ar(blob);
+            airbrush_field = Airbrush::AirbrushField::from_blob(blob);
+        } else
+            airbrush_field.reset();
 		assert(m_mesh);
 		if (has_convex_hull) {
 			cereal::load_optional(ar, m_convex_hull);
@@ -1503,6 +1524,12 @@ private:
         ar(has_cad_body);
         if (has_cad_body)
             ar(cad_body);
+        const bool has_airbrush = airbrush_field != nullptr;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            const std::string blob = airbrush_field->to_blob();
+            ar(blob);
+        }
 		if (has_convex_hull)
 			cereal::save_optional(ar, m_convex_hull);
 	}

@@ -190,6 +190,10 @@ const std::string IMAGE_FILL_DIR = "Metadata/image_fill/";
 // Exact CAD bodies of parts (BRep/CadBody.hpp), one blob per part, referenced from the part's
 // CAD_BODY_FILE_KEY metadata. Versions that do not know the key ignore it and the file.
 const std::string CAD_BODY_DIR = "Metadata/cad_bodies/";
+// Airbrush colour fields (Airbrush/AirbrushField.hpp): one blob per volume that has one, named by
+// the volume's AIRBRUSH_FIELD_FILE_KEY metadata. EdgeSlicer-only and never in a Bambu-compatible
+// export; the baked paint_color is the copy every other slicer reads.
+const std::string AIRBRUSH_DIR = "Metadata/airbrush/";
 const std::string IMAGE_FILL_MANIFEST_FILE = "Metadata/image_fill/manifest.json";
 const std::string PROJECT_EMBEDDED_PRINT_PRESETS_FILE = "Metadata/print_setting_";
 const std::string PROJECT_EMBEDDED_SLICE_PRESETS_FILE = "Metadata/process_settings_";
@@ -419,6 +423,7 @@ static constexpr const char* SOURCE_OFFSET_X_KEY = "source_offset_x";
 static constexpr const char* SOURCE_OFFSET_Y_KEY = "source_offset_y";
 static constexpr const char* SOURCE_OFFSET_Z_KEY = "source_offset_z";
 static constexpr const char* CAD_BODY_FILE_KEY = "cad_body_file";
+static constexpr const char* AIRBRUSH_FIELD_FILE_KEY = "airbrush_field_file";
 static constexpr const char* SOURCE_IN_INCHES    = "source_in_inches";
 static constexpr const char* SOURCE_IN_METERS    = "source_in_meters";
 
@@ -1342,6 +1347,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
         // CAD body blobs by their path in the archive, read before the volumes are generated.
         std::map<std::string, std::string> m_cad_body_files;
+        std::map<std::string, std::string> m_airbrush_files;
         // Texture displacement: every file under Metadata/texture_displacement/, by archive path. Volumes
         // are built only after the whole archive has been walked, so by the time a volume names its JSON
         // every file it could refer to is already in here, whatever order the archive happened to be in.
@@ -2219,6 +2225,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
                 else if (_is_svg_shape_file(name)) {
                     _extract_embossed_svg_shape_file(name, archive, stat);
+                }
+                else if (boost::algorithm::istarts_with(name, AIRBRUSH_DIR)) {
+                    // A volume's airbrush field; attached in _generate_volumes_new(). A 2M-cell field is
+                    // about 12 MB, so anything past 256 MB is not one of ours.
+                    if (stat.m_uncomp_size > 0 && stat.m_uncomp_size < 256ull * 1024ull * 1024ull) {
+                        std::string blob(size_t(stat.m_uncomp_size), '\0');
+                        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, blob.data(), blob.size(), 0))
+                            m_airbrush_files[name] = std::move(blob);
+                    }
                 }
                 else if (boost::algorithm::istarts_with(name, CAD_BODY_DIR)) {
                     // A part's exact CAD body; attached in _generate_volumes_new() if its mesh still matches.
@@ -6160,12 +6175,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // Apply the seam mode after all base-type metadata, regardless of XML key order.
             ModelVolumeType precise_seam_type = ModelVolumeType::INVALID;
             std::string     cad_body_file;
+            std::string     airbrush_file;
             // apply the remaining volume's metadata
             for (const Metadata& metadata : volume_data->metadata) {
                 if (metadata.key == NAME_KEY)
                     volume->name = metadata.value;
                 else if (metadata.key == CAD_BODY_FILE_KEY)
                     cad_body_file = metadata.value;
+                else if (metadata.key == AIRBRUSH_FIELD_FILE_KEY)
+                    airbrush_file = metadata.value;
                 else if (metadata.key == TEXTURE_DISPLACEMENT_KEY)
                     _apply_texture_displacement(*volume, metadata.value);
                 //else if ((metadata.key == MODIFIER_KEY) && (metadata.value == "1"))
@@ -6216,6 +6234,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                                    << "\" does not match its mesh and was dropped";
                 } else
                     BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the CAD body " << cad_body_file << " is missing from the archive";
+            }
+
+            // The airbrush field, moved with the mesh if the mesh was only moved (re-centred).
+            if (!airbrush_file.empty()) {
+                auto it = m_airbrush_files.find(airbrush_file);
+                std::shared_ptr<Airbrush::AirbrushField> field = it != m_airbrush_files.end() ? Airbrush::AirbrushField::from_blob(it->second) : nullptr;
+                if (field) {
+                    field->attach_to_mesh(volume->mesh().its);
+                    volume->airbrush_field = std::move(field);
+                } else
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the airbrush field " << airbrush_file << " of \"" << volume->name
+                                               << "\" is missing or damaged and was dropped";
             }
 
             // Unknown seam modes must remain inert modifiers, even when dormant settings are present.
@@ -7002,6 +7032,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_bambu_compat { false };
         // Names the CAD body blobs of one export uniquely.
         int  m_cad_body_count { 0 };
+        // ... and the airbrush field blobs.
+        int  m_airbrush_count { 0 };
         BambuExport::Context m_bambu_ctx;
         BambuExport::Config  m_bambu_project;
         BambuExport::Report  m_bambu_report;
@@ -9360,6 +9392,21 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                                     else
                                         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not store the CAD body of " << volume->name;
                                 }
+
+                            // stores the part's airbrush field, anchored to the mesh as written. Not in a
+                            // Bambu-compatible export: there the baked paint_color is all there is.
+                            if (!m_bambu_compat && volume->airbrush_field) {
+                                const std::string path = AIRBRUSH_DIR + "field_" + std::to_string(++m_airbrush_count) + ".bin";
+                                BoundingBoxf3     anchor;
+                                for (const stl_vertex &v : volume->mesh().its.vertices)
+                                    anchor.merge(v.cast<double>());
+                                const std::string blob = volume->airbrush_field->to_blob(&anchor);
+                                if (mz_zip_writer_add_mem(&archive, path.c_str(), blob.data(), blob.size(), MZ_DEFAULT_COMPRESSION))
+                                    stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << AIRBRUSH_FIELD_FILE_KEY << "\" " << VALUE_ATTR
+                                           << "=\"" << xml_escape(path) << "\"/>\n";
+                                else
+                                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not store the airbrush field of " << volume->name;
+                            }
 
                             // stores volume's config data
                             if (m_bambu_compat) {

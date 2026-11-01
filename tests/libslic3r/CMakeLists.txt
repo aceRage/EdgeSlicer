@@ -37,6 +37,9 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_penetration.cpp
 	test_paint_remap.cpp
 	test_spread_paint.cpp
+	test_airbrush.cpp
+	test_airbrush_p2.cpp
+	test_airbrush_p3.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_code_emboss.cpp
@@ -100,6 +103,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tac_joint_persistence.cpp
 	test_tac_joint.cpp
 	test_tac_joint_cut.cpp
+	test_cut_connector_surface.cpp
 	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
 	test_geometry.cpp

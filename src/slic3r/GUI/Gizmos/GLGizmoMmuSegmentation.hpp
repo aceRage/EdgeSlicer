@@ -69,15 +69,23 @@ class GLGizmoMmuSegmentation : public GLGizmoPainterBase
 {
 public:
     GLGizmoMmuSegmentation(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
-    ~GLGizmoMmuSegmentation() override = default;
+    ~GLGizmoMmuSegmentation() override;
 
     void render_painter_gizmo() override;
 
     void data_changed(bool is_serializing) override;
 
+    // Edge (Airbrush P2): the tool's state, defined in GLGizmoMmuSegmentationAirbrush.cpp.
+    struct AirbrushState;
+
     // Re-sync the in-memory painting session from the model after an external
     // rewrite of mmu_segmentation_facets (e.g. batch color-match apply).
     void refresh_from_model();
+
+    // Edge (Airbrush P3, A3): before an undo or redo jumps, strokes and fills still waiting for
+    // their bake are either committed (one undo step each, so the undo then removes exactly the last
+    // of them) or cancelled. Either way nothing is pending when the model is reloaded.
+    void airbrush_flush_pending(bool commit);
 
     // Keep this in sync with the shared triangle-selector state range.
     static const constexpr size_t EXTRUDERS_LIMIT = static_cast<size_t>(EnforcerBlockerType::ExtruderMax);
@@ -108,6 +116,13 @@ protected:
     bool on_is_activable() const override;
 
     wxString handle_snapshot_action_name(bool shift_down, Button button_down) const override;
+
+    // Edge (Airbrush P2, GLGizmoMmuSegmentationAirbrush.cpp)
+    bool  airbrush_owns_mouse() const override;
+    bool  on_airbrush_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool control_down) override;
+    float airbrush_cursor_radius() const override;
+    bool  on_airbrush_escape() override;
+    bool  render_airbrush_cursor(const std::vector<Transform3d> &trafos) override;
 
     std::string get_gizmo_entering_text() const override { return "Entering color painting"; }
     std::string get_gizmo_leaving_text() const override { return "Leaving color painting"; }
@@ -148,6 +163,49 @@ private:
     PainterGizmoType get_painter_type() const override;
 
     void init_model_triangle_selectors();
+    // The object list, plate, background process and filament usage after the paint changed.
+    void notify_paint_changed(ModelObject *mo);
+
+    // Edge (Airbrush P2, GLGizmoMmuSegmentationAirbrush.cpp)
+    std::unique_ptr<AirbrushState> m_airbrush;
+    AirbrushState &airbrush();
+    void airbrush_render_panel(float sliders_left_width, float sliders_width, float drag_left_width, float max_tooltip_width, float window_width);
+    void airbrush_render_overlay();
+    // The model was reloaded under the gizmo (undo/redo, another object): drop strokes waiting for a bake.
+    void airbrush_reset();
+    // The gizmo closes: finish the stroke, wait for the bakes and commit them.
+    void airbrush_finish_pending();
+    // Erase all painting also drops the fields of the object's parts.
+    void airbrush_clear_fields(ModelObject *mo);
+    void airbrush_tick();
+    bool airbrush_press(const Vec2d &mouse_position, bool erase);
+    // Edge (Airbrush P3): the Gradient and Pattern modes.
+    bool airbrush_fill_press(const Vec2d &mouse_position);
+    void airbrush_fill_drag(const Vec2d &mouse_position);
+    void airbrush_fill_release();
+    bool airbrush_apply_recipe(int part_idx, const std::string &recipe, bool reapply);
+    // The recipe the current drag would apply (mesh space of the dragged part), and its live preview.
+    std::string airbrush_drag_recipe() const;
+    void airbrush_update_preview(bool force);
+    void airbrush_clear_preview();
+    // A Pattern stroke in the brush area: one stamp of the pattern at `at` (mesh space).
+    void airbrush_stamp_pattern(const Vec3f &at);
+    void airbrush_render_fill_panel(float left, float sliders_width, float drag_left_width, float max_tooltip_width, float window_width);
+    // Cancel strokes and fills waiting for their bake (Esc). True when there were any.
+    bool airbrush_cancel_pending();
+    // A1: the filament remap rewrote the paint; remap the fields' slots to match.
+    void airbrush_after_remap(ModelObject *mo, const EnforcerBlockerStateMap &state_map);
+    // The selected printer's finest nozzle, for Auto.
+    float airbrush_printer_nozzle() const;
+    void airbrush_drag(const Vec2d &mouse_position);
+    void airbrush_release();
+    void airbrush_schedule(int interval_ms);
+    void airbrush_start_bake();
+    void airbrush_poll_bake(bool wait);
+    void airbrush_start_cost();
+    void airbrush_poll_cost(bool wait);
+    void airbrush_apply_params_to_object();
+    void airbrush_sync_from_model();
 
     // BBS
     void update_triangle_selectors_colors();
