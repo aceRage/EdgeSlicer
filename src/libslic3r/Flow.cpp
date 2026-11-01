@@ -1,6 +1,7 @@
 #include "Flow.hpp"
 #include "I18N.hpp"
 #include "Print.hpp"
+#include "NozzleProcess.hpp"
 #include <cmath>
 #include <assert.h>
 
@@ -260,7 +261,9 @@ Flow support_transition_flow(const PrintObject* object)
 Flow support_material_1st_layer_flow(const PrintObject *object, const PrintObjectConfig &object_config, float layer_height)
 {
     const PrintConfig &print_config = object->print()->config();
-    const auto &width = (print_config.initial_layer_line_width.value > 0) ? print_config.initial_layer_line_width : object_config.support_line_width;
+    // Per-nozzle process P6: the first-layer width of the support filament's nozzle (P5 deferred item).
+    const ConfigOptionFloatOrPercent initial = initial_layer_line_width_for_filament(print_config, unsigned(object_config.support_filament.value));
+    const auto &width = (initial.value > 0) ? initial : object_config.support_line_width;
     return Flow::new_from_config_width(
         frSupportMaterial,
         // The width parameter accepted by new_from_config_width is of type ConfigOptionFloatOrPercent, the Flow class takes care of the percent to value substitution.

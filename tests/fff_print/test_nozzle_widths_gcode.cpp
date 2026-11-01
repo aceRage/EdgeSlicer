@@ -1,0 +1,266 @@
+// Per-nozzle process P6 in the slicer and the G-code: on a 0.4 + 0.6 toolchanger whose process widths are in mm for
+// the 0.4, the 0.6 tool prints every role about 1.5x wider (walls classic and Arachne, infill, solid, top, first layer,
+// support, bridges, brim and skirt), a width set per nozzle wins, and one nozzle size slices exactly as before.
+
+#include <catch2/catch.hpp>
+
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/Flow.hpp"
+#include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "test_data.hpp"
+
+#include <cmath>
+#include <map>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+void add_cube_per_filament(Model &model)
+{
+    for (int filament = 1; filament <= 2; ++filament) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube-" + std::to_string(filament) + ".stl";
+        object->add_volume(mesh(TestMesh::cube_20x20x20));
+        object->add_instance()->set_offset(Vec3d(40. + 40. * filament, 40., 0.));
+        object->ensure_on_bed();
+        object->volumes.front()->config.set("extruder", filament);
+    }
+}
+
+// Two tools, T0 = `d0`, T1 = `d1`; process widths in mm, made for 0.4.
+DynamicPrintConfig two_tools(const char *diameters)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter", diameters },
+        { "single_extruder_multi_material", "0" },
+        { "printer_variant", "0.4" },
+        { "enable_prime_tower", "0" },
+        { "enable_arc_fitting", "0" },
+        { "slow_down_for_layer_cooling", "0,0" },
+        { "filament_max_volumetric_speed", "200,200" },
+        { "nozzle_temperature", "210,210" },
+        { "nozzle_temperature_initial_layer", "210,210" },
+        { "wall_generator", "classic" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "line_width", "0.42" },
+        { "outer_wall_line_width", "0.42" },
+        { "inner_wall_line_width", "0.45" },
+        { "sparse_infill_line_width", "0.45" },
+        { "internal_solid_infill_line_width", "0.42" },
+        { "top_surface_line_width", "0.42" },
+        { "initial_layer_line_width", "0.5" },
+        { "support_line_width", "0.42" },
+        { "brim_type", "no_brim" },
+        { "skirt_loops", "0" },
+    });
+    return config;
+}
+
+std::string slice(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    add_cube_per_filament(model);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+// Per (tool, feature, first layer or not), the widths of the extruding moves (the width in force at each move).
+using Widths = std::map<std::tuple<int, std::string, bool>, std::map<double, int>>;
+
+Widths widths_of(const std::string &gcode)
+{
+    Widths                  out;
+    std::istringstream      in(gcode);
+    std::string             line;
+    int                     tool = 0, layer = -1;
+    double                  width = 0.;
+    std::string             type;
+    static const std::regex tool_re(R"(^T([0-9]+)\b)");
+    static const std::regex width_re(R"(^;WIDTH:([0-9.]+))");
+    static const std::regex type_re(R"(^;TYPE:(.*)$)");
+    static const std::regex e_re(R"(\bE[0-9.]+)");
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        std::smatch m;
+        if (line.rfind(";LAYER_CHANGE", 0) == 0) {
+            ++layer;
+            continue;
+        }
+        if (std::regex_search(line, m, tool_re)) {
+            tool = std::stoi(m[1].str());
+            continue;
+        }
+        if (std::regex_search(line, m, width_re)) {
+            width = std::stod(m[1].str());
+            continue;
+        }
+        if (std::regex_search(line, m, type_re)) {
+            type = m[1].str();
+            continue;
+        }
+        if (line.compare(0, 2, "G1") == 0 && std::regex_search(line, e_re) && layer >= 0 && width > 0.)
+            ++out[{ tool, type, layer == 0 }][std::round(width * 1000.) / 1000.];
+    }
+    return out;
+}
+
+// The width most of a feature's moves print with.
+double main_width(const Widths &w, int tool, const std::string &type, bool first_layer)
+{
+    const auto it = w.find({ tool, type, first_layer });
+    if (it == w.end())
+        return 0.;
+    double best = 0.;
+    int    most = -1;
+    for (const auto &[width, count] : it->second)
+        if (count > most) {
+            most = count;
+            best = width;
+        }
+    return best;
+}
+
+std::string without_config_block(const std::string &gcode)
+{
+    const size_t pos = gcode.find("; CONFIG_BLOCK_START");
+    std::string  out = pos == std::string::npos ? gcode : gcode.substr(0, pos);
+    if (const size_t stamp = out.find("; generated by "); stamp != std::string::npos) {
+        const size_t end = out.find('\n', stamp);
+        out.erase(stamp, end == std::string::npos ? std::string::npos : end - stamp);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("A 0.6 tool prints every role at its own size's width, the 0.4 tool as set", "[NozzleWidths][GCode]")
+{
+    const Widths w = widths_of(slice(two_tools("0.4,0.6")));
+    // T0 (0.4): the process's widths.
+    CHECK(main_width(w, 0, "Outer wall", false) == Approx(0.42).margin(0.002));
+    CHECK(main_width(w, 0, "Inner wall", false) == Approx(0.45).margin(0.002));
+    CHECK(main_width(w, 0, "Sparse infill", false) == Approx(0.45).margin(0.002));
+    CHECK(main_width(w, 0, "Internal solid infill", false) == Approx(0.42).margin(0.002));
+    CHECK(main_width(w, 0, "Top surface", false) == Approx(0.42).margin(0.002));
+    CHECK(main_width(w, 0, "Outer wall", true) == Approx(0.5).margin(0.002));
+    // T1 (0.6): x1.5.
+    CHECK(main_width(w, 1, "Outer wall", false) == Approx(0.63).margin(0.002));
+    CHECK(main_width(w, 1, "Inner wall", false) == Approx(0.675).margin(0.002));
+    CHECK(main_width(w, 1, "Sparse infill", false) == Approx(0.675).margin(0.002));
+    CHECK(main_width(w, 1, "Internal solid infill", false) == Approx(0.63).margin(0.002));
+    CHECK(main_width(w, 1, "Top surface", false) == Approx(0.63).margin(0.002));
+    CHECK(main_width(w, 1, "Outer wall", true) == Approx(0.75).margin(0.002));
+    CHECK(main_width(w, 1, "Inner wall", true) == Approx(0.75).margin(0.002));
+}
+
+TEST_CASE("Arachne walls of a 0.6 tool follow its size too", "[NozzleWidths][GCode][Arachne]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.6");
+    config.set_deserialize_strict({ { "wall_generator", "arachne" } });
+    const Widths w = widths_of(slice(config));
+    CHECK(main_width(w, 0, "Outer wall", false) == Approx(0.42).margin(0.01));
+    CHECK(main_width(w, 1, "Outer wall", false) == Approx(0.63).margin(0.01));
+    CHECK(main_width(w, 1, "Inner wall", false) == Approx(0.675).margin(0.01));
+}
+
+TEST_CASE("A width set for the 0.6 nozzle wins over scaling", "[NozzleWidths][GCode][Table]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.6");
+    config.set_deserialize_strict({ { "process_nozzle_line_widths", "0.6: outer_wall_line_width=0.7, sparse_infill_line_width=120%" } });
+    const Widths w = widths_of(slice(config));
+    CHECK(main_width(w, 1, "Outer wall", false) == Approx(0.7).margin(0.002));
+    CHECK(main_width(w, 1, "Sparse infill", false) == Approx(0.72).margin(0.002));
+    CHECK(main_width(w, 1, "Inner wall", false) == Approx(0.675).margin(0.002)); // not in the table: scaled
+    CHECK(main_width(w, 0, "Outer wall", false) == Approx(0.42).margin(0.002));  // the 0.4 is untouched
+}
+
+TEST_CASE("One nozzle size slices exactly as before", "[NozzleWidths][GCode][Identity]")
+{
+    // A 0.4 printer preset with 0.6 nozzles in every tool: not mixed, so the mm widths are not touched, whatever the
+    // process says it was made for.
+    const DynamicPrintConfig uniform = two_tools("0.6,0.6");
+    DynamicPrintConfig       made_for = uniform;
+    made_for.set_deserialize_strict({ { "line_width_nozzle_diameter", "0.25" }, { "printer_variant", "0.6" } });
+    const std::string a = slice(uniform);
+    CHECK(without_config_block(a) == without_config_block(slice(made_for)));
+    const Widths w = widths_of(a);
+    CHECK(main_width(w, 1, "Outer wall", false) == Approx(0.42).margin(0.002));
+
+    Print print;
+    Model model;
+    add_cube_per_filament(model);
+    print.apply(model, uniform);
+    CHECK(print.config().nozzle_line_width.values.empty());
+    CHECK(print.config().nozzle_initial_layer_line_width.values.empty());
+}
+
+TEST_CASE("Support, bridges, brim and skirt of a 0.6 filament take its size's widths", "[NozzleWidths][Apply]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.6");
+    config.set_deserialize_strict({ { "bridge_line_width", "0.4" },
+                                    { "enable_support", "1" },
+                                    { "support_filament", "2" },
+                                    { "support_interface_filament", "2" },
+                                    { "brim_type", "outer_only" },
+                                    { "brim_width", "3" },
+                                    { "skirt_loops", "1" } });
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    object->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &po = *print.objects().front();
+    CHECK(po.config().support_line_width.value == Approx(0.63));
+    CHECK(support_material_flow(&po).width() == Approx(0.63).margin(1e-4));
+    CHECK(support_material_interface_flow(&po).width() == Approx(0.63).margin(1e-4));
+    CHECK(support_material_1st_layer_flow(&po).width() == Approx(0.75).margin(1e-4));
+    REQUIRE(print.num_print_regions() >= 1);
+    const PrintRegionConfig &region = print.get_print_region(0).config();
+    CHECK(region.bridge_line_width.value == Approx(0.6));
+    CHECK(region.outer_wall_line_width.value == Approx(0.63));
+    CHECK(region.skin_infill_line_width.percent); // 100% of the nozzle as before
+    CHECK(print.brim_flow().width() == Approx(0.75).margin(1e-4));
+    CHECK(print.skirt_flow().width() == Approx(0.75).margin(1e-4));
+}
+
+TEST_CASE("A width set on the object wins over the nozzle's", "[NozzleWidths][Apply]")
+{
+    DynamicPrintConfig config = two_tools("0.4,0.6");
+    config.set_deserialize_strict({ { "inner_wall_line_width", "0" } });
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    object->ensure_on_bed();
+    object->volumes.front()->config.set("extruder", 2);
+    object->config.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(0.5, false));
+    object->config.set_key_value("line_width", new ConfigOptionFloatOrPercent(0.55, false));
+    print.apply(model, config);
+    const PrintRegionConfig &region = print.get_print_region(0).config();
+    CHECK(region.outer_wall_line_width.value == Approx(0.5));    // set on the object
+    CHECK(region.inner_wall_line_width.value == Approx(0.));     // 0 = the object's line_width (0.55), not the scaled 0.63
+    CHECK(region.sparse_infill_line_width.value == Approx(0.675)); // not set on the object: the nozzle's
+}

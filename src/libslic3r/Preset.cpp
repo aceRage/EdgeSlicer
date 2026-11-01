@@ -1199,6 +1199,7 @@ static std::vector<std::string> s_Preset_print_options {
     "print_extruder_id", "print_extruder_variant", // Ultra (dual-nozzle)
     "process_extruder_values", // per-nozzle process P1: the process keeps separate left / right values
     "print_extruder_nozzle_diameter", // per-nozzle process P4: the diameter dimension of the slot layout
+    "process_nozzle_line_widths", "line_width_nozzle_diameter", // per-nozzle process P6: widths per nozzle
     "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "enable_order_independent_overlap_carving", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "top_color_penetration_layers", "bottom_color_penetration_layers",

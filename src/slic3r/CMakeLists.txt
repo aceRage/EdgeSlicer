@@ -644,6 +644,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CostsDialog.hpp
     GUI/FilamentNozzleValuesDialog.cpp
     GUI/FilamentNozzleValuesDialog.hpp
+    GUI/ProcessNozzleWidthsDialog.cpp
+    GUI/ProcessNozzleWidthsDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp

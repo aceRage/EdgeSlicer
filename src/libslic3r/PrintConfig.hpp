@@ -1854,6 +1854,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Per-nozzle process P5: the locked-zag skin / skeleton widths, the same way.
     ((ConfigOptionFloatsOrPercents,     nozzle_skin_infill_line_width))
     ((ConfigOptionFloatsOrPercents,     nozzle_skeleton_infill_line_width))
+    // Per-nozzle process P6: the bridge width, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_bridge_line_width))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
@@ -2304,6 +2306,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
     ((ConfigOptionStrings,             nozzle_process_presets))
     ((ConfigOptionBool,                process_extruder_values))
+    // Per-nozzle process P6: explicit line widths per nozzle size / tool, and the nozzle the process's mm widths are for.
+    ((ConfigOptionString,              process_nozzle_line_widths))
+    ((ConfigOptionFloat,               line_width_nozzle_diameter))
     // Per-nozzle process P2: the 1-based physical extruder (tool) each filament prints on, 0 = its own
     // tool (the filament's index on a toolchanger). Only toolchangers use it (physical_extruder_for_filament).
     ((ConfigOptionInts,                filament_nozzle_assignment))
@@ -2404,6 +2409,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
     // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
     ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
+    // Per-nozzle process P6: per FILAMENT, line_width for the filament's nozzle (the skirt's fallback width).
+    ((ConfigOptionFloatsOrPercents,   nozzle_line_width))
     ((ConfigOptionFloat,              initial_layer_print_height))
     ((ConfigOptionFloats,              initial_layer_speed))
 

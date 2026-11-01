@@ -4286,7 +4286,9 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
         config.support_top_z_distance.value = 0.;
     // Per-nozzle process P2: the support width of the support filament's nozzle process (no-op without one).
     // A support width set on the object still wins.
-    if (!config.nozzle_support_line_width.values.empty() && object.config.get().option("support_line_width") == nullptr)
+    // P6: nor does a line_width set on the object when the plate's support width is 0 (= line_width).
+    if (!config.nozzle_support_line_width.values.empty() && object.config.get().option("support_line_width") == nullptr &&
+        !(object.config.get().option("line_width") != nullptr && config.support_line_width.value == 0.))
         stamp_nozzle_line_widths(config);
     return config;
 }
@@ -4622,12 +4624,21 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     // Per-nozzle process P2: each role's width from the process of the nozzle that prints it (no-op without one).
     // A width set on the object, part, modifier or layer range still wins over the nozzle's process.
     if (!config.nozzle_outer_wall_line_width.values.empty()) {
+        const PrintRegionConfig plate = config; // the widths before the stamp
         stamp_nozzle_line_widths(config);
-        auto reapply_widths = [&config](const DynamicPrintConfig &src) {
-            for (const auto &key : nozzle_line_width_keys())
+        auto reapply_widths = [&config, &plate](const DynamicPrintConfig &src) {
+            // P6: a line_width set on the object or a layer range is what a role left at 0 on the plate means.
+            const bool own_line_width = src.option("line_width") != nullptr;
+            for (const auto &key : nozzle_line_width_keys()) {
+                ConfigOption *dst = config.option(key.second);
+                if (dst == nullptr)
+                    continue;
                 if (const ConfigOption *opt = src.option(key.second); opt != nullptr)
-                    if (ConfigOption *dst = config.option(key.second); dst != nullptr)
-                        dst->set(opt);
+                    dst->set(opt);
+                else if (own_line_width && key.second != "bridge_line_width")
+                    if (const auto *before = plate.option<ConfigOptionFloatOrPercent>(key.second); before != nullptr && before->value == 0.)
+                        dst->set(before);
+            }
         };
         reapply_widths(volume.get_object()->config.get());
         reapply_widths(volume.config.get());

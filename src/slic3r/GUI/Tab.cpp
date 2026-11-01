@@ -77,6 +77,7 @@
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
+#include "ProcessNozzleWidthsDialog.hpp"
 #include "CostsDialog.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
@@ -1507,7 +1508,7 @@ void Tab::refresh_nozzle_controls()
             view->nozzle_apply_btn->Enable(false);
         }
         if (by_size && view->nozzle_note != nullptr) {
-            const wxString size_note = format_wxstr(_L("Edited by nozzle size: the fields below are the %1% mm nozzles'. A nozzle with its own process (Speeds from) uses that process instead."),
+            const wxString size_note = format_wxstr(_L("Edited by nozzle size: the fields below are the %1% mm nozzles'. A nozzle with its own process (Speeds from) uses that process instead. Line widths per nozzle size are set on the Quality page (Line widths per nozzle)."),
                                                     from_u8(format_nozzle_diameter_word(view->selected_size)));
             view->nozzle_note->SetLabel(size_note);
             if (view->host != nullptr && view->host->GetClientSize().x > FromDIP(60))
@@ -3411,6 +3412,14 @@ void TabPrint::build()
         optgroup->append_single_option_line("internal_solid_infill_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("support_line_width","quality_settings_line_width");
         optgroup->append_single_option_line("bridge_line_width","quality_settings_line_width");
+        // Per-nozzle process P6: the widths each nozzle of a mixed-nozzle printer prints with, and the table that sets
+        // them per nozzle size (or per tool when the process is edited per nozzle).
+        if (m_type == Preset::TYPE_PRINT) {
+            Line nozzle_widths_line = Line{ "", "" };
+            nozzle_widths_line.full_width = 1;
+            nozzle_widths_line.widget = [this](wxWindow* parent) { return nozzle_widths_create_widget(parent); };
+            optgroup->append_line(nozzle_widths_line);
+        }
 
         optgroup = page->new_optgroup(L("Seam"), L"param_seam");
         optgroup->append_single_option_line("seam_position", "quality_settings_seam#seam-position");
@@ -4026,6 +4035,88 @@ void TabPrint::reload_config()
     refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     Tab::reload_config();
+    update_nozzle_widths_note();
+}
+
+// ---- Per-nozzle process P6: line widths per nozzle -------------------------------------------------------------
+
+wxSizer* TabPrint::nozzle_widths_create_widget(wxWindow* parent)
+{
+    const int em     = em_unit(parent);
+    auto*     vsizer = new wxBoxSizer(wxVERTICAL);
+    m_nozzle_widths_note = new wxStaticText(parent, wxID_ANY, wxEmptyString);
+    m_nozzle_widths_note->SetFont(wxGetApp().normal_font());
+    vsizer->Add(m_nozzle_widths_note, 0, wxEXPAND);
+    auto* btn = new Button(parent, _L("Line widths per nozzle") + dots);
+    btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn->SetToolTip(_L("Every line width each nozzle size prints with, in one table: set a width for one nozzle size (or one "
+                       "nozzle, when the nozzles are edited separately), and see the width every other nozzle gets."));
+    btn->Bind(wxEVT_BUTTON, [this, parent](wxCommandEvent&) { edit_nozzle_widths_table(parent); });
+    vsizer->Add(btn, 0, wxTOP, em / 2);
+    update_nozzle_widths_note();
+    return vsizer;
+}
+
+void TabPrint::update_nozzle_widths_note()
+{
+    if (m_nozzle_widths_note == nullptr || m_config == nullptr || m_preset_bundle == nullptr)
+        return;
+    DynamicPrintConfig config = m_preset_bundle->printers.get_edited_preset().config;
+    config.apply(*m_config, true);
+    const std::vector<double> sizes = printer_nozzle_sizes(config);
+    const auto*               text  = m_config->option<ConfigOptionString>("process_nozzle_line_widths");
+    size_t                    set   = 0;
+    if (text != nullptr)
+        for (const FilamentNozzleVariant& v : parse_filament_nozzle_variants(text->value))
+            set += v.values.size();
+    wxString note;
+    if (sizes.size() < 2)
+        note = _L("One nozzle size: the widths above apply to every nozzle.");
+    else {
+        wxString list;
+        for (double d : sizes)
+            list += (list.empty() ? "" : " + ") + from_u8(format_nozzle_diameter_word(d));
+        note = format_wxstr(_L("Nozzles %1% mm: widths in %% follow each nozzle, widths in mm are scaled from %2% mm."), list,
+                            format_nozzle_diameter_word(line_width_reference_diameter(config)));
+    }
+    if (set > 0)
+        note += " " + format_wxstr(_L("%1% width(s) set per nozzle."), set);
+    m_nozzle_widths_note->SetLabel(note);
+    m_nozzle_widths_note->SetToolTip(note);
+    if (m_nozzle_widths_note->GetParent() != nullptr && m_nozzle_widths_note->GetParent()->GetClientSize().x > em_unit(this) * 10)
+        m_nozzle_widths_note->Wrap(m_nozzle_widths_note->GetParent()->GetClientSize().x - em_unit(this) * 2);
+}
+
+void TabPrint::edit_nozzle_widths_table(wxWindow* parent)
+{
+    if (m_config == nullptr || m_preset_bundle == nullptr)
+        return;
+    const auto*       text_opt  = m_config->option<ConfigOptionString>("process_nozzle_line_widths");
+    const std::string text      = text_opt != nullptr ? text_opt->value : std::string();
+    const auto*       ref_opt   = m_config->option<ConfigOptionFloat>("line_width_nozzle_diameter");
+    const double      reference = ref_opt != nullptr ? ref_opt->value : 0.;
+    ProcessNozzleWidthsDialog dlg(parent, *m_config, m_preset_bundle->printers.get_edited_preset().config);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const std::string result         = dlg.text();
+    const double      result_ref     = std::max(0., dlg.reference_diameter());
+    bool              changed        = false;
+    if (result != text) {
+        m_config->set_key_value("process_nozzle_line_widths", new ConfigOptionString(result));
+        Tab::on_value_change("process_nozzle_line_widths", boost::any(result));
+        changed = true;
+    }
+    if (std::abs(result_ref - reference) > 1e-9) {
+        m_config->set_key_value("line_width_nozzle_diameter", new ConfigOptionFloat(result_ref));
+        Tab::on_value_change("line_width_nozzle_diameter", boost::any(result_ref));
+        changed = true;
+    }
+    if (!changed)
+        return;
+    update_dirty();
+    update_nozzle_widths_note();
+    update_changed_ui();
+    m_parent->Layout();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4542,6 +4633,7 @@ void TabPrint::clear_pages()
 
     m_recommended_thin_wall_thickness_description_line = nullptr;
     m_top_bottom_shell_thickness_explanation = nullptr;
+    m_nozzle_widths_note = nullptr; // P6: owned by the page
 
     // Ultra (support sets): the page owns these windows, so drop the pointers with it. The three
     // icon buttons registered themselves in Tab::m_scaled_buttons for the DPI / dark-mode passes,
