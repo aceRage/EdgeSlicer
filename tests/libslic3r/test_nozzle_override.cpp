@@ -28,14 +28,14 @@ using namespace Slic3r;
 
 namespace {
 
-bool near(double a, double b) { return std::abs(a - b) < 1e-6; }
+bool same_sizes(double a, double b) { return std::abs(a - b) < 1e-6; }
 
-bool near(const std::vector<double> &a, const std::vector<double> &b)
+bool same_sizes(const std::vector<double> &a, const std::vector<double> &b)
 {
     if (a.size() != b.size())
         return false;
     for (size_t i = 0; i < a.size(); ++i)
-        if (!near(a[i], b[i]))
+        if (!same_sizes(a[i], b[i]))
             return false;
     return true;
 }
@@ -77,11 +77,11 @@ TEST_CASE("The stored override drops sizes equal to the preset's, and is { 0 } w
     const std::vector<double> preset{ 0.4, 0.4, 0.4, 0.4 };
     CHECK(nozzle_diameter_override_stored({}, preset) == std::vector<double>{ 0. });
     CHECK(nozzle_diameter_override_stored({ 0.4, 0.4, 0., 0.4 }, preset) == std::vector<double>{ 0. });
-    CHECK(near(nozzle_diameter_override_stored({ 0.2, 0.4, 0.6, 0.8 }, preset), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(nozzle_diameter_override_stored({ 0.2, 0.4, 0.6, 0.8 }, preset), { 0.2, 0.4, 0.6, 0.8 }));
     // Entries past the printer's extruders are dropped.
-    CHECK(near(nozzle_diameter_override_stored({ 0.2, 0., 0., 0., 0.6 }, preset), { 0.2, 0., 0., 0. }));
+    CHECK(same_sizes(nozzle_diameter_override_stored({ 0.2, 0., 0., 0., 0.6 }, preset), { 0.2, 0., 0., 0. }));
     // Negative / nonsense entries are "the preset's".
-    CHECK(near(nozzle_diameter_override_stored({ -1., 0.6 }, preset), { 0., 0.6 }));
+    CHECK(same_sizes(nozzle_diameter_override_stored({ -1., 0.6 }, preset), { 0., 0.6 }));
 }
 
 TEST_CASE("Each tool's size is set on its own", "[NozzleOverride]")
@@ -91,10 +91,10 @@ TEST_CASE("Each tool's size is set on its own", "[NozzleOverride]")
     ov = set_tool_nozzle_diameter(ov, preset, 0, 0.2);
     ov = set_tool_nozzle_diameter(ov, preset, 2, 0.6);
     ov = set_tool_nozzle_diameter(ov, preset, 3, 0.8);
-    CHECK(near(nozzle_diameters_with_override(preset, ov), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(nozzle_diameters_with_override(preset, ov), { 0.2, 0.4, 0.6, 0.8 }));
     // Back to the preset's size for T1 keeps the others.
     ov = set_tool_nozzle_diameter(ov, preset, 0, 0.);
-    CHECK(near(nozzle_diameters_with_override(preset, ov), { 0.4, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(nozzle_diameters_with_override(preset, ov), { 0.4, 0.4, 0.6, 0.8 }));
     // Every tool back: unused again.
     ov = set_tool_nozzle_diameter(ov, preset, 2, 0.4);
     ov = set_tool_nozzle_diameter(ov, preset, 3, 0.);
@@ -105,18 +105,18 @@ TEST_CASE("Each tool's size is set on its own", "[NozzleOverride]")
 
 TEST_CASE("The size picker offers the standard sizes, the family's variants and the current sizes", "[NozzleOverride]")
 {
-    CHECK(near(nozzle_size_choices({}, {}), { 0.2, 0.4, 0.6, 0.8 }));
-    CHECK(near(printer_variant_sizes("0.4+0.6"), { 0.4, 0.6 }));
+    CHECK(same_sizes(nozzle_size_choices({}, {}), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(printer_variant_sizes("0.4+0.6"), { 0.4, 0.6 }));
     CHECK(printer_variant_sizes("").empty());
-    CHECK(near(nozzle_size_choices({ 0.4, 0.25 }, { "0.4", "0.4+0.6", "1.0" }), { 0.2, 0.25, 0.4, 0.6, 0.8, 1.0 }));
+    CHECK(same_sizes(nozzle_size_choices({ 0.4, 0.25 }, { "0.4", "0.4+0.6", "1.0" }), { 0.2, 0.25, 0.4, 0.6, 0.8, 1.0 }));
 }
 
 TEST_CASE("The app config text round-trips and refuses garbage", "[NozzleOverride]")
 {
     CHECK(serialize_nozzle_diameter_override({ 0. }).empty());
     CHECK(serialize_nozzle_diameter_override({ 0.2, 0., 0.6, 0.8 }) == "0.2,0,0.6,0.8");
-    CHECK(near(parse_nozzle_diameter_override("0.2,0,0.6,0.8"), { 0.2, 0., 0.6, 0.8 }));
-    CHECK(near(parse_nozzle_diameter_override(" 0.25 , 0.4"), { 0.25, 0.4 }));
+    CHECK(same_sizes(parse_nozzle_diameter_override("0.2,0,0.6,0.8"), { 0.2, 0., 0.6, 0.8 }));
+    CHECK(same_sizes(parse_nozzle_diameter_override(" 0.25 , 0.4"), { 0.25, 0.4 }));
     CHECK(parse_nozzle_diameter_override("").empty());
     CHECK(parse_nozzle_diameter_override("0,0").empty());
     CHECK(parse_nozzle_diameter_override("0.4,abc").empty());
@@ -129,7 +129,7 @@ TEST_CASE("Sync from printer and the mismatch check before sending", "[NozzleOve
     const std::vector<double> preset{ 0.4, 0.4, 0.4, 0.4 };
     // The printer reports T1..T4; T2 is unknown (0) and keeps the current size (overridden to 0.6 before).
     const std::vector<double> ov = nozzle_diameter_override_from_reported(preset, { 0., 0.6 }, { 0.2, 0., 0.6, 0.8 });
-    CHECK(near(nozzle_diameters_with_override(preset, ov), { 0.2, 0.6, 0.6, 0.8 }));
+    CHECK(same_sizes(nozzle_diameters_with_override(preset, ov), { 0.2, 0.6, 0.6, 0.8 }));
     // A report equal to the preset clears the override.
     CHECK(nozzle_diameter_override_from_reported(preset, { 0.2, 0.6 }, { 0.4, 0.4, 0.4, 0.4 }) == std::vector<double>{ 0. });
 
@@ -157,10 +157,10 @@ TEST_CASE("A Bambu report gives the mounted size per extruder and, with a rack, 
         return n;
     };
     state.nozzles = { nozzle(0, "0.6"), nozzle(1, "0.4"), nozzle(0x10, "0.2"), nozzle(0x11, "0.8", false) };
-    CHECK(near(reported_extruder_nozzle_sizes(state, 2), { 0.4, 0.6 }));
+    CHECK(same_sizes(reported_extruder_nozzle_sizes(state, 2), { 0.4, 0.6 }));
     const auto available = reported_available_nozzle_sizes(state, 2);
-    CHECK(near(available[0], { 0.4 }));
-    CHECK(near(available[1], { 0.6, 0.2 })); // the rack nozzles belong to physical 0 = logical 1 (right); the 0.8 is abnormal
+    CHECK(same_sizes(available[0], { 0.4 }));
+    CHECK(same_sizes(available[1], { 0.6, 0.2 })); // the rack nozzles belong to physical 0 = logical 1 (right); the 0.8 is abnormal
     // Rack printer: a size on the rack is no mismatch, one the extruder has nowhere is.
     CHECK(rack_nozzle_size_mismatches({ 0.4, 0.2 }, available).empty());
     const auto missing = rack_nozzle_size_mismatches({ 0.4, 0.8 }, available);
@@ -191,10 +191,10 @@ TEST_CASE("U1 T1-T4 at 0.2 / 0.4 / 0.6 / 0.8 on a 0.4 printer preset", "[NozzleO
     DynamicPrintConfig cfg = u1_04();
     cfg.set_deserialize_strict({ { "nozzle_diameter_override", "0.2,0.4,0.6,0.8" } });
     REQUIRE(apply_nozzle_diameter_override(cfg));
-    CHECK(near(cfg.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(cfg.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.2, 0.4, 0.6, 0.8 }));
     // The layer limits follow each size (the preset's 0.28 is for its 0.4).
-    CHECK(near(cfg.option<ConfigOptionFloats>("max_layer_height")->values, { 0.14, 0.28, 0.42, 0.56 }));
-    CHECK(near(cfg.option<ConfigOptionFloats>("min_layer_height")->values, { 0.08, 0.08, 0.08, 0.08 }));
+    CHECK(same_sizes(cfg.option<ConfigOptionFloats>("max_layer_height")->values, { 0.14, 0.28, 0.42, 0.56 }));
+    CHECK(same_sizes(cfg.option<ConfigOptionFloats>("min_layer_height")->values, { 0.08, 0.08, 0.08, 0.08 }));
     // Applying again changes nothing more (Print::apply runs on every apply).
     const DynamicPrintConfig once = cfg;
     CHECK_FALSE(apply_nozzle_diameter_override(cfg));
@@ -203,8 +203,8 @@ TEST_CASE("U1 T1-T4 at 0.2 / 0.4 / 0.6 / 0.8 on a 0.4 printer preset", "[NozzleO
     PrintConfig pc;
     pc.apply(cfg, true);
     for (unsigned f = 1; f <= 4; ++f)
-        CHECK(near(nozzle_diameter_for_filament(pc, f), 0.2 * f));
-    CHECK(near(min_physical_nozzle_diameter(pc), 0.2));
+        CHECK(same_sizes(nozzle_diameter_for_filament(pc, f), 0.2 * f));
+    CHECK(same_sizes(min_physical_nozzle_diameter(pc), 0.2));
 
     // P6: mm widths made for the 0.4 scale to each tool's size.
     REQUIRE(resolve_nozzle_line_widths(cfg));
@@ -217,9 +217,9 @@ TEST_CASE("U1 T1-T4 at 0.2 / 0.4 / 0.6 / 0.8 on a 0.4 printer preset", "[NozzleO
     const double expect_first[] = { 0.25, 0.5, 0.75, 1.0 };
     for (size_t f = 0; f < 4; ++f) {
         INFO("filament " << f + 1);
-        CHECK(near(outer[f].value, expect_outer[f]));
-        CHECK(near(inner[f].value, expect_inner[f]));
-        CHECK(near(first[f].value, expect_first[f]));
+        CHECK(same_sizes(outer[f].value, expect_outer[f]));
+        CHECK(same_sizes(inner[f].value, expect_inner[f]));
+        CHECK(same_sizes(first[f].value, expect_first[f]));
     }
 }
 
@@ -232,8 +232,8 @@ TEST_CASE("One size overridden on a single-nozzle printer scales its widths", "[
                                  { "nozzle_diameter_override", "0.6" } });
     REQUIRE(apply_nozzle_diameter_override(cfg));
     REQUIRE(resolve_nozzle_line_widths(cfg));
-    CHECK(near(array(cfg, "nozzle_outer_wall_line_width").front().value, 0.63));
-    CHECK(near(array(cfg, "nozzle_sparse_infill_line_width").front().value, 0.675));
+    CHECK(same_sizes(array(cfg, "nozzle_outer_wall_line_width").front().value, 0.63));
+    CHECK(same_sizes(array(cfg, "nozzle_sparse_infill_line_width").front().value, 0.675));
     // The same printer preset edited to 0.6 (no override) keeps P6's one-size rule: nothing is scaled.
     DynamicPrintConfig edited = u1_04();
     edited.set_num_filaments(1);
@@ -277,10 +277,10 @@ TEST_CASE("H2D left and right sizes set independently", "[NozzleOverride][Resolv
     cfg.set_deserialize_strict({ { "nozzle_diameter", "0.4,0.4" }, { "max_layer_height", "0.28,0.28" }, { "min_layer_height", "0.08,0.08" },
                                  { "nozzle_diameter_override", "0,0.6" } });
     REQUIRE(apply_nozzle_diameter_override(cfg));
-    CHECK(near(cfg.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.6 }));
+    CHECK(same_sizes(cfg.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.6 }));
     REQUIRE(resolve_nozzle_line_widths(cfg));
-    CHECK(near(array(cfg, "nozzle_outer_wall_line_width")[0].value, 0.42));
-    CHECK(near(array(cfg, "nozzle_outer_wall_line_width")[1].value, 0.63));
+    CHECK(same_sizes(array(cfg, "nozzle_outer_wall_line_width")[0].value, 0.42));
+    CHECK(same_sizes(array(cfg, "nozzle_outer_wall_line_width")[1].value, 0.63));
 }
 
 // ---- 3. The preset bundle: project key, per-model memory -----------------------------------------------------
@@ -294,34 +294,34 @@ TEST_CASE("The project's nozzle sizes leave the printer preset unchanged", "[Noz
     printer.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
 
     CHECK_FALSE(bundle.has_nozzle_diameter_override());
-    CHECK(near(bundle.effective_nozzle_diameters(), { 0.4, 0.4, 0.4, 0.4 }));
+    CHECK(same_sizes(bundle.effective_nozzle_diameters(), { 0.4, 0.4, 0.4, 0.4 }));
     CHECK(bundle.set_tool_nozzle_diameter(0, 0.2));
     CHECK(bundle.set_tool_nozzle_diameter(2, 0.6));
     CHECK(bundle.set_tool_nozzle_diameter(3, 0.8));
     CHECK_FALSE(bundle.set_tool_nozzle_diameter(3, 0.8)); // no change
     CHECK(bundle.has_nozzle_diameter_override());
-    CHECK(near(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
-    CHECK(near(bundle.preset_nozzle_diameters(), { 0.4, 0.4, 0.4, 0.4 })); // the preset is untouched
+    CHECK(same_sizes(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(bundle.preset_nozzle_diameters(), { 0.4, 0.4, 0.4, 0.4 })); // the preset is untouched
     // The Tabs list sizes from the printer config with the project's sizes.
-    CHECK(near(printer_nozzle_sizes(bundle.printer_config_with_project_sizes()), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(printer_nozzle_sizes(bundle.printer_config_with_project_sizes()), { 0.2, 0.4, 0.6, 0.8 }));
     // The slice gets them as full_config() builds it (printer, then the project keys) + Print::apply.
     DynamicPrintConfig full = printer;
     full.apply(bundle.project_config);
-    CHECK(near(full.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.4, 0.4, 0.4 }));
-    CHECK(near(effective_nozzle_diameters(full), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(full.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.4, 0.4, 0.4 }));
+    CHECK(same_sizes(effective_nozzle_diameters(full), { 0.2, 0.4, 0.6, 0.8 }));
 
     // Remembered per printer model; another model brings its own (none), coming back restores them.
     AppConfig app;
     bundle.remember_nozzle_diameter_override(app);
     CHECK(app.get("nozzle_diameter_override", "Snapmaker U1") == "0.2,0.4,0.6,0.8");
     bundle.update_nozzle_diameter_override_for_printer(app); // the model it was set for: kept
-    CHECK(near(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
     printer.set_key_value("printer_model", new ConfigOptionString("Other printer"));
     bundle.update_nozzle_diameter_override_for_printer(app);
     CHECK_FALSE(bundle.has_nozzle_diameter_override());
     printer.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
     bundle.update_nozzle_diameter_override_for_printer(app);
-    CHECK(near(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
 
     // Every tool back to the preset's size: the override is unused again.
     for (size_t t = 0; t < 4; ++t)
@@ -380,9 +380,9 @@ TEST_CASE("The project's nozzle sizes save and reopen with the 3MF; the preset's
     DynamicPrintConfig loaded;
     REQUIRE(override_round_trip(cfg, loaded));
     REQUIRE(loaded.has(NOZZLE_DIAMETER_OVERRIDE_KEY));
-    CHECK(near(nozzle_diameter_override_values(loaded), { 0.2, 0.4, 0.6, 0.8 }));
-    CHECK(near(loaded.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.4, 0.4, 0.4 }));
-    CHECK(near(effective_nozzle_diameters(loaded), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(nozzle_diameter_override_values(loaded), { 0.2, 0.4, 0.6, 0.8 }));
+    CHECK(same_sizes(loaded.option<ConfigOptionFloats>("nozzle_diameter")->values, { 0.4, 0.4, 0.4, 0.4 }));
+    CHECK(same_sizes(effective_nozzle_diameters(loaded), { 0.2, 0.4, 0.6, 0.8 }));
 
     // A project without the key reopens as "the preset's sizes".
     DynamicPrintConfig plain = u1_04();
