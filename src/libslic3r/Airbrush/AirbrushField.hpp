@@ -155,8 +155,9 @@ public:
     // cell remembers its weights at the start and how much this stroke has covered it, so the
     // opacity cap is exact and rounding never drifts however many dabs land on one cell.
     void   begin_stroke(const StrokeParams &params);
-    // Returns the number of cells the dab changed.
-    size_t dab(const AirbrushSurface &surface, const Dab &dab);
+    // Returns the number of cells the dab changed. `changed_keys`, when given, receives their keys (in
+    // ascending order), so a viewer can redraw only what moved (the P2 overlay).
+    size_t dab(const AirbrushSurface &surface, const Dab &dab, std::vector<uint64_t> *changed_keys = nullptr);
     void   end_stroke();
     bool   in_stroke() const { return m_stroke_active; }
 
