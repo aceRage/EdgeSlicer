@@ -99,6 +99,14 @@ public:
         // Exact B-rep fillet / chamfer / shell of a CAD part (GLGizmoCadFillet). Not in the
         // toolbar: opened from the part's context menu and from the Edit gizmo.
         CadFillet,
+#ifdef SLIC3R_CAD
+        // Design-tab launchers. Appended AFTER CadFillet so existing EType values (and the
+        // m_gizmos order they index) stay put. Registered only when enable_cad_feature is on
+        // (Orca #15762); get_gizmo() bounds-checks because skipping them leaves m_gizmos
+        // shorter than the enum.
+        Primitive,
+        Sketch,
+#endif
         //SlaSupports,
         // BBS
         //FaceRecognition,

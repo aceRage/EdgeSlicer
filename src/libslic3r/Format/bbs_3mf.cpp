@@ -7591,7 +7591,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
 #ifdef SLIC3R_CAD
             // F5: .gcode.3mf is a sliced handoff, not a project. Keep the recipe in project
-            // 3MFs only. F4 (optional [Content_Types] bin) is deferred.
+            // 3MFs only. F4: the recipe part is still not listed in [Content_Types].xml
+            // (Orca @3610d8bb write path). Load looks up the zip entry by name and does
+            // not require an Override.
             if (!m_save_gcode && !_add_cad_recipe_file_to_archive(archive, model)) {
                 close_zip_writer(&archive);
                 return false;
