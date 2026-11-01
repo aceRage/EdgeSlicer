@@ -45,4 +45,34 @@ private:
     boost::filesystem::path m_previous;
 };
 
+// Owns a unique path under the system temp dir, "<prefix>-<unique>[<extension>]"
+// (parallel-safe, cross-platform). Shared base for the RAII temp guards below.
+class ScopedTemporaryPath
+{
+public:
+    const boost::filesystem::path &path() const { return m_path; }
+    std::string string() const { return m_path.string(); }
+    ScopedTemporaryPath(const ScopedTemporaryPath &) = delete;
+    ScopedTemporaryPath &operator=(const ScopedTemporaryPath &) = delete;
+
+protected:
+    ScopedTemporaryPath(const std::string &prefix, const std::string &extension)
+        : m_path(boost::filesystem::temp_directory_path()
+                 / boost::filesystem::unique_path(prefix + "-%%%%-%%%%-%%%%" + extension))
+    {}
+    ~ScopedTemporaryPath() = default;
+
+    boost::filesystem::path m_path;
+};
+
+// A temp file the caller creates by writing to path()/string(); the guard only
+// reserves the name and removes the file on scope exit.
+class ScopedTemporaryFile : public ScopedTemporaryPath
+{
+public:
+    explicit ScopedTemporaryFile(const std::string &extension = ".tmp")
+        : ScopedTemporaryPath("slic3r", extension) {}
+    ~ScopedTemporaryFile() { boost::system::error_code ec; boost::filesystem::remove(m_path, ec); }
+};
+
 #endif // SLIC3R_TEST_UTILS

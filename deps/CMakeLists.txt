@@ -70,7 +70,7 @@ else()
     set(SLIC3R_SENTRY_DEFAULT OFF)
 endif()
 option(SLIC3R_SENTRY "Enable Sentry crash reporting SDK" ${SLIC3R_SENTRY_DEFAULT})
-# Must match the main project's SLIC3R_CAD. Default OFF until Design-tab sources land (P1).
+# Must match the main project's SLIC3R_CAD. Default OFF (Design tab stays dark until P2 GUI).
 # OCCT ModelingAlgorithms stays ON regardless — Edge B-rep (#163 STEP export/mesh-to-solid,
 # #218 fillet/chamfer) already needs it. Orca gates that module on this flag; we do not.
 option(SLIC3R_CAD "Build the SolveSpace solver the parametric Design/CAD tab needs. Must match the main project's SLIC3R_CAD." OFF)
