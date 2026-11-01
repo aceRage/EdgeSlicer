@@ -64,6 +64,7 @@ DynamicPrintConfig u1_04()
         { "support_line_width", "0.42" },
         { "brim_type", "no_brim" },
         { "skirt_loops", "0" },
+        { "layer_gcode", "G92 E0" }, // relative E needs it, or validate() refuses
     });
     return config;
 }

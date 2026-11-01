@@ -313,7 +313,7 @@ TEST_CASE("The project's nozzle sizes leave the printer preset unchanged", "[Noz
     // Remembered per printer model; another model brings its own (none), coming back restores them.
     AppConfig app;
     bundle.remember_nozzle_diameter_override(app);
-    CHECK(app.get("nozzle_diameter_override", "Snapmaker U1") == "0.2,0.4,0.6,0.8");
+    CHECK(app.get("nozzle_diameter_override", "Snapmaker U1") == "0.2,0,0.6,0.8"); // T2 was never set: the preset's
     bundle.update_nozzle_diameter_override_for_printer(app); // the model it was set for: kept
     CHECK(same_sizes(bundle.effective_nozzle_diameters(), { 0.2, 0.4, 0.6, 0.8 }));
     printer.set_key_value("printer_model", new ConfigOptionString("Other printer"));
