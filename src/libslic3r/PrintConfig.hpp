@@ -2320,6 +2320,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_filament_nozzle_mapping))
     ((ConfigOptionStrings,             extruder_rack_nozzle_diameter))
     ((ConfigOptionFloats,              filament_rack_nozzle_diameter))
+    // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
+    ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))

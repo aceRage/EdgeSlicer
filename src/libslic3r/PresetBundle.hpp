@@ -691,10 +691,35 @@ public:
     // "Nozzles: 3 > T4 0.6, ..." for the filaments not on their own nozzle; empty when none.
     std::string                 filament_nozzle_assignment_summary() const;
 
+    // ---- Per-nozzle process P7: each tool's nozzle size (project_config "nozzle_diameter_override", NozzleOverride.hpp) ----
+    // The printer preset stays; the size each extruder carries in this project is a project key, saved in 3MF projects
+    // and remembered per printer model in the app config (section "nozzle_diameter_override", key printer_model).
+    //
+    // The size each extruder of the edited printer prints with: the preset's nozzle_diameter with the override applied.
+    std::vector<double>         effective_nozzle_diameters() const;
+    // The printer preset's own sizes (no override).
+    std::vector<double>         preset_nozzle_diameters() const;
+    // The edited printer's config with this project's nozzle sizes applied (nozzle_diameter and the layer-height limits,
+    // apply_nozzle_diameter_override) and nozzle_diameter_override set: what the Tabs list nozzle sizes and widths from.
+    DynamicPrintConfig          printer_config_with_project_sizes() const;
+    // Whether this project overrides any extruder's size.
+    bool                        has_nozzle_diameter_override() const;
+    // Set 0-based extruder `tool` to `diameter` (0 = the preset's size). Returns true when the override changed.
+    bool                        set_tool_nozzle_diameter(size_t tool, double diameter);
+    // Replace the whole override (stored form, NozzleOverride.hpp). Returns true when it changed.
+    bool                        set_nozzle_diameter_override(const std::vector<double> &values);
+    // Remember the current override as the default of the edited printer's model.
+    void                        remember_nozzle_diameter_override(AppConfig &config) const;
+    // After a printer switch: another printer model brings its own remembered sizes (none: the preset's); the same
+    // model keeps the project's sizes, cut to its extruder count.
+    void                        update_nozzle_diameter_override_for_printer(AppConfig &config);
+
 private:
     void                        restore_nozzle_processes(AppConfig &config, const std::string &printer_name);
     // The printer the per-nozzle selection was last restored for or loaded with (a project).
     std::string                 m_nozzle_process_printer;
+    // The printer model the nozzle size override was last restored for or loaded with (a project).
+    std::string                 m_nozzle_override_model;
     void                        fill_nozzle_processes(DynamicPrintConfig &out) const;
 
     //std::pair<PresetsConfigSubstitutions, std::string> load_system_presets(ForwardCompatibilitySubstitutionRule compatibility_rule);

@@ -794,6 +794,14 @@ private:
     std::map<size_t, std::pair<wxTextCtrl*, wxStaticText*>> m_rack_controls; // extruder -> (text box, problem)
     void                update_rack_error(size_t extruder, const std::string& text);
     void                update_rack_controls(size_t extruder);
+    // Per-nozzle process P7: Extruder N's "Nozzle size in this project" picker (project key nozzle_diameter_override).
+    std::map<size_t, ComboBox*> m_project_size_controls; // extruder -> picker
+public:
+    // Show the project's nozzle sizes in the Extruder N pickers (after the sidebar or a printer sync changed them).
+    void                update_project_nozzle_sizes();
+private:
+    void                update_project_nozzle_size(size_t extruder);
+    std::vector<double> project_size_choices() const;
 public:
 	ScalableButton*	m_reset_to_filament_color = nullptr;
 

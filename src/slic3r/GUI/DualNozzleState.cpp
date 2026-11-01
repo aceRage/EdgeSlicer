@@ -49,9 +49,9 @@ std::vector<int> preset_physical_extruder_map()
 
 std::vector<double> preset_nozzle_diameters()
 {
+    // Per-nozzle process P7: the sizes this project gives the nozzles (the printer preset's when not overridden).
     if (PresetBundle *pb = wxGetApp().preset_bundle)
-        if (const auto *d = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter"))
-            return d->values;
+        return pb->effective_nozzle_diameters();
     return {};
 }
 

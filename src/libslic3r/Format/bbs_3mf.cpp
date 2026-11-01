@@ -2,6 +2,7 @@
 #include "../Exception.hpp"
 #include "BambuExport.hpp"
 #include "../Model.hpp"
+#include "../NozzleOverride.hpp"
 #include "../MixedFilament.hpp"
 #include "../Preset.hpp"
 #include "../CostOverrides.hpp"
@@ -9916,8 +9917,18 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
         return true;
     }
 
-    bool _BBS_3MF_Exporter::_add_slice_info_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config)
+    bool _BBS_3MF_Exporter::_add_slice_info_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& project_config)
     {
+        // Per-nozzle process P7: slice_info declares the nozzle sizes the job was sliced for. The project config keeps the
+        // printer preset's nozzle_diameter plus nozzle_diameter_override (so the preset reloads unmodified); the printer
+        // has to read the sizes each extruder really carries.
+        DynamicPrintConfig overridden_config;
+        const bool         nozzle_override = has_nozzle_diameter_override(project_config);
+        if (nozzle_override) {
+            overridden_config = project_config;
+            apply_nozzle_diameter_override(overridden_config);
+        }
+        const DynamicPrintConfig &config = nozzle_override ? overridden_config : project_config;
         std::stringstream stream;
         // Store mesh transformation in full precision, as the volumes are stored transformed and they need to be transformed back
         // when loaded as accurately as possible.

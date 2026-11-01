@@ -75,6 +75,7 @@
 #include "Widgets/SegmentedToggle.hpp"
 #include "FlowVariantEdit.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "FilamentNozzleValuesDialog.hpp"
 #include "ProcessNozzleWidthsDialog.hpp"
@@ -1219,7 +1220,8 @@ std::vector<wxString> Tab::nozzle_switch_labels() const
     if (m_type != Preset::TYPE_PRINT || !m_flow_variant_view || m_flow_variant_view->domain != ConfigFlowDomain::Process ||
         m_preset_bundle == nullptr)
         return labels;
-    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    // Per-nozzle process P7: the sizes the nozzles carry in this project.
+    const DynamicPrintConfig printer = m_preset_bundle->printer_config_with_project_sizes();
     if (!supports_nozzle_processes(printer))
         return labels;
     const std::vector<double>& nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter")->values;
@@ -1492,7 +1494,7 @@ void Tab::refresh_nozzle_controls()
     if (view->size_split_btn != nullptr) {
         const bool by_size = m_config != nullptr && process_has_diameter_slots(*m_config);
         const bool sizes   = m_preset_bundle != nullptr &&
-                           printer_nozzle_sizes(m_preset_bundle->printers.get_edited_preset().config).size() >= 2;
+                           printer_nozzle_sizes(m_preset_bundle->printer_config_with_project_sizes()).size() >= 2; // P7
         view->size_split_btn->SetLabel(by_size ? _L("Link nozzle sizes") : _L("Edit by nozzle size"));
         const bool can_act = by_size || (sizes && !split);
         view->size_split_btn->SetToolTip(by_size ? _L("Edit all nozzle sizes together again: every size takes the values of the size shown.") :
@@ -1539,7 +1541,7 @@ void Tab::on_split_by_nozzle_size()
         changed = link_process_diameters(*m_config, from, &m_presets->get_selected_preset().config);
         m_flow_variant_view->selected_size = 0.;
     } else if (!nozzle_values_split()) {
-        const std::vector<double> sizes = printer_nozzle_sizes(m_preset_bundle->printers.get_edited_preset().config);
+        const std::vector<double> sizes = printer_nozzle_sizes(m_preset_bundle->printer_config_with_project_sizes()); // P7
         changed = split_process_per_diameter(*m_config, sizes);
         if (changed)
             m_flow_variant_view->selected_size = sizes.front();
@@ -3222,8 +3224,11 @@ void Tab::on_presets_changed()
 
     // Per-nozzle process P1: another printer brings its own remembered per-nozzle processes; a changed
     // nozzle drops the processes that no longer fit it. Before the process tab reloads its nozzle switch.
-    if (m_type == Preset::TYPE_PRINTER)
+    if (m_type == Preset::TYPE_PRINTER) {
+        // Per-nozzle process P7 first: the processes that fit a nozzle depend on the size it carries in this project.
+        wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
         wxGetApp().preset_bundle->update_nozzle_processes_for_printer(*wxGetApp().app_config);
+    }
 
     // Printer selected at the Printer tab, update "compatible" marks at the print and filament selectors.
     for (auto t: m_dependent_tabs)
@@ -4061,7 +4066,7 @@ void TabPrint::update_nozzle_widths_note()
 {
     if (m_nozzle_widths_note == nullptr || m_config == nullptr || m_preset_bundle == nullptr)
         return;
-    DynamicPrintConfig config = m_preset_bundle->printers.get_edited_preset().config;
+    DynamicPrintConfig config = m_preset_bundle->printer_config_with_project_sizes(); // P7: the project's nozzle sizes
     config.apply(*m_config, true);
     const std::vector<double> sizes = printer_nozzle_sizes(config);
     const auto*               text  = m_config->option<ConfigOptionString>("process_nozzle_line_widths");
@@ -4095,7 +4100,7 @@ void TabPrint::edit_nozzle_widths_table(wxWindow* parent)
     const std::string text      = text_opt != nullptr ? text_opt->value : std::string();
     const auto*       ref_opt   = m_config->option<ConfigOptionFloat>("line_width_nozzle_diameter");
     const double      reference = ref_opt != nullptr ? ref_opt->value : 0.;
-    ProcessNozzleWidthsDialog dlg(parent, *m_config, m_preset_bundle->printers.get_edited_preset().config);
+    ProcessNozzleWidthsDialog dlg(parent, *m_config, m_preset_bundle->printer_config_with_project_sizes()); // P7
     if (dlg.ShowModal() != wxID_OK)
         return;
     const std::string result         = dlg.text();
@@ -6179,7 +6184,7 @@ std::vector<double> TabFilament::nozzle_size_choices() const
             sizes.push_back(d);
     };
     if (m_preset_bundle != nullptr) {
-        const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+        const DynamicPrintConfig printer = m_preset_bundle->printer_config_with_project_sizes(); // P7
         if (const auto* nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter"))
             for (double d : nozzles->values)
                 add(d);
@@ -6319,7 +6324,7 @@ std::vector<wxString> TabFilament::printer_tool_labels() const
     std::vector<wxString> labels;
     if (m_preset_bundle == nullptr)
         return labels;
-    const DynamicPrintConfig& printer = m_preset_bundle->printers.get_edited_preset().config;
+    const DynamicPrintConfig  printer = m_preset_bundle->printer_config_with_project_sizes(); // P7
     const auto*               nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
     if (nozzles == nullptr)
         return labels;
@@ -7393,6 +7398,43 @@ if (is_marlin_flavor)
 
                 auto optgroup = page->new_optgroup(L("Size"), L"param_extruder_size");
                 optgroup->append_single_option_line("nozzle_diameter", "", extruder_idx);
+                // Per-nozzle process P7: the size this extruder carries in this project, mirrored from the Prepare
+                // sidebar. It is a project setting: the printer preset's nozzle diameter above is not changed.
+                {
+                    Line size_line = Line{ _L("Nozzle size in this project"),
+                                           _L("The nozzle this extruder carries in the current project. Each extruder can have its own size "
+                                              "without a printer preset for every combination: the printer preset's nozzle diameter above is "
+                                              "not changed. Saved with the project and remembered for this printer model. Also set in the "
+                                              "Prepare sidebar, or synced from a connected printer.") };
+                    size_line.widget = [this, extruder_idx](wxWindow* parent) {
+                        auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+                        auto* combo = new ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(em_unit(parent) * 20, -1), 0,
+                                                   nullptr, wxCB_READONLY);
+                        sizer->Add(combo, 0, wxALIGN_CENTER_VERTICAL);
+                        combo->Bind(wxEVT_COMBOBOX, [this, extruder_idx, combo](wxCommandEvent&) {
+                            // Entry 0 is the printer preset's size; the others are sizes (their client data index).
+                            const int sel = combo->GetSelection();
+                            const std::vector<double> sizes = project_size_choices();
+                            double d = 0.;
+                            if (sel > 0 && size_t(sel - 1) < sizes.size())
+                                d = sizes[size_t(sel - 1)];
+                            wxGetApp().CallAfter([extruder_idx, d]() {
+                                if (wxGetApp().plater() != nullptr)
+                                    wxGetApp().plater()->sidebar().set_tool_nozzle_size(int(extruder_idx), d);
+                            });
+                        });
+                        combo->Bind(wxEVT_DESTROY, [this, extruder_idx, combo](wxWindowDestroyEvent& evt) {
+                            evt.Skip();
+                            auto it = m_project_size_controls.find(extruder_idx);
+                            if (it != m_project_size_controls.end() && it->second == combo)
+                                m_project_size_controls.erase(it);
+                        });
+                        m_project_size_controls[extruder_idx] = combo;
+                        update_project_nozzle_size(extruder_idx);
+                        return sizer;
+                    };
+                    optgroup->append_line(size_line);
+                }
 
                 optgroup->m_on_change = [this, extruder_idx](const t_config_option_key& opt_key, boost::any value)
                 {
@@ -7896,6 +7938,48 @@ void TabPrinter::update_rack_error(size_t extruder, const std::string& text)
     }
 }
 
+std::vector<double> TabPrinter::project_size_choices() const
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return {};
+    std::vector<double> current = bundle->effective_nozzle_diameters();
+    const std::vector<double> preset = bundle->preset_nozzle_diameters();
+    current.insert(current.end(), preset.begin(), preset.end());
+    return Slic3r::nozzle_size_choices(current, bundle->printers.diameters_of_selected_printer()); // the free function, not Tab::nozzle_size_choices
+}
+
+void TabPrinter::update_project_nozzle_size(size_t extruder)
+{
+    auto it = m_project_size_controls.find(extruder);
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (it == m_project_size_controls.end() || bundle == nullptr)
+        return;
+    ComboBox* combo = it->second;
+    // The edited preset's own size (it may be edited on this page right now), then the project's override.
+    const std::vector<double> preset    = bundle->preset_nozzle_diameters();
+    const std::vector<double> override_values = nozzle_diameter_override_values(bundle->project_config);
+    const double preset_size = extruder < preset.size() ? preset[extruder] : 0.;
+    const double own         = extruder < override_values.size() && override_values[extruder] > 0. ? override_values[extruder] : 0.;
+    const std::vector<double> sizes = project_size_choices();
+    combo->Clear();
+    combo->Append(wxString::Format(_L("Printer preset (%s mm)"), from_u8(format_diameter_to_str(preset_size))));
+    int sel = 0;
+    for (size_t i = 0; i < sizes.size(); ++i) {
+        combo->Append(from_u8(format_diameter_to_str(sizes[i])) + " mm");
+        if (own > 0. && same_nozzle_diameter(sizes[i], own))
+            sel = int(i + 1);
+    }
+    combo->SetSelection(sel);
+    combo->Enable(m_presets != nullptr && m_presets->get_edited_preset().printer_technology() == ptFFF);
+}
+
+void TabPrinter::update_project_nozzle_sizes()
+{
+    for (size_t e = 0; e < m_extruders_count; ++e)
+        update_project_nozzle_size(e);
+}
+
 void TabPrinter::update_rack_controls(size_t extruder)
 {
     auto it = m_rack_controls.find(extruder);
@@ -7922,6 +8006,8 @@ void TabPrinter::toggle_options()
     // Per-nozzle process P5: the rack nozzle size boxes follow the printer.
     for (size_t e = 0; e < m_extruders_count; ++e)
         update_rack_controls(e);
+    // Per-nozzle process P7: so do the project nozzle size pickers.
+    update_project_nozzle_sizes();
 
     //BBS: whether the preset is Bambu Lab printer
     bool is_BBL_printer = false;

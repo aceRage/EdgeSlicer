@@ -3,6 +3,7 @@
 #include "ToolSlots.hpp"
 
 #include "MultiNozzleUtils.hpp"
+#include "NozzleOverride.hpp"
 #include "Preset.hpp"
 #include "PrintConfig.hpp"
 
@@ -358,7 +359,9 @@ double filament_rack_pin(const ConfigBase &config, unsigned int filament_id)
 
 double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
-    const std::vector<double> nozzles = floats_of(config, "nozzle_diameter");
+    // Per-nozzle process P7: the size the extruder carries in the project (a full config before Print::apply, as the
+    // preset bundle builds it, still has the preset's nozzle_diameter beside nozzle_diameter_override).
+    const std::vector<double> nozzles = effective_nozzle_diameters(config);
     if (nozzles.empty())
         return 0.;
     const size_t extruder = std::min(physical_extruder_of(config, filament_id), nozzles.size() - 1);

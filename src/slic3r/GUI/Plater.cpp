@@ -125,6 +125,7 @@
 #include "libslic3r/MemoryGuardPolicy.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
@@ -759,42 +760,31 @@ public:
     void on_dpi_changed(const wxRect& suggested_rect) override {}
 };
 
-// Mixed nozzle sizes (Phase 3): write the diameters a device just reported for its heads into the
-// selected printer preset's per-extruder `nozzle_diameter`. The base preset the user picked gives
-// every head the same value; this puts back the real per-head sizes so a mixed machine slices
-// correctly without the user retyping them under Printer settings -> Extruder N.
+// Mixed nozzle sizes (Phase 3), per-nozzle process P7: the diameters a device just reported for its heads become
+// this project's nozzle sizes (nozzle_diameter_override). The base preset the user picked stays as it is - it is no
+// longer edited, so it is not marked modified and needs no preset per combination of sizes.
 //
 // `reported` holds one string per head, in head order, as the device sent them ("0.6", "0.2 mm",
-// "0.4mm"...). Heads the device did not report keep whatever the base preset has. Does nothing
-// unless the printer actually supports mixed diameters and the reported set really is mixed.
+// "0.4mm"...). Heads the device did not report keep their current size. A report that matches the preset clears
+// the override.
 void apply_reported_nozzle_diameters(const std::vector<std::string> &reported)
 {
-    if (reported.size() < 2)
-        return;
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    Tab          *tab    = wxGetApp().get_tab(Preset::TYPE_PRINTER);
-    if (bundle == nullptr || tab == nullptr)
+    if (bundle == nullptr || reported.empty())
+        return;
+    const std::vector<double> preset = bundle->preset_nozzle_diameters();
+    if (preset.empty())
         return;
 
-    DynamicPrintConfig &cfg = bundle->printers.get_edited_preset().config;
-    if (!supports_mixed_nozzle_diameters(cfg))
+    // NozzleSync::plan is the pure part (tested): head 0 is treated like every other head, and a head whose
+    // report cannot be read is 0 here (keeps its size) without shifting the others.
+    const std::vector<double> per_head = NozzleSync::apply_per_head(std::vector<double>(preset.size(), 0.), NozzleSync::plan(reported).per_head);
+    const std::vector<double> values   = nozzle_diameter_override_from_reported(preset, nozzle_diameter_override_values(bundle->project_config), per_head);
+    if (!bundle->set_nozzle_diameter_override(values))
         return;
-    auto *nozzle = cfg.option<ConfigOptionFloats>("nozzle_diameter");
-    if (nozzle == nullptr || nozzle->values.empty())
-        return;
-
-    // NozzleSync is the pure part (tested): head 0 is treated like every other head, and a head whose
-    // report cannot be read keeps the base preset's value without shifting the others.
-    bool                changed   = false;
-    std::vector<double> diameters = NozzleSync::apply_per_head(nozzle->values, NozzleSync::plan(reported).per_head, &changed);
-    if (!changed)
-        return;
-
-    DynamicPrintConfig new_conf = cfg;
-    new_conf.set_key_value("nozzle_diameter", new ConfigOptionFloats(diameters));
-    tab->load_config(new_conf);
-    BOOST_LOG_TRIVIAL(info) << "apply_reported_nozzle_diameters: per-head nozzle_diameter set to "
-                            << nozzle_diameter_summary(diameters);
+    BOOST_LOG_TRIVIAL(info) << "apply_reported_nozzle_diameters: project nozzle sizes set to "
+                            << nozzle_diameter_summary(bundle->effective_nozzle_diameters()) << " (printer preset unchanged)";
+    wxGetApp().plater()->sidebar().on_nozzle_sizes_changed();
 }
 
 std::string extract_base_filament_name(const std::string& full_name)
@@ -2357,6 +2347,11 @@ Sidebar::Sidebar(Plater *parent)
         p->m_printerinfo_syncbtn->SetCursor(wxCURSOR_HAND);
         p->m_printerinfo_syncbtn->SetToolTip(_L("Synchronize nozzle information"));
         p->m_printerinfo_syncbtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
+            // Per-nozzle process P7: a Bambu printer reports each extruder's nozzle size over its own connection.
+            if (wxGetApp().preset_bundle->is_bbl_vendor()) {
+                sync_nozzle_sizes_from_bambu_printer();
+                return;
+            }
             bool hasConnectDevice = false;
             auto devices = wxGetApp().app_config->get_devices();
             for (const auto& device : devices) {
@@ -2512,6 +2507,9 @@ Sidebar::Sidebar(Plater *parent)
                         // Ultra: device-driven nozzle sync (uniform diameter) - force_select=true
                         // to stay silent on U1->U1 device switches (no save/transfer/discard dialog).
                         wxGetApp().get_tab(Preset::TYPE_PRINTER)->select_preset(preset->name, false, "", true);
+                        // Per-nozzle process P7: the preset now has the printer's size on every head.
+                        if (wxGetApp().preset_bundle->set_nozzle_diameter_override({ 0. }))
+                            wxGetApp().plater()->sidebar().on_nozzle_sizes_changed();
                         wxGetApp().plater()->sidebar().update_all_preset_comboboxes(true);
                         wxGetApp().plater()->sidebar().update_nozzle_settings(true);
 
@@ -4508,7 +4506,8 @@ void Sidebar::update_presets(Preset::Type preset_type)
             std::string printer_model   = printer_model_opt->value;
             bool        is_snapmaker_u1 = boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
 
-            if (is_snapmaker_u1)
+            // Per-nozzle process P7: Bambu printers report each extruder's nozzle size too.
+            if (is_snapmaker_u1 || wxGetApp().preset_bundle->is_bbl_vendor())
             {
                 p->m_printerinfo_syncbtn->Show();
             } 
@@ -4807,6 +4806,95 @@ void Sidebar::set_filament_rack_pin(size_t filament, double diameter)
     BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filament " << filament + 1 << " pinned to rack nozzle size " << diameter;
     wxGetApp().plater()->update_project_dirty_from_presets();
     wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
+void Sidebar::set_tool_nozzle_size(int tool, double diameter)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+    bool changed = false;
+    if (tool < 0)
+        changed = bundle->set_nozzle_diameter_override(std::vector<double>(bundle->preset_nozzle_diameters().size(), diameter));
+    else
+        changed = bundle->set_tool_nozzle_diameter(size_t(tool), diameter);
+    if (!changed)
+        return;
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P7: " << (tool < 0 ? std::string("every tool") : "T" + std::to_string(tool + 1)) << " set to "
+                            << diameter << " mm; project nozzle sizes " << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
+    on_nozzle_sizes_changed();
+}
+
+void Sidebar::on_nozzle_sizes_changed()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+    bundle->remember_nozzle_diameter_override(*wxGetApp().app_config);
+    // Per-nozzle processes (Speeds from) are cut for a nozzle size.
+    bundle->prune_nozzle_processes();
+    update_nozzle_settings(false);
+    update_filament_nozzle_summary();
+    // The per-slot filament lists filter by the slot's nozzle size.
+    for (PlaterPresetComboBox *combo : p->combos_filament)
+        if (combo != nullptr)
+            combo->update();
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
+        if (auto *tab_printer = dynamic_cast<TabPrinter *>(tab))
+            tab_printer->update_project_nozzle_sizes();
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+            tab_print->refresh_nozzle_header();
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
+void Sidebar::sync_nozzle_sizes_from_bambu_printer()
+{
+    PresetBundle  *bundle = wxGetApp().preset_bundle;
+    DeviceManager *dev    = wxGetApp().getDeviceManager();
+    MachineObject *obj    = dev != nullptr ? dev->get_selected_machine() : nullptr;
+    if (bundle == nullptr)
+        return;
+    if (obj == nullptr || !obj->is_connected() || obj->m_extder_data.extders.empty()) {
+        MessageDialog dlg(wxGetApp().mainframe,
+                          _L("No printer is connected, or it has not reported its nozzles yet. Connect the printer on the Device page, then sync again."),
+                          _L("Sync nozzle sizes"), wxOK);
+        dlg.ShowModal();
+        return;
+    }
+    const std::vector<double> preset = bundle->preset_nozzle_diameters();
+    std::vector<double>       reported(preset.size(), 0.);
+    if (preset.size() >= 2 && obj->m_extder_data.extders.size() >= 2) {
+        // Logical extruder (the preset's order) from the physical one the printer reports (the H2D's right is physical 0).
+        reported = reported_extruder_nozzle_sizes(DualNozzle::printer_state(obj), preset.size());
+        if (std::none_of(reported.begin(), reported.end(), [](double d) { return d > 0.; })) {
+            const std::vector<int> pem = DualNozzle::preset_physical_extruder_map();
+            for (size_t logical = 0; logical < preset.size(); ++logical) {
+                const int physical = BambuExtruderMap::logical_to_physical(pem, int(logical));
+                for (const Extder &x : obj->m_extder_data.extders)
+                    if (x.id == physical && x.nozzle_id != 0xff && NozzleInfo::diameter_known(x.current_nozzle_diameter))
+                        reported[logical] = x.current_nozzle_diameter;
+            }
+        }
+    } else if (!preset.empty() && NozzleInfo::diameter_known(obj->m_extder_data.extders.front().current_nozzle_diameter)) {
+        reported.assign(preset.size(), obj->m_extder_data.extders.front().current_nozzle_diameter);
+    }
+    if (std::none_of(reported.begin(), reported.end(), [](double d) { return d > 0.; })) {
+        MessageDialog dlg(wxGetApp().mainframe, _L("The printer did not report its nozzle sizes."), _L("Sync nozzle sizes"), wxOK);
+        dlg.ShowModal();
+        return;
+    }
+    const std::vector<double> values = nozzle_diameter_override_from_reported(preset, nozzle_diameter_override_values(bundle->project_config), reported);
+    if (bundle->set_nozzle_diameter_override(values)) {
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P7: nozzle sizes synced from " << obj->dev_id << ": "
+                                << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
+        on_nozzle_sizes_changed();
+    }
+    MessageDialog dlg(wxGetApp().mainframe,
+                      wxString::Format(_L("Nozzle sizes in this project: %s mm."), from_u8(nozzle_diameter_summary(bundle->effective_nozzle_diameters()))),
+                      _L("Sync nozzle sizes"), wxOK);
+    dlg.ShowModal();
 }
 
 void Sidebar::on_filaments_change(size_t num_filaments)
@@ -10643,22 +10731,79 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
         // Visible presets for this printer_model (system + user). Imported multi-nozzle variants are
         // usually non-system; diameters_for_same_printer_model() only counted system and kept the combo disabled.
-        auto diameters = wxGetApp().preset_bundle->printers.diameters_of_selected_printer();
+        PresetBundle             &bundle       = *wxGetApp().preset_bundle;
+        const DynamicPrintConfig &printer_cfg  = bundle.printers.get_edited_preset().config;
+        auto                      diameters    = bundle.printers.diameters_of_selected_printer();
+        const std::vector<double> effective    = bundle.effective_nozzle_diameters();
+        const std::vector<double> preset_sizes = bundle.preset_nozzle_diameters();
+        const double              own_size     = i < effective.size() ? effective[i] : 0.;
+        const double              preset_size  = i < preset_sizes.size() ? preset_sizes[i] : 0.;
+        const bool                overridden   = own_size > 0. && preset_size > 0. && !same_nozzle_diameter(own_size, preset_size);
+
+        // Per-nozzle process P7: the sizes a tool can be given in this project - the standard ones, the printer
+        // family's variants, and what the tools carry now.
+        std::vector<double> current_sizes = effective;
+        current_sizes.insert(current_sizes.end(), preset_sizes.begin(), preset_sizes.end());
+        const std::vector<double> size_choices = nozzle_size_choices(current_sizes, diameters);
+        auto size_entry = [](double d) { return from_u8(format_diameter_to_str(d)) + "mm"; };
+
+        // A machine whose tools may carry different nozzles at once (U1 T1-T4, H2D / H2C / X2D left and right, any
+        // toolchanger): every tool picks its own size, and the printer preset stays.
+        const bool per_tool = supports_mixed_nozzle_diameters(printer_cfg);
+        if (per_tool) {
+            for (double d : size_choices)
+                diameter_combo->AppendString(size_entry(d));
+            diameter_combo->SetValue(own_size > 0. ? size_entry(own_size) : wxString());
+            wxString tip = wxString::Format(_L("The nozzle size of this tool in this project: %s mm.\n"
+                                               "Each tool can have its own size; the printer preset (%s) is not changed. "
+                                               "Line widths, process and filament values for the size follow when slicing."),
+                                            from_u8(format_diameter_to_str(own_size)), from_u8(bundle.printers.get_edited_preset().name));
+            if (overridden)
+                tip += "\n" + wxString::Format(_L("The printer preset has %s mm here."), from_u8(format_diameter_to_str(preset_size)));
+            diameter_combo->SetToolTip(tip);
+            diameter_combo->Bind(wxEVT_COMBOBOX, [this, diameter_combo, i, size_choices](wxCommandEvent&) {
+                const int sel = diameter_combo->GetSelection();
+                if (sel < 0 || size_t(sel) >= size_choices.size())
+                    return;
+                const double d = size_choices[size_t(sel)];
+                // set_tool_nozzle_size rebuilds the nozzle pages, which destroys this combo: after the event.
+                wxGetApp().CallAfter([this, i, d]() { set_tool_nozzle_size(int(i), d); });
+            });
+        } else {
+        // One nozzle (or one nozzle fed by several filaments): the printer family's variants select their printer preset
+        // as before; a size no preset of the family has is set for this project.
+        std::vector<double> extra_sizes;
         for (auto& diameter : diameters) {
             diameter_combo->AppendString(wxString(diameter) + "mm");
         }
+        for (double d : size_choices)
+            if (std::none_of(diameters.begin(), diameters.end(), [d](const std::string &v) {
+                    const std::vector<double> sizes = printer_variant_sizes(v);
+                    return sizes.size() == 1 && same_nozzle_diameter(sizes.front(), d);
+                })) {
+                diameter_combo->AppendString(size_entry(d));
+                extra_sizes.push_back(d);
+            }
         if (diameter_combo->GetCount() == 0) {
             const auto *pv = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_variant");
             if (pv)
                 diameter_combo->AppendString(wxString(pv->value) + "mm");
         }
-        if (diameters.size() < 2) {
+        if (diameter_combo->GetCount() < 2) {
             diameter_combo->Enable(false);
         }
 
-        diameter_combo->Bind(wxEVT_COMBOBOX, [this, diameter_combo, i](wxCommandEvent& event) {
+        diameter_combo->Bind(wxEVT_COMBOBOX, [this, diameter_combo, i, extra_sizes, variant_count = diameters.size()](wxCommandEvent& event) {
 
             const auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+
+            // Per-nozzle process P7: a size no printer preset of this family has is the project's nozzle size.
+            const int sel = diameter_combo->GetSelection();
+            if (sel >= int(variant_count) && size_t(sel - int(variant_count)) < extra_sizes.size()) {
+                const double d = extra_sizes[size_t(sel - int(variant_count))];
+                wxGetApp().CallAfter([this, d]() { set_tool_nozzle_size(-1, d); });
+                return;
+            }
 
             // The entry is the printer_variant plus "mm" ("0.4mm", or "0.4+0.6mm" for a mixed-nozzle
             // machine), so strip the unit instead of cutting at three characters.
@@ -10698,7 +10843,7 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
                 return;
             }
             preset->is_visible = true; // force visible
-            
+
             // Each head shows its OWN diameter: "0.4+0.6" names the machine, it is not a nozzle size.
             const auto *target_nozzles = preset->config.option<ConfigOptionFloats>("nozzle_diameter");
             for (size_t i = 0; i < p->m_nozzle_diameter_lists.size(); ++i) {
@@ -10708,16 +10853,22 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
                 p->m_nozzle_diameter_lists[i]->SetValue(head + "mm");
             }
 
+            // Per-nozzle process P7: the preset of that size replaces a size set for the project.
+            wxGetApp().preset_bundle->set_nozzle_diameter_override({ 0. });
             wxGetApp().get_tab(Preset::TYPE_PRINTER)->select_preset(preset->name);
             // Do not event.Skip(): select_preset rebuilds nozzle UI and can destroy this combo; skipping would let sidebar treat this as bed-type combo and use-after-free.
         });
-        
+
         // Mixed nozzle sizes (Phase 3): the combo used to display printer_variant, a single string
         // that cannot express "0.6 and 0.2". Show the actual per-extruder diameters: this head's
         // own value when they differ, and the shared value (== the variant) when they do not.
-        const auto &printer_cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
         wxString    diam_str;
-        if (has_mixed_nozzle_diameters(printer_cfg)) {
+        if (overridden) {
+            // Per-nozzle process P7: the project's size.
+            diam_str = from_u8(format_diameter_to_str(own_size));
+            diameter_combo->SetToolTip(wxString::Format(_L("The nozzle size in this project: %s mm. The printer preset (%s mm) is not changed."),
+                                                        diam_str, from_u8(format_diameter_to_str(preset_size))));
+        } else if (has_mixed_nozzle_diameters(printer_cfg)) {
             const auto *nd = printer_cfg.option<ConfigOptionFloats>("nozzle_diameter");
             const double own = nd->values[std::min(i, nd->values.size() - 1)];
             diam_str = from_u8(format_diameter_to_str(own));
@@ -10732,8 +10883,9 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
         } else if (const auto *pv_opt = printer_cfg.option<ConfigOptionString>("printer_variant")) {
             diam_str = from_u8(pv_opt->value);
         }
-        
+
         diameter_combo->SetValue(diam_str.empty() ? wxString() : diam_str + "mm");
+        }
 
         p->m_nozzle_diameter_lists.push_back(diameter_combo);
 
@@ -24602,7 +24754,7 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     auto* filament_id_opt = dynamic_cast<const ConfigOptionStrings*>(cfg.option("filament_ids"));
     std::string nozzle_diameter_str;
     if (nozzle_diameter_option)
-        nozzle_diameter_str = nozzle_diameter_option->serialize();
+        nozzle_diameter_str = ConfigOptionFloats(effective_nozzle_diameters(cfg)).serialize(); // P7: the project's sizes
 
     std::string printer_model_id = preset_bundle.printers.get_edited_preset().get_printer_type(&preset_bundle);
 

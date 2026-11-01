@@ -233,7 +233,8 @@ static std::string nozzles_info()
     std::vector<int> volume_types;
     if (const auto* vol = wxGetApp().preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
         for (size_t i = 0; i < vol->size(); ++i) volume_types.push_back(vol->get_at(i));
-    return BambuSendMapping::nozzles_info(diam->values, volume_types);
+    // Per-nozzle process P7: the sizes this project gives the nozzles.
+    return BambuSendMapping::nozzles_info(wxGetApp().preset_bundle->effective_nozzle_diameters(), volume_types);
 }
 
 static json params_json(const BBL::PrintParams& p)
