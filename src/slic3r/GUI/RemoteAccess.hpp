@@ -188,6 +188,12 @@ private:
     ApiResponse api_process_set(const std::string& form_body);
     ApiResponse api_process_revert();
     ApiResponse api_process_save();
+    // PR F: filament settings, per slot
+    ApiResponse api_filament_settings(int slot);
+    ApiResponse api_filament_set(int slot, const std::string& form_body);
+    ApiResponse api_filament_revert(int slot);
+    ApiResponse api_filament_save(int slot, const std::string& name);
+    ApiResponse api_filament_remove(int slot, int replace, bool confirm);
 
     struct Job
     {

@@ -2388,8 +2388,12 @@ RemoteAccess::ApiResponse RemoteAccess::api_presets()
             f["value"] = bundle->filament_presets[i];
             f["color"] = (colors && i < colors->values.size()) ? colors->values[i] : "";
             f["type"]  = filament_type_of(*bundle, bundle->filament_presets[i]); // slice_v1
+            // PR F: the slot's preset has unsaved edits (every slot using it shares them).
+            f["dirty"] = bundle->filaments.current_is_dirty() && bundle->filament_presets[i] == bundle->filaments.get_edited_preset().name;
             j["filaments"].push_back(f);
         }
+        if (Tab* ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT); ftab && ftab->get_combo_box())
+            j["filament_editing"] = std::max(0, ftab->get_combo_box()->get_filament_idx()); // PR F: the slot the Filament tab edits
         // The sidebar's nozzle notebook: the visible variants of this printer model, and the
         // one in use (Sidebar::update_nozzle_settings reads printer_variant, not nozzle_diameter).
         nlohmann::json nozzles;
@@ -2590,98 +2594,138 @@ static const char* mode_name(ConfigOptionMode m)
     return m == comSimple ? "simple" : m == comAdvanced ? "advanced" : "develop";
 }
 
-static nlohmann::json process_state_json()
+// The Process tab's presets, or (PR F) the Filament tab's.
+static PresetCollection& settings_presets(Preset::Type type)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    return type == Preset::TYPE_FILAMENT ? bundle->filaments : bundle->prints;
+}
+
+static nlohmann::json settings_state_json(Preset::Type type)
 {
     nlohmann::json j;
-    PresetBundle* bundle = wxGetApp().preset_bundle;
-    const Preset& edited = bundle->prints.get_edited_preset();
+    PresetCollection& presets = settings_presets(type);
+    const Preset&     edited  = presets.get_edited_preset();
     j["preset"]    = edited.name;
     j["is_system"] = edited.is_system;
-    j["dirty"]     = bundle->prints.current_dirty_options();
+    j["dirty"]     = presets.current_dirty_options();
     return j;
 }
 
-// The Process tab's pages / option groups / lines, with the definition, current value and the
+static nlohmann::json process_state_json() { return settings_state_json(Preset::TYPE_PRINT); }
+
+// PR F: a slot's filament settings state - the process shape plus the slot and every slot that
+// uses the same preset (one edited copy changes all of them).
+static nlohmann::json filament_state_json(int slot)
+{
+    nlohmann::json j = settings_state_json(Preset::TYPE_FILAMENT);
+    j["index"]       = slot;
+    j["shared_by"]   = SliceV1::slots_sharing(wxGetApp().preset_bundle->filament_presets, slot);
+    // The current plate's bed type (its own, else the project's) and the filament keys that hold
+    // its first-layer and other-layer bed temperatures, so the phone's quick settings show the
+    // plate in use. Absent when the printer has no bed types.
+    if (Plater* plater = wxGetApp().plater()) {
+        const BedType bed = plater->get_partplate_list().get_curr_plate()->get_bed_type(true);
+        const std::string first = get_bed_temp_1st_layer_key(bed), other = get_bed_temp_key(bed);
+        if (bed != btDefault && !first.empty() && !other.empty()) {
+            const ConfigOptionDef* def   = print_config_def.get("curr_bed_type");
+            std::string            label = ConfigOptionEnum<BedType>(bed).serialize();
+            for (size_t i = 0; def && i < def->enum_values.size() && i < def->enum_labels.size(); ++i)
+                if (def->enum_values[i] == label) { label = _(def->enum_labels[i]).ToUTF8().data(); break; }
+            j["bed_type"]      = label;
+            j["bed_temp_keys"] = {first, other};
+        }
+    }
+    return j;
+}
+
+// A settings tab's pages / option groups / lines, with the definition, current value and the
 // last-saved value of every option — the phone renders exactly the slicer's layout from this.
+static void settings_pages_json(Tab* tab, Preset::Type type, nlohmann::json& j)
+{
+    PresetCollection&         presets = settings_presets(type);
+    const DynamicPrintConfig& edited  = presets.get_edited_preset().config;
+    const DynamicPrintConfig& saved   = presets.get_selected_preset().config;
+    std::set<std::string> dirty;
+    for (const std::string& k : presets.current_dirty_options()) dirty.insert(k);
+    j["pages"] = nlohmann::json::array();
+    for (const PageShp& page : tab->get_pages()) {
+        nlohmann::json jp;
+        jp["title"]  = page->title().ToUTF8().data();
+        jp["groups"] = nlohmann::json::array();
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
+            nlohmann::json jg;
+            jg["title"] = group->title.ToUTF8().data();
+            jg["lines"] = nlohmann::json::array();
+            for (const Line& line : group->get_lines()) {
+                if (line.is_separator()) continue;
+                nlohmann::json jl;
+                jl["label"]   = line.label.ToUTF8().data();
+                jl["tooltip"] = line.label_tooltip.ToUTF8().data();
+                jl["options"] = nlohmann::json::array();
+                for (const Option& opt : line.get_options()) {
+                    std::string key = opt.opt_id;
+                    int         idx = -1;
+                    const size_t hash = key.find('#');
+                    if (hash != std::string::npos) { idx = std::atoi(key.c_str() + hash + 1); key = key.substr(0, hash); }
+                    const ConfigOption* cur = edited.option(key);
+                    if (!cur) continue;
+                    const ConfigOption* sav = saved.option(key);
+                    const ConfigOptionDef& def = opt.opt;
+                    nlohmann::json jo;
+                    jo["key"]     = key;
+                    if (idx >= 0) jo["index"] = idx;
+                    jo["label"]   = _(def.label).ToUTF8().data();
+                    jo["tooltip"] = _(def.tooltip).ToUTF8().data();
+                    jo["type"]    = option_type_name(def.type);
+                    jo["unit"]    = _(def.sidetext).ToUTF8().data();
+                    jo["mode"]    = mode_name(def.mode);
+                    jo["readonly"] = def.readonly || opt.readonly;
+                    // ConfigOptionDef min/max are floats since Orca #11915 (unset = -/+FLT_MAX). Send whole
+                    // numbers as integers and the rest rounded, so 0.01f goes out as 0.01, not 0.0099999998.
+                    auto limit_json = [](float v) -> nlohmann::json {
+                        const double d = std::round(double(v) * 1e6) / 1e6;
+                        if (d == std::floor(d) && std::abs(d) < 1e15) return (long long) d;
+                        return d;
+                    };
+                    if (def.min > -FLT_MAX) jo["min"] = limit_json(def.min);
+                    if (def.max < FLT_MAX) jo["max"] = limit_json(def.max);
+                    if (!def.enum_values.empty()) {
+                        jo["enum"] = nlohmann::json::array();
+                        for (size_t e = 0; e < def.enum_values.size(); ++e) {
+                            nlohmann::json je;
+                            je["value"] = def.enum_values[e];
+                            je["label"] = e < def.enum_labels.size() ? _(def.enum_labels[e]).ToUTF8().data() : def.enum_values[e];
+                            jo["enum"].push_back(je);
+                        }
+                    }
+                    jo["value"] = cur->serialize();
+                    jo["saved"] = sav ? sav->serialize() : "";
+                    jo["dirty"] = dirty.count(key) > 0;
+                    jl["options"].push_back(jo);
+                }
+                if (!jl["options"].empty())
+                    jg["lines"].push_back(jl);
+            }
+            if (!jg["lines"].empty())
+                jp["groups"].push_back(jg);
+        }
+        if (!jp["groups"].empty())
+            j["pages"].push_back(jp);
+    }
+}
+
+// The Process tab (settings_pages_json).
 RemoteAccess::ApiResponse RemoteAccess::api_process_settings()
 {
     auto out = std::make_shared<nlohmann::json>();
     bool ok  = run_on_main([out]() {
-        nlohmann::json& j      = *out;
-        PresetBundle*   bundle = wxGetApp().preset_bundle;
-        Tab*            tab    = wxGetApp().get_tab(Preset::TYPE_PRINT);
+        nlohmann::json& j   = *out;
+        Tab*            tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
         if (!tab) return;
-        j        = process_state_json();
+        j         = process_state_json();
         j["mode"] = mode_name(wxGetApp().get_mode());
-        const DynamicPrintConfig& edited = bundle->prints.get_edited_preset().config;
-        const DynamicPrintConfig& saved  = bundle->prints.get_selected_preset().config;
-        std::set<std::string> dirty;
-        for (const std::string& k : bundle->prints.current_dirty_options()) dirty.insert(k);
-        j["pages"] = nlohmann::json::array();
-        for (const PageShp& page : tab->get_pages()) {
-            nlohmann::json jp;
-            jp["title"]  = page->title().ToUTF8().data();
-            jp["groups"] = nlohmann::json::array();
-            for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
-                nlohmann::json jg;
-                jg["title"] = group->title.ToUTF8().data();
-                jg["lines"] = nlohmann::json::array();
-                for (const Line& line : group->get_lines()) {
-                    if (line.is_separator()) continue;
-                    nlohmann::json jl;
-                    jl["label"]   = line.label.ToUTF8().data();
-                    jl["tooltip"] = line.label_tooltip.ToUTF8().data();
-                    jl["options"] = nlohmann::json::array();
-                    for (const Option& opt : line.get_options()) {
-                        std::string key = opt.opt_id;
-                        int         idx = -1;
-                        const size_t hash = key.find('#');
-                        if (hash != std::string::npos) { idx = std::atoi(key.c_str() + hash + 1); key = key.substr(0, hash); }
-                        const ConfigOption* cur = edited.option(key);
-                        if (!cur) continue;
-                        const ConfigOption* sav = saved.option(key);
-                        const ConfigOptionDef& def = opt.opt;
-                        nlohmann::json jo;
-                        jo["key"]     = key;
-                        if (idx >= 0) jo["index"] = idx;
-                        jo["label"]   = _(def.label).ToUTF8().data();
-                        jo["tooltip"] = _(def.tooltip).ToUTF8().data();
-                        jo["type"]    = option_type_name(def.type);
-                        jo["unit"]    = _(def.sidetext).ToUTF8().data();
-                        jo["mode"]    = mode_name(def.mode);
-                        jo["readonly"] = def.readonly || opt.readonly;
-                        // ConfigOptionDef min/max are floats since Orca #11915 (unset = -/+FLT_MAX). Send whole
-                        // numbers as integers and the rest rounded, so 0.01f goes out as 0.01, not 0.0099999998.
-                        auto limit_json = [](float v) -> nlohmann::json {
-                            const double d = std::round(double(v) * 1e6) / 1e6;
-                            if (d == std::floor(d) && std::abs(d) < 1e15) return (long long) d;
-                            return d;
-                        };
-                        if (def.min > -FLT_MAX) jo["min"] = limit_json(def.min);
-                        if (def.max < FLT_MAX) jo["max"] = limit_json(def.max);
-                        if (!def.enum_values.empty()) {
-                            jo["enum"] = nlohmann::json::array();
-                            for (size_t e = 0; e < def.enum_values.size(); ++e) {
-                                nlohmann::json je;
-                                je["value"] = def.enum_values[e];
-                                je["label"] = e < def.enum_labels.size() ? _(def.enum_labels[e]).ToUTF8().data() : def.enum_values[e];
-                                jo["enum"].push_back(je);
-                            }
-                        }
-                        jo["value"] = cur->serialize();
-                        jo["saved"] = sav ? sav->serialize() : "";
-                        jo["dirty"] = dirty.count(key) > 0;
-                        jl["options"].push_back(jo);
-                    }
-                    if (!jl["options"].empty())
-                        jg["lines"].push_back(jl);
-                }
-                if (!jg["lines"].empty())
-                    jp["groups"].push_back(jg);
-            }
-            if (!jp["groups"].empty())
-                j["pages"].push_back(jp);
-        }
+        settings_pages_json(tab, Preset::TYPE_PRINT, j);
     });
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); }
@@ -2690,9 +2734,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_settings()
     return r;
 }
 
-// Apply key=value pairs (form-encoded, serialized option values) to the edited process
-// preset, exactly like typing them into the Process tab; the preset becomes "modified".
-RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_body)
+// A form body's key=value pairs, decoded, in order.
+static std::vector<std::pair<std::string, std::string>> form_pairs(const std::string& form_body)
 {
     std::vector<std::pair<std::string, std::string>> pairs;
     size_t pos = 0;
@@ -2705,6 +2748,14 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_
             pairs.emplace_back(percent_decode(kv.substr(0, eq)), percent_decode(kv.substr(eq + 1)));
         pos = amp + 1;
     }
+    return pairs;
+}
+
+// Apply key=value pairs (form-encoded, serialized option values) to the edited process
+// preset, exactly like typing them into the Process tab; the preset becomes "modified".
+RemoteAccess::ApiResponse RemoteAccess::api_process_set(const std::string& form_body)
+{
+    const std::vector<std::pair<std::string, std::string>> pairs = form_pairs(form_body);
     ApiResponse r;
     if (pairs.empty()) { r.status = 404; r.body = json_error("no key=value pairs"); return r; }
     auto result = std::make_shared<std::pair<int, std::string>>(500, "");
@@ -2774,6 +2825,193 @@ RemoteAccess::ApiResponse RemoteAccess::api_process_save()
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); }
     else       r.body = state->dump();
+    return r;
+}
+
+// ------------------------------------------------ filament settings (PR F) ----
+// The Process tab's routes over the Filament tab, for one slot at a time. The tab is one editor
+// bound to one slot (the sidebar's Edit on a slot binds it); its edits are one copy of a preset,
+// shared by every slot using that preset.
+
+// Point the Filament tab at `slot` the way the sidebar's Edit does (Sidebar::edit_filament,
+// PlaterPresetComboBox::switch_to_tab), without its Save / Discard question for the edits of
+// another preset: SliceV1::bind_filament_slot refuses those (409) instead. GUI thread.
+static SliceV1::Refusal open_filament_slot(int slot)
+{
+    Sidebar&      sb     = wxGetApp().sidebar();
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    Tab*          tab    = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+    if (!tab) return { 404, "no filament tab" };
+    const int          slots = (int) std::min(sb.combos_filament().size(), bundle->filament_presets.size());
+    TabPresetComboBox* combo = tab->get_combo_box();
+    const int          bound = combo && combo->get_filament_idx() >= 0 ? combo->get_filament_idx() : 0;
+    const std::string  want  = slot >= 0 && slot < slots ? bundle->filament_presets[slot] : std::string();
+    SliceV1::Refusal   r     = SliceV1::bind_filament_slot(slot, slots, bound, tab->current_preset_is_dirty(), want,
+                                                           bundle->filaments.get_edited_preset().name);
+    if (!r.ok()) return r;
+    if (want != bundle->filaments.get_selected_preset_name()) {
+        // No slot follows the tab while it opens another preset (Sidebar::update_presets would
+        // otherwise give the slot it last edited this one).
+        sb.set_editing_filament(-1);
+        if (!tab->select_preset(want)) return { 409, "the slicer did not open " + want };
+    }
+    if (combo) combo->set_filament_idx(slot);
+    sb.set_editing_filament(slot);
+    return {};
+}
+
+// An error answer (Response: RemoteAccess::ApiResponse, private to it, so named by the caller).
+template<class Response> static Response refused(int status, const std::string& error)
+{
+    Response r;
+    r.status = status;
+    r.body   = json_error(error);
+    return r;
+}
+
+// GET settings/filament?index=: the Process schema's shape for the slot's preset, plus `index` and
+// `shared_by`.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_settings(int slot)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto out    = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, out, slot]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        nlohmann::json& j = *out;
+        j         = filament_state_json(slot);
+        j["mode"] = mode_name(wxGetApp().get_mode());
+        settings_pages_json(wxGetApp().get_tab(Preset::TYPE_FILAMENT), Preset::TYPE_FILAMENT, j);
+    }, 30000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = out->dump();
+    return r;
+}
+
+// POST settings/filament?index= with key=value pairs: like typing them into the Filament tab for
+// that slot. Only the filament preset's own settings are taken.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_set(int slot, const std::string& form_body)
+{
+    const std::vector<std::pair<std::string, std::string>> pairs = form_pairs(form_body);
+    if (pairs.empty()) return refused<ApiResponse>(404, "no key=value pairs");
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot, pairs]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        const DynamicPrintConfig& edited = wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+        DynamicPrintConfig        cfg;
+        for (const auto& kv : pairs) {
+            if (!print_config_def.has(kv.first)) { *result = { 404, "unknown setting: " + kv.first }; return; }
+            if (!edited.has(kv.first)) { *result = { 404, "not a filament setting: " + kv.first }; return; }
+            try {
+                cfg.set_deserialize_strict(kv.first, kv.second);
+            } catch (const std::exception& e) {
+                *result = { 400, "bad value for " + kv.first + ": " + e.what() };
+                return;
+            }
+        }
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->load_config(cfg);
+        wxGetApp().plater()->on_config_change(cfg);
+        *state = filament_state_json(slot);
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+RemoteAccess::ApiResponse RemoteAccess::api_filament_revert(int slot)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->on_roll_back_value(false); // "reset all settings to the last saved preset"
+        wxGetApp().plater()->on_config_change(wxGetApp().preset_bundle->full_config());
+        *state = filament_state_json(slot);
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+// POST settings/filament/save?index=[&name=]: under the same name (a system preset to its
+// "<name> - Custom" shadow, as the process save; every slot using the preset follows, as on the
+// desktop), or with `name` as a new preset for this slot only (Save as).
+RemoteAccess::ApiResponse RemoteAccess::api_filament_save(int slot, const std::string& name)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "no filament tab" });
+    auto state  = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([result, state, slot, name]() {
+        *result = open_filament_slot(slot);
+        if (!result->ok()) return;
+        PresetBundle*     bundle  = wxGetApp().preset_bundle;
+        Tab*              tab     = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+        const Preset&     edited  = bundle->filaments.get_edited_preset();
+        const std::string old     = edited.name;
+        const std::string to      = SliceV1::filament_save_name(name, old, edited.is_system);
+        const bool        save_as = to != SliceV1::filament_save_name("", old, edited.is_system);
+        if (save_as) {
+            // A name that is taken would need the desktop's overwrite question: refused.
+            if (const Preset* taken = bundle->filaments.find_preset(to, false); taken && taken->name != old) {
+                *result = { 409, "a filament preset named " + to + " already exists" };
+                return;
+            }
+        } else if (!edited.is_dirty) {
+            *state = filament_state_json(slot); // nothing to save
+            return;
+        }
+        const std::vector<std::string> before = bundle->filament_presets;
+        // An explicit name: SavePresetDialog is never constructed.
+        tab->save_preset(to);
+        if (save_as) {
+            const std::vector<std::string> after = SliceV1::slots_after_save_as(before, slot, to);
+            for (size_t i = 0; i < after.size() && i < bundle->filament_presets.size(); ++i)
+                bundle->set_filament_preset(i, after[i]);
+            wxGetApp().sidebar().update_presets(Preset::TYPE_FILAMENT);
+            bundle->export_selections(*wxGetApp().app_config);
+        }
+        *state = filament_state_json(slot);
+    }, 30000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    ApiResponse r;
+    r.body = state->dump();
+    return r;
+}
+
+// POST presets/filament_remove?index=[&replace=][&confirm=1]: the slot menu's Delete
+// (Sidebar::delete_filament). Objects using the slot take `replace`'s filament, or the first one.
+RemoteAccess::ApiResponse RemoteAccess::api_filament_remove(int slot, int replace, bool confirm)
+{
+    auto result = std::make_shared<SliceV1::Refusal>(SliceV1::Refusal { 500, "" });
+    auto count  = std::make_shared<size_t>(0);
+    bool ok     = run_on_main([result, count, slot, replace, confirm]() {
+        Plater*       plater = wxGetApp().plater();
+        Sidebar&      sb     = wxGetApp().sidebar();
+        PresetBundle* bundle = wxGetApp().preset_bundle;
+        if (plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
+        const int slots = (int) std::min(sb.combos_filament().size(), bundle->filament_presets.size());
+        const int mixed = slot >= 0 && slot < slots ? (int) bundle->mixed_filaments.mixed_filaments_using_physical((unsigned) slot + 1).size() : 0;
+        *result = SliceV1::filament_remove_check(slot, slots, replace, mixed, confirm);
+        if (!result->ok()) return;
+        // The mixed-filament question was asked above (confirm=1), so the desktop does not ask it.
+        sb.delete_filament((size_t) slot, replace, true);
+        *count = bundle->filament_presets.size();
+    }, 60000);
+    if (!ok) return refused<ApiResponse>(503, "the slicer is busy");
+    if (!result->ok()) return refused<ApiResponse>(result->status, result->error);
+    nlohmann::json j;
+    j["filaments"] = *count;
+    ApiResponse r;
+    r.body = j.dump();
     return r;
 }
 
@@ -3128,6 +3366,12 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/settings/process"},       {"description", "form body key=value[&key=value…] (serialized option values); applies like typing into the tab, returns preset/dirty state"} },
             { {"method", "POST"}, {"path", "/api/settings/process/revert"}, {"description", "reset all settings to the last saved preset"} },
             { {"method", "POST"}, {"path", "/api/settings/process/save"},  {"description", "save modifications under the same name (system presets save to '<name> - Custom')"} },
+            // PR F (slice_filament_settings): the Filament tab, one slot at a time
+            { {"method", "GET"},  {"path", "/api/settings/filament?index={slot}"}, {"description", "the Filament tab for that slot's preset, in the Process tab's shape, plus index, shared_by (every slot using the same preset: one edited copy changes them all) and, when the printer has bed types, bed_type (the current plate's) and bed_temp_keys [first layer, other layers]; 409 while another preset has unsaved changes there"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament?index={slot}"}, {"description", "form body key=value[&key=value…] of that preset's own settings; applies like typing into the Filament tab, returns the state"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament/revert?index={slot}"}, {"description", "reset that slot's preset to its last saved values"} },
+            { {"method", "POST"}, {"path", "/api/settings/filament/save?index={slot}[&name={new}]"}, {"description", "save under the same name (a system preset to '<name> - Custom'; the slots using it follow), or with name as a new preset for this slot only; 409 when that name is taken"} },
+            { {"method", "POST"}, {"path", "/api/presets/filament_remove?index={slot}[&replace={slot}][&confirm=1]"}, {"description", "remove a filament slot like its Delete; objects using it take replace's filament (else the first); 409 for the last slot, or without confirm=1 when mixed filaments are made from it; answers {filaments}"} },
             { {"method", "GET"},  {"path", "/api/archive[?printer={id}]"}, {"description", "the G-code archive (Preferences > Ultra > Store G-Code Files): every file this PC has sent to a printer while it was on, newest first, as {enabled, max, records}. Each record is {id, time, file, sent_name, size, sha256, printer {id, kind bambu|snapmaker|printhost|connect, name, model}, plate, plate_name, project_title, filaments [{index, type, colour, grams}], estimated_time_s, estimated_weight_g, source desktop|phone, mode upload|print, has_thumbnail, exists (its file is still on disk), mapping (the toolhead mapping a Snapmaker send used, in the wire form /send takes) and spoolman_deduct (a Spoolman deduction was asked for)} - names and sizes only, never a path on the PC. `printer` filters by the printer id a send used"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}"},        {"description", "one record, the same fields a row of /api/archive carries plus `exists` (its file is still on disk)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "the plate preview stored with that record"} },
@@ -3181,6 +3425,20 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     }
     if (path == "/presets/filament_add" && method == "POST")
         return api_filament_add();
+    // PR F: filament settings, per slot (index= in the query; the settings in the form body).
+    if (path == "/settings/filament" || path == "/settings/filament/revert" || path == "/settings/filament/save" ||
+        path == "/presets/filament_remove") {
+        auto get = [&](const char* k) { std::string v = query_param(query, k); return v.empty() ? query_param(body, k) : v; };
+        const int slot = num(get("index"), -1);
+        if (path == "/settings/filament" && method == "GET") return api_filament_settings(slot);
+        if (path == "/settings/filament" && method == "POST") return api_filament_set(slot, body);
+        if (path == "/settings/filament/revert" && method == "POST") return api_filament_revert(slot);
+        if (path == "/settings/filament/save" && method == "POST") return api_filament_save(slot, get("name"));
+        if (path == "/presets/filament_remove" && method == "POST") {
+            const std::string replace = get("replace");
+            return api_filament_remove(slot, replace.empty() ? -1 : num(replace, -2), get("confirm") == "1");
+        }
+    }
     if (path == "/plates" && method == "GET")
         return api_plates();
     if (path == "/plates/loose" && method == "GET")

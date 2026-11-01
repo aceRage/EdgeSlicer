@@ -6811,6 +6811,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/settings/process")              return get || post;
     if (sub == "/api/settings/process/revert")       return post;
     if (sub == "/api/settings/process/save")         return post;
+    if (sub == "/api/settings/filament")             return get || post; // PR F: index= in the query
+    if (sub == "/api/settings/filament/revert")      return post;
+    if (sub == "/api/settings/filament/save")        return post;
+    if (sub == "/api/presets/filament_remove")       return post;
     if (sub == "/api/archive")                       return get;
     return false;
 }
