@@ -11,6 +11,7 @@
 #include "ShowcaseCallouts.hpp"
 #include "ShowcaseWatermark.hpp"
 
+#include "libslic3r/Showcase/ShowcasePanelRules.hpp"
 #include "libslic3r/Showcase/ShowcasePath.hpp"
 #include "libslic3r/Showcase/ShowcaseRenderCli.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
@@ -30,6 +31,7 @@ namespace Slic3r { namespace Showcase { class EncoderWorker; class VideoJob; str
 
 class wxGLCanvas;
 class wxBoxSizer;
+class wxSizerItem;
 class wxButton;
 class wxGauge;
 class wxSpinCtrlDouble;
@@ -110,6 +112,9 @@ private:
     void                     fit_side_width();
     void                     sync_controls();
     void                     update_enabled();
+    void                     index_panel_rows();       // after the panel is built: which sizer items make a row
+    void                     apply_row_visibility();   // hide the rows that do not apply to the scene as it is
+    bool                     show_row(const void *key, bool show);
     void                     refresh_plates();
     void                     refresh_views();
     void                     refresh_watermark_presets();
@@ -379,7 +384,8 @@ private:
     wxSlider                *m_fill_intensity = nullptr;
     wxCheckBox              *m_rim = nullptr;
     wxSlider                *m_rim_intensity = nullptr;
-    wxChoice                *m_environment = nullptr;
+    wxChoice                *m_environment = nullptr;   // Background section: the backdrop's environment
+    wxChoice                *m_light_env = nullptr;     // Light section: the same value, for other backdrops
     wxSlider                *m_env_intensity = nullptr;
     wxSlider                *m_env_rotation = nullptr;
     wxSlider                *m_exposure = nullptr;
@@ -446,6 +452,13 @@ private:
     };
     int                      m_side_content_w = 0;      // S5c: the widest the panel's rows have been (px)
     std::vector<PanelSection> m_sections;               // S5b
+    struct PanelRow
+    {
+        wxSizerItem *a       = nullptr;   // the label's cell (or the whole item)
+        wxSizerItem *b       = nullptr;   // the control's cell
+        int          section = -1;
+    };
+    std::map<const void *, PanelRow> m_rows;            // key: a control or a sizer; hidden rows keep their values
     wxBoxSizer              *m_side_root = nullptr;     // S5b: the panel's sizer
     wxChoice                *m_co_list = nullptr;
     wxButton                *m_co_edit = nullptr;
