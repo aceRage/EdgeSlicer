@@ -135,6 +135,7 @@ protected:
     virtual void on_start(wxCommandEvent &event);
     void         update_summary();
     void         reset_to_defaults();
+    static void  filament_default_params(Calib_Params &params);
     bool         read_params(Calib_Params &params, wxString *error) const;
     double       bed_width() const;
 

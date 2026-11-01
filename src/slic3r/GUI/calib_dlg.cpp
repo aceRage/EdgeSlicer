@@ -991,7 +991,7 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     SetFont(Label::Body_14);
 
     Calib_Params defaults;
-    stringing_grid_default_params(defaults);
+    filament_default_params(defaults);
     const unsigned long start_temp = (unsigned long) defaults.start;
     const unsigned long end_temp   = (unsigned long) defaults.end;
 
@@ -1090,10 +1090,26 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
 
 TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
 
+void TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
+{
+    double center = 0., low = 0., high = 0.;
+    if (const auto *bundle = wxGetApp().preset_bundle) {
+        const auto &fc  = bundle->filaments.get_edited_preset().config;
+        auto        first = [&fc](const char *key) {
+            const auto *o = fc.option<ConfigOptionInts>(key);
+            return (o != nullptr && !o->values.empty()) ? double(o->values[0]) : 0.;
+        };
+        center = first("nozzle_temperature");
+        low    = first("nozzle_temperature_range_low");
+        high   = first("nozzle_temperature_range_high");
+    }
+    stringing_grid_default_params(params, center, low, high, 5.);
+}
+
 void TempRetract_Calibration_Dlg::reset_to_defaults()
 {
     Calib_Params p;
-    stringing_grid_default_params(p);
+    filament_default_params(p);
     m_tiStartTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.start)));
     m_tiEndTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.end)));
     m_tiTempStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.step));

@@ -1137,21 +1137,50 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
     return true;
 }
 
-void stringing_grid_default_params(Calib_Params &params)
+void stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high, double step)
 {
-    // B1: fixed defaults from the approved plan. The filament's nozzle_temperature_range can span
-    // more than 10 bands (240/190 at 5 C = 11), so it is not used to seed the dialog.
     params                      = Calib_Params();
     params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
-    params.start                = 230.;
-    params.end                  = 205.;
-    params.step                 = 5.;
+    params.step                 = step > 0. ? step : 5.;
     params.band_height          = 8.;
     params.retract_start        = 0.2;
     params.retract_end          = 1.6;
     params.retract_step         = 0.2;
     params.print_labels         = false;
     params.wait_for_temperature = true;
+
+    // Lance (2026-11-01): build outward from the filament's other-layers temperature,
+    // center +step, -step, +2 step, -2 step, ... never past the filament's range. When one side
+    // reaches its limit, keep adding on the other side. Stop at the 10-band cap or when both
+    // sides are at their limits. Bands are center + k * step, so (start - end) is a step multiple.
+    // Missing or invalid temperatures fall back to the fixed 230/205 plan.
+    const double eps = 1e-6;
+    if (center <= 0. || range_low <= 0. || range_high <= 0. || range_low > range_high || center < range_low - eps ||
+        center > range_high + eps) {
+        params.start = 230.;
+        params.end   = 205.;
+        return;
+    }
+    const int max_bands = 10;
+    double    hi = center, lo = center;
+    int       bands = 1;
+    while (bands < max_bands) {
+        const bool can_up   = hi + params.step <= range_high + eps;
+        const bool can_down = lo - params.step >= range_low - eps;
+        if (!can_up && !can_down)
+            break;
+        if (can_up) {
+            hi += params.step;
+            if (++bands >= max_bands)
+                break;
+        }
+        if (can_down) {
+            lo -= params.step;
+            ++bands;
+        }
+    }
+    params.start = hi;
+    params.end   = lo;
 }
 
 double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)

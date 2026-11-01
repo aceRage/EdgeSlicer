@@ -241,28 +241,57 @@ TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][Te
     CHECK(temp_for_z(p, stringing_grid_base_height + 1.5 * p.band_height) == Approx(225.));
 }
 
-TEST_CASE("Stringing grid defaults are fixed and valid for a 240/190 PLA profile", "[Calib][TempRetract]")
+TEST_CASE("Stringing grid defaults build outward from the other-layers temperature", "[Calib][TempRetract]")
 {
-    // B1: Snapmaker PLA has nozzle_temperature_range 190..240 (11 bands at 5 C). The dialog
-    // defaults must not follow that range.
-    DynamicPrintConfig filament = DynamicPrintConfig::full_print_config();
-    filament.set_deserialize_strict({{"nozzle_temperature_range_low", "190"}, {"nozzle_temperature_range_high", "240"}});
-    Calib_Params p;
-    stringing_grid_default_params(p);
-    CHECK(p.start == Approx(230.));
-    CHECK(p.end == Approx(205.));
-    CHECK(p.step == Approx(5.));
-    CHECK_FALSE(p.print_labels);
-    CHECK(p.wait_for_temperature);
-    CHECK(p.mode == CalibMode::Calib_Temp_Retract_Grid);
-    CHECK(stringing_grid_band_count(p) == 6);
-    std::string err;
-    CHECK(stringing_grid_params_valid(p, 270., &err));
-    CHECK(err.empty());
+    // Lance 2026-11-01: center +5, -5, +10, -10, ... within the filament range, at most 10 bands.
+    struct Case { double center, low, high, start, end; int bands; };
+    const Case cases[] = {
+        {220., 190., 240., 240., 195., 10}, // 220,225,215,...,240,200 then 195 (245 is out of range)
+        {220., 210., 230., 230., 210., 5},  // both sides reach the range limits
+        {235., 190., 240., 240., 195., 10}, // high side stops at 240, low side fills
+        {215., 190., 240., 240., 195., 10}, // 240/190 PLA profile, nozzle 215
+    };
+    for (const Case &c : cases) {
+        CAPTURE(c.center, c.low, c.high);
+        Calib_Params p;
+        stringing_grid_default_params(p, c.center, c.low, c.high, 5.);
+        CHECK(p.start == Approx(c.start));
+        CHECK(p.end == Approx(c.end));
+        CHECK(p.step == Approx(5.));
+        CHECK(stringing_grid_band_count(p) == c.bands);
+        CHECK(std::fmod(p.start - p.end, p.step) == Approx(0.).margin(1e-9));
+        CHECK(p.mode == CalibMode::Calib_Temp_Retract_Grid);
+        CHECK_FALSE(p.print_labels);
+        CHECK(p.wait_for_temperature);
+        std::string err;
+        CHECK(stringing_grid_params_valid(p, 270., &err));
+        CHECK(err.empty());
+    }
+}
 
-    Calib_Params ranged = p;
-    ranged.start        = 240.;
-    ranged.end          = 190.;
+TEST_CASE("Stringing grid defaults fall back to 230/205 on invalid filament temperatures", "[Calib][TempRetract]")
+{
+    struct Case { double center, low, high; };
+    const Case cases[] = {
+        {0., 190., 240.},   // missing nozzle temperature
+        {220., 0., 0.},     // missing range
+        {220., 240., 190.}, // low > high
+        {250., 190., 240.}, // center above the range
+        {180., 190., 240.}, // center below the range
+    };
+    for (const Case &c : cases) {
+        CAPTURE(c.center, c.low, c.high);
+        Calib_Params p;
+        stringing_grid_default_params(p, c.center, c.low, c.high, 5.);
+        CHECK(p.start == Approx(230.));
+        CHECK(p.end == Approx(205.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    // The raw 240/190 range is still over the cap when typed in by hand.
+    Calib_Params ranged;
+    stringing_grid_default_params(ranged, 220., 190., 240., 5.);
+    ranged.start = 240.;
+    ranged.end   = 190.;
     CHECK_FALSE(stringing_grid_params_valid(ranged, 270.));
 }
 
