@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -615,6 +616,8 @@ TEST_CASE("A 0 mm retraction column keeps restart extra", "[Calib][TempRetract][
     REQUIRE(writer.extruder()->restart_extra() == Approx(0.1));
     const std::string g = writer.reduce_retraction_to(0.);
     CHECK_FALSE(g.empty());
+    // Relative E: the partial unretract gives back all 0.8 mm (it was written as E0 before the fix).
+    CHECK(parse_e(g) == Approx(0.8).margin(1e-4));
     CHECK(writer.extruder()->retracted() == Approx(0.));
     CHECK(writer.extruder()->restart_extra() == Approx(0.1));
 }
@@ -698,4 +701,86 @@ TEST_CASE("Nonzero z_offset does not steal layer 1 from the first-layer temperat
     CHECK(bands[1].temp == 225);
     // Comment Z is object-space (no z_offset); band 1 still opens at the 9 mm object boundary.
     CHECK(bands[1].z == Approx(stringing_grid_base_height + params.band_height).margin(0.21));
+}
+
+namespace {
+
+// The grid the dialog makes by default for a PLA-like filament (220 C, range 190-240), with the
+// slicer settings Plater::calib_temp_retraction forces.
+Calib_Params dialog_default_grid(DynamicPrintConfig &config)
+{
+    config.set_deserialize_strict({{"nozzle_temperature_initial_layer", "220"}, {"nozzle_temperature", "220"}});
+    Calib_Params params;
+    stringing_grid_default_params(params, 220., 190., 240., 5.);
+    apply_stringing_grid_slicer_config(config, config, config, 0);
+    return params;
+}
+
+} // namespace
+
+TEST_CASE("Dialog-default grid: a band at every band edge, retraction within the column range", "[Calib][TempRetract][Slice]")
+{
+    DynamicPrintConfig config = grid_print_config();
+    const Calib_Params params = dialog_default_grid(config);
+    REQUIRE(stringing_grid_params_valid(params, 300.));
+    const int                 n_bands = stringing_grid_band_count(params);
+    const std::vector<double> lens    = stringing_grid_retract_schedule(params);
+    REQUIRE(n_bands == 10);
+    REQUIRE(lens.size() == 8);
+
+    const std::string g = slice_grid(params, config);
+
+    // Temperature: one command per band, start - k * step, at the band's bottom edge (band 0 on layer 2).
+    const auto bands = parse_band_events(g);
+    REQUIRE(int(bands.size()) == n_bands);
+    for (int k = 0; k < n_bands; ++k) {
+        CHECK(bands[k].band == k);
+        CHECK(bands[k].temp == int(std::lround(params.start - k * params.step)));
+        CHECK(bands[k].cmd.rfind("M109", 0) == 0);
+        CHECK(bands[k].cmd.find("S" + std::to_string(bands[k].temp)) != std::string::npos);
+        if (k == 0)
+            CHECK(bands[k].z == Approx(0.4).margin(1e-3));
+        else
+            CHECK(bands[k].z == Approx(stringing_grid_base_height + k * params.band_height).margin(0.21));
+    }
+
+    // Retraction: every column announced with its scheduled length, no held retraction above the
+    // longest column (or the 0.8 mm preset used after the restore), no firmware retraction.
+    const std::regex col_re(R"(; Calib_TempRetract: col=(\d+) retract=([0-9.]+))");
+    const double     cap      = std::max(lens.back(), 0.8) + 1e-3;
+    RetractState     rs;
+    double           max_held = 0.;
+    std::set<int>    cols_seen;
+    bool             restored = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (rs.feed(line)) {
+            max_held = std::max(max_held, rs.held);
+            CHECK(rs.held <= cap);
+        }
+        std::smatch m;
+        if (std::regex_search(line, m, col_re)) {
+            const int col = std::stoi(m[1]);
+            REQUIRE(col >= 0);
+            REQUIRE(col < int(lens.size()));
+            CHECK(std::stod(m[2]) == Approx(lens[size_t(col)]).margin(1e-6));
+            cols_seen.insert(col);
+        }
+        if (line.rfind("; Calib_TempRetract: restore retract=0.8", 0) == 0)
+            restored = true;
+        CHECK(line.rfind("G10", 0) != 0);
+    }
+    CHECK(cols_seen.size() == lens.size());
+    CHECK(max_held == Approx(lens.back()).margin(1e-3));
+    CHECK(restored);
+}
+
+// Hidden: writes the dialog-default grid's G-code to the current directory for a manual look.
+// Run with: fff_print_tests "[TempRetractDump]"
+TEST_CASE("Write the dialog-default grid G-code", "[.][TempRetractDump]")
+{
+    DynamicPrintConfig config = grid_print_config();
+    const Calib_Params params = dialog_default_grid(config);
+    std::ofstream      out("stringcalib_default_grid.gcode", std::ios::binary);
+    out << slice_grid(params, config);
+    CHECK(out.good());
 }
