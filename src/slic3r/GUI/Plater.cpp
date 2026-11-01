@@ -12509,8 +12509,12 @@ Plater::priv::~priv()
     main_frame->m_tabpanel->Unbind(wxEVT_NOTEBOOK_PAGE_CHANGING, &priv::on_tab_selection_changing, this);
 }
 
+static bool update_ironing_flow_names(Model& model, const Print* print, bool slicing);
+
 void Plater::priv::update(unsigned int flags)
 {
+    update_ironing_flow_names(model, background_process.fff_print(), false);
+
     // the following line, when enabled, causes flickering on NVIDIA graphics cards
 //    wxWindowUpdateLocker freeze_guard(q);
 #ifdef SUPPORT_AUTOCENTER
@@ -21713,6 +21717,97 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
+// Filament preset name without the printer suffix. No Bambu colour-catalog lookup: U1 (and
+// every other Edge printer) identifies the test by the selected filament name alone.
+static std::string ironing_flow_filament_name(size_t filament_idx)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (!bundle || filament_idx >= bundle->filament_presets.size())
+        return {};
+    std::string name = bundle->filament_presets[filament_idx];
+    name = name.substr(0, name.find('@'));
+    boost::algorithm::trim(name);
+    return name;
+}
+
+// Object name and text of the name strip until the test is sliced. Not translated: the name identifies the test.
+static const std::string ironing_flow_object_name  = "Ironing flow test";
+static const std::string ironing_flow_placeholder  = "Ironing flow calibration test";
+static constexpr double  ironing_flow_layer_height = 0.12;
+
+// Extra solid leveling layers under the ironed bands (pi-squared-studio / Orca #17026):
+// first layer + 6 solid, 2 layers of marks/text, 1 ironed top. Centered like
+// ModelVolume::center_geometry_after_creation() so that a new name keeps the test in place.
+static TriangleMesh ironing_flow_test_mesh(const Calib_Params& params, const std::string& name)
+{
+    const double nozzle_diameter = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
+    const double first_layer     = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("initial_layer_print_height");
+    TriangleMesh mesh(ironing_flow_calib_mesh(params.start, params.end, params.step, name, nozzle_diameter,
+                                              first_layer + 6. * ironing_flow_layer_height,
+                                              first_layer + 8. * ironing_flow_layer_height,
+                                              first_layer + 9. * ironing_flow_layer_height));
+    const Vec3d shift = mesh.bounding_box().center();
+    mesh.translate(-shift.cast<float>());
+    mesh.set_init_shift(shift);
+    return mesh;
+}
+
+// Names the ironing flow tests after their filaments when slicing, and shows the placeholder while they are not up to date.
+static bool update_ironing_flow_names(Model& model, const Print* print, bool slicing)
+{
+    if (!print || print->calib_mode() != CalibMode::Calib_Ironing_Flow)
+        return false;
+    bool changed = false;
+    for (ModelObject* object : model.objects) {
+        if (object->name != ironing_flow_object_name || object->volumes.size() != 1)
+            continue;
+        ModelVolume* volume = object->volumes.front();
+        TriangleMesh mesh   = ironing_flow_test_mesh(print->calib_params(), ironing_flow_filament_name(size_t(std::max(volume->extruder_id(), 1) - 1)));
+        if (mesh.its.vertices == volume->mesh().its.vertices)
+            continue;
+        if (!slicing) {
+            mesh = ironing_flow_test_mesh(print->calib_params(), ironing_flow_placeholder);
+            if (mesh.its.vertices == volume->mesh().its.vertices)
+                continue;
+        }
+        volume->set_mesh(std::move(mesh));
+        volume->set_new_unique_id();
+        volume->calculate_convex_hull();
+        volume->invalidate_convex_hull_2d();
+        object->invalidate_bounding_box();
+        object->ensure_on_bed();
+        changed = true;
+    }
+    return changed;
+}
+
+void Plater::calib_ironing_flow(const Calib_Params& params)
+{
+    const wxString calib_ironing_flow_name = from_u8(ironing_flow_object_name);
+    new_project(false, false, calib_ironing_flow_name);
+    wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    if (params.mode != CalibMode::Calib_Ironing_Flow)
+        return;
+
+    sidebar().obj_list()->load_mesh_object(ironing_flow_test_mesh(params, ironing_flow_placeholder), from_u8(ironing_flow_object_name), true);
+
+    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto obj          = model().objects[0];
+
+    print_config->set_key_value("ironing_type", new ConfigOptionEnum<IroningType>(IroningType::TopmostOnly));
+    print_config->set_key_value("ironing_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
+    // Ironing lines along Y, so that the flow changes from one line to the next.
+    print_config->set_key_value("ironing_angle_fixed", new ConfigOptionBool(true));
+    print_config->set_key_value("ironing_angle", new ConfigOptionFloat(90.));
+    obj->config.set_key_value("layer_height", new ConfigOptionFloat(ironing_flow_layer_height));
+
+    changed_objects({ 0 });
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_ui_from_settings();
+
+    p->background_process.fff_print()->set_calib_params(params);
+}
+
 BuildVolume_Type Plater::get_build_volume_type() const { return p->bed.get_build_volume_type(); }
 
 void Plater::import_zip_archive()
@@ -24767,6 +24862,9 @@ bool Plater::reslice()
     // S3: grouping was confirmed by the caller. Do not clear on the early
     // returns above (invalid data / gizmo / UI-job timeout).
     p->partplate_list.set_filament_group_dirty(false);
+
+    if (update_ironing_flow_names(p->model, p->background_process.fff_print(), true))
+        p->update();
 
     // Orca: regenerate CalibPressureAdvancePattern custom G-code to apply changes
     if (model().calib_pa_pattern) {

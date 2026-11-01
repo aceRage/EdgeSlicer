@@ -25,6 +25,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SVG.hpp"
+#include "libslic3r/calib.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
@@ -1017,6 +1018,99 @@ template<typename RolePred> static std::vector<int> angles_per_layer(const Print
 
 static bool solid_role(ExtrusionRole role) { return is_solid_infill(role) && role != erIroning; }
 static bool sparse_role(ExtrusionRole role) { return role == erInternalInfill; }
+
+TEST_CASE("Ironing flow calibration grows the ironing flow from left to right", "[Fill][Ironing][Calib]")
+{
+    const double min_flow = 10.;
+    const double max_flow = 60.;
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({make_cube(60, 15, 2)}, print, model,
+                             {{"ironing_type", "topmost"},
+                              {"ironing_pattern", "rectilinear"},
+                              {"ironing_flow", "10%"},
+                              // Lines along Y, so that each line has its own flow.
+                              {"ironing_angle", 90},
+                              {"ironing_angle_fixed", 1},
+                              {"layer_height", 0.2}});
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Ironing_Flow;
+    params.start = min_flow;
+    params.end   = max_flow;
+    print.set_calib_params(params);
+    print.process();
+
+    REQUIRE(dominant_fill_angle(*print.objects().front()->layers().back(),
+                                [](ExtrusionRole role) { return role == erIroning; }) == 90);
+
+    // Flow of every ironing segment, from left to right.
+    std::vector<std::pair<coord_t, double>> flows;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (auto *path = dynamic_cast<const ExtrusionPath *>(entity); path && path->role() == erIroning)
+                for (size_t i = 1; i < path->polyline.points.size(); ++i)
+                    flows.emplace_back((path->polyline.points[i - 1].x() + path->polyline.points[i].x()) / 2, path->mm3_per_mm);
+    REQUIRE(flows.size() > 10);
+    std::sort(flows.begin(), flows.end());
+
+    for (size_t i = 1; i < flows.size(); ++i) {
+        CAPTURE(i, flows[i - 1].second, flows[i].second);
+        CHECK(flows[i].second >= flows[i - 1].second - 1e-9);
+    }
+    // The 5 mm side strips are ironed at the minimum and maximum flows.
+    CHECK(flows.back().second / flows.front().second == Approx(max_flow / min_flow).epsilon(1e-3));
+}
+
+TEST_CASE("Ironing flow calibration reverses the rear band so bed tilt can be compared", "[Fill][Ironing][Calib]")
+{
+    const double min_flow = 10.;
+    const double max_flow = 60.;
+
+    TriangleMesh front = make_cube(60., 15., 2.);
+    TriangleMesh rear  = make_cube(60., 15., 2.);
+    rear.translate(0.f, 20.f, 0.f);
+    front.merge(rear);
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({front}, print, model,
+                             {{"ironing_type", "topmost"},
+                              {"ironing_pattern", "rectilinear"},
+                              {"ironing_flow", "10%"},
+                              {"ironing_angle", 90},
+                              {"ironing_angle_fixed", 1},
+                              {"layer_height", 0.2}});
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Ironing_Flow;
+    params.start = min_flow;
+    params.end   = max_flow;
+    print.set_calib_params(params);
+    print.process();
+
+    const coord_t split_y = (print.objects().front()->bounding_box().min.y() + print.objects().front()->bounding_box().max.y()) / 2;
+    std::vector<std::pair<coord_t, double>> front_flows;
+    std::vector<std::pair<coord_t, double>> rear_flows;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (auto *path = dynamic_cast<const ExtrusionPath *>(entity); path && path->role() == erIroning)
+                for (size_t i = 1; i < path->polyline.points.size(); ++i) {
+                    const coord_t x = (path->polyline.points[i - 1].x() + path->polyline.points[i].x()) / 2;
+                    const coord_t y = (path->polyline.points[i - 1].y() + path->polyline.points[i].y()) / 2;
+                    (y < split_y ? front_flows : rear_flows).emplace_back(x, path->mm3_per_mm);
+                }
+    REQUIRE(front_flows.size() > 10);
+    REQUIRE(rear_flows.size() > 10);
+    std::sort(front_flows.begin(), front_flows.end());
+    std::sort(rear_flows.begin(), rear_flows.end());
+
+    for (size_t i = 1; i < front_flows.size(); ++i)
+        CHECK(front_flows[i].second >= front_flows[i - 1].second - 1e-9);
+    for (size_t i = 1; i < rear_flows.size(); ++i)
+        CHECK(rear_flows[i].second <= rear_flows[i - 1].second + 1e-9);
+    CHECK(front_flows.back().second / front_flows.front().second == Approx(max_flow / min_flow).epsilon(1e-3));
+    CHECK(rear_flows.front().second / rear_flows.back().second == Approx(max_flow / min_flow).epsilon(1e-3));
+}
 
 TEST_CASE("Infill rotation template is unaffected by a raft", "[Fill][Regression]")
 {
