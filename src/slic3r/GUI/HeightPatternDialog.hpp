@@ -103,6 +103,9 @@ private:
     ::TextInput *m_gap_input     = nullptr;
     ::TextInput *m_repeat_input  = nullptr;
     ::CheckBox *m_to_top_cb     = nullptr;
+    ::TextInput *m_seq_gap_input = nullptr;
+    ::ComboBox *m_seq_gap_mode  = nullptr;
+    ::ComboBox *m_seq_gap_filament = nullptr;
     ::ComboBox *m_gap_mode      = nullptr;
     ::ComboBox *m_gap_filament  = nullptr;
     ::Label *m_gap_filament_label = nullptr;
