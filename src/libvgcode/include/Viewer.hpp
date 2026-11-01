@@ -140,6 +140,14 @@ public:
     //
     void set_extruded_volume_enabled(bool enabled);
     //
+    // EDGE (multi-colour P5): Preview (smooth look off) lights the base colour prelude's colour for
+    // the coextruded slots, with its own per-vertex lighting, instead of the plain extruder colour.
+    // Off by default; with it off, or without the prelude (set_base_color_prelude), Preview draws
+    // exactly as before. is_multicolour_preview_active() says whether the next render() will.
+    //
+    void set_multicolour_preview(bool enabled);
+    bool is_multicolour_preview_active() const;
+    //
     // ORCA: section view. Cuts away where dot(plane, (x, y, z, 1)) < 0; { 0, 0, 0, 1 } keeps all.
     //
     void set_clipping_plane(const std::array<float, 4>& plane);

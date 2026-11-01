@@ -1,0 +1,18 @@
+SolveSpace libslvs (geometric constraint solver)
+
+Builds of EdgeSlicer made with the SLIC3R_CAD option (the parametric Design tab) link libslvs, the
+constraint solver library of SolveSpace, statically into the application. It solves the sketch
+constraints of the Design tab. Builds without SLIC3R_CAD do not contain it.
+
+  Project:  SolveSpace, https://solvespace.com (Copyright the SolveSpace authors)
+  Source:   https://github.com/JacobStoren/SolveSpaceLib, commit 4d8704523e4bf212fadf5189f92484244f670fea
+            (an extraction of SolveSpace's libslvs, used unmodified; EdgeSlicer supplies only the
+            build script, deps/SLVS/CMakeLists.txt.in)
+  Licence:  GNU General Public License, version 3 (GPL-3.0),
+            https://www.gnu.org/licenses/gpl-3.0.html
+
+EdgeSlicer is licensed under the GNU Affero General Public License, version 3. Section 13 of the
+AGPL-3.0 and of the GPL-3.0 permits combining the two; the combined work is distributed under the
+AGPL-3.0, and the libslvs part stays under the GPL-3.0. The complete corresponding source of
+EdgeSlicer, including the build recipe that fetches the libslvs source above, is published at
+https://github.com/aceRage/EdgeSlicer.

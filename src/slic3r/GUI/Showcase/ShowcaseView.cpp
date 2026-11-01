@@ -6,6 +6,7 @@
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "libslic3r/Showcase/ShowcaseEncoder.hpp"
 #include "libslic3r/Showcase/ShowcaseWebP.hpp"
 #include "libslic3r/Utils.hpp"
@@ -741,9 +742,24 @@ void ShowcaseView::build_panel()
     m_coextruded = new wxCheckBox(m_side, wxID_ANY, _L("Coextruded colours"));
     m_coextruded->SetToolTip(_L("Shows a dual- or tri-colour filament the way it prints: its colours side by side, with the "
                                 "proportions and rotation set in the filament's colour dialog. Off: one plain colour per filament. "
+                                "Before slicing the model shows an approximation: the walls are right, but the top stripes "
+                                "are not at the real line positions, and seams and ironing are not shown. "
                                 "Visual only; the G-code is not affected."));
     grid->AddSpacer(0);
     grid->Add(m_coextruded);
+    // Glow-in-the-dark G1 (design section 10): the lights-off view.
+    m_lights_off = new wxCheckBox(m_side, wxID_ANY, _L("Lights off (glow)"));
+    m_lights_off->SetToolTip(_L("Turns the lights out. Filaments go dim; filaments set to glow in their colour dialog shine in their "
+                                "glow colour. Visual only; the G-code is not affected."));
+    grid->AddSpacer(0);
+    grid->Add(m_lights_off);
+    m_lights_ambient = slider(5, 0, 50);
+    m_lights_ambient->SetToolTip(_L("How much of the light is left with the lights off, in percent. Applies to the filaments, "
+                                    "the floor and the backdrop."));
+    row(_L("Light left"), m_lights_ambient);
+    m_glow_intensity = slider(100, 0, 300);
+    m_glow_intensity->SetToolTip(_L("How strongly every glow filament shines, in percent. Saved with the project; Preview uses it too."));
+    row(_L("Glow intensity"), m_glow_intensity);
     // S5: the print's real extrusions instead of the model (once the plate is sliced), with D13's
     // smoothing: rounded beads and blended top skin. Showcase only; Preview keeps its look.
     wxArrayString sources;
@@ -1203,6 +1219,25 @@ void ShowcaseView::build_panel()
         const bool on = m_coextruded->GetValue();
         edit([on](Showcase::Scene &s) { s.materials.coextruded_look = on; });
     });
+    m_lights_off->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_lights_off->GetValue();
+        edit([on](Showcase::Scene &s) { s.materials.lights_off = on; });
+    });
+    m_lights_ambient->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float level = float(m_lights_ambient->GetValue()) / 100.f;
+        edit([level](Showcase::Scene &s) { s.materials.lights_off_ambient = level; });
+    });
+    m_glow_intensity->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        if (m_syncing || read_only())
+            return;
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        if (bundle == nullptr)
+            return;
+        bundle->project_config.set_key_value("filament_glow_intensity", new ConfigOptionFloat(double(m_glow_intensity->GetValue())));
+        if (Plater *plater = wxGetApp().plater())
+            plater->update_project_dirty_from_presets();
+        set_as_dirty();
+    });
     m_source->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_source->GetSelection();
         if (sel >= 0)
@@ -1445,6 +1480,10 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         bool                                shown = false;
     };
     std::vector<MakeUpChip> chips(filaments.size());
+    // Glow G1: which slots glow, shown beside the name (set in the colour dialog).
+    std::vector<Glow::Slot> glow;
+    if (const PresetBundle *bundle = wxGetApp().preset_bundle)
+        glow = Glow::slots_from_bundle(*bundle);
     if (const PresetBundle *bundle = wxGetApp().preset_bundle) {
         const DynamicPrintConfig &pc = bundle->project_config;
         const bool look = scene().materials.coextruded_look;
@@ -1460,6 +1499,8 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     for (size_t i = 0; i < filaments.size(); ++i) {
         const ShowcaseFilament &f = filaments[i];
         signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
+        if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+            signature += "glow\n";
         if (chips[i].shown) {
             for (const std::string &c : chips[i].colors)
                 signature += c + ",";
@@ -1496,10 +1537,20 @@ void ShowcaseView::refresh_materials(bool sync_selection)
             } else {
                 auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
                 swatch->SetBackgroundColour(showcase_wx_colour(f.color));
+                swatch->SetToolTip(_L("Click to edit this filament's colour, make-up and glow."));
+                swatch->SetCursor(wxCursor(wxCURSOR_HAND));
+                const int swatch_slot = f.slot;
+                swatch->Bind(wxEVT_LEFT_UP, [swatch_slot](wxMouseEvent &) {
+                    auto &combos = wxGetApp().sidebar().combos_filament();
+                    if (swatch_slot >= 1 && size_t(swatch_slot) <= combos.size())
+                        combos[size_t(swatch_slot - 1)]->ChangeExtruderColor();
+                });
                 label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
             }
             wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
                                                   : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
+            if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+                name += _L("  (glows)");
             auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
             text->SetToolTip(wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
             label->Add(text, 1, wxALIGN_CENTER_VERTICAL);
@@ -1628,6 +1679,9 @@ void ShowcaseView::sync_controls()
     m_tone->SetSelection(s.lighting.tone == Showcase::ToneCurve::Filmic ? 1 : 0);
     m_layer_lines->SetSelection(int(s.materials.layer_lines));
     m_coextruded->SetValue(s.materials.coextruded_look);
+    m_lights_off->SetValue(s.materials.lights_off);
+    m_lights_ambient->SetValue(int(std::lround(s.materials.lights_off_ambient * 100.f)));
+    m_glow_intensity->SetValue(int(std::lround(Glow::intensity_from_config(wxGetApp().preset_bundle->project_config) * 100.f)));
     m_source->SetSelection(s.source == "toolpaths" ? 1 : 0);
     m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
     if (s.materials.toolpath_smoothness >= 0.f)
@@ -1833,8 +1887,10 @@ void ShowcaseView::update_enabled()
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_presets, m_hide_plate, m_hide_wipe_tower, m_bg_type, m_light_fixed, m_shadows,
                                                           m_ssao, m_projection, m_size, m_quality, m_format, m_wm_enabled, m_light_rig,
                                                           m_key_intensity, m_key_temperature, m_fill, m_rim, m_shadow_softness, m_environment,
-                                                          m_exposure, m_tone, m_coextruded, m_use_as_cover, m_source, m_smooth_auto })
+                                                          m_exposure, m_tone, m_coextruded, m_lights_off, m_use_as_cover, m_source, m_smooth_auto })
         w->Enable(editable);
+    m_lights_ambient->Enable(editable && s.materials.lights_off);
+    m_glow_intensity->Enable(editable);
     // The toolpaths are the real layers, so the procedural lines only apply to the model.
     m_layer_lines->Enable(editable && s.source != "toolpaths");
     m_smooth->Enable(editable && s.materials.toolpath_smoothness >= 0.f);

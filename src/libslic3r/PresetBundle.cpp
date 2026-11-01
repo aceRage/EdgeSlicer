@@ -224,6 +224,12 @@ static std::vector<std::string> s_project_options {
     "filament_colour_split",
     "filament_colour_angle",
     "filament_colour_twist",
+    // Glow-in-the-dark (G1), visual only as well.
+    "filament_glow",
+    "filament_glow_colour",
+    "filament_glow_intensity",
+    "filament_gradient_dwell",
+    "filament_gradient_transition",
     "wipe_tower_x",
     "wipe_tower_y",
     "curr_bed_type",

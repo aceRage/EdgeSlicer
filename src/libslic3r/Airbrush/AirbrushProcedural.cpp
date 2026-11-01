@@ -1,0 +1,707 @@
+#include "AirbrushProcedural.hpp"
+#include "BlueNoise.hpp"
+
+#include "../AABBTreeIndirect.hpp"
+#include "../TriangleMesh.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
+#include <limits>
+#include <memory>
+#include <queue>
+#include <sstream>
+
+namespace Slic3r {
+namespace Airbrush {
+
+static constexpr float TWO_PI = 6.28318530717958647692f;
+
+const char *fill_kind_name(FillKind kind)
+{
+    switch (kind) {
+    case FillKind::Linear: return "linear";
+    case FillKind::Radial: return "radial";
+    case FillKind::AlongZ: return "z";
+    case FillKind::Noise: return "noise";
+    case FillKind::Speckle: return "speckle";
+    case FillKind::Camo: return "camo";
+    case FillKind::Marble: return "marble";
+    default: return "?";
+    }
+}
+
+static bool fill_kind_from_name(const std::string &s, FillKind &out)
+{
+    for (int k = 0; k < int(FillKind::Count); ++k)
+        if (s == fill_kind_name(FillKind(k))) {
+            out = FillKind(k);
+            return true;
+        }
+    return false;
+}
+
+// =============================================================================================
+// Recipe
+// =============================================================================================
+
+bool AirbrushFillRecipe::sanitize()
+{
+    std::vector<GradientStop> s;
+    for (GradientStop st : stops) {
+        if (st.filament < 0 || st.filament > int(EnforcerBlockerType::ExtruderMax) || !std::isfinite(st.pos))
+            continue;
+        st.pos = std::clamp(st.pos, 0.f, 1.f);
+        s.push_back(st);
+    }
+    std::stable_sort(s.begin(), s.end(), [](const GradientStop &a, const GradientStop &b) { return a.pos < b.pos; });
+    if (s.size() > AIRBRUSH_MAX_STOPS)
+        s.resize(AIRBRUSH_MAX_STOPS);
+    stops = std::move(s);
+    auto fin = [](float v, float lo, float hi, float def) { return std::isfinite(v) ? std::clamp(v, lo, hi) : def; };
+    scale_mm = fin(scale_mm, 0.2f, 500.f, 8.f);
+    contrast = fin(contrast, 0.f, 8.f, 1.f);
+    amount   = fin(amount, 0.f, 1.f, 0.3f);
+    opacity  = fin(opacity, 0.f, 1.f, 1.f);
+    octaves  = std::clamp(octaves, 1, 8);
+    brush_radius = fin(brush_radius, 0.01f, 1000.f, 4.f);
+    hardness     = fin(hardness, 0.f, 1.f, 0.5f);
+    if (area != Area::WholePart && area != Area::Brush)
+        area = Area::WholePart;
+    if (!facing.allFinite())
+        facing = Vec3f::Zero();
+    if (!start.allFinite())
+        start = Vec3f::Zero();
+    if (!end.allFinite())
+        end = Vec3f::Zero();
+    if (!up.allFinite() || up.squaredNorm() <= 0.f)
+        up = Vec3f::UnitZ();
+    return stops.size() >= 2;
+}
+
+std::string AirbrushFillRecipe::to_string() const
+{
+    std::ostringstream ss;
+    ss.imbue(std::locale::classic());
+    ss << "kind=" << fill_kind_name(kind) << ";stops=";
+    for (size_t i = 0; i < stops.size(); ++i)
+        ss << (i ? "," : "") << stops[i].filament << "@" << stops[i].pos;
+    auto v3 = [&ss](const char *k, const Vec3f &v) { ss << ";" << k << "=" << v.x() << "," << v.y() << "," << v.z(); };
+    v3("start", start);
+    v3("end", end);
+    v3("up", up);
+    ss << ";scale=" << scale_mm << ";contrast=" << contrast << ";octaves=" << octaves << ";amount=" << amount << ";seed=" << seed
+       << ";opacity=" << opacity;
+    if (area == Area::Brush) {
+        ss << ";area=brush;radius=" << brush_radius << ";hardness=" << hardness;
+        v3("facing", facing);
+    }
+    return ss.str();
+}
+
+bool AirbrushFillRecipe::from_string(const std::string &s, AirbrushFillRecipe &out)
+{
+    AirbrushFillRecipe r;
+    std::istringstream ss(s);
+    ss.imbue(std::locale::classic());
+    std::string item;
+    bool        have_kind = false;
+    auto read_v3 = [](const std::string &v, Vec3f &o) {
+        std::istringstream vs(v);
+        vs.imbue(std::locale::classic());
+        char c1 = 0, c2 = 0;
+        float x = 0, y = 0, z = 0;
+        if (!(vs >> x >> c1 >> y >> c2 >> z) || c1 != ',' || c2 != ',')
+            return false;
+        o = Vec3f(x, y, z);
+        return true;
+    };
+    while (std::getline(ss, item, ';')) {
+        const size_t eq = item.find('=');
+        if (eq == std::string::npos)
+            continue;
+        const std::string k = item.substr(0, eq), v = item.substr(eq + 1);
+        std::istringstream vs(v);
+        vs.imbue(std::locale::classic());
+        bool ok = true;
+        if (k == "kind")
+            ok = have_kind = fill_kind_from_name(v, r.kind);
+        else if (k == "stops") {
+            std::istringstream ls(v);
+            std::string        stop;
+            while (ok && std::getline(ls, stop, ',')) {
+                const size_t at = stop.find('@');
+                if (at == std::string::npos) {
+                    ok = false;
+                    break;
+                }
+                std::istringstream fs(stop.substr(0, at)), ps(stop.substr(at + 1));
+                fs.imbue(std::locale::classic());
+                ps.imbue(std::locale::classic());
+                GradientStop st;
+                ok = bool(fs >> st.filament) && bool(ps >> st.pos);
+                if (ok)
+                    r.stops.push_back(st);
+            }
+        } else if (k == "start") ok = read_v3(v, r.start);
+        else if (k == "end") ok = read_v3(v, r.end);
+        else if (k == "up") ok = read_v3(v, r.up);
+        else if (k == "scale") ok = bool(vs >> r.scale_mm);
+        else if (k == "contrast") ok = bool(vs >> r.contrast);
+        else if (k == "octaves") ok = bool(vs >> r.octaves);
+        else if (k == "amount") ok = bool(vs >> r.amount);
+        else if (k == "seed") { unsigned long sd = 0; ok = bool(vs >> sd); r.seed = uint32_t(sd); }
+        else if (k == "opacity") ok = bool(vs >> r.opacity);
+        else if (k == "area") r.area = v == "brush" ? AirbrushFillRecipe::Area::Brush : AirbrushFillRecipe::Area::WholePart;
+        else if (k == "radius") ok = bool(vs >> r.brush_radius);
+        else if (k == "hardness") ok = bool(vs >> r.hardness);
+        else if (k == "facing") ok = read_v3(v, r.facing);
+        if (!ok)
+            return false;
+    }
+    if (!have_kind || !r.sanitize())
+        return false;
+    out = std::move(r);
+    return true;
+}
+
+std::vector<GradientStop> two_stops(int a, int b) { return { GradientStop{ a, 0.f }, GradientStop{ b, 1.f } }; }
+
+std::vector<GradientStop> even_stops(const std::vector<int> &filaments)
+{
+    std::vector<GradientStop> out;
+    const size_t n = std::min(filaments.size(), AIRBRUSH_MAX_STOPS);
+    for (size_t i = 0; i < n; ++i)
+        out.push_back({ filaments[i], n > 1 ? float(i) / float(n - 1) : 0.f });
+    return out;
+}
+
+// =============================================================================================
+// Noise
+// =============================================================================================
+
+static inline float lattice(int32_t x, int32_t y, int32_t z, uint32_t seed)
+{
+    const uint32_t h = airbrush_hash(uint32_t(x), uint32_t(y), airbrush_hash(uint32_t(z), seed, 0x9E3779B9u));
+    return float(h & 0xFFFFFFu) / float(0x1000000);
+}
+
+static inline float fade(float t) { return t * t * (3.f - 2.f * t); }
+
+float value_noise(const Vec3f &p, uint32_t seed)
+{
+    const float   fx = std::floor(p.x()), fy = std::floor(p.y()), fz = std::floor(p.z());
+    const int32_t x = int32_t(fx), y = int32_t(fy), z = int32_t(fz);
+    const float   u = fade(p.x() - fx), v = fade(p.y() - fy), w = fade(p.z() - fz);
+    auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+    const float x00 = lerp(lattice(x, y, z, seed), lattice(x + 1, y, z, seed), u);
+    const float x10 = lerp(lattice(x, y + 1, z, seed), lattice(x + 1, y + 1, z, seed), u);
+    const float x01 = lerp(lattice(x, y, z + 1, seed), lattice(x + 1, y, z + 1, seed), u);
+    const float x11 = lerp(lattice(x, y + 1, z + 1, seed), lattice(x + 1, y + 1, z + 1, seed), u);
+    return lerp(lerp(x00, x10, v), lerp(x01, x11, v), w);
+}
+
+float fbm_noise(const Vec3f &p, int octaves, uint32_t seed)
+{
+    octaves     = std::clamp(octaves, 1, 8);
+    float sum   = 0.f, amp = 1.f, norm = 0.f;
+    Vec3f q     = p;
+    for (int o = 0; o < octaves; ++o) {
+        sum += amp * value_noise(q, airbrush_hash(seed, uint32_t(o), 0xF00Du));
+        norm += amp;
+        amp *= 0.5f;
+        // Twice the frequency, and a fixed offset so the octaves' lattices do not line up.
+        q = q * 2.f + Vec3f(17.13f, 31.71f, 7.37f);
+    }
+    return sum / norm;
+}
+
+float worley_f1(const Vec3f &p, uint32_t seed)
+{
+    const int32_t x = int32_t(std::floor(p.x())), y = int32_t(std::floor(p.y())), z = int32_t(std::floor(p.z()));
+    float         best = std::numeric_limits<float>::max();
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int32_t cx = x + dx, cy = y + dy, cz = z + dz;
+                const Vec3f   fp(float(cx) + lattice(cx, cy, cz, seed), float(cy) + lattice(cx, cy, cz, seed ^ 0x51EDu),
+                                 float(cz) + lattice(cx, cy, cz, seed ^ 0xA5A5u));
+                best = std::min(best, (fp - p).squaredNorm());
+            }
+    return std::sqrt(best);
+}
+
+float pattern_value(const AirbrushFillRecipe &r, const Vec3f &p_mesh)
+{
+    const float scale = std::max(r.scale_mm, 1e-3f);
+    const Vec3f p     = p_mesh / scale;
+    switch (r.kind) {
+    case FillKind::Noise: {
+        const float n = fbm_noise(p, r.octaves, r.seed);
+        return std::clamp(0.5f + r.contrast * 2.f * (n - 0.5f), 0.f, 1.f);
+    }
+    case FillKind::Speckle: {
+        // One spot (a ball of radius rad) per unit cell. A surface cuts the balls in disks that cover
+        // about 4/3 pi rad^3 of it before overlaps, so rad = cbrt(3 amount / (4 pi)).
+        const float rad  = std::clamp(std::cbrt(3.f * std::max(r.amount, 0.f) / (4.f * 3.14159265f)), 0.f, 0.62f);
+        if (!(rad > 0.f))
+            return 0.f;
+        const float d    = worley_f1(p, r.seed);
+        const float soft = 0.15f * rad / std::max(r.contrast, 0.1f);
+        if (d <= rad - soft)
+            return 1.f;
+        if (d >= rad)
+            return 0.f;
+        return fade((rad - d) / soft);
+    }
+    case FillKind::Camo: {
+        // Low frequency, stretched so the hard bands share the surface about evenly.
+        const float n = fbm_noise(p, std::min(r.octaves, 3), r.seed);
+        return std::clamp(0.5f + 2.2f * std::max(r.contrast, 0.1f) * (n - 0.5f), 0.f, 1.f);
+    }
+    case FillKind::Marble: {
+        Vec3f up = r.up;
+        if (up.squaredNorm() > 0.f)
+            up.normalize();
+        const float h     = p.dot(up);
+        const float n     = fbm_noise(p, r.octaves, r.seed);
+        const float phase = TWO_PI * h + r.contrast * TWO_PI * n;
+        return 0.5f + 0.5f * std::sin(phase);
+    }
+    default: return 0.f;
+    }
+}
+
+std::vector<float> ramp_weights(const std::vector<GradientStop> &stops, float t, bool hard)
+{
+    std::vector<float> w(stops.size(), 0.f);
+    if (stops.empty())
+        return w;
+    if (!std::isfinite(t))
+        t = 0.f;
+    if (hard) {
+        // One band per stop over 0..1.
+        const size_t n = stops.size();
+        w[std::min(n - 1, size_t(std::max(0.f, t) * float(n)))] = 1.f;
+        return w;
+    }
+    if (t <= stops.front().pos) {
+        w.front() = 1.f;
+        return w;
+    }
+    if (t >= stops.back().pos) {
+        w.back() = 1.f;
+        return w;
+    }
+    for (size_t i = 0; i + 1 < stops.size(); ++i)
+        if (t <= stops[i + 1].pos) {
+            const float span = stops[i + 1].pos - stops[i].pos;
+            const float u    = span > 0.f ? (t - stops[i].pos) / span : 1.f;
+            w[i]             = 1.f - u;
+            w[i + 1]         = u;
+            break;
+        }
+    return w;
+}
+
+// =============================================================================================
+// Surface distance
+// =============================================================================================
+
+namespace {
+
+// The last mesh's AABB tree and the last seed's distances (hand test 2026-10-31: a gradient's live
+// preview re-runs the fill many times a second during one drag, on one mesh, from one start).
+struct MeshKey
+{
+    const void *vertices = nullptr;
+    size_t      nv = 0, nf = 0;
+    uint64_t    probe = 0;
+    bool operator==(const MeshKey &r) const { return vertices == r.vertices && nv == r.nv && nf == r.nf && probe == r.probe; }
+};
+MeshKey mesh_key(const indexed_triangle_set &its)
+{
+    MeshKey k;
+    k.vertices = its.vertices.data();
+    k.nv       = its.vertices.size();
+    k.nf       = its.indices.size();
+    // A few vertices hashed in, so a new mesh at a reused address is not mistaken for the old one.
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < its.vertices.size(); i += std::max<size_t>(1, its.vertices.size() / 16))
+        for (int c = 0; c < 3; ++c) {
+            uint32_t bits;
+            std::memcpy(&bits, &its.vertices[i][c], 4);
+            h = (h ^ bits) * 1099511628211ull;
+        }
+    k.probe = h;
+    return k;
+}
+struct DistanceCache
+{
+    MeshKey                                         key;
+    std::shared_ptr<const AABBTreeIndirect::Tree3f> tree;
+    bool                                            has_seed = false;
+    Vec3f                                           seed     = Vec3f::Zero();
+    std::shared_ptr<const std::vector<float>>       dist;
+    std::shared_ptr<const std::vector<char>>        patch;
+};
+std::mutex    g_distance_mutex;
+DistanceCache g_distance_cache;
+
+std::shared_ptr<const AABBTreeIndirect::Tree3f> cached_tree(const indexed_triangle_set &its)
+{
+    const MeshKey key = mesh_key(its);
+    {
+        std::lock_guard<std::mutex> lock(g_distance_mutex);
+        if (g_distance_cache.tree && g_distance_cache.key == key)
+            return g_distance_cache.tree;
+    }
+    auto tree = std::make_shared<const AABBTreeIndirect::Tree3f>(
+        AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(its.vertices, its.indices));
+    std::lock_guard<std::mutex> lock(g_distance_mutex);
+    if (!(g_distance_cache.key == key)) {
+        g_distance_cache          = DistanceCache();
+        g_distance_cache.key      = key;
+    }
+    g_distance_cache.tree = tree;
+    return tree;
+}
+
+size_t closest_facet(const indexed_triangle_set &its, const Vec3f &p, bool *ok = nullptr)
+{
+    const auto tree = cached_tree(its);
+    size_t     f    = 0;
+    Vec3f      hit;
+    const bool found = AABBTreeIndirect::squared_distance_to_indexed_triangle_set(its.vertices, its.indices, *tree, p, f, hit) >= 0.f;
+    if (ok)
+        *ok = found;
+    return found ? f : 0;
+}
+
+void cached_distances(const indexed_triangle_set &its, const Vec3f &seed, std::shared_ptr<const std::vector<float>> &dist,
+                      std::shared_ptr<const std::vector<char>> &patch)
+{
+    const MeshKey key = mesh_key(its);
+    {
+        std::lock_guard<std::mutex> lock(g_distance_mutex);
+        if (g_distance_cache.key == key && g_distance_cache.has_seed && g_distance_cache.seed == seed) {
+            dist  = g_distance_cache.dist;
+            patch = g_distance_cache.patch;
+            return;
+        }
+    }
+    auto p = std::make_shared<std::vector<char>>();
+    auto d = std::make_shared<const std::vector<float>>(geodesic_distances(its, seed, p.get()));
+    dist   = d;
+    patch  = p;
+    std::lock_guard<std::mutex> lock(g_distance_mutex);
+    if (!(g_distance_cache.key == key)) {
+        g_distance_cache     = DistanceCache();
+        g_distance_cache.key = key;
+    }
+    g_distance_cache.has_seed = true;
+    g_distance_cache.seed     = seed;
+    g_distance_cache.dist     = dist;
+    g_distance_cache.patch    = patch;
+}
+
+} // namespace
+
+std::vector<float> geodesic_distances(const indexed_triangle_set &its, const Vec3f &seed, std::vector<char> *seed_patch_out)
+{
+    const float        INF = std::numeric_limits<float>::infinity();
+    std::vector<float> dist(its.vertices.size(), INF);
+    std::vector<char>  patch(its.indices.size(), 0);
+    if (its.indices.empty()) {
+        if (seed_patch_out)
+            *seed_patch_out = std::move(patch);
+        return dist;
+    }
+    // Weld by position first. Meshes often repeat a vertex along a seam (mirrored halves, per-face
+    // normals, UV seams); the distance must cross those seams, or everything past one reads as out
+    // of reach - a hard split along the seam (hand test 2026-10-31, the bunny).
+    std::vector<int> canon(its.vertices.size());
+    {
+        BoundingBoxf3 bb;
+        for (const stl_vertex &v : its.vertices)
+            bb.merge(Vec3d(v.cast<double>()));
+        const double q = std::max(1e-5, 1e-6 * bb.size().norm());
+        struct KeyHash
+        {
+            size_t operator()(const std::array<int64_t, 3> &k) const
+            {
+                return size_t(airbrush_hash(uint32_t(k[0]), uint32_t(k[1]), uint32_t(k[2])));
+            }
+        };
+        std::unordered_map<std::array<int64_t, 3>, int, KeyHash> ids;
+        ids.reserve(its.vertices.size());
+        for (size_t i = 0; i < its.vertices.size(); ++i) {
+            const Vec3f                  &v = its.vertices[i];
+            const std::array<int64_t, 3> k  = { int64_t(std::llround(double(v.x()) / q)), int64_t(std::llround(double(v.y()) / q)),
+                                                int64_t(std::llround(double(v.z()) / q)) };
+            canon[i] = ids.emplace(k, int(i)).first->second;
+        }
+    }
+    auto cv = [&](size_t f, int k) { return canon[size_t(its.indices[f][k])]; };
+    // Facets round each welded vertex.
+    std::vector<std::vector<int>> vf(its.vertices.size());
+    for (size_t f = 0; f < its.indices.size(); ++f)
+        for (int k = 0; k < 3; ++k)
+            vf[size_t(cv(f, k))].push_back(int(f));
+    // The facet under the seed.
+    const size_t seed_facet = closest_facet(its, seed);
+    // The flat patch round it, through welded edges: straight-line distances are exact there.
+    const Vec3f         n0 = its_face_normal(its, int(seed_facet));
+    const Vec3f         p0 = its.vertices[size_t(its.indices[seed_facet][0])];
+    std::vector<size_t> stack { seed_facet };
+    patch[seed_facet] = 1;
+    while (!stack.empty()) {
+        const size_t f = stack.back();
+        stack.pop_back();
+        for (int e = 0; e < 3; ++e) {
+            const int a = cv(f, e), b = cv(f, (e + 1) % 3);
+            for (int g : vf[size_t(a)]) {
+                if (patch[size_t(g)])
+                    continue;
+                bool has_b = false;
+                for (int k = 0; k < 3; ++k)
+                    has_b |= cv(size_t(g), k) == b;
+                if (!has_b || its_face_normal(its, g).dot(n0) < 0.99999f)
+                    continue;
+                bool coplanar = true;
+                for (int k = 0; k < 3 && coplanar; ++k)
+                    coplanar = std::abs((its.vertices[size_t(its.indices[size_t(g)][k])] - p0).dot(n0)) < 1e-4f;
+                if (!coplanar)
+                    continue;
+                patch[size_t(g)] = 1;
+                stack.push_back(size_t(g));
+            }
+        }
+    }
+    using Item = std::pair<float, int>;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> q;
+    std::vector<float> d(its.vertices.size(), INF);   // per welded vertex
+    for (size_t f = 0; f < its.indices.size(); ++f)
+        if (patch[f])
+            for (int k = 0; k < 3; ++k) {
+                const int   v  = cv(f, k);
+                const float dd = (its.vertices[size_t(v)] - seed).norm();
+                if (dd < d[size_t(v)]) {
+                    d[size_t(v)] = dd;
+                    q.emplace(dd, v);
+                }
+            }
+    while (!q.empty()) {
+        const auto [dv, v] = q.top();
+        q.pop();
+        if (dv > d[size_t(v)])
+            continue;
+        for (int f : vf[size_t(v)])
+            for (int k = 0; k < 3; ++k) {
+                const int w = cv(size_t(f), k);
+                if (w == v)
+                    continue;
+                const float nd = dv + (its.vertices[size_t(w)] - its.vertices[size_t(v)]).norm();
+                if (nd < d[size_t(w)]) {
+                    d[size_t(w)] = nd;
+                    q.emplace(nd, w);
+                }
+            }
+    }
+    for (size_t i = 0; i < its.vertices.size(); ++i) {
+        const float dd = d[size_t(canon[i])];
+        // A separate shell the surface never reaches: the straight line, so it still grades.
+        dist[i] = std::isfinite(dd) ? dd : (its.vertices[i] - seed).norm();
+    }
+    if (seed_patch_out)
+        *seed_patch_out = std::move(patch);
+    return dist;
+}
+
+float geodesic_at(const indexed_triangle_set &its, const std::vector<float> &vertex_dist, const std::vector<char> &seed_patch,
+                  const Vec3f &seed, size_t facet, const Vec3f &p)
+{
+    if (facet < seed_patch.size() && seed_patch[facet])
+        return (p - seed).norm();
+    float best = std::numeric_limits<float>::infinity();
+    if (facet >= its.indices.size())
+        return best;
+    for (int k = 0; k < 3; ++k) {
+        const int v = its.indices[facet][k];
+        if (size_t(v) < vertex_dist.size())
+            best = std::min(best, vertex_dist[size_t(v)] + (p - its.vertices[size_t(v)]).norm());
+    }
+    return best;
+}
+
+// =============================================================================================
+// Applying a recipe
+// =============================================================================================
+
+float fill_area_weight(const AirbrushFillRecipe &r, const Vec3f &p, float radial_radius)
+{
+    if (r.area != AirbrushFillRecipe::Area::Brush)
+        return 1.f;
+    if (r.kind == FillKind::Radial) {
+        // Whole inside the gradient's circle, then a soft rim outside it (narrower the harder).
+        // The straight-line distance never exceeds the surface distance, so nothing the gradient
+        // reaches is cut.
+        const float radius = radial_radius > 0.f ? radial_radius : (r.end - r.start).norm();
+        const float d      = (p - r.start).norm();
+        if (d <= radius)
+            return 1.f;
+        const float rim = radius * 0.5f * (1.f - std::clamp(r.hardness, 0.f, 1.f));
+        if (!(rim > 0.f) || d >= radius + rim)
+            return 0.f;
+        const float t = (radius + rim - d) / rim;
+        return t * t * (3.f - 2.f * t);
+    }
+    // Distance to the drag segment (a click: to the point).
+    const Vec3f d  = r.end - r.start;
+    const float l2 = d.squaredNorm();
+    const float t  = l2 > 0.f ? std::clamp((p - r.start).dot(d) / l2, 0.f, 1.f) : 0.f;
+    return dab_falloff((p - (r.start + t * d)).norm(), r.brush_radius, r.hardness);
+}
+
+bool make_fill_function(AirbrushField &field, const indexed_triangle_set &its, const AirbrushFillRecipe &recipe_in,
+                        AirbrushField::FillFunction &out, std::string *error, float *radial_radius)
+{
+    auto fail = [error](const char *why) {
+        if (error)
+            *error = why;
+        return false;
+    };
+    AirbrushFillRecipe recipe = recipe_in;
+    if (!recipe.sanitize())
+        return fail("a gradient needs at least two stops");
+    // Each stop's slot (-1: the part's own colour).
+    std::vector<int> slot_of_stop;
+    for (const GradientStop &st : recipe.stops) {
+        if (st.filament == 0) {
+            slot_of_stop.push_back(-1);
+            continue;
+        }
+        const int s = field.add_slot(st.filament);
+        if (s < 0)
+            return fail("the field already holds the most filaments it can");
+        slot_of_stop.push_back(s);
+    }
+    const bool hard = recipe.kind == FillKind::Camo;
+    auto       to_cov = [slot_of_stop, stops = recipe.stops, hard](float t, AirbrushField::Coverage &cov) {
+        const std::vector<float> w = ramp_weights(stops, t, hard);
+        for (size_t i = 0; i < w.size(); ++i)
+            if (slot_of_stop[i] >= 0 && w[i] > 0.f)
+                cov[size_t(slot_of_stop[i])] += w[i];
+    };
+
+    switch (recipe.kind) {
+    case FillKind::Linear: {
+        const Vec3f d  = recipe.end - recipe.start;
+        const float l2 = d.squaredNorm();
+        if (!(l2 > 1e-6f))
+            return fail("drag across the part to set the gradient's direction");
+        const Vec3f s = recipe.start;
+        out = [to_cov, s, d, l2](const Vec3f &p, size_t, int, AirbrushField::Coverage &cov) { to_cov((p - s).dot(d) / l2, cov); };
+        return true;
+    }
+    case FillKind::AlongZ: {
+        Vec3f up = recipe.up;
+        if (up.squaredNorm() <= 0.f)
+            up = Vec3f::UnitZ();
+        float h0 = recipe.start.dot(up), h1 = recipe.end.dot(up);
+        if (!(std::abs(h1 - h0) > 1e-3f)) {
+            // A click without a drag: the part's whole height.
+            h0 = std::numeric_limits<float>::max();
+            h1 = -std::numeric_limits<float>::max();
+            for (const stl_vertex &v : its.vertices) {
+                h0 = std::min(h0, v.dot(up));
+                h1 = std::max(h1, v.dot(up));
+            }
+            if (!(h1 > h0))
+                return fail("the part has no height");
+        }
+        out = [to_cov, up, h0, h1](const Vec3f &p, size_t, int, AirbrushField::Coverage &cov) { to_cov((p.dot(up) - h0) / (h1 - h0), cov); };
+        return true;
+    }
+    case FillKind::Radial: {
+        const float chord = (recipe.end - recipe.start).norm();
+        if (!(chord > 1e-3f))
+            return fail("drag out from the centre to set the radius");
+        std::shared_ptr<const std::vector<float>> dist;
+        std::shared_ptr<const std::vector<char>>  patch;
+        cached_distances(its, recipe.start, dist, patch);
+        const Vec3f seed = recipe.start;
+        const indexed_triangle_set *pits = &its;
+        // The last stop sits where the drag ended, measured over the surface like everything else
+        // (the straight chord is shorter on a curved part, which ended the gradient early).
+        float radius = chord;
+        {
+            bool         found = false;
+            const size_t f_end = closest_facet(its, recipe.end, &found);
+            if (found) {
+                const float g = geodesic_at(its, *dist, *patch, seed, f_end, recipe.end);
+                if (std::isfinite(g) && g > chord)
+                    radius = g;
+            }
+        }
+        if (radial_radius)
+            *radial_radius = radius;
+        out = [to_cov, dist, patch, seed, radius, pits](const Vec3f &p, size_t facet, int, AirbrushField::Coverage &cov) {
+            const float d = geodesic_at(*pits, *dist, *patch, seed, facet, p);
+            to_cov(std::isfinite(d) ? d / radius : 1.f, cov);
+        };
+        return true;
+    }
+    case FillKind::Noise:
+    case FillKind::Speckle:
+    case FillKind::Camo:
+    case FillKind::Marble:
+        out = [to_cov, recipe](const Vec3f &p, size_t, int, AirbrushField::Coverage &cov) { to_cov(pattern_value(recipe, p), cov); };
+        return true;
+    default: return fail("unknown fill");
+    }
+}
+
+long apply_fill(AirbrushField &field, const AirbrushSurface &surface, const AirbrushFillRecipe &recipe, std::vector<uint64_t> *changed_keys,
+                std::string *error, const AirbrushField *base)
+{
+    AirbrushField::FillFunction fn;
+    float                       radial_radius = 0.f;
+    if (!make_fill_function(field, surface.its(), recipe, fn, error, &radial_radius))
+        return -1;
+    AirbrushFillRecipe stored = recipe;
+    stored.sanitize();
+    if (stored.area == AirbrushFillRecipe::Area::Brush) {
+        // Only the facets that can be inside the area are visited.
+        const float reach = stored.kind == FillKind::Radial ? 1.5f * std::max(radial_radius, (stored.end - stored.start).norm()) :
+                                                              stored.brush_radius;
+        std::vector<size_t> facets;
+        const Vec3f         a = stored.start, b = stored.kind == FillKind::Radial ? stored.start : stored.end;
+        const int           n = std::max(1, int(std::ceil((b - a).norm() / std::max(0.5f * reach, 1e-3f))));
+        for (int i = 0; i <= n; ++i) {
+            const std::vector<size_t> part = surface.facets_in_radius(a + (b - a) * (float(i) / float(n)), reach);
+            facets.insert(facets.end(), part.begin(), part.end());
+        }
+        std::sort(facets.begin(), facets.end());
+        facets.erase(std::unique(facets.begin(), facets.end()), facets.end());
+        const Vec3f facing = stored.facing.squaredNorm() > 0.f ? Vec3f(stored.facing.normalized()) : Vec3f::Zero();
+        const AirbrushField::FillMask mask = [&stored, &surface, facing, radial_radius](const Vec3f &p, size_t facet) {
+            // The far side, as a spray (not for a radial gradient: it wraps round the part).
+            if (stored.kind != FillKind::Radial && facing.squaredNorm() > 0.f && surface.facet_normal(facet).dot(facing) <= 0.f)
+                return 0.f;
+            return fill_area_weight(stored, p, radial_radius);
+        };
+        const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys, &mask, &facets, base);
+        field.set_fill_recipe(stored.to_string());
+        return long(changed);
+    }
+    const size_t changed = field.fill(surface, fn, stored.opacity, changed_keys, nullptr, nullptr, base);
+    field.set_fill_recipe(stored.to_string());
+    return long(changed);
+}
+
+} // namespace Airbrush
+} // namespace Slic3r

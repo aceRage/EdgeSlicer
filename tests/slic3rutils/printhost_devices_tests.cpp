@@ -12,13 +12,31 @@
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
 #include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
+#include "slic3r/Utils/CrealityPrintModel.hpp"
+#include "slic3r/GUI/ThirdPartyFilamentMap.hpp"
 
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/websocket.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <ctime>
+#include <future>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <map>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace Slic3r;
 using namespace Slic3r::PrintHostDevices;
@@ -1173,6 +1191,7 @@ TEST_CASE("PrusaLinkStatus: what a PrusaLink printer says it is doing", "[PrintH
         CHECK(PrintHostDevices::can_probe("prusaconnect"));
         CHECK(PrintHostDevices::can_probe("octoprint"));
         CHECK(PrintHostDevices::can_probe("elegoolink")); // the CC1's CANVAS
+        CHECK(PrintHostDevices::can_probe("crealityprint")); // K-series CFS over WS 9999
         // It reports a state but never a filament, and the dialog has to say so.
         CHECK(PrintHostDevices::no_filament_note("prusalink").find("PrusaLink") != std::string::npos);
     }
@@ -1392,4 +1411,687 @@ TEST_CASE("Elegoo CC2 device with no serial and an empty API key gets the shared
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "127.0.0.22", "", "Elegoo Centauri Carbon"));
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("octoprint", "127.0.0.22", "", preset));
     CHECK_FALSE(ElegooCc2::wants_shared_device_page("elegoolink", "", "", preset));
+}
+
+TEST_CASE("CrealityPrint: K1/K2 gcode root and host parse", "[CrealityPrint]")
+{
+    using namespace Slic3r::CrealityPrintModel;
+
+    SECTION("K1-family uses /usr/data") {
+        CHECK(is_k1_family("K1"));
+        CHECK(is_k1_family("K1 SE"));
+        CHECK(is_k1_family("K1C"));
+        CHECK(is_k1_family("K1_CFS-C"));
+        CHECK(gcode_root("K1") == "/usr/data");
+        CHECK(gcode_path("K1C", "cube.gcode") == "/usr/data/printer_data/gcodes/cube.gcode");
+        CHECK(omit_upload_path("K1"));
+        CHECK(omit_upload_path("K1_CFS-C"));
+    }
+
+    SECTION("K2-platform uses /mnt/UDISK") {
+        CHECK_FALSE(is_k1_family("F008"));
+        CHECK_FALSE(is_k1_family("F012"));
+        CHECK_FALSE(is_k1_family("F021"));
+        CHECK_FALSE(is_k1_family("F022"));
+        CHECK_FALSE(is_k1_family("K2"));
+        CHECK(gcode_root("F008") == "/mnt/UDISK");
+        CHECK(gcode_root("F012") == "/mnt/UDISK");
+        CHECK(gcode_root("F021") == "/mnt/UDISK");
+        CHECK(gcode_root("F022") == "/mnt/UDISK");
+        CHECK(gcode_path("F021", "benchy.gcode") == "/mnt/UDISK/printer_data/gcodes/benchy.gcode");
+        CHECK(omit_upload_path("F008"));
+        CHECK(omit_upload_path("F012"));
+        CHECK(omit_upload_path("F021"));
+        CHECK(omit_upload_path("F022"));
+        CHECK(model_display_name("F008") == "K2 Plus");
+        CHECK(model_display_name("F012") == "K2 Pro");
+        CHECK(model_display_name("F021") == "K2");
+        CHECK(model_display_name("F022") == "SPARKX i7");
+    }
+
+    SECTION("an unknown model is not treated as K1, so the K2-platform root applies") {
+        CHECK_FALSE(is_k1_family(""));
+        CHECK_FALSE(is_k1_family("Ender-3"));
+        CHECK(gcode_root("") == "/mnt/UDISK");
+        CHECK_FALSE(omit_upload_path(""));
+        CHECK_FALSE(model_supports_multi_color("Ender-3"));
+    }
+
+    SECTION("empty or unknown /info falls back to the preset printer_model") {
+        CHECK(resolve_model("K1C", "Creality K2 Plus") == "K1C");
+        CHECK(resolve_model("F021", "Creality K1C") == "F021");
+        CHECK(resolve_model("", "Creality K1C") == "K1C");
+        CHECK(resolve_model("unknown", "Creality K1") == "K1");
+        CHECK(resolve_model("", "Creality K2 Plus") == "F008");
+        CHECK(gcode_root_for("", "Creality K1C") == "/usr/data");
+        CHECK(gcode_root_for("garbage", "Creality K1 SE") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K1") == "/usr/data");
+        CHECK(gcode_root_for("", "Creality K2 Plus") == "/mnt/UDISK");
+        CHECK(gcode_root_for("K1C", "Creality K2 Plus") == "/usr/data");
+        CHECK(gcode_root_for("F021", "Creality K1C") == "/mnt/UDISK");
+        CHECK(looks_like_k1_family("Creality K1 Max"));
+        CHECK(gcode_root_for("", "Creality K1 Max") == "/usr/data");
+    }
+
+    SECTION("ws_host strips scheme and port (Http::url_host)") {
+        CHECK(ws_host("192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50/") == "192.168.1.50");
+        CHECK(ws_host("http://192.168.1.50:80") == "192.168.1.50");
+        CHECK(ws_host("https://k2.local:443/path") == "k2.local");
+        CHECK(ws_host("http://Printer.Local:7125") == "printer.local");
+        CHECK(ws_host("").empty());
+    }
+
+    SECTION("parse_model_from_info is hostile-JSON safe") {
+        CHECK(parse_model_from_info(R"({"model":"K1C"})") == "K1C");
+        CHECK(parse_model_from_info(R"({"model":"F021","mac":"aa"})") == "F021");
+        CHECK(parse_model_from_info("").empty());
+        CHECK(parse_model_from_info("<html>").empty());
+        CHECK(parse_model_from_info("[]").empty());
+        CHECK(parse_model_from_info(R"({"model":1})").empty());
+        CHECK(parse_model_from_info(R"({"name":"K1"})").empty());
+        REQUIRE_NOTHROW(parse_model_from_info(std::string(64, '{')));
+    }
+}
+
+TEST_CASE("CrealityPrint: CFS boxsInfo parser and start commands", "[CrealityPrint]")
+{
+    using namespace Slic3r::CrealityPrintModel;
+    using Slic3r::PrintHostDevices::Status;
+    using Slic3r::PrintHostDevices::status_from_cfs;
+    using Slic3r::PrintHostDevices::cfs_auto_match;
+
+    const std::string k2_boxs = R"({
+        "boxsInfo": { "materialBoxs": [
+            { "id": 0, "state": 1, "type": 1, "materials": [
+                { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Generic PLA", "color": "#00FF0000" }
+            ]},
+            { "id": 1, "state": 1, "type": 0, "model": "MF003", "materials": [
+                { "id": 0, "state": 1, "vendor": "Creality", "type": "PLA", "name": "Hyper PLA", "color": "#0FF0000" },
+                { "id": 1, "state": 2, "vendor": "eSUN", "type": "PETG", "name": "PETG", "color": "#0000FF" },
+                { "id": 2, "state": 0, "vendor": "", "type": "", "name": "", "color": "" },
+                { "id": 3, "state": 1, "vendor": "Creality", "type": "ABS", "name": "ABS", "color": "#FFFFFF" }
+            ]}
+        ]}
+    })";
+
+    SECTION("parses CFS and the external holder") {
+        const CfsParseResult r = parse_cfs_response(k2_boxs);
+        CHECK(r.ok);
+        CHECK(r.box_count == 1);
+        CHECK(r.variant == "CFS");
+        REQUIRE(r.slots.size() == 5); // 1 external + 4 CFS
+        CHECK(r.slots[0].external);
+        CHECK(r.slots[0].filament_type == "PLA");
+        CHECK(r.slots[1].box_id == 1);
+        CHECK(r.slots[1].slot_id == 0);
+        CHECK(r.slots[1].filament_type == "PLA");
+        CHECK(r.slots[1].color_hex == "#FF0000"); // leading 0 stripped
+        CHECK(r.slots[1].loaded);
+        CHECK(r.slots[2].filament_type == "PETG");
+        CHECK(r.slots[2].loaded); // state 2 = loaded on K2 Plus
+        CHECK_FALSE(r.slots[3].loaded);
+        CHECK(r.slots[4].filament_type == "ABS");
+        CHECK(cfs_variant_name("MF050") == "CFS-C");
+        CHECK(cfs_variant_name("MF040") == "CFS Lite");
+        CHECK(cfs_variant_name("MF046") == "CFS Mini");
+        CHECK(cfs_variant_name("MF049") == "CFS Nano");
+        CHECK(cfs_variant_name("MF042") == "CFS Pro");
+        CHECK(cfs_variant_name("CFS Nano2") == "CFS Nano2");
+    }
+
+    SECTION("status_from_cfs fills the mapping-table slots") {
+        const Status st = status_from_cfs(k2_boxs);
+        CHECK(st.probed);
+        CHECK(st.online);
+        CHECK(st.cfs);
+        CHECK(st.cfs_box_count == 1);
+        CHECK(st.slots_have_filaments);
+        REQUIRE(st.slots.size() == 5);
+        CHECK(st.slots[1].cfs_box == 1);
+        CHECK(st.slots[1].cfs_material == 0);
+        CHECK_FALSE(st.slots[1].cfs_external);
+        CHECK(st.slots[0].cfs_external);
+        CHECK(st.slots[1].label().find("CFS") != std::string::npos);
+        CHECK(st.slots[0].label().find("External") != std::string::npos);
+        // Tile labels 1A–1D from Slot::unit / tray (boxId 1 → unit 0). External stays ungrouped.
+        CHECK(st.slots[0].unit == -1);
+        CHECK(st.slots[1].unit == 0);
+        CHECK(st.slots[1].tray == 0);
+        CHECK(st.slots[2].tray == 1);
+        CHECK(st.slots[3].tray == 2);
+        CHECK(st.slots[4].unit == 0);
+        CHECK(st.slots[4].tray == 3);
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[1].unit, st.slots[1].tray) == "1A");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[2].unit, st.slots[2].tray) == "1B");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[3].unit, st.slots[3].tray) == "1C");
+        CHECK(Slic3r::GUI::bambu_style_slot_label(st.slots[4].unit, st.slots[4].tray) == "1D");
+        // What the send dialog's swatch map actually shows (positional, as main's #625 panel does):
+        // the external holder by name, never "T1", and the box's slots 1A-1D.
+        const auto tiles = Slic3r::GUI::third_party_slots_from(st.slots, st.mmu_grouped());
+        REQUIRE(tiles.size() == 5);
+        CHECK(Slic3r::GUI::slot_display_label(tiles[0]) == "External");
+        CHECK(Slic3r::GUI::slot_display_label(tiles[1]) == "1A");
+        CHECK(Slic3r::GUI::slot_display_label(tiles[2]) == "1B");
+        CHECK(Slic3r::GUI::slot_display_label(tiles[4]) == "1D");
+        CHECK(st.slots[1].type == "PLA");
+        CHECK(st.slots[1].color == "#FF0000");
+        CHECK(st.slots[2].type == "PETG");
+        CHECK(st.slots[2].color == "#0000FF");
+        CHECK(st.slots[4].type == "ABS");
+        CHECK(st.slots[4].color == "#FFFFFF");
+    }
+
+    SECTION("hostile JSON is refused without throwing") {
+        CHECK_FALSE(parse_cfs_response("").ok);
+        CHECK_FALSE(parse_cfs_response("<html>").ok);
+        CHECK_FALSE(parse_cfs_response("[]").ok);
+        CHECK_FALSE(parse_cfs_response(R"({"boxsInfo":{}})").ok);
+        REQUIRE_NOTHROW(parse_cfs_response(std::string(128, '{')));
+        CHECK_FALSE(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).ok);
+        CHECK(parse_cfs_response(std::string(1024 * 1024 + 1, 'x')).error == "message too large");
+        // Huge doubles are range-checked before the int cast.
+        const CfsParseResult huge_id = parse_cfs_response(R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": 1e20, "state": 1, "type": 0, "materials": [
+                    { "id": 0, "state": 1, "type": "PLA", "vendor": "X", "color": "#FF0000" }
+                ]}
+            ]}
+        })");
+        CHECK(huge_id.ok);
+        REQUIRE(huge_id.slots.size() == 4);
+        CHECK(huge_id.slots[0].box_id == 0); // fallback, not a truncated int
+        // Huge box/material arrays are capped, not thrown.
+        std::string huge = R"({"boxsInfo":{"materialBoxs":[)";
+        for (int i = 0; i < 40; ++i) {
+            if (i)
+                huge += ",";
+            huge += R"({"id":)" + std::to_string(i) + R"(,"state":1,"type":0,"materials":[)";
+            for (int m = 0; m < 20; ++m) {
+                if (m)
+                    huge += ",";
+                huge += R"({"id":)" + std::to_string(m) + R"(,"state":1,"type":"PLA","vendor":"X","color":"#FF0000"})";
+            }
+            huge += "]}";
+        }
+        huge += "]}}";
+        const CfsParseResult r = parse_cfs_response(huge);
+        CHECK(r.ok);
+        CHECK(r.box_count <= 8);
+        CHECK(r.slots.size() <= 32);
+    }
+
+    SECTION("wrong-type fields are skipped") {
+        const CfsParseResult r = parse_cfs_response(R"({
+            "boxsInfo": { "materialBoxs": [
+                { "id": "nope", "state": true, "type": [], "materials": "x" },
+                { "id": 2, "state": 1, "type": 0, "materials": [
+                    { "id": "3", "state": "1", "type": "PLA", "vendor": "Creality", "color": 12 }
+                ]}
+            ]}
+        })");
+        CHECK(r.ok);
+        REQUIRE(r.slots.size() == 4);
+        CHECK(r.slots[3].filament_type == "PLA");
+        CHECK(r.slots[3].color_hex.empty()); // colour was a number
+    }
+
+    SECTION("auto-match prefers CFS type+colour over external") {
+        const CfsParseResult r = parse_cfs_response(k2_boxs);
+        // Plate PLA red: CFS slot 0 beats the external PLA.
+        CHECK(auto_match_index("PLA", "#FF0000", r.slots) == 1);
+        // Plate PETG: the loaded CFS PETG.
+        CHECK(auto_match_index("PETG", "#0000FF", r.slots) == 2);
+        // Type-only PLA still prefers CFS over external.
+        CHECK(auto_match_index("PLA", "", r.slots) == 1);
+        const Status st = status_from_cfs(k2_boxs);
+        CHECK(cfs_auto_match("PLA", "#FF0000", st.slots, true) == 1);
+        CHECK(cfs_auto_match("ABS", "#FFFFFF", st.slots, true) == 4);
+        // Colour-only must not pick a slot whose material conflicts.
+        CfsSlot pla_only;
+        pla_only.loaded        = true;
+        pla_only.filament_type = "PLA";
+        pla_only.color_hex     = "#FF0000";
+        CHECK(auto_match_index("PETG", "#FF0000", {pla_only}) == -1);
+        CHECK(auto_match_index("PLA", "#FF0000FF", {pla_only}) == 0); // 8-char plate colour
+        CHECK(colour_hex("#FF0000FF") == "#FF0000");
+        CHECK(colour_hex("00FF00AA") == "#00FF00");
+    }
+
+    SECTION("start commands match Creality Print") {
+        const auto op = op_gcode_file_cmd("/mnt/UDISK/printer_data/gcodes/a.gcode", 1);
+        CHECK(op["params"]["opGcodeFile"] == "printprt:/mnt/UDISK/printer_data/gcodes/a.gcode");
+        CHECK(op["params"]["enableSelfTest"] == 1);
+        nlohmann::json list = nlohmann::json::array();
+        list.push_back(color_match_item_from_value("T1A\tPLA\t#FF0000\t1\t0"));
+        const auto cm = color_match_cmd("/mnt/UDISK/printer_data/gcodes/a.gcode", list);
+        CHECK(cm["params"]["colorMatch"]["path"] == "/mnt/UDISK/printer_data/gcodes/a.gcode");
+        CHECK(cm["params"]["colorMatch"]["list"][0]["id"] == "T1A");
+        CHECK(cm["params"]["colorMatch"]["list"][0]["boxId"] == 1);
+        const auto mc = multi_color_print_cmd("/usr/data/printer_data/gcodes/b.gcode", 0);
+        CHECK(mc["params"]["multiColorPrint"]["gcode"] == "/usr/data/printer_data/gcodes/b.gcode");
+        CHECK(mc["params"]["multiColorPrint"]["enableSelfTest"] == 0);
+        CHECK(color_match_id(0) == "T1A");
+        CHECK(color_match_id(1) == "T1B");
+        CHECK(color_match_id(3) == "T1D");
+        CHECK(color_match_id(4) == "T2A");
+        // B2 / F18: the same helper extendedInfo() uses, not a rebuilt id string.
+        const auto mapped = color_match_item_from_value(color_match_value(0, "PLA", "#FF0000", 2, 1));
+        CHECK(mapped["id"] == "T1A");
+        CHECK(mapped["boxId"] == 2);
+        CHECK(mapped["materialId"] == 1);
+        CHECK(color_match_value(0, "PLA", "#FF0000", 2, 1) == "T1A\tPLA\t#FF0000\t2\t1");
+        CHECK(color_match_item_from_value("bad").empty());
+        CHECK(color_match_item_from_value("T1A\tPLA\t#FF0000\t999\t0").empty());
+    }
+
+    SECTION("only a CrealityPrint probe leaves the UI thread; every other host keeps main's synchronous probe") {
+        CHECK(Slic3r::PrintHostDevices::probe_on_worker("crealityprint"));
+        for (const char* h : {"prusalink", "prusaconnect", "octoprint", "moonraker", "moonraker_mqtt", "duet", "flashair",
+                              "astrobox", "repetier", "mks", "esp3d", "obico", "flashforge", "simplyprint", "elegoolink", ""}) {
+            INFO(h);
+            CHECK_FALSE(Slic3r::PrintHostDevices::probe_on_worker(h));
+        }
+    }
+
+    SECTION("preset_model_may_have_cfs: Creality K1/K2/SPARKX presets only, by model word") {
+        // Every K-series / SPARKX printer_model the Creality profiles ship.
+        for (const char* m : {"Creality K1", "Creality K1C", "Creality K1 SE", "Creality K1 Max", "Creality K1_CFS-C",
+                              "Creality K1C_CFS-C", "Creality K1 SE_CFS-C", "Creality K1 Max_CFS-C", "Creality K2",
+                              "Creality K2 Plus", "Creality K2 Pro", "Creality SPARKX i7", "Creality SPARKX i8"}) {
+            INFO(m);
+            CHECK(preset_model_may_have_cfs(m));
+        }
+        // /info codes the capability table knows.
+        CHECK(preset_model_may_have_cfs("F008"));
+        CHECK(preset_model_may_have_cfs("K1C"));
+        // Not a K-series Creality, or not a Creality at all: the old "starts with K2" guess matched some.
+        for (const char* m : {"Creality Ender-3 V3", "Creality Hi", "Creality CR-10 SE", "Creality K20", "Creality K2X",
+                              "K2", "K2 Plus", "Kingroon KP3S", "Elegoo Centauri Carbon", "Snapmaker U1", "", "Creality "}) {
+            INFO(m);
+            CHECK_FALSE(preset_model_may_have_cfs(m));
+        }
+    }
+
+    SECTION("normalize_filament_type strips subtypes") {
+        CHECK(normalize_filament_type("PLA Silk") == "PLA");
+        CHECK(normalize_filament_type("PLA+") == "PLA");
+        CHECK(normalize_filament_type("PLA-CF") == "PLA");
+        CHECK(normalize_filament_type("PCTG") == "PC");
+        CHECK(normalize_filament_type("PETG") == "PETG");
+        CHECK(normalize_filament_type("ABS Pro") == "ABS");
+        CHECK(normalize_filament_type("Nylon") == "Nylon");
+    }
+
+    SECTION("match_filament_preset scores brand then vendor, type-gated") {
+        const std::vector<FilamentPresetRef> presets = {
+            {"Generic PLA @K2", "GPLA", "PLA", "Creality", true, true, true},
+            {"Hyper PLA @K2", "HPLA", "PLA", "Creality", true, true, true},
+            {"Generic PLA Matte @K2", "GPLAM", "PLA", "Creality", true, true, true},
+            {"Generic PETG @K2", "GPETG", "PETG", "Creality", true, true, true},
+        };
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PLA") == "HPLA");
+        // Spool only said PLA: extra "matte" costs points, Generic PLA wins.
+        CHECK(match_filament_preset(presets, "Creality", "", "PLA") == "GPLA");
+        CHECK(match_filament_preset(presets, "Creality", "Hyper PLA", "PETG") == "GPETG");
+        CHECK(match_filament_preset(presets, "", "", "TPU").empty());
+    }
+
+    SECTION("color_match_from_positions is byte-identical to the old wxChoice loop") {
+        const Status st = status_from_cfs(k2_boxs);
+        std::vector<ColorMatchTarget> slots;
+        slots.reserve(st.slots.size());
+        for (const auto &s : st.slots)
+            slots.push_back({s.cfs_box, s.cfs_material, s.type, s.color});
+        const std::vector<ColorMatchFilament> filaments = {
+            {0, "PLA", "#FF0000"},
+            {1, "PETG", "#0000FF"},
+            {2, "ABS", ""},
+        };
+
+        auto legacy = [&](const std::vector<int> &positions) {
+            // Old extendedInfo loop: sel = GetSelection(), skip sel <= 0, slot = sel - 1.
+            // mapping_choice_positions() already stores sel - 1, so slot == positions[i].
+            std::map<std::string, std::string> out;
+            int                                n = 0;
+            for (size_t i = 0; i < positions.size() && i < filaments.size(); ++i) {
+                const int sel = positions[i] + 1;
+                if (sel <= 0)
+                    continue;
+                const int slot = sel - 1;
+                if (slot < 0 || slot >= (int) st.slots.size())
+                    continue;
+                const auto &s = st.slots[slot];
+                if (s.cfs_box < 0)
+                    continue;
+                const auto &        f     = filaments[i];
+                const std::string   type  = f.type;
+                const std::string   color = f.color.empty() ? s.color : f.color;
+                const std::string   value = color_match_value(f.index, type, color, s.cfs_box, s.cfs_material);
+                if (!value.empty())
+                    out["colorMatch_" + std::to_string(n++)] = value;
+            }
+            return out;
+        };
+
+        const std::vector<int> mapped     = {1, 2, 4};      // CFS 1A, 1B, 1D
+        const std::vector<int> with_skip  = {-1, 2, 4};     // first row as sliced
+        const std::vector<int> external   = {0, -1, -1};    // external holder (boxId 0)
+        CHECK(color_match_from_positions(mapped, filaments, slots) == legacy(mapped));
+        CHECK(color_match_from_positions(with_skip, filaments, slots) == legacy(with_skip));
+        CHECK(color_match_from_positions(external, filaments, slots) == legacy(external));
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_0"] ==
+              "T1A\tPLA\t#FF0000\t1\t0");
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_1"] ==
+              "T1B\tPETG\t#0000FF\t1\t1");
+        CHECK(color_match_from_positions(mapped, filaments, slots)["colorMatch_2"] ==
+              "T1C\tABS\t#FFFFFF\t1\t3");
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_0") == 1);
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_1") == 1);
+        CHECK(color_match_from_positions(with_skip, filaments, slots).count("colorMatch_2") == 0);
+    }
+}
+
+namespace {
+
+const std::string k_start_gcode_path = "/usr/data/printer_data/gcodes/part.gcode";
+
+// A colorMatch_n value as the send dialog writes it: "toolId\ttype\tcolor\tboxId\tmaterialId"
+std::string start_slot(const std::string &tool, int box_id, int material_id)
+{
+    return tool + "\tPLA\t#FF0000\t" + std::to_string(box_id) + "\t" + std::to_string(material_id);
+}
+
+std::vector<nlohmann::json> start_commands(const std::map<std::string, std::string> &extended_info)
+{
+    std::vector<nlohmann::json> parsed;
+    for (const std::string &cmd : CrealityPrintModel::start_print_commands(k_start_gcode_path, extended_info))
+        parsed.push_back(nlohmann::json::parse(cmd));
+    return parsed;
+}
+
+} // namespace
+
+// Port of OrcaSlicer #16794's start_print_commands cases. #616 gates CFS on the
+// Use CFS checkbox (useCFS=1) rather than Orca's model-id multi_color flag, and
+// always carries enableSelfTest on the plain start (Calibrate before printing).
+
+TEST_CASE("A CFS-capable printer that listed no slots starts from the spool holder", "[CrealityPrint]")
+{
+    // The dialog maps filaments only onto slots the printer listed in boxsInfo;
+    // a K1-family printer without a CFS (or any CFS-capable model whose boxsInfo
+    // failed) lists none. Never send an empty colorMatch.
+    auto cmds = start_commands({{"useCFS", "1"}, {"enableSelfTest", "1"}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 1);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
+TEST_CASE("A filament mapped onto the spool holder starts a plain print", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"}, {"enableSelfTest", "0"}, {"colorMatch_0", start_slot("T1A", 0, 0)}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 0);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
+TEST_CASE("A mapping that includes the spool holder starts a plain print even when other filaments map to CFS slots",
+          "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"},
+                                {"enableSelfTest", "0"},
+                                {"colorMatch_0", start_slot("T1A", 1, 2)},
+                                {"colorMatch_1", start_slot("T1B", 0, 0)}});
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0]["params"]["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK_FALSE(cmds[0]["params"].contains("colorMatch"));
+}
+
+TEST_CASE("Filaments mapped onto CFS slots send the colour match before the multi-colour start", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "1"},
+                                {"enableSelfTest", "1"},
+                                {"colorMatch_0", start_slot("T1A", 1, 0)},
+                                {"colorMatch_1", start_slot("T1B", 1, 3)}});
+    REQUIRE(cmds.size() == 2);
+
+    const nlohmann::json &match = cmds[0]["params"]["colorMatch"];
+    CHECK(match["path"] == k_start_gcode_path);
+    REQUIRE(match["list"].size() == 2);
+    CHECK(match["list"][0]["id"] == "T1A");
+    CHECK(match["list"][0]["boxId"] == 1);
+    CHECK(match["list"][0]["materialId"] == 0);
+    CHECK(match["list"][1]["id"] == "T1B");
+    CHECK(match["list"][1]["materialId"] == 3);
+    CHECK(match["list"][1]["type"] == "PLA");
+    CHECK(match["list"][1]["color"] == "#FF0000");
+
+    const nlohmann::json &start = cmds[1]["params"]["multiColorPrint"];
+    CHECK(start["gcode"] == k_start_gcode_path);
+    CHECK(start["enableSelfTest"] == 1);
+}
+
+TEST_CASE("Use CFS off gets the plain start command", "[CrealityPrint]")
+{
+    auto cmds = start_commands({{"useCFS", "0"}, {"enableSelfTest", "1"}});
+    REQUIRE(cmds.size() == 1);
+    const nlohmann::json &params = cmds[0]["params"];
+    CHECK(params["opGcodeFile"] == "printprt:" + k_start_gcode_path);
+    CHECK(params["enableSelfTest"] == 1);
+    CHECK_FALSE(params.contains("colorMatch"));
+}
+
+TEST_CASE("CrealityPrint: WebSocket budget 0 does not start and does not UAF", "[CrealityPrint]")
+{
+    SECTION("expired total budget fails before any I/O") {
+        CrealityWsClient ws(200, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+        CHECK(ws.remaining_ms() == 0);
+    }
+
+    SECTION("local acceptor that never accepts times out and drains") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(150, 150);
+        std::string      err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("cancel from another thread before open") {
+        CrealityWsClient ws(200, 200);
+        std::thread t([&] { ws.cancel(); });
+        t.join();
+        std::string err;
+        REQUIRE_FALSE(ws.open("127.0.0.1", "1", err));
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("cancel from another thread during a never-accepting connect") {
+        namespace net = boost::asio;
+        using tcp     = net::ip::tcp;
+        net::io_context ioc;
+        tcp::acceptor   acc(ioc, tcp::endpoint(tcp::v4(), 0));
+        const auto      port = std::to_string(acc.local_endpoint().port());
+        CrealityWsClient ws(2000, 2000);
+        std::string      err;
+        std::thread      t([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            ws.cancel();
+        });
+        REQUIRE_FALSE(ws.open("127.0.0.1", port, err));
+        t.join();
+        CHECK(ws.is_cancelled());
+        CHECK(err.find("cancelled") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+}
+
+// OrcaSlicer #16772 timeout cases, ported onto CrealityWsClient (this fork's
+// AsioUtils/run_until_done equivalent). query_boxes_info stays on the #616 stack.
+namespace {
+
+namespace beast     = boost::beast;
+namespace http      = beast::http;
+namespace websocket = beast::websocket;
+namespace net       = boost::asio;
+using tcp           = net::ip::tcp;
+
+enum class SilentWs {
+    BeforeHandshake, // Accepts TCP, reads the upgrade, never answers
+    AfterHandshake,  // Completes the upgrade, then never reads or sends
+};
+
+class FakeSilentCrealityWs
+{
+public:
+    explicit FakeSilentCrealityWs(SilentWs behavior) : m_behavior(behavior)
+    {
+        m_accept_thread = std::thread([this] { accept_loop(); });
+    }
+
+    ~FakeSilentCrealityWs()
+    {
+        release();
+        m_stopping = true;
+        tcp::socket       wake{m_accept_ioc};
+        beast::error_code ec;
+        wake.connect(m_acceptor.local_endpoint(), ec);
+        if (m_accept_thread.joinable())
+            m_accept_thread.join();
+        for (std::thread& connection : m_connections)
+            if (connection.joinable())
+                connection.join();
+    }
+
+    std::string port() const { return std::to_string(m_acceptor.local_endpoint().port()); }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_released = true;
+        m_changed.notify_all();
+    }
+
+private:
+    void accept_loop()
+    {
+        for (;;) {
+            auto              ioc = std::make_unique<net::io_context>();
+            tcp::socket       socket{*ioc};
+            beast::error_code ec;
+            m_acceptor.accept(socket, ec);
+            if (ec || m_stopping)
+                return;
+            m_connections.emplace_back([this, ioc = std::move(ioc), socket = std::move(socket)]() mutable { serve(std::move(socket)); });
+        }
+    }
+
+    void serve(tcp::socket socket)
+    {
+        beast::flat_buffer               buffer;
+        http::request<http::string_body> request;
+        beast::error_code                ec;
+        http::read(socket, buffer, request, ec);
+        if (ec)
+            return;
+        if (!websocket::is_upgrade(request) || m_behavior == SilentWs::BeforeHandshake) {
+            wait_for_release();
+            return;
+        }
+
+        websocket::stream<tcp::socket> ws{std::move(socket)};
+        ws.accept(request, ec);
+        if (ec)
+            return;
+        wait_for_release();
+    }
+
+    void wait_for_release()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_changed.wait(lock, [this] { return m_released; });
+    }
+
+    const SilentWs           m_behavior;
+    net::io_context          m_accept_ioc;
+    tcp::acceptor            m_acceptor{m_accept_ioc, {net::ip::make_address("127.0.0.1"), 0}};
+    std::atomic<bool>        m_stopping{false};
+    std::thread              m_accept_thread;
+    std::vector<std::thread> m_connections;
+    std::mutex               m_mutex;
+    std::condition_variable  m_changed;
+    bool                     m_released = false;
+};
+
+// Runs `call`, giving it `limit` to return before the printer hangs up on it.
+template<class Call> bool finishes_within(FakeSilentCrealityWs& printer, std::chrono::milliseconds limit, Call&& call)
+{
+    auto       done    = std::async(std::launch::async, std::forward<Call>(call));
+    const bool in_time = done.wait_for(limit) == std::future_status::ready;
+    printer.release();
+    // The future destructor would wait forever for a call the hang-up cannot unblock.
+    if (done.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        std::cerr << "CrealityWsClient call still running 10 s after the printer hung up" << std::endl;
+        std::_Exit(EXIT_FAILURE);
+    }
+    return in_time;
+}
+
+} // namespace
+
+TEST_CASE("CrealityPrint: silent printer WebSocket steps stay inside their deadlines", "[CrealityPrint]")
+{
+    // start_print is open + write + best-effort read + close. A printer that
+    // never answers the upgrade fails open (the start command is never sent).
+    // One that upgrades and then goes silent still delivers the write; the
+    // read times out and is not a start failure.
+    SECTION("handshake never completes") {
+        FakeSilentCrealityWs printer(SilentWs::BeforeHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        bool                 opened = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(2), [&] { opened = ws.open("127.0.0.1", printer.port(), err); }));
+        CHECK_FALSE(opened);
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
+
+    SECTION("upgrade completes then the printer goes silent") {
+        FakeSilentCrealityWs printer(SilentWs::AfterHandshake);
+        CrealityWsClient     ws(200);
+        std::string          err;
+        std::string          frame;
+        bool                 opened  = false;
+        bool                 wrote   = false;
+        bool                 read_ok = true;
+        CHECK(finishes_within(printer, std::chrono::seconds(3), [&] {
+            opened = ws.open("127.0.0.1", printer.port(), err);
+            if (!opened)
+                return;
+            wrote   = ws.write(R"({"method":"set","params":{"opGcodeFile":"printprt:/mnt/UDISK/printer_data/gcodes/test.gcode"}})", err);
+            read_ok = ws.read_once(frame, err);
+            ws.close();
+        }));
+        CHECK(opened);
+        CHECK(wrote);
+        CHECK_FALSE(read_ok);
+        CHECK(err.find("timed out") != std::string::npos);
+        CHECK_FALSE(ws.is_open());
+    }
 }

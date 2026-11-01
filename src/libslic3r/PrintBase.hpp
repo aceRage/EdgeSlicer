@@ -123,7 +123,10 @@ public:
         // active_step_add_warning de-duplicates by id.
         SlicingStabilizerPaintUnreachable,
         // Side stabilizers set to Manual on an object with no painted stabilizer points. Appended; own id.
-        SlicingStabilizerManualUnpainted
+        SlicingStabilizerManualUnpainted,
+        // Airbrush P3: an airbrushed part's grain is finer than the slicing nozzle prints cleanly.
+        // Appended; own id.
+        SlicingAirbrushGrainBelowNozzle
     };
 
     typedef size_t TimeStamp;
