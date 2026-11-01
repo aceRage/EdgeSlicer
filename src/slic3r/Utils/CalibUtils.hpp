@@ -61,6 +61,7 @@ public:
     static void calib_max_vol_speed(const CalibInfo &calib_info, wxString &error_message);
     static void calib_VFA(const CalibInfo &calib_info, wxString &error_message);
     static void calib_retraction(const CalibInfo &calib_info, wxString &error_message);
+    static void calib_temp_retraction(const CalibInfo &calib_info, wxString &error_message);
 
     //help function
     static int get_selected_calib_idx(const std::vector<PACalibResult> &pa_calib_values, int cali_idx);

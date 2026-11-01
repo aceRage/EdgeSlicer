@@ -978,6 +978,196 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 }
 
+// TempRetract_Calibration_Dlg
+// Combined temperature × retraction stringing grid (single toolhead, v1).
+//
+
+TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater)
+    : DPIDialog(parent, id, _L("Stringing (temp × retraction)"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
+    , m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE);
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    unsigned long start_temp = 230;
+    unsigned long end_temp   = 205;
+    if (const auto *bundle = wxGetApp().preset_bundle) {
+        const auto &fc = bundle->filaments.get_edited_preset().config;
+        if (const auto *hi = fc.option<ConfigOptionInts>("nozzle_temperature_range_high"); hi && !hi->values.empty() && hi->values[0] > 0)
+            start_temp = (unsigned long) hi->values[0];
+        if (const auto *lo = fc.option<ConfigOptionInts>("nozzle_temperature_range_low"); lo && !lo->values.empty() && lo->values[0] > 0)
+            end_temp = (unsigned long) lo->values[0];
+        if (end_temp > start_temp) {
+            start_temp = 230;
+            end_temp   = 205;
+        }
+    }
+
+    wxBoxSizer *v_sizer = new wxBoxSizer(wxVERTICAL);
+    SetSizer(v_sizer);
+
+    wxString start_temp_str    = _L("Start temp: ");
+    wxString end_temp_str      = _L("End temp: ");
+    wxString temp_step_str     = _L("Temp step: ");
+    wxString band_height_str   = _L("Band height: ");
+    wxString retract_start_str = _L("Retraction min: ");
+    wxString retract_end_str   = _L("Retraction max: ");
+    wxString retract_step_str  = _L("Retraction step: ");
+    int      text_max          = GetTextMax(this, std::vector<wxString>{start_temp_str, end_temp_str, temp_step_str, band_height_str,
+                                                                       retract_start_str, retract_end_str, retract_step_str});
+
+    auto st_size = FromDIP(wxSize(text_max, -1));
+    auto ti_size = FromDIP(wxSize(120, -1));
+
+    LabeledStaticBox *stb            = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer *settings_sizer = new wxStaticBoxSizer(stb, wxVERTICAL);
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto add_row = [&](const wxString &label, TextInput *&ti, const wxString &value, const wxString &unit) {
+        auto row  = new wxBoxSizer(wxHORIZONTAL);
+        auto text = new wxStaticText(this, wxID_ANY, label, wxDefaultPosition, st_size, wxALIGN_LEFT);
+        ti        = new TextInput(this, value, unit, "", wxDefaultPosition, ti_size);
+        ti->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+        row->Add(text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(ti, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        settings_sizer->Add(row, 0, wxLEFT, FromDIP(3));
+    };
+
+    add_row(start_temp_str, m_tiStartTemp, std::to_string(start_temp), wxString::FromUTF8("\u2103"));
+    add_row(end_temp_str, m_tiEndTemp, std::to_string(end_temp), wxString::FromUTF8("\u2103"));
+    add_row(temp_step_str, m_tiTempStep, wxString::FromDouble(5), wxString::FromUTF8("\u2103"));
+    add_row(band_height_str, m_tiBandHeight, wxString::FromDouble(8), "mm");
+    add_row(retract_start_str, m_tiRetractStart, wxString::FromDouble(0.2), "mm");
+    add_row(retract_end_str, m_tiRetractEnd, wxString::FromDouble(1.6), "mm");
+    add_row(retract_step_str, m_tiRetractStep, wxString::FromDouble(0.2), "mm");
+
+    auto labels_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbLabels        = new CheckBox(this);
+    m_cbLabels->SetValue(false);
+    auto labels_text = new wxStaticText(this, wxID_ANY, _L("Raised labels"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbLabels->SetToolTip(_L("Emboss retraction values on each base and temperatures on a label tower. Off by default: the values are in the G-code comments."));
+    labels_text->SetToolTip(m_cbLabels->GetToolTipText());
+    labels_sizer->Add(m_cbLabels, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    labels_sizer->Add(labels_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(labels_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
+    auto wait_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbWaitTemp    = new CheckBox(this);
+    m_cbWaitTemp->SetValue(true);
+    auto wait_text = new wxStaticText(this, wxID_ANY, _L("Wait for temperature at each band (M109)"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbWaitTemp->SetToolTip(_L("Use M109 (wait) at each temperature band. Off writes M104 and keeps printing while the hotend settles."));
+    wait_text->SetToolTip(m_cbWaitTemp->GetToolTipText());
+    wait_sizer->Add(m_cbWaitTemp, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    wait_sizer->Add(wait_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(wait_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
+    settings_sizer->AddSpacer(FromDIP(5));
+    m_stSummary = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_stSummary->SetForegroundColour(wxColour(128, 128, 128));
+    settings_sizer->Add(m_stSummary, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto note = new wxStaticText(this, wxID_ANY,
+                                 _L("Single toolhead. Layer 1 keeps the first-layer temperature; band 0 starts at layer 2. Raft is disabled."),
+                                 wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    note->SetForegroundColour(wxColour(128, 128, 128));
+    note->Wrap(FromDIP(360));
+    v_sizer->Add(note, 0, wxLEFT | wxRIGHT, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &TempRetract_Calibration_Dlg::on_start, this);
+
+    auto on_edit = [this](wxFocusEvent &e) {
+        this->update_summary();
+        e.Skip();
+    };
+    for (TextInput *ti : {m_tiStartTemp, m_tiEndTemp, m_tiTempStep, m_tiBandHeight, m_tiRetractStart, m_tiRetractEnd, m_tiRetractStep})
+        ti->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, on_edit);
+    m_cbLabels->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &) { update_summary(); });
+    m_cbWaitTemp->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &) { update_summary(); });
+
+    wxGetApp().UpdateDlgDarkUI(this);
+    update_summary();
+    Layout();
+    Fit();
+}
+
+TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
+
+double TempRetract_Calibration_Dlg::bed_width() const
+{
+    if (const auto *bundle = wxGetApp().preset_bundle)
+        return stringing_grid_bed_width(bundle->printers.get_edited_preset().config);
+    return 270.;
+}
+
+bool TempRetract_Calibration_Dlg::read_params(Calib_Params &params, wxString *error) const
+{
+    bool ok = m_tiStartTemp->GetTextCtrl()->GetValue().ToDouble(&params.start);
+    ok      = ok && m_tiEndTemp->GetTextCtrl()->GetValue().ToDouble(&params.end);
+    ok      = ok && m_tiTempStep->GetTextCtrl()->GetValue().ToDouble(&params.step);
+    ok      = ok && m_tiBandHeight->GetTextCtrl()->GetValue().ToDouble(&params.band_height);
+    ok      = ok && m_tiRetractStart->GetTextCtrl()->GetValue().ToDouble(&params.retract_start);
+    ok      = ok && m_tiRetractEnd->GetTextCtrl()->GetValue().ToDouble(&params.retract_end);
+    ok      = ok && m_tiRetractStep->GetTextCtrl()->GetValue().ToDouble(&params.retract_step);
+    if (!ok) {
+        if (error)
+            *error = _L("Please input valid numbers.");
+        return false;
+    }
+    params.band_count           = 0;
+    params.retract_lengths.clear();
+    params.print_labels         = m_cbLabels->GetValue();
+    params.wait_for_temperature = m_cbWaitTemp->GetValue();
+    params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
+    std::string err;
+    if (!stringing_grid_params_valid(params, bed_width(), &err)) {
+        if (error)
+            *error = wxString::FromUTF8(err.c_str());
+        return false;
+    }
+    return true;
+}
+
+void TempRetract_Calibration_Dlg::update_summary()
+{
+    Calib_Params params;
+    wxString     err;
+    if (!read_params(params, &err)) {
+        m_stSummary->SetLabel(err);
+        Layout();
+        return;
+    }
+    const int cols  = stringing_grid_column_count(params);
+    const int bands = stringing_grid_band_count(params);
+    m_stSummary->SetLabel(wxString::Format(_L("%d columns × %d bands of %.0f mm  (max %d columns on this bed)"), cols, bands,
+                                           params.band_height, std::min(17, stringing_grid_max_columns(bed_width()))));
+    Layout();
+}
+
+void TempRetract_Calibration_Dlg::on_start(wxCommandEvent &event)
+{
+    wxString err;
+    if (!read_params(m_params, &err)) {
+        MessageDialog msg_dlg(nullptr, err, wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    m_plater->calib_temp_retraction(m_params);
+    EndModal(wxID_OK);
+}
+
+void TempRetract_Calibration_Dlg::on_dpi_changed(const wxRect &suggested_rect)
+{
+    this->Refresh();
+    Fit();
+}
+
 // Input_Shaping_Freq_Test_Dlg
 //
 

@@ -3755,6 +3755,15 @@ void MainFrame::init_menubar_as_editor()
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Temperature × retraction stringing grid
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Max Volumetric Speed
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Max flowrate"), _L("Max flowrate"),
         [this](wxCommandEvent&) {
@@ -3877,6 +3886,15 @@ void MainFrame::init_menubar_as_editor()
             if (!m_retraction_calib_dlg)
                 m_retraction_calib_dlg = new Retraction_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
             m_retraction_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Temperature × retraction stringing grid
+    append_menu_item(calib_menu, wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
