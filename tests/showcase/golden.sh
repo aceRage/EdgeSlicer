@@ -12,7 +12,10 @@
 #     --out <dir>        where fixtures, renders, diffs and the report go (default ./showcase_golden)
 #     --only <name>      one fixture (studio_white, dark_gradient, build_plate, desk_wood, transparent,
 #                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
-#                        video)
+#                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated, video)
+#                        The hdri_* fixtures need the HDRI environments (realism 1h-1), which the shared
+#                        baseline of main does not have: they are always expected to change (the golden
+#                        shows the fallback gradient, the candidate the HDRI backdrop and sun).
 #     --size <px>        the stills' shorter side (default 540)
 #     --keep-goldens     reuse goldens already in <out>/golden
 #     --max-delta <n>    largest per-channel difference in 8-bit steps (default 2)
@@ -93,6 +96,8 @@ echo "candidate: $CEXE" | tee -a "$REPORT"
 echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$REPORT"
 [ -n "$GENV" ] && echo "golden env:    $GENV" | tee -a "$REPORT"
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
+# 1h-1: the HDRI fixtures are new, so a golden made by an install without HDRI support differs on purpose.
+EXPECT="${EXPECT:+$EXPECT,}hdri_outdoor,hdri_studio,hdri_workshop,hdri_loft,hdri_sunset,hdri_outdoor_rotated"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
 # Whether fixture $1 is listed in --expect-change.
@@ -202,6 +207,12 @@ run_still toolpaths_finishes --slice
 run_still toolpaths_silk --slice
 run_still silk_walls --settings
 run_still silk_top --model OrcaCube_v2.3mf --settings
+run_still hdri_outdoor
+run_still hdri_studio
+run_still hdri_workshop
+run_still hdri_loft
+run_still hdri_sunset
+run_still hdri_outdoor_rotated
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.
