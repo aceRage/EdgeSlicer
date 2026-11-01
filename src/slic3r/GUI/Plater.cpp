@@ -19583,6 +19583,9 @@ void Plater::priv::undo()
 {
     if (this->undo_redo_blocked_by_job())
         return;
+    // Edge (Airbrush P3, A3): a stroke still baking becomes its own undo step first, so this undo
+    // removes that stroke and not the step before it.
+    this->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(true);
     const std::vector<UndoRedo::Snapshot> &snapshots = this->undo_redo_stack().snapshots();
     auto it_current = std::lower_bound(snapshots.begin(), snapshots.end(), UndoRedo::Snapshot(this->undo_redo_stack().active_snapshot_time()));
     // BBS: undo-redo until modify record
@@ -19604,6 +19607,9 @@ void Plater::priv::redo()
 {
     if (this->undo_redo_blocked_by_job())
         return;
+    // Edge (Airbrush P3, A3): nothing to redo past a stroke the user just made; commit it so the
+    // redo stack it truncates is the one the user sees.
+    this->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(true);
     const std::vector<UndoRedo::Snapshot> &snapshots = this->undo_redo_stack().snapshots();
     auto it_current = std::lower_bound(snapshots.begin(), snapshots.end(), UndoRedo::Snapshot(this->undo_redo_stack().active_snapshot_time()));
     // BBS: undo-redo until modify record
@@ -25853,6 +25859,9 @@ void Plater::undo_to(int selection)
         p->undo();
         return;
     }
+    // Edge (Airbrush P3, A3): the list was built without the stroke still baking; drop it so the
+    // chosen index still names the step the user picked.
+    p->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(false);
 
     const int idx = p->get_active_snapshot_index() - selection - 1;
     p->undo_redo_to(p->undo_redo_stack().snapshots()[idx].timestamp);
@@ -25863,6 +25872,7 @@ void Plater::redo_to(int selection)
         p->redo();
         return;
     }
+    p->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(false);
 
     const int idx = p->get_active_snapshot_index() + selection + 1;
     p->undo_redo_to(p->undo_redo_stack().snapshots()[idx].timestamp);

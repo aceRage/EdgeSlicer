@@ -38,6 +38,9 @@ struct HeightPatternInput
     std::vector<int>  sequence;                 // 1-based filament ids
     int               gap_mode       = int(HeightPatternGapMode::ObjectFilament);
     int               gap_filament   = 0;
+    double            seq_gap        = 10.;     // Sequence Gap height in `unit`; 0 = off
+    int               seq_gap_mode   = int(HeightPatternGapMode::ObjectFilament);
+    int               seq_gap_filament = 0;
     bool              snap_to_layers = true;
 };
 
