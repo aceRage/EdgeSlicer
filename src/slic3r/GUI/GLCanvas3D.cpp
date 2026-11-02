@@ -7595,9 +7595,13 @@ std::vector<Vec2f> GLCanvas3D::get_empty_cells(const Vec2f start_point, const Ve
         {
             cells.emplace_back(x, y);
         }
+    // Every instance's footprint. Edge (hub PR G): a cell is empty only when no instance covers it -
+    // the check used to keep a cell that any one instance left free, so with two objects on the plate
+    // the first one's own spot counted as empty and every paste after the first (Clone x2, the phone's
+    // Duplicate) landed on top of it.
+    std::vector<Polygon> footprints;
     for (size_t i = 0; i < m_model->objects.size(); ++i) {
         ModelObject* model_object = m_model->objects[i];
-        auto id = model_object->id().id;
         ModelInstance* model_instance0 = model_object->instances.front();
         Polygon hull_2d = model_object->convex_hull_2d(Geometry::assemble_transform({ 0.0, 0.0, model_instance0->get_offset().z() }, model_instance0->get_rotation(),
             model_instance0->get_scaling_factor(), model_instance0->get_mirror()));
@@ -7611,17 +7615,13 @@ std::vector<Vec2f> GLCanvas3D::get_empty_cells(const Vec2f start_point, const Ve
             const Vec3d& offset = instance->get_offset();
             transformation.set_offset({ scale_(offset.x()), scale_(offset.y()), 0.0 });
             transformation.set_rotation(Z, instance->get_rotation().z() - rotation_z0);
-            const Transform3d& trafo = transformation.get_matrix();
-            Polygon inst_hull_2d = hull_2d.transform(trafo);
-
-            for (auto it = cells.begin(); it != cells.end(); )
-            {
-                if (!inst_hull_2d.contains(Point(scale_(it->x()), scale_(it->y()))))
-                    cells_ret.push_back(*it);
-
-                it++;
-            }
+            footprints.push_back(hull_2d.transform(transformation.get_matrix()));
         }
+    }
+    for (const Vec2f& cell : cells) {
+        const Point p(scale_(cell.x()), scale_(cell.y()));
+        if (std::none_of(footprints.begin(), footprints.end(), [&p](const Polygon& f) { return f.contains(p); }))
+            cells_ret.push_back(cell);
     }
 
     Vec2f start = start_point;
