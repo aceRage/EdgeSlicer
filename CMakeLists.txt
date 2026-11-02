@@ -104,6 +104,7 @@ endif()
 
 option(SLIC3R_STATIC 			"Compile Snapmaker_Orca with static libraries (Boost, TBB, glew)" ${SLIC3R_STATIC_INITIAL})
 option(SLIC3R_GUI    			"Compile Snapmaker_Orca with GUI components (OpenGL, wxWidgets)" 1)
+option(SLIC3R_CAD               "Compile Snapmaker_Orca with the parametric Design/CAD tab (needs OCCT ModelingAlgorithms)" 0)
 option(SLIC3R_FHS               "Assume Snapmaker_Orca is to be installed in a FHS directory structure" 0)
 option(SLIC3R_WX_STABLE         "Build against wxWidgets stable (3.0) as oppsed to dev (3.1) on Linux" 0)
 option(SLIC3R_PROFILE 			"Compile Snapmaker_Orca with an invasive Shiny profiler" 0)
@@ -304,6 +305,10 @@ endforeach()
 
 if (SLIC3R_GUI)
     add_definitions(-DSLIC3R_GUI)
+endif ()
+
+if (SLIC3R_CAD)
+    add_definitions(-DSLIC3R_CAD)
 endif ()
 
 if(SLIC3R_DESKTOP_INTEGRATION)
@@ -963,6 +968,19 @@ set(OCCT_RUNTIME_TOOLKITS
     TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKSTEP TKSTEP209
     TKSTEPAttr TKSTEPBase TKTopAlgo TKV3d TKVCAF TKXCAF TKXDESTEP TKXSBase)
 
+# SLIC3R_CAD=ON builds against OCCT 8.0.1 (deps built with -DSLIC3R_CAD=ON, e.g. edgebuild's "cad"
+# deps profile): OCCT 7.8 merged the five STEP toolkits into TKDESTEP, which also needs TKDE.
+# The list above stays first and unchanged: the Windows self-hosted CI parses the first
+# set(OCCT_RUNTIME_TOOLKITS ...) against the default (OCCT 7.6) deps. Keep this one in step with
+# OCCT_LIBS in src/libslic3r/CMakeLists.txt.
+set(OCCT_RUNTIME_TOOLKITS_CAD
+    TKBO TKBool TKBRep TKCAF TKCDF TKernel TKFeat TKFillet TKG2d TKG3d TKGeomAlgo TKGeomBase
+    TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKDESTEP TKDE
+    TKTopAlgo TKV3d TKVCAF TKXCAF TKXSBase)
+if (SLIC3R_CAD)
+    set(OCCT_RUNTIME_TOOLKITS ${OCCT_RUNTIME_TOOLKITS_CAD})
+endif ()
+
 function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
         set(_arch "x64")
@@ -999,12 +1017,43 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
         )
     endif()
 
+    if (NOT SLIC3R_CAD)
     set(_occt_dlls_src "")
     set(_occt_dlls_out "")
     foreach (_tk IN LISTS OCCT_RUNTIME_TOOLKITS)
         list(APPEND _occt_dlls_src ${OCCT_PREFIX}/bin/occt/${_tk}.dll)
         list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
     endforeach ()
+    else ()
+    # SLIC3R_CAD=ON (OCCT 8.0.1): stage the OCCT toolkits libslic3r links. RelWithDebInfo / Debug
+    # installs live in bin/occti and bin/occtd; the directory is published per build type from TKernel.
+    string(TOUPPER "${config}" _config_upper)
+    set(_occt_bin "${OCCT_BIN_DIR_${_config_upper}}")
+    if (NOT _occt_bin)
+        set(_occt_bin "${OCCT_PREFIX}/bin/occt")
+    endif ()
+    set(_occt_toolkits ${OCCT_LIBS})
+    if (NOT _occt_toolkits)
+        set(_occt_toolkits ${OCCT_RUNTIME_TOOLKITS})
+    endif ()
+    set(_occt_dlls_src "")
+    set(_occt_dlls_out "")
+    set(_missing_occt "")
+    foreach (_tk IN LISTS _occt_toolkits)
+        if (EXISTS "${_occt_bin}/${_tk}.dll")
+            list(APPEND _occt_dlls_src ${_occt_bin}/${_tk}.dll)
+            list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
+        else ()
+            list(APPEND _missing_occt "${_tk}.dll")
+        endif ()
+    endforeach ()
+    if (_missing_occt)
+        message(FATAL_ERROR
+            "OCCT DLLs missing from ${_occt_bin}/: ${_missing_occt}\n"
+            "SLIC3R_CAD=ON needs the OCCT 8.0.1 toolkit set: build the deps with -DSLIC3R_CAD=ON "
+            "(e.g. edgebuild --deps cad) and point CMAKE_PREFIX_PATH / OCCT_PREFIX at that prefix.")
+    endif ()
+    endif ()
     file(COPY ${_occt_dlls_src}
             ${CMAKE_PREFIX_PATH}/bin/freetype.dll
          DESTINATION ${_out_dir})

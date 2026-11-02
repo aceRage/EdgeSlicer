@@ -36,8 +36,8 @@ class CancelIndicator : public Message_ProgressIndicator
 {
 public:
     explicit CancelIndicator(const std::atomic<bool>* cancel) : m_cancel(cancel) {}
-    Standard_Boolean UserBreak() override { return m_cancel != nullptr && m_cancel->load(); }
-    void             Show(const Message_ProgressScope&, const Standard_Boolean) override {}
+    bool UserBreak() override { return m_cancel != nullptr && m_cancel->load(); }
+    void Show(const Message_ProgressScope&, const bool) override {}
 
 private:
     const std::atomic<bool>* m_cancel;

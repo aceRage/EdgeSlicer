@@ -7,14 +7,18 @@
 #include <boost/filesystem.hpp>
 #include <Message_ProgressIndicator.hxx>
 #include <atomic>
+#include <functional>
 #include <iomanip>
 #include <iostream>
+#include <string>
+#include <vector>
 
 namespace fs = boost::filesystem;
 
 namespace Slic3r {
 
 class TriangleMesh;
+class Model;
 class ModelObject;
 
 // load step stage
@@ -89,9 +93,9 @@ class StepProgressIncdicator : public Message_ProgressIndicator
 public:
     StepProgressIncdicator(std::atomic<bool>& stop_flag) : should_stop(stop_flag){}
 
-    Standard_Boolean UserBreak() override { return should_stop.load(); }
+    bool UserBreak() override { return should_stop.load(); }
 
-    void Show(const Message_ProgressScope&, const Standard_Boolean) override {
+    void Show(const Message_ProgressScope&, const bool) override {
         // Orca #14994: GetPosition() is a 0..1 fraction.
         std::cout << "Progress: " << std::fixed << std::setprecision(2) << 100.0 * GetPosition() << "%" << std::endl;
     }
