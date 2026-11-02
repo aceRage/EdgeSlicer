@@ -579,6 +579,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
