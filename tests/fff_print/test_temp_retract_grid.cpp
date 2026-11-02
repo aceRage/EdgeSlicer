@@ -370,8 +370,9 @@ bool gcode_word(const std::string &line, char axis, double &value)
 }
 
 // Per layer (Z in 1/100 mm) above the base top and up to the label top: the number of extrusion moves of
-// SG_col_* objects that end between the two pillars (9..21 mm from the object's front edge; the pillars
-// cover 3..7 and 23..27). The front edge is the lowest Y extruded on the object's first layer.
+// SG_col_* objects that end between the two pillars (11..19 mm from the object's front edge; the pillars
+// cover 3..7 and 23..27, their fillet feet reach about 9 and 21 on the first layer above the plate, and the
+// labels cover 12.5..17.5). The front edge is the lowest Y extruded on the object's first layer.
 std::map<long, int> base_label_extrusions(const std::string &gcode)
 {
     std::map<std::string, double> front;
@@ -409,7 +410,7 @@ std::map<long, int> base_label_extrusions(const std::string &gcode)
             front[obj] = it == front.end() ? y : std::min(it->second, y);
         } else if (z > stringing_grid_base_height + 1e-3 && z <= label_top && front.count(obj)) {
             const double rel = y - front[obj];
-            if (rel > 9. && rel < 21.)
+            if (rel > 11. && rel < 19.)
                 ++hits[std::lround(z * 100.)];
         }
     }
@@ -434,6 +435,90 @@ TEST_CASE("Raised base labels print as extrusions on the base top between the pi
     for (const auto &[z, n] : hits) {
         CAPTURE(z);
         CHECK(n >= 3 * 4);
+    }
+}
+
+namespace {
+
+// X extent of the extrusions of each SG_col_* object's FRONT pillar (less than 12 mm from the object's front
+// edge) on the layer printed at z (1/100 mm), keyed by object name.
+std::map<std::string, double> front_pillar_widths(const std::string &gcode, long z_key)
+{
+    std::map<std::string, double>                    front;
+    std::map<std::string, std::pair<double, double>> ext;
+    std::string                                      obj;
+    double                                           z = 0., x = 0., y = 0.;
+    for (const std::string &line : gcode_lines(gcode)) {
+        if (line.rfind("; printing object ", 0) == 0) {
+            std::istringstream in(line.substr(18));
+            in >> obj;
+            continue;
+        }
+        if (line.rfind("; stop printing object", 0) == 0) {
+            obj.clear();
+            continue;
+        }
+        if (line.rfind(";Z:", 0) == 0) {
+            z = std::stod(line.substr(3));
+            continue;
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        double v = 0., e = 0.;
+        const bool has_x = gcode_word(line, 'X', v);
+        if (has_x)
+            x = v;
+        const bool has_y = gcode_word(line, 'Y', v);
+        if (has_y)
+            y = v;
+        if (!(has_x || has_y) || !gcode_word(line, 'E', e) || e <= 0. || obj.rfind(stringing_grid_column_prefix, 0) != 0)
+            continue;
+        if (z < 0.21) {
+            auto it = front.find(obj);
+            front[obj] = it == front.end() ? y : std::min(it->second, y);
+        } else if (std::lround(z * 100.) == z_key && front.count(obj) && y - front[obj] < 12.) {
+            auto it = ext.find(obj);
+            if (it == ext.end())
+                ext[obj] = {x, x};
+            else
+                it->second = {std::min(it->second.first, x), std::max(it->second.second, x)};
+        }
+    }
+    std::map<std::string, double> out;
+    for (const auto &[name, mm] : ext)
+        out[name] = mm.second - mm.first;
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("The fillet foot prints a wider cross-section than the pillar on the first layers above the plate",
+          "[Calib][TempRetract][Slice]")
+{
+    // Owner (real print): the towers snapped at the plate. With the fillet (default on, 3 mm) the first
+    // layer above the plate is several mm wider than the pillar; 6 mm up it is the pillar again.
+    Calib_Params params = small_grid_params();
+    REQUIRE(params.fillet_base);
+    const std::string g       = slice_grid(params, grid_print_config());
+    const auto        foot    = front_pillar_widths(g, 120);
+    const auto        pillar  = front_pillar_widths(g, 600);
+    REQUIRE(foot.size() == 3);
+    REQUIRE(pillar.size() == 3);
+    for (const auto &[name, w] : foot) {
+        CAPTURE(name, w, pillar.at(name));
+        CHECK(pillar.at(name) < stringing_grid_pillar_xy);
+        CHECK(w > pillar.at(name) + 2.5);
+        CHECK(w < stringing_grid_base_x);
+    }
+
+    params.fillet_base = false;
+    const std::string g_off    = slice_grid(params, grid_print_config());
+    const auto        foot_off = front_pillar_widths(g_off, 120);
+    const auto        pil_off  = front_pillar_widths(g_off, 600);
+    REQUIRE(foot_off.size() == 3);
+    for (const auto &[name, w] : foot_off) {
+        CAPTURE(name, w);
+        CHECK(w == Approx(pil_off.at(name)).margin(0.1));
     }
 }
 

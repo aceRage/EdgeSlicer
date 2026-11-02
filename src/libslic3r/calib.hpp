@@ -63,6 +63,10 @@ struct Calib_Params
     int  band_count            = 0;
     bool wait_for_temperature  = true;  // M109 at each band change. Lance: default ON.
     bool print_labels          = false; // Raised value labels. PR A core support; dialog is PR B.
+    // Concave fillet where each pillar meets its base plate (owner: the towers snapped at the joint).
+    // Radius is clamped to stringing_grid_max_fillet_radius() so the foot stays on the plate.
+    bool   fillet_base         = true;
+    double fillet_radius       = 3.0;
 
     CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
@@ -126,6 +130,15 @@ TriangleMesh         make_stringing_grid_column_label_mesh(const Calib_Params &p
 TriangleMesh         make_stringing_grid_band_label_mesh(const Calib_Params &params, int band);
 // Label text: "0.2" ... "9.8", whole lengths of 10 mm and more without the ".0" so they fit the base.
 std::string          stringing_grid_retract_label(double length);
+// Largest pillar fillet that keeps the foot on the base plate (the pillar is 3 mm from the plate's edges).
+double               stringing_grid_max_fillet_radius();
+// The fillet radius make_stringing_grid_column_mesh uses: 0 when off, else clamped to (0, max].
+double               stringing_grid_fillet_radius(const Calib_Params &params);
+// One watertight concave fillet ("foot") around a pillar centred at (cx, cy): a square loft from the
+// pillar size plus radius at the base top (reaching stringing_grid_label_embed into the plate) up to the
+// pillar size at radius above the plate, following a quarter circle. It overlaps the pillar and the plate,
+// so the three slice as one solid. Empty for radius <= 0.
+TriangleMesh         make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius);
 void                 make_stringing_grid(Model &model, const Calib_Params &params);
 
 // Persisted name for Calib_Temp_Retract_Grid. Never serialize CalibMode as an int (F12).

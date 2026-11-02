@@ -1527,6 +1527,59 @@ TriangleMesh make_stringing_grid_band_label_mesh(const Calib_Params &params, int
     return mesh;
 }
 
+double stringing_grid_max_fillet_radius()
+{
+    const double y0 = (stringing_grid_base_y - stringing_grid_pillar_gap) * 0.5; // front pillar centre
+    return std::min(0.5 * (stringing_grid_base_x - stringing_grid_pillar_xy), y0 - 0.5 * stringing_grid_pillar_xy);
+}
+
+double stringing_grid_fillet_radius(const Calib_Params &params)
+{
+    if (!params.fillet_base || params.fillet_radius <= 0.)
+        return 0.;
+    return std::min(params.fillet_radius, stringing_grid_max_fillet_radius());
+}
+
+TriangleMesh make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius)
+{
+    if (radius <= 0.)
+        return {};
+    // Square rings, corners counter-clockwise seen from above: (-,-) (+,-) (+,+) (-,+). The loft is pulled in
+    // by `inset` so its top ring lies inside the pillar and its foot inside the plate edge (no coplanar faces).
+    const double inset  = 0.05;
+    const double half   = 0.5 * stringing_grid_pillar_xy - inset;
+    const double z_base = stringing_grid_base_height;
+    const int    steps  = 12;
+    std::vector<std::pair<double, double>> rings; // (z, half size)
+    rings.emplace_back(z_base - stringing_grid_label_embed, half + radius);
+    for (int i = 0; i <= steps; ++i) {
+        // Concave quarter circle centred at (half + radius, z_base + radius): extra(t) = r - sqrt(r^2 - (r - t)^2).
+        const double t     = radius * double(i) / double(steps);
+        const double extra = radius - std::sqrt(std::max(0., radius * radius - (radius - t) * (radius - t)));
+        rings.emplace_back(z_base + t, half + extra);
+    }
+    indexed_triangle_set its;
+    for (const auto &[z, h] : rings) {
+        its.vertices.emplace_back(float(cx - h), float(cy - h), float(z));
+        its.vertices.emplace_back(float(cx + h), float(cy - h), float(z));
+        its.vertices.emplace_back(float(cx + h), float(cy + h), float(z));
+        its.vertices.emplace_back(float(cx - h), float(cy + h), float(z));
+    }
+    const int n = int(rings.size());
+    for (int r = 0; r + 1 < n; ++r)
+        for (int j = 0; j < 4; ++j) {
+            const int a0 = 4 * r + j, a1 = 4 * r + (j + 1) % 4, b0 = a0 + 4, b1 = a1 + 4;
+            its.indices.emplace_back(a0, a1, b1);
+            its.indices.emplace_back(a0, b1, b0);
+        }
+    its.indices.emplace_back(0, 2, 1); // bottom cap, facing down
+    its.indices.emplace_back(0, 3, 2);
+    const int top = 4 * (n - 1);
+    its.indices.emplace_back(top + 0, top + 1, top + 2); // top cap, facing up
+    its.indices.emplace_back(top + 0, top + 2, top + 3);
+    return TriangleMesh(std::move(its));
+}
+
 TriangleMesh make_stringing_grid_column_mesh(const Calib_Params &params, int column)
 {
     TriangleMesh mesh;
@@ -1535,6 +1588,11 @@ TriangleMesh make_stringing_grid_column_mesh(const Calib_Params &params, int col
     const double y0 = (stringing_grid_base_y - stringing_grid_pillar_gap) * 0.5;
     add_pillar(mesh, cx, y0, params);
     add_pillar(mesh, cx, y0 + stringing_grid_pillar_gap, params);
+    // Owner (real print): the 4 mm pillars snapped at the plate. A concave fillet foot under each one.
+    if (const double r = stringing_grid_fillet_radius(params); r > 0.) {
+        mesh.merge(make_stringing_grid_pillar_fillet_mesh(cx, y0, r));
+        mesh.merge(make_stringing_grid_pillar_fillet_mesh(cx, y0 + stringing_grid_pillar_gap, r));
+    }
     if (params.print_labels)
         mesh.merge(make_stringing_grid_column_label_mesh(params, column));
     return mesh;
