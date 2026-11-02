@@ -449,6 +449,9 @@ TEST_CASE("Showcase lens: backplate turn and toolpath switches are saved only wh
 
     s.background.plate_rotation = 270;
     s.background.plate_flip     = true;
+    s.background.plate_zoom     = 0.5f;
+    s.background.plate_offset_x = -0.25f;
+    s.background.plate_offset_y = 0.75f;
     s.materials.toolpath_supports = false;
     s.materials.toolpath_skirt    = false;
     s.materials.toolpath_infill   = false;
@@ -475,4 +478,37 @@ TEST_CASE("Showcase panel: toolpath switches and the backplate's turn", "[showca
     CHECK(panel_visibility(s, false).mat_toolpath);   // Supports, Brim and skirt, Infill under Show
     s.background.type = BackgroundType::Backplate;
     CHECK(panel_visibility(s, false).bg_plate_match);   // Rotate photo, Flip, horizon, lens, Match camera
+}
+
+TEST_CASE("Showcase lens: framing a photo backplate", "[showcase][lens]")
+{
+    const double frame = 16. / 9., portrait = 1500. / 2000.;
+    // Zoom 1, no pan: the cover fit (the portrait photo's middle strip fills the frame's width).
+    PlateMapping m = plate_mapping(portrait, frame, 1., 0., 0.);
+    CHECK(m.sx == Approx(1.));
+    CHECK(m.sy == Approx(portrait / frame));
+    CHECK(m.ox == Approx(0.));
+    CHECK(m.oy == Approx(0.5 - 0.5 * portrait / frame));
+    // The frame's middle is the photo's middle; the horizon goes through photo -> frame and back.
+    CHECK(m.photo_v(0.5) == Approx(0.5));
+    CHECK(m.frame_y(m.photo_v(0.3)) == Approx(0.3));
+    // Fit whole photo: the frame shows all of the photo's height (and more width).
+    const double fit = plate_fit_zoom(portrait, frame);
+    CHECK(fit == Approx(portrait / frame));
+    m = plate_mapping(portrait, frame, fit, 0., 0.);
+    CHECK(m.sy == Approx(1.));
+    CHECK(m.oy == Approx(0.));
+    CHECK(m.sx > 1.);
+    CHECK(plate_fit_zoom(frame, frame) == Approx(1.));
+    // Pan to the top: the frame's centre on the photo's top edge.
+    m = plate_mapping(portrait, frame, 1., 0., 1.);
+    CHECK(m.photo_v(0.5) == Approx(1.));
+    // The frame sees sy of the photo's height: its angle of view shrinks with it.
+    const PlateMapping full = plate_mapping(portrait, frame, fit, 0., 0.);
+    CHECK(plate_frame_fov_y(26., portrait, full) == Approx(fov_y_from_focal(26., portrait)));
+    const PlateMapping crop = plate_mapping(portrait, frame, 1., 0., 0.);
+    CHECK(std::tan(0.5 * plate_frame_fov_y(26., portrait, crop)) == Approx(crop.sy * std::tan(0.5 * fov_y_from_focal(26., portrait))));
+    // The default keys: zoom 1, no pan.
+    CHECK(Background().plate_zoom == 1.f);
+    CHECK(Background().plate_offset_x == 0.f);
 }

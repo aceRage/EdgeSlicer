@@ -190,7 +190,8 @@ bool Background::operator==(const Background &o) const
     return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur &&
            backdrop_pitch == o.backdrop_pitch && ground == o.ground && ground_height == o.ground_height &&
            ground_radius == o.ground_radius && ground_scale == o.ground_scale && plate_horizon == o.plate_horizon &&
-           plate_focal == o.plate_focal && plate_rotation == o.plate_rotation && plate_flip == o.plate_flip;
+           plate_focal == o.plate_focal && plate_rotation == o.plate_rotation && plate_flip == o.plate_flip &&
+           plate_zoom == o.plate_zoom && plate_offset_x == o.plate_offset_x && plate_offset_y == o.plate_offset_y;
 }
 
 int floor_rotation_snap(double degrees)
@@ -758,6 +759,9 @@ json scene_to_json_object(const Scene &s)
     bg["plate_focal"]    = s.background.plate_focal;
     bg["plate_rotation"] = s.background.plate_rotation;
     bg["plate_flip"]     = s.background.plate_flip;
+    bg["plate_zoom"]     = s.background.plate_zoom;
+    bg["plate_offset_x"] = s.background.plate_offset_x;
+    bg["plate_offset_y"] = s.background.plate_offset_y;
     {
         json out = merged(raw, "background", bg);
         // 1h-2: only when changed, so an older scene writes back as it was read (and a value set back
@@ -781,6 +785,12 @@ json scene_to_json_object(const Scene &s)
             out.erase("plate_rotation");
         if (s.background.plate_flip == def.plate_flip)
             out.erase("plate_flip");
+        if (s.background.plate_zoom == def.plate_zoom)
+            out.erase("plate_zoom");
+        if (s.background.plate_offset_x == def.plate_offset_x)
+            out.erase("plate_offset_x");
+        if (s.background.plate_offset_y == def.plate_offset_y)
+            out.erase("plate_offset_y");
         j["background"] = out;
     }
 
@@ -926,6 +936,9 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.background.plate_focal    = clamp_or(get_or<float>(bg, "plate_focal", 50.f), 8.f, 600.f, 50.f);
     s.background.plate_rotation = floor_rotation_snap(get_or<double>(bg, "plate_rotation", 0.));
     s.background.plate_flip     = get_or<bool>(bg, "plate_flip", false);
+    s.background.plate_zoom     = clamp_or(get_or<float>(bg, "plate_zoom", 1.f), 0.1f, 10.f, 1.f);
+    s.background.plate_offset_x = clamp_or(get_or<float>(bg, "plate_offset_x", 0.f), -1.f, 1.f, 0.f);
+    s.background.plate_offset_y = clamp_or(get_or<float>(bg, "plate_offset_y", 0.f), -1.f, 1.f, 0.f);
 
     const json fl             = j.contains("floor") ? j["floor"] : json();
     s.floor.type              = enum_or(fl, "type", s.floor.type);

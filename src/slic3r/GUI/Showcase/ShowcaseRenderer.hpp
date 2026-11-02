@@ -151,6 +151,10 @@ public:
     // (a video frame's pose): what frame_view_projection() and the ID pass then use.
     void prepare_live_camera();
 
+    // 1h-2b: the backdrop picture's width / height as uploaded (EXIF and the backplate's turn applied);
+    // 0 before it is loaded.
+    double background_aspect() const { return m_bg_texture != 0 && m_bg_image_h > 0 ? double(m_bg_image_w) / double(m_bg_image_h) : 0.; }
+
     // The safe frame of the last live frame, in canvas pixels, origin top-left.
     Showcase::RectI live_frame() const { return m_live_frame; }
 

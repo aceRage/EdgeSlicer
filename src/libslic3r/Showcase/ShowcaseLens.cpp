@@ -175,6 +175,38 @@ LensVec matched_eye(const LensVec &target, const LensVec &forward, double pitch,
     return lens_sub(target, lens_mul(f, distance));
 }
 
+PlateMapping plate_mapping(double image_aspect, double frame_aspect, double zoom, double offset_x, double offset_y)
+{
+    PlateMapping m;
+    if (!(image_aspect > 0.) || !(frame_aspect > 0.))
+        return m;
+    // Cover: the photo's longer side (relative to the frame) is cropped.
+    if (image_aspect > frame_aspect)
+        m.sx = frame_aspect / image_aspect;
+    else
+        m.sy = image_aspect / frame_aspect;
+    const double z = std::isfinite(zoom) && zoom > 0. ? zoom : 1.;
+    m.sx /= z;
+    m.sy /= z;
+    const double cx = 0.5 + 0.5 * std::clamp(offset_x, -1., 1.);
+    const double cy = 0.5 + 0.5 * std::clamp(offset_y, -1., 1.);
+    m.ox = cx - 0.5 * m.sx;
+    m.oy = cy - 0.5 * m.sy;
+    return m;
+}
+
+double plate_fit_zoom(double image_aspect, double frame_aspect)
+{
+    if (!(image_aspect > 0.) || !(frame_aspect > 0.))
+        return 1.;
+    return std::min(image_aspect / frame_aspect, frame_aspect / image_aspect);
+}
+
+double plate_frame_fov_y(double focal_mm, double image_aspect, const PlateMapping &m)
+{
+    return 2. * std::atan(m.sy * std::tan(0.5 * fov_y_from_focal(focal_mm, image_aspect)));
+}
+
 // ---- Depth of field -----------------------------------------------------------------------------
 
 int dof_taps(BokehQuality q)

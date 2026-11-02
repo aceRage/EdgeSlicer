@@ -14,7 +14,7 @@
 #                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
 #                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated,
 #                        hdri_outdoor_tilt, ground_workshop_dof, ground_sunset_sill, ground_loft, backplate_desk,
-#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, video)
+#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait, video)
 #                        The 1h-2 fixtures (hdri_outdoor_tilt, ground_*, backplate_desk) need the backdrop
 #                        placement, ground projection, photo backplate and depth of field, which a golden
 #                        install from before 1h-2 does not have: they are expected to change until the
@@ -101,7 +101,7 @@ echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$RE
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
 # 1h-2: fixtures the shared baseline cannot render yet differ on purpose. (The 1h-1 HDRI fixtures are
 # compared strictly: the baseline has them since c5b7546a45.)
-NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden"
+NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden,backplate_portrait"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
@@ -160,11 +160,16 @@ run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact]
     if [ "${1:-}" = "--photo" ]; then photo="$OUT/fixtures/desk_photo.png"; shift; fi
     # --photo-file <name> (1h-2b): a picture kept in tests/showcase/fixtures instead
     if [ "${1:-}" = "--photo-file" ]; then photo="$HERE/fixtures/$2"; shift 2; fi
+    # --photo-portrait: the generated desk photo at 540 x 960 (a phone's portrait shot)
+    if [ "${1:-}" = "--photo-portrait" ]; then photo="$OUT/fixtures/desk_photo_portrait.png"; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
     [ "${1:-}" = "--slice" ] && settings=$SLICE_SETTINGS
     if [ -n "$photo" ] && [ ! -f "$photo" ]; then
-        "$PY" "$HERE/make_desk_photo.py" "$photo" || { STATUS=2; return; }
+        case "$photo" in
+        *portrait*) "$PY" "$HERE/make_desk_photo.py" "$photo" 540 960 || { STATUS=2; return; } ;;
+        *) "$PY" "$HERE/make_desk_photo.py" "$photo" || { STATUS=2; return; } ;;
+        esac
     fi
     "$PY" "$HERE/make_fixture.py" ${photo:+--image "$photo"} "$model" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
     g="$OUT/golden/$name.png"
@@ -237,6 +242,7 @@ run_still backplate_exif --photo-file desk_photo_exif6.jpg
 run_still backplate_catcher --photo
 run_still ground_ortho
 run_still toolpaths_hidden --slice
+run_still backplate_portrait --photo-portrait
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

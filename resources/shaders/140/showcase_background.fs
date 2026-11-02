@@ -14,7 +14,7 @@ uniform float frame_aspect; // frame width / height
 uniform sampler2D image_tex;
 uniform vec4 uv_transform;  // image: uv = f * xy + zw, f = position in the frame (0..1)
 uniform bool tile;
-uniform bool extend;        // 1h-2b: a photo backplate: past the picture's edge keep its edge pixels, not color1
+uniform bool extend;        // 1h-2b: a photo backplate: past the picture's edge a blurred stretch of it, not color1
 uniform vec2 viewport_size; // pixels (checkerboard)
 
 // S2: a soft focus look. 0 = sharp; the image is mipmapped and image_lod is the level to read.
@@ -184,9 +184,13 @@ void main()
         vec2 uv = f * uv_transform.xy + uv_transform.zw;
         if (tile)
             uv = fract(uv);
-        if (extend)
-            uv = clamp(uv, 0.0, 1.0);
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        if (extend && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) {
+            // A zoomed-out backplate (and the live view's margins): a soft, darker stretch of the
+            // photo's edge, like a phone's blurred fill, rather than flat bars.
+            vec2 e = clamp(uv, 0.0, 1.0);
+            float lod = max(image_lod, log2(max(float(textureSize(image_tex, 0).x), 1.0)) - 4.0);
+            c = vec4(textureLod(image_tex, vec2(e.x, 1.0 - e.y), lod).rgb * 0.8, 1.0);
+        } else if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
             c = color1;
         else
             c = sample_image(vec2(uv.x, 1.0 - uv.y));

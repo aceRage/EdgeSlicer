@@ -1073,7 +1073,14 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         const float ia = float(m_bg_image_w) / float(std::max(1, m_bg_image_h));
         float sx = 1.f, sy = 1.f;
         const Showcase::ImageFit fit = type == Showcase::BackgroundType::Backplate ? Showcase::ImageFit::Fill : m_scene->background.fit;
-        if (fit == Showcase::ImageFit::Tile) {
+        if (type == Showcase::BackgroundType::Backplate) {
+            // 1h-2b: the backplate's zoom and pan (zoom 1, no pan = the cover fit below).
+            const Showcase::Background &b = m_scene->background;
+            const Showcase::PlateMapping pm = Showcase::plate_mapping(double(ia), double(frame_aspect), double(b.plate_zoom),
+                                                                      double(b.plate_offset_x), double(b.plate_offset_y));
+            sx = float(pm.sx);
+            sy = float(pm.sy);
+        } else if (fit == Showcase::ImageFit::Tile) {
             sy = 3.f;
             sx = 3.f * frame_aspect / ia;
         } else {
@@ -1083,8 +1090,12 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
             else
                 sy = ia / frame_aspect;
         }
-        const float ox = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sx;
-        const float oy = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sy;
+        float ox = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sx;
+        float oy = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sy;
+        if (type == Showcase::BackgroundType::Backplate) {
+            ox = float(0.5 + 0.5 * std::clamp(double(m_scene->background.plate_offset_x), -1., 1.)) - 0.5f * sx;
+            oy = float(0.5 + 0.5 * std::clamp(double(m_scene->background.plate_offset_y), -1., 1.)) - 0.5f * sy;
+        }
         shader->set_uniform("uv_transform", std::array<float, 4>{ sx, sy, ox, oy });
         shader->set_uniform("tile", fit == Showcase::ImageFit::Tile);
         // 1h-2b: a backplate continues past the safe frame (the live view's margins show more photo, not
@@ -2378,7 +2389,12 @@ void ShowcaseRenderer::draw_overlay(int vp_w, int vp_h)
         // 1h-2: a photo backplate's horizon (where the user put it) and the camera's own, to line them up.
         // The live view only: never in an export.
         if (m_scene->background.type == Showcase::BackgroundType::Backplate) {
-            const float hy = y0 + (1.f - std::clamp(m_scene->background.plate_horizon, 0.f, 1.f)) * (y1 - y0);
+            // The horizon is kept in the photo's coordinates: through the zoom and the pan to the frame.
+            const double ia = background_aspect();
+            const Showcase::PlateMapping pm = Showcase::plate_mapping(ia > 0. ? ia : double(f.w) / double(std::max(1, f.h)),
+                                                                      double(f.w) / double(std::max(1, f.h)), double(m_scene->background.plate_zoom),
+                                                                      double(m_scene->background.plate_offset_x), double(m_scene->background.plate_offset_y));
+            const float hy = y0 + float(1. - pm.frame_y(double(m_scene->background.plate_horizon))) * (y1 - y0);
             dl->AddLine(ImVec2(x0, hy), ImVec2(x1, hy), IM_COL32(255, 196, 0, 210), 1.5f);
             dl->AddText(ImVec2(x0 + 6.f, hy - ImGui::GetTextLineHeight() - 2.f), IM_COL32(255, 196, 0, 230), _u8L("Photo horizon").c_str());
             const Camera &camera = wxGetApp().plater()->get_camera();

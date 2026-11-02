@@ -655,6 +655,17 @@ void ShowcaseView::build_panel()
     m_plate_flip = new wxCheckBox(m_side, wxID_ANY, _L("Flip photo left to right"));
     grid->AddSpacer(0);
     grid->Add(m_plate_flip);
+    m_plate_zoom = slider(100, 25, 400);
+    m_plate_zoom->SetToolTip(_L("100 % fills the frame. Smaller shows more of the photo, with a soft stretch of its edges around it."));
+    row(_L("Photo zoom"), m_plate_zoom);
+    m_plate_offset_x = slider(0, -100, 100);
+    row(_L("Photo offset X"), m_plate_offset_x);
+    m_plate_offset_y = slider(0, -100, 100);
+    m_plate_offset_y->SetToolTip(_L("Right shows more of the top of the photo."));
+    row(_L("Photo offset Y"), m_plate_offset_y);
+    m_plate_fit = new wxButton(m_side, wxID_ANY, _L("Fit whole photo"));
+    grid->AddSpacer(0);
+    grid->Add(m_plate_fit);
     // 1h-2: the photo backplate's camera match.
     m_plate_horizon = slider(50, 0, 100);
     m_plate_horizon->SetToolTip(_L("Where the photo's horizon is, from the bottom of the frame. The live view draws it as a line."));
@@ -1246,6 +1257,31 @@ void ShowcaseView::build_panel()
         if (sel >= 0 && sel < 4)
             edit([sel](Showcase::Scene &s) { s.background.plate_rotation = sel * 90; });
     });
+    m_plate_zoom->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float z = float(m_plate_zoom->GetValue()) / 100.f;
+        edit([z](Showcase::Scene &s) { s.background.plate_zoom = z; });
+    });
+    m_plate_offset_x->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_plate_offset_x->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.background.plate_offset_x = v; });
+    });
+    m_plate_offset_y->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_plate_offset_y->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.background.plate_offset_y = v; });
+    });
+    m_plate_fit->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        const Showcase::Scene &s  = scene();
+        const double           ia = m_renderer->background_aspect();
+        const double           fa = double(std::max(1, s.export_settings.width)) / double(std::max(1, s.export_settings.height));
+        if (!(ia > 0.))
+            return;
+        const float z = float(Showcase::plate_fit_zoom(ia, fa));
+        edit([z](Showcase::Scene &sc) {
+            sc.background.plate_zoom     = z;
+            sc.background.plate_offset_x = 0.f;
+            sc.background.plate_offset_y = 0.f;
+        });
+    });
     m_plate_flip->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
         const bool on = m_plate_flip->GetValue();
         edit([on](Showcase::Scene &s) { s.background.plate_flip = on; });
@@ -1267,9 +1303,16 @@ void ShowcaseView::build_panel()
         const Showcase::RectI  f = m_renderer->live_frame();
         if (f.empty())
             return;
-        const double fov_y = Showcase::fov_y_from_focal(double(s.background.plate_focal), double(f.w) / double(f.h));
-        const double pitch = Showcase::pitch_for_horizon(double(s.background.plate_horizon), fov_y);
-        apply_camera_lens(double(s.background.plate_focal), &pitch);
+        // 1h-2b: the photo's lens and horizon seen through the backplate's zoom and pan.
+        const double fa = double(f.w) / double(f.h);
+        double       ia = m_renderer->background_aspect();
+        if (!(ia > 0.))
+            ia = fa;
+        const Showcase::PlateMapping pm = Showcase::plate_mapping(ia, fa, double(s.background.plate_zoom), double(s.background.plate_offset_x),
+                                                                  double(s.background.plate_offset_y));
+        const double fov_y = Showcase::plate_frame_fov_y(double(s.background.plate_focal), ia, pm);
+        const double pitch = Showcase::pitch_for_horizon(pm.frame_y(double(s.background.plate_horizon)), fov_y);
+        apply_camera_lens(Showcase::focal_from_fov_y(fov_y, fa), &pitch);
     });
     m_bg_color1->Bind(wxEVT_COLOURPICKER_CHANGED, [this](wxColourPickerEvent &) {
         edit([this](Showcase::Scene &s) { s.background.color1 = showcase_hex(m_bg_color1->GetColour()); });
@@ -1876,6 +1919,9 @@ void ShowcaseView::sync_controls()
     m_plate_focal->SetValue(std::clamp(int(std::lround(s.background.plate_focal)), 8, 600));
     m_plate_rotation->SetSelection(std::clamp(Showcase::floor_rotation_snap(double(s.background.plate_rotation)) / 90, 0, 3));
     m_plate_flip->SetValue(s.background.plate_flip);
+    m_plate_zoom->SetValue(std::clamp(int(std::lround(s.background.plate_zoom * 100.f)), 25, 400));
+    m_plate_offset_x->SetValue(std::clamp(int(std::lround(s.background.plate_offset_x * 100.f)), -100, 100));
+    m_plate_offset_y->SetValue(std::clamp(int(std::lround(s.background.plate_offset_y * 100.f)), -100, 100));
     m_tp_supports->SetValue(s.materials.toolpath_supports);
     m_tp_skirt->SetValue(s.materials.toolpath_skirt);
     m_tp_infill->SetValue(s.materials.toolpath_infill);
@@ -2167,7 +2213,8 @@ void ShowcaseView::update_enabled()
                                                           m_bg_ground, m_bg_ground_height, m_bg_ground_radius, m_bg_ground_scale, m_bg_pitch,
                                                           m_plate_horizon, m_plate_focal, m_plate_match, m_lens, m_dof, m_dof_fnumber,
                                                           m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
-                                                          m_tp_supports, m_tp_skirt, m_tp_infill })
+                                                          m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
+                                                          m_plate_offset_y, m_plate_fit })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2357,6 +2404,10 @@ void ShowcaseView::apply_row_visibility()
     set(m_plate_match, v.bg_plate_match);
     set(m_plate_rotation, v.bg_plate_match);
     set(m_plate_flip, v.bg_plate_match);
+    set(m_plate_zoom, v.bg_plate_match);
+    set(m_plate_offset_x, v.bg_plate_match);
+    set(m_plate_offset_y, v.bg_plate_match);
+    set(m_plate_fit, v.bg_plate_match);
     set(m_tp_supports, v.mat_toolpath);
     set(m_tp_skirt, v.mat_toolpath);
     set(m_tp_infill, v.mat_toolpath);

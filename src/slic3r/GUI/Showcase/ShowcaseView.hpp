@@ -382,6 +382,10 @@ private:
     wxButton                *m_plate_match = nullptr;
     wxChoice                *m_plate_rotation = nullptr;   // 1h-2b: the photo's own turn and mirror
     wxCheckBox              *m_plate_flip = nullptr;
+    wxSlider                *m_plate_zoom = nullptr;       // 1h-2b: framing the photo
+    wxSlider                *m_plate_offset_x = nullptr;
+    wxSlider                *m_plate_offset_y = nullptr;
+    wxButton                *m_plate_fit = nullptr;
     // 1h-2b: what the toolpaths view shows besides the model (Materials, under Show).
     wxCheckBox              *m_tp_supports = nullptr;
     wxCheckBox              *m_tp_skirt = nullptr;

@@ -89,6 +89,24 @@ double  distance_for_fov(double frame_h_px, double zoom_px_per_mm, double fov_y)
 // keeping the compass direction of `forward` (its horizontal part; +Y when it has none).
 LensVec matched_eye(const LensVec &target, const LensVec &forward, double pitch, double distance);
 
+// The photo backplate on the frame: uv = f * scale + offset, f the position in the frame (0..1, y up)
+// and uv the position in the photo (0..1, v up). Zoom 1 covers the frame (the photo cropped to it);
+// the offsets pan (Background::plate_offset_x / _y). Mirrors draw_background()'s backplate.
+struct PlateMapping
+{
+    double sx = 1., sy = 1., ox = 0., oy = 0.;
+    // The photo's height from the bottom (0..1) seen at the frame's height `fy` (0..1), and back.
+    double photo_v(double fy) const { return fy * sy + oy; }
+    double frame_y(double v) const { return sy != 0. ? (v - oy) / sy : 0.5; }
+};
+PlateMapping plate_mapping(double image_aspect, double frame_aspect, double zoom, double offset_x, double offset_y);
+// The zoom at which the whole photo fits in the frame (1 when the aspects match, below 1 otherwise).
+double       plate_fit_zoom(double image_aspect, double frame_aspect);
+// The frame's vertical angle of view for a photo taken with `focal_mm` (35 mm equivalent, measured on
+// the photo's own aspect) and shown through `m` (the frame sees sy of the photo's height). Off-centre
+// pans are treated as if centred (no lens shift).
+double       plate_frame_fov_y(double focal_mm, double image_aspect, const PlateMapping &m);
+
 // ---- Depth of field -----------------------------------------------------------------------------
 
 // The circle of confusion is capped at this share of the frame height (its diameter).

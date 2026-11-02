@@ -115,6 +115,13 @@ struct Background
     // right (before the turn), on top of the EXIF orientation of the file (which is always applied).
     int            plate_rotation = 0;
     bool           plate_flip     = false;
+    // Backplate framing: 1 = the photo covers the frame (cropped to it); larger zooms in, smaller shows
+    // more of it (the rest of the frame a blurred stretch of its edges). The offsets pan the view over
+    // the photo: -1..1 moves the frame's centre to the photo's left / right (x) or bottom / top (y) edge.
+    // plate_horizon stays in the photo's own coordinates (0 its bottom, 1 its top).
+    float          plate_zoom     = 1.f;
+    float          plate_offset_x = 0.f;
+    float          plate_offset_y = 0.f;
 
     bool operator==(const Background &o) const;
     bool operator!=(const Background &o) const { return !(*this == o); }
