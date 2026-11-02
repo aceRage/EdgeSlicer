@@ -146,6 +146,11 @@ struct Lighting
     std::string environment     = "studio";
     float       env_intensity   = 0.7f;   // 0..3
     float       env_rotation_deg = 0.f;   // around +Z
+    // 1h-1: for an HDRI environment (ShowcaseHdr.hpp), the key light is the sun (or brightest light)
+    // found in the panorama - its direction (turned with env_rotation_deg), colour and strength - and
+    // it is taken out of the image-based light. The key_intensity still scales it. Off = the key
+    // light's own angles and temperature.
+    bool        sun_from_env    = false;
     float       exposure        = 0.f;    // EV, -3..3
     float       shadow_softness = 1.f;    // 0.5 (hard, sun) .. 4 (very soft)
     // 1a: the post pass's tone curve (D-R1: Khronos PBR Neutral by default, filmic as an option).

@@ -3,3 +3,5 @@
 
 tests/cli/*.sh text eol=lf
 tests/showcase/*.sh text eol=lf
+
+*.hdr binary
