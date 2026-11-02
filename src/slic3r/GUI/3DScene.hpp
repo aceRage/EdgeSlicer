@@ -252,6 +252,10 @@ public:
     std::vector<coordf_t>       print_zs;
     // Offset into qverts & tverts, or offsets into indices stored into an OpenGL name_index_buffer.
     std::vector<size_t>         offsets;
+#ifdef SLIC3R_CAD
+    // Design tab ghost preview: pushed back in depth so coplanar body faces win (no z-fighting).
+    bool                        depth_bias{false};
+#endif
 
     // Bounding box of this volume, in unscaled coordinates.
     BoundingBoxf3 bounding_box() const {

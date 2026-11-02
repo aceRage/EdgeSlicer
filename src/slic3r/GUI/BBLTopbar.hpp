@@ -55,6 +55,9 @@ public:
 
     void EnableUndoRedoItems();
     void DisableUndoRedoItems();
+#ifdef SLIC3R_CAD
+    void EnableUndoRedo(bool undo, bool redo);
+#endif
 
     void SaveNormalRect();
 

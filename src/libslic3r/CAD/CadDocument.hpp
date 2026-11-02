@@ -38,6 +38,7 @@ enum class ExtrudeEnd { Blind, Symmetric, TwoSided, ThroughAll, UpToFace, UpToVe
 std::string brep_to_string(const TopoDS_Shape& s);
 TopoDS_Shape brep_from_string(const std::string& d);
 // Test hook: times brep_from_string actually called BRepTools::Read (empty input does not count).
+// F9: the counter is std::atomic so concurrent restore/tests cannot data-race it.
 void reset_brep_from_string_calls();
 int  brep_from_string_calls();
 
@@ -86,12 +87,15 @@ struct CadFeature {
     // Imported rigid 3D B-rep solid (STEP). When the feature type is Import this carries
     // the OCCT shape verbatim — it is adopted as a base body in route_feature (no parametric
     // recipe). Downstream face/edge features (fillet/chamfer/cut/shell/...) act on it like any
-    // other body. TopoDS_Shape is a cheap handle, so copying it through recompute/checkpoint
-    // snapshots is cheap. Saved with the recipe as a BRep string (see save()/load()).
+    // other body. TopoDS_Shape is a handle to shared BRep data: copying the handle is cheap,
+    // but checkpoint/recompute still share that geometry until a modifying algorithm copies
+    // it. Saved with the recipe as a BRep string (see save()/load()).
     TopoDS_Shape imported_solid;
     // Wire-form BRep text for Import. save() writes this when imported_solid is null (so a
     // parse-only load can still round-trip junk). load() always fills it from the cereal
     // string; BRepTools::Read into imported_solid is skipped when the archive is parse-only.
+    // After a successful restore the string is cleared so the recipe does not keep a second
+    // copy of the BRep text next to the live shape (F10).
     std::string  imported_brep;
 
     // Non-destructive placement transform for imported_regions (Text/SVG),
@@ -472,8 +476,11 @@ struct CadFeature {
                text_string, text_font, text_height,
                revolve_axis_entity);
         imported_brep = std::move(brep);
-        if (!recipe_parse_only(ar))
+        if (!recipe_parse_only(ar)) {
             imported_solid = brep_from_string(imported_brep);
+            if (!imported_solid.IsNull())
+                imported_brep.clear();
+        }
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature
     // length, so it can only be read with exactly the field list it was written with; reading it
@@ -518,8 +525,11 @@ struct CadFeature {
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges);
         imported_brep = std::move(brep);
-        if (!recipe_parse_only(ar))
+        if (!recipe_parse_only(ar)) {
             imported_solid = brep_from_string(imported_brep);
+            if (!imported_solid.IsNull())
+                imported_brep.clear();
+        }
     }
 
 };
@@ -797,7 +807,12 @@ public:
     // strings are read as text and left unrestored. true = keep the bytes on Model::cad_recipe;
     // false + *error = drop them. A recipe that would fail recompute() or fail to restore an
     // Import solid on this build still returns true so it can round-trip on the next save.
+    // A newer, unknown recipe version also returns true (bytes kept opaque, see newer_recipe_version).
     static bool validate_recipe_bytes(const std::string& blob, std::string* error = nullptr);
+    // The blob's version when it is newer than this build reads (and within
+    // kMaxFutureRecipeVersion, so random bytes do not qualify); 0 otherwise.
+    static constexpr uint32_t kMaxFutureRecipeVersion = 255;
+    static uint32_t newer_recipe_version(const std::string& blob);
 
     // Export every body to a STEP file as native B-rep (not mesh). body_xforms is the
     // per-body display transform (Move gizmo); when supplied the bodies are written at

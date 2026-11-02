@@ -58,6 +58,9 @@ class MainFrame;
 class ParamsDialog;
 class SliceModePopup;
 class HomePanel;
+#ifdef SLIC3R_CAD
+class DesignPanel;
+#endif
 
 enum QuickSlice
 {
@@ -268,6 +271,9 @@ public:
         tpCalibration   = MainTabs::Calibration,
         tpAuxiliary     = MainTabs::Auxiliary,
         toDebugTool     = MainTabs::DebugTool,
+#ifdef SLIC3R_CAD
+        tpDesign        = MainTabs::Design, // sentinel 100; resolve via FindPage, never SetSelection(100)
+#endif
     };
 
     //BBS: add slice&&print status update logic
@@ -486,6 +492,15 @@ public:
 
     CalibrationPanel*     m_calibration{ nullptr };
     LazyPanelHolder*      m_calibration_holder{ nullptr };
+#ifdef SLIC3R_CAD
+    // Optional last real page. The holder is the notebook page so TabPosition indices of
+    // Home..Calibration stay 0..8; the DesignPanel is built on first Show.
+    LazyPanelHolder*      m_design_holder{ nullptr };
+    DesignPanel*          shown_design_panel() const;
+    void                  set_undo_redo_enabled(bool undo, bool redo);
+    void                  ensure_design_tab_last();
+    LazyPanelHolder*      make_design_holder();
+#endif
 
     // On-demand accessors for the deferred tabs. Each builds its panel if it has not been
     // built yet, and returns nullptr only when the tab is not part of this layout at all

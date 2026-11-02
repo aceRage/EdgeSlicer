@@ -13,6 +13,7 @@
 #include "test_utils.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <cstring>
 #include <boost/filesystem.hpp>
 
 using namespace Slic3r;
@@ -345,6 +346,43 @@ TEST_CASE("A structurally valid recipe that would not rebuild is kept byte-for-b
     REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
 }
 
+TEST_CASE("A recipe from a newer Design tab survives load/save byte for byte", "[CadRecipe][3mf]")
+{
+    prepare_temp_dir();
+    std::string blob = square_extrude_recipe();
+    REQUIRE(blob.size() > 8);
+    uint32_t v = 0;
+    std::memcpy(&v, blob.data(), sizeof(v));
+    REQUIRE(v == CadDocument::ORCA_CAD_RECIPE_VERSION);   // the version is the leading u32
+    v = CadDocument::ORCA_CAD_RECIPE_VERSION + 1;
+    std::memcpy(&blob[0], &v, sizeof(v));
+    blob += std::string("\x01\x02" "future-only-tail", 18);
+
+    REQUIRE(CadDocument::newer_recipe_version(blob) == v);
+    REQUIRE(CadDocument::validate_recipe_bytes(blob));
+    CadDocument doc;
+    REQUIRE_FALSE(doc.deserialize_recipe(blob));          // not loaded by this build
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".3mf");
+    REQUIRE(store_project(file.string(), src));
+    Model loaded;
+    REQUIRE(load_project(file.string(), loaded));
+    REQUIRE(loaded.cad_recipe == blob);
+    ScopedTemporaryFile again(".3mf");
+    REQUIRE(store_project(again.string(), loaded));
+    REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
+
+    // Structurally corrupt bytes are still dropped (an implausible leading version).
+    std::string junk = blob;
+    const uint32_t wild = 0x73696874u;
+    std::memcpy(&junk[0], &wild, sizeof(wild));
+    REQUIRE(CadDocument::newer_recipe_version(junk) == 0);
+    REQUIRE_FALSE(CadDocument::validate_recipe_bytes(junk));
+}
+
 TEST_CASE("An Import with junk BRep text is kept without calling BRepTools", "[CadRecipe][3mf]")
 {
     prepare_temp_dir();
@@ -367,4 +405,29 @@ TEST_CASE("An Import with junk BRep text is kept without calling BRepTools", "[C
     ScopedTemporaryFile again(".3mf");
     REQUIRE(store_project(again.string(), loaded));
     REQUIRE(zip_entry(again.string(), "Metadata/orca_cad.bin") == blob);
+}
+
+TEST_CASE("A sliced .gcode.3mf does not carry the CAD recipe", "[CadRecipe][3mf]")
+{
+    // F5: project 3MFs keep Metadata/orca_cad.bin; sliced handoff files do not.
+    prepare_temp_dir();
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20, 10, 0, "Sketch");
+    doc.add_extrude(sk, 5.0, false, BooleanMode::New, "Extrude");
+    REQUIRE(doc.recompute());
+    const std::string blob = doc.serialize_recipe();
+
+    Model src;
+    one_cube(src);
+    src.cad_recipe = blob;
+    ScopedTemporaryFile file(".gcode.3mf");
+    DynamicPrintConfig cfg = project_config();
+    StoreParams        sp;
+    sp.path     = file.string();
+    sp.model    = &src;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary | SaveStrategy::SkipStatic |
+                  SaveStrategy::WithGcode;
+    REQUIRE(store_bbs_3mf(sp));
+    REQUIRE_FALSE(zip_has_entry(file.string(), "Metadata/orca_cad.bin"));
 }

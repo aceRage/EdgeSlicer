@@ -455,6 +455,11 @@ private:
     bool update_items_enabled_state();
 };
 
+#ifdef SLIC3R_CAD
+enum class CollapseSide { None, Left, Right };
+bool setup_collapse_toolbar(GLToolbar& toolbar, std::function<void()> toggle);
+#endif
+
 } // namespace GUI
 } // namespace Slic3r
 

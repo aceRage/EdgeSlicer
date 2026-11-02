@@ -29,6 +29,14 @@ enum Position : int {
     Calibration = 8,
     Auxiliary   = 9,   // never has a page
     DebugTool   = 10,  // never has a page
+#ifdef SLIC3R_CAD
+    // Optional Design tab. NOT a notebook index: Edge's enum values are the notebook
+    // indices of the always-present pages, so inserting Design after Home would shift
+    // Prepare (1), Preview (2), Device (4) and break select_tab / default_page / topbar.
+    // When compiled in AND enable_cad_feature is on, the page is appended after
+    // Calibration; select_tab(Design) maps through FindPage. 100 is a sentinel.
+    Design      = 100,
+#endif
 };
 
 // The three pages that host the plater (one wxPanel added three times).
@@ -42,6 +50,9 @@ inline int tab_from_name(const std::string &name)
         { "Home", Home },         { "3DEditor", Editor3D }, { "Preview", Preview },   { "Showcase", Showcase },
         { "Monitor", Monitor },   { "Stream", Stream },     { "MultiDevice", Printers }, { "Printers", Printers },
         { "Project", Project },   { "Calibration", Calibration }, { "Auxiliary", Auxiliary }, { "DebugTool", DebugTool },
+#ifdef SLIC3R_CAD
+        { "Design", Design },
+#endif
     };
     for (const Entry &e : entries)
         if (name == e.name)

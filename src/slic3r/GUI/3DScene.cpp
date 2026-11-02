@@ -1215,7 +1215,17 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
                                             model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
         shader->set_uniform("view_normal_matrix", view_normal_matrix);
+#ifdef SLIC3R_CAD
+        if (volume.first->depth_bias) {
+            glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
+            glsafe(::glPolygonOffset(1.0f, 1.0f));
+        }
+#endif
         volume.first->render();
+#ifdef SLIC3R_CAD
+        if (volume.first->depth_bias)
+            glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
+#endif
 
 #if ENABLE_ENVIRONMENT_MAP
         if (use_environment_texture)
