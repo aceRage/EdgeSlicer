@@ -566,6 +566,9 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
     // (shortest) crosses the whole grid. It keeps the longer retraction: giving the difference back
     // before the travel (review F9) was a stationary unretract followed by a long, barely retracted
     // travel that strung over every column. The unretract at the new column gives it all back.
+    // So the switch never reduces what is held: the travel holds the longer of the new column's length
+    // and whatever was already retracted at the marker (the previous column's length, or for the very
+    // first column the printer's own retraction from the start-of-print layer change, 0.8 here).
     const Calib_Params params = small_grid_params();
     const std::string  g      = slice_grid(params, grid_print_config());
     REQUIRE_FALSE(lines_starting_with(g, "G1 E").empty());
@@ -583,7 +586,7 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
         std::smatch m;
         if (std::regex_search(line, m, col_re)) {
             want   = std::stod(m[2]);
-            expect = std::max(want, prev_L);
+            expect = std::max(want, rs.held);
             if (prev_L > want + 1e-6)
                 ++shrinking;
             prev_L = want;
@@ -592,7 +595,7 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
         const bool travel = line.rfind("G1 ", 0) == 0 && line.find('E') == std::string::npos &&
                             (line.find('X') != std::string::npos || line.find('Y') != std::string::npos);
         if (want > 0. && travel) {
-            // First XY travel after the switch: the longer of the previous and the new column's length.
+            // First XY travel after the switch: the longer of what was held and the new column's length.
             if (rs.held > 1e-6) {
                 CHECK(rs.held == Approx(expect).margin(1e-3));
                 ++checked;
