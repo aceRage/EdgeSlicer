@@ -1120,6 +1120,8 @@ public:
     wxWindow* GetPage(size_t index) const { return (index < m_tabs.size()) ? m_tabs[index].page : nullptr; }
 
     int GetSelection() const { return m_selectedIndex; }
+    // Per-nozzle process P9: the strip of tab labels above the page, to size the notebook to its pages.
+    int GetTabHeight() const { return m_tabHeight; }
 
     void SetSelection(size_t index)
     {
@@ -11120,33 +11122,47 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             counts != nullptr && i < counts->values.size() && !counts->is_nil(i) && counts->values[i] > 1) {
             const DynamicPrintConfig sized = bundle.printer_config_with_project_sizes();
             const auto               racks = extruder_rack_nozzles(sized);
-            // Owner hand test 2026-11-02: one compact row, grouped like the Process selector ("Rack: 5 x 0.4, 1 x 0.6"), the theme's
-            // text colour, the sidebar's small-button style; the per-slot detail is in Edit.
+            // Owner hand tests 2026-11-02: a row laid out like the Diameter / Flow row above it - the "Rack" label in the Diameter
+            // label's column and font, the summary ("5 x 0.4, 1 x 0.6", grouped like the Process selector) vertically centred in a
+            // row as tall as the Diameter combo, Edit / Sync at the size of the buttons beside parameter boxes. The per-slot detail
+            // is in Edit. The notebook grows to fit the page (end of update_nozzle_settings).
             wxBoxSizer*   rack_sizer = new wxBoxSizer(wxHORIZONTAL);
             const bool    has_slots  = i < racks.size() && racks[i].size() >= 2;
-            const wxString summary   = has_slots ? _L("Rack") + ": " + from_u8(rack_summary(racks[i])) : _L("Rack: not set up");
-            Label*        rack_value = new Label(nozzle_panel, summary);
-            rack_value->SetFont(Label::Body_13);
-            rack_value->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
+            wxStaticText* rack_label = new wxStaticText(nozzle_panel, wxID_ANY, _L("Rack"));
+            rack_label->SetForegroundColour(is_dark ? wxColor(194, 194, 194) : wxColor(0, 0, 0));
+            rack_label->SetFont(Label::Body_14);
+            // The same column as "Diameter".
+            const int label_w = std::max(diameter_label->GetBestSize().x, rack_label->GetBestSize().x);
+            diameter_label->SetMinSize(wxSize(label_w, -1));
+            rack_label->SetMinSize(wxSize(label_w, -1));
+            wxStaticText* rack_value = new wxStaticText(nozzle_panel, wxID_ANY,
+                                                        has_slots ? from_u8(rack_summary(racks[i])) + " mm" : _L("not set up"),
+                                                        wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_END);
+            rack_value->SetForegroundColour(is_dark ? wxColor(194, 194, 194) : wxColor(0, 0, 0));
+            rack_value->SetFont(Label::Body_14);
             rack_value->SetToolTip(_L("The nozzles in this extruder's rack in this project. With two or more sizes, each size is a tool of its "
                                       "own on the Process tab (Right 0.4, Right 0.6) with its own process; filaments can be pinned to a slot "
-                                      "(filament menu > Rack slot). The stock printer preset declares no rack: add the nozzles with Edit, or "
-                                      "Sync them from a connected printer."));
+                                      "(filament menu > Rack slot). The stock printer preset declares no rack: add the nozzles with Add / "
+                                      "Edit, or Sync them from a connected printer."));
             Button* rack_edit = new Button(nozzle_panel, has_slots ? _L("Edit") : _L("Add"));
-            rack_edit->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            rack_edit->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
             rack_edit->SetToolTip(_L("The nozzle in each rack slot (Printer settings > Extruder: Rack nozzles in this project)."));
             rack_edit->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
                 // After the click: the dialog result rebuilds these pages.
                 wxGetApp().CallAfter([this, i]() { edit_rack_nozzles(i); });
             });
             Button* rack_sync = new Button(nozzle_panel, _L("Sync"));
-            rack_sync->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            rack_sync->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
             rack_sync->SetToolTip(_L("Read the rack's nozzles from the connected printer (the Device page's state; nothing is sent)."));
             rack_sync->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { wxGetApp().CallAfter([this]() { sync_nozzle_sizes_from_bambu_printer(); }); });
-            rack_sizer->AddSpacer(FromDIP(15));
+            rack_sizer->AddSpacer(15);
+            rack_sizer->Add(rack_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
+            rack_sizer->AddSpacer(10);
             rack_sizer->Add(rack_value, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
-            rack_sizer->Add(rack_edit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+            rack_sizer->Add(rack_edit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
             rack_sizer->Add(rack_sync, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(15));
+            // As tall as the Diameter row.
+            rack_sizer->SetMinSize(wxSize(-1, FromDIP(32)));
             panel_sizer->Add(rack_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(4));
         }
 
@@ -11182,6 +11198,33 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
     if (shown_nozzle_tab > 0 && size_t(shown_nozzle_tab) < p->m_nozzle_notebook->GetPageCount()) {
         p->m_nozzle_notebook->SetSelection(size_t(shown_nozzle_tab));
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: sidebar nozzle tab " << shown_nozzle_tab + 1 << " shown again after the rebuild";
+    }
+    // Per-nozzle process P9 (owner hand test 2026-11-02): the notebook sized its pages to a fixed 80 px container, which crushed
+    // the Rack row under Right Nozzle. Size the notebook and its container to the tallest page (tab strip + page + the 4 px
+    // UpdateLayout keeps), then lay the printer section and the sidebar out again.
+    {
+        int page_h = 0;
+        for (size_t k = 0; k < p->m_nozzle_notebook->GetPageCount(); ++k)
+            if (wxWindow *page = p->m_nozzle_notebook->GetPage(k))
+                page_h = std::max(page_h, page->GetSizer() != nullptr ? page->GetSizer()->CalcMin().y : page->GetBestSize().y);
+        const int need = p->m_nozzle_notebook->GetTabHeight() + 1 + page_h + 4 + FromDIP(4);
+        p->m_nozzle_notebook->SetMinSize(wxSize(-1, need));
+        if (wxWindow *container = p->m_nozzle_notebook->GetParent()) {
+            container->SetMinSize(wxSize(-1, std::max(FromDIP(80), need)));
+            container->InvalidateBestSize();
+            container->Layout();
+        }
+        p->m_nozzle_notebook->InvalidateBestSize();
+        if (p->m_panel_printer_content != nullptr) {
+            p->m_panel_printer_content->InvalidateBestSize();
+            p->m_panel_printer_content->Layout();
+        }
+        if (p->scrolled != nullptr) {
+            p->scrolled->Layout();
+            if (auto *sw = dynamic_cast<wxScrolledWindow *>(p->scrolled))
+                sw->FitInside();
+        }
+        Layout();
     }
     p->m_nozzle_notebook->Layout();
 
