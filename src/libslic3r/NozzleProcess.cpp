@@ -1217,8 +1217,9 @@ std::string pick_nozzle_process(std::vector<NozzleProcessCandidate> candidates, 
         return std::string();
     const std::string word = process_quality_word(plate_name);
     auto rank = [&](const NozzleProcessCandidate &c) {
-        return std::make_tuple(c.system ? 0 : 1, int(std::lround(std::abs(c.layer_height - plate_layer_height) * 1000.)),
-                               (!word.empty() && process_quality_word(c.name) == word) ? 0 : 1,
+        // The layer height is the Plate's anyway: the kind of profile ("Standard", "Strength"...) matters more.
+        return std::make_tuple(c.system ? 0 : 1, (!word.empty() && process_quality_word(c.name) == word) ? 0 : 1,
+                               int(std::lround(std::abs(c.layer_height - plate_layer_height) * 1000.)),
                                process_quality_word(c.name) == "Standard" ? 0 : 1, c.name);
     };
     return std::min_element(candidates.begin(), candidates.end(),

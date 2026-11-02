@@ -247,8 +247,8 @@ struct NozzleProcessCandidate
     double      layer_height{ 0. };
     bool        system{ false };
 };
-// The automatic choice: system presets first, then the layer height nearest the plate's, then the plate's quality word
-// ("Standard", "Strength"...), then "Standard", then by name. Empty when there is no candidate.
+// The automatic choice: system presets first, then the plate's quality word ("Standard", "Strength"...), then the layer
+// height nearest the plate's, then "Standard", then by name. Empty when there is no candidate.
 std::string pick_nozzle_process(std::vector<NozzleProcessCandidate> candidates, double plate_layer_height, const std::string &plate_name);
 
 // Writes nozzle_region_values of a full config: for each filament the region settings of its tool's process (nullptr = the
