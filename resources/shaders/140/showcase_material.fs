@@ -657,9 +657,9 @@ vec3 speckle_albedo(vec3 albedo, float fleck_px)
         float band = abs(sin((p.x * 0.6 + p.y * 0.35 + p.z * 0.25) * 0.18 + warp));
         float vein = pow(1.0 - band, 10.0);
         vec3  id   = hash33(floor(p / 0.35));
-        float dark = step(0.86, id.x) * fine;
-        float lite = step(0.93, id.y) * fine;
-        vec3  c    = mix(albedo, albedo * 0.32, vein * 0.75 * mat_speckle);
+        float dark = step(0.96, id.x) * fine;
+        float lite = step(0.98, id.y) * fine;
+        vec3  c    = mix(albedo, albedo * 0.3, vein * 0.9 * mat_speckle);
         c = mix(c, c * 0.25, dark * 0.8 * mat_speckle);
         c = mix(c, mix(c, vec3(1.0), 0.6), lite * 0.6 * mat_speckle);
         // Averaged flecks where they are under a pixel.
@@ -669,9 +669,9 @@ vec3 speckle_albedo(vec3 albedo, float fleck_px)
     float shade  = fbm3(p * 0.15);
     vec3  c      = albedo * mix(1.0, 0.78 + 0.45 * shade, mat_speckle);
     vec3  fid    = hash33(floor(vec3(p.x / 1.2, p.y / 1.2, p.z / 0.3)));
-    float fibre  = step(0.82, fid.x) * fine;
+    float fibre  = step(0.92, fid.x) * fine;
     vec3  speck  = hash33(floor(p / 0.35) + 5.0);
-    float dot_on = step(0.9, speck.z) * fine;
+    float dot_on = step(0.96, speck.z) * fine;
     c = mix(c, c * 0.6, fibre * 0.5 * mat_speckle);
     c = mix(c, c * 0.35, dot_on * 0.7 * mat_speckle);
     return mix(c, c * (1.0 - 0.08 * mat_speckle), 1.0 - fine);
@@ -695,7 +695,7 @@ vec2 wobble_offset(float li)
     vec2  j0 = vec2(hash_layer(il, 3.0), hash_layer(il, 4.0));
     vec2  j1 = vec2(hash_layer(il + 1.0, 3.0), hash_layer(il + 1.0, 4.0));
     vec2  j  = mix(j0, j1, smoothstep(0.7, 1.0, fract(li))) - 0.5;
-    return 2.0 * (mix(a, b, f) + 0.5 * j);
+    return 2.0 * (mix(a, b, f) + 0.25 * j);
 }
 
 vec4 seam_point(int i) { return texelFetch(seam_table, ivec2(i - (i / seam_table_width) * seam_table_width, i / seam_table_width), 0); }
@@ -892,7 +892,7 @@ void main()
             float d0    = dot(wobble_offset(li - 0.25), n.xy);
             float d1    = dot(wobble_offset(li + 0.25), n.xy);
             float slope = (d1 - d0) / (0.5 * h) * amp;
-            n = normalize(n - vec3(0.0, 0.0, 1.0) * slope * 3.0 * lfade * wall_i);
+            n = normalize(n - vec3(0.0, 0.0, 1.0) * slope * 2.0 * lfade * wall_i);
             albedo *= 1.0 + 0.05 * imp_wobble * dot(wobble_offset(li), vec2(0.7071)) * lfade;
         }
         // The seam: a line of small bumps, a touch glossier, where the slicer put it.
@@ -966,7 +966,7 @@ void main()
         alpha = clamp(mix(alpha, 1.0, edge * 0.7) + dot(specular, vec3(0.3)) * 0.5, 0.0, 1.0);
         // 1d: thick plastic hides more of what is behind it than a thin wall.
         if (mat_transmission > 0.0)
-            alpha = clamp(mix(alpha, 1.0, (1.0 - t_share) * 0.5), 0.0, 1.0);
+            alpha = clamp(mix(alpha, 1.0, (1.0 - t_share) * 0.8), 0.0, 1.0);
     }
 
     out_color = material_output(lit, alpha, exposure, force_opaque);

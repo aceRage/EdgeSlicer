@@ -61,7 +61,7 @@
         "enabled": true,
         "f_number": 1.4,
         "focus_on_model": false,
-        "focus_mm": 900,
+        "focus_mm": 2500,
         "quality": "good",
         "near_bleed": true,
         "highlights": 0.9

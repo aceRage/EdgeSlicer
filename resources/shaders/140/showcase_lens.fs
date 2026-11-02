@@ -90,7 +90,7 @@ void main()
     }
     vec3 lin = srgb_to_linear(c.rgb);
     if (bloom > 0.0)
-        lin += texture(bloom_tex, uv).rgb * bloom * 0.6;
+        lin += texture(bloom_tex, uv).rgb * bloom * 0.3;
     if (vignette > 0.0) {
         float cv = cos(atan(r * 0.6));
         lin *= 1.0 + vignette * (cv * cv * cv * cv - 1.0);

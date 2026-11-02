@@ -1,18 +1,64 @@
 {
-  "_fixture": { "settings": { "filament_colour": ["#D8DCE0"] } },
+  "_fixture": {
+    "settings": {
+      "filament_colour": [
+        "#3C6E9E"
+      ]
+    }
+  },
   "schema": 2,
   "active": "plate1",
   "scenes": [
     {
-      "id": "plate1", "name": "Golden: camera effects (grain, vignette, bloom, fringes, distortion) under the sun", "plate_index": 0,
-      "source": "model", "preset_base": "studio_white",
-      "background": { "type": "environment", "blur": 0, "color1": "#E8E8E8", "color2": "#808080" },
-      "floor": { "type": "shadow_catcher", "color": "#F2F2F2", "shadow_strength": 0.6 },
-      "lighting": { "azimuth": 200, "elevation": 40, "key_intensity": 1.3, "environment": "hdri_outdoor", "env_intensity": 1.0,
-                    "env_rotation": 0, "sun_light": true, "shadow_softness": 1, "exposure": 0.5 },
-      "materials": { "layer_lines": "real", "filaments": [ { "slot": 1, "finish": "gloss" } ] },
-      "lens": { "grain": 0.5, "vignette": 0.7, "bloom": 0.8, "chromatic": 0.7, "distortion": 0.5 },
-      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+      "id": "plate1",
+      "name": "Golden: camera effects (grain, vignette, bloom, fringes, distortion) under the sun",
+      "plate_index": 0,
+      "source": "model",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "environment",
+        "blur": 0,
+        "color1": "#E8E8E8",
+        "color2": "#808080"
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "color": "#F2F2F2",
+        "shadow_strength": 0.6
+      },
+      "lighting": {
+        "azimuth": 200,
+        "elevation": 40,
+        "key_intensity": 1.0,
+        "environment": "hdri_outdoor",
+        "env_intensity": 1.0,
+        "env_rotation": 0,
+        "sun_light": true,
+        "shadow_softness": 1,
+        "exposure": 0.0
+      },
+      "materials": {
+        "layer_lines": "real",
+        "filaments": [
+          {
+            "slot": 1,
+            "finish": "gloss"
+          }
+        ]
+      },
+      "lens": {
+        "grain": 0.5,
+        "vignette": 0.7,
+        "bloom": 0.8,
+        "chromatic": 0.7,
+        "distortion": 0.5
+      },
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      }
     }
   ]
 }

@@ -1,8 +1,8 @@
 #version 140
 
 // Showcase realism 1d (tests/design_showcase_realism.md 2.4): the coloured shadows. Every shadow
-// caster is drawn from the key light into an RGBA8 map cleared to white with multiplying blending:
-// an opaque one multiplies by black, a translucent one by the light it lets through, in its colour
+// caster is drawn from the key light into an RGBA8 map cleared to white with MIN blending: an opaque
+// one leaves black, a translucent one the light it lets through, in its colour, counted once per caster
 // (Showcase::shadow_transmittance). The floor lightens and tints its shadow by this map
 // (showcase_floor.fs), so a translucent filament throws a lighter, coloured shadow. Uses
 // showcase_material.vs with the light's view-projection as the projection.

@@ -233,7 +233,7 @@ MaterialParams material_params(Finish finish)
         p.roughness    = 0.32f;
         p.f0           = 0.045f;
         p.clearcoat    = 0.25f;
-        p.alpha        = 0.82f;
+        p.alpha        = 0.92f;
         p.line_shade   = 0.25f;
         p.transmission = 0.85f;
         p.density      = 0.55f;
@@ -337,7 +337,7 @@ std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_lin
     for (size_t i = 0; i < 3; ++i) {
         // The light let through takes the filament's colour; a clearer plastic lets more through.
         const float a = std::clamp(albedo_linear[i], 0.f, 1.f);
-        out[i]        = t * (0.35f + 0.65f * a);
+        out[i]        = t * (0.15f + 0.85f * std::pow(a, 1.2f));
     }
     return out;
 }
@@ -389,7 +389,7 @@ std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float 
     const float s = std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f;
     if (s <= 0.f || max_count == 0)
         return out;
-    const float keep = 0.25f * s;
+    const float keep = 0.15f * s;
     size_t i = 0;
     while (i < moves.size() && out.size() < max_count) {
         // A run of travels (with retractions and wipes) right after an extrusion.

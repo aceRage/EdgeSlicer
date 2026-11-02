@@ -325,8 +325,8 @@ TEST_CASE("Showcase 1f: strings hang on travels across gaps", "[Showcase][Realis
     CHECK(string_wisps(moves, 0.f).empty());   // off
     const std::vector<StringWisp> some = string_wisps(moves, 1.f, 10000);
     REQUIRE_FALSE(some.empty());
-    // About a quarter of the candidates, and only the 0 -> 10 mm hops.
-    CHECK(some.size() <= 150);   // a quarter of 400 on average
+    // About 15 % of the candidates, and only the 0 -> 10 mm hops.
+    CHECK(some.size() <= 100);   // 60 of 400 on average
     for (const StringWisp &w : some) {
         CHECK(w.a[0] == 0.f);
         CHECK(w.b[0] == 10.f);

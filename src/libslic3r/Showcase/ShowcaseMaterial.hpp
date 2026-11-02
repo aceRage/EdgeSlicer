@@ -139,7 +139,7 @@ struct StringWisp
 };
 // The travels a string could hang on: from the end of one extrusion to the start of the next on the
 // same layer, 2 to 30 mm apart (retractions and wipes between them do not count). `strength` 0..1
-// keeps that share of them, at most a quarter, picked by a fixed hash of the move so the same ones
+// keeps that share of them, at most 15 %, picked by a fixed hash of the move so the same ones
 // stay from frame to frame; at most `max_count`.
 std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count = 400);
 // A point along a wisp, t in 0..1 (a parabola below the straight line).

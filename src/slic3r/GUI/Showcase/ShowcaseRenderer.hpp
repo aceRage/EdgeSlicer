@@ -329,7 +329,7 @@ private:
     // material pass reads it (m_thick_valid). The caller's framebuffer and viewport come back.
     bool            render_thickness(const std::vector<std::pair<GLVolume *, int>> &items, const Transform3d &view,
                                      const Transform3d &projection, const Vec3d &eye);
-    // Realism 1d: the coloured shadows. Every shadow caster seen from the key light, multiplied into a
+    // Realism 1d: the coloured shadows. Every shadow caster seen from the key light, MIN-blended into a
     // white RGBA8 map by the light it lets through (m_transmit_valid; only when a caster lets light
     // through, else the floor's shadow stays grey as before).
     void            render_transmit_map();

@@ -2098,8 +2098,10 @@ void ShowcaseRenderer::render_transmit_map()
     glsafe(::glDepthMask(GL_FALSE));
     glsafe(::glDisable(GL_CULL_FACE));
     glsafe(::glEnable(GL_BLEND));
-    // Multiply: every caster along the light's ray takes its share of the light away.
-    glsafe(::glBlendFunc(GL_ZERO, GL_SRC_COLOR));
+    // The least light any caster lets through along the light's ray: each caster counts once, however
+    // many of its faces the ray crosses (an opaque one lets none through).
+    glsafe(::glBlendEquation(GL_MIN));
+    glsafe(::glBlendFunc(GL_ONE, GL_ONE));
     shader->start_using();
     shader->set_uniform("projection_matrix", m_canvas.m_shadow_light_vp);
     for (const Caster &c : casters) {
@@ -2107,12 +2109,11 @@ void ShowcaseRenderer::render_transmit_map()
         shader->set_uniform("view_model_matrix", world);
         shader->set_uniform("volume_world_matrix", world);
         shader->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
-        // Each face counts once on the way in: a closed mesh is crossed by a ray twice, so the
-        // transmittance is taken as its square root per face.
-        shader->set_uniform("transmit", Vec3f(std::sqrt(c.transmit.x()), std::sqrt(c.transmit.y()), std::sqrt(c.transmit.z())));
+        shader->set_uniform("transmit", c.transmit);
         c.volume->model.render();
     }
     shader->stop_using();
+    glsafe(::glBlendEquation(GL_FUNC_ADD));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     glsafe(::glDisable(GL_BLEND));
     glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
@@ -2245,7 +2246,7 @@ void ShowcaseRenderer::draw_strings(GLShaderProgram &shader, const Transform3d &
     shader.set_uniform("mat_metal_tint", 0.f);
     shader.set_uniform("mat_anisotropy", 0.f);
     shader.set_uniform("mat_clearcoat", 0.f);
-    shader.set_uniform("mat_alpha", 0.45f);
+    shader.set_uniform("mat_alpha", 0.3f);
     shader.set_uniform("mat_line_shade", 0.f);
     shader.set_uniform("mat_fiber_noise", 0.f);
     for (const char *name : { "mat_transmission", "mat_density", "mat_sss", "mat_sheen", "mat_sparkle", "mat_speckle", "imp_wobble", "imp_seam", "imp_colour" })
