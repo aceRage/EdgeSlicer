@@ -38,13 +38,13 @@
       "camera": {
         "projection": "perspective",
         "eye": [
-          175,
-          -155,
+          100,
+          -230,
           42
         ],
         "target": [
-          175,
-          175,
+          100,
+          100,
           0
         ],
         "up": [
