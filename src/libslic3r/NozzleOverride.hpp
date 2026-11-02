@@ -91,6 +91,10 @@ std::vector<std::vector<double>> reported_available_nozzle_sizes(const DualNozzl
 std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<double> &sliced,
                                                             const std::vector<std::vector<double>> &available,
                                                             const std::vector<size_t> &used_tools = {});
+// Per-nozzle process P9 ("Sync from printer" for rack slots): per logical extruder with a rack, its mounted nozzle's size
+// followed by the usable rack nozzles in rack position order; empty for an extruder without rack nozzles.
+// rack_override_from_reported() (ToolSlots.hpp) turns it into the project's rack texts.
+std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders);
 
 } // namespace Slic3r
 

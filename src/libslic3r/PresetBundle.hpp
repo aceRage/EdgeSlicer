@@ -667,6 +667,40 @@ public:
     // printer of the same printer_model whose nozzle (printer_variant) is that extruder's diameter, or a
     // process compatible with the edited printer that claims no other nozzle size.
     bool                        nozzle_process_fits(const Preset &process, size_t extruder) const;
+    // The same rule for a nozzle of size `nozzle`.
+    bool                        nozzle_process_fits_size(const Preset &process, double nozzle) const;
+
+    // ---- Per-nozzle process P9: H2C rack slots as tools (NozzleProcess.hpp "P9") ----
+    // Every per-tool call below (`extruder` / `tool` arguments) takes a TOOL index: 0 .. E-1 are the extruders, E .. E+S-1
+    // the rack slots (nozzle_slot_tools() order) of extruders whose rack lists two or more nozzles. Without a rack a tool is
+    // an extruder, as in P8.
+    struct NozzleToolRef
+    {
+        bool        valid{ false };
+        size_t      extruder{ 0 };
+        int         slot{ 0 };      // 1-based rack slot, 0 = the extruder itself
+        double      diameter{ 0. };
+        std::string id;             // "T2" or "T2.3"
+    };
+    NozzleToolRef               nozzle_tool_ref(size_t tool) const;
+    size_t                      nozzle_tool_count() const;
+    // The tool of an id ("T2", "T2.3"), -1 when the printer has no such tool.
+    int                         nozzle_tool_index(const std::string &id) const;
+    // The Process tab's selector entries (after Plate) as tools: per extruder its rack slots, or the extruder itself.
+    std::vector<size_t>         nozzle_selector_tools() const;
+    // "Left (T1)", "Right slot 3".
+    std::string                 nozzle_tool_name(size_t tool) const;
+    // The process chosen for a tool ("" = none).
+    std::string                 nozzle_tool_selection(size_t tool) const;
+    // The project's rack sizes (extruder_rack_nozzle_override): extruder `extruder`'s text, "" = the printer preset's rack.
+    std::string                 rack_nozzle_override(size_t extruder) const;
+    // Set one extruder's text, or all of them; prunes the slot choices that went away. True when it changed.
+    bool                        set_rack_nozzle_override(size_t extruder, const std::string &text);
+    bool                        set_rack_nozzle_override(const std::vector<std::string> &texts);
+    // The rack slot 0-based `filament` is pinned to (1-based, 0 = none), and pinning it (clears its rack size pin).
+    int                         filament_rack_slot_choice(size_t filament) const;
+    bool                        set_filament_rack_slot(size_t filament, int slot);
+
     // The visible process presets that fit extruder `extruder`, sorted by name.
     std::vector<std::string>    nozzle_process_candidates(size_t extruder) const;
     // The selection, one entry per physical extruder of the edited printer.
@@ -787,6 +821,8 @@ private:
     // The printer model the nozzle size override was last restored for or loaded with (a project).
     std::string                 m_nozzle_override_model;
     void                        fill_nozzle_processes(DynamicPrintConfig &out) const;
+    // P9: the printer keys the tool list is read from, with the project's sizes (nozzle and rack) over them.
+    DynamicPrintConfig          nozzle_tool_config() const;
 
     //std::pair<PresetsConfigSubstitutions, std::string> load_system_presets(ForwardCompatibilitySubstitutionRule compatibility_rule);
     //BBS: add json related logic

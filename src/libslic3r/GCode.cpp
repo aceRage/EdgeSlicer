@@ -9850,12 +9850,22 @@ static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::s
         const auto *opt = cfg.option<ConfigOptionFloats>(key);
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](double v) { return !(v > 0.); });
     }
-    if (key == "extruder_rack_nozzle_diameter" || key == "filament_nozzle_variants") {
+    if (key == "extruder_rack_nozzle_diameter" || key == "filament_nozzle_variants" ||
+        // Per-nozzle process P9: the project's rack sizes and the slots' processes, likewise only when set.
+        key == "extruder_rack_nozzle_override" || key == "nozzle_slot_process_presets") {
         const auto *opt = cfg.option<ConfigOptionStrings>(key);
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](const std::string &v) {
                    return v.find_first_not_of(" \t") == std::string::npos;
                });
     }
+    // Per-nozzle process P9: the rack slot pins only when a filament is pinned; the internal per-filament process slots and the
+    // missing slots never (the values are in the moves; such a job is refused).
+    if (key == "filament_rack_nozzle_slot") {
+        const auto *opt = cfg.option<ConfigOptionInts>(key);
+        return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](int v) { return v <= 0; });
+    }
+    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing")
+        return true;
     return false;
 }
 

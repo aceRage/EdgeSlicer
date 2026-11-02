@@ -162,6 +162,8 @@ public:
     void update_filament_nozzle_summary();
     // Per-nozzle process P5: pin 0-based filament `filament` to rack nozzle size `diameter` (0 = its extruder's nozzle).
     void set_filament_rack_pin(size_t filament, double diameter);
+    // Per-nozzle process P9: pin 0-based filament `filament` to rack slot `slot` (1-based, 0 = any slot of its size).
+    void set_filament_rack_slot(size_t filament, int slot);
     // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
     // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).
     void set_tool_nozzle_size(int tool, double diameter);

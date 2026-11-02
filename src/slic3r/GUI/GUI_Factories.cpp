@@ -2575,6 +2575,42 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
         }
     }
 
+    // Per-nozzle process P9: "Rack slot" pins this filament to one slot of its extruder's rack (filament_rack_nozzle_slot): it
+    // prints with that slot's size, process and nozzle, so filaments on different slots change nozzles (M632) instead of
+    // purging. Offered when the filament's extruder shows rack slots (two or more rack nozzles declared).
+    const int slot_item_id = menu->FindItem(_L("Rack slot"));
+    if (slot_item_id != wxNOT_FOUND)
+        menu->Destroy(slot_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig full     = bundle->full_config();
+            const size_t             extruder = nozzle_for_filament(full, unsigned(filament + 1));
+            const size_t             slots    = rack_slot_count(full, extruder);
+            if (slots > 0) {
+                const auto racks     = extruder_rack_nozzles(full);
+                wxMenu    *slot_menu = new wxMenu();
+                auto       pinned    = [filament]() { return wxGetApp().preset_bundle->filament_rack_slot_choice(size_t(filament)); };
+                append_menu_check_item(slot_menu, wxID_ANY, _L("Any slot of its size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), 0); }, slot_menu,
+                    []() { return true; }, [pinned]() { return pinned() <= 0; }, m_parent);
+                for (size_t k = 1; k <= slots && extruder < racks.size() && k <= racks[extruder].size(); ++k) {
+                    const wxString label = from_u8(rack_slot_name(full, extruder, int(k))) + " (" +
+                                           from_u8(format_nozzle_diameter_word(racks[extruder][k - 1].diameter)) + " mm)";
+                    append_menu_check_item(slot_menu, wxID_ANY, label, "",
+                        [filament, k](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), int(k)); }, slot_menu,
+                        []() { return true; }, [pinned, k]() { return pinned() == int(k); }, m_parent);
+                }
+                append_submenu(menu, slot_menu, wxID_ANY, _L("Rack slot"),
+                               _L("Experimental. The rack slot this filament prints with: that slot's nozzle size and process (Process tab), "
+                                  "on that slot's nozzle. Filaments on different slots of one extruder change nozzles instead of purging. "
+                                  "The printer matches the slots to its rack nozzles by size when the job is sent."),
+                               "", []() { return true; }, m_parent);
+            }
+        }
+    }
+
     wxMenu *                      sub_menu         = new wxMenu();
     std::vector<wxBitmap *>       icons            = get_extruder_color_icons(true);
     const std::vector<std::string> &filament_presets = wxGetApp().preset_bundle->filament_presets;

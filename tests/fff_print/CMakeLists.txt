@@ -36,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_widths_gcode.cpp
 	test_nozzle_override_gcode.cpp
 	test_nozzle_tool_process_gcode.cpp
+	test_nozzle_rack_slots_gcode.cpp
 	test_mixed_width_tower.cpp
 	test_printobject.cpp
 	test_skirt_brim.cpp

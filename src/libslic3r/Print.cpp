@@ -602,6 +602,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // read by validate() only.
         "nozzle_process_edits",
         "nozzle_process_missing",
+        // Per-nozzle process P9: likewise the rack slots' processes (their values are filled in) and the missing slots.
+        "nozzle_slot_process_presets",
+        "nozzle_slot_process_missing",
         // Per-nozzle process P4: the per-nozzle filament values reach the slicer as the filament values they set
         // (resolve_filament_nozzle_variants), which invalidate what they change; the physical nozzle declaration
         // is a G-code line.
@@ -824,7 +827,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "extruder_rack_nozzle_diameter"
             || opt_key == "filament_rack_nozzle_diameter"
             // Per-nozzle process P7: an overridden nozzle size (Print::apply wrote it into nozzle_diameter already).
-            || opt_key == "nozzle_diameter_override") {
+            || opt_key == "nozzle_diameter_override"
+            // Per-nozzle process P9: rack slot pins, the project's rack sizes and the per-filament process slots decide each
+            // filament's nozzle, size and values.
+            || opt_key == "filament_rack_nozzle_slot"
+            || opt_key == "extruder_rack_nozzle_override"
+            || opt_key == "nozzle_filament_process_slot") {
             // Snapmaker: switching a filament's flow variant changes the values read out of
             // flow-variant arrays without the arrays themselves changing.
             invalidated |= this->invalidate_all_steps();
@@ -2882,8 +2890,19 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (unsigned int filament : extruders) {
             const size_t e = nozzle_for_filament(m_config, filament + 1);
             const auto  &missing = m_config.nozzle_process_missing.values;
-            if (std::find(missing.begin(), missing.end(), int(e) + 1) != missing.end())
+            if (std::find(missing.begin(), missing.end(), int(e) + 1) != missing.end() && filament_rack_slot(m_config, filament + 1) <= 0)
                 return { nozzle_process_missing_error(m_config, e) };
+        }
+    // Per-nozzle process P9: likewise a rack slot that prints, naming the slot ("Right slot 3").
+    if (!m_config.nozzle_slot_process_missing.values.empty())
+        for (unsigned int filament : extruders) {
+            const int slot = filament_rack_slot(m_config, filament + 1);
+            if (slot <= 0)
+                continue;
+            const size_t e       = nozzle_for_filament(m_config, filament + 1);
+            const auto  &missing = m_config.nozzle_slot_process_missing.values;
+            if (std::find(missing.begin(), missing.end(), nozzle_slot_id(e, slot)) != missing.end())
+                return { nozzle_slot_process_missing_error(m_config, e, slot) };
         }
 
 	{
@@ -2939,9 +2958,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // Per-nozzle process P8 (owner design E): on a printer with several nozzles a width error names the tool and its size,
         // and its jump link ("key@T2") opens that tool's process.
         const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2;
-        auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_tool_name(m_config, nozzle_for_filament(m_config, std::max(filament_id, 1u))); };
+        // P9: a filament on a rack slot names the slot ("Right slot 3") and jumps to it ("key@T2.3").
+        auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_filament_tool_name(m_config, std::max(filament_id, 1u)); };
         auto tool_opt_key = [this, several_nozzles](const char *opt_key, unsigned int filament_id) {
-            return several_nozzles ? std::string(opt_key) + "@" + nozzle_tool_id(nozzle_for_filament(m_config, std::max(filament_id, 1u))) :
+            return several_nozzles ? std::string(opt_key) + "@" + nozzle_filament_tool_id(m_config, std::max(filament_id, 1u)) :
                                      std::string(opt_key);
         };
         auto width_error = [&tool_of_filament, several_nozzles](const std::string &generic, const char *opt_key, unsigned int filament_id, double width,

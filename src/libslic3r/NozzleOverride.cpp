@@ -302,4 +302,33 @@ std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<do
     return out;
 }
 
+std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders)
+{
+    // Per logical extruder: (order key, size); the mounted nozzle sorts first, rack positions after it in their order.
+    std::vector<std::vector<std::pair<int, double>>> found(extruders);
+    for (const DualNozzleSync::PrinterNozzle &nozzle : state.nozzles) {
+        if (nozzle.on_rack() && !nozzle.normal)
+            continue;
+        const int logical = state.logical_extruder_of(nozzle);
+        if (logical < 0 || size_t(logical) >= extruders)
+            continue;
+        try {
+            const double d = std::stod(nozzle.diameter);
+            if (plausible_size(d))
+                found[size_t(logical)].emplace_back(nozzle.on_rack() ? 1 + nozzle.rack_slot() : 0, d);
+        } catch (...) {
+        }
+    }
+    std::vector<std::vector<double>> out(extruders);
+    for (size_t e = 0; e < extruders; ++e) {
+        std::stable_sort(found[e].begin(), found[e].end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+        // Only an extruder with rack nozzles has a rack to describe.
+        if (std::none_of(found[e].begin(), found[e].end(), [](const auto &n) { return n.first > 0; }))
+            continue;
+        for (const auto &n : found[e])
+            out[e].push_back(n.second);
+    }
+    return out;
+}
+
 } // namespace Slic3r

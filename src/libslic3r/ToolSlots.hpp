@@ -125,8 +125,55 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
 // else a message naming the first filament, layer and diameters that do not match.
 std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group);
 // Configuration errors of the rack keys (an extruder's nozzle_diameter missing from its rack, a pin no rack nozzle
-// has), or empty.
+// has, a slot pin past the end of the rack), or empty.
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
+
+// ---- P9: rack slots as tools (H2C) -------------------------------------------------------------------------------
+//
+// A rack slot is one entry of an extruder's rack text (extruder_rack_nozzle_diameter, or the project's
+// extruder_rack_nozzle_override over it), counted from 1. An extruder whose rack lists two or more nozzles shows its
+// slots as tools of their own on the Process tab (each with its own size and process profile). A filament can be pinned
+// to a slot (filament_rack_nozzle_slot): it then prints with that slot's size and on that slot's nozzle of the
+// grouping, so a change to a filament on another slot of the same extruder is a rack nozzle change (M632 / M633).
+// The slot numbers are the slicer's: the printer maps them to its rack positions by size when the job is sent.
+
+// The number of rack slots extruder `extruder` shows as tools: its rack's nozzle count when that is two or more, else 0.
+size_t rack_slot_count(const ConfigBase &config, size_t extruder);
+// "Right slot 3" on Bambu's two-extruder machines, "T2 slot 3" elsewhere (1-based slot).
+std::string rack_slot_name(const ConfigBase &config, size_t extruder, int slot);
+// The slot 1-based `filament_id` is pinned to (filament_rack_nozzle_slot), 0 when none.
+int filament_rack_slot_pin(const ConfigBase &config, unsigned int filament_id);
+bool has_filament_rack_slot_pins(const ConfigBase &config);
+// filament_rack_nozzle_slot with 0-based `filament` pinned to `slot` (0 = none), sized for `filaments`; { 0 } when nothing
+// is pinned.
+std::vector<int> set_filament_rack_slot_pin(std::vector<int> pins, size_t filament, size_t filaments, int slot);
+// The slot whose process 1-based `filament_id` prints with: its pin, else the first slot of its extruder's rack with the size
+// it prints with (two slots of one size print alike). 0 when its extruder shows no slots or no slot has that size.
+int filament_rack_slot(const ConfigBase &config, unsigned int filament_id);
+// The index into `nozzle_list` (the grouping's nozzles, build_nozzle_list order) of extruder `extruder`'s rack slot `slot`,
+// -1 when there is none.
+int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot);
+
+// Send-time check (the printer's reported rack).
+struct RackSlotUse
+{
+    size_t                    extruder{ 0 };
+    int                       slot{ 0 };      // 1-based
+    double                    diameter{ 0. };
+    bool                      pinned{ false }; // some filament is pinned to it (it needs a nozzle of its own)
+    std::vector<unsigned int> filaments;       // 0-based
+};
+// The rack slots the used filaments (0-based) print with, sorted by extruder and slot.
+std::vector<RackSlotUse> rack_slots_in_use(const ConfigBase &config, const std::vector<unsigned int> &used_filaments);
+// What the printer cannot print of `uses`, one message per size, naming the slots: `available` holds, per logical extruder,
+// the sizes of every usable nozzle it reports (mounted and rack; empty = not reported, never a problem). A pinned slot
+// needs a nozzle of its own; unpinned filaments of one size share one.
+std::vector<std::string> rack_slot_send_problems(const ConfigBase &config, const std::vector<RackSlotUse> &uses,
+                                                 const std::vector<std::vector<double>> &available);
+// "Sync from printer": the project's rack texts (extruder_rack_nozzle_override) from the reported nozzles, per logical
+// extruder the mounted nozzle first and then the rack positions in order. An extruder that reports fewer than two nozzles
+// keeps its `current` text; an all-empty result is returned empty.
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<double>> &mounted_then_rack, const std::vector<std::string> &current);
 
 // ---- 4. Per-nozzle filament values ------------------------------------------------------------------------------
 

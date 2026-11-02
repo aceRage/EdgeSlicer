@@ -50,9 +50,15 @@ std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
 //   kept as they are. Extruder 1's slots are kept either way, so filling twice changes nothing.
 // - Sets process_extruder_values when the result really differs per extruder (so the slicer reads the
 //   slots), leaves it as the plate had it otherwise.
-// Returns false (config untouched) when no extruder has a source or the printer has fewer than two
-// extruders.
-bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
+// - P9: `filament_sources` (one entry per filament, nullptr = the plate's), when given, is the process each filament
+//   prints with: a filament on an H2C rack slot with a process of its own. Its widths and region settings come from
+//   it, and for each (extruder, source) that differs from its extruder's one slot per flow mode is added to the layout
+//   right after that extruder's slots; nozzle_filament_process_slot points the filament at it (process_config_idx).
+//   Without it the result is exactly P8's.
+// Returns false (config untouched but for an empty nozzle_filament_process_slot) when no extruder has a source or the
+// printer has fewer than two extruders.
+bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                               const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
 
 // ---- Per-nozzle process P2: line widths per nozzle (design D8) ----
 //
@@ -69,7 +75,8 @@ size_t nozzle_for_filament(const ConfigBase &config, unsigned int filament_id);
 // Writes the nozzle_*_line_width arrays of a full config: for each filament whose nozzle has a source process,
 // that process's role width (its line_width when the role's is 0); every other filament the plate's width. All
 // arrays are left empty when no filament's nozzle has a source. Called by fill_nozzle_process_slots(). Returns whether any entry was set.
-bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
+bool fill_nozzle_line_widths(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                             const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
 // Layer-height guard (design D9, FOrca 0b1f80cd22's Tab rule, AGPL-3.0): one global layer height, held to the
 // [min_layer_height, max_layer_height] of the SMALLEST nozzle that prints (`used_nozzles`, 0-based), not to the
 // loosest limits of all nozzles. With uniform nozzles or no used nozzle known: the old rule, the smallest
@@ -254,7 +261,8 @@ std::string pick_nozzle_process(std::vector<NozzleProcessCandidate> candidates, 
 // Writes nozzle_region_values of a full config: for each filament the region settings of its tool's process (nullptr = the
 // plate's) for every region key some tool's process sets differently from the plate; empty when none does. Called by
 // fill_nozzle_process_slots(). Returns whether any key differs.
-bool fill_nozzle_region_values(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources);
+bool fill_nozzle_region_values(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                               const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
 // Stamps nozzle_region_values into the region's settings, each key through the filament of its role: top / bottom / solid /
 // bridge / ironing settings through the solid infill filament, other infill settings through the sparse infill filament,
 // everything else through the wall filament.
@@ -263,6 +271,49 @@ void stamp_nozzle_region_values(PrintRegionConfig &config);
 // Validation messages that name the tool, its size and the setting (owner design E).
 std::string nozzle_layer_height_error(const ConfigBase &config, unsigned int filament_id, bool first_layer, double layer_height, double nozzle);
 std::string nozzle_process_missing_error(const ConfigBase &config, size_t extruder);
+
+// ---- Per-nozzle process P9: H2C rack slots as tools (owner 2026-11-01) ----
+//
+// An extruder whose rack lists two or more nozzles (rack_slot_count, ToolSlots.hpp) shows each rack slot as a tool of its own:
+// the Process tab's selector reads "Plate | Left 0.4 | Right slot 1 0.4 | ... | Right slot N 0.6", each slot with its size and
+// its own process profile. Storage, alongside P8's:
+//   - nozzle_slot_process_presets: the profile chosen for a slot, the slot id "T2.3" then the name on the next line (none = the
+//     plate's when it fits the slot's
+//     size, else the system process of that size picked automatically, as for an extruder);
+//   - nozzle_process_edits: a slot's unsaved changes under its id "T2.3" (builds without P9 ignore such ids);
+//   - filament_rack_nozzle_slot (ToolSlots.hpp): the slot a filament is pinned to.
+// A filament on a rack extruder prints with the process of its slot (filament_rack_slot): fill_nozzle_process_slots() takes
+// per-filament sources for that. Without a rack declared nothing changes.
+
+// "T2.3": extruder 2 (1-based), rack slot 3.
+std::string nozzle_slot_id(size_t extruder, int slot);
+// The 0-based extruder and 1-based slot of a "T<n>.<k>" id; false for any other id (a "T<n>" id included).
+bool        parse_nozzle_slot_id(const std::string &id, size_t &extruder, int &slot);
+
+// One entry of the Process tab's selector: an extruder (slot 0) or one of its rack slots.
+struct NozzleToolEntry
+{
+    size_t extruder{ 0 };
+    int    slot{ 0 };      // 1-based rack slot, 0 = the extruder itself
+    double diameter{ 0. }; // the nozzle size (the project's)
+};
+// The selector's entries in order: per extruder its rack slots when it shows them, else the extruder.
+std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config);
+// The rack slot entries only (in nozzle_tool_entries order).
+std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config);
+// "T1" or "T2.3".
+std::string nozzle_tool_entry_id(const NozzleToolEntry &entry);
+// "Left (T1)", "Right slot 3", "T2 slot 3", "T3".
+std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry);
+// The tool a filament prints with, as messages name it (its rack slot when it has one) and as jump ids carry it.
+std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id);
+std::string nozzle_filament_tool_id(const ConfigBase &config, unsigned int filament_id);
+
+// nozzle_slot_process_presets as slot id -> process name, and back (entries with an empty name or a bad id are dropped).
+std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &config);
+std::vector<std::string>           serialize_nozzle_slot_process_names(const std::map<std::string, std::string> &names);
+// The slot's version of nozzle_process_missing_error().
+std::string nozzle_slot_process_missing_error(const ConfigBase &config, size_t extruder, int slot);
 
 } // namespace Slic3r
 

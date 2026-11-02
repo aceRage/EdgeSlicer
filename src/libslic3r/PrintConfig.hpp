@@ -2328,6 +2328,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_filament_nozzle_mapping))
     ((ConfigOptionStrings,             extruder_rack_nozzle_diameter))
     ((ConfigOptionFloats,              filament_rack_nozzle_diameter))
+    // Per-nozzle process P9 (H2C rack slots as tools, NozzleProcess.hpp "P9"): the rack slot each filament is pinned to
+    // (1-based, 0 = none), the process each rack slot uses ("T2.3" then the name), the rack nozzle sizes of this project
+    // (one text per extruder, "" = the printer preset's), and two internal keys filled while slicing: the slot ids that
+    // need a process and have none, and per filament the process slot it reads (-1 = the extruder's).
+    ((ConfigOptionInts,                filament_rack_nozzle_slot))
+    ((ConfigOptionStrings,             nozzle_slot_process_presets))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_override))
+    ((ConfigOptionStrings,             nozzle_slot_process_missing))
+    ((ConfigOptionInts,                nozzle_filament_process_slot))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))

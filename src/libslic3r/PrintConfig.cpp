@@ -4665,6 +4665,53 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
 
+    // Per-nozzle process P9 (NozzleProcess.hpp "P9", H2C rack slots as tools): project-level. The rack slot (1-based, in
+    // the order of the extruder's rack nozzle diameters) each filament is pinned to; 0 or no entry = none (its size decides).
+    def = this->add("filament_rack_nozzle_slot", coInts);
+    def->label = L("Rack slot");
+    def->tooltip = L("The rack slot each filament prints with, counted from 1 in the order of the extruder's rack nozzles. "
+                     "0 means any rack nozzle of the filament's size.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts { 0 }); // 0 = unused; an empty vector would load back as { 0 }
+
+    // Per-nozzle process P9: project-level. The process profile each rack slot uses, one entry per slot with a choice:
+    // the slot id ("T2.3": extruder 2, slot 3) on the first line, the process preset's name on the second.
+    def = this->add("nozzle_slot_process_presets", coStrings);
+    def->label = "Process per rack slot";
+    def->tooltip = "The process preset each rack slot uses (slot id, then the preset name).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P9: project-level, the P7 nozzle_diameter_override of the rack. One text per extruder in the
+    // extruder_rack_nozzle_diameter format; "" = the printer preset's rack. Set in Printer settings or synced from the
+    // printer; the printer preset is not changed.
+    def = this->add("extruder_rack_nozzle_override", coStrings);
+    def->label = L("Rack nozzles in this project");
+    def->tooltip = L("The nozzle in each rack slot in this project, separated by commas, without changing the printer preset. "
+                     "Empty means the printer preset's rack nozzle diameters.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+
+    // Per-nozzle process P9: filled while the slicing config is assembled. The rack slot ids ("T2.3") whose size no process
+    // fits; Print::validate refuses a job that prints on one of them. Internal.
+    def = this->add("nozzle_slot_process_missing", coStrings);
+    def->label = "Rack slots without a process";
+    def->tooltip = "Rack slots whose size no process fits (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P9: filled by fill_nozzle_process_slots(). Per filament, the slot of the process layout
+    // (print_extruder_id) its speeds are read from when its rack slot has a process of its own; -1 = its extruder's.
+    // Internal.
+    def = this->add("nozzle_filament_process_slot", coInts);
+    def->label = "Process slot per filament";
+    def->tooltip = "The process layout slot each filament reads (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+    def->cli = ConfigOptionDef::nocli;
+
     // Per-nozzle process P7 (NozzleOverride.hpp): the nozzle size each extruder really carries, set per project
     // (Prepare sidebar, Printer settings > Extruder N), one value per extruder; 0 = the printer preset's nozzle_diameter.
     def = this->add("nozzle_diameter_override", coFloats);
@@ -10969,6 +11016,12 @@ size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned in
     const size_t legacy = get_config_idx(config, ConfigFlowDomain::Process, filament_idx);
     if (opt_size < 2 || filament_idx == (unsigned int) -1)
         return legacy;
+    // Per-nozzle process P9: a filament on a rack slot with a process of its own reads that slot's layout slot
+    // (fill_nozzle_process_slots appends them), for an option of the layout's length.
+    if (const ConfigOptionInts *own = ints_option(config, "nozzle_filament_process_slot");
+        own != nullptr && filament_idx < own->values.size() && own->values[filament_idx] >= 0 && size_t(own->values[filament_idx]) < opt_size)
+        if (const ConfigOptionInts *ids = ints_option(config, "print_extruder_id"); ids != nullptr && ids->values.size() == opt_size)
+            return size_t(own->values[filament_idx]);
     // Per-nozzle process P4: a process with diameter slots, or a layout on a printer that opted into the per-tool
     // slot model, is read by (tool, flow, diameter) (ToolSlots.hpp).
     if (const int slot = tool_slot_for_filament(config, opt_size, filament_idx); slot >= 0)
@@ -11107,7 +11160,14 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
         if ((flag != nullptr && flag->type() == coBool && static_cast<const ConfigOptionBool *>(flag)->value &&
              !process_extruder_variant_slots(config).empty()) ||
             // Per-nozzle process P4: the per-tool slot model.
-            tool_slot_model_active(config)) {
+            tool_slot_model_active(config) ||
+            // Per-nozzle process P9: rack slots with processes of their own.
+            [&config]() {
+                const ConfigOptionInts *own = ints_option(config, "nozzle_filament_process_slot");
+                const ConfigOptionInts *ids = ints_option(config, "print_extruder_id");
+                return own != nullptr && ids != nullptr && !ids->values.empty() &&
+                       std::any_of(own->values.begin(), own->values.end(), [](int s) { return s >= 0; });
+            }()) {
             out.process_layout_size = config.option<ConfigOptionInts>("print_extruder_id")->values.size();
             out.process_extruder_idx.reserve(count);
             for (size_t i = 0; i < count; ++i)

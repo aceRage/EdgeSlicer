@@ -4,6 +4,7 @@
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
@@ -2307,6 +2308,25 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
                                         "Change the nozzle sizes in the Prepare sidebar (or sync them from the printer) and slice again."),
                                      from_u8(describe_nozzle_size_mismatches(missing))),
                     ConfirmBeforeSendInfo::InfoLevel::Warning));
+            }
+            // Per-nozzle process P9: the rack slots the job prints with, named, against the nozzles the printer reports (read from
+            // the device state the Device page holds; nothing is requested). A slot whose size the rack lacks, or more pinned slots
+            // of a size than the rack has nozzles of it, refuses the send.
+            const DynamicPrintConfig  full = wxGetApp().preset_bundle->full_config();
+            std::vector<unsigned int> used_filaments;
+            for (int f : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (f >= 1)
+                    used_filaments.push_back(unsigned(f - 1));
+            const std::vector<RackSlotUse> uses = rack_slots_in_use(full, used_filaments);
+            if (!uses.empty()) {
+                const std::vector<std::string> problems =
+                    rack_slot_send_problems(full, uses, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()));
+                for (const std::string &problem : problems) {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P9: send refused: " << problem;
+                    has_slice_warnings = true;
+                    is_printing_block  = true;
+                    confirm_text.push_back(ConfirmBeforeSendInfo(from_u8(problem), ConfirmBeforeSendInfo::InfoLevel::Warning));
+                }
             }
         }
         if (!rack_printer && !is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))

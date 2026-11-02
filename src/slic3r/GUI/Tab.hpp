@@ -251,6 +251,9 @@ protected:
 	std::vector<PageShp>			m_pages;
 	Page*				m_active_page {nullptr};
 	bool				m_disable_tree_sel_changed_event {false};
+	// Per-nozzle process P9: the page held across a refresh (hold_page / release_page) and how many holds are open.
+	wxString			m_held_page;
+	int					m_held_page_depth {0};
 	bool				m_show_incompatible_presets;
 	int					m_last_select_item = -1;
 
@@ -536,6 +539,13 @@ protected:
     // Per-nozzle process P8 (owner bug F): select the page titled `title` again when something rebuilt the page list and
     // left another page shown.
     void select_page_by_title(const wxString& title);
+    // Per-nozzle process P9 (the owner's P8 bug: a nozzle diameter change on Extruder 2/3/4 jumped back to Extruder 1).
+    // While a page is held, every rebuild of the page list (rebuild_page_tree) lands on it instead of on whatever the tab
+    // control shows. release_page() shows it now and once more after the pending events (a modal dialog or a CallAfter'd
+    // refresh can still rebuild), then stops holding. Holds nest.
+    void hold_page(const wxString& title);
+    void release_page();
+    const wxString& held_page() const { return m_held_page; }
 
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);
@@ -583,7 +593,12 @@ public:
 	// own process profile in the preset combo and on every page (PresetBundle::begin_nozzle_tool_view).
 	void		refresh_tool_selector();
 	// Show the Plate (-1) or tool `extruder`'s profile. False when the printer takes no per-tool processes.
+	// P9: `extruder` is a tool index (extruders, then H2C rack slots: PresetBundle::nozzle_tool_ref).
 	bool		show_tool(int extruder);
+	// Per-nozzle process P9 (owner bug from P8): the tool shown, by id ("T3", "T2.3"; empty = Plate), so a refresh that has
+	// to show the Plate (a nozzle size changed) can show the same tool again afterwards when it still exists.
+	std::string	shown_tool_id() const;
+	void		show_tool_by_id(const std::string& id);
 
 private:
 	// Per-nozzle process P8.
@@ -593,6 +608,8 @@ private:
 	Button*					m_tool_expand_btn   = nullptr;
 	wxStaticText*			m_tool_note         = nullptr;
 	std::vector<wxString>	m_tool_labels;
+	// Per-nozzle process P9: the tool (PresetBundle tool index: extruders, then rack slots) of each selector entry after Plate.
+	std::vector<size_t>		m_tool_ids;
 	bool					m_tools_expanded    = false; // the user opened the selector on a printer whose tools all match
 	bool					m_tool_marks_shown  = false; // the plate-wide fields carry the "(Plate)" mark
 	void					create_tool_selector();
@@ -815,6 +832,10 @@ private:
     void                update_rack_controls(size_t extruder);
     // Per-nozzle process P7: Extruder N's "Nozzle size in this project" picker (project key nozzle_diameter_override).
     std::map<size_t, ComboBox*> m_project_size_controls; // extruder -> picker
+    // Per-nozzle process P9: Extruder N's "Rack nozzles in this project" box (project key extruder_rack_nozzle_override).
+    std::map<size_t, std::pair<wxTextCtrl*, wxStaticText*>> m_project_rack_controls; // extruder -> (text box, problem)
+    void                update_project_rack(size_t extruder);
+    void                update_project_rack_error(size_t extruder, const std::string& text);
 public:
     // Show the project's nozzle sizes in the Extruder N pickers (after the sidebar or a printer sync changed them).
     void                update_project_nozzle_sizes();

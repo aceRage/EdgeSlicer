@@ -16,6 +16,7 @@
 #include <locale>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -132,6 +133,29 @@ size_t physical_extruder_of(const ConfigBase &config, unsigned int filament_id)
     const std::vector<double> nozzles = floats_of(config, "nozzle_diameter");
     return physical_extruder_for_filament(nozzles.size(), filament_count_of(config), ints_of(config, "filament_map"), filament_id,
                                           ints_of(config, "filament_nozzle_assignment"));
+}
+
+// Per-nozzle process P9: extruder `e`'s rack text, the project's (extruder_rack_nozzle_override) when it sets one for that
+// extruder, else the printer's (extruder_rack_nozzle_diameter). Empty when neither declares a rack.
+std::string rack_text_of(const ConfigBase &config, size_t e)
+{
+    if (const auto *own = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_override"))
+        if (e < own->values.size() && !trimmed(own->values[e]).empty())
+            return own->values[e];
+    if (const auto *opt = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_diameter"))
+        if (e < opt->values.size())
+            return opt->values[e];
+    return std::string();
+}
+
+bool any_rack_text(const ConfigBase &config)
+{
+    for (const char *key : { "extruder_rack_nozzle_override", "extruder_rack_nozzle_diameter" })
+        if (const auto *opt = opt_of<ConfigOptionStrings>(config, key))
+            for (const std::string &text : opt->values)
+                if (!trimmed(text).empty())
+                    return true;
+    return false;
 }
 
 } // namespace
@@ -271,13 +295,15 @@ std::vector<std::vector<RackNozzle>> extruder_rack_nozzles(const ConfigBase &con
 {
     const size_t                         extruders = floats_of(config, "nozzle_diameter").size();
     std::vector<std::vector<RackNozzle>> out(extruders);
-    if (const auto *opt = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_diameter"))
-        for (size_t e = 0; e < extruders && e < opt->values.size(); ++e) {
-            out[e] = parse_rack_nozzles(opt->values[e]);
-            for (RackNozzle &nozzle : out[e])
-                if (!nozzle.volume_given)
-                    nozzle.volume_type = extruder_volume_type(config, e) == nvtHybrid ? nvtStandard : extruder_volume_type(config, e);
-        }
+    if (!any_rack_text(config))
+        return out;
+    for (size_t e = 0; e < extruders; ++e) {
+        // P9: the project's rack sizes (extruder_rack_nozzle_override) over the printer's.
+        out[e] = parse_rack_nozzles(rack_text_of(config, e));
+        for (RackNozzle &nozzle : out[e])
+            if (!nozzle.volume_given)
+                nozzle.volume_type = extruder_volume_type(config, e) == nvtHybrid ? nvtStandard : extruder_volume_type(config, e);
+    }
     return out;
 }
 
@@ -351,6 +377,13 @@ bool has_mixed_rack_diameters(const ConfigBase &config)
 
 double filament_rack_pin(const ConfigBase &config, unsigned int filament_id)
 {
+    // Per-nozzle process P9: a filament pinned to a rack slot prints with that slot's size.
+    if (const int slot = filament_rack_slot_pin(config, filament_id); slot > 0) {
+        const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+        const size_t                               e     = physical_extruder_of(config, filament_id);
+        if (e < racks.size() && size_t(slot) <= racks[e].size())
+            return racks[e][size_t(slot - 1)].diameter;
+    }
     const std::vector<double> pins = floats_of(config, "filament_rack_nozzle_diameter");
     if (filament_id == 0 || filament_id > pins.size())
         return 0.;
@@ -366,13 +399,14 @@ double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filam
         return 0.;
     const size_t extruder = std::min(physical_extruder_of(config, filament_id), nozzles.size() - 1);
     const double own      = nozzles[extruder];
-    const auto  *racks    = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_diameter");
-    if (racks == nullptr || extruder >= racks->values.size() || racks->values[extruder].empty())
+    // P9: the project's rack (extruder_rack_nozzle_override) over the printer's.
+    const std::string rack = rack_text_of(config, extruder);
+    if (trimmed(rack).empty())
         return own;
     const double pin = filament_rack_pin(config, filament_id);
     if (pin <= 0.)
         return own;
-    for (const RackNozzle &nozzle : parse_rack_nozzles(racks->values[extruder]))
+    for (const RackNozzle &nozzle : parse_rack_nozzles(rack))
         if (same_nozzle_diameter(nozzle.diameter, pin))
             return nozzle.diameter;
     return own;
@@ -381,7 +415,7 @@ double nozzle_diameter_for_filament(const ConfigBase &config, unsigned int filam
 double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
     const double own = config.nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id));
-    if (config.extruder_rack_nozzle_diameter.values.empty())
+    if (config.extruder_rack_nozzle_diameter.values.empty() && config.extruder_rack_nozzle_override.values.empty())
         return own;
     return nozzle_diameter_for_filament(static_cast<const ConfigBase &>(config), filament_id);
 }
@@ -390,7 +424,7 @@ double min_physical_nozzle_diameter(const PrintConfig &config)
 {
     const std::vector<double> &nozzles = config.nozzle_diameter.values;
     double                     out     = nozzles.empty() ? 0. : *std::min_element(nozzles.begin(), nozzles.end());
-    if (!config.extruder_rack_nozzle_diameter.values.empty())
+    if (!config.extruder_rack_nozzle_diameter.values.empty() || !config.extruder_rack_nozzle_override.values.empty())
         for (const std::vector<RackNozzle> &rack : extruder_rack_nozzles(config))
             for (const RackNozzle &nozzle : rack)
                 out = std::min(out, nozzle.diameter);
@@ -430,7 +464,10 @@ bool rack_nozzle_groups(const ConfigBase &config, size_t extruder, std::vector<s
 int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list,
                               const std::vector<unsigned int> &used_filaments, std::vector<int> &filament_nozzle_map)
 {
-    if (!has_mixed_rack_diameters(config))
+    // P9: filaments pinned to a rack slot print on that slot's nozzle, also in a rack of one size (each slot can carry its own
+    // process, and keeping filaments on their own nozzles saves purging).
+    const bool slot_pins = has_filament_rack_slot_pins(config);
+    if (!has_mixed_rack_diameters(config) && !slot_pins)
         return 0;
     int moved = 0;
     for (unsigned int f : used_filaments) {
@@ -440,6 +477,18 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
         if (current < 0 || size_t(current) >= nozzle_list.size())
             continue;
         const MultiNozzleUtils::NozzleInfo &now  = nozzle_list[current];
+        if (const int slot = slot_pins ? filament_rack_slot_pin(config, f + 1) : 0; slot > 0) {
+            const int target = rack_slot_nozzle_index(config, nozzle_list, size_t(std::max(0, now.extruder_id)), slot);
+            if (target >= 0) {
+                if (target != current) {
+                    filament_nozzle_map[f] = target;
+                    ++moved;
+                }
+                continue;
+            }
+        }
+        if (!has_mixed_rack_diameters(config))
+            continue;
         const double                        want = nozzle_diameter_for_filament(config, f + 1);
         double                              have = 0.;
         if (parse_positive_number(now.diameter, have) && same_nozzle_diameter(have, want))
@@ -511,7 +560,187 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
             return "Filament " + std::to_string(f + 1) + " asks for a " + format_diameter_to_str(pin) + " mm rack nozzle, but extruder " +
                    std::to_string(e + 1) + "'s rack has none.";
     }
+    // P9: a slot pin past the end of its extruder's rack.
+    for (unsigned int f : used_filaments) {
+        const int slot = filament_rack_slot_pin(config, f + 1);
+        if (slot <= 0)
+            continue;
+        const size_t e = physical_extruder_for_filament(config, f + 1);
+        if (e >= racks.size() || size_t(slot) > racks[e].size())
+            return "Filament " + std::to_string(f + 1) + " is set to print on " + rack_slot_name(config, e, slot) + ", but that rack has " +
+                   std::to_string(e < racks.size() ? racks[e].size() : 0) + " nozzles.";
+    }
     return {};
+}
+
+// ---- P9: rack slots as tools ------------------------------------------------------------------------------------
+
+size_t rack_slot_count(const ConfigBase &config, size_t extruder)
+{
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    return extruder < racks.size() && racks[extruder].size() >= 2 ? racks[extruder].size() : 0;
+}
+
+std::string rack_slot_name(const ConfigBase &config, size_t extruder, int slot)
+{
+    const size_t extruders = floats_of(config, "nozzle_diameter").size();
+    std::string  side      = extruders == 2 && is_bambu_grouping_machine(config, 2) ? std::string(extruder == 0 ? "Left" : "Right") :
+                                                                                      "T" + std::to_string(extruder + 1);
+    return side + " slot " + std::to_string(slot);
+}
+
+int filament_rack_slot_pin(const ConfigBase &config, unsigned int filament_id)
+{
+    const std::vector<int> pins = ints_of(config, "filament_rack_nozzle_slot");
+    if (filament_id == 0 || filament_id > pins.size())
+        return 0;
+    return std::max(0, pins[filament_id - 1]);
+}
+
+bool has_filament_rack_slot_pins(const ConfigBase &config)
+{
+    const std::vector<int> pins = ints_of(config, "filament_rack_nozzle_slot");
+    return std::any_of(pins.begin(), pins.end(), [](int s) { return s > 0; });
+}
+
+std::vector<int> set_filament_rack_slot_pin(std::vector<int> pins, size_t filament, size_t filaments, int slot)
+{
+    if (pins.size() < filaments)
+        pins.resize(filaments, 0);
+    if (filament < pins.size())
+        pins[filament] = std::max(0, slot);
+    // An all-0 list is stored as the key's "unused" value, { 0 }, so a project that pins nothing reads as before.
+    if (std::all_of(pins.begin(), pins.end(), [](int s) { return s <= 0; }))
+        return { 0 };
+    return pins;
+}
+
+int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
+{
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    const size_t                               e     = physical_extruder_of(config, filament_id);
+    if (e >= racks.size() || racks[e].size() < 2)
+        return 0;
+    if (const int pin = filament_rack_slot_pin(config, filament_id); pin > 0 && size_t(pin) <= racks[e].size())
+        return pin;
+    // Unpinned: the first slot of the size it prints with. Two slots of one size print alike, so this only names the process.
+    const double d = nozzle_diameter_for_filament(config, filament_id);
+    for (size_t k = 0; k < racks[e].size(); ++k)
+        if (same_nozzle_diameter(racks[e][k].diameter, d))
+            return int(k) + 1;
+    return 0;
+}
+
+int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot)
+{
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    if (extruder >= racks.size() || slot < 1 || size_t(slot) > racks[extruder].size())
+        return -1;
+    const std::vector<RackNozzle> &rack = racks[extruder];
+    const RackNozzle              &want = rack[size_t(slot - 1)];
+    auto same_kind = [&want](double d, NozzleVolumeType v) { return same_nozzle_diameter(d, want.diameter) && v == want.volume_type; };
+    // build_nozzle_groups makes one group per kind of rack nozzle and build_nozzle_list lists each group's nozzles together, so
+    // the n-th rack nozzle of a kind is the n-th nozzle of that kind in the list.
+    int ordinal = 0;
+    for (size_t k = 0; k + 1 < size_t(slot); ++k)
+        if (same_kind(rack[k].diameter, rack[k].volume_type))
+            ++ordinal;
+    int seen = 0;
+    for (size_t n = 0; n < nozzle_list.size(); ++n) {
+        double d = 0.;
+        if (nozzle_list[n].extruder_id != int(extruder) || !parse_positive_number(nozzle_list[n].diameter, d) || !same_kind(d, nozzle_list[n].volume_type))
+            continue;
+        if (seen++ == ordinal)
+            return int(n);
+    }
+    return -1;
+}
+
+std::vector<RackSlotUse> rack_slots_in_use(const ConfigBase &config, const std::vector<unsigned int> &used_filaments)
+{
+    std::vector<RackSlotUse>                   out;
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    for (unsigned int f : used_filaments) {
+        const size_t e    = physical_extruder_of(config, f + 1);
+        const int    slot = filament_rack_slot(config, f + 1);
+        if (slot <= 0 || e >= racks.size())
+            continue;
+        const bool pinned = filament_rack_slot_pin(config, f + 1) > 0;
+        auto it = std::find_if(out.begin(), out.end(), [&](const RackSlotUse &u) { return u.extruder == e && u.slot == slot; });
+        if (it == out.end()) {
+            out.push_back({ e, slot, racks[e][size_t(slot - 1)].diameter, pinned, {} });
+            it = out.end() - 1;
+        }
+        it->pinned |= pinned;
+        it->filaments.push_back(f);
+    }
+    std::sort(out.begin(), out.end(), [](const RackSlotUse &a, const RackSlotUse &b) { return std::tie(a.extruder, a.slot) < std::tie(b.extruder, b.slot); });
+    return out;
+}
+
+std::vector<std::string> rack_slot_send_problems(const ConfigBase &config, const std::vector<RackSlotUse> &uses,
+                                                 const std::vector<std::vector<double>> &available)
+{
+    std::vector<std::string> out;
+    auto sizes_text = [](const std::vector<double> &sizes) {
+        std::string text;
+        for (double d : sizes)
+            text += (text.empty() ? "" : ", ") + format_diameter_to_str(d);
+        return text;
+    };
+    // Per extruder and size: the slots of that size the job needs. A pinned slot needs a nozzle of its own; the unpinned
+    // filaments of a size share one.
+    std::map<std::pair<size_t, std::string>, std::vector<const RackSlotUse *>> needs;
+    for (const RackSlotUse &u : uses)
+        needs[{ u.extruder, format_diameter_to_str(u.diameter) }].push_back(&u);
+    for (const auto &[key, slots] : needs) {
+        const size_t e = key.first;
+        if (e >= available.size() || available[e].empty())
+            continue; // the printer reported nothing for this extruder
+        const double d     = slots.front()->diameter;
+        const size_t have  = size_t(std::count_if(available[e].begin(), available[e].end(), [d](double a) { return same_nozzle_diameter(a, d); }));
+        size_t       want  = 0;
+        bool         loose = false;
+        for (const RackSlotUse *u : slots)
+            if (u->pinned)
+                ++want;
+            else
+                loose = true;
+        want += loose && want == 0 ? 1 : 0;
+        if (have >= want)
+            continue;
+        std::string names;
+        for (const RackSlotUse *u : slots)
+            names += (names.empty() ? "" : ", ") + rack_slot_name(config, e, u->slot);
+        const std::string mm = format_diameter_to_str(d) + " mm";
+        if (have == 0)
+            out.push_back(names + " needs a " + mm + " nozzle, but the printer reports none of that size on this extruder (it has " +
+                          sizes_text(available[e]) + " mm). Mount a " + mm + " nozzle, or change the slot's size.");
+        else
+            out.push_back(names + ": this job prints with " + std::to_string(want) + " separate " + mm + " nozzles, but the printer reports " +
+                          std::to_string(have) + " (it has " + sizes_text(available[e]) + " mm). Mount another " + mm +
+                          " nozzle, or pin those filaments to one slot.");
+    }
+    return out;
+}
+
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<double>> &mounted_then_rack, const std::vector<std::string> &current)
+{
+    std::vector<std::string> out = current;
+    if (out.size() < mounted_then_rack.size())
+        out.resize(mounted_then_rack.size());
+    for (size_t e = 0; e < mounted_then_rack.size(); ++e) {
+        // One size is no rack to choose from: leave the extruder as it was.
+        if (mounted_then_rack[e].size() < 2)
+            continue;
+        std::string text;
+        for (double d : mounted_then_rack[e])
+            text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(d);
+        out[e] = text;
+    }
+    if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))
+        out.clear();
+    return out;
 }
 
 // ---- 4. Per-nozzle filament values ------------------------------------------------------------------------------

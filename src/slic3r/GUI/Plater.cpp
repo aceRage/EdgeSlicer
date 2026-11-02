@@ -4740,7 +4740,9 @@ void Sidebar::jump_to_option(const std::string& opt_key_in, Preset::Type type, c
     std::string opt_key = opt_key_in;
     int         tool    = -1;
     if (const size_t at = opt_key.find('@'); at != std::string::npos) {
-        tool    = nozzle_tool_id_extruder(opt_key.substr(at + 1));
+        // P9: "T2.3" (a rack slot) as well as "T2".
+        tool    = wxGetApp().preset_bundle != nullptr ? wxGetApp().preset_bundle->nozzle_tool_index(opt_key.substr(at + 1)) :
+                                                        nozzle_tool_id_extruder(opt_key.substr(at + 1));
         opt_key = opt_key.substr(0, at);
     }
     if (type == Preset::TYPE_PRINT && tool >= 0)
@@ -4810,10 +4812,28 @@ void Sidebar::set_filament_rack_pin(size_t filament, double diameter)
         return;
     auto *pins = bundle->project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true);
     std::vector<double> values = Slic3r::set_filament_rack_pin(pins->values, filament, bundle->filament_presets.size(), diameter);
-    if (values == pins->values)
+    // Per-nozzle process P9: a size pin replaces a slot pin (the slot would decide the size).
+    const bool slot_cleared = diameter > 0. && bundle->filament_rack_slot_choice(filament) > 0 && bundle->set_filament_rack_slot(filament, 0);
+    if (values == pins->values && !slot_cleared)
         return;
     pins->values = std::move(values);
     BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filament " << filament + 1 << " pinned to rack nozzle size " << diameter;
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
+void Sidebar::set_filament_rack_slot(size_t filament, int slot)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || filament >= bundle->filament_presets.size())
+        return;
+    if (!bundle->set_filament_rack_slot(filament, slot))
+        return;
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: filament " << filament + 1 << " pinned to rack slot " << slot;
+    // The Process tab's note and selector name what each slot prints.
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+            tab_print->refresh_nozzle_header();
     wxGetApp().plater()->update_project_dirty_from_presets();
     wxGetApp().plater()->on_config_change(bundle->full_config());
 }
@@ -4841,10 +4861,14 @@ void Sidebar::on_nozzle_sizes_changed()
     if (bundle == nullptr)
         return;
     bundle->remember_nozzle_diameter_override(*wxGetApp().app_config);
-    // Per-nozzle process P8: the Process tab shows the Plate again (a tool's profile depends on its size).
+    // Per-nozzle process P8: the Process tab shows the Plate while the sizes change (a tool's profile depends on its size).
+    // P9 (owner bug from P8): and the same tool again afterwards, when it still exists (its profile follows the new size).
+    std::string shown_tool;
     if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
-        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab)) {
+            shown_tool = tab_print->shown_tool_id();
             tab_print->show_tool(-1);
+        }
     // Per-nozzle processes are cut for a nozzle size.
     bundle->prune_nozzle_processes();
     update_nozzle_settings(false);
@@ -4857,8 +4881,10 @@ void Sidebar::on_nozzle_sizes_changed()
         if (auto *tab_printer = dynamic_cast<TabPrinter *>(tab))
             tab_printer->update_project_nozzle_sizes();
     if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
-        if (auto *tab_print = dynamic_cast<TabPrint *>(tab))
+        if (auto *tab_print = dynamic_cast<TabPrint *>(tab)) {
             tab_print->refresh_nozzle_header();
+            tab_print->show_tool_by_id(shown_tool);
+        }
     wxGetApp().plater()->update_project_dirty_from_presets();
     wxGetApp().plater()->on_config_change(bundle->full_config());
 }
@@ -4900,13 +4926,33 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         return;
     }
     const std::vector<double> values = nozzle_diameter_override_from_reported(preset, nozzle_diameter_override_values(bundle->project_config), reported);
-    if (bundle->set_nozzle_diameter_override(values)) {
+    bool changed = bundle->set_nozzle_diameter_override(values);
+    if (changed)
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process P7: nozzle sizes synced from " << obj->dev_id << ": "
                                 << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
-        on_nozzle_sizes_changed();
+    // Per-nozzle process P9: a printer with a nozzle rack (H2C) also reports the nozzles in it. Read from the device state the
+    // Device page already holds (no request is sent): the mounted nozzle, then the rack positions in order, become the
+    // project's rack slots.
+    wxString rack_note;
+    if (obj->has_nozzle_rack() && preset.size() >= 2) {
+        const std::vector<std::vector<double>> layout = reported_rack_layout(DualNozzle::printer_state(obj), preset.size());
+        std::vector<std::string>               current(preset.size());
+        for (size_t e = 0; e < preset.size(); ++e)
+            current[e] = bundle->rack_nozzle_override(e);
+        const std::vector<std::string> texts = rack_override_from_reported(layout, current);
+        if (bundle->set_rack_nozzle_override(texts)) {
+            changed = true;
+            BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: rack nozzles synced from " << obj->dev_id;
+        }
+        for (size_t e = 0; e < texts.size(); ++e)
+            if (!texts[e].empty())
+                rack_note += "\n" + wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e]));
     }
+    if (changed)
+        on_nozzle_sizes_changed();
     MessageDialog dlg(wxGetApp().mainframe,
-                      wxString::Format(_L("Nozzle sizes in this project: %s mm."), from_u8(nozzle_diameter_summary(bundle->effective_nozzle_diameters()))),
+                      wxString::Format(_L("Nozzle sizes in this project: %s mm."), from_u8(nozzle_diameter_summary(bundle->effective_nozzle_diameters()))) +
+                          rack_note,
                       _L("Sync nozzle sizes"), wxOK);
     dlg.ShowModal();
 }

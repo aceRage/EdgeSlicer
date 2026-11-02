@@ -8,6 +8,7 @@
 #include "PrintConfig.hpp"
 #include "NozzleProcess.hpp"
 #include "NozzleOverride.hpp"
+#include "ToolSlots.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
 #include "LocalesUtils.hpp"
@@ -256,6 +257,10 @@ static std::vector<std::string> s_project_options {
     "filament_rack_nozzle_diameter",
     // Per-nozzle process P7: the nozzle size each extruder carries in this project.
     "nozzle_diameter_override",
+    // Per-nozzle process P9: the rack slot each filament is pinned to, each slot's process, the rack's sizes in this project.
+    "filament_rack_nozzle_slot",
+    "nozzle_slot_process_presets",
+    "extruder_rack_nozzle_override",
     // Ultra (dual-nozzle): plate-level filament grouping state.
     "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_map_mode",
     "enable_filament_dynamic_map", "has_filament_switcher", "prime_volume_mode",
@@ -2793,6 +2798,11 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
     if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter");
         rack != nullptr && rack->values.size() > to_del_filament_id)
         rack->values.erase(rack->values.begin() + to_del_filament_id);
+    // Per-nozzle process P9: and its rack slot pin.
+    if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > to_del_filament_id) {
+        slots->values.erase(slots->values.begin() + to_del_filament_id);
+        slots->values = set_filament_rack_slot_pin(slots->values, 0, 0, slots->values.empty() ? 0 : slots->values.front());
+    }
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
@@ -2825,6 +2835,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     // Per-nozzle process P4: likewise the rack nozzle size.
     if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter"); rack != nullptr && rack->values.size() > n)
         rack->values.resize(n);
+    // Per-nozzle process P9: and the rack slot pin.
+    if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > n)
+        slots->values = set_filament_rack_slot_pin(std::vector<int>(slots->values.begin(), slots->values.begin() + n), 0, 0, n > 0 ? slots->values.front() : 0);
     // BBS set new filament color to new_color
     if (old_slot_count < n) {
         if (!new_colors.empty()) {
@@ -2864,6 +2877,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     // Per-nozzle process P4: likewise the rack nozzle size.
     if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter"); rack != nullptr && rack->values.size() > n)
         rack->values.resize(n);
+    // Per-nozzle process P9: and the rack slot pin.
+    if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > n)
+        slots->values = set_filament_rack_slot_pin(std::vector<int>(slots->values.begin(), slots->values.begin() + n), 0, 0, n > 0 ? slots->values.front() : 0);
 
     //BBS set new filament color to new_color
     if (old_slot_count < n) {
@@ -3219,16 +3235,122 @@ static const Preset &nozzle_process_binding(const Preset &process, const PresetC
     return process;
 }
 
+// ---- Per-nozzle process P9: tools are extruders [0, E) and rack slots [E, E + S) ----------------------------------
+
+DynamicPrintConfig PresetBundle::nozzle_tool_config() const
+{
+    // What the tool list is read from: the printer's sizes, its rack and the project's sizes over them.
+    DynamicPrintConfig out;
+    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
+    for (const char *key : { "nozzle_diameter", "extruder_rack_nozzle_diameter", "nozzle_volume_type", "extruder_variant_list",
+                             "single_extruder_multi_material" })
+        if (const ConfigOption *opt = printer.option(key))
+            out.set_key_value(key, opt->clone());
+    for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override" })
+        if (const ConfigOption *opt = this->project_config.option(key))
+            out.set_key_value(key, opt->clone());
+    return out;
+}
+
+size_t PresetBundle::nozzle_tool_count() const
+{
+    const DynamicPrintConfig cfg = this->nozzle_tool_config();
+    return this->effective_nozzle_diameters().size() + nozzle_slot_tools(cfg).size();
+}
+
+PresetBundle::NozzleToolRef PresetBundle::nozzle_tool_ref(size_t tool) const
+{
+    NozzleToolRef             ref;
+    const std::vector<double> nozzles = this->effective_nozzle_diameters();
+    if (tool < nozzles.size()) {
+        ref.valid    = true;
+        ref.extruder = tool;
+        ref.diameter = nozzles[tool];
+        ref.id       = nozzle_tool_id(tool);
+        return ref;
+    }
+    const DynamicPrintConfig           cfg   = this->nozzle_tool_config();
+    const std::vector<NozzleToolEntry> slots = nozzle_slot_tools(cfg);
+    if (tool - nozzles.size() < slots.size()) {
+        const NozzleToolEntry &entry = slots[tool - nozzles.size()];
+        ref.valid    = true;
+        ref.extruder = entry.extruder;
+        ref.slot     = entry.slot;
+        ref.diameter = entry.diameter;
+        ref.id       = nozzle_tool_entry_id(entry);
+    }
+    return ref;
+}
+
+int PresetBundle::nozzle_tool_index(const std::string &id) const
+{
+    const size_t extruders = this->effective_nozzle_diameters().size();
+    if (const int e = nozzle_tool_id_extruder(id); e >= 0)
+        return size_t(e) < extruders ? e : -1;
+    const std::vector<NozzleToolEntry> slots = nozzle_slot_tools(this->nozzle_tool_config());
+    for (size_t i = 0; i < slots.size(); ++i)
+        if (nozzle_tool_entry_id(slots[i]) == id)
+            return int(extruders + i);
+    return -1;
+}
+
+std::vector<size_t> PresetBundle::nozzle_selector_tools() const
+{
+    std::vector<size_t>                out;
+    const size_t                       extruders = this->effective_nozzle_diameters().size();
+    const std::vector<NozzleToolEntry> entries   = nozzle_tool_entries(this->nozzle_tool_config());
+    size_t                             next_slot = extruders;
+    for (const NozzleToolEntry &entry : entries)
+        out.push_back(entry.slot > 0 ? next_slot++ : entry.extruder);
+    return out;
+}
+
+std::string PresetBundle::nozzle_tool_name(size_t tool) const
+{
+    const NozzleToolRef ref = this->nozzle_tool_ref(tool);
+    if (!ref.valid)
+        return std::string();
+    const DynamicPrintConfig cfg = this->nozzle_tool_config();
+    return ref.slot > 0 ? rack_slot_name(cfg, ref.extruder, ref.slot) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
+}
+
+std::string PresetBundle::nozzle_tool_selection(size_t tool) const
+{
+    const NozzleToolRef ref = this->nozzle_tool_ref(tool);
+    if (!ref.valid)
+        return std::string();
+    if (ref.slot > 0) {
+        const std::map<std::string, std::string> names = nozzle_slot_process_names(this->project_config);
+        const auto                               it    = names.find(ref.id);
+        return it != names.end() ? it->second : std::string();
+    }
+    const std::vector<std::string> selection = this->nozzle_process_selection();
+    return ref.extruder < selection.size() ? selection[ref.extruder] : std::string();
+}
+
 bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) const
 {
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
     if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
         return false;
-    // Per-nozzle process P7: the size the extruder carries in this project.
+    // Per-nozzle process P7: the size the extruder carries in this project. P9: `extruder` is a tool, a rack slot past the
+    // extruders (its own size).
     const std::vector<double> nozzles = this->effective_nozzle_diameters();
-    if (extruder >= nozzles.size())
+    double nozzle = 0.;
+    if (extruder < nozzles.size())
+        nozzle = nozzles[extruder];
+    else if (const NozzleToolRef ref = this->nozzle_tool_ref(extruder); ref.valid)
+        nozzle = ref.diameter;
+    else
         return false;
-    const double nozzle = nozzles[extruder];
+    return this->nozzle_process_fits_size(process, nozzle);
+}
+
+bool PresetBundle::nozzle_process_fits_size(const Preset &process, double nozzle) const
+{
+    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
+    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
+        return false;
 
     const Preset &binding  = nozzle_process_binding(process, this->prints);
     const double  diameter = filament_preset_nozzle_diameter(binding, this->printers); // the same rule for any preset
@@ -3281,6 +3403,20 @@ static std::vector<std::string> nozzle_process_stored(std::vector<std::string> n
 
 bool PresetBundle::set_nozzle_process(size_t extruder, const std::string &name)
 {
+    // P9: a rack slot's choice is kept by its id.
+    if (const NozzleToolRef ref = this->nozzle_tool_ref(extruder); ref.valid && ref.slot > 0) {
+        std::map<std::string, std::string> names = nozzle_slot_process_names(this->project_config);
+        const std::string                  old   = names.count(ref.id) ? names[ref.id] : std::string();
+        if (old == name)
+            return false;
+        if (name.empty())
+            names.erase(ref.id);
+        else
+            names[ref.id] = name;
+        this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(serialize_nozzle_slot_process_names(names)));
+        this->set_nozzle_process_edits(extruder, DynamicPrintConfig());
+        return true;
+    }
     std::vector<std::string> selection = this->nozzle_process_selection();
     if (extruder >= selection.size())
         return false;
@@ -3312,13 +3448,37 @@ bool PresetBundle::prune_nozzle_processes()
             this->set_nozzle_process_edits(e, DynamicPrintConfig()); // P8: its changes went with it
         }
     }
-    // P8: no changes for tools the printer does not have.
+    // P9: slot choices for slots the rack no longer has, or that no longer fit the slot's size.
+    bool                  slots_changed = false;
+    std::set<std::string> dropped_slot_ids;
+    {
+        std::map<std::string, std::string> names = nozzle_slot_process_names(this->project_config);
+        for (auto it = names.begin(); it != names.end();) {
+            const int     tool   = this->nozzle_tool_index(it->first);
+            const Preset *preset = tool >= 0 ? this->prints.find_preset(it->second, false) : nullptr;
+            if (preset == nullptr || !nozzle_process_fits(*preset, size_t(tool))) {
+                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: dropping '" << it->second << "' for " << it->first
+                                        << " (missing, no such rack slot, or not cut for its nozzle)";
+                dropped_slot_ids.insert(it->first); // its changes went with it
+                it            = names.erase(it);
+                slots_changed = true;
+            } else
+                ++it;
+        }
+        if (slots_changed)
+            this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(serialize_nozzle_slot_process_names(names)));
+    }
+    // P8: no changes for tools the printer does not have (P9: nor for rack slots it does not have).
     {
         NozzleProcessEdits edits = this->nozzle_process_edits_map();
         bool               dropped = false;
         for (auto it = edits.begin(); it != edits.end();) {
             const int e = nozzle_tool_id_extruder(it->first);
-            if (e >= 0 && size_t(e) >= selection.size()) {
+            size_t    se = 0;
+            int       sk = 0;
+            const bool slot_id = parse_nozzle_slot_id(it->first, se, sk);
+            if ((e >= 0 && size_t(e) >= selection.size()) || (slot_id && this->nozzle_tool_index(it->first) < 0) ||
+                dropped_slot_ids.count(it->first) > 0) {
                 it      = edits.erase(it);
                 dropped = true;
             } else
@@ -3326,10 +3486,11 @@ bool PresetBundle::prune_nozzle_processes()
         }
         if (dropped)
             this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings(serialize_nozzle_process_edits(edits)));
+        slots_changed |= dropped;
     }
     selection = nozzle_process_stored(std::move(selection));
     if (opt->values == selection)
-        return false;
+        return slots_changed;
     opt->values = std::move(selection);
     return true;
 }
@@ -3353,6 +3514,8 @@ void PresetBundle::restore_nozzle_processes(AppConfig &config, const std::string
     this->project_config.set_key_value("nozzle_process_presets", new ConfigOptionStrings(names));
     // P8: another printer's tools carry none of these changes.
     this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings());
+    // P9: nor its rack slots' processes (project keys only, not remembered per printer).
+    this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings());
     this->prune_nozzle_processes();
 }
 
@@ -3449,7 +3612,71 @@ DynamicPrintConfig PresetBundle::printer_config_with_project_sizes() const
         out.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY, opt->clone());
         apply_nozzle_diameter_override(out);
     }
+    // P9: and the project's rack sizes.
+    if (const ConfigOption *opt = this->project_config.option("extruder_rack_nozzle_override"))
+        out.set_key_value("extruder_rack_nozzle_override", opt->clone());
     return out;
+}
+
+bool PresetBundle::set_rack_nozzle_override(size_t extruder, const std::string &text)
+{
+    auto                    *opt    = this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true);
+    std::vector<std::string> values = opt->values;
+    const size_t             count  = this->preset_nozzle_diameters().size();
+    if (extruder >= count)
+        return false;
+    values.resize(std::max(values.size(), count));
+    std::string trimmed = text;
+    boost::algorithm::trim(trimmed);
+    values[extruder] = trimmed;
+    values.resize(count);
+    if (std::all_of(values.begin(), values.end(), [](const std::string &s) { return s.empty(); }))
+        values.clear();
+    if (values == opt->values)
+        return false;
+    opt->values = std::move(values);
+    // Slots that went away take their choices and changes with them; a slot whose size changed keeps a choice only if it fits.
+    this->prune_nozzle_processes();
+    return true;
+}
+
+bool PresetBundle::set_rack_nozzle_override(const std::vector<std::string> &texts)
+{
+    auto *opt = this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true);
+    if (opt->values == texts)
+        return false;
+    opt->values = texts;
+    this->prune_nozzle_processes();
+    return true;
+}
+
+std::string PresetBundle::rack_nozzle_override(size_t extruder) const
+{
+    if (const auto *opt = this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override"))
+        if (extruder < opt->values.size())
+            return opt->values[extruder];
+    return std::string();
+}
+
+int PresetBundle::filament_rack_slot_choice(size_t filament) const
+{
+    return filament_rack_slot_pin(this->project_config, unsigned(filament + 1));
+}
+
+bool PresetBundle::set_filament_rack_slot(size_t filament, int slot)
+{
+    auto *opt = this->project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot", true);
+    std::vector<int> values = set_filament_rack_slot_pin(opt->values, filament, this->filament_presets.size(), slot);
+    bool changed = values != opt->values;
+    opt->values  = std::move(values);
+    // The slot decides the size: a size pin (P4/P5 "Rack nozzle size") would only contradict it.
+    if (slot > 0)
+        if (auto *sizes = this->project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true); filament < sizes->values.size() &&
+                                                                                                              sizes->values[filament] > 0.) {
+            sizes->values = set_filament_rack_pin(sizes->values, filament, this->filament_presets.size(), 0.);
+            changed       = true;
+        }
+    return changed;
 }
 
 std::vector<double> PresetBundle::effective_nozzle_diameters() const
@@ -3529,7 +3756,44 @@ void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
     }
     if (!missing.empty())
         out.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
-    fill_nozzle_process_slots(out, sources);
+
+    // Per-nozzle process P9: rack slots with a process of their own. Each filament on an extruder that shows rack slots prints
+    // with its slot's process (filament_rack_slot: its pin, else the first slot of its size).
+    out.set_key_value("nozzle_slot_process_missing", new ConfigOptionStrings());
+    const std::vector<NozzleToolEntry> slot_tools = nozzle_slot_tools(this->nozzle_tool_config());
+    if (slot_tools.empty()) {
+        fill_nozzle_process_slots(out, sources);
+        return;
+    }
+    std::vector<DynamicPrintConfig>         slot_store(slot_tools.size());
+    std::vector<const DynamicPrintConfig *> slot_sources(slot_tools.size(), nullptr);
+    std::vector<std::string>                slot_missing;
+    for (size_t i = 0; i < slot_tools.size(); ++i) {
+        if (!this->nozzle_tool_process_config(extruders + i, slot_store[i])) {
+            slot_missing.push_back(nozzle_tool_entry_id(slot_tools[i]));
+            continue;
+        }
+        if (!nozzle_process_diff(slot_store[i], plate).empty())
+            slot_sources[i] = &slot_store[i];
+    }
+    if (!slot_missing.empty())
+        out.set_key_value("nozzle_slot_process_missing", new ConfigOptionStrings(slot_missing));
+    const auto  *filament_opt = dynamic_cast<const ConfigOptionVectorBase *>(out.option("filament_diameter"));
+    const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
+    std::vector<const DynamicPrintConfig *> filament_sources(filaments, nullptr);
+    for (size_t f = 0; f < filaments; ++f) {
+        const size_t e    = nozzle_for_filament(out, unsigned(f + 1));
+        const int    slot = filament_rack_slot(out, unsigned(f + 1));
+        filament_sources[f] = e < sources.size() ? sources[e] : nullptr;
+        if (slot <= 0)
+            continue;
+        for (size_t i = 0; i < slot_tools.size(); ++i)
+            if (slot_tools[i].extruder == e && slot_tools[i].slot == slot) {
+                filament_sources[f] = slot_sources[i];
+                break;
+            }
+    }
+    fill_nozzle_process_slots(out, sources, &filament_sources);
 }
 
 // ---- Per-nozzle process P8 ---------------------------------------------------------------------------------------
@@ -3572,16 +3836,17 @@ std::string PresetBundle::auto_nozzle_process(size_t extruder, bool *missing) co
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
     if (!supports_nozzle_processes(printer))
         return std::string();
-    const std::vector<double> nozzles = this->effective_nozzle_diameters();
-    if (extruder >= nozzles.size())
+    // P9: `extruder` is a tool (an extruder or a rack slot with its own size).
+    const NozzleToolRef ref = this->nozzle_tool_ref(extruder);
+    if (!ref.valid)
         return std::string();
     const Preset &plate = this->plate_print_preset();
     // The plate's process fits a tool whose size it is made for, or any tool when it is made for no particular size.
     const double claim = process_nozzle_claim(plate, this->prints, this->printers);
-    if (!(claim > 0.) || std::abs(claim - nozzles[extruder]) < EPSILON)
+    if (!(claim > 0.) || std::abs(claim - ref.diameter) < EPSILON)
         return std::string();
     const auto       *lh   = plate.config.option<ConfigOptionFloat>("layer_height");
-    const std::string name = auto_nozzle_process_in(this->prints, this->printers, printer.opt_string("printer_model"), nozzles[extruder],
+    const std::string name = auto_nozzle_process_in(this->prints, this->printers, printer.opt_string("printer_model"), ref.diameter,
                                                     lh != nullptr ? lh->value : 0.,
                                                     // a user process names its kind through the system one it inherits
                                                     !plate.is_system && !plate.inherits().empty() ? plate.inherits() : plate.name);
@@ -3595,7 +3860,9 @@ NozzleProcessEdits PresetBundle::nozzle_process_edits_map() const { return nozzl
 void PresetBundle::set_nozzle_process_edits(size_t extruder, const DynamicPrintConfig &diff)
 {
     NozzleProcessEdits edits = this->nozzle_process_edits_map();
-    const std::string  id    = nozzle_tool_id(extruder);
+    // P9: a rack slot's changes are kept under its own id ("T2.3").
+    const NozzleToolRef ref = this->nozzle_tool_ref(extruder);
+    const std::string   id  = ref.valid ? ref.id : nozzle_tool_id(extruder);
     if (diff.empty())
         edits.erase(id);
     else
@@ -3610,7 +3877,8 @@ PresetBundle::NozzleToolProcess PresetBundle::nozzle_tool_process_info(size_t ex
 {
     NozzleToolProcess info;
     const NozzleProcessEdits edits = this->nozzle_process_edits_map();
-    info.edited = edits.count(nozzle_tool_id(extruder)) > 0;
+    const NozzleToolRef      ref   = this->nozzle_tool_ref(extruder); // P9: an extruder or a rack slot
+    info.edited = edits.count(ref.valid ? ref.id : nozzle_tool_id(extruder)) > 0;
     if (m_tool_view.extruder == int(extruder)) {
         // The shown tool: what is selected and edited now.
         info.name   = this->prints.get_selected_preset_name();
@@ -3623,12 +3891,11 @@ PresetBundle::NozzleToolProcess PresetBundle::nozzle_tool_process_info(size_t ex
                                                   this->prints.current_is_dirty();
         return info;
     }
-    const std::vector<std::string> selection = this->nozzle_process_selection();
-    if (extruder < selection.size() && !selection[extruder].empty()) {
-        const Preset *preset = this->prints.find_preset(selection[extruder], false);
+    if (const std::string chosen = this->nozzle_tool_selection(extruder); !chosen.empty()) {
+        const Preset *preset = this->prints.find_preset(chosen, false);
         if (preset != nullptr && nozzle_process_fits(*preset, extruder)) {
             info.kind = NozzleToolProcessKind::Chosen;
-            info.name = selection[extruder];
+            info.name = chosen;
             return info;
         }
     }
@@ -3652,7 +3919,8 @@ bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfi
         return false;
     }
     const NozzleProcessEdits edits = this->nozzle_process_edits_map();
-    const auto               it    = edits.find(nozzle_tool_id(extruder));
+    const NozzleToolRef      ref   = this->nozzle_tool_ref(extruder);
+    const auto               it    = edits.find(ref.valid ? ref.id : nozzle_tool_id(extruder));
     const DynamicPrintConfig *own  = it != edits.end() ? &it->second : nullptr;
     const Preset *preset = info.kind == NozzleToolProcessKind::FollowsPlate ? nullptr : this->prints.find_preset(info.name, false);
     out = nozzle_tool_process(plate, preset != nullptr ? preset->config : plate, own);
@@ -3682,9 +3950,11 @@ void PresetBundle::apply_tool_view_compatibility()
 {
     if (m_tool_view.extruder < 0)
         return;
+    // P9: by the shown tool's size (an extruder's or a rack slot's), worked out once.
+    const NozzleToolRef ref = this->nozzle_tool_ref(size_t(m_tool_view.extruder));
     std::vector<char> fits;
     for (const Preset &preset : this->prints.get_presets())
-        fits.push_back(preset.is_default ? (preset.is_compatible ? 1 : 0) : (nozzle_process_fits(preset, size_t(m_tool_view.extruder)) ? 1 : 0));
+        fits.push_back(preset.is_default ? (preset.is_compatible ? 1 : 0) : (ref.valid && nozzle_process_fits_size(preset, ref.diameter) ? 1 : 0));
     size_t i = 0;
     for (const Preset &preset : this->prints.get_presets())
         const_cast<Preset &>(preset).is_compatible = fits[i++] != 0;
@@ -3705,7 +3975,8 @@ bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
     if (m_tool_view.extruder == int(extruder))
         return true;
     this->end_nozzle_tool_view();
-    if (!supports_nozzle_processes(this->printers.get_edited_preset().config) || extruder >= this->effective_nozzle_diameters().size() ||
+    // P9: any tool, the rack slots past the extruders included.
+    if (!supports_nozzle_processes(this->printers.get_edited_preset().config) || extruder >= this->nozzle_tool_count() ||
         this->prints.get_selected_idx() == size_t(-1))
         return false;
     const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
@@ -3713,7 +3984,8 @@ bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
                                     this->prints.find_preset(info.name, false) : nullptr;
     const bool follows = tool_preset == nullptr;
     const NozzleProcessEdits edits = this->nozzle_process_edits_map();
-    const auto it = edits.find(nozzle_tool_id(extruder));
+    const NozzleToolRef      ref   = this->nozzle_tool_ref(extruder);
+    const auto it = edits.find(ref.id);
 
     m_tool_view.plate         = this->prints.get_edited_preset();
     m_tool_view.plate_idx     = this->prints.get_selected_idx();
@@ -3737,7 +4009,7 @@ bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
     const std::vector<std::string> plate_keys = plate_process_option_keys();
     this->prints.set_dirty_ignore(std::set<std::string>(plate_keys.begin(), plate_keys.end()));
     this->prints.update_dirty();
-    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: showing " << nozzle_tool_id(extruder) << " with '" << m_tool_view.tool_preset << "'"
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: showing " << ref.id << " with '" << m_tool_view.tool_preset << "'"
                             << (follows ? " (follows the plate)" : "") << ", plate '" << m_tool_view.plate.name << "' kept aside";
     return true;
 }
@@ -3780,13 +4052,21 @@ void PresetBundle::nozzle_tool_view_sync()
         m_tool_view.follows_plate = false;
         m_tool_view.auto_picked   = false;
         m_tool_view.tool_preset   = selected;
-        std::vector<std::string> selection = this->nozzle_process_selection();
-        if (e < selection.size()) {
-            selection[e] = selected;
-            auto *opt    = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets", true);
-            opt->values  = nozzle_process_stored(std::move(selection));
+        const NozzleToolRef ref = this->nozzle_tool_ref(e);
+        if (ref.valid && ref.slot > 0) {
+            // P9: a rack slot's choice, by its id (its changes are stored right below, against the new profile).
+            std::map<std::string, std::string> names = nozzle_slot_process_names(this->project_config);
+            names[ref.id] = selected;
+            this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(serialize_nozzle_slot_process_names(names)));
+        } else {
+            std::vector<std::string> selection = this->nozzle_process_selection();
+            if (e < selection.size()) {
+                selection[e] = selected;
+                auto *opt    = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets", true);
+                opt->values  = nozzle_process_stored(std::move(selection));
+            }
         }
-        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << nozzle_tool_id(e) << " now uses '" << selected << "'";
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << (ref.valid ? ref.id : nozzle_tool_id(e)) << " now uses '" << selected << "'";
     }
     this->apply_plate_keys_to_tool_view();
     this->store_tool_view_edits();
@@ -4529,6 +4809,13 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // Per-nozzle process P7: likewise every extruder has the printer preset's nozzle size.
         if (!config.has(NOZZLE_DIAMETER_OVERRIDE_KEY))
             this->project_config.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY, new ConfigOptionFloats{ 0. });
+        // Per-nozzle process P9: and no rack slot pins, slot processes or rack sizes of the project.
+        if (!config.has("filament_rack_nozzle_slot"))
+            this->project_config.set_key_value("filament_rack_nozzle_slot", new ConfigOptionInts{ 0 });
+        if (!config.has("nozzle_slot_process_presets"))
+            this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings());
+        if (!config.has("extruder_rack_nozzle_override"))
+            this->project_config.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings());
         this->project_config.apply_only(config, s_project_options);
         m_nozzle_process_printer = this->printers.get_selected_preset_name();
         m_nozzle_override_model  = nozzle_override_model_key(this->printers);

@@ -101,6 +101,7 @@ using namespace nlohmann;
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/ProjectConfigFill.hpp"
 #include <algorithm>
 #include <array>
@@ -3733,25 +3734,21 @@ int CLI::run(int argc, char **argv)
         }
         const double plate_lh = m_print_config.option<ConfigOptionFloat>("layer_height") != nullptr ? m_print_config.opt_float("layer_height") : 0.;
 
-        std::vector<DynamicPrintConfig>         nozzle_process_store(nozzles.size());
-        std::vector<const DynamicPrintConfig *> nozzle_process_sources(nozzles.size(), nullptr);
-        std::vector<int>                        missing;
-        for (size_t e = 0; e < nozzles.size(); ++e) {
+        // One tool's effective process into `store` (P9: an extruder "T2" or a rack slot "T2.3"); false when no process fits it.
+        auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
             DynamicPrintConfig base;
             bool               has_base = false;
             std::string        filament_id_unused;
-            std::string        name = names[e];
-            if (name.empty() && plate_claim > 0. && std::abs(plate_claim - nozzles[e]) > EPSILON && plate_bundle != nullptr) {
+            if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
                 name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
-                                                           nozzles[e], plate_lh, system_name.empty() ? plate_name : system_name);
+                                                           diameter, plate_lh, system_name.empty() ? plate_name : system_name);
                 if (name.empty()) {
-                    missing.push_back(int(e) + 1);
-                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits T" << e + 1 << " (" << nozzles[e] << " mm)";
-                    boost::nowide::cerr << "per-nozzle process: no process fits T" << e + 1 << " (" << nozzles[e] << " mm)" << std::endl;
-                    continue;
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits " << id << " (" << diameter << " mm)";
+                    boost::nowide::cerr << "per-nozzle process: no process fits " << id << " (" << diameter << " mm)" << std::endl;
+                    return false;
                 }
-                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: T" << e + 1 << " (" << nozzles[e] << " mm) uses '" << name << "' (picked)";
-                boost::nowide::cout << "per-nozzle process: T" << e + 1 << " (" << nozzles[e] << " mm) uses '" << name << "', picked for its size" << std::endl;
+                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << id << " (" << diameter << " mm) uses '" << name << "' (picked)";
+                boost::nowide::cout << "per-nozzle process: " << id << " (" << diameter << " mm) uses '" << name << "', picked for its size" << std::endl;
             }
             if (!name.empty()) {
                 if (const Preset *preset = named_presets().find_system(name, Preset::TYPE_PRINT)) {
@@ -3760,17 +3757,64 @@ int CLI::run(int argc, char **argv)
                 } else if (named_presets().find_user(name, Preset::TYPE_PRINT, base, filament_id_unused)) {
                     has_base = true;
                 } else {
-                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << name << "' for extruder " << e + 1 << " not found";
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << name << "' for " << id << " not found";
                     boost::nowide::cerr << "per-nozzle process: preset not found: " << name << std::endl;
                 }
             }
-            const auto it = edits.find(nozzle_tool_id(e));
-            nozzle_process_store[e] = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            const auto it = edits.find(id);
+            store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            return true;
+        };
+
+        std::vector<DynamicPrintConfig>         nozzle_process_store(nozzles.size());
+        std::vector<const DynamicPrintConfig *> nozzle_process_sources(nozzles.size(), nullptr);
+        std::vector<int>                        missing;
+        for (size_t e = 0; e < nozzles.size(); ++e) {
+            if (!resolve_tool(nozzle_tool_id(e), nozzles[e], names[e], nozzle_process_store[e])) {
+                missing.push_back(int(e) + 1);
+                continue;
+            }
             if (!nozzle_process_diff(nozzle_process_store[e], m_print_config).empty())
                 nozzle_process_sources[e] = &nozzle_process_store[e];
         }
         m_print_config.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
-        if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources))
+
+        // Per-nozzle process P9: the rack slots of an extruder whose rack lists two or more nozzles each have a process of their
+        // own (chosen in nozzle_slot_process_presets, else the plate's or the one picked for the slot's size), and each filament
+        // on such an extruder prints with its slot's.
+        const std::vector<NozzleToolEntry> slot_tools = nozzle_slot_tools(m_print_config);
+        std::vector<const DynamicPrintConfig *> filament_sources;
+        std::vector<DynamicPrintConfig>         slot_store(slot_tools.size());
+        if (!slot_tools.empty()) {
+            const std::map<std::string, std::string> slot_names = nozzle_slot_process_names(m_print_config);
+            std::vector<const DynamicPrintConfig *>  slot_sources(slot_tools.size(), nullptr);
+            std::vector<std::string>                 slot_missing;
+            for (size_t i = 0; i < slot_tools.size(); ++i) {
+                const std::string id   = nozzle_tool_entry_id(slot_tools[i]);
+                const auto        name = slot_names.find(id);
+                if (!resolve_tool(id, slot_tools[i].diameter, name != slot_names.end() ? name->second : std::string(), slot_store[i])) {
+                    slot_missing.push_back(id);
+                    continue;
+                }
+                if (!nozzle_process_diff(slot_store[i], m_print_config).empty())
+                    slot_sources[i] = &slot_store[i];
+            }
+            m_print_config.set_key_value("nozzle_slot_process_missing", new ConfigOptionStrings(slot_missing));
+            const auto  *filament_opt = dynamic_cast<const ConfigOptionVectorBase *>(m_print_config.option("filament_diameter"));
+            const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
+            filament_sources.assign(filaments, nullptr);
+            for (size_t f = 0; f < filaments; ++f) {
+                const size_t e    = nozzle_for_filament(m_print_config, unsigned(f + 1));
+                const int    slot = filament_rack_slot(m_print_config, unsigned(f + 1));
+                filament_sources[f] = e < nozzle_process_sources.size() ? nozzle_process_sources[e] : nullptr;
+                for (size_t i = 0; slot > 0 && i < slot_tools.size(); ++i)
+                    if (slot_tools[i].extruder == e && slot_tools[i].slot == slot) {
+                        filament_sources[f] = slot_sources[i];
+                        break;
+                    }
+            }
+        }
+        if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources, slot_tools.empty() ? nullptr : &filament_sources))
             BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filled the extruder slots of the process keys";
     }
 
