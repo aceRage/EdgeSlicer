@@ -142,7 +142,10 @@ std::string zip_entry_extra_bytes(mz_zip_archive* zip, mz_uint file_index)
 {
     if (zip == nullptr)
         return {};
-    std::string  extra(4096, 0);
+    // The extra-field length is a 16-bit value, so 65535 bytes plus miniz's terminating NUL
+    // always holds the whole field: a 0x9901 header past the first 4 KiB is still found.
+    // (WinZip AES also always sets compression method 99, which is checked first.)
+    std::string  extra(65536, 0);
     const size_t extra_size = mz_zip_reader_get_extra(zip, file_index, extra.data(), extra.size());
     if (extra_size == 0)
         return {};
@@ -201,7 +204,20 @@ bool zip_name_is_valid_utf8(const std::string& s)
             return false;
         if (extra == 1 && *p < 0xC2u) // overlong 2-byte
             return false;
-        if (p + extra >= end)
+        if (*p > 0xF4u) // above U+10FFFF
+            return false;
+        // Need `extra` continuation bytes after the lead byte: p[1..extra] must be < end.
+        if (end - p <= extra)
+            return false;
+        const unsigned char lead = p[0];
+        const unsigned char next = p[1];
+        if (lead == 0xE0u && next < 0xA0u) // overlong 3-byte
+            return false;
+        if (lead == 0xEDu && next >= 0xA0u) // UTF-16 surrogate U+D800..U+DFFF
+            return false;
+        if (lead == 0xF0u && next < 0x90u) // overlong 4-byte
+            return false;
+        if (lead == 0xF4u && next >= 0x90u) // above U+10FFFF
             return false;
         ++p;
         for (int i = 0; i < extra; ++i, ++p)
@@ -246,14 +262,20 @@ std::string sanitize_zip_extract_segment(const std::string& seg)
     if (out.empty())
         return "_";
 
+    // Windows ignores trailing spaces and dots before the extension ("CON .txt" opens CON),
+    // so trim them from the stem before the comparison.
     std::string stem = out.substr(0, out.find('.'));
+    while (!stem.empty() && (stem.back() == ' ' || stem.back() == '.'))
+        stem.pop_back();
     std::string upper;
     upper.reserve(stem.size());
     for (char c : stem)
         upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
     static const char* const reserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "CONIN$", "CONOUT$", "COM1", "COM2",
                                            "COM3", "COM4", "COM5", "COM6", "COM7",   "COM8",    "COM9", "LPT1",
-                                           "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",   "LPT7",    "LPT8", "LPT9"};
+                                           "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",   "LPT7",    "LPT8", "LPT9",
+                                           // Superscript digits 1-3 (U+00B9, U+00B2, U+00B3) are also device names.
+                                           "COM\xC2\xB9", "COM\xC2\xB2", "COM\xC2\xB3", "LPT\xC2\xB9", "LPT\xC2\xB2", "LPT\xC2\xB3"};
     for (const char* r : reserved)
         if (upper == r) {
             out = "_" + out;
@@ -541,6 +563,23 @@ bool commit_part(const boost::filesystem::path &part, const boost::filesystem::p
     return true;
 }
 
+// First `stem(n).ext` (n = 1, 2, ...) next to `dest` that does not exist on disk. Empty when
+// none of the first 10000 candidates is free.
+boost::filesystem::path next_free_sibling(const boost::filesystem::path& dest)
+{
+    namespace fs           = boost::filesystem;
+    const std::string leaf = path_utf8(dest.filename());
+    const size_t      dot  = leaf.find_last_of('.');
+    const std::string stem = (dot != std::string::npos && dot != 0) ? leaf.substr(0, dot) : leaf;
+    const std::string ext  = (dot != std::string::npos && dot != 0) ? leaf.substr(dot) : std::string();
+    for (unsigned n = 1; n <= 10000; ++n) {
+        const fs::path candidate = dest.parent_path() / entry_path(stem + "(" + std::to_string(n) + ")" + ext);
+        if (!leaf_exists(candidate))
+            return candidate;
+    }
+    return {};
+}
+
 struct StagedFile
 {
     boost::filesystem::path dest;
@@ -648,6 +687,12 @@ bool extract_entry_capped_to_file(
         return false;
     }
     if (stat.m_uncomp_size == 0) {
+        // Nothing to inflate or CRC: an empty payload's CRC-32 is 0, so a non-zero stored CRC
+        // means the header is lying about the size. Reject that instead of writing an empty file.
+        if (stat.m_crc32 != 0) {
+            err = std::string("CRC check failed: ") + stat.m_filename;
+            return false;
+        }
         auto f = open_extract_file(path);
         if (!f) {
             err = "create file failed: " + path_utf8(path);
@@ -852,8 +897,8 @@ bool extract_archive_confined(mz_zip_archive &archive, const boost::filesystem::
 bool extract_archive_confined(const boost::filesystem::path &zip_path, const boost::filesystem::path &dest, std::string &err)
 {
     MZ_Archive archive;
-    if (!archive.open_reader(zip_path.string())) {
-        err = "unable to open zip reader for " + zip_path.string();
+    if (!archive.open_reader(path_utf8(zip_path))) {
+        err = "unable to open zip reader for " + path_utf8(zip_path);
         BOOST_LOG_TRIVIAL(error) << err;
         return false;
     }
@@ -864,6 +909,9 @@ bool inspect_zip_entries(mz_zip_archive& archive, const ZipExtractCaps& caps, st
 {
     out.clear();
     err.clear();
+    // Central-directory bomb guard: the cap applies to the whole archive (every entry miniz
+    // indexed), not just the selected ones, so a zip with millions of tiny headers is refused
+    // before any per-entry work.
     const mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
     if (num_entries > caps.max_entries_scanned) {
         err = "ZIP has too many entries (" + std::to_string(num_entries) + "; max " + std::to_string(caps.max_entries_scanned) + ")";
@@ -922,6 +970,9 @@ bool extract_entries_confined(mz_zip_archive&                archive,
         return false;
     };
 
+    // Central-directory bomb guard: the cap applies to the whole archive (every entry miniz
+    // indexed), not just the selected ones, so a zip with millions of tiny headers is refused
+    // before any per-entry work.
     const mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
     if (num_entries > caps.max_entries_scanned) {
         err = "ZIP has too many entries (" + std::to_string(num_entries) + "; max " + std::to_string(caps.max_entries_scanned) + ")";
@@ -941,7 +992,11 @@ bool extract_entries_confined(mz_zip_archive&                archive,
     std::vector<std::string> encrypted_names;
     std::uint64_t            total_uncomp = 0;
 
+    std::set<mz_uint> seen_indices;
     for (mz_uint index : indices) {
+        // A caller passing the same index twice gets one copy, not `name` plus `name(1)`.
+        if (!seen_indices.insert(index).second)
+            continue;
         if (index >= num_entries) {
             err = "archive entry index out of range";
             return fail();
@@ -989,14 +1044,45 @@ bool extract_entries_confined(mz_zip_archive&                archive,
             }
             total_uncomp += stat.m_uncomp_size;
         }
-        const fs::path unique = ZipWorkDir::uniquify_entry_path(dest_root, name, taken);
-        if (!untrusted::is_path_within_root(dest_root, unique)) {
-            err = "entry resolves outside the extraction root: " + path_utf8(unique);
+        planned.push_back({index, stat, name, fs::path(), stat.m_is_directory != 0});
+    }
+
+    // Every folder the plan needs: directory entries plus every parent of every entry. A file
+    // whose name equals one of these ('a' next to 'a/b.stl') would collide with the folder, so
+    // it is renamed (`a(1)`) here instead of failing half-way through staging.
+    std::vector<fs::path> plan_dirs;
+    for (const Planned& p : planned) {
+        if (p.is_directory)
+            plan_dirs.push_back(dest_root / entry_path(p.name));
+        for (size_t slash = p.name.find('/'); slash != std::string::npos; slash = p.name.find('/', slash + 1))
+            if (slash > 0)
+                plan_dirs.push_back(dest_root / entry_path(p.name.substr(0, slash)));
+    }
+    for (Planned& p : planned) {
+        if (p.is_directory) {
+            // Folders merge; they never get a suffix.
+            p.dest = dest_root / entry_path(p.name);
+        } else {
+            std::vector<fs::path> blocked = taken;
+            blocked.insert(blocked.end(), plan_dirs.begin(), plan_dirs.end());
+            p.dest = ZipWorkDir::uniquify_entry_path(dest_root, p.name, blocked);
+            taken.push_back(p.dest);
+        }
+        if (!untrusted::is_path_within_root(dest_root, p.dest)) {
+            err = "entry resolves outside the extraction root: " + path_utf8(p.dest);
             return fail();
         }
-        taken.push_back(unique);
-        reserved.insert(unique);
-        planned.push_back({index, stat, name, unique, stat.m_is_directory != 0});
+        // A file already in the destination where the plan needs a folder cannot be replaced.
+        const fs::path root_n = normalize_dir_path(dest_root);
+        for (fs::path anc = normalize_dir_path(p.is_directory ? p.dest : p.dest.parent_path());
+             !anc.empty() && anc != root_n && anc.parent_path() != anc; anc = anc.parent_path()) {
+            if (leaf_exists(anc) && !is_dir_or_dir_symlink(anc)) {
+                err = "cannot create folder " + path_utf8(anc) + ": a file with that name already exists in the destination";
+                BOOST_LOG_TRIVIAL(error) << "Unzip: " << err;
+                return fail();
+            }
+        }
+        reserved.insert(p.dest);
     }
 
     if (!encrypted_names.empty()) {
@@ -1045,6 +1131,19 @@ bool extract_entries_confined(mz_zip_archive&                archive,
     }
 
     for (StagedFile& s : staged) {
+        // Planning folds case with ASCII rules only. On a case- or normalization-insensitive
+        // file system (APFS, NTFS) 'É.stl' / 'é.stl', or NFC / NFD spellings of one name, are
+        // the same file, and the first commit makes the second dest "exist". Ask the file
+        // system instead of overwriting: pick the next free `name(n).ext` beside it.
+        if (!s.dest_existed && leaf_exists(s.dest)) {
+            const fs::path renamed = next_free_sibling(s.dest);
+            if (renamed.empty() || !untrusted::is_path_within_root(dest_root, renamed)) {
+                err = "could not choose a unique name for " + path_utf8(s.dest);
+                return fail();
+            }
+            BOOST_LOG_TRIVIAL(info) << "Unzip: " << path_utf8(s.dest) << " collides with an extracted file, using " << path_utf8(renamed);
+            s.dest = renamed;
+        }
         if (!commit_part(s.part, s.dest, err))
             return fail();
         s.part.clear();
@@ -1060,11 +1159,11 @@ bool extract_entries_confined(const boost::filesystem::path& zip_path,
                               std::string&                   err)
 {
     MZ_Archive archive;
-    if (!archive.open_reader(zip_path.string())) {
+    if (!archive.open_reader(path_utf8(zip_path))) {
         if (archive.arch.m_last_error == MZ_ZIP_UNSUPPORTED_MULTIDISK)
             err = "This is a split ZIP archive (.z01 / multi-disk). Edge cannot open split archives; combine the parts first.";
         else
-            err = "unable to open zip reader for " + zip_path.string();
+            err = "unable to open zip reader for " + path_utf8(zip_path);
         BOOST_LOG_TRIVIAL(error) << err;
         return false;
     }
