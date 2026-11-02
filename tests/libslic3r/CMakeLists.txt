@@ -197,6 +197,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_lens.cpp
     test_showcase_skin.cpp
     test_showcase_realism.cpp
+    test_showcase_blender.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

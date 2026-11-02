@@ -1163,6 +1163,11 @@ void ShowcaseView::build_panel()
         m_copy   = new wxButton(m_side, wxID_ANY, _L("Copy to clipboard"));
         buttons->Add(m_export, 0, wxRIGHT, em / 2);
         buttons->Add(m_copy, 0);
+        // Realism phase 4: Export for Blender / Open in Blender / Install the add-on.
+        auto *blender = new wxButton(m_side, wxID_ANY, _L("Blender..."));
+        blender->SetToolTip(_L("Render this scene in Blender's Cycles: export a package, or open it in Blender directly."));
+        buttons->Add(blender, 0, wxLEFT, em / 2);
+        blender->Bind(wxEVT_BUTTON, [this, blender](wxCommandEvent &) { on_blender_menu(blender); });
         col->Add(buttons, 0, wxLEFT | wxRIGHT, em);
         m_status = new wxStaticText(m_side, wxID_ANY, "");
         col->Add(m_status, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, em);
