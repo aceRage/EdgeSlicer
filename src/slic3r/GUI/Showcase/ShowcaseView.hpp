@@ -570,6 +570,7 @@ private:
     wxCheckBox              *m_vid_build = nullptr;
     wxChoice                *m_vid_co_motion = nullptr;   // S5c
     wxChoice                *m_vid_co_appear = nullptr;   // S5c
+    wxChoice                *m_vid_build_source = nullptr;     // Build-up shows: Toolpaths (Auto) / Model (Clip)
     wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
     wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;

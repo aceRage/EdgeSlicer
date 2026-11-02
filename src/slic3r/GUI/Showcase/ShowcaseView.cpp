@@ -2600,6 +2600,7 @@ void ShowcaseView::apply_row_visibility()
     set(m_vid_co_motion, v.vid_co_position);
     set(m_vid_co_appear, v.vid_co_appearance);
     set_box(m_vid_build_infill, v.vid_build_parts);
+    set(m_vid_build_source, v.vid_build_source);
     // Export
     const bool custom = m_size->GetSelection() == SHOWCASE_SIZE_COUNT;
     set(m_width, custom);

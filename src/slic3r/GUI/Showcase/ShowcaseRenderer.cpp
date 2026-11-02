@@ -3614,13 +3614,14 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
 
     GCodeViewer::ShowcaseLook look;
     look.hide_wipe_tower = m_scene->floor.hide_wipe_tower;
-    // S5b: only a build-up leaves out infill or supports; the toolpath source shows the whole slice.
-    look.show_infill   = m_build_fraction < 0. || m_build_infill;
-    look.show_supports = m_build_fraction < 0. || m_build_supports;
-    // 1h-2b: the scene's own switches (Materials, under Show) for stills and the live view, on top.
-    look.show_infill   = look.show_infill && m_scene->materials.toolpath_infill;
-    look.show_supports = look.show_supports && m_scene->materials.toolpath_supports;
-    look.show_skirt    = m_scene->materials.toolpath_skirt;
+    // S5b: during a build-up the video's own Infill / Supports switches decide what is laid. 1h-2b: the
+    // scene's switches (Materials, under Show) are for stills and the live view; they no longer also
+    // apply to a build-up (ANDed with the video's, a Materials > Infill left off made the video's
+    // build-up hollow with its Infill on).
+    const Showcase::ToolpathParts parts = Showcase::toolpath_parts(m_scene->materials, m_build_fraction >= 0., m_build_infill, m_build_supports);
+    look.show_infill   = parts.infill;
+    look.show_supports = parts.supports;
+    look.show_skirt    = parts.skirt;
     if (m_build_fraction >= 0. && m_build_fraction < 1.) {
         // Every layer takes the same time, the top one laid move by move.
         const std::vector<double>     zs = gv.get_layers_zs();
