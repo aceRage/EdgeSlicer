@@ -742,6 +742,8 @@ set(lisbslic3r_sources
     VariableWidth.hpp
     Zipper.cpp
     Zipper.hpp
+    ZipWorkDir.cpp
+    ZipWorkDir.hpp
 )
 
 if (APPLE)
