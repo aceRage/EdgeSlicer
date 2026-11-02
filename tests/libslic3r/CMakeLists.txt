@@ -35,6 +35,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
+	test_paint_wire.cpp
 	test_paint_remap.cpp
 	test_spread_paint.cpp
 	test_airbrush.cpp

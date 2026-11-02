@@ -392,3 +392,147 @@ TEST_CASE("paint_v1: session ids", "[paint_v1]")
     CHECK(PaintV1::volume_type_name(ModelVolumeType::MODEL_PART) == "model_part");
     CHECK(PaintV1::volume_type_name(ModelVolumeType::PRECISE_SEAM_LEFT) == "seam_modifier");
 }
+
+// ---- H2: apply ----
+
+namespace {
+
+PaintV1::ApplyRequest cube_request(const PaintV1::ObjectSnapshot& s, const std::string& revision, std::vector<PaintWireTree> trees)
+{
+    PaintV1::ApplyRequest req;
+    req.revision = revision;
+    PaintV1::ApplyVolume v;
+    v.index     = 0;
+    v.triangles = uint32_t(s.volumes[0].triangles());
+    v.mesh_hash = PaintV1::mesh_hash(s.volumes[0].mesh);
+    v.trees     = std::move(trees);
+    req.volumes.push_back(std::move(v));
+    return req;
+}
+
+} // namespace
+
+TEST_CASE("paint_v1 apply: the body round-trips and bad bodies are refused", "[paint_v1]")
+{
+    PaintedCube                   c;
+    const PaintV1::ObjectSnapshot s   = c.snapshot();
+    const PaintV1::ApplyRequest   req = cube_request(s, PaintV1::revision(s, palette()), { { 3, { 2 } }, { 5, { 0xFF, 1, 0, 3, 0 } } });
+    const std::string             body = PaintV1::encode_apply(req);
+    CHECK(body.substr(0, 4) == "PSA1");
+    PaintV1::ApplyRequest back;
+    std::string           error;
+    REQUIRE(PaintV1::decode_apply(body, back, error));
+    CHECK(back.revision == req.revision);
+    REQUIRE(back.volumes.size() == 1);
+    CHECK(back.volumes[0].mesh_hash == req.volumes[0].mesh_hash);
+    CHECK(back.volumes[0].trees == req.volumes[0].trees);
+
+    CHECK_FALSE(PaintV1::decode_apply("", back, error));
+    CHECK_FALSE(PaintV1::decode_apply("PSA2" + body.substr(4), back, error));
+    CHECK_FALSE(PaintV1::decode_apply(body.substr(0, body.size() - 1), back, error));
+    CHECK_FALSE(PaintV1::decode_apply(body + "x", back, error));
+    std::string upper = body;
+    upper[4] = 'A'; // revisions are lowercase hex
+    CHECK_FALSE(PaintV1::decode_apply(upper, back, error));
+    PaintV1::ApplyRequest twice = req;
+    twice.volumes.push_back(req.volumes[0]);
+    CHECK_FALSE(PaintV1::decode_apply(PaintV1::encode_apply(twice), back, error));
+    CHECK(error.find("twice") != std::string::npos);
+    std::string huge = body.substr(0, 20) + std::string("\xff\xff\xff\x7f", 4);
+    CHECK_FALSE(PaintV1::decode_apply(huge, back, error)); // a lying count is refused before allocating
+
+    // The app's encoder is checked against this body (tools/paint_v1/fixtures/hub/apply_cube.psapply).
+    if (write_fixtures())
+        write_file("apply_cube.psapply", body);
+    CHECK(read_file("apply_cube.psapply") == body);
+}
+
+TEST_CASE("paint_v1 apply: on the current revision the touched triangles change and nothing else", "[paint_v1]")
+{
+    PaintedCube                   c;
+    const PaintV1::ObjectSnapshot s   = c.snapshot();
+    const std::string             rev = PaintV1::revision(s, palette());
+    const auto plan = PaintV1::plan_apply(cube_request(s, rev, { { 0, { 0 } }, { 3, { 2 } } }), s, rev, nullptr, 3);
+    REQUIRE(plan.status == 200);
+    REQUIRE(plan.paint.size() == 1);
+    CHECK(plan.triangles == 2);
+    const auto& before = s.volumes[0].paint;
+    const auto& after  = plan.paint[0].second;
+    for (int t = 0; t < 12; ++t) {
+        INFO("triangle " << t);
+        if (t == 0 || t == 3)
+            continue;
+        CHECK(paint_wire_triangle_bits(after, t) == paint_wire_triangle_bits(before, t));
+    }
+    CHECK(paint_wire_triangle_bits(after, 0).empty()); // cleared
+    CHECK_FALSE(paint_wire_triangle_bits(after, 3).empty());
+    CHECK(after.used_states[3]); // the brush dot (filament 3) stays
+    CHECK(after.used_states[2]); // triangle 3 is filament 2 now
+
+    // An empty diff changes nothing at all.
+    const auto none = PaintV1::plan_apply(cube_request(s, rev, {}), s, rev, nullptr, 3);
+    REQUIRE(none.status == 200);
+    CHECK(none.paint[0].second == before);
+}
+
+TEST_CASE("paint_v1 apply: refusals change nothing", "[paint_v1]")
+{
+    PaintedCube                   c;
+    const PaintV1::ObjectSnapshot s   = c.snapshot();
+    const std::string             rev = PaintV1::revision(s, palette());
+    auto status = [&](const PaintV1::ApplyRequest& req, size_t filaments = 3) {
+        const auto plan = PaintV1::plan_apply(req, s, rev, nullptr, filaments);
+        if (plan.status != 200) CHECK(plan.paint.empty());
+        return plan.status;
+    };
+    CHECK(status(cube_request(s, rev, { { 3, { 4 } } })) == 400);                  // filament 4 of 3
+    CHECK(status(cube_request(s, rev, { { 3, { 4 } } }), 4) == 200);
+    CHECK(status(cube_request(s, rev, { { 3, { 0xFF, 1, 1, 1, 1 } } })) == 400);   // not in normal form
+    CHECK(status(cube_request(s, rev, { { 12, { 1 } } })) == 400);                 // past the mesh
+    CHECK(status(cube_request(s, rev, { { 5, { 1 } }, { 3, { 1 } } })) == 400);    // not ascending
+    auto modifier = cube_request(s, rev, { { 3, { 1 } } });
+    modifier.volumes[0].index = 1;
+    CHECK(status(modifier) == 400);                                                // not a model part
+    auto changed = cube_request(s, rev, { { 3, { 1 } } });
+    changed.volumes[0].mesh_hash = std::string(64, 'a');
+    CHECK(status(changed) == 409);                                                 // the mesh changed
+    PaintV1::ApplyRequest empty;
+    empty.revision = rev;
+    CHECK(status(empty) == 400);
+}
+
+TEST_CASE("paint_v1 apply: the per-triangle merge after the PC painted too", "[paint_v1]")
+{
+    PaintedCube                   c;
+    const PaintV1::ObjectSnapshot then     = c.snapshot();
+    const std::string             then_rev = PaintV1::revision(then, palette());
+    const PaintV1::PaintByVolume  base     = PaintV1::paint_by_volume(then);
+
+    // Meanwhile the PC repaints triangle 0 (filament 2 -> 1).
+    {
+        TriangleSelector sel(c.object->volumes[0]->mesh());
+        sel.deserialize(c.object->volumes[0]->mmu_segmentation_facets.get_data());
+        sel.set_facet(0, EnforcerBlockerType::Extruder1);
+        c.object->volumes[0]->mmu_segmentation_facets.set(sel);
+    }
+    const PaintV1::ObjectSnapshot now     = c.snapshot();
+    const std::string             now_rev = PaintV1::revision(now, palette());
+    REQUIRE(now_rev != then_rev);
+
+    // The tablet painted triangle 3 only: merged onto the PC's new paint.
+    const auto merged = PaintV1::plan_apply(cube_request(then, then_rev, { { 3, { 2 } } }), now, now_rev, &base, 3);
+    REQUIRE(merged.status == 200);
+    CHECK(paint_wire_triangle_bits(merged.paint[0].second, 0) == paint_wire_triangle_bits(now.volumes[0].paint, 0));
+
+    // The tablet also painted triangle 0: refused, naming it.
+    const auto clash = PaintV1::plan_apply(cube_request(then, then_rev, { { 0, { 3 } }, { 3, { 2 } } }), now, now_rev, &base, 3);
+    REQUIRE(clash.status == 409);
+    CHECK(clash.paint.empty());
+    CHECK(clash.answer["revision"] == now_rev);
+    CHECK(clash.answer["conflicts"] == json::parse(R"([{"volume":0,"triangles":[0]}])"));
+
+    // A revision this hub never served: it cannot tell, so it asks for a re-read.
+    const auto unknown = PaintV1::plan_apply(cube_request(then, then_rev, { { 3, { 2 } } }), now, now_rev, nullptr, 3);
+    CHECK(unknown.status == 409);
+    CHECK_FALSE(unknown.answer.contains("conflicts"));
+}

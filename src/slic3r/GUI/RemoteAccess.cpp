@@ -62,6 +62,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <iterator>
 #include <chrono>
 #include <ctime>
 #include <future>
@@ -3666,8 +3667,9 @@ RemoteAccess::ApiResponse RemoteAccess::api_paint_session_open(const std::string
                 if (it->second.opened < oldest->second.opened) oldest = it;
             m_paint_sessions.erase(oldest);
         }
-        m_paint_sessions[id] = PaintSession { key, std::chrono::steady_clock::now() };
+        m_paint_sessions[id] = PaintSession { key, std::chrono::steady_clock::now(), {} };
     }
+    paint_remember(id, rev, s->object);
     r.body = PaintV1::session_json(id, rev, s->object, s->palette, PaintV1::paint_depth_json(s->print, s->object_config)).dump();
     return r;
 }
@@ -3692,6 +3694,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_paint_session(const std::string& id,
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
     if (!s->found) { r.status = 404; r.body = json_error("the object is no longer in the project"); return r; }
     const std::string rev = PaintV1::revision(s->object, s->palette);
+    paint_remember(id, rev, s->object);
     if (what.empty()) {
         r.body = PaintV1::session_json(id, rev, s->object, s->palette, PaintV1::paint_depth_json(s->print, s->object_config)).dump();
         return r;
@@ -3714,6 +3717,117 @@ RemoteAccess::ApiResponse RemoteAccess::api_paint_session(const std::string& id,
         r.type = "application/x-edgeslicer-pspaint";
         r.body = PaintV1::encode_paint(*v->mesh, v->paint);
     }
+    return r;
+}
+
+// The paint a session served at `revision`: what a later apply was painted on. Three revisions per
+// session are plenty (the tablet sends against the newest it read; one older covers a send that crossed
+// a re-read).
+void RemoteAccess::paint_remember(const std::string& id, const std::string& revision, const PaintV1::ObjectSnapshot& object)
+{
+    std::lock_guard<std::mutex> lock(m_paint_mutex);
+    auto                        it = m_paint_sessions.find(id);
+    if (it == m_paint_sessions.end()) return;
+    auto& seen = it->second.seen;
+    if (!seen.empty() && seen.back().first == revision) return;
+    seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const auto& e) { return e.first == revision; }), seen.end());
+    seen.emplace_back(revision, PaintV1::paint_by_volume(object));
+    while (seen.size() > 3) seen.erase(seen.begin());
+}
+
+// POST /api/paint/sessions/{id}/apply, form path={the hub's spooled body}: the hub's own call for
+// POST /r/<token>/i/<pid>/paint/{id}/apply (H2; the body is MBs, so it never goes through the proxy).
+// The body is read once and its folder deleted. Everything is checked before anything changes
+// (PaintV1::plan_apply); then one undo step, "Paint from tablet", writes each touched model part's
+// paint and drops its Airbrush record (the spray's bake no longer matches what is painted). 409 while
+// slicing or busy, while the colour painting tool is open on that object (it would write its own
+// selectors back over the tablet's paint), for a changed mesh, or for triangles the PC painted too.
+RemoteAccess::ApiResponse RemoteAccess::api_paint_apply(const std::string& id, const std::string& path_in)
+{
+    ApiResponse               r;
+    boost::system::error_code ec;
+    const fs::path            path    = fs::weakly_canonical(fs::path(path_in), ec);
+    const fs::path            uploads = fs::weakly_canonical(fs::path(RemoteHub::uploads_dir()), ec);
+    if (path_in.empty() || !fs::is_regular_file(path, ec)) { r.status = 404; r.body = json_error("no such file"); return r; }
+    if (path.parent_path().parent_path() != uploads) { r.status = 400; r.body = json_error("only a body the hub spooled can be applied"); return r; }
+    std::string body;
+    {
+        const auto size = fs::file_size(path, ec);
+        if (!ec && size <= PaintV1::MAX_APPLY_BYTES) {
+            boost::nowide::ifstream f(path.string(), std::ios::binary);
+            body.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        }
+        fs::remove_all(path.parent_path(), ec); // read once: the body is not kept on the PC
+    }
+    auto req = std::make_shared<PaintV1::ApplyRequest>();
+    std::string error;
+    if (body.empty() || !PaintV1::decode_apply(body, *req, error)) {
+        r.status = 400;
+        r.body   = json_error(error.empty() ? "the paint body could not be read" : error);
+        return r;
+    }
+    std::string key;
+    auto        base = std::make_shared<PaintV1::PaintByVolume>();
+    bool        known = false;
+    {
+        std::lock_guard<std::mutex> lock(m_paint_mutex);
+        auto                        it = m_paint_sessions.find(id);
+        if (it != m_paint_sessions.end()) {
+            key = it->second.object_key;
+            for (const auto& e : it->second.seen)
+                if (e.first == req->revision) { *base = e.second; known = true; }
+        }
+    }
+    if (key.empty()) { r.status = 404; r.body = json_error("no such paint session"); return r; }
+    auto result = std::make_shared<std::pair<int, nlohmann::json>>(500, nlohmann::json());
+    auto after  = std::make_shared<PaintState>();
+    bool ok = run_on_main([result, after, req, base, known, key]() {
+        Plater* plater = wxGetApp().plater();
+        if (auto blocked = edit_blocked(plater); blocked.first != 200) {
+            *result = { blocked.first, { { "error", blocked.second } } };
+            return;
+        }
+        PaintState now;
+        paint_state_of(key, now);
+        if (!now.found) { *result = { 404, { { "error", "the object is no longer in the project" } } }; return; }
+        const int oi = now.object.index;
+        for (GLCanvas3D* canvas : { plater->get_view3D_canvas3D(), plater->get_assmeble_canvas3D() }) {
+            if (canvas == nullptr) continue;
+            if (canvas->get_gizmos_manager().get_current_type() == GLGizmosManager::EType::MmSegmentation &&
+                canvas->get_selection().get_object_idx() == oi) {
+                *result = { 409, { { "error", "the colour painting tool is open on this object on the PC; close it and send again" } } };
+                return;
+            }
+        }
+        const std::string    rev  = PaintV1::revision(now.object, now.palette);
+        PaintV1::ApplyPlan   plan = PaintV1::plan_apply(*req, now.object, rev, known ? base.get() : nullptr, now.palette.size());
+        if (plan.status != 200) { *result = { plan.status, plan.answer }; return; }
+        ModelObject* o = plater->model().objects[size_t(oi)];
+        plater->select_view_3D("3D");
+        plater->take_snapshot(PaintV1::APPLY_UNDO_LABEL);
+        nlohmann::json volumes = nlohmann::json::array();
+        for (auto& [vi, paint] : plan.paint) {
+            ModelVolume* mv = o->volumes[size_t(vi)];
+            mv->mmu_segmentation_facets.set_data(std::move(paint));
+            const bool had_airbrush = mv->airbrush_field != nullptr;
+            mv->airbrush_field.reset();
+            volumes.push_back({ { "index", vi }, { "airbrush_dropped", had_airbrush } });
+        }
+        // As the PC's own colour gizmo does after a stroke (GLGizmoMmuSegmentation::notify_paint_changed).
+        wxGetApp().obj_list()->update_info_items(size_t(oi));
+        plater->get_partplate_list().notify_instance_update(oi, 0);
+        plater->get_view3D_canvas3D()->post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        plater->notify_filament_usage_changed();
+        paint_state_of(key, *after);
+        const std::string new_rev = PaintV1::revision(after->object, after->palette);
+        *result = { 200, { { "ok", true }, { "revision", new_rev }, { "undo_label", topmost_undo_label(plater) },
+                           { "triangles", plan.triangles }, { "volumes", volumes } } };
+    }, 120000, "applying tablet paint");
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (result->first == 200 && after->found)
+        paint_remember(id, result->second["revision"].get<std::string>(), after->object);
+    r.status = result->first;
+    r.body   = result->second.dump();
     return r;
 }
 
@@ -3996,7 +4110,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         // 3: slice_v1 (plates/{index}/result, jobs/{id}/cancel, presets type, image ETags);
         // 4: PR D, arrange (layout lists overhanging instances, plates/loose, blocked, arrange /
         //    orient, objects/printable, transform plate=, undo); 5: PR F; 6: PR E; 7: PR G (plates,
-        //    objects and save); 8: paint_v1 (H1, paint objects and read sessions)
+        //    objects and save); 8: paint_v1 (H1, paint objects and read sessions); 9: paint_v1 apply (H2)
         j["version"] = SliceV1::INSTANCE_API_VERSION;
         j["routes"]  = nlohmann::json::array({
             { {"method", "GET"},  {"path", "/api"},                        {"description", "this manifest"} },
@@ -4066,6 +4180,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/paint/sessions/{id}"},    {"description", "{session, revision (changes with any volume's mesh or paint, the volume set or the palette), object {key, obj, name, plate, extruder}, volumes [model parts: {index, name, triangles, vertices, mesh_hash, mesh_bytes, painted, airbrushed, image_fill, extruder, matrix (volume in object space, 16 numbers column-major)}], instances [matrix (world)], palette [{id (1-based filament), color, type, preset}], paint_depth {definitions [{key, type, label, tooltip, unit?, min?, max?, enum_values?, enum_labels?}], values {key: value}} (the object's own, else the print preset's), caps {triangles, leaves}, formats {mesh psmesh1, paint pspaint1}}; 404 for an unknown session or an object no longer in the project"} },
             { {"method", "GET"},  {"path", "/api/paint/sessions/{id}/mesh?volume={index}[&rev=]"}, {"description", "that model part's mesh, application/x-edgeslicer-psmesh: \"PSM1\", uint32 vertex count, uint32 triangle count, float32 x,y,z per vertex (volume mesh space, mm), uint32 a,b,c per triangle, little-endian; mesh_hash = SHA-256 of everything after the 12-byte header. X-Mesh-Hash and X-Paint-Revision headers; 409 {error, revision} when rev= is not the current revision"} },
             { {"method", "GET"},  {"path", "/api/paint/sessions/{id}/paint?volume={index}[&rev=]"}, {"description", "the PC's painting of that model part, application/x-edgeslicer-pspaint: \"PSP1\", uint32 state count, then per state uint32 state (1-based filament), uint32 count n, n x 9 float32 (three corners, mesh space), n x uint32 original triangle; unpainted is not listed. 409 as for /mesh"} },
+            { {"method", "POST"}, {"path", "/api/paint/sessions/{id}/apply"}, {"description", "H2 (the hub's own call for POST /r/<token>/i/<pid>/paint/{id}/apply, which spools the tablet's body - not proxied): form path={that file}. The body is application/x-edgeslicer-psapply: \"PSA1\", the 16-hex revision it painted on, uint32 volume count; per volume uint32 index, uint32 triangle count, 64-hex mesh hash, uint32 tree count, then per tree (ascending) uint32 triangle, uint32 n, n bytes of paint wire tree (EdgeSlicerApp docs/paint_wire_v0.md). The touched triangles take the trees, every other triangle keeps the PC's paint (per-triangle merge); one undo step \"Paint from tablet\" that also drops those parts' Airbrush record. Answers {ok, revision, undo_label, triangles, volumes [{index, airbrush_dropped}]}; 400 a bad body (tree, triangle, volume, a filament the project lacks); 404 unknown session or object; 409 slicing or busy, the colour painting tool open on that object, a changed mesh, or {error, revision, conflicts [{volume, triangles}]} when the PC painted some of the same triangles since that revision"} },
             { {"method", "GET"},  {"path", "/api/archive[?printer={id}]"}, {"description", "the G-code archive (Preferences > Ultra > Store G-Code Files): every file this PC has sent to a printer while it was on, newest first, as {enabled, max, records}. Each record is {id, time, file, sent_name, size, sha256, printer {id, kind bambu|snapmaker|printhost|connect, name, model}, plate, plate_name, project_title, filaments [{index, type, colour, grams}], estimated_time_s, estimated_weight_g, source desktop|phone, mode upload|print, has_thumbnail, exists (its file is still on disk), mapping (the toolhead mapping a Snapmaker send used, in the wire form /send takes) and spoolman_deduct (a Spoolman deduction was asked for)} - names and sizes only, never a path on the PC. `printer` filters by the printer id a send used"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}"},        {"description", "one record, the same fields a row of /api/archive carries plus `exists` (its file is still on disk)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "the plate preview stored with that record"} },
@@ -4285,6 +4400,14 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         return api_paint_objects();
     if (path == "/paint/sessions" && method == "POST")
         return api_paint_session_open(body.empty() ? query : body);
+    if (path.compare(0, 16, "/paint/sessions/") == 0 && method == "POST") {
+        const std::string rest = path.substr(16);
+        const size_t      slash = rest.find('/');
+        if (slash != std::string::npos && rest.substr(slash) == "/apply" && PaintV1::is_session_id(rest.substr(0, slash))) {
+            const std::string form = body.empty() ? query : body;
+            return api_paint_apply(rest.substr(0, slash), query_param(form, "path"));
+        }
+    }
     if (path.compare(0, 16, "/paint/sessions/") == 0 && method == "GET") {
         const std::string rest  = path.substr(16);
         const size_t      slash = rest.find('/');
