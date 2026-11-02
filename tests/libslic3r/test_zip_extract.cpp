@@ -678,3 +678,211 @@ TEST_CASE("inspect_zip_entries reports encryption per entry and honours the scan
     CHECK_FALSE(inspect_zip_entries(archive.arch, caps, infos, err));
     CHECK(err.find("too many entries") != std::string::npos);
 }
+
+TEST_CASE("extract_entries_confined keeps a pre-existing dest file through a rollback", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "keep.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_binary_file(dest / "model.stl", "original");
+    write_zip_entries(zip, {{"model.stl", "new"}, {"bad.stl", "payload"}});
+    patch_crc(zip, "bad.stl");
+
+    std::string err;
+    CHECK_FALSE(extract_all(zip, dest, ZipExtractCaps{}, err));
+    CHECK(read_binary_file(dest / "model.stl") == "original");
+    const auto files = list_regular_files(dest);
+    REQUIRE(files.size() == 1);
+    CHECK(files.front().filename() == "model.stl");
+}
+
+#ifndef _WIN32
+TEST_CASE("extract_entries_confined refuses to write through a pre-existing dir symlink that leaves dest", "[ZipExtract][ZipSlip]")
+{
+    TempDir    tmp;
+    const auto zip     = tmp.dir / "link.zip";
+    const auto dest    = tmp.dir / "out";
+    const auto outside = tmp.dir / "outside";
+    fs::create_directories(dest);
+    fs::create_directories(outside);
+    fs::create_directory_symlink(outside, dest / "link");
+    write_zip_entries(zip, {{"link/evil.stl", "evil"}});
+
+    std::string err;
+    CHECK_FALSE(extract_all(zip, dest, ZipExtractCaps{}, err));
+    CHECK(list_regular_files(outside).empty());
+    CHECK(fs::is_symlink(fs::symlink_status(dest / "link")));
+}
+
+TEST_CASE("extract_entries_confined follows a pre-existing dir symlink that stays inside dest", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "inlink.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest / "real");
+    fs::create_directory_symlink(dest / "real", dest / "alias");
+    write_zip_entries(zip, {{"alias/part.stl", "ok"}});
+
+    std::string err;
+    REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+    CHECK(read_binary_file(dest / "real" / "part.stl") == "ok");
+}
+#endif
+
+TEST_CASE("extract_entries_confined renames a file that clashes with a folder in the same archive", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+
+    SECTION("file first")
+    {
+        const auto zip = tmp.dir / "clash1.zip";
+        write_zip_entries(zip, {{"a", "file"}, {"a/b.stl", "inner"}});
+        std::string err;
+        REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+        CHECK(fs::is_directory(dest / "a"));
+        CHECK(read_binary_file(dest / "a" / "b.stl") == "inner");
+        CHECK(read_binary_file(dest / "a(1)") == "file");
+    }
+    SECTION("folder first")
+    {
+        const auto zip = tmp.dir / "clash2.zip";
+        write_zip_entries(zip, {{"a/b.stl", "inner"}, {"a", "file"}});
+        std::string err;
+        REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+        CHECK(read_binary_file(dest / "a" / "b.stl") == "inner");
+        CHECK(read_binary_file(dest / "a(1)") == "file");
+    }
+    SECTION("a file already in dest blocks the folder with a clear error")
+    {
+        const auto zip = tmp.dir / "clash3.zip";
+        write_binary_file(dest / "a", "existing");
+        write_zip_entries(zip, {{"ok.stl", "ok"}, {"a/b.stl", "inner"}});
+        std::string err;
+        CHECK_FALSE(extract_all(zip, dest, ZipExtractCaps{}, err));
+        INFO(err);
+        CHECK(err.find("already exists") != std::string::npos);
+        CHECK(read_binary_file(dest / "a") == "existing");
+        CHECK(list_regular_files(dest).size() == 1);
+    }
+}
+
+TEST_CASE("extract_entries_confined ignores duplicate indices", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "dupidx.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_zip_entries(zip, {{"one.stl", "1"}, {"two.stl", "2"}});
+
+    std::string err;
+    REQUIRE(extract_entries_confined(zip, {0, 1, 0, 0, 1}, dest, ZipExtractCaps{}, err));
+    const auto files = list_regular_files(dest);
+    REQUIRE(files.size() == 2);
+    CHECK(read_binary_file(dest / "one.stl") == "1");
+    CHECK(read_binary_file(dest / "two.stl") == "2");
+    CHECK_FALSE(fs::exists(dest / "one(1).stl"));
+}
+
+TEST_CASE("zip_name_is_valid_utf8 handles end-of-name multibyte, overlongs and surrogates", "[ZipExtract]")
+{
+    // Valid multibyte as the very last character (2, 3 and 4 bytes).
+    CHECK(zip_name_is_valid_utf8("caf\xC3\xA9"));
+    CHECK(zip_name_is_valid_utf8("x\xE2\x82\xAC"));
+    CHECK(zip_name_is_valid_utf8("x\xF0\x9F\x98\x80"));
+    CHECK(zip_name_is_valid_utf8("\xED\x9F\xBF"));     // U+D7FF, just below the surrogates
+    CHECK(zip_name_is_valid_utf8("\xF4\x8F\xBF\xBF")); // U+10FFFF
+    // Truncated at the end.
+    CHECK_FALSE(zip_name_is_valid_utf8("caf\xC3"));
+    CHECK_FALSE(zip_name_is_valid_utf8("x\xE2\x82"));
+    CHECK_FALSE(zip_name_is_valid_utf8("x\xF0\x9F\x98"));
+    // Overlongs.
+    CHECK_FALSE(zip_name_is_valid_utf8("\xC0\xAF"));
+    CHECK_FALSE(zip_name_is_valid_utf8("\xE0\x80\xAF"));
+    CHECK_FALSE(zip_name_is_valid_utf8("\xF0\x80\x80\xAF"));
+    // Surrogates and out of range.
+    CHECK_FALSE(zip_name_is_valid_utf8("\xED\xA0\x80"));
+    CHECK_FALSE(zip_name_is_valid_utf8("\xED\xBF\xBF"));
+    CHECK_FALSE(zip_name_is_valid_utf8("\xF4\x90\x80\x80"));
+    CHECK_FALSE(zip_name_is_valid_utf8("\xF5\x80\x80\x80"));
+}
+
+TEST_CASE("extract_entries_confined keeps a multibyte last character in the name", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "mb.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    const std::string name = "caf\xC3\xA9";
+    write_zip_entries(zip, {{name, "x"}});
+
+    std::string err;
+    REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+    const auto files = list_regular_files(dest);
+    REQUIRE(files.size() == 1);
+    CHECK(files.front().filename().string().find('%') == std::string::npos);
+}
+
+TEST_CASE("sanitize_zip_extract_path treats superscript and padded device names as reserved", "[ZipExtract]")
+{
+    CHECK(sanitize_zip_extract_path("COM\xC2\xB9.stl") == "_COM\xC2\xB9.stl");
+    CHECK(sanitize_zip_extract_path("com\xC2\xB2") == "_com\xC2\xB2");
+    CHECK(sanitize_zip_extract_path("LPT\xC2\xB3.txt") == "_LPT\xC2\xB3.txt");
+    CHECK(sanitize_zip_extract_path("lpt\xC2\xB9") == "_lpt\xC2\xB9");
+    CHECK(sanitize_zip_extract_path("CON .txt") == "_CON .txt");
+    CHECK(sanitize_zip_extract_path("nul. .stl") == "_nul. .stl");
+    CHECK(sanitize_zip_extract_path("COM\xC2\xB9" "0.stl") == "COM\xC2\xB9" "0.stl");
+    CHECK(sanitize_zip_extract_path("CONSOLE.txt") == "CONSOLE.txt");
+}
+
+TEST_CASE("extract_entries_confined never lets Unicode case or normalization variants overwrite each other", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+
+    SECTION("upper and lower case E-acute")
+    {
+        const auto zip = tmp.dir / "ucase.zip";
+        write_zip_entries(zip, {{"\xC3\x89.stl", "upper"}, {"\xC3\xA9.stl", "lower"}});
+        std::string err;
+        REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+        const auto files = list_regular_files(dest);
+        REQUIRE(files.size() == 2);
+        std::vector<std::string> contents;
+        for (const auto& f : files)
+            contents.push_back(read_binary_file(f));
+        std::sort(contents.begin(), contents.end());
+        CHECK(contents == std::vector<std::string>{"lower", "upper"});
+    }
+    SECTION("NFC and NFD spellings")
+    {
+        const auto zip = tmp.dir / "nfd.zip";
+        write_zip_entries(zip, {{"caf\xC3\xA9.stl", "nfc"}, {"cafe\xCC\x81.stl", "nfd"}});
+        std::string err;
+        REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
+        const auto files = list_regular_files(dest);
+        REQUIRE(files.size() == 2);
+        std::vector<std::string> contents;
+        for (const auto& f : files)
+            contents.push_back(read_binary_file(f));
+        std::sort(contents.begin(), contents.end());
+        CHECK(contents == std::vector<std::string>{"nfc", "nfd"});
+    }
+}
+
+TEST_CASE("extract_entries_confined rejects a zero-size entry with a non-zero CRC", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "empty.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_zip_entries(zip, {{"empty.stl", ""}});
+    patch_crc(zip, "empty.stl");
+
+    std::string err;
+    CHECK_FALSE(extract_all(zip, dest, ZipExtractCaps{}, err));
+    CHECK(list_regular_files(dest).empty());
+}

@@ -163,7 +163,7 @@ bool ZipWorkDir::create_session(const boost::filesystem::path& root,
     if (!ensure_root(root, err))
         return false;
 
-    std::string stem = untrusted::sanitize_download_filename(zip_path.stem().string());
+    std::string stem = untrusted::sanitize_download_filename(path_utf8(zip_path.stem()));
     if (stem.empty())
         stem = "zip";
     const std::string base = stem + "_" + local_timestamp();
