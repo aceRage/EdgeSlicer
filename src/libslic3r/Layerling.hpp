@@ -273,6 +273,9 @@ CustomUrl normalize_custom_url(const std::string &input);
 // no other addresses, no network scan.
 std::vector<std::string> local_candidates();
 
+// The Get page's "Use layerling.com - no setup" choice.
+constexpr const char *LAYERLING_COM_URL = "https://layerling.com/";
+
 // Layerling's /version.json (static export: {"version":"1.131.1","build":...}). False when the
 // body is not that.
 bool parse_version_json(const std::string &body, std::string &version);

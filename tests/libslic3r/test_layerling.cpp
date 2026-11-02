@@ -532,6 +532,9 @@ TEST_CASE("Layerling: which Layerling the tab shows", "[Layerling]")
     CHECK(select_source(source_key(Source::BuiltIn), "https://layerling.com/") == Source::BuiltIn);
     CHECK(std::string(source_key(Source::Custom)) == "custom");
     CHECK(std::string(source_key(Source::BuiltIn)) == "builtin");
+    // The Get page's layerling.com choice is a usable custom address as it is.
+    CHECK(normalize_custom_url(LAYERLING_COM_URL).url == LAYERLING_COM_URL);
+    CHECK(select_source("custom", LAYERLING_COM_URL) == Source::Custom);
 }
 
 TEST_CASE("Layerling: looking for a Layerling on this computer stays on this computer", "[Layerling]")

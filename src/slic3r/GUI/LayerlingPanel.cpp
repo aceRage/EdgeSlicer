@@ -170,6 +170,10 @@ struct LayerlingPanel::Impl
     Button       *btn_get { nullptr };
     Button       *btn_cancel { nullptr };
     Button       *btn_own { nullptr };
+    Button       *btn_site { nullptr };
+    wxStaticText *get_line_get { nullptr };
+    wxStaticText *get_line_site { nullptr };
+    wxStaticText *get_note { nullptr };
     wxGauge      *gauge { nullptr };
     wxStaticText *get_status { nullptr };
 
@@ -291,6 +295,7 @@ struct LayerlingPanel::Impl
 
     // Use my own Layerling, MCP
     void choose_source();
+    void use_layerling_com();
     void apply_source();
     void show_mcp_setup();
 };
@@ -326,10 +331,8 @@ void LayerlingPanel::Impl::build_get_page()
     get_title->SetFont(Label::Head_18);
     get_text = new wxStaticText(get_page, wxID_ANY,
                                 _L("Layerling is a free CAD for 3D printing that runs in a browser: put shapes on the plate, size them, "
-                                   "cut holes, group them, and send the result straight to EdgeSlicer's plate.\n\n"
-                                   "EdgeSlicer can download the official Layerling web app from its GitHub releases (about 50 MB) and run it "
-                                   "here, on this computer, also without internet. Your designs stay on this computer. Layerling is not part "
-                                   "of EdgeSlicer and is not installed with it."));
+                                   "cut holes, group them, and send the result straight to EdgeSlicer's plate. It is not part of "
+                                   "EdgeSlicer: choose how to use it."));
     get_text->SetFont(Label::Body_14);
     get_text->Wrap(w);
     get_licence = new wxStaticText(get_page, wxID_ANY,
@@ -342,32 +345,62 @@ void LayerlingPanel::Impl::build_get_page()
     get_support->SetFont(Label::Body_13);
     get_funding_row = new wxBoxSizer(wxHORIZONTAL);
 
+    // Two equal choices side by side: download it, or use layerling.com.
+    const int col_w = (w - owner->FromDIP(24)) / 2;
     btn_get = new Button(get_page, _L("Download Layerling"));
     btn_get->SetStyle(ButtonStyle::Confirm, ButtonType::Choice);
+    btn_get->SetMinSize(wxSize(col_w, -1));
+    get_line_get = new wxStaticText(get_page, wxID_ANY, _L("About 50 MB. Runs on this computer, also offline; updates are offered."));
+    get_line_get->SetFont(Label::Body_13);
+    get_line_get->Wrap(col_w);
+    btn_site = new Button(get_page, _L("Use layerling.com - no setup"));
+    btn_site->SetStyle(ButtonStyle::Confirm, ButtonType::Choice);
+    btn_site->SetMinSize(wxSize(col_w, -1));
+    get_line_site = new wxStaticText(get_page, wxID_ANY, _L("Opens layerling.com right away. Needs internet."));
+    get_line_site->SetFont(Label::Body_13);
+    get_line_site->Wrap(col_w);
+    const wxString per_choice = _L("Designs are kept separately for each choice. Switch any time under About > Layerling source.");
+    get_note = new wxStaticText(get_page, wxID_ANY, per_choice);
+    get_note->SetFont(Label::Body_12);
+    get_note->Wrap(w);
+    btn_get->SetToolTip(per_choice);
+    btn_site->SetToolTip(per_choice);
+
     btn_cancel = new Button(get_page, _L("Cancel"));
     btn_cancel->SetStyle(ButtonStyle::Regular, ButtonType::Choice);
     btn_cancel->Hide();
     gauge = new wxGauge(get_page, wxID_ANY, 1000, wxDefaultPosition, wxSize(w, owner->FromDIP(8)));
     gauge->Hide();
     get_status = new wxStaticText(get_page, wxID_ANY, wxEmptyString);
-    btn_own = new Button(get_page, _L("Use my own Layerling..."));
-    btn_own->SetStyle(ButtonStyle::Regular, ButtonType::Choice);
-    btn_own->SetToolTip(_L("Show a Layerling you already run (a NAS, a home server, Docker) or layerling.com instead of downloading it"));
     get_status->SetFont(Label::Body_13);
+    btn_own = new Button(get_page, _L("Another Layerling (NAS, home server)..."));
+    btn_own->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    btn_own->SetToolTip(_L("Show a Layerling you already run (a NAS, a home server, Docker) instead"));
 
-    auto *buttons = new wxBoxSizer(wxHORIZONTAL);
-    buttons->Add(btn_get, 0, wxRIGHT, owner->FromDIP(8));
-    buttons->Add(btn_cancel, 0, wxRIGHT, owner->FromDIP(8));
-    buttons->Add(btn_own, 0);
+    auto *choice_get = new wxBoxSizer(wxVERTICAL);
+    choice_get->Add(btn_get, 0, wxEXPAND | wxBOTTOM, owner->FromDIP(6));
+    choice_get->Add(get_line_get, 0);
+    auto *choice_site = new wxBoxSizer(wxVERTICAL);
+    choice_site->Add(btn_site, 0, wxEXPAND | wxBOTTOM, owner->FromDIP(6));
+    choice_site->Add(get_line_site, 0);
+    auto *choices = new wxBoxSizer(wxHORIZONTAL);
+    choices->Add(choice_get, 1, wxRIGHT, owner->FromDIP(24));
+    choices->Add(choice_site, 1);
+
+    auto *progress = new wxBoxSizer(wxHORIZONTAL);
+    progress->Add(gauge, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, owner->FromDIP(8));
+    progress->Add(btn_cancel, 0, wxALIGN_CENTER_VERTICAL);
 
     auto *col = new wxBoxSizer(wxVERTICAL);
     col->Add(get_title, 0, wxBOTTOM, owner->FromDIP(12));
-    col->Add(get_text, 0, wxBOTTOM, owner->FromDIP(12));
+    col->Add(get_text, 0, wxBOTTOM, owner->FromDIP(16));
+    col->Add(choices, 0, wxEXPAND | wxBOTTOM, owner->FromDIP(10));
+    col->Add(get_note, 0, wxBOTTOM, owner->FromDIP(6));
+    col->Add(btn_own, 0, wxBOTTOM, owner->FromDIP(12));
+    col->Add(progress, 0, wxEXPAND | wxBOTTOM, owner->FromDIP(6));
+    col->Add(get_status, 0, wxBOTTOM, owner->FromDIP(16));
     col->Add(get_licence, 0, wxBOTTOM, owner->FromDIP(4));
     col->Add(get_source, 0, wxBOTTOM, owner->FromDIP(16));
-    col->Add(buttons, 0, wxBOTTOM, owner->FromDIP(10));
-    col->Add(gauge, 0, wxBOTTOM, owner->FromDIP(6));
-    col->Add(get_status, 0, wxBOTTOM, owner->FromDIP(16));
     col->Add(get_support, 0, wxBOTTOM, owner->FromDIP(4));
     col->Add(get_funding_row, 0);
 
@@ -379,8 +412,23 @@ void LayerlingPanel::Impl::build_get_page()
     rebuild_funding_row();
 
     btn_get->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { start_download(false); });
+    btn_site->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { use_layerling_com(); });
     btn_cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { cancel_download(); });
     btn_own->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { choose_source(); });
+}
+
+// The Get page's second choice: layerling.com as the source, at once. Reversible under About >
+// Layerling source (the downloaded copy's designs, if any, are kept). Once a source is chosen the
+// Get page does not come back by itself: refresh() shows it only for the downloaded copy while it
+// is not installed, i.e. after the user picked that again in the source dialog.
+void LayerlingPanel::Impl::use_layerling_com()
+{
+    if (downloading)
+        return;
+    BOOST_LOG_TRIVIAL(info) << "Layerling: the user chose layerling.com on the Get page";
+    set_cfg(KEY_BASE_URL, layerling::LAYERLING_COM_URL);
+    set_cfg(KEY_SOURCE, layerling::source_key(layerling::Source::Custom));
+    apply_source();
 }
 
 void LayerlingPanel::Impl::rebuild_funding_row()
@@ -489,12 +537,13 @@ void LayerlingPanel::Impl::apply_colours()
     get_page->SetBackgroundColour(bg);
     for (wxStaticText *t : {get_title, get_text, get_licence, get_support})
         t->SetForegroundColour(text);
-    get_status->SetForegroundColour(muted);
+    for (wxStaticText *t : {get_status, get_line_get, get_line_site, get_note})
+        t->SetForegroundColour(muted);
     toolbar->SetBackgroundColour(bar);
     status->SetForegroundColour(muted);
     host->SetBackgroundColour(bg);
     apply_notice_colours();
-    for (Button *b : {btn_get, btn_cancel, btn_own, btn_send, btn_reload, btn_update, btn_support, btn_about, notice_action, notice_close})
+    for (Button *b : {btn_get, btn_site, btn_cancel, btn_own, btn_send, btn_reload, btn_update, btn_support, btn_about, notice_action, notice_close})
         b->Rescale();
     if (browser)
         browser->set_dark(wxGetApp().dark_mode());
@@ -852,6 +901,7 @@ void LayerlingPanel::Impl::offer_update()
 void LayerlingPanel::Impl::set_get_busy(bool busy)
 {
     btn_get->Enable(!busy);
+    btn_site->Enable(!busy);
     btn_cancel->Show(busy);
     gauge->Show(busy);
     if (!busy)
@@ -2048,7 +2098,7 @@ public:
 
         check->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { check_url(false); });
         site->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
-            m_url->ChangeValue("https://layerling.com/");
+            m_url->ChangeValue(layerling::LAYERLING_COM_URL);
             m_custom->SetValue(true);
             m_checked.clear();
             check_url(false);
