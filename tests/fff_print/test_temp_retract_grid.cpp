@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -349,6 +350,88 @@ TEST_CASE("Raised labels add a label-tower object only when the toggle is on", "
     const std::string on_g = slice_grid(params, grid_print_config());
     CHECK(on_g.find("SG_label") != std::string::npos);
     CHECK(on_g.find("SG_col_00") != std::string::npos);
+}
+
+namespace {
+
+// Value of an axis word ('X', 'Y', 'E') in a G0/G1 line, comment stripped.
+bool gcode_word(const std::string &line, char axis, double &value)
+{
+    const std::string code = line.substr(0, line.find(';'));
+    for (size_t i = 1; i < code.size(); ++i)
+        if (code[i] == axis && code[i - 1] == ' ') {
+            value = std::stod(code.substr(i + 1));
+            return true;
+        }
+    return false;
+}
+
+// Per layer (Z in 1/100 mm) above the base top and up to the label top: the number of extrusion moves of
+// SG_col_* objects that end between the two pillars (9..21 mm from the object's front edge; the pillars
+// cover 3..7 and 23..27). The front edge is the lowest Y extruded on the object's first layer.
+std::map<long, int> base_label_extrusions(const std::string &gcode)
+{
+    std::map<std::string, double> front;
+    std::map<long, int>           hits;
+    std::string                   obj;
+    double                        z = 0., x = 0., y = 0.;
+    const double                  label_top = stringing_grid_base_height + stringing_grid_label_height + 1e-3;
+    for (const std::string &line : gcode_lines(gcode)) {
+        if (line.rfind("; printing object ", 0) == 0) {
+            std::istringstream in(line.substr(18));
+            in >> obj;
+            continue;
+        }
+        if (line.rfind("; stop printing object", 0) == 0) {
+            obj.clear();
+            continue;
+        }
+        if (line.rfind(";Z:", 0) == 0) {
+            z = std::stod(line.substr(3));
+            continue;
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        double v = 0., e = 0.;
+        const bool has_x = gcode_word(line, 'X', v);
+        if (has_x)
+            x = v;
+        const bool has_y = gcode_word(line, 'Y', v);
+        if (has_y)
+            y = v;
+        if (!(has_x || has_y) || !gcode_word(line, 'E', e) || e <= 0. || obj.rfind(stringing_grid_column_prefix, 0) != 0)
+            continue;
+        if (z < 0.21) {
+            auto it = front.find(obj);
+            front[obj] = it == front.end() ? y : std::min(it->second, y);
+        } else if (z > stringing_grid_base_height + 1e-3 && z <= label_top && front.count(obj)) {
+            const double rel = y - front[obj];
+            if (rel > 9. && rel < 21.)
+                ++hits[std::lround(z * 100.)];
+        }
+    }
+    return hits;
+}
+
+} // namespace
+
+TEST_CASE("Raised base labels print as extrusions on the base top between the pillars", "[Calib][TempRetract][Slice]")
+{
+    // Owner hand test: the base labels sliced to a few stray fragments and travel stubs.
+    Calib_Params params = small_grid_params();
+    params.print_labels = false;
+    CHECK(base_label_extrusions(slice_grid(params, grid_print_config())).empty());
+
+    params.print_labels = true;
+    const std::map<long, int> hits = base_label_extrusions(slice_grid(params, grid_print_config()));
+    // Every layer from the base top to the label top (1.2, 1.4, 1.6 at 0.2 mm) extrudes the labels,
+    // several moves per column (3 columns).
+    const int label_layers = int(std::lround(stringing_grid_label_height / 0.2));
+    REQUIRE(int(hits.size()) == label_layers);
+    for (const auto &[z, n] : hits) {
+        CAPTURE(z);
+        CHECK(n >= 3 * 4);
+    }
 }
 
 namespace {

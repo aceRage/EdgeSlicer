@@ -75,7 +75,14 @@ static constexpr double      stringing_grid_base_x           = 10.0;
 static constexpr double      stringing_grid_base_y           = 30.0;
 static constexpr double      stringing_grid_base_height      = 1.0;
 static constexpr double      stringing_grid_notch_depth      = 0.4;
-static constexpr double      stringing_grid_label_height     = 0.6;
+static constexpr double      stringing_grid_label_height     = 0.6;  // emboss height above the host face (3 layers at 0.2)
+static constexpr double      stringing_grid_label_embed      = 0.2;  // how far a label reaches into its host, so it fuses
+static constexpr double      stringing_grid_label_glyph_height = 5.0; // 7-segment digit height
+static constexpr double      stringing_grid_label_glyph_width  = 3.0; // 7-segment digit width
+static constexpr double      stringing_grid_label_stroke     = 1.0;  // segment width: about two 0.45 mm lines
+// Label tower (temperature per band, digits upright on its front face, y = 0).
+static constexpr double      stringing_grid_label_tower_x    = 10.5;
+static constexpr double      stringing_grid_label_tower_y    = 6.0;
 static constexpr double      stringing_grid_bed_margin       = 15.0;
 static constexpr double      stringing_grid_prime_tower_size = 35.0;
 static constexpr const char *stringing_grid_column_prefix    = "SG_col_";
@@ -92,6 +99,13 @@ double               temp_for_z(const Calib_Params &params, double z);
 double               retract_for_column(const Calib_Params &params, int column);
 TriangleMesh         make_stringing_grid_column_mesh(const Calib_Params &params, int column);
 TriangleMesh         make_stringing_grid_label_tower_mesh(const Calib_Params &params);
+// The raised labels on their own, in the coordinates of their host mesh (column base / label tower).
+// Column: retraction value on the base top between the two pillars. Band: that band's temperature,
+// upright on the label tower's front face (y = 0), centred in the band.
+TriangleMesh         make_stringing_grid_column_label_mesh(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_band_label_mesh(const Calib_Params &params, int band);
+// Label text: "0.2" ... "9.8", whole lengths of 10 mm and more without the ".0" so they fit the base.
+std::string          stringing_grid_retract_label(double length);
 void                 make_stringing_grid(Model &model, const Calib_Params &params);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
