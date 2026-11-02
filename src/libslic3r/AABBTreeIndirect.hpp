@@ -549,16 +549,19 @@ namespace detail {
 	};
 
 	// Whether a box may hold a primitive closer to p than sqrt(up_sqr_d).
-	// Eigen's AlignedBox<int>::squaredExteriorDistance() squares and sums in int: with libslic3r's 32-bit coord_t it
-	// overflows once the box is more than 46341 units (0.46 mm) away. The wrapped value is still a lower bound, so the
-	// searches stay correct, but it is far too low and disables almost all pruning: a nearest-line query over a
-	// layer's walls then visits most of the tree. This exact double bound is checked in addition to the original test.
+	// Guard only (ported from Bambu #12874). Eigen's AlignedBox<Integral>::squaredExteriorDistance() squares and sums
+	// in the box's own integer type. Upstream builds with a 32-bit coord_t, where that overflows a fraction of a
+	// millimetre away and disables pruning. EdgeSlicer's coord_t is int64_t (see libslic3r.h and the static_assert
+	// below), so the sum only overflows for a box about 2.1e9 units (~2 m at the 1 nm scale) away, far beyond any bed, and the bug does not occur here today. This exact
+	// double bound is checked in addition to the original test so pruning stays correct if coord_t or the box type
+	// ever narrows.
 	// A subtree it rejects has no primitive strictly closer than up_sqr_d, so skipping it changes nothing, not even
 	// which of several equally close primitives is reported. Floating point boxes keep the original test only.
 	template<typename BBox, typename Vector>
 	inline bool box_may_contain_closer(const BBox &bbox, const Vector &p, double up_sqr_d)
 	{
 		if constexpr (std::is_integral<typename BBox::Scalar>::value) {
+			static_assert(sizeof(coord_t) == 8, "EdgeSlicer expects a 64-bit coord_t; with 32 bits the integral squaredExteriorDistance() overflows (Bambu #12874)");
 			double d2 = 0.;
 			for (int k = 0; k < int(BBox::AmbientDimAtCompileTime); ++ k) {
 				const double lo = double(bbox.min()[k]), hi = double(bbox.max()[k]), x = double(p[k]);
