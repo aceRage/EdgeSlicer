@@ -2365,6 +2365,8 @@ TEST_CASE("Print: shared layers need the same center offset, not only the same t
     // make_cube() spans 0..20, so its centre is off the origin and moves when rotated about Z.
     ModelObject *a = model.add_object();
     a->name        = "A";
+    // Model::add_object(const ModelObject&) gives the copies an "extruder" key; give A the same one, or no object shares.
+    a->config.set_key_value("extruder", new ConfigOptionInt(1));
     a->add_volume(make_cube(20.0, 20.0, 20.0));
     a->add_instance()->set_offset(Vec3d(40., 40., 0.));
     a->ensure_on_bed();
