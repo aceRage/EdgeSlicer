@@ -34,18 +34,21 @@ namespace {
 // system code page, as before.
 std::string decode_zip_unicode_path_extra_field(const std::string& extra, const std::string& path)
 {
-    size_t          offset   = 0;
+    size_t offset = 0;
     const mz_uint32 path_crc = mz_crc32(0, reinterpret_cast<const unsigned char*>(path.data()), path.size());
 
     while (offset + 4 <= extra.size()) {
         const unsigned char* field = reinterpret_cast<const unsigned char*>(extra.data() + offset);
-        const std::uint16_t  len   = field[2] | (static_cast<std::uint16_t>(field[3]) << 8);
+        const std::uint16_t len = field[2] | (static_cast<std::uint16_t>(field[3]) << 8);
         if (offset + 4 + len > extra.size())
             break;
 
         if (field[0] == 0x75 && field[1] == 0x70 && len >= 5 && field[4] == 0x01) {
-            const mz_uint32 stored_crc = static_cast<mz_uint32>(field[5]) | (static_cast<mz_uint32>(field[6]) << 8) |
-                                         (static_cast<mz_uint32>(field[7]) << 16) | (static_cast<mz_uint32>(field[8]) << 24);
+            const mz_uint32 stored_crc =
+                static_cast<mz_uint32>(field[5]) |
+                (static_cast<mz_uint32>(field[6]) << 8) |
+                (static_cast<mz_uint32>(field[7]) << 16) |
+                (static_cast<mz_uint32>(field[8]) << 24);
             if (stored_crc == path_crc)
                 return std::string(extra.data() + offset + 9, extra.data() + offset + 4 + len);
         }
@@ -56,13 +59,12 @@ std::string decode_zip_unicode_path_extra_field(const std::string& extra, const 
     return Slic3r::decode_path(path.c_str());
 }
 
-bool open_zip(mz_zip_archive* zip, const char* fname, bool isread)
+bool open_zip(mz_zip_archive *zip, const char *fname, bool isread)
 {
-    if (!zip)
-        return false;
-    const char* mode = isread ? "rb" : "wb";
+    if (!zip) return false;
+    const char *mode = isread ? "rb" : "wb";
 
-    FILE* f = nullptr;
+    FILE *f = nullptr;
 #if defined(_MSC_VER) || defined(__MINGW64__)
     f = boost::nowide::fopen(fname, mode);
 #elif defined(__GNUC__) && defined(_LARGEFILE64_SOURCE)
@@ -77,50 +79,58 @@ bool open_zip(mz_zip_archive* zip, const char* fname, bool isread)
     }
 
     bool res = false;
-    if (isread) {
+    if (isread)
+    {
         res = mz_zip_reader_init_cfile(zip, f, 0, 0);
         if (!res)
             // if we get here it means we tried to open a non-zip file
             // we need to close the file here because the call to mz_zip_get_cfile() made into close_zip() returns a null pointer
             // see: https://github.com/prusa3d/PrusaSlicer/issues/3536
             fclose(f);
-    } else
+    }
+    else
         res = mz_zip_writer_init_cfile(zip, f, 0);
 
     return res;
 }
 
-bool close_zip(mz_zip_archive* zip, bool isread)
+bool close_zip(mz_zip_archive *zip, bool isread)
 {
     bool ret = false;
     if (zip) {
-        FILE* f = mz_zip_get_cfile(zip);
-        ret     = bool(isread ? mz_zip_reader_end(zip) : mz_zip_writer_end(zip));
-        if (f)
-            fclose(f);
+        FILE *f = mz_zip_get_cfile(zip);
+        ret     = bool(isread ? mz_zip_reader_end(zip)
+                          : mz_zip_writer_end(zip));
+        if (f) fclose(f);
     }
     return ret;
 }
-} // namespace
+}
 
-bool open_zip_reader(mz_zip_archive* zip, const std::string& fname) { return open_zip(zip, fname.c_str(), true); }
+bool open_zip_reader(mz_zip_archive *zip, const std::string &fname)
+{
+    return open_zip(zip, fname.c_str(), true);
+}
 
-bool open_zip_writer(mz_zip_archive* zip, const std::string& fname) { return open_zip(zip, fname.c_str(), false); }
+bool open_zip_writer(mz_zip_archive *zip, const std::string &fname)
+{
+    return open_zip(zip, fname.c_str(), false);
+}
 
-bool close_zip_reader(mz_zip_archive* zip) { return close_zip(zip, true); }
-bool close_zip_writer(mz_zip_archive* zip) { return close_zip(zip, false); }
+bool close_zip_reader(mz_zip_archive *zip) { return close_zip(zip, true); }
+bool close_zip_writer(mz_zip_archive *zip) { return close_zip(zip, false); }
 
-std::string decode_archive_entry_path(mz_zip_archive* zip, const mz_zip_archive_file_stat& stat)
+std::string decode_archive_entry_path(mz_zip_archive *zip, const mz_zip_archive_file_stat &stat)
 {
     if (stat.m_is_utf8)
         return stat.m_filename;
 
-    std::string  extra(1024, 0);
+    std::string extra(1024, 0);
     const size_t extra_size = mz_zip_reader_get_extra(zip, stat.m_file_index, extra.data(), extra.size());
     return decode_zip_unicode_path_extra_field(extra.substr(0, extra_size > 0 ? extra_size - 1 : 0), stat.m_filename);
 }
 
-bool zip_entry_is_symlink(const mz_zip_archive_file_stat& stat)
+bool zip_entry_is_symlink(const mz_zip_archive_file_stat &stat)
 {
     const mz_uint32 mode = stat.m_external_attr >> 16;
     return (mode & 0170000u) == 0120000u;
@@ -273,7 +283,7 @@ std::string sanitize_zip_extract_path(const std::string& normalized_utf8)
     return out.empty() ? std::string("_") : out;
 }
 
-bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const boost::filesystem::path& dest_path)
+bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const boost::filesystem::path &dest_path)
 {
 #ifdef _WIN32
     // path::c_str() is a wchar_t* here. No narrowing: the ANSI code page maps U+FF0E / U+FF0F
@@ -284,7 +294,7 @@ bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const bo
 #endif
 }
 
-bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const std::string& dest_path_utf8)
+bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const std::string &dest_path_utf8)
 {
 #ifdef _WIN32
     const std::wstring dest_w = boost::nowide::widen(dest_path_utf8);
@@ -297,20 +307,20 @@ bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const st
 namespace {
 struct CappedSink
 {
-    std::string*  out;
+    std::string  *out;
     std::uint64_t cap;
     bool          overflow = false;
 };
 
-size_t capped_sink_write(void* opaque, mz_uint64 file_ofs, const void* data, size_t n)
+size_t capped_sink_write(void *opaque, mz_uint64 file_ofs, const void *data, size_t n)
 {
-    CappedSink* sink = static_cast<CappedSink*>(opaque);
+    CappedSink *sink = static_cast<CappedSink *>(opaque);
     // Entries are written sequentially; anything else is a corrupt stream.
     if (file_ofs != sink->out->size() || n > sink->cap - std::min<std::uint64_t>(sink->cap, sink->out->size())) {
         sink->overflow = true;
         return 0; // a short write makes miniz abort the extraction
     }
-    sink->out->append(static_cast<const char*>(data), n);
+    sink->out->append(static_cast<const char *>(data), n);
     return n;
 }
 
@@ -362,10 +372,10 @@ std::unique_ptr<FILE, FileCloser> open_extract_file(const boost::filesystem::pat
 
 } // namespace
 
-bool read_zip_entry_capped(mz_zip_archive& archive, mz_uint file_index, std::uint64_t cap, std::string& out, std::string* why)
+bool read_zip_entry_capped(mz_zip_archive &archive, mz_uint file_index, std::uint64_t cap, std::string &out, std::string *why)
 {
     out.clear();
-    auto fail = [&](const char* reason) {
+    auto fail = [&](const char *reason) {
         out.clear();
         out.shrink_to_fit();
         if (why != nullptr)
@@ -379,7 +389,7 @@ bool read_zip_entry_capped(mz_zip_archive& archive, mz_uint file_index, std::uin
         return true;
     if (stat.m_uncomp_size > cap)
         return fail("entry is larger than the allowed size");
-    CappedSink sink{&out, stat.m_uncomp_size};            // stop at the declared size (already within cap)
+    CappedSink sink{&out, stat.m_uncomp_size}; // stop at the declared size (already within cap)
     out.reserve(static_cast<size_t>(stat.m_uncomp_size)); // the header was just checked against cap
     if (!mz_zip_reader_extract_to_callback(&archive, file_index, capped_sink_write, &sink, 0))
         return fail(sink.overflow ? "entry inflates beyond its declared size" : "entry cannot be inflated");
@@ -393,7 +403,7 @@ namespace {
 // An archive entry name is UTF-8. On Windows it is widened explicitly, so the path does not
 // depend on whether boost::filesystem has the nowide locale installed (the app installs it,
 // a unit test may not).
-boost::filesystem::path entry_path(const std::string& name_utf8)
+boost::filesystem::path entry_path(const std::string &name_utf8)
 {
 #ifdef _WIN32
     return boost::filesystem::path(boost::nowide::widen(name_utf8));
@@ -404,7 +414,7 @@ boost::filesystem::path entry_path(const std::string& name_utf8)
 
 // UTF-8 text of a path for logs and error messages (path::string() would go through the
 // narrow locale, which can throw for characters the code page does not have).
-std::string path_utf8(const boost::filesystem::path& p)
+std::string path_utf8(const boost::filesystem::path &p)
 {
 #ifdef _WIN32
     return boost::nowide::narrow(p.native());
@@ -429,14 +439,14 @@ boost::filesystem::path normalize_dir_path(boost::filesystem::path p)
     return p;
 }
 
-bool leaf_exists(const boost::filesystem::path& p)
+bool leaf_exists(const boost::filesystem::path &p)
 {
     boost::system::error_code ec;
     const auto                st = boost::filesystem::symlink_status(p, ec);
     return !ec && boost::filesystem::exists(st);
 }
 
-bool is_dir_or_dir_symlink(const boost::filesystem::path& p)
+bool is_dir_or_dir_symlink(const boost::filesystem::path &p)
 {
     boost::system::error_code ec;
     const auto                st = boost::filesystem::symlink_status(p, ec);
@@ -451,12 +461,12 @@ bool is_dir_or_dir_symlink(const boost::filesystem::path& p)
 
 // Create missing directories from root toward dir. A regular file already sitting
 // on that path (the "blocker" case) is a failure, not an overwrite.
-bool ensure_dirs(const boost::filesystem::path&        root,
-                 const boost::filesystem::path&        dir,
-                 std::vector<boost::filesystem::path>& created,
-                 std::string&                          err)
+bool ensure_dirs(const boost::filesystem::path &root,
+                 const boost::filesystem::path &dir,
+                 std::vector<boost::filesystem::path> &created,
+                 std::string                         &err)
 {
-    namespace fs          = boost::filesystem;
+    namespace fs = boost::filesystem;
     const fs::path root_n = normalize_dir_path(root);
     const fs::path dir_n  = normalize_dir_path(dir);
     if (dir_n.empty())
@@ -468,7 +478,7 @@ bool ensure_dirs(const boost::filesystem::path&        root,
             break;
     }
     std::reverse(chain.begin(), chain.end());
-    for (const fs::path& p : chain) {
+    for (const fs::path &p : chain) {
         if (is_dir_or_dir_symlink(p))
             continue;
         if (leaf_exists(p)) {
@@ -486,20 +496,21 @@ bool ensure_dirs(const boost::filesystem::path&        root,
     return true;
 }
 
-bool extract_to_path(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, const boost::filesystem::path& path, std::string& err)
+bool extract_to_path(mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, const boost::filesystem::path &path, std::string &err)
 {
     // Wide API only on Windows (see extract_entry_to_file): no narrow attempt first, no fallback.
     const bool res = extract_entry_to_file(archive, stat.m_file_index, path);
     if (!res) {
         const mz_zip_error zip_err = mz_zip_get_last_error(&archive);
-        err                        = std::string("extract failed: ") + stat.m_filename +
+        err = std::string("extract failed: ") + stat.m_filename +
               (zip_err != MZ_ZIP_NO_ERROR ? (std::string(" (") + mz_zip_get_error_string(zip_err) + ")") : std::string());
         return false;
     }
     return true;
 }
 
-boost::filesystem::path make_part_path(const boost::filesystem::path& full_dest, const std::set<boost::filesystem::path>& reserved)
+boost::filesystem::path make_part_path(const boost::filesystem::path              &full_dest,
+                                       const std::set<boost::filesystem::path>    &reserved)
 {
     namespace fs = boost::filesystem;
     // Always a random suffix so an archive that itself contains "x.json.part" cannot steal
@@ -516,7 +527,7 @@ boost::filesystem::path make_part_path(const boost::filesystem::path& full_dest,
     return fs::unique_path(unique);
 }
 
-bool commit_part(const boost::filesystem::path& part, const boost::filesystem::path& dest, std::string& err)
+bool commit_part(const boost::filesystem::path &part, const boost::filesystem::path &dest, std::string &err)
 {
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
@@ -537,11 +548,12 @@ struct StagedFile
     bool                    dest_existed = false;
 };
 
-void rollback_extract(std::vector<StagedFile>& staged, std::vector<boost::filesystem::path>& created_dirs)
+void rollback_extract(std::vector<StagedFile>                 &staged,
+                      std::vector<boost::filesystem::path>    &created_dirs)
 {
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
-    for (const StagedFile& s : staged) {
+    for (const StagedFile &s : staged) {
         if (!s.part.empty())
             fs::remove(s.part, ec);
         // A dest that did not exist before this call and was already committed (rename
@@ -549,9 +561,10 @@ void rollback_extract(std::vector<StagedFile>& staged, std::vector<boost::filesy
         if (!s.dest_existed)
             fs::remove(s.dest, ec);
     }
-    std::sort(created_dirs.begin(), created_dirs.end(),
-              [](const fs::path& a, const fs::path& b) { return a.generic_string().size() > b.generic_string().size(); });
-    for (const fs::path& d : created_dirs)
+    std::sort(created_dirs.begin(), created_dirs.end(), [](const fs::path &a, const fs::path &b) {
+        return a.generic_string().size() > b.generic_string().size();
+    });
+    for (const fs::path &d : created_dirs)
         fs::remove(d, ec);
 }
 
@@ -713,7 +726,7 @@ bool prepare_extract_dest(const boost::filesystem::path&        dest,
 
 } // namespace
 
-bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::path& dest, std::string& err)
+bool extract_archive_confined(mz_zip_archive &archive, const boost::filesystem::path &dest, std::string &err)
 {
     namespace fs = boost::filesystem;
     err.clear();
@@ -734,7 +747,7 @@ bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::
             }
             created_dirs.push_back(dest_root);
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         err = e.what();
         BOOST_LOG_TRIVIAL(error) << "Unzip: dest path: " << err;
         return false;
@@ -768,11 +781,12 @@ bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::
         // Backslash separators, "./" prefixes, "a//b" and a trailing separator are normalised
         // first; the result is then judged as strictly as ever. A bare "./" entry has nothing to
         // extract. Two entries that normalise to the same name follow the duplicate rule below.
-        std::string                       name;
+        std::string name;
         const untrusted::ArchiveEntryName verdict = untrusted::normalize_archive_entry_path(stat.m_filename, name);
         if (verdict == untrusted::ArchiveEntryName::Skip)
             continue;
-        if (verdict == untrusted::ArchiveEntryName::Reject || !untrusted::is_path_within_root(dest_root, dest_root / entry_path(name))) {
+        if (verdict == untrusted::ArchiveEntryName::Reject ||
+            !untrusted::is_path_within_root(dest_root, dest_root / entry_path(name))) {
             err = std::string("entry resolves outside the extraction root: ") + stat.m_filename;
             BOOST_LOG_TRIVIAL(error) << "Unzip: rejecting archive, " << err;
             return fail();
@@ -815,7 +829,7 @@ bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::
             if (!extract_to_path(archive, stat, part, err))
                 return fail();
             BOOST_LOG_TRIVIAL(info) << "Unzip: staged file " << stat.m_file_index << " to " << path_utf8(part);
-        } catch (const std::exception& e) {
+        } catch (const std::exception &e) {
             err = e.what();
             BOOST_LOG_TRIVIAL(error) << "Unzip: archive read exception: " << err;
             return fail();
@@ -826,7 +840,7 @@ bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::
     // A failure here can leave a mix of old and new files (already-renamed dests stay;
     // not-yet-renamed dests keep their previous content). Nothing is truncated or deleted,
     // but the result is not atomic across files.
-    for (StagedFile& s : staged) {
+    for (StagedFile &s : staged) {
         if (!commit_part(s.part, s.dest, err))
             return fail();
         s.part.clear();
@@ -835,7 +849,7 @@ bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::
     return true;
 }
 
-bool extract_archive_confined(const boost::filesystem::path& zip_path, const boost::filesystem::path& dest, std::string& err)
+bool extract_archive_confined(const boost::filesystem::path &zip_path, const boost::filesystem::path &dest, std::string &err)
 {
     MZ_Archive archive;
     if (!archive.open_reader(zip_path.string())) {
@@ -1098,40 +1112,74 @@ bool MZ_Archive::close()
 
 std::string MZ_Archive::get_errorstr(mz_zip_error mz_err)
 {
-    switch (mz_err) {
-    case MZ_ZIP_NO_ERROR: return "no error";
-    case MZ_ZIP_UNDEFINED_ERROR: return L("undefined error");
-    case MZ_ZIP_TOO_MANY_FILES: return L("too many files");
-    case MZ_ZIP_FILE_TOO_LARGE: return L("file too large");
-    case MZ_ZIP_UNSUPPORTED_METHOD: return L("unsupported method");
-    case MZ_ZIP_UNSUPPORTED_ENCRYPTION: return L("unsupported encryption");
-    case MZ_ZIP_UNSUPPORTED_FEATURE: return L("unsupported feature");
-    case MZ_ZIP_FAILED_FINDING_CENTRAL_DIR: return L("failed finding central directory");
-    case MZ_ZIP_NOT_AN_ARCHIVE: return L("not a ZIP archive");
-    case MZ_ZIP_INVALID_HEADER_OR_CORRUPTED: return L("invalid header or corrupted");
-    case MZ_ZIP_UNSUPPORTED_MULTIDISK: return L("unsupported multidisk");
-    case MZ_ZIP_DECOMPRESSION_FAILED: return L("decompression failed");
-    case MZ_ZIP_COMPRESSION_FAILED: return L("compression failed");
-    case MZ_ZIP_UNEXPECTED_DECOMPRESSED_SIZE: return L("unexpected decompressed size");
-    case MZ_ZIP_CRC_CHECK_FAILED: return L("CRC check failed");
-    case MZ_ZIP_UNSUPPORTED_CDIR_SIZE: return L("unsupported central directory size");
-    case MZ_ZIP_ALLOC_FAILED: return L("allocation failed");
-    case MZ_ZIP_FILE_OPEN_FAILED: return L("file open failed");
-    case MZ_ZIP_FILE_CREATE_FAILED: return L("file create failed");
-    case MZ_ZIP_FILE_WRITE_FAILED: return L("file write failed");
-    case MZ_ZIP_FILE_READ_FAILED: return L("file read failed");
-    case MZ_ZIP_FILE_CLOSE_FAILED: return L("file close failed");
-    case MZ_ZIP_FILE_SEEK_FAILED: return L("file seek failed");
-    case MZ_ZIP_FILE_STAT_FAILED: return L("file stat failed");
-    case MZ_ZIP_INVALID_PARAMETER: return L("invalid parameter");
-    case MZ_ZIP_INVALID_FILENAME: return L("invalid filename");
-    case MZ_ZIP_BUF_TOO_SMALL: return L("buffer too small");
-    case MZ_ZIP_INTERNAL_ERROR: return L("internal error");
-    case MZ_ZIP_FILE_NOT_FOUND: return L("file not found");
-    case MZ_ZIP_ARCHIVE_TOO_LARGE: return L("archive too large");
-    case MZ_ZIP_VALIDATION_FAILED: return L("validation failed");
-    case MZ_ZIP_WRITE_CALLBACK_FAILED: return L("write callback failed");
-    default: break;
+    switch (mz_err)
+    {
+    case MZ_ZIP_NO_ERROR:
+        return "no error";
+    case MZ_ZIP_UNDEFINED_ERROR:
+        return L("undefined error");
+    case MZ_ZIP_TOO_MANY_FILES:
+        return L("too many files");
+    case MZ_ZIP_FILE_TOO_LARGE:
+        return L("file too large");
+    case MZ_ZIP_UNSUPPORTED_METHOD:
+        return L("unsupported method");
+    case MZ_ZIP_UNSUPPORTED_ENCRYPTION:
+        return L("unsupported encryption");
+    case MZ_ZIP_UNSUPPORTED_FEATURE:
+        return L("unsupported feature");
+    case MZ_ZIP_FAILED_FINDING_CENTRAL_DIR:
+        return L("failed finding central directory");
+    case MZ_ZIP_NOT_AN_ARCHIVE:
+        return L("not a ZIP archive");
+    case MZ_ZIP_INVALID_HEADER_OR_CORRUPTED:
+        return L("invalid header or corrupted");
+    case MZ_ZIP_UNSUPPORTED_MULTIDISK:
+        return L("unsupported multidisk");
+    case MZ_ZIP_DECOMPRESSION_FAILED:
+        return L("decompression failed");
+    case MZ_ZIP_COMPRESSION_FAILED:
+        return L("compression failed");
+    case MZ_ZIP_UNEXPECTED_DECOMPRESSED_SIZE:
+        return L("unexpected decompressed size");
+    case MZ_ZIP_CRC_CHECK_FAILED:
+        return L("CRC check failed");
+    case MZ_ZIP_UNSUPPORTED_CDIR_SIZE:
+        return L("unsupported central directory size");
+    case MZ_ZIP_ALLOC_FAILED:
+        return L("allocation failed");
+    case MZ_ZIP_FILE_OPEN_FAILED:
+        return L("file open failed");
+    case MZ_ZIP_FILE_CREATE_FAILED:
+        return L("file create failed");
+    case MZ_ZIP_FILE_WRITE_FAILED:
+        return L("file write failed");
+    case MZ_ZIP_FILE_READ_FAILED:
+        return L("file read failed");
+    case MZ_ZIP_FILE_CLOSE_FAILED:
+        return L("file close failed");
+    case MZ_ZIP_FILE_SEEK_FAILED:
+        return L("file seek failed");
+    case MZ_ZIP_FILE_STAT_FAILED:
+        return L("file stat failed");
+    case MZ_ZIP_INVALID_PARAMETER:
+        return L("invalid parameter");
+    case MZ_ZIP_INVALID_FILENAME:
+        return L("invalid filename");
+    case MZ_ZIP_BUF_TOO_SMALL:
+        return L("buffer too small");
+    case MZ_ZIP_INTERNAL_ERROR:
+        return L("internal error");
+    case MZ_ZIP_FILE_NOT_FOUND:
+        return L("file not found");
+    case MZ_ZIP_ARCHIVE_TOO_LARGE:
+        return L("archive too large");
+    case MZ_ZIP_VALIDATION_FAILED:
+        return L("validation failed");
+    case MZ_ZIP_WRITE_CALLBACK_FAILED:
+        return L("write callback failed");
+    default:
+        break;
     }
 
     return "unknown error";

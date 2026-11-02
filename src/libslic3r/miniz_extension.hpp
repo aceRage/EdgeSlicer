@@ -10,16 +10,16 @@
 
 namespace Slic3r {
 
-bool open_zip_reader(mz_zip_archive* zip, const std::string& fname_utf8);
-bool open_zip_writer(mz_zip_archive* zip, const std::string& fname_utf8);
-bool close_zip_reader(mz_zip_archive* zip);
-bool close_zip_writer(mz_zip_archive* zip);
+bool open_zip_reader(mz_zip_archive *zip, const std::string &fname_utf8);
+bool open_zip_writer(mz_zip_archive *zip, const std::string &fname_utf8);
+bool close_zip_reader(mz_zip_archive *zip);
+bool close_zip_writer(mz_zip_archive *zip);
 // Entry name as UTF-8: the UTF-8 flagged name, else the Info-ZIP Unicode Path extra field, else the
 // legacy name decoded with the system code page.
-std::string decode_archive_entry_path(mz_zip_archive* zip, const mz_zip_archive_file_stat& stat);
+std::string decode_archive_entry_path(mz_zip_archive *zip, const mz_zip_archive_file_stat &stat);
 
 // Unix symlink bit in the zip central-directory external attributes (high 16 bits).
-bool zip_entry_is_symlink(const mz_zip_archive_file_stat& stat);
+bool zip_entry_is_symlink(const mz_zip_archive_file_stat &stat);
 
 // Traditional PKWARE encryption (general-purpose bit 0 / strong-encryption bit 6), compression
 // method 99, or a WinZip AES extra field (0x9901). `zip` may be null; the extra-field check is
@@ -77,8 +77,8 @@ bool inspect_zip_entries(mz_zip_archive& archive, const ZipExtractCaps& caps, st
 // dest-file symlink is replaced by that rename rather than written through. A failure partway
 // through the commit (rename) phase can leave a mix of old and new files: nothing is truncated
 // or deleted, but the result is not atomic across files.
-bool extract_archive_confined(mz_zip_archive& archive, const boost::filesystem::path& dest, std::string& err);
-bool extract_archive_confined(const boost::filesystem::path& zip_path, const boost::filesystem::path& dest, std::string& err);
+bool extract_archive_confined(mz_zip_archive &archive, const boost::filesystem::path &dest, std::string &err);
+bool extract_archive_confined(const boost::filesystem::path &zip_path, const boost::filesystem::path &dest, std::string &err);
 
 // Extracts only the selected central-directory indices under dest. Same path checks and
 // stage-then-rename guarantees as extract_archive_confined, plus zip-bomb caps, a capped
@@ -101,8 +101,8 @@ bool extract_entries_confined(const boost::filesystem::path& zip_path,
 // fullwidth look-alikes (U+FF0E U+FF0E U+FF0F) into "../". Every extraction of an untrusted
 // entry name must use this rather than encode_path() + mz_zip_reader_extract_to_file().
 // The std::string overload takes a UTF-8 path.
-bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const boost::filesystem::path& dest_path);
-bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const std::string& dest_path_utf8);
+bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const boost::filesystem::path &dest_path);
+bool extract_entry_to_file(mz_zip_archive &archive, mz_uint file_index, const std::string &dest_path_utf8);
 
 // Reads one archive entry of a file we did not write into `out`, never trusting its header: the
 // declared uncompressed size is compared with `cap` before anything is allocated, and the data
@@ -110,13 +110,12 @@ bool extract_entry_to_file(mz_zip_archive& archive, mz_uint file_index, const st
 // about its size, or a zip bomb, cannot take more than `cap` bytes. Returns false (and `out`
 // empty) when the entry is too large, cannot be inflated, or its size or CRC disagree with its
 // header. `*why` gets a short reason. A zero-length entry yields true and an empty `out`.
-bool read_zip_entry_capped(mz_zip_archive& archive, mz_uint file_index, std::uint64_t cap, std::string& out, std::string* why = nullptr);
+bool read_zip_entry_capped(mz_zip_archive &archive, mz_uint file_index, std::uint64_t cap, std::string &out, std::string *why = nullptr);
 
-class MZ_Archive
-{
+class MZ_Archive {
 public:
     mz_zip_archive arch;
-
+    
     MZ_Archive();
     ~MZ_Archive();
 
@@ -128,12 +127,18 @@ public:
     bool open_reader(const std::string& fname_utf8);
     bool open_writer(const std::string& fname_utf8);
     bool close();
-
+    
     static std::string get_errorstr(mz_zip_error mz_err);
+    
+    std::string get_errorstr() const
+    {
+        return get_errorstr(arch.m_last_error) + "!";
+    }
 
-    std::string get_errorstr() const { return get_errorstr(arch.m_last_error) + "!"; }
-
-    bool is_alive() const { return arch.m_zip_mode != MZ_ZIP_MODE_WRITING_HAS_BEEN_FINALIZED; }
+    bool is_alive() const
+    {
+        return arch.m_zip_mode != MZ_ZIP_MODE_WRITING_HAS_BEEN_FINALIZED;
+    }
 
 private:
     enum class Kind { None, Reader, Writer };
