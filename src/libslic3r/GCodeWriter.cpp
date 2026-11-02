@@ -1334,31 +1334,6 @@ std::string GCodeWriter::unretract()
     return gcode;
 }
 
-std::string GCodeWriter::reduce_retraction_to(double length)
-{
-    if (m_extruder == nullptr || this->config.use_firmware_retraction)
-        return {};
-    const double held = m_extruder->retracted();
-    if (held <= length + EPSILON)
-        return {};
-    const double restart_extra = m_extruder->restart_extra();
-    m_extruder->extrude(held - length);
-    // Take the E to write now: with relative E, the retract(0, extra) below resets E() to 0
-    // and the partial unretract would be written as E0 (filament lost from the bookkeeping).
-    const double e_out = m_extruder->E();
-    m_extruder->set_retracted(std::max(0., length), restart_extra);
-    // F13: set_retracted(0, extra) drops restart extra. A 0 mm column must keep the
-    // same restart extra as the other columns so the next unretract stays consistent.
-    if (length <= EPSILON && restart_extra > EPSILON)
-        m_extruder->retract(0., restart_extra);
-    GCodeG1Formatter w;
-    w.emit_e(e_out);
-    this->seed_formatter_guard(w);
-    w.emit_f(m_extruder->deretract_speed() * 60.);
-    w.emit_comment(GCodeWriter::full_gcode_comment, " ; partial unretract");
-    return w.string();
-}
-
 /*  If this method is called more than once before calling unlift(),
     it will not perform subsequent lifts, even if Z was raised manually
     (i.e. with travel_to_z()) and thus _lifted was reduced. */

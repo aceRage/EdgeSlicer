@@ -559,17 +559,21 @@ TEST_CASE("By-object sequence re-runs the temperature bands for every column", "
     CHECK(matched >= 3);
 }
 
-TEST_CASE("A column switch travels with exactly the new column's retraction", "[Calib][TempRetract][Slice]")
+TEST_CASE("A column switch keeps the longer retraction for the travel into the column", "[Calib][TempRetract][Slice]")
 {
-    // Review F9: going from a longer column (0.6) to a shorter one (0.2) used to keep 0.6 retracted on
-    // the travel into the new column. Now the difference is given back first.
+    // The travel from the last column of a layer (longest retraction) to the first column of the next
+    // (shortest) crosses the whole grid. It keeps the longer retraction: giving the difference back
+    // before the travel (review F9) was a stationary unretract followed by a long, barely retracted
+    // travel that strung over every column. The unretract at the new column gives it all back.
     const Calib_Params params = small_grid_params();
     const std::string  g      = slice_grid(params, grid_print_config());
     REQUIRE_FALSE(lines_starting_with(g, "G1 E").empty());
+    CHECK(g.find("partial unretract") == std::string::npos);
 
     const std::regex col_re(R"(; Calib_TempRetract: col=(\d+) retract=([0-9.]+))");
     RetractState     rs;
     double           want      = -1.;
+    double           expect    = -1.;
     int              checked   = 0;
     int              shrinking = 0;
     double           prev_L    = -1.;
@@ -577,7 +581,8 @@ TEST_CASE("A column switch travels with exactly the new column's retraction", "[
         rs.feed(line);
         std::smatch m;
         if (std::regex_search(line, m, col_re)) {
-            want = std::stod(m[2]);
+            want   = std::stod(m[2]);
+            expect = std::max(want, prev_L);
             if (prev_L > want + 1e-6)
                 ++shrinking;
             prev_L = want;
@@ -586,9 +591,9 @@ TEST_CASE("A column switch travels with exactly the new column's retraction", "[
         const bool travel = line.rfind("G1 ", 0) == 0 && line.find('E') == std::string::npos &&
                             (line.find('X') != std::string::npos || line.find('Y') != std::string::npos);
         if (want > 0. && travel) {
-            // First XY travel after the switch: if anything is retracted, it is this column's length.
+            // First XY travel after the switch: the longer of the previous and the new column's length.
             if (rs.held > 1e-6) {
-                CHECK(rs.held == Approx(want).margin(1e-3));
+                CHECK(rs.held == Approx(expect).margin(1e-3));
                 ++checked;
             }
             want = -1.;
@@ -596,30 +601,6 @@ TEST_CASE("A column switch travels with exactly the new column's retraction", "[
     }
     CHECK(shrinking >= 1);
     CHECK(checked >= 3);
-}
-
-TEST_CASE("A 0 mm retraction column keeps restart extra", "[Calib][TempRetract][Slice]")
-{
-    // F13: reduce_retraction_to(0) used to drop retract_restart_extra via set_retracted(0).
-    GCodeWriter writer;
-    writer.config.set_deserialize_strict({{"gcode_flavor", "marlin"},
-                                          {"use_relative_e_distances", "1"},
-                                          {"use_firmware_retraction", "0"},
-                                          {"retraction_length", "0.8"},
-                                          {"retract_restart_extra", "0.1"},
-                                          {"retraction_speed", "30"},
-                                          {"deretraction_speed", "30"}});
-    writer.set_extruders({0});
-    writer.set_extruder(0);
-    writer.retract();
-    REQUIRE(writer.extruder()->retracted() == Approx(0.8));
-    REQUIRE(writer.extruder()->restart_extra() == Approx(0.1));
-    const std::string g = writer.reduce_retraction_to(0.);
-    CHECK_FALSE(g.empty());
-    // Relative E: the partial unretract gives back all 0.8 mm (it was written as E0 before the fix).
-    CHECK(parse_e(g) == Approx(0.8).margin(1e-4));
-    CHECK(writer.extruder()->retracted() == Approx(0.));
-    CHECK(writer.extruder()->restart_extra() == Approx(0.1));
 }
 
 TEST_CASE("Raft layers hold first-layer temp; band 0 starts at object layer 2", "[Calib][TempRetract][Slice]")

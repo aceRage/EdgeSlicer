@@ -12348,9 +12348,12 @@ std::string GCode::apply_temp_retract_grid_object(const Print &print, const Prin
     }
     char buf[96];
     std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=%d retract=%g\n", col, L);
-    // Review F9: the extruder may still hold the previous column's longer retraction. Give back the
-    // difference now, so the travel into this column is retracted by exactly this column's length.
-    return std::string(buf) + writer().reduce_retraction_to(L);
+    // The extruder may still hold the previous column's longer retraction (the last column of a layer
+    // before the first column of the next). Keep it for the travel: giving it back here was a stationary
+    // unretract over the previous column followed by a travel across the whole grid with only this
+    // column's (shortest) retraction, which strings over every column. The unretract at the start of
+    // this column gives everything back, and the pillar-to-pillar travels inside the column use L.
+    return buf;
 }
 
 std::string GCode::restore_temp_retract_grid_retraction(const Print &print)
