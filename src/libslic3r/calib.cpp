@@ -1220,6 +1220,17 @@ bool stringing_grid_default_params(
     return false;
 }
 
+bool stringing_grid_default_params_from_filament(Calib_Params &params, const ConfigBase &filament_config, double step,
+                                                 double printer_max_nozzle_temp)
+{
+    auto first = [&filament_config](const char *key) {
+        const auto *o = filament_config.option<ConfigOptionInts>(key);
+        return (o != nullptr && !o->values.empty()) ? double(o->values.front()) : 0.;
+    };
+    return stringing_grid_default_params(params, first("nozzle_temperature"), first("nozzle_temperature_range_low"),
+                                         first("nozzle_temperature_range_high"), step, printer_max_nozzle_temp);
+}
+
 double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
 {
     return print_z - first_printed_layer_bottom;

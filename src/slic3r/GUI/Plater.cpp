@@ -21448,6 +21448,13 @@ void Plater::calib_temp_retraction(const Calib_Params& params)
     if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
         return;
 
+    // The grid prints with filament slot 1 and its defaults came from slot 1's preset. The Filament tab
+    // may be editing another slot; bring slot 1's preset into the tab so the forced filament overrides
+    // below land on the filament that prints (the tab asks about unsaved edits of the other slot).
+    if (PresetBundle *bundle = wxGetApp().preset_bundle;
+        !bundle->filament_presets.empty() && bundle->filaments.get_edited_preset().name != bundle->filament_presets.front())
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(bundle->filament_presets.front());
+
     auto print_config    = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;

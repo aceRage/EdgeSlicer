@@ -103,6 +103,10 @@ int                  temp_retract_band_index(const Calib_Params &params, double 
 // Returns false otherwise, including the 230/205 fallback for missing or invalid values.
 bool                 stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high,
                                                    double step = 5., double printer_max_nozzle_temp = 0.);
+// Same, reading nozzle_temperature / nozzle_temperature_range_low / _high (first value) from a filament
+// preset's config. The dialog passes the preset of filament slot 1, which the grid prints with.
+bool                 stringing_grid_default_params_from_filament(Calib_Params &params, const ConfigBase &filament_config,
+                                                                 double step = 5., double printer_max_nozzle_temp = 0.);
 double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
 double               temp_for_z(const Calib_Params &params, double z);
 double               retract_for_column(const Calib_Params &params, int column);

@@ -1087,8 +1087,11 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     };
     for (TextInput *ti : {m_tiStartTemp, m_tiEndTemp, m_tiTempStep, m_tiBandHeight, m_tiRetractStart, m_tiRetractEnd, m_tiRetractStep})
         ti->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, on_edit);
-    m_cbLabels->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &) { update_summary(); });
-    m_cbWaitTemp->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &) { update_summary(); });
+    // Skip(): handlers bound later run first, and CheckBox's own wxEVT_TOGGLEBUTTON handler (bound in its
+    // constructor) is what swaps the checked/unchecked bitmap. Without Skip() it never ran, so both boxes
+    // looked locked (owner hand test).
+    m_cbLabels->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
+    m_cbWaitTemp->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
 
     wxGetApp().UpdateDlgDarkUI(this);
     update_summary();
@@ -1098,23 +1101,35 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
 
 TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
 
+const DynamicPrintConfig *TempRetract_Calibration_Dlg::slot1_filament_config()
+{
+    // The grid prints with filament slot 1 (Plater::calib_temp_retraction puts every column on extruder 1).
+    // The Filament tab's edited preset is the slot the tab is editing, which can be another slot, so
+    // reading it showed the defaults of whatever filament was selected last (owner hand test: PLA
+    // defaults with PETG in slot 1). Use the edited copy only when it is slot 1's preset, so unsaved
+    // edits to slot 1 still count.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return nullptr;
+    const Preset &edited = bundle->filaments.get_edited_preset();
+    if (bundle->filament_presets.empty())
+        return &edited.config;
+    const std::string &slot1 = bundle->filament_presets.front();
+    if (edited.name == slot1)
+        return &edited.config;
+    if (const Preset *preset = bundle->filaments.find_preset(slot1, false))
+        return &preset->config;
+    return &edited.config;
+}
+
 bool TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
 {
-    double center = 0., low = 0., high = 0.;
-    if (const auto *bundle = wxGetApp().preset_bundle) {
-        const auto &fc  = bundle->filaments.get_edited_preset().config;
-        auto        first = [&fc](const char *key) {
-            const auto *o = fc.option<ConfigOptionInts>(key);
-            return (o != nullptr && !o->values.empty()) ? double(o->values[0]) : 0.;
-        };
-        center = first("nozzle_temperature");
-        low    = first("nozzle_temperature_range_low");
-        high   = first("nozzle_temperature_range_high");
-    }
     // F14: the printer preset has no max nozzle temperature option (PrintConfig defines none), so the
     // cap is the filament's nozzle_temperature_range_high and 350 C. Pass the printer max here if one is added.
     const double printer_max_nozzle_temp = 0.;
-    return stringing_grid_default_params(params, center, low, high, 5., printer_max_nozzle_temp);
+    if (const DynamicPrintConfig *fc = slot1_filament_config())
+        return stringing_grid_default_params_from_filament(params, *fc, 5., printer_max_nozzle_temp);
+    return stringing_grid_default_params(params, 0., 0., 0., 5., printer_max_nozzle_temp);
 }
 
 void TempRetract_Calibration_Dlg::reset_to_defaults()

@@ -377,6 +377,57 @@ TEST_CASE("Stringing grid defaults fall back to 230/205 on invalid filament temp
     CHECK_FALSE(stringing_grid_params_valid(ranged, 270.));
 }
 
+TEST_CASE("Stringing grid defaults read the filament preset's temperatures", "[Calib][TempRetract]")
+{
+    // Owner hand test: PETG in slot 1 opened with PLA defaults. The dialog now passes slot 1's preset
+    // config; the defaults must follow that config's nozzle_temperature and range.
+    auto filament = [](int center, int low, int high) {
+        DynamicPrintConfig cfg;
+        cfg.set_key_value("nozzle_temperature", new ConfigOptionInts{center});
+        cfg.set_key_value("nozzle_temperature_range_low", new ConfigOptionInts{low});
+        cfg.set_key_value("nozzle_temperature_range_high", new ConfigOptionInts{high});
+        return cfg;
+    };
+    SECTION("PETG 245 in 230-260")
+    {
+        Calib_Params from_cfg, direct;
+        stringing_grid_default_params_from_filament(from_cfg, filament(245, 230, 260));
+        stringing_grid_default_params(direct, 245., 230., 260.);
+        CHECK(from_cfg.start == Approx(direct.start));
+        CHECK(from_cfg.end == Approx(direct.end));
+        CHECK(from_cfg.start >= 245.);
+        CHECK(from_cfg.end <= 245.);
+        CHECK(from_cfg.start <= 260.);
+        CHECK(from_cfg.end >= 230.);
+        CHECK(stringing_grid_params_valid(from_cfg, 270.));
+    }
+    SECTION("PLA 220 in 190-240 gives different bands from PETG")
+    {
+        Calib_Params pla, petg;
+        stringing_grid_default_params_from_filament(pla, filament(220, 190, 240));
+        stringing_grid_default_params_from_filament(petg, filament(245, 230, 260));
+        CHECK(pla.start < petg.start);
+        CHECK(pla.end < petg.end);
+        CHECK(pla.start <= 240.);
+        CHECK(pla.end >= 190.);
+    }
+    SECTION("only the first value of a multi-entry option is read")
+    {
+        DynamicPrintConfig cfg = filament(245, 230, 260);
+        cfg.set_key_value("nozzle_temperature", new ConfigOptionInts{245, 210});
+        Calib_Params p;
+        stringing_grid_default_params_from_filament(p, cfg);
+        CHECK(p.start >= 245.);
+    }
+    SECTION("a preset without temperatures falls back to 230/205")
+    {
+        Calib_Params p;
+        CHECK_FALSE(stringing_grid_default_params_from_filament(p, DynamicPrintConfig()));
+        CHECK(p.start == Approx(230.));
+        CHECK(p.end == Approx(205.));
+    }
+}
+
 TEST_CASE("Stringing grid rejects a temperature range that is not a whole number of steps", "[Calib][TempRetract]")
 {
     // F5: temp_for_z must never land between steps.

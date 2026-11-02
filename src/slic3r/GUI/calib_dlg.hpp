@@ -136,6 +136,7 @@ protected:
     void         update_summary();
     void         reset_to_defaults();
     static bool  filament_default_params(Calib_Params &params);
+    static const DynamicPrintConfig *slot1_filament_config();
     bool         read_params(Calib_Params &params, wxString *error) const;
     double       bed_width() const;
 
