@@ -544,7 +544,7 @@ TEST_CASE("extract_entries_confined suffixes case collisions on Windows and macO
     REQUIRE(extract_all(zip, dest, ZipExtractCaps{}, err));
 #if defined(_WIN32) || defined(__APPLE__)
     CHECK(fs::exists(dest / "Model.stl"));
-    CHECK(fs::exists(dest / "Model(1).stl") || fs::exists(dest / "model(1).stl"));
+    CHECK((fs::exists(dest / "Model(1).stl") || fs::exists(dest / "model(1).stl")));
 #else
     CHECK(read_binary_file(dest / "Model.stl") == "A");
     CHECK(read_binary_file(dest / "model.stl") == "b");
