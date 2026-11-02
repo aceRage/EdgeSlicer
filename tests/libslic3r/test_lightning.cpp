@@ -36,7 +36,12 @@ TEST_CASE("Lightning distance field hands out each sample once when the overhang
     size_t previous_idx          = std::numeric_limits<size_t>::max();
     size_t idx                   = 0;
     Point location;
+    // A regression used to loop forever; cap the iterations so it fails instead. Each sample is handed out
+    // at most once, so the sliver's cell count (well under 1000 here) bounds a correct run.
+    const size_t max_iterations = 10000;
+    size_t       iterations     = 0;
     while (distance_field.tryGetNextPoint(&location, &idx, idx)) {
+        REQUIRE(++iterations <= max_iterations);
         REQUIRE(idx != previous_idx);
         previous_idx            = idx;
         sample_outside_outlines = sample_outside_outlines || !outline_bbox.contains(location);
