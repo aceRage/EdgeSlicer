@@ -6,6 +6,10 @@
     #define NOMINMAX
     #include <Windows.h>
     #include <wchar.h>
+    // P9: local minidumps for test copies (MiniDumpWriteDump is loaded at run time, no link change).
+    #include <DbgHelp.h>
+    #include <cwctype>
+    #include <stdlib.h>
     #ifdef SLIC3R_GUI
     extern "C"
     {
@@ -7823,9 +7827,102 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
 // Guards against a failed allocation inside the dump re-entering the new-handler.
 static std::atomic<bool> g_dump_in_progress{false};
 
+// ---- Local minidumps for test copies (per-nozzle process P9, owner crash report 2026-11-02) ------------------------------
+// Opt-in, Windows, no network: when EDGESLICER_LOCAL_MINIDUMP=1, or when the exe runs from a C:/Dev/EdgeSlicerTest test copy, an
+// unhandled crash (access violation, abort, std::terminate, pure call, invalid CRT parameter) writes
+// <exe folder>/crash/EdgeSlicer_<pid>_<time>.dmp, to open with cdb / Visual Studio and the build tree's PDBs. Release builds
+// that do not opt in are unchanged; Sentry, when it is set up, still installs its own handler after this one.
+namespace {
+std::wstring g_local_dump_dir;
+std::atomic<bool> g_local_dump_written{false};
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+                                          PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+
+void write_local_minidump(EXCEPTION_POINTERS *pointers)
+{
+    if (g_local_dump_dir.empty() || g_local_dump_written.exchange(true))
+        return;
+    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr)
+        return;
+    auto write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (write == nullptr)
+        return;
+    ::CreateDirectoryW(g_local_dump_dir.c_str(), nullptr);
+    SYSTEMTIME t;
+    ::GetLocalTime(&t);
+    wchar_t name[96];
+    swprintf(name, 96, L"\\EdgeSlicer_%lu_%04d%02d%02d_%02d%02d%02d.dmp", ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour,
+             t.wMinute, t.wSecond);
+    const std::wstring path = g_local_dump_dir + name;
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    MINIDUMP_EXCEPTION_INFORMATION info;
+    info.ThreadId          = ::GetCurrentThreadId();
+    info.ExceptionPointers = pointers;
+    info.ClientPointers    = FALSE;
+    const MINIDUMP_TYPE type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
+                                             MiniDumpWithUnloadedModules | MiniDumpWithHandleData);
+    write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, pointers != nullptr ? &info : nullptr, nullptr, nullptr);
+    ::CloseHandle(file);
+}
+
+LONG WINAPI local_minidump_filter(EXCEPTION_POINTERS *pointers)
+{
+    write_local_minidump(pointers);
+    return g_previous_filter != nullptr ? g_previous_filter(pointers) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+// abort / terminate / pure call / invalid parameter have no exception record: raise one so the dump carries a usable context.
+void dump_without_exception()
+{
+    __try {
+        ::RaiseException(0xE0D0D0D0, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    } __except (write_local_minidump(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void install_local_minidumps()
+{
+    wchar_t exe[MAX_PATH] = {};
+    ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring folder(exe);
+    if (const size_t slash = folder.find_last_of(L"\\/"); slash != std::wstring::npos)
+        folder.resize(slash);
+    std::wstring lower = folder;
+    for (wchar_t &c : lower)
+        c = (c == L'\\') ? L'/' : wchar_t(::towlower(c));
+    const char *env       = std::getenv("EDGESLICER_LOCAL_MINIDUMP");
+    const bool  opted_in  = env != nullptr && std::strcmp(env, "1") == 0;
+    const bool  test_copy = lower.find(L"/dev/edgeslicertest/") != std::wstring::npos;
+    if ((!opted_in && !test_copy) || (env != nullptr && std::strcmp(env, "0") == 0))
+        return;
+    g_local_dump_dir  = folder + L"\\crash";
+    g_previous_filter = ::SetUnhandledExceptionFilter(local_minidump_filter);
+    std::set_terminate([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    std::signal(SIGABRT, [](int) { dump_without_exception(); });
+    _set_purecall_handler([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    _set_invalid_parameter_handler([](const wchar_t *, const wchar_t *, const wchar_t *, unsigned int, uintptr_t) {
+        dump_without_exception();
+        std::abort();
+    });
+}
+} // namespace
+
 extern "C" {
     __declspec(dllexport) int __stdcall Snapmaker_Orca_main(int argc, wchar_t **argv)
     {
+        // Per-nozzle process P9: local crash dumps for test copies (opt-in, see install_local_minidumps).
+        install_local_minidumps();
         // Convert wchar_t arguments to UTF8.
         std::vector<std::string> 	argv_narrow;
         std::vector<char*>			argv_ptrs(argc + 1, nullptr);

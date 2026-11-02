@@ -2575,6 +2575,20 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
         }
     }
 
+    // Per-nozzle process P9 (owner hand test 2026-11-02): on H2D / H2C / X2D, "Print on": Auto / Left / Right, and the nozzles of a
+    // side's rack by size ("Right 0.6 (slot 6)"), whether or not a rack is set up (Left / Right always).
+    const int side_item_id = menu->FindItem(_L("Print on"));
+    if (side_item_id != wxNOT_FOUND)
+        menu->Destroy(side_item_id);
+    if (const int filament = active_filament_menu_id; filament >= 0 && plater()->sidebar().filament_sides_supported()) {
+        wxMenu *side_menu = new wxMenu();
+        plater()->sidebar().append_filament_side_menu(side_menu, size_t(filament));
+        append_submenu(menu, side_menu, wxID_ANY, _L("Print on"),
+                       _L("The side (nozzle) this filament prints on. Auto lets the grouping decide; Left / Right pin it on this plate. "
+                          "A side with a nozzle rack also lists its nozzles by size."),
+                       "", []() { return true; }, m_parent);
+    }
+
     // Per-nozzle process P9: "Rack slot" pins this filament to one slot of its extruder's rack (filament_rack_nozzle_slot): it
     // prints with that slot's size, process and nozzle, so filaments on different slots change nozzles (M632) instead of
     // purging. Offered when the filament's extruder shows rack slots (two or more rack nozzles declared).

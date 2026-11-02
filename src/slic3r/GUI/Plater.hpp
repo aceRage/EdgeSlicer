@@ -169,6 +169,13 @@ public:
     // Per-nozzle process P9: the toolhead button beside each filament (toolchangers): its label and visibility, and a click.
     void update_filament_tool_buttons();
     wxWindow *make_filament_tool_button(int filament_idx);
+    // Per-nozzle process P9: Left / Right per filament on Bambu's two-extruder machines (the plate's manual filament map), the
+    // "Print on" menu (Auto / Left / Right and the rack's nozzles by size) and pinning a rack size.
+    bool filament_sides_supported() const;
+    int  filament_side(size_t filament) const; // 0 = auto, 1 = left, 2 = right
+    void set_filament_side(size_t filament, int side);
+    void set_filament_rack_size(size_t filament, size_t extruder, double diameter);
+    void append_filament_side_menu(wxMenu *menu, size_t filament);
     void cycle_filament_tool(size_t filament);
     // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
     // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).

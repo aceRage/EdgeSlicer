@@ -4812,6 +4812,13 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
     });
     tool_btn->Bind(wxEVT_RIGHT_DOWN, [this, tool_btn, filament_idx](wxMouseEvent &) {
         PresetBundle *bundle = wxGetApp().preset_bundle;
+        // P9: H2D / H2C / X2D: Auto / Left / Right and the rack's nozzles.
+        if (bundle != nullptr && !bundle->filament_nozzle_assignment_supported() && filament_sides_supported()) {
+            wxMenu menu;
+            append_filament_side_menu(&menu, size_t(filament_idx));
+            tool_btn->PopupMenu(&menu);
+            return;
+        }
         if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
             return;
         const std::vector<size_t> tools = bundle->filament_nozzles();
@@ -4831,6 +4838,132 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
     return tool_btn;
 }
 
+// ---- Per-nozzle process P9 (owner hand test 2026-11-02): which side a filament prints on, on Bambu's two-extruder machines ----
+// (H2D / H2C / X2D). Bambu's grouping decides by default ("Auto"); Left / Right pin it through the plate's manual filament map
+// (the same map the dual-nozzle slice dialog writes), and on a side with a nozzle rack a size or a slot can be pinned as well.
+
+bool Sidebar::filament_sides_supported() const
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return false;
+    const DynamicPrintConfig &printer = bundle->printers.get_edited_preset().config;
+    const auto               *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
+    return nozzles != nullptr && nozzles->values.size() == 2 && is_bambu_grouping_machine(printer, 2);
+}
+
+int Sidebar::filament_side(size_t filament) const
+{
+    PartPlate *plate = p->plater != nullptr ? p->plater->get_partplate_list().get_curr_plate() : nullptr;
+    if (plate == nullptr)
+        return 0;
+    const std::vector<int> map = plate->get_manual_filament_map();
+    return filament < map.size() && (map[filament] == 1 || map[filament] == 2) ? map[filament] : 0;
+}
+
+void Sidebar::set_filament_side(size_t filament, int side)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    PartPlate    *plate  = p->plater != nullptr ? p->plater->get_partplate_list().get_curr_plate() : nullptr;
+    if (bundle == nullptr || plate == nullptr || filament >= bundle->filament_presets.size())
+        return;
+    const std::vector<int> old_map = plate->get_manual_filament_map();
+    if (side <= 0) {
+        // Auto: Bambu's grouping decides again (a manual map pins every filament, so Auto is for all of them).
+        if (old_map.empty())
+            return;
+        plate->clear_manual_filament_map();
+    } else {
+        std::vector<int> map = old_map;
+        if (map.size() != bundle->filament_presets.size()) {
+            // From the grouping the plate has now (the global map), else everything on the left.
+            map = p->plater->get_global_filament_map();
+            map.resize(bundle->filament_presets.size(), 1);
+            for (int &m : map)
+                if (m != 1 && m != 2)
+                    m = 1;
+        }
+        map[filament] = side;
+        if (map == old_map)
+            return;
+        plate->set_manual_filament_map(map);
+    }
+    // A filament on the left has no rack pin.
+    if (side == 1) {
+        bundle->set_filament_rack_slot(filament, 0);
+        if (auto *pins = bundle->project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true);
+            filament < pins->values.size() && pins->values[filament] > 0.)
+            pins->values = Slic3r::set_filament_rack_pin(pins->values, filament, bundle->filament_presets.size(), 0.);
+    }
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: filament " << filament + 1 << " side " << (side == 1 ? "Left" : side == 2 ? "Right" : "Auto");
+    plate->update_slice_result_valid_state(false);
+    p->plater->set_plater_dirty(true);
+    update_filament_tool_buttons();
+    wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
+void Sidebar::set_filament_rack_size(size_t filament, size_t extruder, double diameter)
+{
+    // A size of a side's rack: that side, and the size pin (P4/P5); a slot pin is cleared by it.
+    set_filament_side(filament, int(extruder) + 1);
+    set_filament_rack_pin(filament, diameter);
+    update_filament_tool_buttons();
+}
+
+void Sidebar::append_filament_side_menu(wxMenu *menu, size_t filament)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !filament_sides_supported())
+        return;
+    const int  side  = filament_side(filament);
+    const auto check = [menu](const wxString &label, bool checked, std::function<void()> action) {
+        const int id = wxWindow::NewControlId();
+        menu->AppendCheckItem(id, label);
+        menu->Check(id, checked);
+        menu->Bind(wxEVT_MENU, [action](wxCommandEvent &) { wxGetApp().CallAfter(action); }, id);
+    };
+    const std::vector<double> sizes = bundle->effective_nozzle_diameters();
+    check(_L("Auto (the grouping decides)"), side == 0, [this, filament]() { set_filament_side(filament, 0); });
+    const DynamicPrintConfig full  = bundle->full_config();
+    const auto               racks = extruder_rack_nozzles(full);
+    const int                slot  = bundle->filament_rack_slot_choice(filament);
+    const double             pin   = filament_rack_pin(bundle->project_config, unsigned(filament + 1));
+    for (size_t e = 0; e < 2 && e < sizes.size(); ++e) {
+        const wxString name = e == 0 ? _L("Left") : _L("Right");
+        check(name + " " + from_u8(format_diameter_to_str(sizes[e])), side == int(e) + 1 && slot <= 0 && !(pin > 0.),
+              [this, filament, e]() { set_filament_side(filament, int(e) + 1); });
+        if (rack_slot_count(full, e) == 0)
+            continue;
+        // The side's rack, grouped by size: "Right 0.6 (slot 6)", "Right 0.4 (slots 1, 2, 3)".
+        std::vector<std::pair<double, std::vector<int>>> groups;
+        for (size_t k = 0; k < racks[e].size(); ++k) {
+            auto it = std::find_if(groups.begin(), groups.end(), [&](const auto &g) { return same_nozzle_diameter(g.first, racks[e][k].diameter); });
+            if (it == groups.end())
+                groups.push_back({ racks[e][k].diameter, { int(k) + 1 } });
+            else
+                it->second.push_back(int(k) + 1);
+        }
+        for (const auto &[d, slots] : groups) {
+            wxString list;
+            for (int k : slots)
+                list += (list.empty() ? wxString() : wxString(", ")) + wxString::Format("%d", k);
+            const wxString label = name + " " + from_u8(format_nozzle_diameter_word(d)) + " (" +
+                                   (slots.size() == 1 ? wxString::Format(_L("slot %s"), list) : wxString::Format(_L("slots %s"), list)) + ")";
+            const bool on = side == int(e) + 1 && ((slot > 0 && std::find(slots.begin(), slots.end(), slot) != slots.end()) ||
+                                                   (slot <= 0 && pin > 0. && same_nozzle_diameter(pin, d)));
+            if (slots.size() == 1) {
+                const int k = slots.front();
+                check(label, on, [this, filament, e, k]() {
+                    set_filament_side(filament, int(e) + 1);
+                    set_filament_rack_slot(filament, k);
+                    update_filament_tool_buttons();
+                });
+            } else
+                check(label, on, [this, filament, e, d = d]() { set_filament_rack_size(filament, e, d); });
+        }
+    }
+}
+
 void Sidebar::update_filament_tool_buttons()
 {
     PresetBundle *bundle = wxGetApp().preset_bundle;
@@ -4838,6 +4971,7 @@ void Sidebar::update_filament_tool_buttons()
         return;
     // Toolchangers that take an assignment (U1 class, no AMS); Bambu's grouping machines route filaments themselves.
     const bool                supported = bundle->filament_nozzle_assignment_supported();
+    const bool                sides     = !supported && filament_sides_supported(); // P9: H2D / H2C / X2D: L / R badge
     const std::vector<size_t> tools     = supported ? bundle->filament_nozzles() : std::vector<size_t>();
     const std::vector<double> sizes     = bundle->effective_nozzle_diameters();
     bool                      changed   = false;
@@ -4846,6 +4980,26 @@ void Sidebar::update_filament_tool_buttons()
         if (combo == nullptr || combo->tool_btn == nullptr)
             continue;
         auto      *btn  = static_cast<Button *>(combo->tool_btn);
+        if (sides && f < bundle->filament_presets.size()) {
+            const int    side  = filament_side(f);
+            const int    slot  = bundle->filament_rack_slot_choice(f);
+            const double pin   = filament_rack_pin(bundle->project_config, unsigned(f + 1));
+            wxString     label = side == 1 ? "L" : side == 2 ? "R" : "A";
+            if (side == 2 && slot > 0)
+                label += wxString::Format("%d", slot);
+            else if (side == 2 && pin > 0.)
+                label += from_u8(format_nozzle_diameter_word(pin));
+            if (btn->GetLabel() != label)
+                btn->SetLabel(label);
+            btn->SetToolTip(wxString::Format(_L("Filament %d prints on: %s. Click: Auto, Left, Right in turn. Right-click: choose (with the rack's "
+                                                "nozzles on a side that has a rack)."),
+                                             int(f + 1), side == 1 ? _L("Left") : side == 2 ? _L("Right") : _L("Auto (the grouping decides)")));
+            if (!btn->IsShown()) {
+                btn->Show(true);
+                changed = true;
+            }
+            continue;
+        }
         const bool show = supported && f < tools.size();
         if (show) {
             const size_t   t     = tools[f];
@@ -4869,6 +5023,11 @@ void Sidebar::update_filament_tool_buttons()
 void Sidebar::cycle_filament_tool(size_t filament)
 {
     PresetBundle *bundle = wxGetApp().preset_bundle;
+    // P9: on H2D / H2C / X2D the badge cycles Auto -> Left -> Right.
+    if (bundle != nullptr && !bundle->filament_nozzle_assignment_supported() && filament_sides_supported()) {
+        set_filament_side(filament, (filament_side(filament) + 1) % 3);
+        return;
+    }
     if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
         return;
     const std::vector<size_t> tools = bundle->filament_nozzles();

@@ -15,6 +15,7 @@
 //	   Slic3r::GUI::Tab::Preset;
 //	       - Single preset item: name, file is default or external.
 
+#include <wx/weakref.h>
 #include <wx/panel.h>
 #include <wx/notebook.h>
 #include <wx/listbook.h>
@@ -830,13 +831,13 @@ private:
     wxStaticText*       m_rate_note                     {nullptr};
     wxSizer*            rate_note_create_widget(wxWindow* parent);
     // Per-nozzle process P5: under each extruder's Rack nozzle diameters, what is wrong with the text (or nothing).
-    std::map<size_t, std::pair<wxTextCtrl*, wxStaticText*>> m_rack_controls; // extruder -> (text box, problem)
+    std::map<size_t, std::pair<wxWeakRef<wxTextCtrl>, wxWeakRef<wxStaticText>>> m_rack_controls; // extruder -> (text box, problem)
     void                update_rack_error(size_t extruder, const std::string& text);
     void                update_rack_controls(size_t extruder);
     // Per-nozzle process P7: Extruder N's "Nozzle size in this project" picker (project key nozzle_diameter_override).
-    std::map<size_t, ComboBox*> m_project_size_controls; // extruder -> picker
+    std::map<size_t, wxWeakRef<ComboBox>> m_project_size_controls; // extruder -> picker
     // Per-nozzle process P9: Extruder N's "Rack nozzles in this project" box (project key extruder_rack_nozzle_override).
-    std::map<size_t, std::pair<wxTextCtrl*, wxStaticText*>> m_project_rack_controls; // extruder -> (text box, problem)
+    std::map<size_t, std::pair<wxWeakRef<wxTextCtrl>, wxWeakRef<wxStaticText>>> m_project_rack_controls; // extruder -> (text box, problem)
     void                update_project_rack(size_t extruder);
     void                update_project_rack_error(size_t extruder, const std::string& text);
 public:

@@ -7658,10 +7658,10 @@ if (is_marlin_flavor)
                         combo->Bind(wxEVT_DESTROY, [this, extruder_idx, combo](wxWindowDestroyEvent& evt) {
                             evt.Skip();
                             auto it = m_project_size_controls.find(extruder_idx);
-                            if (it != m_project_size_controls.end() && it->second == combo)
+                            if (it != m_project_size_controls.end() && it->second.get() == combo)
                                 m_project_size_controls.erase(it);
                         });
-                        m_project_size_controls[extruder_idx] = combo;
+                        m_project_size_controls[extruder_idx] = wxWeakRef<ComboBox>(combo);
                         update_project_nozzle_size(extruder_idx);
                         return sizer;
                     };
@@ -7836,10 +7836,10 @@ if (is_marlin_flavor)
                             w->Bind(wxEVT_DESTROY, [this, extruder_idx, w](wxWindowDestroyEvent& evt) {
                                 evt.Skip();
                                 auto it = m_rack_controls.find(extruder_idx);
-                                if (it != m_rack_controls.end() && (it->second.first == w || it->second.second == w))
+                                if (it != m_rack_controls.end() && (it->second.first.get() == w || it->second.second.get() == w))
                                     m_rack_controls.erase(it);
                             });
-                        m_rack_controls[extruder_idx] = { edit, label };
+                        m_rack_controls[extruder_idx] = { wxWeakRef<wxTextCtrl>(edit), wxWeakRef<wxStaticText>(label) };
                         update_rack_controls(extruder_idx);
                         return sizer;
                     };
@@ -7900,10 +7900,10 @@ if (is_marlin_flavor)
                             w->Bind(wxEVT_DESTROY, [this, extruder_idx, w](wxWindowDestroyEvent& evt) {
                                 evt.Skip();
                                 auto it = m_project_rack_controls.find(extruder_idx);
-                                if (it != m_project_rack_controls.end() && (it->second.first == w || it->second.second == w))
+                                if (it != m_project_rack_controls.end() && (it->second.first.get() == w || it->second.second.get() == w))
                                     m_project_rack_controls.erase(it);
                             });
-                        m_project_rack_controls[extruder_idx] = { edit, label };
+                        m_project_rack_controls[extruder_idx] = { wxWeakRef<wxTextCtrl>(edit), wxWeakRef<wxStaticText>(label) };
                         update_project_rack(extruder_idx);
                         return sizer;
                     };
@@ -8240,6 +8240,11 @@ void TabPrinter::on_gcode_flavor_changed()
 void TabPrinter::update_rack_error(size_t extruder, const std::string& text)
 {
     auto it = m_rack_controls.find(extruder);
+    // P9 (owner crash report, H2C Extruder 2): the controls are tracked weakly; a page that was cleared took them with it.
+    if (it != m_rack_controls.end() && (it->second.first.get() == nullptr || it->second.second.get() == nullptr)) {
+        m_rack_controls.erase(it);
+        return;
+    }
     if (it == m_rack_controls.end() || m_config == nullptr)
         return;
     const auto*       nozzles = m_config->option<ConfigOptionFloats>("nozzle_diameter");
@@ -8270,6 +8275,11 @@ std::vector<double> TabPrinter::project_size_choices() const
 void TabPrinter::update_project_nozzle_size(size_t extruder)
 {
     auto it = m_project_size_controls.find(extruder);
+    // P9 (owner crash report, H2C Extruder 2): the picker is tracked weakly; a page that was cleared took it with it.
+    if (it != m_project_size_controls.end() && it->second.get() == nullptr) {
+        m_project_size_controls.erase(it);
+        return;
+    }
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (it == m_project_size_controls.end() || bundle == nullptr)
         return;
@@ -8303,6 +8313,11 @@ void TabPrinter::update_project_nozzle_sizes()
 void TabPrinter::update_project_rack(size_t extruder)
 {
     auto it = m_project_rack_controls.find(extruder);
+    // P9: tracked weakly, as above.
+    if (it != m_project_rack_controls.end() && (it->second.first.get() == nullptr || it->second.second.get() == nullptr)) {
+        m_project_rack_controls.erase(it);
+        return;
+    }
     PresetBundle* bundle = wxGetApp().preset_bundle;
     if (it == m_project_rack_controls.end() || bundle == nullptr || m_config == nullptr)
         return;
@@ -8322,6 +8337,11 @@ void TabPrinter::update_project_rack(size_t extruder)
 void TabPrinter::update_project_rack_error(size_t extruder, const std::string& text)
 {
     auto it = m_project_rack_controls.find(extruder);
+    // P9: tracked weakly, as above.
+    if (it != m_project_rack_controls.end() && (it->second.first.get() == nullptr || it->second.second.get() == nullptr)) {
+        m_project_rack_controls.erase(it);
+        return;
+    }
     PresetBundle* bundle = wxGetApp().preset_bundle;
     if (it == m_project_rack_controls.end() || bundle == nullptr)
         return;
@@ -8342,6 +8362,11 @@ void TabPrinter::update_project_rack_error(size_t extruder, const std::string& t
 void TabPrinter::update_rack_controls(size_t extruder)
 {
     auto it = m_rack_controls.find(extruder);
+    // P9 (owner crash report, H2C Extruder 2): the controls are tracked weakly; a page that was cleared took them with it.
+    if (it != m_rack_controls.end() && (it->second.first.get() == nullptr || it->second.second.get() == nullptr)) {
+        m_rack_controls.erase(it);
+        return;
+    }
     if (it == m_rack_controls.end() || m_config == nullptr)
         return;
     const auto*       racks  = m_config->option<ConfigOptionStrings>("extruder_rack_nozzle_diameter");

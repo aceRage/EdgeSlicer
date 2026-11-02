@@ -568,3 +568,42 @@ TEST_CASE("H2C: rack sizes are tools of the preset bundle with their own picked 
         CHECK(b.nozzle_tool_count() == 2);
     }
 }
+
+TEST_CASE("Every per-extruder value the Extruder N pages read exists for N = 1, 2 on the stock H2D and H2C", "[NozzleRackSlots][PresetBundle][Pages]")
+{
+    // Owner crash report 2026-11-02 (H2C Printer settings > Extruder 2). What the Extruder N page and its P4..P9 rows read, for
+    // each extruder of the stock two-extruder Bambu presets, without a value missing or a read past a vector's end.
+    PresetBundle &b = bbl_bundle();
+    for (const char *printer : { "Bambu Lab H2C 0.4 nozzle", "Bambu Lab H2D 0.4 nozzle" }) {
+        INFO(printer);
+        b.end_nozzle_tool_view();
+        REQUIRE(b.printers.select_preset_by_name(printer, true));
+        b.update_compatible(PresetSelectCompatibleType::Never);
+        const DynamicPrintConfig &cfg   = b.printers.get_edited_preset().config;
+        const DynamicPrintConfig  sized = b.printer_config_with_project_sizes();
+        const size_t              n     = cfg.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+        REQUIRE(n == 2);
+        for (size_t e = 0; e < n; ++e) {
+            INFO("extruder " << e + 1);
+            for (const std::string &key : print_config_def.extruder_option_keys()) {
+                const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option(key));
+                if (opt == nullptr)
+                    continue;
+                INFO(key);
+                CHECK(opt->size() > 0);
+                // What a page field reads for its index (ConfigOptionVector::get_at falls back to the first value).
+                const std::vector<std::string> values = opt->vserialize();
+                CHECK_FALSE(values.empty());
+            }
+            // P4..P9 reads of the Extruder page and the sidebar for this extruder.
+            CHECK_NOTHROW(rack_slot_count(sized, e));
+            CHECK_NOTHROW(extruder_has_nozzle_rack(sized, e));
+            CHECK_NOTHROW(validate_rack_nozzle_text(b.rack_nozzle_override(e), b.effective_nozzle_diameters()[e]));
+            CHECK(e < b.effective_nozzle_diameters().size());
+            CHECK(e < b.preset_nozzle_diameters().size());
+        }
+        CHECK(extruder_has_nozzle_rack(sized, 1) == (std::string(printer).find("H2C") != std::string::npos));
+        CHECK_FALSE(extruder_has_nozzle_rack(sized, 0));
+        CHECK(nozzle_tool_entries(sized).size() == 2);
+    }
+}
