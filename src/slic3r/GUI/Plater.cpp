@@ -11298,6 +11298,8 @@ struct Plater::priv
     int m_cur_slice_plate;
     //BBS: m_slice_all in .gcode.3mf file case, set true when slice all
     bool m_slice_all_only_has_gcode{ false };
+    // Plater::set_multipart_answer(): -1 asks, 0 separate objects, 1 one object with parts.
+    int  m_multipart_answer{ -1 };
 
     bool m_need_update{false};
     int  m_batch_physical_deletion{0}; // >0: skip per-deletion painting remap and ObjectList refresh
@@ -13884,7 +13886,17 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
              // A custom model with several objects at different heights stays several objects: turning
              // them into one multi-part object would throw their settings away.
-             if (!is_project_file && !keep_object_settings && model.looks_like_multipart_object()) {
+             if (!is_project_file && !keep_object_settings && m_multipart_answer >= 0) {
+                // Answered in advance (Send to Plate from the Layerling tab): a design of several bodies
+                // becomes one object with a part per body, wherever the bodies sit, or stays separate.
+                if (m_multipart_answer == 1 && model.objects.size() >= 2) {
+                    bool plain = true;
+                    for (const ModelObject *o : model.objects)
+                        plain = plain && o->config.keys().size() <= 1;
+                    if (plain)
+                        model.convert_multipart_object(filaments_cnt);
+                }
+             } else if (!is_project_file && !keep_object_settings && model.looks_like_multipart_object()) {
                MessageDialog msg_dlg(q, _L(
                     "This file contains several objects positioned at multiple heights.\n"
                     "Instead of considering them as multiple objects, should \n"
@@ -22034,6 +22046,9 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_
 }
 
 // To be called when providing a list of files to the GUI slic3r on command line.
+void Plater::set_multipart_answer(int answer) { p->m_multipart_answer = answer < 0 ? -1 : (answer > 0 ? 1 : 0); }
+int  Plater::multipart_answer() const { return p->m_multipart_answer; }
+
 std::vector<size_t> Plater::load_files(const std::vector<std::string>& input_files, LoadStrategy strategy,  bool ask_multi)
 {
     std::vector<fs::path> paths;
