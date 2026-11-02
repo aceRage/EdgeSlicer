@@ -65,6 +65,8 @@ def main():
     ap.add_argument("package")
     ap.add_argument("work")
     ap.add_argument("--installed-version", choices=["same", "older", "none"], default="same")
+    ap.add_argument("--startup-mm", action="store_true",
+                    help="a startup file in millimetres (unit scale 0.001), as the owner's profile has")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
     if os.path.isdir(work):
@@ -78,7 +80,10 @@ def main():
              "for m in ('cycles', 'io_scene_gltf2'):\n"
              "    addon_utils.disable(m, default_set=True)\n"
              "bpy.ops.wm.save_userpref()\n"
-             "print('PROFILE', sorted(bpy.context.preferences.addons.keys()))\n")
+             + ("u = bpy.context.scene.unit_settings\n"
+                "u.system = 'METRIC'; u.scale_length = 0.001; u.length_unit = 'MILLIMETERS'\n"
+                "bpy.ops.wm.save_homefile()\n" if a.startup_mm else "")
+             + "print('PROFILE', sorted(bpy.context.preferences.addons.keys()))\n")
     p = run([a.blender, "-b", "--factory-startup", "--python-expr", setup], env, log)
     if "PROFILE" not in p.stdout:
         print("FAIL: could not make the scratch profile (%s)" % log)
@@ -118,7 +123,21 @@ def main():
              "n = len(px) // 4\nprint('MEAN', sum(px[i*4] + px[i*4+1] + px[i*4+2] for i in range(n)) / (3 * max(1, n)))\n")
     p = run([a.blender, "-b", "--factory-startup", "--python-expr", probe, "--", still], env, log)
     mean = float(next((l.split()[1] for l in p.stdout.splitlines() if l.startswith("MEAN")), "0"))
-    ok = rep.get("objects", 0) > 0 and mean > 0.02
+    # The parts are the size EdgeSlicer exported, and the still's camera sees them (the owner's
+    # millimetre startup file made them 100x too big and the camera miss them).
+    size_ok = True
+    if os.path.isdir(spaced) and rep.get("bounds"):
+        data = json.load(open(os.path.join(spaced, "showcase.json"), encoding="utf-8"))
+        if data.get("source") == "model":
+            want = [data["model"]["max"][i] - data["model"]["min"][i] for i in range(3)]
+            got = [rep["bounds"][1][i] - rep["bounds"][0][i] for i in range(3)]
+            size_ok = all(abs(w - g) <= 1e-4 + 0.01 * w for w, g in zip(want, got))
+            print("size exported %s m, in Blender %s m (the add-on's scene unit scale %s)"
+                  % ([round(x, 4) for x in want], [round(x, 4) for x in got], rep.get("unit_scale")))
+    inside, corners = rep.get("corners_in_frame", [0, 0])
+    frame_ok = corners > 0 and inside >= corners // 2
+    print("bounding-box corners in the camera frame: %d of %d" % (inside, corners))
+    ok = rep.get("objects", 0) > 0 and mean > 0.02 and size_ok and frame_ok
     print("%s: %d objects, %d materials, view transform %s, still %s mean %.3f" % (
         "ok" if ok else "FAIL", rep.get("objects", 0), rep.get("materials", 0), rep.get("view_transform"), still, mean))
     return 0 if ok else 1

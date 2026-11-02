@@ -39,17 +39,13 @@ def main():
     import edgeslicer_render
 
     edgeslicer_render.register()
-    for name in ("Cube", "Camera", "Light"):
-        obj = bpy.data.objects.get(name)
-        if obj is not None:
-            bpy.data.objects.remove(obj, do_unlink=True)
 
     report = {"blender": bpy.app.version_string, "package": a.package, "checks": {}, "errors": []}
     checks = report["checks"]
 
     summary = edgeslicer_render.importer.import_package(a.package, "PREVIEW", "CPU", a.samples)
     report["summary"] = summary
-    sc = bpy.context.scene
+    sc = bpy.data.scenes[summary["scene"]]
     pkg = edgeslicer_render.package.load(a.package)
 
     col = bpy.data.collections.get("EdgeSlicer Showcase")
@@ -119,7 +115,7 @@ def main():
     sc.render.resolution_percentage = max(1, int(round(100.0 * a.width / max(1, sc.render.resolution_x))))
     sc.render.filepath = out_png
     sc.render.image_settings.file_format = "PNG"
-    bpy.ops.render.render(write_still=True)
+    bpy.ops.render.render(write_still=True, scene=sc.name)
     img = bpy.data.images.load(out_png)
     px = list(img.pixels)
     n = len(px) // 4

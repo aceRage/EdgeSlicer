@@ -27,7 +27,7 @@
 bl_info = {
     "name": "EdgeSlicer Render",
     "author": "EdgeSlicer",
-    "version": (1, 1, 1),
+    "version": (1, 1, 2),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > EdgeSlicer, File > Import > EdgeSlicer Showcase package",
     "description": "Render EdgeSlicer Showcase scenes in Cycles",

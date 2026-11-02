@@ -72,14 +72,6 @@ def _register_for_session():
     return edgeslicer_render
 
 
-def _clear_default_scene():
-    # The factory scene's cube, camera and light would sit in the middle of the print.
-    for name in ("Cube", "Camera", "Light"):
-        obj = bpy.data.objects.get(name)
-        if obj is not None:
-            bpy.data.objects.remove(obj, do_unlink=True)
-
-
 def _views():
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
@@ -99,7 +91,8 @@ def _show_panel():
             pass
         space.shading.type = "MATERIAL"
         # Look through the scene's camera.
-        if bpy.context.scene.camera is not None:
+        sc = bpy.data.scenes.get("EdgeSlicer Showcase") or bpy.context.scene
+        if sc.camera is not None:
             space.region_3d.view_perspective = "CAMERA"
         area.tag_redraw()
     return None
@@ -122,15 +115,15 @@ def _popup(message):
 
 def _import(args):
     addon = _register_for_session()
-    _clear_default_scene()
     summary = addon.importer.import_package(args.package, args.quality, args.device, args.samples)
-    sc = bpy.context.scene
+    # The add-on builds its own scene ("EdgeSlicer Showcase", metres); the user's scenes are left alone.
+    sc = bpy.data.scenes[summary["scene"]]
     if args.resolution_percentage:
         sc.render.resolution_percentage = args.resolution_percentage
     if args.render:
         sc.render.filepath = os.path.abspath(args.render)
         sc.render.image_settings.file_format = "PNG"
-        bpy.ops.render.render(write_still=True)
+        bpy.ops.render.render(write_still=True, scene=sc.name)
         summary["render"] = sc.render.filepath
     if args.report:
         summary["blender"] = bpy.app.version_string

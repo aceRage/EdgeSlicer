@@ -15,6 +15,35 @@ import bpy
 from . import compat, materials, package, scene
 
 PROP_PACKAGE = "edgeslicer_package"
+# The package is built in a scene of its own with known units (the user's startup scene may use
+# millimetres with a unit scale of 0.001, which the glTF importer and the add-on would read
+# differently); the user's own scenes are left alone.
+SCENE_NAME = "EdgeSlicer Showcase"
+
+
+def target_scene():
+    """The add-on's scene: metres as Blender units (unit scale 1), lengths shown in millimetres."""
+    sc = bpy.data.scenes.get(SCENE_NAME)
+    if sc is None:
+        sc = bpy.data.scenes.new(SCENE_NAME)
+    us = sc.unit_settings
+    us.system = "METRIC"
+    us.scale_length = 1.0
+    try:
+        us.length_unit = "MILLIMETERS"
+    except TypeError:
+        pass
+    return sc
+
+
+def show_scene(sc):
+    """Makes `sc` the scene of every window (Open in Blender, the import menu)."""
+    wm = getattr(bpy.context, "window_manager", None)
+    for window in (wm.windows if wm is not None else []):
+        try:
+            window.scene = sc
+        except (AttributeError, TypeError, RuntimeError):
+            pass
 
 
 def _strip_suffix(name):
@@ -23,7 +52,7 @@ def _strip_suffix(name):
     return base if dot and num.isdigit() and len(num) == 3 else name
 
 
-def clear_previous():
+def clear_previous(sc):
     """Removes the objects, the camera, lights and world of the last import."""
     col = bpy.data.collections.get(scene.COLLECTION)
     if col is not None:
@@ -44,7 +73,6 @@ def clear_previous():
             bpy.data.collections.remove(child)
         bpy.data.collections.remove(col)
     # The build-up's keyed height (scene.BUILD_PROP), when the scene has no other animation.
-    sc = bpy.context.scene
     if scene.BUILD_PROP in sc.keys():
         if all(fc.data_path == '["%s"]' % scene.BUILD_PROP for fc in compat.action_fcurves(sc)):
             sc.animation_data_clear()
@@ -53,11 +81,11 @@ def clear_previous():
         del sc[scene.BUILD_ON]
 
 
-def _import_glb(path, collection):
+def _import_glb(path, collection, sc):
     compat.ensure_gltf_importer()
     before = set(bpy.data.objects)
-    # New objects go to the active collection: make ours active for the import.
-    view_layer = bpy.context.view_layer
+    # New objects go to the active collection of the add-on's scene: make ours active for the import.
+    view_layer = sc.view_layers[0]
     layer_col = _find_layer_collection(view_layer.layer_collection, collection.name)
     previous = view_layer.active_layer_collection
     if layer_col is not None:
@@ -71,7 +99,13 @@ def _import_glb(path, collection):
     if "import_scene_as_collection" in props:
         kwargs["import_scene_as_collection"] = False
     try:
-        result = bpy.ops.import_scene.gltf(**kwargs)
+        if hasattr(bpy.context, "temp_override"):
+            with bpy.context.temp_override(scene=sc, view_layer=view_layer):
+                result = bpy.ops.import_scene.gltf(**kwargs)
+        else:
+            override = bpy.context.copy()
+            override.update(scene=sc, view_layer=view_layer)
+            result = bpy.ops.import_scene.gltf(override, **kwargs)
     finally:
         if layer_col is not None:
             view_layer.active_layer_collection = previous
@@ -143,19 +177,20 @@ def apply_materials(pkg, model_objects, imperfections=True, layer_bump=True):
 def import_package(path, quality=None, device="AUTO", samples=None, imperfections=True, look_override=None):
     """Builds the scene from the package at `path` (folder, zip, or a file in the folder). Returns a
     summary dict for the panel and the tests."""
-    sc = bpy.context.scene
+    sc = target_scene()
+    show_scene(sc)
     settings = getattr(sc, "edgeslicer", None)
     if settings is not None:
         # The panel shows the package even when a later step fails, so Re-import can try again.
         settings.package_path = path
     pkg = package.load(path)
-    clear_previous()
+    clear_previous(sc)
     collection = bpy.data.collections.new(scene.COLLECTION)
     sc.collection.children.link(collection)
 
     quality = scene.apply_render_settings(pkg, sc, quality, device, samples)
     glb = os.path.join(pkg.root, pkg.get("glb", default="scene.glb"))
-    imported = _import_glb(glb, collection)
+    imported = _import_glb(glb, collection, sc)
     model_objects = [o for o in imported if o.type == "MESH"]
     # Our package bakes positions in world space: the importer's nodes are identity. Empties it made
     # (none expected) are left in place.
@@ -172,8 +207,27 @@ def import_package(path, quality=None, device="AUTO", samples=None, imperfection
     if settings is not None:
         settings.package_path = pkg.source
         settings.quality = quality
+    # Where the parts ended up, for the log and the tests: their world bounds and how many of their
+    # bounding-box corners the still's camera sees.
+    from bpy_extras.object_utils import world_to_camera_view
+    from mathutils import Vector
+
+    lo, hi, inside, corners = [1e30] * 3, [-1e30] * 3, 0, 0
+    for o in model_objects:
+        for c in o.bound_box:
+            w = o.matrix_world @ Vector(c)
+            lo = [min(lo[i], w[i]) for i in range(3)]
+            hi = [max(hi[i], w[i]) for i in range(3)]
+            if sc.camera is not None:
+                p = world_to_camera_view(sc, sc.camera, w)
+                corners += 1
+                inside += 0.0 <= p.x <= 1.0 and 0.0 <= p.y <= 1.0 and p.z > 0.0
     return {
+        "bounds": [lo, hi] if model_objects else None,
+        "corners_in_frame": [inside, corners],
+        "unit_scale": sc.unit_settings.scale_length,
         "root": pkg.root,
+        "scene": sc.name,
         "objects": len(model_objects),
         "materials": len(mats),
         "lights": len(lights),
