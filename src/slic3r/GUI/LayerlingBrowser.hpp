@@ -20,7 +20,9 @@ namespace GUI {
 //  - Persistent storage of its own: Layerling keeps the designs in the page's IndexedDB and
 //    localStorage, keyed by the page's origin. Windows: a WebView2 user data folder at
 //    <data dir>/layerling/.profile (never touched by an update). macOS 14+: a persistent
-//    WKWebsiteDataStore with a fixed identifier; older macOS: the default persistent store.
+//    WKWebsiteDataStore with a fixed identifier, except on a Mac that already used the tab on
+//    macOS 12/13 (its designs are in the default store, which is then kept: see
+//    LayerlingBrowserMac.mm); older macOS: the default persistent store.
 //    Linux: WebKitGTK's default (persistent) context.
 //  - The page stays on its origin (the configured base URL: our 127.0.0.1 server by default).
 //    Links anywhere else, and new windows, open in the system browser.
@@ -35,6 +37,8 @@ namespace GUI {
 //    files is changed.
 //  - Permissions are denied except the ones an editor in a tab needs (clipboard, several
 //    downloads in a row, opening local files the user picks).
+//  - Files dropped on the view go into the page (Layerling's own drop zones); a drop the page does
+//    not take would navigate to a file:// URL, which the navigation rules refuse.
 class LayerlingBrowser
 {
 public:
@@ -49,6 +53,10 @@ public:
         std::function<void(const std::string &suggested_name, const std::string &error)> on_download_failed;
         // The browser could not start, or its content process died.
         std::function<void(const std::string &error)> on_error;
+        // A link the page opens outside the tab (a navigation elsewhere or a new window), before it
+        // goes to the system browser: true when the panel took it (Layerling's update banner, see
+        // layerling::release_link_version), then nothing opens. Runs on the GUI thread.
+        std::function<bool(const std::string &url)> on_external_link;
     };
 
     // `host`: the window the view fills. `allowed_origin`: e.g. "http://127.0.0.1:23456".
@@ -74,6 +82,13 @@ public:
     virtual void clear_data(std::function<void(bool ok)> done) = 0;
     // Light or dark for the page's prefers-color-scheme, where the system lets us set it.
     virtual void set_dark(bool dark) = 0;
+    // The address the page shows now (after its own history.replaceState too), "" before a page.
+    // Layerling's editor shows "?editor=1&project=<id>": that is how Send to Plate knows the design.
+    virtual std::string current_url() const = 0;
+    // Runs `script` in the top frame of the page; `done(ok, result)` gets the script's value as a
+    // string (a string result unquoted). One-way: the page still cannot call the app. Used to hand a
+    // file to Layerling's own import input (layerling::import_file_script).
+    virtual void run_script(const std::string &script, std::function<void(bool ok, const std::string &result)> done) = 0;
 };
 
 } // namespace GUI

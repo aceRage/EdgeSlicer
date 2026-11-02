@@ -23,6 +23,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 
 namespace fs = boost::filesystem;
 
@@ -36,22 +37,46 @@ API_AVAILABLE(macos(12.0))
 }
 @end
 
-// No file drops into the view (MacDarkMode.mm loads a file dropped on any WKWebView into it).
+// File drops go into the page, as in a browser: Layerling's own drop zones (import, fonts, images)
+// take them. MacDarkMode.mm swaps WKWebView's drag methods for ones that load a dropped file as the
+// whole page (its "...2" selectors now hold WebKit's own implementations); this view calls WebKit's
+// own ones instead. A file dropped where the page takes none makes WebKit navigate to its file://
+// URL, which decide_action() refuses (Navigation::Block): drops never replace Layerling.
+@interface WKWebView (EdgeSlicerLayerlingWebKitDrag)
+// WebKit implements the NSDraggingDestination methods; declared here so super can be called.
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender;
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender;
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender;
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender;
+- (NSDragOperation)draggingEntered2:(id<NSDraggingInfo>)sender;
+- (NSDragOperation)draggingUpdated2:(id<NSDraggingInfo>)sender;
+- (BOOL)prepareForDragOperation2:(id<NSDraggingInfo>)sender;
+- (BOOL)performDragOperation2:(id<NSDraggingInfo>)sender;
+@end
+
 @interface EdgeSlicerLayerlingWebView : WKWebView
 @end
 
 @implementation EdgeSlicerLayerlingWebView
-- (instancetype)initWithFrame:(NSRect)frame configuration:(WKWebViewConfiguration *)configuration
+// After the swap in MacDarkMode.mm, WKWebView's "...2" selectors run WebKit's own implementation.
+// Without that swap (the category not loaded), the plain selectors are WebKit's own: call super.
+static bool layerling_drag_swapped() { return [WKWebView instancesRespondToSelector:@selector(performDragOperation2:)]; }
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
 {
-    self = [super initWithFrame:frame configuration:configuration];
-    if (self != nil)
-        [self unregisterDraggedTypes];
-    return self;
+    return layerling_drag_swapped() ? [super draggingEntered2:sender] : [super draggingEntered:sender];
 }
-- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender { return NSDragOperationNone; }
-- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender { return NSDragOperationNone; }
-- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender { return NO; }
-- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender { return NO; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender
+{
+    return layerling_drag_swapped() ? [super draggingUpdated2:sender] : [super draggingUpdated:sender];
+}
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender
+{
+    return layerling_drag_swapped() ? [super prepareForDragOperation2:sender] : [super prepareForDragOperation:sender];
+}
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender
+{
+    return layerling_drag_swapped() ? [super performDragOperation2:sender] : [super performDragOperation:sender];
+}
 @end
 
 namespace Slic3r {
@@ -62,6 +87,18 @@ namespace {
 std::string to_std(NSString *s) { return s == nil ? std::string() : std::string([s UTF8String] ? [s UTF8String] : ""); }
 std::string url_string(NSURL *u) { return u == nil ? std::string() : to_std(u.absoluteString); }
 NSString   *to_ns(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
+
+// The host website data records are listed under ("127.0.0.1", "layerling.com").
+std::string origin_host(const std::string &origin)
+{
+    untrusted::Url u;
+    return untrusted::parse_url(origin, u) ? u.host : std::string();
+}
+
+// Reloads after the page's content process died, before the tab gives up and shows an error.
+constexpr int MAX_CRASH_RELOADS = 3;
+// A crash this long after the last one starts the count again.
+constexpr double CRASH_WINDOW_SECONDS = 120.0;
 
 void open_external(const std::string &url)
 {
@@ -81,6 +118,7 @@ public:
 
     ~LayerlingBrowserMac() override
     {
+        *m_alive = false;
         if (m_delegate != nil) {
             m_delegate->owner = nullptr;
             [m_delegate release];
@@ -105,10 +143,21 @@ public:
 
     void load(const std::string &url) override
     {
-        if (m_view == nil && !create())
+        m_pending_url = url;
+        if (m_view == nil) {
+            // The view is made once the data store is chosen (asynchronous on a first start on
+            // macOS 14+), and then loads m_pending_url.
+            if (!m_choosing_store)
+                create();
             return;
+        }
+        load_now(url);
+    }
+
+    void load_now(const std::string &url)
+    {
         NSURL *u = [NSURL URLWithString:to_ns(url)];
-        if (u != nil)
+        if (u != nil && m_view != nil)
             [m_view loadRequest:[NSURLRequest requestWithURL:u]];
     }
 
@@ -147,25 +196,61 @@ public:
     void clear_data(std::function<void(bool)> done) override
     {
         WKWebsiteDataStore *store = m_store != nil ? m_store : [WKWebsiteDataStore defaultDataStore];
-        untrusted::Url      u;
-        const std::string   host = untrusted::parse_url(m_origin, u) ? u.host : std::string();
+        const std::string   host  = origin_host(m_origin);
         NSSet              *types = [WKWebsiteDataStore allWebsiteDataTypes];
         auto                done_copy = done;
+        if (host.empty()) {
+            if (done_copy)
+                done_copy(false);
+            return;
+        }
         [store fetchDataRecordsOfTypes:types
                      completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
                          // Only the records of Layerling's host: the default store also holds the
                          // app's other web views.
                          NSMutableArray *ours = [NSMutableArray array];
                          for (WKWebsiteDataRecord *r in records)
-                             if (!host.empty() && to_std(r.displayName) == host)
+                             if (to_std(r.displayName) == host)
                                  [ours addObject:r];
                          [store removeDataOfTypes:types
                                    forDataRecords:ours
                                 completionHandler:^{
-                                    if (done_copy)
-                                        wxGetApp().CallAfter([done_copy]() { done_copy(true); });
+                                    // removeDataOfTypes reports no error: look again, and say it
+                                    // worked only when nothing of the host is left.
+                                    [store fetchDataRecordsOfTypes:types
+                                                 completionHandler:^(NSArray<WKWebsiteDataRecord *> *left) {
+                                                     bool clean = true;
+                                                     for (WKWebsiteDataRecord *r in left)
+                                                         if (to_std(r.displayName) == host)
+                                                             clean = false;
+                                                     if (done_copy)
+                                                         wxGetApp().CallAfter([done_copy, clean]() { done_copy(clean); });
+                                                 }];
                                 }];
                      }];
+    }
+
+    std::string current_url() const override { return m_view != nil ? url_string(m_view.URL) : std::string(); }
+
+    void run_script(const std::string &script, std::function<void(bool, const std::string &)> done) override
+    {
+        if (m_view == nil) {
+            if (done)
+                done(false, "no page");
+            return;
+        }
+        auto done_copy = done;
+        [m_view evaluateJavaScript:to_ns(script)
+                 completionHandler:^(id result, NSError *error) {
+                     std::string value;
+                     if ([result isKindOfClass:[NSString class]])
+                         value = to_std((NSString *) result);
+                     else if (error != nil)
+                         value = to_std(error.localizedDescription);
+                     const bool ok = error == nil;
+                     if (done_copy)
+                         wxGetApp().CallAfter([done_copy, ok, value]() { done_copy(ok, value); });
+                 }];
     }
 
     void set_dark(bool dark) override
@@ -189,7 +274,7 @@ public:
         if (!main_frame && d == layerling::Navigation::External)
             return WKNavigationActionPolicyAllow; // a frame showing another site
         if (d == layerling::Navigation::External && action.navigationType == WKNavigationTypeLinkActivated)
-            open_external(url);
+            external(url);
         return WKNavigationActionPolicyCancel;
     }
 
@@ -209,8 +294,16 @@ public:
     {
         const std::string url = url_string(action.request.URL);
         if (!layerling::origin_of(url).empty())
-            open_external(url);
+            external(url);
         return nil; // never a second browser window
+    }
+
+    // The panel first (Layerling's update banner), else the system browser.
+    void external(const std::string &url)
+    {
+        if (m_cb.on_external_link && m_cb.on_external_link(url))
+            return;
+        open_external(url);
     }
 
     void adopt_download(WKDownload *download)
@@ -222,10 +315,15 @@ public:
     {
         const std::string name = layerling::sanitize_export_name(to_std(suggested));
         boost::system::error_code ec;
-        const fs::path dir = m_download_dir / fs::unique_path("%%%%%%%%%%%%");
-        fs::create_directories(dir, ec);
+        // The error_code overloads: nothing may throw inside a WebKit callback.
+        const fs::path dir = m_download_dir / fs::unique_path("%%%%%%%%%%%%", ec);
+        if (!ec)
+            fs::create_directories(dir, ec);
         const fs::path file = dir / name;
         if (ec || !untrusted::is_path_within_root(m_download_dir, file)) {
+            // Reported here, with the reason; WebKit then fails the download as cancelled, which
+            // download_failed() must not report a second time (it would replace this reason).
+            m_refused.insert((void *) download);
             handler(nil);
             if (m_cb.on_download_failed)
                 m_cb.on_download_failed(name, "no usable temporary folder");
@@ -253,6 +351,8 @@ public:
 
     void download_failed(WKDownload *download, NSError *error)
     {
+        if (m_refused.erase((void *) download) > 0)
+            return; // decide_destination() refused it and said why
         auto it = m_downloads.find((void *) download);
         std::string name;
         if (it != m_downloads.end()) {
@@ -273,17 +373,40 @@ public:
             // Our own cancellations (a link sent to the system browser, a download) are not failures.
             if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled)
                 return;
-            if ([error.domain isEqualToString:@"WebKitErrorDomain"] && (error.code == 102 || error.code == 101))
+            // 102 "Frame load interrupted": a navigation that became a download (an export) or that
+            // decide_action() cancelled. 101 "cannot show URL" is a real failure and is reported.
+            if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102)
                 return;
         }
+        if (ok)
+            m_crash_reloads = 0; // a page that loads again ends a crash series
         if (m_cb.on_loaded)
             m_cb.on_loaded(ok, m_view != nil ? url_string(m_view.URL) : std::string(), ok ? std::string() : to_std(error.localizedDescription));
     }
 
+    // The page's content process died (a crash, or macOS ended it under memory pressure). Reload a
+    // few times; when it keeps dying, stop, show a short error page and tell the panel, which
+    // offers Retry instead of reloading for ever.
     void content_process_died()
     {
-        if (m_view != nil)
+        if (m_view == nil)
+            return;
+        const NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        if (m_crash_reloads > 0 && now - m_last_crash > CRASH_WINDOW_SECONDS)
+            m_crash_reloads = 0;
+        m_last_crash = now;
+        if (m_crash_reloads < MAX_CRASH_RELOADS) {
+            ++m_crash_reloads;
+            BOOST_LOG_TRIVIAL(warning) << "Layerling: the page's content process ended, reloading (" << m_crash_reloads << "/" << MAX_CRASH_RELOADS << ")";
             [m_view reload];
+            return;
+        }
+        BOOST_LOG_TRIVIAL(error) << "Layerling: the page's content process keeps ending, not reloading again";
+        [m_view loadHTMLString:@"<!doctype html><meta charset=utf-8><body style=\"font:14px -apple-system,sans-serif;margin:40px;color:#666\">"
+                               @"Layerling stopped several times in a row.</body>"
+                       baseURL:nil];
+        if (m_cb.on_error)
+            m_cb.on_error(_u8L("Layerling stopped several times in a row and was not reloaded again."));
     }
 
 private:
@@ -302,32 +425,99 @@ private:
     WKWebsiteDataStore          *m_store { nil };
     EdgeSlicerLayerlingDelegate *m_delegate { nil };
     std::map<void *, Pending>    m_downloads;
+    std::set<void *>             m_refused; // downloads decide_destination() refused (reported there)
     bool                         m_visible { true };
     bool                         m_dark { false };
+    bool                         m_choosing_store { false };
+    std::shared_ptr<bool>        m_alive { std::make_shared<bool>(true) };
+    std::string                  m_pending_url;
+    int                          m_crash_reloads { 0 };
+    NSTimeInterval               m_last_crash { 0 };
 
-    bool create()
+    // Which persistent data store holds the designs (app_config "layerling_store"):
+    //  - macOS 12/13: the default persistent store (dataStoreForIdentifier: needs macOS 14).
+    //  - macOS 14+: a store of its own ("own", identifier in "layerling_store_id"), so the app's
+    //    other web views do not share it - unless the default store already holds Layerling's
+    //    data: then this Mac ran the tab on macOS 12/13 and was upgraded, and switching stores
+    //    would hide every design made before. Such a system keeps the default store ("default").
+    //    The choice is made once, on the first start on 14+, and remembered. (The default store's
+    //    records are per host, not per port: another web view of the app on 127.0.0.1 also counts
+    //    as "has data", which only means the tab keeps the store macOS 12/13 used.)
+    // Phase 1 kept no "layerling_store": a saved identifier means "own" (its designs are there).
+    static constexpr const char *KEY_STORE    = "layerling_store";
+    static constexpr const char *KEY_STORE_ID = "layerling_store_id";
+
+    void create()
     {
+        if (@available(macOS 14.0, *)) {
+            AppConfig        *app    = wxGetApp().app_config;
+            const std::string choice = app->get(KEY_STORE);
+            if (choice == "default") {
+                make_view(nil);
+                return;
+            }
+            if (choice == "own" || !app->get(KEY_STORE_ID).empty()) {
+                make_view(own_store());
+                return;
+            }
+            // First start on 14+: does the default store already hold Layerling's data?
+            const std::string host = origin_host(m_origin);
+            m_choosing_store       = true;
+            auto alive             = m_alive;
+            [[WKWebsiteDataStore defaultDataStore]
+                fetchDataRecordsOfTypes:[WKWebsiteDataStore allWebsiteDataTypes]
+                      completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+                          if (!*alive)
+                              return;
+                          bool has_data = false;
+                          for (WKWebsiteDataRecord *r in records)
+                              if (!host.empty() && to_std(r.displayName) == host)
+                                  has_data = true;
+                          m_choosing_store = false;
+                          AppConfig *cfg   = wxGetApp().app_config;
+                          if (has_data) {
+                              BOOST_LOG_TRIVIAL(info) << "Layerling: the default data store already holds data of " << host
+                                                      << " (tab used on macOS 12/13): keeping it";
+                              cfg->set(KEY_STORE, "default");
+                              make_view(nil);
+                          } else if (@available(macOS 14.0, *)) {
+                              make_view(own_store());
+                          }
+                      }];
+            return;
+        }
+        make_view(nil);
+    }
+
+    API_AVAILABLE(macos(14.0)) WKWebsiteDataStore *own_store()
+    {
+        AppConfig        *app   = wxGetApp().app_config;
+        NSUUID           *uuid  = nil;
+        const std::string saved = app->get(KEY_STORE_ID);
+        if (!saved.empty())
+            uuid = [[[NSUUID alloc] initWithUUIDString:to_ns(saved)] autorelease];
+        if (uuid == nil) {
+            uuid = [NSUUID UUID];
+            app->set(KEY_STORE_ID, to_std(uuid.UUIDString));
+        }
+        app->set(KEY_STORE, "own");
+        return [WKWebsiteDataStore dataStoreForIdentifier:uuid];
+    }
+
+    // `store` nil: the default persistent store.
+    void make_view(WKWebsiteDataStore *store)
+    {
+        if (m_view != nil)
+            return;
         NSView *parent = (NSView *) m_host->GetHandle();
         if (parent == nil) {
             if (m_cb.on_error)
                 m_cb.on_error(_u8L("The Layerling view could not start."));
-            return false;
+            return;
         }
+        if (store != nil)
+            m_store = [store retain];
         WKWebViewConfiguration *config = [[[WKWebViewConfiguration alloc] init] autorelease];
-        // Persistent storage for the designs. macOS 14+: a store of its own (fixed identifier kept
-        // in app_config); older: the default store, which is persistent too (records are per origin).
-        if (@available(macOS 14.0, *)) {
-            AppConfig        *app   = wxGetApp().app_config;
-            NSUUID           *uuid  = nil;
-            const std::string saved = app->get("layerling_store_id");
-            if (!saved.empty())
-                uuid = [[[NSUUID alloc] initWithUUIDString:to_ns(saved)] autorelease];
-            if (uuid == nil) {
-                uuid = [NSUUID UUID];
-                app->set("layerling_store_id", to_std(uuid.UUIDString));
-            }
-            m_store = [[WKWebsiteDataStore dataStoreForIdentifier:uuid] retain];
-        }
         config.websiteDataStore = m_store != nil ? m_store : [WKWebsiteDataStore defaultDataStore];
         WKUserScript *script = [[[WKUserScript alloc] initWithSource:to_ns(layerling::document_start_script())
                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
@@ -346,7 +536,8 @@ private:
         [parent addSubview:m_view];
         set_dark(m_dark);
         BOOST_LOG_TRIVIAL(info) << "Layerling: browser started (" << (m_store != nil ? "own" : "default") << " persistent data store)";
-        return true;
+        if (!m_pending_url.empty())
+            load_now(m_pending_url);
     }
 };
 

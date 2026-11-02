@@ -144,6 +144,42 @@ public:
         apply_dark();
     }
 
+    std::string current_url() const override
+    {
+        if (!m_view)
+            return std::string();
+        LPWSTR src = nullptr;
+        if (FAILED(m_view->get_Source(&src)))
+            return std::string();
+        return take_wstring(src);
+    }
+
+    void run_script(const std::string &script, std::function<void(bool, const std::string &)> done) override
+    {
+        if (!m_view) {
+            if (done)
+                done(false, "no page");
+            return;
+        }
+        auto          alive = m_alive;
+        const HRESULT hr    = m_view->ExecuteScript(boost::nowide::widen(script).c_str(),
+                                                    Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                                                        [alive, done](HRESULT result, LPCWSTR json) -> HRESULT {
+                                                            if (!*alive || !done)
+                                                                return S_OK;
+                                                            std::string value = json ? boost::nowide::narrow(json) : std::string();
+                                                            // A string result arrives as JSON: "\"edgeslicer-ok\"".
+                                                            if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+                                                                value = value.substr(1, value.size() - 2);
+                                                            const bool ok = SUCCEEDED(result);
+                                                            wxGetApp().CallAfter([done, ok, value]() { done(ok, value); });
+                                                            return S_OK;
+                                                        })
+                                                        .Get());
+        if (FAILED(hr) && done)
+            done(false, "the script could not be run");
+    }
+
 private:
     struct Download
     {
@@ -288,6 +324,14 @@ private:
             c2->put_DefaultBackgroundColor(m_dark ? COREWEBVIEW2_COLOR{255, 0x24, 0x24, 0x28} : COREWEBVIEW2_COLOR{255, 255, 255, 255});
     }
 
+    // The panel first (Layerling's update banner), else the system browser.
+    void external(const std::string &url)
+    {
+        if (m_cb.on_external_link && m_cb.on_external_link(url))
+            return;
+        open_external(url);
+    }
+
     static void open_external(const std::string &url)
     {
         if (!untrusted::is_safe_to_open_externally(url))
@@ -314,7 +358,7 @@ private:
                                                BOOL user = FALSE;
                                                args->get_IsUserInitiated(&user);
                                                if (d == layerling::Navigation::External && user)
-                                                   open_external(url);
+                                                   external(url);
                                                return S_OK;
                                            })
                                            .Get(),
@@ -333,7 +377,7 @@ private:
                                                 .Get(),
                                             &token);
         m_view->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-                                           [alive](ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
+                                           [this, alive](ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
                                                args->put_Handled(TRUE); // never a second browser window
                                                if (!*alive)
                                                    return S_OK;
@@ -341,7 +385,7 @@ private:
                                                args->get_Uri(&uri);
                                                const std::string url = take_wstring(uri);
                                                if (!layerling::origin_of(url).empty())
-                                                   open_external(url);
+                                                   external(url);
                                                return S_OK;
                                            })
                                            .Get(),
@@ -432,8 +476,10 @@ private:
         args->put_Handled(TRUE);
 
         boost::system::error_code ec;
-        const fs::path            dir = m_download_dir / fs::unique_path("%%%%%%%%%%%%");
-        fs::create_directories(dir, ec);
+        // The error_code overloads: nothing may throw inside a WebView2 callback.
+        const fs::path            dir = m_download_dir / fs::unique_path("%%%%%%%%%%%%", ec);
+        if (!ec)
+            fs::create_directories(dir, ec);
         const fs::path file = dir / fs::path(boost::nowide::widen(name));
         if (ec || !untrusted::is_path_within_root(m_download_dir, file) || FAILED(args->put_ResultFilePath(file.wstring().c_str()))) {
             args->put_Cancel(TRUE);
