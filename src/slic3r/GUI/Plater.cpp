@@ -21445,35 +21445,68 @@ void Plater::calib_temp_retraction(const Calib_Params& params)
     if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
         return;
 
-    // F19 (Russ): the grid prints with filament slot 1 and its defaults came from slot 1's preset. The
-    // Filament tab may be editing another slot k. Tab::select_preset() goes through update_presets(),
-    // which calls set_filament_preset(editing_filament, name): with editing_filament = k that would
-    // reassign slot k to slot 1's preset for good. Point editing_filament at slot 0 for the switch so
-    // only slot 1 (which already holds that preset) is written, and restore it if the switch is refused.
-    // If the tab has unsaved edits and the user cancels the discard prompt, the tab still edits slot k:
-    // abort before new_project() so nothing is created and no override lands on slot k's preset.
+    // F19/F21/F22 (Russ): the grid prints with filament slot 1 and its defaults came from slot 1's preset.
+    // The Filament tab may be editing another slot k. Bind it to slot 1 the way Sidebar::edit_filament() /
+    // PlaterPresetComboBox::switch_to_tab() do, without opening the tab:
+    // - unsaved edits of slot k are resolved for slot k first with Save / Discard / Cancel, never Transfer
+    //   (no_transfer), so they are not carried onto slot 1;
+    // - editing_filament is 0 during select_preset(), whose update_presets() writes set_filament_preset(
+    //   editing_filament, ...): slot k is never reassigned to slot 1's preset;
+    // - every slot is put back to what it held (slot k gets the saved name if the user saved), the tab
+    //   combo is bound to slot 0 (set_filament_idx) and the sidebar combos are refreshed.
+    // Cancel at the prompt, or a refused switch, aborts before new_project(): nothing is created.
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    if (bundle != nullptr && !bundle->filament_presets.empty()) {
-        const std::string slot1_name = bundle->filament_presets.front();
-        if (bundle->filaments.get_edited_preset().name != slot1_name) {
-            const int                      previous_editing = sidebar().editing_filament_index();
-            const std::vector<std::string> previous_slots   = bundle->filament_presets;
-            sidebar().set_editing_filament(0);
-            wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(slot1_name);
-            const bool switched = bundle->filaments.get_edited_preset().name == slot1_name;
-            if (!switched)
-                sidebar().set_editing_filament(previous_editing);
-            // Slots other than slot 1 must never change here.
-            for (size_t i = 1; i < previous_slots.size() && i < bundle->filament_presets.size(); ++i)
-                if (bundle->filament_presets[i] != previous_slots[i])
-                    bundle->set_filament_preset(i, previous_slots[i]);
-            if (!switched)
-                return; // the user kept the other slot's unsaved edits: calibration aborted, nothing changed
+    Tab          *filament_tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+    if (bundle != nullptr && filament_tab != nullptr && !bundle->filament_presets.empty()) {
+        TabPresetComboBox *tab_combo = filament_tab->get_combo_box();
+        // The slot the tab is editing now. Until a slot is bound, the tab holds filament_presets[0].
+        const int bound_idx = (tab_combo && tab_combo->get_filament_idx() >= 0) ? tab_combo->get_filament_idx() : 0;
+        const int previous_editing = sidebar().editing_filament_index();
+        std::vector<std::string> slots_target = bundle->filament_presets;
+        bool slots_touched = false;
+        if (bound_idx != 0 && filament_tab->current_preset_is_dirty()) {
+            if (!filament_tab->may_discard_current_dirty_preset(nullptr, "", true))
+                return; // Cancel: the tab keeps editing slot k with its edits; calibration aborted
+            if (filament_tab->current_preset_is_dirty()) {
+                // Discarded (may_discard_current_dirty_preset() leaves that to the caller).
+                bundle->filaments.discard_current_changes();
+                filament_tab->load_current_preset();
+                filament_tab->update_dirty();
+            } else if (size_t(bound_idx) < slots_target.size()) {
+                // Saved: only slot k moves to the saved preset (a save under a new name renames every
+                // slot that used the old one, see switch_to_tab()).
+                slots_target[bound_idx] = bundle->filaments.get_selected_preset_name();
+                slots_touched = true;
+            }
         }
+        const std::string slot1_name = slots_target.front();
+        bool switched = true;
+        if (bundle->filaments.get_edited_preset().name != slot1_name) {
+            sidebar().set_editing_filament(0);
+            switched = filament_tab->select_preset(slot1_name) && bundle->filaments.get_edited_preset().name == slot1_name;
+            slots_touched = true;
+        }
+        for (size_t i = 0; i < slots_target.size() && i < bundle->filament_presets.size(); ++i)
+            if (bundle->filament_presets[i] != slots_target[i])
+                bundle->set_filament_preset(i, slots_target[i]);
+        if (switched) {
+            sidebar().set_editing_filament(0);
+            if (tab_combo)
+                tab_combo->set_filament_idx(0);
+        } else
+            sidebar().set_editing_filament(previous_editing);
+        if (slots_touched) {
+            sidebar().update_presets(Preset::TYPE_FILAMENT);
+            bundle->export_selections(*wxGetApp().app_config);
+        }
+        if (!switched)
+            return; // the switch to slot 1 was refused: calibration aborted, no project, no overrides
     }
 
     const auto calib_name = wxString::Format(L"Stringing temp × retraction");
-    new_project(false, false, calib_name);
+    // F23: "Creating a new project" can be cancelled; then there is no project to set up.
+    if (new_project(false, false, calib_name) == wxID_CANCEL)
+        return;
     wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
 
     auto print_config    = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
