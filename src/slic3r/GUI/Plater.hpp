@@ -176,6 +176,19 @@ public:
     void set_filament_side(size_t filament, int side);
     void set_filament_rack_size(size_t filament, size_t extruder, double diameter);
     void append_filament_side_menu(wxMenu *menu, size_t filament);
+    // One choice of the side badge / "Print on" list: a side (0 auto, 1 left, 2 right) and, on a side whose rack holds several
+    // sizes, a size (0 = any), with the list label, the badge text and the size's rack slots.
+    struct SideChoice
+    {
+        int              side{ 0 };
+        double           size{ 0. };
+        wxString         label;
+        wxString         badge;
+        std::vector<int> slots;
+    };
+    std::vector<SideChoice> filament_side_choices() const;
+    int                     filament_side_choice(size_t filament) const; // index into filament_side_choices()
+    void                    apply_filament_side_choice(size_t filament, const SideChoice &choice);
     void cycle_filament_tool(size_t filament);
     // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
     // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).
