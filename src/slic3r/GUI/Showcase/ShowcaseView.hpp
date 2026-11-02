@@ -444,6 +444,7 @@ private:
     wxSlider                *m_imp_colour = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
+    std::vector<int>         m_mat_slots;     // the filament slot of each choice (physical, then Color Mixing)
     std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
     // 1h-2: the lens (an action: dolly-zooms to a focal length) and the depth of field.

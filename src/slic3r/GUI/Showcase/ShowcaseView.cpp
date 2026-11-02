@@ -23,6 +23,7 @@
 #include "../Plater.hpp"
 #include "../PresetComboBoxes.hpp"
 #include <wx/statbmp.h>
+#include <wx/image.h>
 #include "../Widgets/StateColor.hpp"
 
 #include <wx/button.h>
@@ -898,12 +899,7 @@ void ShowcaseView::build_panel()
     m_imp_colour = slider(0, 0, 100);
     m_imp_colour->SetToolTip(_L("Slight colour and gloss variation, so large faces are not one flat colour."));
     row(_L("Colour variation"), m_imp_colour);
-    {
-        auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
-                                                           "Pick another one where the guess is wrong."));
-        hint->Wrap(29 * em);
-        col->Add(hint, 0, wxLEFT | wxRIGHT, em);
-    }
+    // The per-filament finishes (refresh_materials); each choice explains the guess in its tooltip.
     begin_grid();
     m_mat_grid = grid;
 
@@ -1852,7 +1848,10 @@ void ShowcaseView::refresh_materials(bool sync_selection)
 {
     if (m_mat_grid == nullptr)
         return;
-    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    // The physical slots, then the Color Mixing filaments, as the Prepare sidebar lists them.
+    std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    for (ShowcaseFilament &m : showcase_mixed_filaments())
+        filaments.push_back(std::move(m));
     // Multi-colour P2: a split slot shows its make-up as a chip (colours, proportions, rotation).
     struct MakeUpChip
     {
@@ -1869,6 +1868,8 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         const DynamicPrintConfig &pc = bundle->project_config;
         const bool look = scene().materials.coextruded_look;
         for (size_t i = 0; i < filaments.size(); ++i) {
+            if (filaments[i].mixed)
+                continue;
             const size_t slot = size_t(filaments[i].slot - 1);
             const FilamentColor c = FilamentColorUtils::GetFilamentColorFromConfig(&pc, slot, filaments[i].color);
             chips[i].colors = c.colors;
@@ -1879,8 +1880,8 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     std::string signature;
     for (size_t i = 0; i < filaments.size(); ++i) {
         const ShowcaseFilament &f = filaments[i];
-        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
-        if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n" + f.mixed_label + "\n";
+        if (!f.mixed && size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
             signature += "glow\n";
         if (chips[i].shown) {
             for (const std::string &c : chips[i].colors)
@@ -1897,6 +1898,7 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         m_mat_signature = signature;
         m_mat_grid->Clear(true);
         m_mat_choices.clear();
+        m_mat_slots.clear();
         const int em = wxGetApp().em_unit();
         for (size_t fi = 0; fi < filaments.size(); ++fi) {
             const ShowcaseFilament &f = filaments[fi];
@@ -1916,24 +1918,40 @@ void ShowcaseView::refresh_materials(bool sync_selection)
                 });
                 label->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
             } else {
-                auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
-                swatch->SetBackgroundColour(showcase_wx_colour(f.color));
-                swatch->SetToolTip(_L("Click to edit this filament's colour, make-up and glow."));
-                swatch->SetCursor(wxCursor(wxCURSOR_HAND));
-                const int swatch_slot = f.slot;
-                swatch->Bind(wxEVT_LEFT_UP, [swatch_slot](wxMouseEvent &) {
-                    auto &combos = wxGetApp().sidebar().combos_filament();
-                    if (swatch_slot >= 1 && size_t(swatch_slot) <= combos.size())
-                        combos[size_t(swatch_slot - 1)]->ChangeExtruderColor();
-                });
+                // A drawn swatch, not a coloured panel: the dark theme repaints panels' backgrounds, which
+                // turned a white filament into a dark box. The bitmap keeps the filament's colour, with a
+                // grey border so white and black show on either theme.
+                const int side = int(1.4 * em);
+                wxImage   img(side, side);
+                const wxColour fill = showcase_wx_colour(f.color);
+                for (int y = 0; y < side; ++y)
+                    for (int x = 0; x < side; ++x) {
+                        const bool edge = x == 0 || y == 0 || x == side - 1 || y == side - 1;
+                        img.SetRGB(x, y, edge ? 150 : fill.Red(), edge ? 150 : fill.Green(), edge ? 150 : fill.Blue());
+                    }
+                auto *swatch = new wxStaticBitmap(m_side, wxID_ANY, wxBitmap(img));
+                if (f.mixed)
+                    swatch->SetToolTip(wxString::Format(_L("Color Mixing filament %s"), wxString::FromUTF8(f.mixed_label)));
+                else {
+                    swatch->SetToolTip(_L("Click to edit this filament's colour, make-up and glow."));
+                    swatch->SetCursor(wxCursor(wxCURSOR_HAND));
+                    const int swatch_slot = f.slot;
+                    swatch->Bind(wxEVT_LEFT_UP, [swatch_slot](wxMouseEvent &) {
+                        auto &combos = wxGetApp().sidebar().combos_filament();
+                        if (swatch_slot >= 1 && size_t(swatch_slot) <= combos.size())
+                            combos[size_t(swatch_slot - 1)]->ChangeExtruderColor();
+                    });
+                }
                 label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
             }
-            wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
-                                                  : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
-            if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+            wxString name = f.mixed ? wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.mixed_label)) :
+                            f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot) :
+                                                    wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
+            if (!f.mixed && size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
                 name += _L("  (glows)");
             auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
-            text->SetToolTip(wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
+            text->SetToolTip(f.mixed ? wxString::Format(_L("Color Mixing filament %s"), wxString::FromUTF8(f.mixed_label)) :
+                                       wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
             label->Add(text, 1, wxALIGN_CENTER_VERTICAL);
             m_mat_grid->Add(label, 0, wxALIGN_CENTER_VERTICAL);
 
@@ -1942,7 +1960,9 @@ void ShowcaseView::refresh_materials(bool sync_selection)
             for (Showcase::Finish finish : Showcase::all_finishes())
                 items.Add(showcase_finish_name(finish));
             auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
+            c->SetToolTip(_L("Auto guesses the finish from the preset's name and type. Pick another one where the guess is wrong."));
             const int slot = f.slot;
+            m_mat_slots.push_back(slot);
             c->Bind(wxEVT_CHOICE, [this, c, slot](wxCommandEvent &) {
                 const int sel = c->GetSelection();
                 const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
@@ -1966,7 +1986,7 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     const Showcase::Scene &s = scene();
     const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
     for (size_t i = 0; i < m_mat_choices.size(); ++i) {
-        const Showcase::Finish *o = s.materials.override_for(int(i) + 1);
+        const Showcase::Finish *o = s.materials.override_for(i < m_mat_slots.size() ? m_mat_slots[i] : int(i) + 1);
         int sel = 0;
         if (o != nullptr)
             sel = int(std::find(finishes.begin(), finishes.end(), *o) - finishes.begin()) + 1;

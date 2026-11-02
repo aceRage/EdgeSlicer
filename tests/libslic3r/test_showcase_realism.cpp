@@ -673,6 +673,8 @@ TEST_CASE("Showcase 1h-3: the download catalogue is the owner's six panoramas fr
         CHECK(it->downloadable);
         CHECK(it->licence == "CC0 1.0");
         CHECK_FALSE(it->download_file.empty());
+        // Published on the mirror (release showcase-hdri-1): size and checksum filled in.
+        CHECK(hdri_download_published(*it));
         // Our mirror, never the Poly Haven API (D-R3).
         const std::string url = hdri_download_url(hdri_mirror_base(nullptr), *it);
         CHECK(url.find("polyhaven") == std::string::npos);
