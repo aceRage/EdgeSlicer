@@ -31,6 +31,16 @@ uniform float env_exposure;
 uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
 // G1: 0 = lights on; otherwise the share of the light taken away (1 - the ambient level).
 uniform float scene_dim;
+// 1h-2 (modes 5 and 6): where the environment sits. Ground projection: the panorama projected onto a
+// dome (the panorama's camera at ground_center, ground_radius around it) with a flat floor at Z = 0,
+// the floor disc where the sphere meets it (ground_floor_radius). Otherwise an infinite panorama,
+// optionally tilted about the camera's horizontal axis (backdrop_tilt). ShowcaseLens.cpp mirrors it.
+uniform bool  ground_on;
+uniform vec3  ground_center;
+uniform float ground_radius;
+uniform float ground_floor_radius;
+uniform bool  tilt_on;
+uniform mat3  backdrop_tilt;
 
 in vec2 tex_coord;
 out vec4 out_color;
@@ -43,6 +53,41 @@ vec2 equirect_uv(vec3 w)
 {
     const float pi = 3.14159265;
     return vec2(0.5 - atan(w.y, w.x) / (2.0 * pi), 0.5 - asin(clamp(w.z, -1.0, 1.0)) / pi);
+}
+
+// The direction to look the panorama up in for a view ray from the camera (unit `d`).
+vec3 ground_lookup(vec3 o, vec3 d)
+{
+    vec3 c = ground_center;
+    if (d.z < 0.0 && o.z > 0.0) {
+        float tg = -o.z / d.z;
+        vec3 p = o + tg * d;
+        vec2 q = p.xy - c.xy;
+        if (dot(q, q) <= ground_floor_radius * ground_floor_radius)
+            return p - c;
+    }
+    vec3 oc = o - c;
+    float b = dot(oc, d);
+    float k = dot(oc, oc) - ground_radius * ground_radius;
+    float disc = b * b - k;
+    if (disc >= 0.0) {
+        float t = -b + sqrt(disc);
+        if (t > 0.0) {
+            vec3 p = o + t * d;
+            if (p.z >= 0.0)
+                return p - c;
+        }
+    }
+    return d;
+}
+
+vec3 view_lookup(vec3 dir)
+{
+    if (ground_on)
+        return normalize(ground_lookup(camera_position, dir));
+    if (tilt_on)
+        return backdrop_tilt * dir;
+    return dir;
 }
 
 vec3 env_rotate(vec3 w)
@@ -136,12 +181,12 @@ void main()
         c = vec4(mix(vec3(0.80), vec3(0.92), k), 1.0);
     } else if (mode == 5) {
         vec4 p = inv_view_projection * vec4(tex_coord * 2.0 - 1.0, 1.0, 1.0);
-        vec3 dir = normalize(p.xyz / p.w - camera_position);
+        vec3 dir = view_lookup(normalize(p.xyz / p.w - camera_position));
         vec4 t = textureLod(env_map, to_cube(env_rotate(dir)), clamp(blur, 0.0, 1.0) * env_max_lod);
         c = vec4(linear_to_srgb(tone_curve_map(t.rgb * t.a * 16.0 * env_exposure)), 1.0);
     } else if (mode == 6) {
         vec4 p = inv_view_projection * vec4(tex_coord * 2.0 - 1.0, 1.0, 1.0);
-        vec3 dir = normalize(p.xyz / p.w - camera_position);
+        vec3 dir = view_lookup(normalize(p.xyz / p.w - camera_position));
         // The mip level that matches one screen pixel (from the direction's derivatives, so there is no
         // seam where the longitude wraps), or the blur's level when that is softer.
         vec2 tsize = vec2(textureSize(image_tex, 0));

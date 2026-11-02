@@ -1,0 +1,60 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1",
+      "name": "Golden: photo backplate with the shadow",
+      "plate_index": 0,
+      "source": "model",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "backplate",
+        "image": "@IMAGE0@",
+        "blur": 0,
+        "plate_horizon": 0.8,
+        "plate_focal": 50
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "shadow_strength": 0.55,
+        "contact_shadow": 0.75
+      },
+      "lighting": {
+        "azimuth": 135,
+        "elevation": 35,
+        "key_intensity": 1,
+        "key_temperature": 4800,
+        "environment": "studio",
+        "env_intensity": 0.7,
+        "shadow_softness": 1.5
+      },
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      },
+      "camera": {
+        "projection": "perspective",
+        "eye": [
+          100,
+          -230,
+          42
+        ],
+        "target": [
+          100,
+          100,
+          0
+        ],
+        "up": [
+          0,
+          0,
+          1
+        ],
+        "zoom": 3.82631
+      },
+      "view_frame_height": 540
+    }
+  ]
+}

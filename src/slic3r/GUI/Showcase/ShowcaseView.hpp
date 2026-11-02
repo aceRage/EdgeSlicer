@@ -122,7 +122,15 @@ private:
     // set from the scene on a rebuild or when `sync_selection`.
     void                     refresh_materials(bool sync_selection);
 
-    void                     on_choose_background_image();
+    // `type`: Image, or (1h-2) Backplate: the picture becomes the photo backplate.
+    void                     on_choose_background_image(Showcase::BackgroundType type = Showcase::BackgroundType::Image);
+    // 1h-2: moves the camera along its view (keeping the model's size in the frame) so the frame has the
+    // angle of view of a `focal_mm` 35 mm equivalent lens; with `pitch` (radians, + = down) also turns it
+    // to that pitch (Match camera for a photo backplate).
+    void                     apply_camera_lens(double focal_mm, const double *pitch = nullptr);
+    // 1h-2: the ground projection's camera height and dome radius as drawn when the scene leaves them
+    // automatic (0), before the world scale; for the panel.
+    void                     ground_auto_values(double &height, double &radius);
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -360,6 +368,15 @@ private:
     wxButton                *m_bg_image = nullptr;
     wxChoice                *m_bg_fit = nullptr;
     wxSlider                *m_bg_blur = nullptr;
+    // 1h-2: where the environment backdrop sits, and the photo backplate's camera match.
+    wxCheckBox              *m_bg_ground = nullptr;
+    wxSpinCtrl              *m_bg_ground_height = nullptr;
+    wxSpinCtrl              *m_bg_ground_radius = nullptr;
+    wxSlider                *m_bg_ground_scale = nullptr;
+    wxSlider                *m_bg_pitch = nullptr;
+    wxSlider                *m_plate_horizon = nullptr;
+    wxSpinCtrl              *m_plate_focal = nullptr;
+    wxButton                *m_plate_match = nullptr;
     wxChoice                *m_floor_type = nullptr;
     wxColourPickerCtrl      *m_floor_color = nullptr;
     wxSlider                *m_floor_shadow = nullptr;
@@ -403,6 +420,13 @@ private:
     std::vector<wxChoice *>  m_mat_choices;
     std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
+    // 1h-2: the lens (an action: dolly-zooms to a focal length) and the depth of field.
+    wxChoice                *m_lens = nullptr;
+    wxCheckBox              *m_dof = nullptr;
+    wxChoice                *m_dof_fnumber = nullptr;
+    wxCheckBox              *m_dof_on_model = nullptr;
+    wxSpinCtrl              *m_dof_focus = nullptr;
+    wxChoice                *m_dof_quality = nullptr;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
     wxChoice                *m_size = nullptr;

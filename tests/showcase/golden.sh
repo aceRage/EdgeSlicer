@@ -12,10 +12,12 @@
 #     --out <dir>        where fixtures, renders, diffs and the report go (default ./showcase_golden)
 #     --only <name>      one fixture (studio_white, dark_gradient, build_plate, desk_wood, transparent,
 #                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
-#                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated, video)
-#                        The hdri_* fixtures need the HDRI environments (realism 1h-1), which the shared
-#                        baseline of main does not have: they are always expected to change (the golden
-#                        shows the fallback gradient, the candidate the HDRI backdrop and sun).
+#                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated,
+#                        hdri_outdoor_tilt, ground_workshop_dof, ground_sunset_sill, ground_loft, backplate_desk, video)
+#                        The 1h-2 fixtures (hdri_outdoor_tilt, ground_*, backplate_desk) need the backdrop
+#                        placement, ground projection, photo backplate and depth of field, which a golden
+#                        install from before 1h-2 does not have: they are expected to change until the
+#                        shared baseline has them (then drop them from NEW_FIXTURES below).
 #     --size <px>        the stills' shorter side (default 540)
 #     --keep-goldens     reuse goldens already in <out>/golden
 #     --max-delta <n>    largest per-channel difference in 8-bit steps (default 2)
@@ -56,7 +58,7 @@ while [ $# -gt 0 ]; do
     --expect-change) EXPECT=$2; shift 2 ;;
     --golden-env) GENV=$2; shift 2 ;;
     --candidate-env) CENV=$2; shift 2 ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) CAND=$1; shift ;;
     esac
 done
@@ -96,8 +98,10 @@ echo "candidate: $CEXE" | tee -a "$REPORT"
 echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$REPORT"
 [ -n "$GENV" ] && echo "golden env:    $GENV" | tee -a "$REPORT"
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
-# 1h-1: the HDRI fixtures are new, so a golden made by an install without HDRI support differs on purpose.
-EXPECT="${EXPECT:+$EXPECT,}hdri_outdoor,hdri_studio,hdri_workshop,hdri_loft,hdri_sunset,hdri_outdoor_rotated"
+# 1h-2: fixtures the shared baseline cannot render yet differ on purpose. (The 1h-1 HDRI fixtures are
+# compared strictly: the baseline has them since c5b7546a45.)
+NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk"
+EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
 # Whether fixture $1 is listed in --expect-change.
@@ -139,9 +143,10 @@ render() {   # env exe datadir fixture out extra-args...  (env: NAME=VALUE or em
     grep -q '"ok": *true' "$out.report.json" 2>/dev/null
 }
 
-run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact] [render args...]
+run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact] [--photo] [render args...]
     # --settings: the U1 project settings without slicing (the scene does not depend on what the
     # datadir loaded before; --slice fixtures always get them)
+    # --photo (1h-2): the generated desk photo (make_desk_photo.py) stored as the scene's @IMAGE0@
     name=$1; shift
     alpha=
     premul=
@@ -150,10 +155,15 @@ run_still() {   # name [--model <handy model file>] [--settings] [--alpha-exact]
     settings=
     if [ "${1:-}" = "--settings" ]; then settings=$SLICE_SETTINGS; shift; fi
     if [ "${1:-}" = "--alpha-exact" ]; then alpha=--alpha-exact; premul=--premultiplied; shift; fi
+    photo=
+    if [ "${1:-}" = "--photo" ]; then photo="$OUT/fixtures/desk_photo.png"; shift; fi
     [ -n "$ONLY" ] && [ "$ONLY" != "$name" ] && return 0
     fx="$OUT/fixtures/$name.3mf"
     [ "${1:-}" = "--slice" ] && settings=$SLICE_SETTINGS
-    "$PY" "$HERE/make_fixture.py" "$model" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
+    if [ -n "$photo" ] && [ ! -f "$photo" ]; then
+        "$PY" "$HERE/make_desk_photo.py" "$photo" || { STATUS=2; return; }
+    fi
+    "$PY" "$HERE/make_fixture.py" ${photo:+--image "$photo"} "$model" "$HERE/fixtures/$name.json" "$fx" ${settings:+"$settings"} || { STATUS=2; return; }
     g="$OUT/golden/$name.png"
     c="$OUT/candidate/$name.png"
     if [ "$KEEP" = 0 ] || [ ! -f "$g" ]; then
@@ -213,6 +223,12 @@ run_still hdri_workshop
 run_still hdri_loft
 run_still hdri_sunset
 run_still hdri_outdoor_rotated
+# 1h-2
+run_still hdri_outdoor_tilt
+run_still ground_workshop_dof
+run_still ground_sunset_sill
+run_still ground_loft
+run_still backplate_desk --photo
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

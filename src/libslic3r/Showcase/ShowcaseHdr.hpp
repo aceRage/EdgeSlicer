@@ -132,6 +132,13 @@ struct HdriInfo
     std::string   source;
     std::string   authors;
     std::string   licence;
+    // 1h-2: placement defaults ("ground": { "height_mm", "radius_mm" }, "backdrop_pitch"). The real
+    // camera height and room radius of the shot; only their ratio is used for an automatic dome radius
+    // (ground_dome_radius in ShowcaseLens.hpp). backdrop_pitch is what the panel sets when the HDRI is
+    // chosen (a scene's own value is never replaced at render time).
+    float         ground_height_mm  = 1600.f;
+    float         ground_radius_mm  = 16000.f;
+    float         backdrop_pitch    = 0.f;
 };
 
 struct HdriManifest
