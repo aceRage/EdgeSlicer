@@ -58,3 +58,36 @@ TEST_CASE("Building a tree over a box, ray caster and closest query", "[AABBIndi
     REQUIRE(closest_point.y() == Approx(0.5));
     REQUIRE(closest_point.z() == Approx(1.));
 }
+
+
+#include <libslic3r/AABBTreeLines.hpp>
+#include <libslic3r/Line.hpp>
+#include <algorithm>
+#include <random>
+
+// Bambu #12874: integer AlignedBox::squaredExteriorDistance() overflows past ~0.46 mm and disabled pruning.
+// The extra double bound must not drop any line that is really within the radius.
+TEST_CASE("AABB lines radius query matches brute force on a large layer", "[AABBIndirect][Regression]")
+{
+    std::mt19937 rng(12874);
+    std::uniform_int_distribution<coord_t> pos(-scaled<coord_t>(100.), scaled<coord_t>(100.));
+    std::uniform_int_distribution<coord_t> len(-scaled<coord_t>(2.), scaled<coord_t>(2.));
+    Lines lines;
+    for (int i = 0; i < 2000; ++ i) {
+        Point a(pos(rng), pos(rng));
+        lines.emplace_back(a, a + Point(len(rng), len(rng)));
+    }
+    auto tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(lines);
+    const coord_t radius = scaled<coord_t>(0.3);
+    const coord_t r2     = radius * radius;
+    for (int q = 0; q < 200; ++ q) {
+        const Point p(pos(rng), pos(rng));
+        std::vector<size_t> found = AABBTreeLines::all_lines_in_radius(lines, tree, p, r2);
+        std::sort(found.begin(), found.end());
+        std::vector<size_t> expected;
+        for (size_t i = 0; i < lines.size(); ++ i)
+            if (lines[i].distance_to_squared(p) < double(r2))
+                expected.push_back(i);
+        CHECK(found == expected);
+    }
+}
