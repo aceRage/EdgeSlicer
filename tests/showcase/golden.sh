@@ -259,9 +259,9 @@ run_still imperfections_visible --slice
 # Realism 1g, and the deferred part of 1h-2
 run_still lens_effects --settings
 run_still dof_spill_highlights
-# A video's layer build-up half-way (--still 2 of a 4 s static path): the video's Infill wins over
+# A video's layer build-up (a 4 s static path: --still 0.6 is 15 %, the hull open with its infill; 2 is half-way): the video's Infill wins over
 # Materials > Infill, and the model build-up
-run_still build_infill_mid --slice --still 2
+run_still build_infill_mid --slice --still 0.6
 run_still build_model_mid --slice --still 2
 run_video
 
