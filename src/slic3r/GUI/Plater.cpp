@@ -41,6 +41,7 @@
 #include <regex>
 #include <future>
 #include <functional>
+#include <new>
 #include <sstream>
 #include <utility>
 #include <boost/algorithm/string.hpp>
@@ -22073,11 +22074,110 @@ std::vector<size_t> Plater::load_files(const std::vector<std::string>& input_fil
     return load_files(paths, strategy, ask_multi);
 }
 
+namespace {
+
+// Runs `job` on a worker thread behind an app-modal progress dialog, so archive reads never
+// block the UI thread. Every exception from the job (std::bad_alloc included) is caught on the
+// worker and reported through `err`; the guard joins the worker on every exit path, so a throw
+// on the UI thread between spawning and join() cannot destroy a joinable std::thread.
+bool run_zip_job(const wxString&                   message,
+                 std::atomic<bool>&                cancel,
+                 const std::atomic<std::uint64_t>* done_bytes,
+                 const std::atomic<std::uint64_t>* total_bytes,
+                 std::string&                      err,
+                 const std::function<bool()>&      job)
+{
+    std::atomic<bool> finished{false};
+    bool              ok = false;
+    std::string       worker_err;
+    std::thread       worker([&]() {
+        try {
+            ok = job();
+        } catch (const std::bad_alloc&) {
+            ok         = false;
+            worker_err = "out of memory while reading the ZIP archive";
+        } catch (const std::exception& e) {
+            ok         = false;
+            worker_err = e.what();
+        } catch (...) {
+            ok         = false;
+            worker_err = "unexpected error while reading the ZIP archive";
+        }
+        finished = true;
+    });
+    struct JoinGuard
+    {
+        std::thread&       t;
+        std::atomic<bool>& cancel;
+        ~JoinGuard()
+        {
+            if (t.joinable()) {
+                cancel = true;
+                t.join();
+            }
+        }
+    } guard{worker, cancel};
+    {
+        wxProgressDialog progress(_L("Opening ZIP"), message, 1000, static_cast<wxWindow*>(wxGetApp().mainframe),
+                                  wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+        while (!finished) {
+            bool keep_going = true;
+            if (done_bytes && total_bytes) {
+                const std::uint64_t total = total_bytes->load();
+                const int           value = total > 0 ? int(std::min<std::uint64_t>(999, done_bytes->load() * 1000 / total)) : 0;
+                keep_going                = progress.Update(value);
+            } else
+                keep_going = progress.Pulse();
+            if (!keep_going && !cancel.load()) {
+                cancel = true;
+                progress.Pulse(_L("Cancelling..."));
+            }
+            wxMilliSleep(50);
+        }
+    }
+    {
+        wxBusyCursor busy;
+        worker.join();
+    }
+    if (!worker_err.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "ZIP worker failed: " << worker_err;
+        err = worker_err;
+    }
+    return ok;
+}
+
+} // namespace
+
 bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
 {
+    // The archive dialog and the progress dialogs run nested event loops; a second zip dropped
+    // or opened meanwhile must not start another preview on the same plater.
+    static bool s_zip_preview_active = false;
+    if (s_zip_preview_active) {
+        BOOST_LOG_TRIVIAL(warning) << "ZIP preview already running, ignoring " << archive_path;
+        return false;
+    }
+    struct ActiveFlag
+    {
+        bool& flag;
+        explicit ActiveFlag(bool& f) : flag(f) { flag = true; }
+        ~ActiveFlag() { flag = false; }
+    } active_flag(s_zip_preview_active);
+
     std::vector<fs::path> non_project_paths;
     std::vector<fs::path> project_paths;
     std::vector<fs::path> gcode_paths;
+    // Declared out here so every path that ends with nothing loaded can remove it.
+    fs::path              session;
+    auto                  remove_session = [&session]() {
+        if (session.empty())
+            return;
+        boost::system::error_code ec;
+        fs::remove_all(session, ec);
+        if (ec)
+            BOOST_LOG_TRIVIAL(warning) << "Could not remove ZIP session " << session << ": " << ec.message();
+        session.clear();
+    };
     try
     {
         MZ_Archive archive;
@@ -22113,18 +22213,45 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
                 selectable.push_back(e.index);
         }
 
+        std::vector<ZipListedEntry> listed;
+        listed.reserve(entries.size());
+        for (const ZipEntryInfo& e : entries)
+            listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink, e.is_safe});
+
         // OBJ / MTL text is read with a 16 MiB cap to find mtllib and texture names; an OBJ over
-        // the cap falls back to its same-stem MTL.
-        const ZipEntryReader read_entry = [&archive](std::uint32_t index, std::string& out) {
-            return read_zip_entry_capped(archive.arch, index, 16ull * 1024ull * 1024ull, out);
-        };
+        // the cap falls back to its same-stem MTL. This runs once, on a worker thread, before the
+        // dialog opens, and the result serves both the dialog's size line and extraction.
+        std::vector<std::uint32_t> selectable_objs;
+        for (mz_uint idx : selectable)
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) {
+                    if (boost::algorithm::iends_with(e.decoded_name, ".obj"))
+                        selectable_objs.push_back(idx);
+                    break;
+                }
+        ZipSidecarMap sidecar_map;
+        if (!selectable_objs.empty()) {
+            std::atomic<bool>    scan_cancel{false};
+            const ZipEntryReader read_entry = [&archive](std::uint32_t index, std::string& out) {
+                return read_zip_entry_capped(archive.arch, index, 16ull * 1024ull * 1024ull, out);
+            };
+            const bool scanned = run_zip_job(_L("Reading OBJ materials..."), scan_cancel, nullptr, nullptr, err, [&]() {
+                sidecar_map = zip_sidecar_map(selectable_objs, listed, read_entry, [&scan_cancel] { return scan_cancel.load(); });
+                return !scan_cancel.load();
+            });
+            if (!scanned) {
+                if (scan_cancel.load())
+                    return false;
+                throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to read the ZIP archive.") : err);
+            }
+        }
 
         std::vector<mz_uint> selected;
         const bool auto_open = wxGetApp().app_config->get_bool(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY);
         if (should_auto_open_zip(selectable.size(), auto_open)) {
             selected = selectable;
         } else {
-            FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), entries, selected, read_entry);
+            FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), entries, selected, sidecar_map);
             if (dlg.ShowModal() != wxID_OK)
                 return false;
         }
@@ -22150,29 +22277,25 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             return false;
         }
 
-        std::vector<ZipListedEntry> listed;
-        listed.reserve(entries.size());
-        for (const ZipEntryInfo& e : entries)
-            listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink, e.is_safe});
-
-        std::vector<mz_uint> extract_indices = selected;
+        // Sidecars go first so they keep the names the OBJ / MTL text refers to; see
+        // zip_extract_order. Selected models are opened through dest_by_index, so a suffixed
+        // model name is harmless.
+        std::vector<std::uint32_t> sidecars;
         for (mz_uint idx : selected) {
-            const ZipEntryInfo* info = nullptr;
-            for (const ZipEntryInfo& e : entries)
-                if (e.index == idx) { info = &e; break; }
-            if (!info)
+            auto it = sidecar_map.find(idx);
+            if (it == sidecar_map.end())
                 continue;
-            const ZipListedEntry obj{info->index, info->decoded_name, info->is_directory, info->is_encrypted, info->is_symlink, info->is_safe};
-            for (std::uint32_t extra : zip_obj_sidecar_indices(obj, listed, read_entry)) {
-                if (std::find(extract_indices.begin(), extract_indices.end(), extra) == extract_indices.end())
-                    extract_indices.push_back(extra);
-            }
+            for (std::uint32_t extra : it->second)
+                if (std::find(selected.begin(), selected.end(), extra) == selected.end() &&
+                    std::find(sidecars.begin(), sidecars.end(), extra) == sidecars.end())
+                    sidecars.push_back(extra);
         }
+        const std::vector<std::uint32_t> order = zip_extract_order(std::vector<std::uint32_t>(selected.begin(), selected.end()), sidecars);
+        const std::vector<mz_uint>       extract_indices(order.begin(), order.end());
 
         const std::string configured = wxGetApp().app_config->get(ZIP_WORK_DIR_KEY);
         const fs::path documents(std::string(wxStandardPaths::Get().GetDocumentsDir().utf8_str().data()));
         fs::path       root = configured.empty() ? default_zip_work_root(documents, fs::path(data_dir())) : fs::path(configured);
-        fs::path       session;
         bool           used_temp = false;
         if (!ZipWorkDir::create_session(root, archive_path, session, err)) {
             BOOST_LOG_TRIVIAL(warning) << "ZIP work dir failed (" << err << "), trying fallbacks";
@@ -22199,45 +22322,48 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         // Extract on a worker thread behind a cancellable progress dialog (4 GiB at most, but
         // that can take a while). Cancel rolls back every staged file; the session folder this
         // call created is removed on any failure so no empty marked session is left behind.
-        ZipExtractDests          dest_by_index;
+        ZipExtractDests            dest_by_index;
         std::atomic<std::uint64_t> done_bytes{0};
         std::atomic<std::uint64_t> total_bytes{0};
         std::atomic<bool>          cancel{false};
-        std::atomic<bool>          finished{false};
-        bool                       extracted = false;
-        std::thread worker([&]() {
-            extracted = extract_entries_confined(archive.arch, extract_indices, session, caps, dest_by_index, err,
-                                                 [&](std::uint64_t done, std::uint64_t total) {
-                                                     done_bytes  = done;
-                                                     total_bytes = total;
-                                                     return !cancel.load();
-                                                 });
-            finished = true;
+        const bool                 extracted = run_zip_job(_L("Extracting the selected files..."), cancel, &done_bytes, &total_bytes, err, [&]() {
+            return extract_entries_confined(archive.arch, extract_indices, session, caps, dest_by_index, err,
+                                            [&](std::uint64_t done, std::uint64_t total) {
+                                                done_bytes  = done;
+                                                total_bytes = total;
+                                                return !cancel.load();
+                                            });
         });
-        {
-            wxProgressDialog progress(_L("Opening ZIP"), _L("Extracting the selected files..."), 1000,
-                                      static_cast<wxWindow*>(wxGetApp().mainframe),
-                                      wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
-            while (!finished) {
-                const std::uint64_t total = total_bytes.load();
-                const int           value = total > 0 ? int(std::min<std::uint64_t>(999, done_bytes.load() * 1000 / total)) : 0;
-                if (!progress.Update(value)) {
-                    cancel = true;
-                    progress.Update(value, _L("Cancelling..."));
-                }
-                wxMilliSleep(50);
-            }
-        }
-        {
-            wxBusyCursor busy;
-            worker.join();
-        }
         if (!extracted) {
-            boost::system::error_code ec;
-            fs::remove_all(session, ec);
+            remove_session();
             if (cancel.load())
                 return false;
             throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to extract the selected ZIP entries.") : err);
+        }
+
+        // Sidecars are never renamed on purpose; if one still did not land under its archive
+        // name (two names differing only in case on a case-insensitive volume, or characters the
+        // filesystem cannot store) the OBJ will miss it, so say so instead of failing silently.
+        std::vector<std::string> renamed_sidecars;
+        for (std::uint32_t idx : sidecars) {
+            auto dest_it = dest_by_index.find(idx);
+            if (dest_it == dest_by_index.end())
+                continue;
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) {
+                    const std::string natural = resolve_zip_relative({}, e.decoded_name);
+                    const std::string leaf    = natural.substr(natural.find_last_of('/') == std::string::npos ? 0 : natural.find_last_of('/') + 1);
+                    if (into_u8(from_path(dest_it->second.filename())) != leaf)
+                        renamed_sidecars.push_back(e.decoded_name);
+                    break;
+                }
+        }
+        if (!renamed_sidecars.empty()) {
+            for (const std::string& n : renamed_sidecars)
+                BOOST_LOG_TRIVIAL(warning) << "ZIP sidecar extracted under another name: " << n;
+            if (get_notification_manager())
+                get_notification_manager()->push_plater_warning_notification(
+                    _u8L("Some OBJ material or texture files could not keep their names when extracted; materials may be missing."));
         }
 
         for (mz_uint idx : selected) {
@@ -22269,6 +22395,8 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         }
     }
     catch (const Slic3r::FileIOError& e) {
+        // Every throw above happens before anything is loaded from the session.
+        remove_session();
         GUI::show_error(this, e.what());
         return false;
     }
@@ -22282,8 +22410,10 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         return true;
     }
 
-    if (project_paths.empty() && non_project_paths.empty())
+    if (project_paths.empty() && non_project_paths.empty()) {
+        remove_session();
         return false;
+    }
 
     // F5: only a plater that was empty, or a zip 3MF that became the project, turns the next
     // Save into Save As. Dropping a zip into an already saved project keeps plain Save.
@@ -22294,8 +22424,8 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
     {
         wxArrayString aux;
         aux.Add(from_u8(project_paths.front().string()));
-        load_files(aux);
-        load_files(non_project_paths, LoadStrategy::LoadModel);
+        const bool                loaded_project = load_files(aux);
+        const std::vector<size_t> loaded_models  = load_files(non_project_paths, LoadStrategy::LoadModel);
         // The project folder is the extracted 3MF's folder only when it was opened as the project
         // (not imported as geometry into the current one).
         bool became_project = false;
@@ -22303,13 +22433,22 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             boost::system::error_code ec;
             became_project = fs::equivalent(into_path(get_project_filename()).parent_path(), project_paths.front().parent_path(), ec) && !ec;
         }
+        if (!loaded_project && loaded_models.empty() && !became_project) {
+            // Extraction worked but nothing was loaded (unreadable file, dialog cancelled).
+            remove_session();
+            return false;
+        }
         if (plater_was_empty || became_project)
             set_opened_from_zip(true);
         return true;
     }
 
-    load_files(project_paths, LoadStrategy::LoadModel);
-    load_files(non_project_paths, LoadStrategy::LoadModel);
+    const std::vector<size_t> loaded_projects = load_files(project_paths, LoadStrategy::LoadModel);
+    const std::vector<size_t> loaded_models   = load_files(non_project_paths, LoadStrategy::LoadModel);
+    if (loaded_projects.empty() && loaded_models.empty()) {
+        remove_session();
+        return false;
+    }
     if (plater_was_empty)
         set_opened_from_zip(true);
     return true;

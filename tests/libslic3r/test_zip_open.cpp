@@ -96,9 +96,8 @@ ZipListedEntry listed(std::uint32_t index, const char* name)
 TEST_CASE("parse_obj_mtllib and parse_mtl_texture_refs read names", "[ZipOpen]")
 {
     const auto libs = parse_obj_mtllib("# c\nv 0 0 0\nmtllib mats/My Part.mtl\r\n  mtllib  b.mtl \nusemtl x\n");
-    REQUIRE(libs.size() == 2);
-    CHECK(libs[0] == "mats/My Part.mtl");
-    CHECK(libs[1] == "b.mtl");
+    // Unquoted line with a space: the whole name first, then each token.
+    CHECK(libs == std::vector<std::string>{"mats/My Part.mtl", "mats/My", "Part.mtl", "b.mtl"});
 
     const auto refs = parse_mtl_texture_refs("newmtl a\nKd 1 1 1\nmap_Kd tex/diffuse.png\n"
                                              "map_Bump -bm 0.5 normals/n.png\nbump -o 0 0 0 -s 1 1 1 b.png\n# map_Kd no.png\n");
@@ -106,6 +105,74 @@ TEST_CASE("parse_obj_mtllib and parse_mtl_texture_refs read names", "[ZipOpen]")
     CHECK(refs[0] == "tex/diffuse.png");
     CHECK(refs[1] == "normals/n.png");
     CHECK(refs[2] == "b.png");
+}
+
+TEST_CASE("parse_obj_mtllib reads quoted and several names per line", "[ZipOpen]")
+{
+    CHECK(parse_obj_mtllib("mtllib a.mtl b.mtl\n") == std::vector<std::string>{"a.mtl b.mtl", "a.mtl", "b.mtl"});
+    CHECK(parse_obj_mtllib("mtllib \"My Part.mtl\" other.mtl\n") == std::vector<std::string>{"My Part.mtl", "other.mtl"});
+    CHECK(parse_obj_mtllib("mtllib \"open name.mtl\n") == std::vector<std::string>{"open name.mtl"});
+    CHECK(parse_obj_mtllib("mtllib a.mtl\nmtllib a.mtl\n") == std::vector<std::string>{"a.mtl"});
+}
+
+TEST_CASE("parse_mtl_texture_refs skips word options, unknown flags and quotes", "[ZipOpen]")
+{
+    CHECK(parse_mtl_texture_refs("map_Kd -cc on t.png\n") == std::vector<std::string>{"t.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -clamp off -blendu on -blendv off t1.png\n") == std::vector<std::string>{"t1.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -texres 512 -imfchan r t2.png\n") == std::vector<std::string>{"t2.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -o 0.5 -s 2 2 t3.png\n") == std::vector<std::string>{"t3.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -foo 1 2 t4.png\n") == std::vector<std::string>{"t4.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -type sphere -mm 0 1 \"my tex.png\"\n") == std::vector<std::string>{"my tex.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd my tex.png\n") == std::vector<std::string>{"my tex.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -cc on\n").empty());
+}
+
+TEST_CASE("zip_obj_sidecar_indices matches case only where the platform does", "[ZipOpen]")
+{
+    const std::vector<ZipListedEntry> all = {listed(0, "a/part.obj"), listed(1, "a/Mats.MTL"), listed(2, "a/T.png"),
+                                             listed(3, "a/mats.mtl"), listed(4, "a/t.png")};
+    const ZipEntryReader reader = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "mtllib Mats.MTL\n"; return true; }
+        if (index == 1 || index == 3) { out = "map_Kd -cc on t.png\n"; return true; }
+        return false;
+    };
+    // Exact names always win, on every platform.
+    CHECK(zip_obj_sidecar_indices(all[0], all, reader, false) == std::vector<std::uint32_t>{1, 4});
+    CHECK(zip_obj_sidecar_indices(all[0], all, reader, true) == std::vector<std::uint32_t>{1, 4});
+
+    const std::vector<ZipListedEntry> only_upper = {listed(0, "a/part.obj"), listed(1, "a/Mats.MTL"), listed(2, "a/T.png")};
+    const ZipEntryReader reader2 = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "mtllib mats.mtl\n"; return true; }
+        if (index == 1) { out = "map_Kd t.png\n"; return true; }
+        return false;
+    };
+    // Case-sensitive: mtllib misses and the same-stem fallback is exact too, so nothing is pulled.
+    CHECK(zip_obj_sidecar_indices(only_upper[0], only_upper, reader2, false).empty());
+    CHECK(zip_obj_sidecar_indices(only_upper[0], only_upper, reader2, true) == std::vector<std::uint32_t>{1, 2});
+    CHECK(zip_obj_sidecar_indices(only_upper[0], only_upper, reader2) ==
+          (ZIP_SIDECAR_CASE_INSENSITIVE ? std::vector<std::uint32_t>{1, 2} : std::vector<std::uint32_t>{}));
+}
+
+TEST_CASE("zip_sidecar_map keeps only OBJs with sidecars and honours cancel", "[ZipOpen]")
+{
+    const std::vector<ZipListedEntry> all = {listed(0, "a/part.obj"), listed(1, "a/part.mtl"), listed(2, "a/t.png"), listed(3, "b/x.obj"),
+                                             listed(4, "c.stl")};
+    const ZipEntryReader reader = [](std::uint32_t index, std::string& out) {
+        if (index == 0 || index == 3) { out = "v 0 0 0\n"; return true; }
+        if (index == 1) { out = "map_Kd t.png\n"; return true; }
+        return false;
+    };
+    const ZipSidecarMap map = zip_sidecar_map({0, 3, 4}, all, reader, {}, false);
+    REQUIRE(map.size() == 1);
+    CHECK(map.at(0) == std::vector<std::uint32_t>{1, 2});
+    CHECK(zip_sidecar_map({0, 3}, all, reader, [] { return true; }, false).empty());
+}
+
+TEST_CASE("zip_extract_order puts sidecars first, each index once", "[ZipOpen]")
+{
+    CHECK(zip_extract_order({5, 1}, {2, 3, 2}) == std::vector<std::uint32_t>{2, 3, 5, 1});
+    CHECK(zip_extract_order({4, 2}, {2}) == std::vector<std::uint32_t>{2, 4});
+    CHECK(zip_extract_order({}, {}).empty());
 }
 
 TEST_CASE("resolve_zip_relative folds dots and refuses escapes", "[ZipOpen]")
@@ -128,7 +195,7 @@ TEST_CASE("zip_obj_sidecar_indices follows mtllib and MTL texture refs only", "[
         if (index == 1) { out = "newmtl m\nmap_Kd tex/diffuse.png\nbump ../../shared/bump.jpg\nmap_Ks missing.png\n"; return true; }
         return false;
     };
-    const std::vector<std::uint32_t> extra = zip_obj_sidecar_indices(all[0], all, reader);
+    const std::vector<std::uint32_t> extra = zip_obj_sidecar_indices(all[0], all, reader, true);
     // mtllib wins over the same-stem part.mtl; unused.png is not pulled by extension.
     CHECK(extra == std::vector<std::uint32_t>{1, 2, 5});
 }

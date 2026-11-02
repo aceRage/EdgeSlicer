@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -65,10 +66,14 @@ bool should_auto_open_zip(std::size_t selectable_count, bool option_enabled);
 // Every non-ignored file is encrypted (and at least one such file exists).
 bool zip_archive_is_all_encrypted(const std::vector<ZipListedEntry>& entries);
 
-// `mtllib` file names in an OBJ (a name may contain spaces; several per line are not split).
+// `mtllib` file names in an OBJ. Quoted names are taken as written; an unquoted line yields the
+// whole remainder (a name with spaces) and then each whitespace-separated name.
 std::vector<std::string> parse_obj_mtllib(const std::string& obj_text);
 // Texture file names referenced by an MTL (map_Kd, map_Ka, map_Ks, map_Ns, map_d, map_Bump,
-// bump, disp, decal, refl, norm, map_Pr/Pm/Ps/Ke). Option flags before the name are skipped.
+// bump, disp, decal, refl, norm, map_Pr/Pm/Ps/Ke). Option flags before the name are skipped:
+// word options (-cc/-clamp/-blendu/-blendv on|off, -imfchan, -type) take one token, numeric ones
+// (-o/-s/-t up to 3, -mm 2, -bm/-boost/-texres 1) take the numbers that follow, unknown flags
+// skip up to 3 numbers. A quoted name keeps its spaces.
 std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text);
 // Archive-relative `dir/ref` with `.` / `..` folded and `\` as `/`. Empty when `..` climbs out.
 std::string resolve_zip_relative(const std::string& dir, const std::string& ref);
@@ -80,9 +85,34 @@ using ZipEntryReader = std::function<bool(std::uint32_t index, std::string& out)
 // subfolders allowed), else the same-stem `.mtl` beside it, plus exactly the textures those MTL
 // files reference (relative to the MTL, subfolders allowed). Nothing is pulled in by extension
 // alone. 3MF and GLB embed their textures; external glTF buffers / images are not followed.
+// Name matching follows the OBJ loader on the target platform: exact on macOS and Linux (where
+// fopen of `Tex.png` does not find `tex.png` on a case-sensitive volume), case-insensitive
+// fallback on Windows. An exact match always wins.
+#ifdef _WIN32
+inline constexpr bool ZIP_SIDECAR_CASE_INSENSITIVE = true;
+#else
+inline constexpr bool ZIP_SIDECAR_CASE_INSENSITIVE = false;
+#endif
 std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&              obj,
                                                    const std::vector<ZipListedEntry>& all,
-                                                   const ZipEntryReader&              read_entry);
+                                                   const ZipEntryReader&              read_entry,
+                                                   bool                               case_insensitive = ZIP_SIDECAR_CASE_INSENSITIVE);
+
+// OBJ index -> its sidecars, for every OBJ among `objs`. Built once, off the UI thread, and
+// shared by the archive dialog (size line) and the extraction list. `cancelled` (optional) is
+// polled between OBJs.
+using ZipSidecarMap = std::map<std::uint32_t, std::vector<std::uint32_t>>;
+ZipSidecarMap zip_sidecar_map(const std::vector<std::uint32_t>&  objs,
+                              const std::vector<ZipListedEntry>& all,
+                              const ZipEntryReader&              read_entry,
+                              const std::function<bool()>&       cancelled = {},
+                              bool                               case_insensitive = ZIP_SIDECAR_CASE_INSENSITIVE);
+
+// Extraction order: sidecars first, then the selected entries, each index once. The extractor
+// names files in this order and only suffixes later collisions (`x(1).mtl`), so sidecars keep the
+// names the OBJ / MTL text refers to and only selected models (opened through the dest map) can
+// be suffixed. Sidecars are never renamed to fix a collision and their text is never rewritten.
+std::vector<std::uint32_t> zip_extract_order(const std::vector<std::uint32_t>& selected, const std::vector<std::uint32_t>& sidecars);
 
 // `.zip` but not `.zip.amf`.
 bool is_zip_archive_path(const std::string& path);

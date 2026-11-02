@@ -122,8 +122,10 @@ bool ZipWorkDir::is_inside_work_dir(const boost::filesystem::path& path)
     if (ec)
         p = path;
     // Start at the parent: the marker sits in the root, and every extracted file is at least
-    // one level (the session folder) below it.
-    for (fs::path anc = p.parent_path(); !anc.empty(); anc = anc.parent_path()) {
+    // one level (the session folder) below it. The walk is capped (one stat per level) because
+    // MainFrame calls this on the UI thread for every recent-file add.
+    unsigned depth = 0;
+    for (fs::path anc = p.parent_path(); !anc.empty() && depth < MAX_MARKER_DEPTH; anc = anc.parent_path(), ++depth) {
         if (fs::is_regular_file(anc / marker_name(), ec))
             return true;
         if (anc.parent_path() == anc)

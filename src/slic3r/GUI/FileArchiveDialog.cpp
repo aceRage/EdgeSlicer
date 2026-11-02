@@ -197,13 +197,13 @@ ArchiveViewCtrl::~ArchiveViewCtrl()
 FileArchiveDialog::FileArchiveDialog(wxWindow*                        parent_window,
                                      const std::vector<ZipEntryInfo>& entries,
                                      std::vector<mz_uint>&            selected_indices,
-                                     ZipEntryReader                   read_entry)
+                                     ZipSidecarMap                    sidecars)
     : DPIDialog(parent_window, wxID_ANY, _(L("Archive preview")), wxDefaultPosition,
         wxSize(45 * wxGetApp().em_unit(), 40 * wxGetApp().em_unit()),
         wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
     , m_entries(entries)
     , m_selected_indices(selected_indices)
-    , m_read_entry(std::move(read_entry))
+    , m_sidecars(std::move(sidecars))
 {
 #ifdef _WIN32
     SetBackgroundColour(*wxWHITE);
@@ -420,19 +420,13 @@ void FileArchiveDialog::update_selected_size()
     for (mz_uint idx : ticked)
         total += size_of(idx);
 
-    // OBJ sidecars (MTL + referenced textures) are extracted too; count each once.
+    // OBJ sidecars (MTL + referenced textures) are extracted too; count each once. The map was
+    // built off the UI thread before the dialog opened, so toggling never reads archive data.
     std::vector<std::uint32_t> sidecars;
     for (mz_uint idx : ticked) {
-        auto it = m_sidecar_cache.find(idx);
-        if (it == m_sidecar_cache.end()) {
-            std::vector<std::uint32_t> extra;
-            for (const ZipListedEntry& l : m_listed)
-                if (l.index == idx) {
-                    extra = zip_obj_sidecar_indices(l, m_listed, m_read_entry);
-                    break;
-                }
-            it = m_sidecar_cache.emplace(idx, std::move(extra)).first;
-        }
+        auto it = m_sidecars.find(idx);
+        if (it == m_sidecars.end())
+            continue;
         for (std::uint32_t s : it->second)
             if (std::find(ticked.begin(), ticked.end(), s) == ticked.end() && std::find(sidecars.begin(), sidecars.end(), s) == sidecars.end())
                 sidecars.push_back(s);

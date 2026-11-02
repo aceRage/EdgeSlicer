@@ -279,13 +279,67 @@ bool split_keyword(std::string line, std::string& keyword, std::string& rest)
 
 } // namespace
 
-std::vector<std::string> parse_obj_mtllib(const std::string& obj_text)
+namespace {
+
+// Whitespace-separated tokens; a token starting with '"' runs to the closing quote (spaces kept,
+// quotes dropped). An unterminated quote takes the rest of the line.
+std::vector<std::string> split_tokens(const std::string& text)
 {
     std::vector<std::string> out;
+    size_t                   i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])))
+            ++i;
+        if (i >= text.size())
+            break;
+        if (text[i] == '"') {
+            const size_t close = text.find('"', i + 1);
+            out.push_back(text.substr(i + 1, close == std::string::npos ? std::string::npos : close - i - 1));
+            i = close == std::string::npos ? text.size() : close + 1;
+        } else {
+            size_t end = i;
+            while (end < text.size() && !std::isspace(static_cast<unsigned char>(text[end])))
+                ++end;
+            out.push_back(text.substr(i, end - i));
+            i = end;
+        }
+    }
+    return out;
+}
+
+bool is_number(const std::string& tok)
+{
+    if (tok.empty())
+        return false;
+    char*       end = nullptr;
+    std::strtod(tok.c_str(), &end);
+    return end != nullptr && *end == '\0';
+}
+
+void push_unique(std::vector<std::string>& out, const std::string& v)
+{
+    if (!v.empty() && std::find(out.begin(), out.end(), v) == out.end())
+        out.push_back(v);
+}
+
+} // namespace
+
+std::vector<std::string> parse_obj_mtllib(const std::string& obj_text)
+{
+    // The OBJ spec allows several names per line, but exporters also write one name with spaces
+    // in it. Quoted names are taken as written; otherwise the whole remainder is tried first and
+    // then each whitespace token, so both styles resolve (only names present in the archive are
+    // ever used).
+    std::vector<std::string> out;
     std::string              keyword, rest;
-    for (const std::string& line : split_lines(obj_text))
-        if (split_keyword(line, keyword, rest) && keyword == "mtllib" && !rest.empty())
-            out.push_back(rest);
+    for (const std::string& line : split_lines(obj_text)) {
+        if (!split_keyword(line, keyword, rest) || keyword != "mtllib" || rest.empty())
+            continue;
+        if (rest.find('"') == std::string::npos)
+            push_unique(out, rest);
+        for (const std::string& tok : split_tokens(rest))
+            push_unique(out, tok);
+    }
     return out;
 }
 
@@ -293,43 +347,45 @@ std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text)
 {
     static const std::vector<std::string> keys = {"map_kd", "map_ka", "map_ks", "map_ns", "map_d", "map_bump", "bump", "disp",
                                                   "decal",  "refl",   "norm",   "map_pr", "map_pm", "map_ps", "map_ke"};
-    // Options that take N numeric arguments (MTL spec plus the PBR extension).
-    static const std::vector<std::pair<std::string, int>> opts = {{"-blendu", 1}, {"-blendv", 1}, {"-boost", 1}, {"-mm", 2},
-                                                                  {"-o", 3},      {"-s", 3},      {"-t", 3},     {"-texres", 1},
-                                                                  {"-clamp", 1},  {"-bm", 1},     {"-imfchan", 1}, {"-type", 1}};
+    // Options and how many arguments they take. Numeric options take up to N numbers (-o/-s/-t
+    // allow 1..3); word options take exactly one token (on/off, a channel, a type name).
+    struct Opt { const char* name; int max_args; bool word; };
+    static const std::vector<Opt> opts = {
+        {"-blendu", 1, true}, {"-blendv", 1, true}, {"-cc", 1, true},   {"-clamp", 1, true},   {"-imfchan", 1, true},
+        {"-type", 1, true},   {"-boost", 1, false}, {"-mm", 2, false},  {"-o", 3, false},      {"-s", 3, false},
+        {"-t", 3, false},     {"-texres", 1, false}, {"-bm", 1, false},
+    };
     std::vector<std::string> out;
     std::string              keyword, rest;
     for (const std::string& line : split_lines(mtl_text)) {
         if (!split_keyword(line, keyword, rest) || std::find(keys.begin(), keys.end(), keyword) == keys.end())
             continue;
-        // Skip leading options; the remainder (spaces allowed) is the file name.
-        for (;;) {
-            if (rest.empty() || rest[0] != '-')
-                break;
-            size_t sp = rest.find_first_of(" \t");
-            const std::string opt = ascii_lower(rest.substr(0, sp));
-            int               n   = -1;
-            for (const auto& o : opts)
-                if (o.first == opt)
-                    n = o.second;
-            if (n < 0 || sp == std::string::npos)
-                break;
-            rest = rest.substr(sp);
-            trim_inplace(rest);
-            for (int i = 0; i < n && !rest.empty(); ++i) {
-                // Numeric arguments only; a non-number means the file name starts here.
-                const size_t      sp2 = rest.find_first_of(" \t");
-                const std::string tok = rest.substr(0, sp2);
-                const bool numeric = !tok.empty() && tok.find_first_not_of("+-.0123456789eE") == std::string::npos;
-                const bool word    = (opt == "-clamp" || opt == "-blendu" || opt == "-blendv" || opt == "-imfchan" || opt == "-type");
-                if (!numeric && !word)
-                    break;
-                rest = sp2 == std::string::npos ? std::string() : rest.substr(sp2);
-                trim_inplace(rest);
+        const std::vector<std::string> toks = split_tokens(rest);
+        size_t i = 0;
+        while (i < toks.size() && toks[i].size() > 1 && toks[i][0] == '-' && !is_number(toks[i])) {
+            const std::string opt = ascii_lower(toks[i]);
+            ++i;
+            const Opt* known = nullptr;
+            for (const Opt& o : opts)
+                if (opt == o.name)
+                    known = &o;
+            if (known && known->word) {
+                if (i < toks.size())
+                    ++i;
+            } else {
+                // Known numeric option, or an unknown one: skip the numbers that follow it.
+                const int max_args = known ? known->max_args : 3;
+                for (int n = 0; n < max_args && i < toks.size() && is_number(toks[i]); ++n)
+                    ++i;
             }
         }
-        if (!rest.empty())
-            out.push_back(rest);
+        if (i >= toks.size())
+            continue;
+        // The name is the remainder; an unquoted name may contain spaces.
+        std::string name = toks[i];
+        for (size_t k = i + 1; k < toks.size(); ++k)
+            name += " " + toks[k];
+        push_unique(out, name);
     }
     return out;
 }
@@ -362,8 +418,10 @@ std::string resolve_zip_relative(const std::string& dir, const std::string& ref)
 
 std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&              obj,
                                                    const std::vector<ZipListedEntry>& all,
-                                                   const ZipEntryReader&              read_entry)
+                                                   const ZipEntryReader&              read_entry,
+                                                   bool                               case_insensitive)
 {
+    auto same = [case_insensitive](const std::string& a, const std::string& b) { return case_insensitive ? iequals(a, b) : a == b; };
     std::vector<std::uint32_t> extra;
     if (!has_extension(obj.decoded_name, ".obj"))
         return extra;
@@ -373,8 +431,12 @@ std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&        
         if (rel.empty())
             return nullptr;
         for (const ZipListedEntry& e : all)
-            if (usable(e) && iequals(resolve_zip_relative({}, e.decoded_name), rel))
+            if (usable(e) && resolve_zip_relative({}, e.decoded_name) == rel)
                 return &e;
+        if (case_insensitive)
+            for (const ZipListedEntry& e : all)
+                if (usable(e) && same(resolve_zip_relative({}, e.decoded_name), rel))
+                    return &e;
         return nullptr;
     };
     auto add = [&](const ZipListedEntry* e) {
@@ -398,7 +460,7 @@ std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&        
         const std::string stem = leaf_stem(obj.decoded_name);
         for (const ZipListedEntry& e : all)
             if (usable(e) && parent_dir(e.decoded_name) == obj_dir && has_extension(e.decoded_name, ".mtl") &&
-                iequals(leaf_stem(e.decoded_name), stem) && add(&e))
+                same(leaf_stem(e.decoded_name), stem) && add(&e))
                 mtls.push_back(&e);
     }
     for (const ZipListedEntry* mtl : mtls) {
@@ -410,6 +472,42 @@ std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&        
             add(find(resolve_zip_relative(mtl_dir, ref)));
     }
     return extra;
+}
+
+ZipSidecarMap zip_sidecar_map(const std::vector<std::uint32_t>&  objs,
+                              const std::vector<ZipListedEntry>& all,
+                              const ZipEntryReader&              read_entry,
+                              const std::function<bool()>&       cancelled,
+                              bool                               case_insensitive)
+{
+    ZipSidecarMap out;
+    for (std::uint32_t idx : objs) {
+        if (cancelled && cancelled())
+            break;
+        for (const ZipListedEntry& e : all)
+            if (e.index == idx) {
+                std::vector<std::uint32_t> extra = zip_obj_sidecar_indices(e, all, read_entry, case_insensitive);
+                if (!extra.empty())
+                    out.emplace(idx, std::move(extra));
+                break;
+            }
+    }
+    return out;
+}
+
+std::vector<std::uint32_t> zip_extract_order(const std::vector<std::uint32_t>& selected, const std::vector<std::uint32_t>& sidecars)
+{
+    std::vector<std::uint32_t> out;
+    out.reserve(selected.size() + sidecars.size());
+    auto push = [&out](std::uint32_t i) {
+        if (std::find(out.begin(), out.end(), i) == out.end())
+            out.push_back(i);
+    };
+    for (std::uint32_t i : sidecars)
+        push(i);
+    for (std::uint32_t i : selected)
+        push(i);
+    return out;
 }
 
 bool is_zip_archive_path(const std::string& path)

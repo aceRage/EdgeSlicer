@@ -117,11 +117,12 @@ protected:
 class FileArchiveDialog : public DPIDialog
 {
 public:
-    // `read_entry` (optional) lets the size line count the OBJ sidecars that will be extracted.
+    // `sidecars` (optional, precomputed per OBJ index) lets the size line count the OBJ sidecars
+    // that will be extracted without reading the archive on the UI thread.
     FileArchiveDialog(wxWindow*                        parent_window,
                       const std::vector<ZipEntryInfo>& entries,
                       std::vector<mz_uint>&            selected_indices,
-                      ZipEntryReader                   read_entry = {});
+                      ZipSidecarMap                    sidecars = {});
 
     void update_selected_size();
 
@@ -145,9 +146,8 @@ protected:
     CheckBox* m_show_unsupported { nullptr };
     wxStaticText* m_size_label { nullptr };
     wxStaticText* m_encrypted_msg { nullptr };
-    ZipEntryReader m_read_entry;
+    ZipSidecarMap m_sidecars;
     std::vector<ZipListedEntry> m_listed;
-    std::map<mz_uint, std::vector<std::uint32_t>> m_sidecar_cache;
 };
 
 } // namespace GUI

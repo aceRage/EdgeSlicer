@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/ZipOpen.hpp"
 #include "libslic3r/ZipWorkDir.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
@@ -668,6 +669,38 @@ TEST_CASE("ZipWorkDir::is_inside_work_dir finds the root marker", "[ZipExtract][
     REQUIRE(ZipWorkDir::create_session(root, zip, session, err));
     CHECK(ZipWorkDir::is_inside_work_dir(session / "models" / "part.3mf"));
     CHECK_FALSE(ZipWorkDir::is_inside_work_dir(tmp.dir / "elsewhere" / "part.3mf"));
+
+    // The ancestor walk is bounded: within the cap is found, deeper is treated as outside.
+    fs::path shallow = session;
+    for (unsigned i = 0; i + 2 < ZipWorkDir::MAX_MARKER_DEPTH; ++i)
+        shallow /= "d";
+    CHECK(ZipWorkDir::is_inside_work_dir(shallow / "part.3mf"));
+    fs::path deep = session;
+    for (unsigned i = 0; i < ZipWorkDir::MAX_MARKER_DEPTH + 4; ++i)
+        deep /= "d";
+    CHECK_FALSE(ZipWorkDir::is_inside_work_dir(deep / "part.3mf"));
+}
+
+TEST_CASE("zip_extract_order lets sidecars keep their names on collision", "[ZipExtract][ZipOpen]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "dup.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    // Index 0 is a selected model, 1 a second copy of the same name, 2 the MTL the OBJ names.
+    write_zip_entries(zip, {{"a/part.obj", "mtllib mat.mtl\n"}, {"a/mat.mtl", "OTHER"}, {"a/mat.mtl", "SIDECAR"}});
+
+    MZ_Archive archive;
+    REQUIRE(archive.open_reader(zip.string()));
+    ZipExtractDests dests;
+    std::string     err;
+    const std::vector<std::uint32_t> order = zip_extract_order({0, 1}, {2});
+    REQUIRE(extract_entries_confined(archive.arch, std::vector<mz_uint>(order.begin(), order.end()), dest, ZipExtractCaps{}, dests, err,
+                                     [](std::uint64_t, std::uint64_t) { return true; }));
+    CHECK(dests[2] == dest / "a" / "mat.mtl");
+    CHECK(read_binary_file(dest / "a" / "mat.mtl") == "SIDECAR");
+    CHECK(dests[1] == dest / "a" / "mat(1).mtl");
+    CHECK(dests[0] == dest / "a" / "part.obj");
 }
 
 TEST_CASE("ZipWorkDir creates a session folder, marker, and collision names", "[ZipExtract][ZipWorkDir]")
