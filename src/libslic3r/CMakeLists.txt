@@ -903,12 +903,30 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
 set(OpenCASCADE_DIR "${OCCT_PREFIX}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+# SLIC3R_CAD OFF (default) builds against the default deps' OCCT 7.6, exactly as before the Design
+# tab; SLIC3R_CAD ON needs the OCCT 8.0.1 deps (deps built with -DSLIC3R_CAD=ON, e.g. edgebuild's
+# "cad" deps profile). A mismatch would only fail later at link time, so say so here.
+if (SLIC3R_CAD AND OpenCASCADE_MAJOR_VERSION VERSION_LESS 8)
+    message(FATAL_ERROR "SLIC3R_CAD=ON needs OCCT 8.0.1, but ${OpenCASCADE_DIR} is OCCT "
+        "${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION}. Build the deps with -DSLIC3R_CAD=ON "
+        "(e.g. edgebuild --deps cad) and point CMAKE_PREFIX_PATH at that prefix.")
+elseif (NOT SLIC3R_CAD AND NOT OpenCASCADE_MAJOR_VERSION VERSION_LESS 8)
+    message(FATAL_ERROR "OCCT ${OpenCASCADE_MAJOR_VERSION}.${OpenCASCADE_MINOR_VERSION} (${OpenCASCADE_DIR}) "
+        "is the SLIC3R_CAD deps profile: configure with -DSLIC3R_CAD=ON, or use the default (OCCT 7.6) deps.")
+endif ()
 
 find_package(JPEG REQUIRED)
 
+# OCCT 7.8 merged the five STEP toolkits into TKDESTEP, which also needs TKDE. Only the
+# SLIC3R_CAD=ON (OCCT 8.0.1) build uses the new names; keep in step with OCCT_RUNTIME_TOOLKITS_CAD
+# in the top-level CMakeLists.txt.
+if (SLIC3R_CAD)
+    set(_occt_step_toolkits TKDESTEP TKDE)
+else ()
+    set(_occt_step_toolkits TKXDESTEP TKSTEP TKSTEP209 TKSTEPAttr TKSTEPBase)
+endif ()
 set(OCCT_LIBS
-    TKDESTEP
-    TKDE
+    ${_occt_step_toolkits}
     TKXCAF
     TKXSBase
     TKVCAF
@@ -938,9 +956,11 @@ set(OCCT_LIBS
     TKMath
     TKernel
 )
-# Published for the Windows packaging step in the top-level CMakeLists.txt.
+# SLIC3R_CAD=ON only: published for the Windows packaging step in the top-level CMakeLists.txt.
+if (SLIC3R_CAD)
 set(OCCT_LIBS "${OCCT_LIBS}" CACHE INTERNAL "OCCT toolkits linked by libslic3r")
-if (WIN32)
+endif ()
+if (SLIC3R_CAD AND WIN32)
     # OCCT installs RelWithDebInfo and Debug builds to bin/occti and bin/occtd, so each build
     # type's DLL directory is read from the imported target, falling back to the first installed
     # build, as CMake does when linking.
@@ -997,8 +1017,8 @@ if (WIN32)
     target_link_libraries(libslic3r PRIVATE OpenSSL::Crypto crypt32 ws2_32)
 else()
     # OCCT 8's static targets name FreeType as a bare "freetype", which the macOS linker cannot
-    # find; this target maps that name to FREETYPE_LIBRARIES.
-    if (NOT TARGET freetype)
+    # find; this target maps that name to FREETYPE_LIBRARIES. OCCT 8 only (SLIC3R_CAD=ON).
+    if (SLIC3R_CAD AND NOT TARGET freetype)
         add_library(freetype INTERFACE IMPORTED GLOBAL)
         target_link_libraries(freetype INTERFACE ${FREETYPE_LIBRARIES})
     endif ()
