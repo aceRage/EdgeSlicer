@@ -106,6 +106,7 @@ TEST_CASE("Stringing grid geometry is one pillar pair per column", "[Calib][Temp
     params.retract_lengths = {0.2, 0.4, 0.6};
     params.band_count      = 2;
     params.print_labels    = false;
+    params.fillet_base     = false; // the pillar-gap check below reads the pillar faces; the foot has its own test
 
     const TriangleMesh mesh = make_stringing_grid_column_mesh(params, 0);
     const BoundingBoxf3 bb  = mesh.bounding_box();
