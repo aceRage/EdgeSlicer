@@ -112,6 +112,9 @@ void CopyrightsDialog::fill_entries()
         { "ImGUI",                                          "",      "https://github.com/ocornut/imgui" },
         { "ImGuizmo",                                       "",      "https://github.com/CedricGuillemet/ImGuizmo" },
         { "Libigl",                                         "",      "https://libigl.github.io" },
+        // Not bundled: an optional download the Layerling tab offers (official static web build from
+        // its GitHub releases), run unmodified from 127.0.0.1. Licence: AGPL-3.0, by henmedia.
+        { "Layerling (AGPL-3.0, by henmedia; optional download, not bundled)", "", "https://github.com/henmedia/layerling" },
         { "LEMON",                                          "",      "https://lemon.cs.elte.hu" },
         { "libnest2d",                                      "",      "https://github.com/tamasmeszaros/libnest2d" },
         { "lib_fts",                                        "",      "https://www.forrestthewoods.com" },
