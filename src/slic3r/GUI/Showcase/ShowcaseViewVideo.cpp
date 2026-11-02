@@ -316,6 +316,17 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
                                "laid; without a slice the model is cut by a plane at the height reached."));
     check_row(m_vid_build);
     {
+        // What grows: the slice's toolpaths (Auto: when the plate is sliced) or the model, cut at the
+        // height reached with a solid cap (BuildSource::Clip), in the model's materials and finishes.
+        wxArrayString shows;
+        shows.Add(_L("Toolpaths"));
+        shows.Add(_L("Model"));
+        m_vid_build_source = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, shows);
+        m_vid_build_source->SetToolTip(_L("Model: the model cut at the height reached, with a solid top, in its finishes. "
+                                          "Toolpaths: the slice's extrusions (the model when the plate is not sliced)."));
+        row(_L("Build-up shows"), m_vid_build_source);
+    }
+    {
         // S5b: what of the slice the build-up lays.
         auto *parts          = new wxBoxSizer(wxHORIZONTAL);
         m_vid_build_infill   = new wxCheckBox(m_side, wxID_ANY, _L("Infill"));
@@ -541,6 +552,11 @@ void ShowcaseView::build_video_section(wxBoxSizer *root)
         const bool on = m_vid_build->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.build.enabled = on; }, false);
     });
+    m_vid_build_source->Bind(wxEVT_CHOICE, [this, video_edit](wxCommandEvent &) {
+        const int sel = m_vid_build_source->GetSelection();
+        if (sel >= 0)
+            video_edit([sel](Showcase::VideoSettings &v) { v.build.source = sel == 1 ? Showcase::BuildSource::Clip : Showcase::BuildSource::Auto; }, false);
+    });
     m_vid_build_infill->Bind(wxEVT_CHECKBOX, [this, video_edit](wxCommandEvent &) {
         const bool on = m_vid_build_infill->GetValue();
         video_edit([on](Showcase::VideoSettings &v) { v.build.infill = on; }, false);
@@ -681,6 +697,7 @@ void ShowcaseView::sync_video_controls()
     m_vid_co_motion->SetSelection(int(v.callout_motion));
     m_vid_co_appear->SetSelection(int(v.callout_appearance));
     m_vid_build->SetValue(v.build.enabled);
+    m_vid_build_source->SetSelection(v.build.source == Showcase::BuildSource::Clip ? 1 : 0);
     m_vid_build_infill->SetValue(v.build.infill);
     m_vid_build_supports->SetValue(v.build.supports);
     refresh_path_info();
@@ -751,6 +768,7 @@ void ShowcaseView::update_video_enabled()
     m_vid_co_motion->Enable(editable && scene().callouts.enabled && v.callouts);
     m_vid_co_appear->Enable(editable && scene().callouts.enabled && v.callouts && v.build.enabled);
     m_vid_build->Enable(editable);
+    m_vid_build_source->Enable(editable && v.build.enabled);
     {
         // S5b: infill and supports come from the slice; the model's clip has neither.
         const bool sliced = ShowcaseRenderer::toolpaths_available();
@@ -1376,7 +1394,10 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
 
     ShowcaseImage image;
     std::string   report;
+    // Realism 1g: a new film grain each frame, the same one for the same frame on every run.
+    m_renderer->set_frame_seed(index);
     bool          ok = m_renderer->render_export(image, report) && !image.empty();
+    m_renderer->set_frame_seed(0);
     if (ok && m_video.settings.callouts && fs.callouts.enabled && !fs.callouts.items.empty()) {
         // The callouts of this pose: which anchors are hidden now, their fade, the layout with the
         // sides of the last frame so labels do not jump (design 3.3 item 6, R13).

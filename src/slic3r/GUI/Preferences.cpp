@@ -34,6 +34,7 @@
 #include "HomePanel.hpp"
 #include "HomeVaults.hpp"
 #include "ModelBrowserPanel.hpp"
+#include "LayerlingPanel.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1423,6 +1424,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " sync_user_preset: " << (sync ? "true" : "false");
         }
 
+        // The Layerling tab appears or goes at once.
+        if (param == "show_layerling_tab") {
+            if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr)
+                mf->update_layerling_tab();
+        }
+
         // Home > Models appears or goes at once.
         if (param == "model_browser_beta") {
             if (MainFrame* mf = wxGetApp().mainframe; mf != nullptr && mf->m_home != nullptr)
@@ -2090,6 +2097,19 @@ wxWindow* PreferencesDialog::create_general_page()
     }
 #endif
 
+    // The Layerling tab (LayerlingPanel): an optional download, never bundled.
+    wxBoxSizer* title_layerling = nullptr;
+    wxBoxSizer* item_layerling  = nullptr;
+    if (layerling_supported()) {
+        title_layerling = create_item_title(_L("Layerling"), page, _L("Layerling"));
+        item_layerling  = create_item_checkbox(_L("Show the Layerling tab"), page,
+                                               _L("Adds a Layerling tab: a free CAD for 3D printing by henmedia (AGPL-3.0) that "
+                                                  "EdgeSlicer can download from its GitHub releases and run on this computer. "
+                                                  "What you export there goes onto the plate. Hiding the tab keeps Layerling "
+                                                  "and your designs."),
+                                               50, "show_layerling_tab");
+    }
+
     // auto title_modelmall = create_item_title(_L("Online Models"), page, _L("Online Models"));
     // auto item_backup = create_item_switch(_L("Backup switch"), page, _L("Backup switch"), "units");
     // auto item_modelmall = create_item_checkbox(_L("Show online staff-picked models on the home page"), page, _L("Show online staff-picked models on the home page"), 50, "staff_pick_switch");
@@ -2266,6 +2286,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(associate_url_cura, 0, wxTOP, FromDIP(3));
 #endif // _WIN32
 #if defined(_WIN32) || defined(__APPLE__)
+    if (title_layerling != nullptr && item_layerling != nullptr) {
+        sizer_page->Add(title_layerling, 0, wxTOP | wxEXPAND, FromDIP(20));
+        sizer_page->Add(item_layerling, 0, wxTOP, FromDIP(3));
+    }
     if (title_model_browser != nullptr && item_model_browser != nullptr) {
         sizer_page->Add(title_model_browser, 0, wxTOP | wxEXPAND, FromDIP(20));
         sizer_page->Add(item_model_browser, 0, wxTOP, FromDIP(3));
