@@ -113,6 +113,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseAssets.hpp
     Showcase/ShowcaseHdr.cpp
     Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcaseLens.cpp
+    Showcase/ShowcaseLens.hpp
     Showcase/ShowcasePanelRules.hpp
     Showcase/ShowcaseCallouts.cpp
     Showcase/ShowcaseCallouts.hpp

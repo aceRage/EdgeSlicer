@@ -1937,6 +1937,7 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
         sv.hide_wipe_tower = false;
         sv.show_infill     = true;
         sv.show_supports   = true;
+        sv.show_skirt      = true;
     }
     if (look.hide_wipe_tower != m_showcase.hide_wipe_tower) {
         showcase_set_role(m_viewer, libvgcode::EGCodeExtrusionRole::WipeTower, !look.hide_wipe_tower);
@@ -1963,6 +1964,13 @@ void GCodeViewer::render_for_showcase(const ShowcaseLook &look)
             showcase_set_role(m_viewer, role, look.show_supports);
         m_showcase.show_supports = look.show_supports;
         m_showcase.top_layer     = -2;
+    }
+    // Showcase 1h-2b: the skirt and the brim (a still of the print without its first-layer helpers).
+    if (look.show_skirt != m_showcase.show_skirt) {
+        for (libvgcode::EGCodeExtrusionRole role : { libvgcode::EGCodeExtrusionRole::Skirt, libvgcode::EGCodeExtrusionRole::Brim })
+            showcase_set_role(m_viewer, role, look.show_skirt);
+        m_showcase.show_skirt = look.show_skirt;
+        m_showcase.top_layer  = -2;
     }
 
     const size_t layers = m_viewer.get_layers_count();

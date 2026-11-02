@@ -22,6 +22,12 @@ instead have `"procedural": "sky_sun" | "studio" | "interior"` (a panorama gener
 unit tests use those generators and none is listed in the shipped manifest. If a listed file is missing
 or unreadable the renderer logs a warning and the scene falls back to its backdrop colours.
 
+Placement defaults (1h-2, optional): `"ground": { "height_mm", "radius_mm" }` is the shot's camera
+height and room radius; only their ratio is used, for the automatic dome radius of "Stand on the
+environment's floor" (the automatic camera height comes from the model's size). `"backdrop_pitch"`
+(degrees, + = more sky) is what the panel sets the backdrop tilt to when the HDRI is chosen. The
+values are estimates from looking at the panoramas, not measurements.
+
 ## Catalogue for phase 1h-3 (in-app downloads; not in this folder, no download code yet)
 
 The owner wants these Poly Haven CC0 2k panoramas as download options (2026-11-01), served from our
