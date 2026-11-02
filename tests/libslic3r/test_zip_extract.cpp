@@ -5,6 +5,7 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/convert.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include <algorithm>
@@ -33,9 +34,20 @@ struct TempDir
     }
 };
 
+// UTF-8 spelling of a path. The test binary does not imbue boost::filesystem with UTF-8 (the app
+// does, in main), so on Windows path::string() is the ANSI code page and loses non-ASCII names.
+std::string path_u8(const fs::path& p)
+{
+#ifdef _WIN32
+    return boost::nowide::narrow(p.wstring());
+#else
+    return p.string();
+#endif
+}
+
 std::string read_binary_file(const fs::path& file)
 {
-    boost::nowide::ifstream in(file.string(), std::ios::binary);
+    boost::nowide::ifstream in(path_u8(file), std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
@@ -500,7 +512,7 @@ TEST_CASE("extract_entries_confined decodes non-UTF-8 names (CP437, Shift-JIS + 
         REQUIRE(files.size() == 1);
         CHECK(read_binary_file(files.front()) == "body");
 #ifdef _WIN32
-        CHECK(zip_name_is_valid_utf8(files.front().filename().string()));
+        CHECK(zip_name_is_valid_utf8(path_u8(files.front().filename())));
 #else
         CHECK(files.front().filename().string() == escape_zip_entry_bytes(legacy));
 #endif
