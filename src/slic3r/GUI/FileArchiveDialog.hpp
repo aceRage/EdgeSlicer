@@ -6,6 +6,7 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/filesystem/path.hpp>
+#include <map>
 #include <wx/wx.h>
 #include <wx/dataview.h>
 #include <slic3r/GUI/Widgets/Button.hpp>
@@ -25,8 +26,8 @@ public:
 
     std::vector<std::shared_ptr<ArchiveViewNode>>&  get_children()                                      { return m_children; }
     void                                            set_parent(std::shared_ptr<ArchiveViewNode> parent) { m_parent = parent; }
-    // On Linux, get_parent cannot just return size of m_children. ItemAdded would than crash.
-    std::shared_ptr<ArchiveViewNode>                get_parent() const                                  { return m_parent; }
+    // On Linux, get_parent cannot just return size of m_children. ItemAdded would than crash. 
+    std::shared_ptr<ArchiveViewNode>                get_parent() const                                  { return m_parent; } 
     bool                                            is_container() const                                { return m_container; }
     void                                            set_container(bool is_container)                    { m_container = is_container; }
     wxString                                        get_name() const                                    { return m_name; }
@@ -66,7 +67,7 @@ private:
 
 class ArchiveViewModel : public wxDataViewModel
 {
-public:
+public: 
     ArchiveViewModel(wxWindow* parent);
     ~ArchiveViewModel();
 
@@ -116,7 +117,11 @@ protected:
 class FileArchiveDialog : public DPIDialog
 {
 public:
-    FileArchiveDialog(wxWindow* parent_window, const std::vector<ZipEntryInfo>& entries, std::vector<mz_uint>& selected_indices);
+    // `read_entry` (optional) lets the size line count the OBJ sidecars that will be extracted.
+    FileArchiveDialog(wxWindow*                        parent_window,
+                      const std::vector<ZipEntryInfo>& entries,
+                      std::vector<mz_uint>&            selected_indices,
+                      ZipEntryReader                   read_entry = {});
 
     void update_selected_size();
 
@@ -129,6 +134,8 @@ protected:
     void on_item_activated(wxDataViewEvent& evt);
 
     void populate_tree();
+    std::vector<mz_uint> toggled_indices() const;
+    void restore_toggles(const std::vector<mz_uint>& indices);
     wxBoxSizer* create_btn_sizer();
 
     std::vector<ZipEntryInfo> m_entries;
@@ -138,6 +145,9 @@ protected:
     CheckBox* m_show_unsupported { nullptr };
     wxStaticText* m_size_label { nullptr };
     wxStaticText* m_encrypted_msg { nullptr };
+    ZipEntryReader m_read_entry;
+    std::vector<ZipListedEntry> m_listed;
+    std::map<mz_uint, std::vector<std::uint32_t>> m_sidecar_cache;
 };
 
 } // namespace GUI

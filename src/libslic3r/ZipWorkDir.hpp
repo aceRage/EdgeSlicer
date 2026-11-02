@@ -29,6 +29,10 @@ public:
                                boost::filesystem::path&       session_dir,
                                std::string&                   err);
 
+    // True when `path` lies below a folder that carries the marker (a zip session tree), so
+    // callers can keep extracted copies out of recent files until PR D stores `zip|entry`.
+    static bool is_inside_work_dir(const boost::filesystem::path& path);
+
     // Choose a dest path under `session_dir` for `relative_utf8` (`a/b.stl`).
     // Duplicate names become `name(1).ext`, `name(2).ext`, ...
     // On Windows and macOS, case-insensitive collisions (`A.stl` vs `a.stl`) also get a suffix.

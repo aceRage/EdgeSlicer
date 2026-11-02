@@ -29,7 +29,7 @@ std::shared_ptr<ArchiveViewNode> ArchiveViewModel::AddFile(std::shared_ptr<Archi
 {
     std::shared_ptr<ArchiveViewNode> node = std::make_shared<ArchiveViewNode>(ArchiveViewNode(name));
     node->set_container(container);
-
+    
     if (parent.get() != nullptr) {
         parent->get_children().push_back(node);
         node->set_parent(parent);
@@ -37,17 +37,17 @@ std::shared_ptr<ArchiveViewNode> ArchiveViewModel::AddFile(std::shared_ptr<Archi
     } else {
         m_top_children.emplace_back(node);
     }
-
+     
     wxDataViewItem child = wxDataViewItem((void*)node.get());
     wxDataViewItem parent_item= wxDataViewItem((void*)parent.get());
     ItemAdded(parent_item, child);
-
+    
     if (parent)
         m_ctrl->Expand(parent_item);
     return node;
 }
 
-wxString ArchiveViewModel::GetColumnType(unsigned int col) const
+wxString ArchiveViewModel::GetColumnType(unsigned int col) const 
 {
     if (col == 0)
         return "bool";
@@ -78,7 +78,7 @@ void  ArchiveViewModel::Clear()
     Cleared();
 }
 
-wxDataViewItem ArchiveViewModel::GetParent(const wxDataViewItem& item) const
+wxDataViewItem ArchiveViewModel::GetParent(const wxDataViewItem& item) const 
 {
     assert(item.IsOk());
     ArchiveViewNode* node = static_cast<ArchiveViewNode*>(item.GetID());
@@ -92,7 +92,7 @@ unsigned int ArchiveViewModel::GetChildren(const wxDataViewItem& parent, wxDataV
         }
         return m_top_children.size();
     }
-
+       
     ArchiveViewNode* node = static_cast<ArchiveViewNode*>(parent.GetID());
     for (std::shared_ptr<ArchiveViewNode> child : node->get_children()) {
         array.push_back(wxDataViewItem((void*)child.get()));
@@ -100,7 +100,7 @@ unsigned int ArchiveViewModel::GetChildren(const wxDataViewItem& parent, wxDataV
     return node->get_children().size();
 }
 
-void ArchiveViewModel::GetValue(wxVariant& variant, const wxDataViewItem& item, unsigned int col) const
+void ArchiveViewModel::GetValue(wxVariant& variant, const wxDataViewItem& item, unsigned int col) const 
 {
     assert(item.IsOk());
     ArchiveViewNode* node = static_cast<ArchiveViewNode*>(item.GetID());
@@ -128,7 +128,7 @@ void ArchiveViewModel::untoggle_folders(const wxDataViewItem& item)
         untoggle_folders(wxDataViewItem((void*)node->get_parent().get()));
 }
 
-bool ArchiveViewModel::SetValue(const wxVariant& variant, const wxDataViewItem& item, unsigned int col)
+bool ArchiveViewModel::SetValue(const wxVariant& variant, const wxDataViewItem& item, unsigned int col) 
 {
     assert(item.IsOk());
     ArchiveViewNode* node = static_cast<ArchiveViewNode*>(item.GetID());
@@ -153,7 +153,7 @@ bool ArchiveViewModel::SetValue(const wxVariant& variant, const wxDataViewItem& 
         dlg->update_selected_size();
     return true;
 }
-bool ArchiveViewModel::IsEnabled(const wxDataViewItem& item, unsigned int col) const
+bool ArchiveViewModel::IsEnabled(const wxDataViewItem& item, unsigned int col) const 
 {
     ArchiveViewNode* node = static_cast<ArchiveViewNode*>(item.GetID());
     if (node->get_is_folder())
@@ -163,7 +163,7 @@ bool ArchiveViewModel::IsEnabled(const wxDataViewItem& item, unsigned int col) c
     return true;
 }
 
-bool ArchiveViewModel::IsContainer(const wxDataViewItem& item) const
+bool ArchiveViewModel::IsContainer(const wxDataViewItem& item) const 
 {
     if(!item.IsOk())
         return true;
@@ -194,12 +194,16 @@ ArchiveViewCtrl::~ArchiveViewCtrl()
     }
 }
 
-FileArchiveDialog::FileArchiveDialog(wxWindow* parent_window, const std::vector<ZipEntryInfo>& entries, std::vector<mz_uint>& selected_indices)
+FileArchiveDialog::FileArchiveDialog(wxWindow*                        parent_window,
+                                     const std::vector<ZipEntryInfo>& entries,
+                                     std::vector<mz_uint>&            selected_indices,
+                                     ZipEntryReader                   read_entry)
     : DPIDialog(parent_window, wxID_ANY, _(L("Archive preview")), wxDefaultPosition,
         wxSize(45 * wxGetApp().em_unit(), 40 * wxGetApp().em_unit()),
         wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
     , m_entries(entries)
     , m_selected_indices(selected_indices)
+    , m_read_entry(std::move(read_entry))
 {
 #ifdef _WIN32
     SetBackgroundColour(*wxWHITE);
@@ -216,11 +220,10 @@ FileArchiveDialog::FileArchiveDialog(wxWindow* parent_window, const std::vector<
     m_encrypted_msg = new wxStaticText(this, wxID_ANY,
         _L("This ZIP is password-protected. Edge can't open encrypted archives; extract it with your system tool first."));
     m_encrypted_msg->Wrap(40 * em);
-    std::vector<ZipListedEntry> listed;
-    listed.reserve(m_entries.size());
+    m_listed.reserve(m_entries.size());
     for (const ZipEntryInfo& e : m_entries)
-        listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink});
-    if (!zip_archive_is_all_encrypted(listed))
+        m_listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink, e.is_safe});
+    if (!zip_archive_is_all_encrypted(m_listed))
         m_encrypted_msg->Hide();
     topSizer->Add(m_encrypted_msg, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
 
@@ -234,7 +237,7 @@ FileArchiveDialog::FileArchiveDialog(wxWindow* parent_window, const std::vector<
     size_t selectable = 0;
     for (const ZipEntryInfo& e : m_entries) {
         const ZipEntryKind kind = classify_zip_entry_name(e.decoded_name, e.is_directory);
-        if (zip_entry_is_selectable(kind, e.is_encrypted, e.is_symlink))
+        if (zip_entry_is_selectable(kind, e.is_encrypted, e.is_symlink, e.is_safe))
             ++selectable;
     }
     if (selectable == 1)
@@ -251,8 +254,11 @@ FileArchiveDialog::FileArchiveDialog(wxWindow* parent_window, const std::vector<
     unsupported_row->Add(m_show_unsupported, 0, wxALIGN_CENTER_VERTICAL);
     unsupported_row->Add(unsupported_lbl, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, FromDIP(6));
     m_show_unsupported->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent&) {
+        // Rebuilding the tree recreates every node; carry the ticks across.
+        const std::vector<mz_uint> ticked = toggled_indices();
         m_avc->get_model()->Clear();
         populate_tree();
+        restore_toggles(ticked);
         update_selected_size();
         Layout();
     });
@@ -279,7 +285,7 @@ FileArchiveDialog::FileArchiveDialog(wxWindow* parent_window, const std::vector<
 void FileArchiveDialog::populate_tree()
 {
     const bool show_unsupported = m_show_unsupported && m_show_unsupported->GetValue();
-
+    
     std::vector<std::shared_ptr<ArchiveViewNode>> stack;
 
     std::function<void(std::vector<std::shared_ptr<ArchiveViewNode> >&, size_t)> reduce_stack = [] (std::vector<std::shared_ptr<ArchiveViewNode>>& stack, size_t size) {
@@ -290,15 +296,18 @@ void FileArchiveDialog::populate_tree()
         while (stack.size() > size)
             stack.pop_back();
     };
-    std::function<size_t(const boost::filesystem::path&, std::vector<std::shared_ptr<ArchiveViewNode>>&)> adjust_stack = [&adjust_stack, &reduce_stack, &avc = m_avc](const boost::filesystem::path& const_file, std::vector<std::shared_ptr<ArchiveViewNode>>& stack)->size_t {
+    // `is_folder` comes from the position in the path (every parent is a folder, the leaf is a
+    // file), not from the extension, so `v1.2/part.stl` shows `v1.2` as a folder and an
+    // extensionless file is not turned into one.
+    std::function<size_t(const boost::filesystem::path&, bool, std::vector<std::shared_ptr<ArchiveViewNode>>&)> adjust_stack = [&adjust_stack, &reduce_stack, &avc = m_avc](const boost::filesystem::path& const_file, bool is_folder, std::vector<std::shared_ptr<ArchiveViewNode>>& stack)->size_t {
         boost::filesystem::path file(const_file);
-        size_t struct_size = file.has_parent_path() ? adjust_stack(file.parent_path(), stack) : 0;
+        size_t struct_size = file.has_parent_path() ? adjust_stack(file.parent_path(), true, stack) : 0;
 
-        if (stack.size() > struct_size && (file.has_extension() || file.filename().string() != stack[struct_size]->get_name()))
+        if (stack.size() > struct_size && (!is_folder || boost::nowide::widen(file.filename().string()) != stack[struct_size]->get_name()))
         {
             reduce_stack(stack, struct_size);
         }
-        if (!file.has_extension() && stack.size() == struct_size)
+        if (is_folder && stack.size() == struct_size)
             stack.push_back(avc->get_model()->AddFile((stack.empty() ? std::shared_ptr<ArchiveViewNode>(nullptr) : stack.back()), boost::nowide::widen(file.filename().string()), true));
         return struct_size + 1;
     };
@@ -310,7 +319,8 @@ void FileArchiveDialog::populate_tree()
         const bool hidden_by_default = kind == ZipEntryKind::Ignored || kind == ZipEntryKind::Unsupported;
         if (hidden_by_default && !show_unsupported)
             continue;
-        if (e.decoded_name.empty())
+        // Folder entries are implied by the files under them.
+        if (e.decoded_name.empty() || e.is_directory)
             continue;
         filtered.push_back(&e);
     }
@@ -323,7 +333,7 @@ void FileArchiveDialog::populate_tree()
         const boost::filesystem::path path(e->decoded_name);
         std::shared_ptr<ArchiveViewNode> parent(nullptr);
 
-        adjust_stack(path, stack);
+        adjust_stack(path, false, stack);
         if (!stack.empty())
             parent = stack.back();
 
@@ -342,22 +352,20 @@ void FileArchiveDialog::populate_tree()
         new_node->set_index(e->index);
         new_node->set_kind(kind);
         new_node->set_encrypted(e->is_encrypted);
-        new_node->set_selectable(zip_entry_is_selectable(kind, e->is_encrypted, e->is_symlink));
+        new_node->set_selectable(zip_entry_is_selectable(kind, e->is_encrypted, e->is_symlink, e->is_safe));
         new_node->set_is_folder(e->is_directory);
     }
 }
 
-void FileArchiveDialog::update_selected_size()
+std::vector<mz_uint> FileArchiveDialog::toggled_indices() const
 {
-    if (!m_size_label || !m_avc)
-        return;
-    std::uint64_t total = 0;
+    std::vector<mz_uint> out;
     std::function<void(ArchiveViewNode*)> walk = [&](ArchiveViewNode* node) {
         if (node == nullptr)
             return;
         if (node->get_children().empty()) {
-            if (node->get_toggle() && node->is_selectable())
-                total += node->get_size();
+            if (!node->get_is_folder() && node->get_toggle() && node->is_selectable())
+                out.push_back(node->get_index());
         } else {
             for (std::shared_ptr<ArchiveViewNode> child : node->get_children())
                 walk(child.get());
@@ -367,7 +375,78 @@ void FileArchiveDialog::update_selected_size()
     m_avc->get_model()->GetChildren(wxDataViewItem(nullptr), top_items);
     for (const auto& item : top_items)
         walk(static_cast<ArchiveViewNode*>(item.GetID()));
-    m_size_label->SetLabel(wxString::Format(_L("Selected: %s"), wxString::FromUTF8(format_zip_size(total).c_str())));
+    return out;
+}
+
+void FileArchiveDialog::restore_toggles(const std::vector<mz_uint>& indices)
+{
+    // Returns true when every selectable leaf below `node` is ticked (folders mirror that).
+    std::function<bool(ArchiveViewNode*)> walk = [&](ArchiveViewNode* node) -> bool {
+        if (node == nullptr)
+            return true;
+        if (node->get_children().empty()) {
+            if (node->get_is_folder() || !node->is_selectable())
+                return true;
+            const bool on = std::find(indices.begin(), indices.end(), node->get_index()) != indices.end();
+            node->set_toggle(on);
+            return on;
+        }
+        bool all = true;
+        for (std::shared_ptr<ArchiveViewNode> child : node->get_children())
+            all = walk(child.get()) && all;
+        node->set_toggle(all);
+        return all;
+    };
+    wxDataViewItemArray top_items;
+    m_avc->get_model()->GetChildren(wxDataViewItem(nullptr), top_items);
+    for (const auto& item : top_items) {
+        walk(static_cast<ArchiveViewNode*>(item.GetID()));
+        m_avc->get_model()->ValueChanged(item, 0);
+    }
+}
+
+void FileArchiveDialog::update_selected_size()
+{
+    if (!m_size_label || !m_avc)
+        return;
+    auto size_of = [this](mz_uint index) -> std::uint64_t {
+        for (const ZipEntryInfo& e : m_entries)
+            if (e.index == index)
+                return e.uncomp_size;
+        return 0;
+    };
+    const std::vector<mz_uint> ticked = toggled_indices();
+    std::uint64_t              total  = 0;
+    for (mz_uint idx : ticked)
+        total += size_of(idx);
+
+    // OBJ sidecars (MTL + referenced textures) are extracted too; count each once.
+    std::vector<std::uint32_t> sidecars;
+    for (mz_uint idx : ticked) {
+        auto it = m_sidecar_cache.find(idx);
+        if (it == m_sidecar_cache.end()) {
+            std::vector<std::uint32_t> extra;
+            for (const ZipListedEntry& l : m_listed)
+                if (l.index == idx) {
+                    extra = zip_obj_sidecar_indices(l, m_listed, m_read_entry);
+                    break;
+                }
+            it = m_sidecar_cache.emplace(idx, std::move(extra)).first;
+        }
+        for (std::uint32_t s : it->second)
+            if (std::find(ticked.begin(), ticked.end(), s) == ticked.end() && std::find(sidecars.begin(), sidecars.end(), s) == sidecars.end())
+                sidecars.push_back(s);
+    }
+    std::uint64_t sidecar_total = 0;
+    for (std::uint32_t s : sidecars)
+        sidecar_total += size_of(s);
+
+    if (sidecars.empty())
+        m_size_label->SetLabel(wxString::Format(_L("Selected: %s"), wxString::FromUTF8(format_zip_size(total).c_str())));
+    else
+        m_size_label->SetLabel(wxString::Format(_L("Selected: %s (including %s of OBJ materials and textures)"),
+                                                wxString::FromUTF8(format_zip_size(total + sidecar_total).c_str()),
+                                                wxString::FromUTF8(format_zip_size(sidecar_total).c_str())));
 }
 
 void FileArchiveDialog::on_dpi_changed(const wxRect& suggested_rect)
@@ -404,7 +483,7 @@ void FileArchiveDialog::on_open_button()
     m_selected_indices.clear();
     wxDataViewItemArray top_items;
     m_avc->get_model()->GetChildren(wxDataViewItem(nullptr), top_items);
-
+    
     bool has_model = false;
     bool has_gcode = false;
     std::function<void(ArchiveViewNode*)> deep_fill = [&](ArchiveViewNode* node){
@@ -418,7 +497,7 @@ void FileArchiveDialog::on_open_button()
                 if (node->get_kind() == ZipEntryKind::GCode)
                     has_gcode = true;
             }
-        } else {
+        } else { 
             for (std::shared_ptr<ArchiveViewNode> child : node->get_children())
                 deep_fill(child.get());
         }
@@ -438,7 +517,7 @@ void FileArchiveDialog::on_open_button()
 
 void FileArchiveDialog::on_all_button()
 {
-
+    
     wxDataViewItemArray top_items;
     m_avc->get_model()->GetChildren(wxDataViewItem(nullptr), top_items);
 

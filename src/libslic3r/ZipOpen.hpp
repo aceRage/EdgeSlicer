@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,11 +49,15 @@ struct ZipListedEntry
     bool          is_directory  = false;
     bool          is_encrypted  = false;
     bool          is_symlink    = false;
+    // inspect_zip_entries' path verdict (no traversal / absolute / drive / NUL).
+    bool          is_safe       = true;
 };
 
 ZipEntryKind classify_zip_entry_name(const std::string& decoded_name, bool is_directory);
 bool         zip_entry_name_is_ignored(const std::string& decoded_name, bool is_directory);
-bool         zip_entry_is_selectable(ZipEntryKind kind, bool is_encrypted, bool is_symlink);
+// Only Model / G-code entries that are not encrypted, not symlinks and have a safe path can be
+// ticked, so one `../x.stl` entry can never be selected and abort the whole extraction.
+bool         zip_entry_is_selectable(ZipEntryKind kind, bool is_encrypted, bool is_symlink, bool is_safe);
 
 // True when the option is on and the archive has exactly one selectable entry.
 bool should_auto_open_zip(std::size_t selectable_count, bool option_enabled);
@@ -60,8 +65,24 @@ bool should_auto_open_zip(std::size_t selectable_count, bool option_enabled);
 // Every non-ignored file is encrypted (and at least one such file exists).
 bool zip_archive_is_all_encrypted(const std::vector<ZipListedEntry>& entries);
 
-// Same-folder `.mtl` (matching stem) plus image files next to a selected `.obj`.
-std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry& obj, const std::vector<ZipListedEntry>& all);
+// `mtllib` file names in an OBJ (a name may contain spaces; several per line are not split).
+std::vector<std::string> parse_obj_mtllib(const std::string& obj_text);
+// Texture file names referenced by an MTL (map_Kd, map_Ka, map_Ks, map_Ns, map_d, map_Bump,
+// bump, disp, decal, refl, norm, map_Pr/Pm/Ps/Ke). Option flags before the name are skipped.
+std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text);
+// Archive-relative `dir/ref` with `.` / `..` folded and `\` as `/`. Empty when `..` climbs out.
+std::string resolve_zip_relative(const std::string& dir, const std::string& ref);
+
+// Reads one entry (capped by the caller); false when it cannot be read.
+using ZipEntryReader = std::function<bool(std::uint32_t index, std::string& out)>;
+
+// Sidecars of a selected `.obj`: the MTL files its `mtllib` lines name (relative to the OBJ,
+// subfolders allowed), else the same-stem `.mtl` beside it, plus exactly the textures those MTL
+// files reference (relative to the MTL, subfolders allowed). Nothing is pulled in by extension
+// alone. 3MF and GLB embed their textures; external glTF buffers / images are not followed.
+std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&              obj,
+                                                   const std::vector<ZipListedEntry>& all,
+                                                   const ZipEntryReader&              read_entry);
 
 // `.zip` but not `.zip.amf`.
 bool is_zip_archive_path(const std::string& path);
@@ -78,6 +99,13 @@ boost::filesystem::path default_zip_work_root(const boost::filesystem::path& doc
 // Join a sanitized extract-relative path onto a session folder (UTF-8, `/` separators).
 boost::filesystem::path zip_session_entry_dest(const boost::filesystem::path& session_dir, const std::string& extract_name);
 #endif
+
+// Floors for the hidden cap keys: a value below the floor (0 included) is raised to it, so a
+// typo cannot make every archive fail (ratio 0 would refuse everything over 1 MiB).
+inline constexpr std::uint32_t ZIP_MIN_ENTRIES_SCANNED    = 16;
+inline constexpr std::uint64_t ZIP_MIN_ENTRY_UNCOMPRESSED = 1ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t ZIP_MIN_TOTAL_UNCOMPRESSED = 1ull * 1024ull * 1024ull;
+inline constexpr std::uint64_t ZIP_MIN_COMPRESSION_RATIO  = 10;
 
 struct ZipCapValues
 {

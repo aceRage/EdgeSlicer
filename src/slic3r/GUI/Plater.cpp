@@ -22109,16 +22109,22 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         selectable.reserve(entries.size());
         for (const ZipEntryInfo& e : entries) {
             const ZipEntryKind kind = classify_zip_entry_name(e.decoded_name, e.is_directory);
-            if (zip_entry_is_selectable(kind, e.is_encrypted, e.is_symlink))
+            if (zip_entry_is_selectable(kind, e.is_encrypted, e.is_symlink, e.is_safe))
                 selectable.push_back(e.index);
         }
+
+        // OBJ / MTL text is read with a 16 MiB cap to find mtllib and texture names; an OBJ over
+        // the cap falls back to its same-stem MTL.
+        const ZipEntryReader read_entry = [&archive](std::uint32_t index, std::string& out) {
+            return read_zip_entry_capped(archive.arch, index, 16ull * 1024ull * 1024ull, out);
+        };
 
         std::vector<mz_uint> selected;
         const bool auto_open = wxGetApp().app_config->get_bool(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY);
         if (should_auto_open_zip(selectable.size(), auto_open)) {
             selected = selectable;
         } else {
-            FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), entries, selected);
+            FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), entries, selected, read_entry);
             if (dlg.ShowModal() != wxID_OK)
                 return false;
         }
@@ -22147,7 +22153,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         std::vector<ZipListedEntry> listed;
         listed.reserve(entries.size());
         for (const ZipEntryInfo& e : entries)
-            listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink});
+            listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink, e.is_safe});
 
         std::vector<mz_uint> extract_indices = selected;
         for (mz_uint idx : selected) {
@@ -22156,8 +22162,8 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
                 if (e.index == idx) { info = &e; break; }
             if (!info)
                 continue;
-            const ZipListedEntry obj{info->index, info->decoded_name, info->is_directory, info->is_encrypted, info->is_symlink};
-            for (std::uint32_t extra : zip_obj_sidecar_indices(obj, listed)) {
+            const ZipListedEntry obj{info->index, info->decoded_name, info->is_directory, info->is_encrypted, info->is_symlink, info->is_safe};
+            for (std::uint32_t extra : zip_obj_sidecar_indices(obj, listed, read_entry)) {
                 if (std::find(extract_indices.begin(), extract_indices.end(), extra) == extract_indices.end())
                     extract_indices.push_back(extra);
             }
@@ -22190,27 +22196,49 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             get_notification_manager()->push_plater_warning_notification(
                 _u8L("Could not write the ZIP working folder; extracted files were written to the temporary directory instead."));
 
-        // Predict dests with the same uniquify order extract_entries_confined uses, before
-        // files land on disk (uniquify also looks at existing names).
-        std::vector<fs::path>                    taken;
-        std::unordered_map<mz_uint, fs::path>    dest_by_index;
-        dest_by_index.reserve(extract_indices.size());
-        for (mz_uint idx : extract_indices) {
-            const ZipEntryInfo* info = nullptr;
-            for (const ZipEntryInfo& e : entries)
-                if (e.index == idx) { info = &e; break; }
-            if (!info || info->is_directory)
-                continue;
-            const std::string name = info->extract_name.empty() ? info->decoded_name : info->extract_name;
-            if (name.empty())
-                continue;
-            const fs::path dest = ZipWorkDir::uniquify_entry_path(session, name, taken);
-            taken.push_back(dest);
-            dest_by_index[idx] = dest;
+        // Extract on a worker thread behind a cancellable progress dialog (4 GiB at most, but
+        // that can take a while). Cancel rolls back every staged file; the session folder this
+        // call created is removed on any failure so no empty marked session is left behind.
+        ZipExtractDests          dest_by_index;
+        std::atomic<std::uint64_t> done_bytes{0};
+        std::atomic<std::uint64_t> total_bytes{0};
+        std::atomic<bool>          cancel{false};
+        std::atomic<bool>          finished{false};
+        bool                       extracted = false;
+        std::thread worker([&]() {
+            extracted = extract_entries_confined(archive.arch, extract_indices, session, caps, dest_by_index, err,
+                                                 [&](std::uint64_t done, std::uint64_t total) {
+                                                     done_bytes  = done;
+                                                     total_bytes = total;
+                                                     return !cancel.load();
+                                                 });
+            finished = true;
+        });
+        {
+            wxProgressDialog progress(_L("Opening ZIP"), _L("Extracting the selected files..."), 1000,
+                                      static_cast<wxWindow*>(wxGetApp().mainframe),
+                                      wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+            while (!finished) {
+                const std::uint64_t total = total_bytes.load();
+                const int           value = total > 0 ? int(std::min<std::uint64_t>(999, done_bytes.load() * 1000 / total)) : 0;
+                if (!progress.Update(value)) {
+                    cancel = true;
+                    progress.Update(value, _L("Cancelling..."));
+                }
+                wxMilliSleep(50);
+            }
         }
-
-        if (!extract_entries_confined(archive.arch, extract_indices, session, caps, err))
+        {
+            wxBusyCursor busy;
+            worker.join();
+        }
+        if (!extracted) {
+            boost::system::error_code ec;
+            fs::remove_all(session, ec);
+            if (cancel.load())
+                return false;
             throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to extract the selected ZIP entries.") : err);
+        }
 
         for (mz_uint idx : selected) {
             auto dest_it = dest_by_index.find(idx);
@@ -22257,6 +22285,10 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
     if (project_paths.empty() && non_project_paths.empty())
         return false;
 
+    // F5: only a plater that was empty, or a zip 3MF that became the project, turns the next
+    // Save into Save As. Dropping a zip into an already saved project keeps plain Save.
+    const bool plater_was_empty = is_empty_project() && get_project_filename().IsEmpty();
+
     // 1 project file and some models - behave like drag n drop of 3mf and then load models
     if (project_paths.size() == 1)
     {
@@ -22264,13 +22296,22 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         aux.Add(from_u8(project_paths.front().string()));
         load_files(aux);
         load_files(non_project_paths, LoadStrategy::LoadModel);
-        set_opened_from_zip(true);
+        // The project folder is the extracted 3MF's folder only when it was opened as the project
+        // (not imported as geometry into the current one).
+        bool became_project = false;
+        if (!get_project_filename().IsEmpty()) {
+            boost::system::error_code ec;
+            became_project = fs::equivalent(into_path(get_project_filename()).parent_path(), project_paths.front().parent_path(), ec) && !ec;
+        }
+        if (plater_was_empty || became_project)
+            set_opened_from_zip(true);
         return true;
     }
 
     load_files(project_paths, LoadStrategy::LoadModel);
     load_files(non_project_paths, LoadStrategy::LoadModel);
-    set_opened_from_zip(true);
+    if (plater_was_empty)
+        set_opened_from_zip(true);
     return true;
 }
 

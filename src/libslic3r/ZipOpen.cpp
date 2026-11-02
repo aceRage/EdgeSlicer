@@ -215,9 +215,9 @@ ZipEntryKind classify_zip_entry_name(const std::string& decoded_name, bool is_di
     return ZipEntryKind::Unsupported;
 }
 
-bool zip_entry_is_selectable(ZipEntryKind kind, bool is_encrypted, bool is_symlink)
+bool zip_entry_is_selectable(ZipEntryKind kind, bool is_encrypted, bool is_symlink, bool is_safe)
 {
-    return (kind == ZipEntryKind::Model || kind == ZipEntryKind::GCode) && !is_encrypted && !is_symlink;
+    return (kind == ZipEntryKind::Model || kind == ZipEntryKind::GCode) && !is_encrypted && !is_symlink && is_safe;
 }
 
 bool should_auto_open_zip(std::size_t selectable_count, bool option_enabled)
@@ -238,22 +238,176 @@ bool zip_archive_is_all_encrypted(const std::vector<ZipListedEntry>& entries)
     return any_file;
 }
 
-std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry& obj, const std::vector<ZipListedEntry>& all)
+namespace {
+
+std::vector<std::string> split_lines(const std::string& text)
+{
+    std::vector<std::string> lines;
+    size_t                   start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.push_back(std::move(line));
+        if (end == text.size())
+            break;
+        start = end + 1;
+    }
+    return lines;
+}
+
+// Keyword (lower case) and the rest of the line, trimmed. Comments start at '#'.
+bool split_keyword(std::string line, std::string& keyword, std::string& rest)
+{
+    const auto hash = line.find('#');
+    if (hash != std::string::npos)
+        line.erase(hash);
+    trim_inplace(line);
+    if (line.empty())
+        return false;
+    size_t sp = 0;
+    while (sp < line.size() && !std::isspace(static_cast<unsigned char>(line[sp])))
+        ++sp;
+    keyword = ascii_lower(line.substr(0, sp));
+    rest    = line.substr(sp);
+    trim_inplace(rest);
+    return true;
+}
+
+} // namespace
+
+std::vector<std::string> parse_obj_mtllib(const std::string& obj_text)
+{
+    std::vector<std::string> out;
+    std::string              keyword, rest;
+    for (const std::string& line : split_lines(obj_text))
+        if (split_keyword(line, keyword, rest) && keyword == "mtllib" && !rest.empty())
+            out.push_back(rest);
+    return out;
+}
+
+std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text)
+{
+    static const std::vector<std::string> keys = {"map_kd", "map_ka", "map_ks", "map_ns", "map_d", "map_bump", "bump", "disp",
+                                                  "decal",  "refl",   "norm",   "map_pr", "map_pm", "map_ps", "map_ke"};
+    // Options that take N numeric arguments (MTL spec plus the PBR extension).
+    static const std::vector<std::pair<std::string, int>> opts = {{"-blendu", 1}, {"-blendv", 1}, {"-boost", 1}, {"-mm", 2},
+                                                                  {"-o", 3},      {"-s", 3},      {"-t", 3},     {"-texres", 1},
+                                                                  {"-clamp", 1},  {"-bm", 1},     {"-imfchan", 1}, {"-type", 1}};
+    std::vector<std::string> out;
+    std::string              keyword, rest;
+    for (const std::string& line : split_lines(mtl_text)) {
+        if (!split_keyword(line, keyword, rest) || std::find(keys.begin(), keys.end(), keyword) == keys.end())
+            continue;
+        // Skip leading options; the remainder (spaces allowed) is the file name.
+        for (;;) {
+            if (rest.empty() || rest[0] != '-')
+                break;
+            size_t sp = rest.find_first_of(" \t");
+            const std::string opt = ascii_lower(rest.substr(0, sp));
+            int               n   = -1;
+            for (const auto& o : opts)
+                if (o.first == opt)
+                    n = o.second;
+            if (n < 0 || sp == std::string::npos)
+                break;
+            rest = rest.substr(sp);
+            trim_inplace(rest);
+            for (int i = 0; i < n && !rest.empty(); ++i) {
+                // Numeric arguments only; a non-number means the file name starts here.
+                const size_t      sp2 = rest.find_first_of(" \t");
+                const std::string tok = rest.substr(0, sp2);
+                const bool numeric = !tok.empty() && tok.find_first_not_of("+-.0123456789eE") == std::string::npos;
+                const bool word    = (opt == "-clamp" || opt == "-blendu" || opt == "-blendv" || opt == "-imfchan" || opt == "-type");
+                if (!numeric && !word)
+                    break;
+                rest = sp2 == std::string::npos ? std::string() : rest.substr(sp2);
+                trim_inplace(rest);
+            }
+        }
+        if (!rest.empty())
+            out.push_back(rest);
+    }
+    return out;
+}
+
+std::string resolve_zip_relative(const std::string& dir, const std::string& ref)
+{
+    const std::string        joined = dir.empty() ? slash_normalized(ref) : slash_normalized(dir) + "/" + slash_normalized(ref);
+    std::vector<std::string> parts;
+    size_t                   start = 0;
+    while (start <= joined.size()) {
+        size_t end = joined.find('/', start);
+        if (end == std::string::npos)
+            end = joined.size();
+        const std::string part = joined.substr(start, end - start);
+        if (part == "..") {
+            if (parts.empty())
+                return {};
+            parts.pop_back();
+        } else if (!part.empty() && part != ".")
+            parts.push_back(part);
+        if (end == joined.size())
+            break;
+        start = end + 1;
+    }
+    std::string out;
+    for (const std::string& p : parts)
+        out += (out.empty() ? "" : "/") + p;
+    return out;
+}
+
+std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&              obj,
+                                                   const std::vector<ZipListedEntry>& all,
+                                                   const ZipEntryReader&              read_entry)
 {
     std::vector<std::uint32_t> extra;
     if (!has_extension(obj.decoded_name, ".obj"))
         return extra;
-    const std::string dir  = parent_dir(obj.decoded_name);
-    const std::string stem = leaf_stem(obj.decoded_name);
-    for (const ZipListedEntry& e : all) {
-        if (e.index == obj.index || e.is_directory || e.is_encrypted || e.is_symlink)
+
+    auto usable = [&](const ZipListedEntry& e) { return e.index != obj.index && !e.is_directory && !e.is_encrypted && !e.is_symlink && e.is_safe; };
+    auto find   = [&](const std::string& rel) -> const ZipListedEntry* {
+        if (rel.empty())
+            return nullptr;
+        for (const ZipListedEntry& e : all)
+            if (usable(e) && iequals(resolve_zip_relative({}, e.decoded_name), rel))
+                return &e;
+        return nullptr;
+    };
+    auto add = [&](const ZipListedEntry* e) {
+        if (e && std::find(extra.begin(), extra.end(), e->index) == extra.end()) {
+            extra.push_back(e->index);
+            return true;
+        }
+        return false;
+    };
+
+    const std::string           obj_dir = parent_dir(obj.decoded_name);
+    std::vector<const ZipListedEntry*> mtls;
+    std::string                 text;
+    if (read_entry && read_entry(obj.index, text)) {
+        for (const std::string& name : parse_obj_mtllib(text))
+            if (const ZipListedEntry* e = find(resolve_zip_relative(obj_dir, name)); e && add(e))
+                mtls.push_back(e);
+    }
+    if (mtls.empty()) {
+        // No readable mtllib line (or the OBJ is over the read cap): the same-stem MTL beside it.
+        const std::string stem = leaf_stem(obj.decoded_name);
+        for (const ZipListedEntry& e : all)
+            if (usable(e) && parent_dir(e.decoded_name) == obj_dir && has_extension(e.decoded_name, ".mtl") &&
+                iequals(leaf_stem(e.decoded_name), stem) && add(&e))
+                mtls.push_back(&e);
+    }
+    for (const ZipListedEntry* mtl : mtls) {
+        text.clear();
+        if (!read_entry || !read_entry(mtl->index, text))
             continue;
-        if (parent_dir(e.decoded_name) != dir)
-            continue;
-        const bool mtl = has_extension(e.decoded_name, ".mtl") && iequals(leaf_stem(e.decoded_name), stem);
-        const bool img = has_any_extension(e.decoded_name, zip_sidecar_image_extensions());
-        if (mtl || img)
-            extra.push_back(e.index);
+        const std::string mtl_dir = parent_dir(mtl->decoded_name);
+        for (const std::string& ref : parse_mtl_texture_refs(text))
+            add(find(resolve_zip_relative(mtl_dir, ref)));
     }
     return extra;
 }
@@ -334,6 +488,10 @@ ZipCapValues zip_extract_caps_from_values(const std::string& max_entries_scanned
     caps.max_entry_uncompressed = parse_u64(max_entry_uncompressed, caps.max_entry_uncompressed);
     caps.max_total_uncompressed = parse_u64(max_total_uncompressed, caps.max_total_uncompressed);
     caps.max_compression_ratio  = parse_u64(max_compression_ratio, caps.max_compression_ratio);
+    caps.max_entries_scanned    = std::max(caps.max_entries_scanned, ZIP_MIN_ENTRIES_SCANNED);
+    caps.max_entry_uncompressed = std::max(caps.max_entry_uncompressed, ZIP_MIN_ENTRY_UNCOMPRESSED);
+    caps.max_total_uncompressed = std::max(caps.max_total_uncompressed, ZIP_MIN_TOTAL_UNCOMPRESSED);
+    caps.max_compression_ratio  = std::max(caps.max_compression_ratio, ZIP_MIN_COMPRESSION_RATIO);
     return caps;
 }
 

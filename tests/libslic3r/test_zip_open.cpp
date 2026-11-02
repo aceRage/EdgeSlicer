@@ -46,13 +46,14 @@ TEST_CASE("classify_zip_entry_name ignores directories, __MACOSX and AppleDouble
 
 TEST_CASE("zip_entry_is_selectable requires a model or gcode that is not locked", "[ZipOpen]")
 {
-    CHECK(zip_entry_is_selectable(ZipEntryKind::Model, false, false));
-    CHECK(zip_entry_is_selectable(ZipEntryKind::GCode, false, false));
-    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Model, true, false));
-    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::GCode, false, true));
-    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::NestedZip, false, false));
-    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Unsupported, false, false));
-    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Ignored, false, false));
+    CHECK(zip_entry_is_selectable(ZipEntryKind::Model, false, false, true));
+    CHECK(zip_entry_is_selectable(ZipEntryKind::GCode, false, false, true));
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Model, true, false, true));
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::GCode, false, true, true));
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Model, false, false, false)); // unsafe path
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::NestedZip, false, false, true));
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Unsupported, false, false, true));
+    CHECK_FALSE(zip_entry_is_selectable(ZipEntryKind::Ignored, false, false, true));
 }
 
 TEST_CASE("should_auto_open_zip is on only for a single selectable entry", "[ZipOpen]")
@@ -82,33 +83,67 @@ TEST_CASE("zip_archive_is_all_encrypted ignores mac metadata", "[ZipOpen]")
     CHECK_FALSE(zip_archive_is_all_encrypted({}));
 }
 
-TEST_CASE("zip_obj_sidecar_indices pulls the matching mtl and same-folder images", "[ZipOpen]")
+namespace {
+ZipListedEntry listed(std::uint32_t index, const char* name)
 {
-    ZipListedEntry obj;
-    obj.index        = 0;
-    obj.decoded_name = "models/part.obj";
-    ZipListedEntry mtl;
-    mtl.index        = 1;
-    mtl.decoded_name = "models/part.mtl";
-    ZipListedEntry png;
-    png.index        = 2;
-    png.decoded_name = "models/tex.png";
-    ZipListedEntry other_mtl;
-    other_mtl.index        = 3;
-    other_mtl.decoded_name = "models/other.mtl";
-    ZipListedEntry nested;
-    nested.index        = 4;
-    nested.decoded_name = "models/maps/tex.png";
-    ZipListedEntry jpg;
-    jpg.index        = 5;
-    jpg.decoded_name = "models/photo.jpg";
+    ZipListedEntry e;
+    e.index        = index;
+    e.decoded_name = name;
+    return e;
+}
+} // namespace
 
-    const std::vector<ZipListedEntry> all   = {obj, mtl, png, other_mtl, nested, jpg};
-    const std::vector<std::uint32_t>  extra = zip_obj_sidecar_indices(obj, all);
-    REQUIRE(extra.size() == 3);
-    CHECK(extra[0] == 1);
-    CHECK(extra[1] == 2);
-    CHECK(extra[2] == 5);
+TEST_CASE("parse_obj_mtllib and parse_mtl_texture_refs read names", "[ZipOpen]")
+{
+    const auto libs = parse_obj_mtllib("# c\nv 0 0 0\nmtllib mats/My Part.mtl\r\n  mtllib  b.mtl \nusemtl x\n");
+    REQUIRE(libs.size() == 2);
+    CHECK(libs[0] == "mats/My Part.mtl");
+    CHECK(libs[1] == "b.mtl");
+
+    const auto refs = parse_mtl_texture_refs("newmtl a\nKd 1 1 1\nmap_Kd tex/diffuse.png\n"
+                                             "map_Bump -bm 0.5 normals/n.png\nbump -o 0 0 0 -s 1 1 1 b.png\n# map_Kd no.png\n");
+    REQUIRE(refs.size() == 3);
+    CHECK(refs[0] == "tex/diffuse.png");
+    CHECK(refs[1] == "normals/n.png");
+    CHECK(refs[2] == "b.png");
+}
+
+TEST_CASE("resolve_zip_relative folds dots and refuses escapes", "[ZipOpen]")
+{
+    CHECK(resolve_zip_relative("models", "tex/a.png") == "models/tex/a.png");
+    CHECK(resolve_zip_relative("models/sub", "../tex\\a.png") == "models/tex/a.png");
+    CHECK(resolve_zip_relative("", "./a.mtl") == "a.mtl");
+    CHECK(resolve_zip_relative("models", "../../a.png").empty());
+}
+
+TEST_CASE("zip_obj_sidecar_indices follows mtllib and MTL texture refs only", "[ZipOpen]")
+{
+    const std::vector<ZipListedEntry> all = {
+        listed(0, "models/part.obj"),      listed(1, "models/mats/part_mats.mtl"),
+        listed(2, "models/mats/tex/Diffuse.PNG"), listed(3, "models/unused.png"),
+        listed(4, "models/part.mtl"),      listed(5, "shared/bump.jpg"),
+    };
+    const ZipEntryReader reader = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "mtllib mats/part_mats.mtl\nv 0 0 0\n"; return true; }
+        if (index == 1) { out = "newmtl m\nmap_Kd tex/diffuse.png\nbump ../../shared/bump.jpg\nmap_Ks missing.png\n"; return true; }
+        return false;
+    };
+    const std::vector<std::uint32_t> extra = zip_obj_sidecar_indices(all[0], all, reader);
+    // mtllib wins over the same-stem part.mtl; unused.png is not pulled by extension.
+    CHECK(extra == std::vector<std::uint32_t>{1, 2, 5});
+}
+
+TEST_CASE("zip_obj_sidecar_indices falls back to the same-stem MTL", "[ZipOpen]")
+{
+    const std::vector<ZipListedEntry> all = {listed(0, "a/part.obj"), listed(1, "a/part.mtl"), listed(2, "a/t.png"), listed(3, "a/x.png")};
+    const ZipEntryReader reader = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "v 0 0 0\n"; return true; }
+        if (index == 1) { out = "map_Kd t.png\n"; return true; }
+        return false;
+    };
+    CHECK(zip_obj_sidecar_indices(all[0], all, reader) == std::vector<std::uint32_t>{1, 2});
+    // Without a reader only the same-stem MTL can be found.
+    CHECK(zip_obj_sidecar_indices(all[0], all, {}) == std::vector<std::uint32_t>{1});
 }
 
 TEST_CASE("is_zip_archive_path rejects zip.amf", "[ZipOpen]")
@@ -169,6 +204,20 @@ TEST_CASE("zip_extract_caps_from_values falls back to defaults", "[ZipOpen]")
     CHECK(caps.max_entries_scanned == ZipCapValues{}.max_entries_scanned);
     CHECK(caps.max_entry_uncompressed == ZipCapValues{}.max_entry_uncompressed);
     CHECK(caps.max_compression_ratio == 200);
+}
+
+TEST_CASE("zip_extract_caps_from_values raises values below the floors", "[ZipOpen]")
+{
+    const ZipCapValues zero = zip_extract_caps_from_values("0", "0", "0", "0");
+    CHECK(zero.max_entries_scanned == ZIP_MIN_ENTRIES_SCANNED);
+    CHECK(zero.max_entry_uncompressed == ZIP_MIN_ENTRY_UNCOMPRESSED);
+    CHECK(zero.max_total_uncompressed == ZIP_MIN_TOTAL_UNCOMPRESSED);
+    CHECK(zero.max_compression_ratio == ZIP_MIN_COMPRESSION_RATIO);
+    const ZipCapValues ok = zip_extract_caps_from_values("20", "2097152", "3145728", "50");
+    CHECK(ok.max_entries_scanned == 20);
+    CHECK(ok.max_entry_uncompressed == 2097152ull);
+    CHECK(ok.max_total_uncompressed == 3145728ull);
+    CHECK(ok.max_compression_ratio == 50);
 }
 
 TEST_CASE("format_zip_size uses byte units", "[ZipOpen]")

@@ -29,6 +29,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
+#include "libslic3r/ZipWorkDir.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -4644,6 +4645,10 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
 {
+    // Extracted ZIP copies live in the zip working folder and may be auto-cleaned (PR C); keep
+    // them out of recent files until PR D records `archive.zip|entry` instead.
+    if (ZipWorkDir::is_inside_work_dir(into_path(filename)))
+        return;
     if (wxFileExists(filename))
     {
         m_recent_projects.AddFileToHistory(filename);

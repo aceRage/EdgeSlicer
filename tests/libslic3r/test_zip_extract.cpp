@@ -608,6 +608,68 @@ TEST_CASE("extract_entries_confined leaves no partial files after a failure", "[
     }
 }
 
+TEST_CASE("extract_entries_confined reports where each index landed", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "bundle.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_zip_entries(zip, {{"a/part.stl", "AAA"}, {"A/PART.stl", "BBB"}, {"x.stl", "CCC"}});
+
+    MZ_Archive archive;
+    REQUIRE(archive.open_reader(zip.string()));
+    ZipExtractDests dests;
+    std::string     err;
+    std::uint64_t   last_done = 0, last_total = 0;
+    int             calls     = 0;
+    REQUIRE(extract_entries_confined(archive.arch, {0, 1, 2}, dest, ZipExtractCaps{}, dests, err,
+                                     [&](std::uint64_t done, std::uint64_t total) {
+                                         ++calls;
+                                         last_done  = done;
+                                         last_total = total;
+                                         return true;
+                                     }));
+    REQUIRE(dests.size() == 3);
+    CHECK(read_binary_file(dests[0]) == "AAA");
+    CHECK(read_binary_file(dests[1]) == "BBB");
+    CHECK(read_binary_file(dests[2]) == "CCC");
+    CHECK(dests[2] == dest / "x.stl");
+    CHECK(calls > 0);
+    CHECK(last_done == last_total);
+}
+
+TEST_CASE("extract_entries_confined cancel rolls back and reports cancellation", "[ZipExtract]")
+{
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "bundle.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_zip_entries(zip, {{"a.stl", std::string(4096, 'a')}, {"b.stl", std::string(4096, 'b')}});
+
+    MZ_Archive archive;
+    REQUIRE(archive.open_reader(zip.string()));
+    ZipExtractDests dests;
+    std::string     err;
+    int             calls = 0;
+    CHECK_FALSE(extract_entries_confined(archive.arch, {0, 1}, dest, ZipExtractCaps{}, dests, err,
+                                         [&](std::uint64_t, std::uint64_t) { return ++calls < 3; }));
+    CHECK(err == ZIP_EXTRACT_CANCELLED);
+    CHECK(dests.empty());
+    CHECK(list_regular_files(dest).empty());
+}
+
+TEST_CASE("ZipWorkDir::is_inside_work_dir finds the root marker", "[ZipExtract][ZipWorkDir]")
+{
+    TempDir    tmp;
+    const auto root = tmp.dir / "work";
+    const auto zip  = tmp.dir / "m.zip";
+    std::string err;
+    fs::path    session;
+    REQUIRE(ZipWorkDir::create_session(root, zip, session, err));
+    CHECK(ZipWorkDir::is_inside_work_dir(session / "models" / "part.3mf"));
+    CHECK_FALSE(ZipWorkDir::is_inside_work_dir(tmp.dir / "elsewhere" / "part.3mf"));
+}
+
 TEST_CASE("ZipWorkDir creates a session folder, marker, and collision names", "[ZipExtract][ZipWorkDir]")
 {
     TempDir    tmp;

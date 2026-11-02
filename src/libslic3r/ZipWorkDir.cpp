@@ -112,6 +112,26 @@ void split_stem_ext(const std::string& leaf, std::string& stem, std::string& ext
 
 } // namespace
 
+bool ZipWorkDir::is_inside_work_dir(const boost::filesystem::path& path)
+{
+    namespace fs = boost::filesystem;
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    fs::path                  p = fs::absolute(path, ec);
+    if (ec)
+        p = path;
+    // Start at the parent: the marker sits in the root, and every extracted file is at least
+    // one level (the session folder) below it.
+    for (fs::path anc = p.parent_path(); !anc.empty(); anc = anc.parent_path()) {
+        if (fs::is_regular_file(anc / marker_name(), ec))
+            return true;
+        if (anc.parent_path() == anc)
+            break;
+    }
+    return false;
+}
+
 bool ZipWorkDir::ensure_root(const boost::filesystem::path& root, std::string& err)
 {
     namespace fs = boost::filesystem;
