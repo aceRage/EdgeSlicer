@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <regex>
 #include <set>
@@ -755,13 +756,15 @@ TEST_CASE("Dialog-default grid: a band at every band edge, retraction within the
     CHECK(restored);
 }
 
-// Hidden: writes the dialog-default grid's G-code to the current directory for a manual look.
-// Run with: fff_print_tests "[TempRetractDump]"
+// Hidden ([.], not in default runs): writes the dialog-default grid's G-code to the system temp
+// directory for a manual look. Run with: fff_print_tests "[TempRetractDump]"
 TEST_CASE("Write the dialog-default grid G-code", "[.][TempRetractDump]")
 {
-    DynamicPrintConfig config = grid_print_config();
-    const Calib_Params params = dialog_default_grid(config);
-    std::ofstream      out("stringcalib_default_grid.gcode", std::ios::binary);
+    DynamicPrintConfig                  config = grid_print_config();
+    const Calib_Params                  params = dialog_default_grid(config);
+    const std::filesystem::path path   = std::filesystem::temp_directory_path() / "stringcalib_default_grid.gcode";
+    std::ofstream                       out(path, std::ios::binary);
     out << slice_grid(params, config);
     CHECK(out.good());
+    INFO("G-code written to " << path.string());
 }

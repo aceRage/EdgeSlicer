@@ -1150,43 +1150,92 @@ void stringing_grid_default_params(Calib_Params &params, double center, double r
     params.wait_for_temperature = true;
 
     // Lance (2026-11-01): build outward from the filament's other-layers temperature,
-    // center +step, -step, +2 step, -2 step, ... never past the filament's range. When one side
-    // reaches its limit, keep adding on the other side. Stop at the 10-band cap or when both
-    // sides are at their limits. Bands are center + k * step, so (start - end) is a step multiple.
-    // Missing or invalid temperatures fall back to the fixed 230/205 plan.
-    const double eps = 1e-6;
-    if (center <= 0. || range_low <= 0. || range_high <= 0. || range_low > range_high || center < range_low - eps ||
-        center > range_high + eps) {
+    // center +step, -step, +2 step, -2 step, ... When one side reaches its limit, keep adding on the
+    // other side. Stop at the 10-band cap or when both sides are at their limits. Bands are
+    // center + k * step, so (start - end) is always a step multiple.
+    // B2: 1) build inside the filament range (intersected with the validator's 150-350 C limits);
+    //     2) if that gives fewer than 2 bands (single-temperature or narrower-than-a-step range, or a
+    //        range entirely outside the limits), build again from the center inside the limits only;
+    //     3) the center itself is clipped to the limits (e.g. a 420 C PEEK profile starts at 350 C);
+    //     4) anything that still fails stringing_grid_params_valid falls back to 230/205.
+    const double eps       = 1e-6;
+    const double abs_low   = 150.;
+    const double abs_high  = 350.;
+    const int    min_bands = 2;
+    const int    max_bands = 10;
+    auto set_fallback = [&params]() {
         params.start = 230.;
         params.end   = 205.;
+    };
+    if (center <= 0. || range_low <= 0. || range_high <= 0. || range_low > range_high || center < range_low - eps ||
+        center > range_high + eps) {
+        set_fallback();
         return;
     }
-    const int max_bands = 10;
-    double    hi = center, lo = center;
-    int       bands = 1;
-    while (bands < max_bands) {
-        const bool can_up   = hi + params.step <= range_high + eps;
-        const bool can_down = lo - params.step >= range_low - eps;
-        if (!can_up && !can_down)
-            break;
-        if (can_up) {
-            hi += params.step;
-            if (++bands >= max_bands)
+    auto build = [&](double c, double lim_low, double lim_high, double &hi, double &lo) {
+        hi = lo = c;
+        int bands = 1;
+        while (bands < max_bands) {
+            const bool can_up   = hi + params.step <= lim_high + eps;
+            const bool can_down = lo - params.step >= lim_low - eps;
+            if (!can_up && !can_down)
                 break;
+            if (can_up) {
+                hi += params.step;
+                if (++bands >= max_bands)
+                    break;
+            }
+            if (can_down) {
+                lo -= params.step;
+                ++bands;
+            }
         }
-        if (can_down) {
-            lo -= params.step;
-            ++bands;
-        }
-    }
+        return bands;
+    };
+    const double c_clipped = std::clamp(center, abs_low, abs_high);
+    const double in_low    = std::max(range_low, abs_low);
+    const double in_high   = std::min(range_high, abs_high);
+    double       hi = c_clipped, lo = c_clipped;
+    int          bands = 0;
+    if (in_low <= in_high + eps && c_clipped >= in_low - eps && c_clipped <= in_high + eps)
+        bands = build(c_clipped, in_low, in_high, hi, lo);
+    if (bands < min_bands)
+        bands = build(c_clipped, abs_low, abs_high, hi, lo);
     params.start = hi;
     params.end   = lo;
+    if (bands < min_bands || !stringing_grid_params_valid(params, 1000.))
+        set_fallback();
 }
 
 double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
 {
     return print_z - first_printed_layer_bottom;
 }
+
+namespace {
+// Sets entry idx (clamped to the last entry), or every entry when idx < 0, of a vector option that may be
+// stored either as the plain or as the nullable class.
+template<class Plain, class Nullable, class Value>
+void set_vector_option(DynamicPrintConfig &cfg, const char *key, int idx, Value value)
+{
+    ConfigOption *opt = cfg.optptr(key);
+    if (opt == nullptr || opt->type() != Plain::static_type())
+        return;
+    auto apply = [idx, value](auto &values) {
+        if (values.empty())
+            return;
+        if (idx < 0)
+            for (auto &v : values)
+                v = value;
+        else
+            values[size_t(std::min(idx, int(values.size()) - 1))] = value;
+    };
+    if (opt->nullable())
+        apply(static_cast<Nullable *>(opt)->values);
+    else
+        apply(static_cast<Plain *>(opt)->values);
+}
+} // namespace
 
 void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
                                         DynamicPrintConfig &filament_config,
@@ -1218,22 +1267,16 @@ void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
         for (auto &v : opt->values)
             v = 0.;
 
+    // F12: the filament_* overrides are registered nullable (PrintConfig add_nullable), but a config built
+    // elsewhere can carry the plain vector type; ConfigBase::option<T>() only compares type(), so pick the
+    // concrete class from nullable() instead of casting blindly.
     const int idx = std::max(filament_idx, 0);
-    if (auto *opt = filament_config.option<ConfigOptionBoolsNullable>("filament_wipe"); opt && !opt->values.empty())
-        opt->values[size_t(std::min(idx, int(opt->values.size()) - 1))] = false;
-    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_retract_restart_extra");
-        opt && !opt->values.empty())
-        opt->values[size_t(std::min(idx, int(opt->values.size()) - 1))] = 0.;
-    // F6: filament-level overrides win over the printer values forced above; neutralise them the same way.
-    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_z_hop"))
-        for (auto &v : opt->values)
-            v = 0.;
-    if (auto *opt = filament_config.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer"))
-        for (auto &v : opt->values)
-            v = true;
-    if (auto *opt = filament_config.option<ConfigOptionFloatsNullable>("filament_retraction_minimum_travel"))
-        for (auto &v : opt->values)
-            v = 1.;
+    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_wipe", idx, false);
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retract_restart_extra", idx, 0.);
+    // F6: filament-level overrides win over the printer values forced above; neutralise them on every entry.
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_z_hop", -1, 0.);
+    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_retract_when_changing_layer", -1, true);
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retraction_minimum_travel", -1, 1.);
 }
 
 std::string stringing_grid_column_name(int column)
