@@ -34,6 +34,15 @@ uniform float focus;     // mm along the view axis
 uniform float k_px;      // diameter of the circle of something infinitely far
 uniform float max_px;    // diameter cap
 uniform int   taps;
+// The deferred part of 1h-2, both off by default (the gather is then exactly as before):
+// near_bleed: a blurred foreground spills over the sharper background behind it (the gather looks as
+//             far as the largest circle of anything in front of this pixel that reaches it);
+// highlights: bright highlights bloom into bokeh discs: the light the tone curve clipped, from the
+//             HDR objects layer (hdr_tex, linear, times the exposure), is added back to each sample.
+uniform bool      near_bleed;
+uniform float     highlights;
+uniform sampler2D hdr_tex;
+uniform float     exposure;
 
 in vec2 tex_coord;
 out vec4 out_color;
@@ -106,18 +115,35 @@ void main()
     vec4  c0 = texelFetch(color_tex, px, 0);
     vec2  cz0 = texelFetch(coc_tex, px, 0).rg;
     float r0 = cz0.r;
-    if (r0 < 0.5) {
-        out_color = c0;
-        return;
-    }
     ivec2 last = ivec2(viewport_size) - 1;
     // A per-pixel turn of the disc (interleaved gradient noise) trades banding for fine grain, which
     // the export's supersampling averages away.
     float turn = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    // How far to gather: this pixel's own circle, or (near_bleed) the largest circle of something in
+    // front of it whose blur reaches it.
+    float r_search = r0;
+    if (near_bleed) {
+        for (int i = 0; i < 16; ++i) {
+            float a  = turn + float(i) * 0.39269908;
+            float rr = 0.5 * max_px * (0.35 + 0.65 * float(i & 1));
+            ivec2 sp = clamp(ivec2(gl_FragCoord.xy + vec2(cos(a), sin(a)) * rr), ivec2(0), last);
+            vec2  cz = texelFetch(coc_tex, sp, 0).rg;
+            if (cz.g < cz0.g - 1e-3 && cz.r >= rr)
+                r_search = max(r_search, cz.r);
+        }
+    }
+    if (r_search < 0.5) {
+        out_color = c0;
+        return;
+    }
     vec4  sum  = vec4(srgb_to_linear(c0.rgb), c0.a);
     float wsum = 1.0;
+    if (highlights > 0.0) {
+        vec3 hl = max(texelFetch(hdr_tex, px, 0).rgb * exposure - vec3(1.0), vec3(0.0));
+        sum.rgb += highlights * hl;
+    }
     for (int i = 0; i < taps; ++i) {
-        float rr = sqrt((float(i) + 0.5) / float(taps)) * r0;
+        float rr = sqrt((float(i) + 0.5) / float(taps)) * r_search;
         float a  = turn + float(i) * 2.39996323;
         ivec2 sp = clamp(ivec2(gl_FragCoord.xy + vec2(cos(a), sin(a)) * rr), ivec2(0), last);
         vec2  cz = texelFetch(coc_tex, sp, 0).rg;
@@ -128,7 +154,15 @@ void main()
         if (w <= 0.0)
             continue;
         vec4 cs = texelFetch(color_tex, sp, 0);
-        sum  += vec4(srgb_to_linear(cs.rgb), cs.a) * w;
+        vec4 ls = vec4(srgb_to_linear(cs.rgb), cs.a);
+        if (highlights > 0.0) {
+            // The clipped light comes back, and bright samples weigh more: they spread into discs.
+            vec3  hl  = max(texelFetch(hdr_tex, sp, 0).rgb * exposure - vec3(1.0), vec3(0.0));
+            float lum = dot(hl, vec3(0.2126, 0.7152, 0.0722));
+            ls.rgb += highlights * hl;
+            w *= 1.0 + highlights * min(lum, 8.0);
+        }
+        sum  += ls * w;
         wsum += w;
     }
     sum /= wsum;

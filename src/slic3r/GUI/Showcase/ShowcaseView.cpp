@@ -1,5 +1,6 @@
 #include "ShowcaseView.hpp"
 
+#include "ShowcaseHdriDialog.hpp"
 #include "ShowcaseRenderer.hpp"
 #include "ShowcaseTextures.hpp"
 
@@ -22,6 +23,7 @@
 #include "../Plater.hpp"
 #include "../PresetComboBoxes.hpp"
 #include <wx/statbmp.h>
+#include <wx/image.h>
 #include "../Widgets/StateColor.hpp"
 
 #include <wx/button.h>
@@ -162,11 +164,15 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
             return true;
         if (m_video.borrowed && (evt.ButtonDown() || evt.GetWheelRotation() != 0))
             video_restore_view();
+        // 1h-2, the deferred part: the photo horizon's line can be dragged on the view.
+        if (horizon_on_mouse(evt))
+            return true;
         return callouts_on_mouse(evt);
     });
     // A callout drag holds the mouse; losing it ends the drag where it is.
     m_canvas_widget->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent &evt) {
         m_callouts.drag = CalloutUi::Drag::None;
+        m_horizon_drag  = false;
         evt.Skip();
     });
 
@@ -613,6 +619,11 @@ void ShowcaseView::build_panel()
     m_environment = env_choice();
     m_environment->SetToolTip(_L("The surrounding shown behind the model. It also lights the model and shows in its reflections."));
     row(_L("Environment"), m_environment);
+    // 1h-3: more environments to download, and your own HDRI.
+    m_env_more = new wxButton(m_side, wxID_ANY, _L("Environments..."));
+    m_env_more->SetToolTip(_L("Download more environments, or load your own HDRI panorama."));
+    grid->AddSpacer(0);
+    grid->Add(m_env_more);
     // 1h-2: where the environment sits (the box first: it decides which rows below apply).
     m_bg_ground = new wxCheckBox(m_side, wxID_ANY, _L("Stand on the environment's floor"));
     m_bg_ground->SetToolTip(_L("Projects the environment onto a dome with a flat floor, so the model stands on its floor "
@@ -626,6 +637,11 @@ void ShowcaseView::build_panel()
     m_bg_ground_radius = new wxSpinCtrl(m_side, wxID_ANY, "1500", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 50, 1000000, 1500);
     m_bg_ground_radius->SetToolTip(_L("How far away the walls and the horizon are."));
     row(_L("Dome radius (mm)"), m_bg_ground_radius);
+    // 1h-2, the deferred part: back to the sizes worked out from the model and the panorama.
+    m_bg_ground_auto = new wxButton(m_side, wxID_ANY, _L("Reset to auto"));
+    m_bg_ground_auto->SetToolTip(_L("Camera height and dome radius from the model's size and the environment again."));
+    grid->AddSpacer(0);
+    grid->Add(m_bg_ground_auto);
     m_bg_ground_scale = slider(100, 25, 400);
     m_bg_ground_scale->SetToolTip(_L("Makes the whole surrounding larger or smaller around the model."));
     row(_L("World scale"), m_bg_ground_scale);
@@ -776,6 +792,10 @@ void ShowcaseView::build_panel()
     m_light_env = env_choice();
     m_light_env->SetToolTip(_L("Light and reflections from a photographed surrounding, behind the colour, gradient or picture."));
     row(_L("Lighting environment"), m_light_env);
+    m_light_env_more = new wxButton(m_side, wxID_ANY, _L("Environments..."));
+    m_light_env_more->SetToolTip(_L("Download more environments, or load your own HDRI panorama."));
+    grid->AddSpacer(0);
+    grid->Add(m_light_env_more);
     m_env_intensity = slider(70, 0, 300);
     row(_L("Environment brightness"), m_env_intensity);
     m_env_rotation = slider(0, 0, 359);
@@ -862,12 +882,24 @@ void ShowcaseView::build_panel()
                             "skin widened and flattened into one surface."));
     grid->Add(m_smooth_auto, 0, wxALIGN_CENTER_VERTICAL);
     grid->Add(m_smooth, 1, wxEXPAND);
-    {
-        auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
-                                                           "Pick another one where the guess is wrong."));
-        hint->Wrap(29 * em);
-        col->Add(hint, 0, wxLEFT | wxRIGHT, em);
-    }
+    // Realism 1d: light through thin walls and soft edges (model mode).
+    m_translucency = slider(0, 0, 100);
+    m_translucency->SetToolTip(_L("Light shines through thin walls and softens the edges of the plastic. Translucent filaments glow on their own."));
+    row(_L("Translucency"), m_translucency);
+    // Realism 1f: imperfections (model mode), all off by default.
+    m_imp_wobble = slider(0, 0, 100);
+    m_imp_wobble->SetToolTip(_L("Layers shifted a little sideways, as on a real printer (Z-banding)."));
+    row(_L("Layer wobble"), m_imp_wobble);
+    m_imp_seam = slider(0, 0, 100);
+    m_imp_seam->SetToolTip(_L("The seam as a line of small bumps where the slicer put it. Slice the plate first."));
+    row(_L("Seam"), m_imp_seam);
+    m_imp_strings = slider(0, 0, 100);
+    m_imp_strings->SetToolTip(_L("Faint strings where the nozzle travelled across a gap. Slice the plate first."));
+    row(_L("Stringing"), m_imp_strings);
+    m_imp_colour = slider(0, 0, 100);
+    m_imp_colour->SetToolTip(_L("Slight colour and gloss variation, so large faces are not one flat colour."));
+    row(_L("Colour variation"), m_imp_colour);
+    // The per-filament finishes (refresh_materials); each choice explains the guess in its tooltip.
     begin_grid();
     m_mat_grid = grid;
 
@@ -931,6 +963,30 @@ void ShowcaseView::build_panel()
     m_dof_quality = choice(bokeh);
     m_dof_quality->SetToolTip(_L("Smoother blur, slower to render."));
     row(_L("Bokeh quality"), m_dof_quality);
+    // 1h-2, the deferred part.
+    m_dof_bleed = new wxCheckBox(m_side, wxID_ANY, _L("Soft foreground edges"));
+    m_dof_bleed->SetToolTip(_L("A blurred foreground spills over the sharper background behind it, as through a real lens."));
+    grid->AddSpacer(0);
+    grid->Add(m_dof_bleed);
+    m_dof_highlights = slider(0, 0, 100);
+    m_dof_highlights->SetToolTip(_L("Bright highlights out of focus grow into bright discs."));
+    row(_L("Bokeh highlights"), m_dof_highlights);
+    // Realism 1g: the camera effects, all off by default.
+    m_lens_grain = slider(0, 0, 100);
+    m_lens_grain->SetToolTip(_L("Fine film grain, at the size of the exported image."));
+    row(_L("Film grain"), m_lens_grain);
+    m_lens_vignette = slider(0, 0, 100);
+    m_lens_vignette->SetToolTip(_L("Darkens the corners of the frame a little."));
+    row(_L("Vignette"), m_lens_vignette);
+    m_lens_bloom = slider(0, 0, 100);
+    m_lens_bloom->SetToolTip(_L("A soft glow around the brightest highlights."));
+    row(_L("Bloom"), m_lens_bloom);
+    m_lens_chromatic = slider(0, 0, 100);
+    m_lens_chromatic->SetToolTip(_L("Faint colour fringes towards the corners."));
+    row(_L("Colour fringing"), m_lens_chromatic);
+    m_lens_distortion = slider(0, 0, 100);
+    m_lens_distortion->SetToolTip(_L("Bulges straight lines a little, like a wide lens."));
+    row(_L("Lens distortion"), m_lens_distortion);
 
     // --- Callouts (S3) ------------------------------------------------------------------------
     header(_L("Callouts"), "callouts");
@@ -1236,6 +1292,14 @@ void ShowcaseView::build_panel()
         const float mm = float(m_bg_ground_radius->GetValue());
         edit([mm](Showcase::Scene &s) { s.background.ground_radius = mm; });
     });
+    for (wxButton *b : { m_env_more, m_light_env_more })
+        b->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_manage_environments(); });
+    m_bg_ground_auto->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        edit([](Showcase::Scene &s) {
+            s.background.ground_height = 0.f;
+            s.background.ground_radius = 0.f;
+        }, true);
+    });
     m_bg_ground_scale->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         const float k = float(m_bg_ground_scale->GetValue()) / 100.f;
         edit([k](Showcase::Scene &s) { s.background.ground_scale = k; });
@@ -1502,6 +1566,20 @@ void ShowcaseView::build_panel()
         const int v = m_smooth->GetValue();
         edit([v](Showcase::Scene &s) { s.materials.toolpath_smoothness = float(v) / 100.f; });
     });
+    // Realism 1d.
+    m_translucency->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_translucency->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.materials.translucency = v; });
+    });
+    // Realism 1f.
+    for (wxSlider *sl : { m_imp_wobble, m_imp_seam, m_imp_strings, m_imp_colour })
+        sl->Bind(wxEVT_SLIDER, [this, sl](wxCommandEvent &) {
+            const float v = float(sl->GetValue()) / 100.f;
+            edit([this, sl, v](Showcase::Scene &s) {
+                Showcase::Imperfections &im = s.materials.imperfections;
+                (sl == m_imp_wobble ? im.wobble : sl == m_imp_seam ? im.seam : sl == m_imp_strings ? im.strings : im.colour) = v;
+            });
+        });
 
     m_lens->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_lens->GetSelection();
@@ -1533,6 +1611,25 @@ void ShowcaseView::build_panel()
         if (sel >= 0 && sel < 3)
             edit([sel](Showcase::Scene &s) { s.dof.quality = Showcase::BokehQuality(sel); });
     });
+    // 1h-2, the deferred part.
+    m_dof_bleed->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_dof_bleed->GetValue();
+        edit([on](Showcase::Scene &s) { s.dof.near_bleed = on; });
+    });
+    m_dof_highlights->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_dof_highlights->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.dof.highlights = v; });
+    });
+    // Realism 1g.
+    for (wxSlider *sl : { m_lens_grain, m_lens_vignette, m_lens_bloom, m_lens_chromatic, m_lens_distortion })
+        sl->Bind(wxEVT_SLIDER, [this, sl](wxCommandEvent &) {
+            const float v = float(sl->GetValue()) / 100.f;
+            edit([this, sl, v](Showcase::Scene &s) {
+                Showcase::LensEffects &l = s.lens;
+                (sl == m_lens_grain ? l.grain : sl == m_lens_vignette ? l.vignette : sl == m_lens_bloom ? l.bloom :
+                 sl == m_lens_chromatic ? l.chromatic : l.distortion) = v;
+            });
+        });
     m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing || read_only())
             return;
@@ -1751,7 +1848,10 @@ void ShowcaseView::refresh_materials(bool sync_selection)
 {
     if (m_mat_grid == nullptr)
         return;
-    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    // The physical slots, then the Color Mixing filaments, as the Prepare sidebar lists them.
+    std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    for (ShowcaseFilament &m : showcase_mixed_filaments())
+        filaments.push_back(std::move(m));
     // Multi-colour P2: a split slot shows its make-up as a chip (colours, proportions, rotation).
     struct MakeUpChip
     {
@@ -1768,6 +1868,8 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         const DynamicPrintConfig &pc = bundle->project_config;
         const bool look = scene().materials.coextruded_look;
         for (size_t i = 0; i < filaments.size(); ++i) {
+            if (filaments[i].mixed)
+                continue;
             const size_t slot = size_t(filaments[i].slot - 1);
             const FilamentColor c = FilamentColorUtils::GetFilamentColorFromConfig(&pc, slot, filaments[i].color);
             chips[i].colors = c.colors;
@@ -1778,8 +1880,8 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     std::string signature;
     for (size_t i = 0; i < filaments.size(); ++i) {
         const ShowcaseFilament &f = filaments[i];
-        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n";
-        if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+        signature += f.preset_name + "\n" + f.type + "\n" + f.color + "\n" + f.mixed_label + "\n";
+        if (!f.mixed && size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
             signature += "glow\n";
         if (chips[i].shown) {
             for (const std::string &c : chips[i].colors)
@@ -1796,6 +1898,7 @@ void ShowcaseView::refresh_materials(bool sync_selection)
         m_mat_signature = signature;
         m_mat_grid->Clear(true);
         m_mat_choices.clear();
+        m_mat_slots.clear();
         const int em = wxGetApp().em_unit();
         for (size_t fi = 0; fi < filaments.size(); ++fi) {
             const ShowcaseFilament &f = filaments[fi];
@@ -1815,24 +1918,40 @@ void ShowcaseView::refresh_materials(bool sync_selection)
                 });
                 label->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
             } else {
-                auto *swatch = new wxPanel(m_side, wxID_ANY, wxDefaultPosition, wxSize(int(1.4 * em), int(1.4 * em)), wxBORDER_SIMPLE);
-                swatch->SetBackgroundColour(showcase_wx_colour(f.color));
-                swatch->SetToolTip(_L("Click to edit this filament's colour, make-up and glow."));
-                swatch->SetCursor(wxCursor(wxCURSOR_HAND));
-                const int swatch_slot = f.slot;
-                swatch->Bind(wxEVT_LEFT_UP, [swatch_slot](wxMouseEvent &) {
-                    auto &combos = wxGetApp().sidebar().combos_filament();
-                    if (swatch_slot >= 1 && size_t(swatch_slot) <= combos.size())
-                        combos[size_t(swatch_slot - 1)]->ChangeExtruderColor();
-                });
+                // A drawn swatch, not a coloured panel: the dark theme repaints panels' backgrounds, which
+                // turned a white filament into a dark box. The bitmap keeps the filament's colour, with a
+                // grey border so white and black show on either theme.
+                const int side = int(1.4 * em);
+                wxImage   img(side, side);
+                const wxColour fill = showcase_wx_colour(f.color);
+                for (int y = 0; y < side; ++y)
+                    for (int x = 0; x < side; ++x) {
+                        const bool edge = x == 0 || y == 0 || x == side - 1 || y == side - 1;
+                        img.SetRGB(x, y, edge ? 150 : fill.Red(), edge ? 150 : fill.Green(), edge ? 150 : fill.Blue());
+                    }
+                auto *swatch = new wxStaticBitmap(m_side, wxID_ANY, wxBitmap(img));
+                if (f.mixed)
+                    swatch->SetToolTip(wxString::Format(_L("Color Mixing filament %s"), wxString::FromUTF8(f.mixed_label)));
+                else {
+                    swatch->SetToolTip(_L("Click to edit this filament's colour, make-up and glow."));
+                    swatch->SetCursor(wxCursor(wxCURSOR_HAND));
+                    const int swatch_slot = f.slot;
+                    swatch->Bind(wxEVT_LEFT_UP, [swatch_slot](wxMouseEvent &) {
+                        auto &combos = wxGetApp().sidebar().combos_filament();
+                        if (swatch_slot >= 1 && size_t(swatch_slot) <= combos.size())
+                            combos[size_t(swatch_slot - 1)]->ChangeExtruderColor();
+                    });
+                }
                 label->Add(swatch, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
             }
-            wxString name = f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot)
-                                                  : wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
-            if (size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
+            wxString name = f.mixed ? wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.mixed_label)) :
+                            f.preset_name.empty() ? wxString::Format(_L("Filament %d"), f.slot) :
+                                                    wxString::Format("%d  %s", f.slot, wxString::FromUTF8(f.preset_name));
+            if (!f.mixed && size_t(f.slot - 1) < glow.size() && glow[size_t(f.slot - 1)].on)
                 name += _L("  (glows)");
             auto *text = new wxStaticText(m_side, wxID_ANY, name, wxDefaultPosition, wxSize(14 * em, -1), wxST_ELLIPSIZE_END);
-            text->SetToolTip(wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
+            text->SetToolTip(f.mixed ? wxString::Format(_L("Color Mixing filament %s"), wxString::FromUTF8(f.mixed_label)) :
+                                       wxString::FromUTF8(f.preset_name + (f.type.empty() ? std::string() : " (" + f.type + ")")));
             label->Add(text, 1, wxALIGN_CENTER_VERTICAL);
             m_mat_grid->Add(label, 0, wxALIGN_CENTER_VERTICAL);
 
@@ -1841,7 +1960,9 @@ void ShowcaseView::refresh_materials(bool sync_selection)
             for (Showcase::Finish finish : Showcase::all_finishes())
                 items.Add(showcase_finish_name(finish));
             auto *c = new wxChoice(m_side, wxID_ANY, wxDefaultPosition, wxDefaultSize, items);
+            c->SetToolTip(_L("Auto guesses the finish from the preset's name and type. Pick another one where the guess is wrong."));
             const int slot = f.slot;
+            m_mat_slots.push_back(slot);
             c->Bind(wxEVT_CHOICE, [this, c, slot](wxCommandEvent &) {
                 const int sel = c->GetSelection();
                 const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
@@ -1865,7 +1986,7 @@ void ShowcaseView::refresh_materials(bool sync_selection)
     const Showcase::Scene &s = scene();
     const std::vector<Showcase::Finish> finishes = Showcase::all_finishes();
     for (size_t i = 0; i < m_mat_choices.size(); ++i) {
-        const Showcase::Finish *o = s.materials.override_for(int(i) + 1);
+        const Showcase::Finish *o = s.materials.override_for(i < m_mat_slots.size() ? m_mat_slots[i] : int(i) + 1);
         int sel = 0;
         if (o != nullptr)
             sel = int(std::find(finishes.begin(), finishes.end(), *o) - finishes.begin()) + 1;
@@ -1994,6 +2115,11 @@ void ShowcaseView::sync_controls()
     m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
     if (s.materials.toolpath_smoothness >= 0.f)
         m_smooth->SetValue(int(std::lround(s.materials.toolpath_smoothness * 100.f)));
+    m_translucency->SetValue(std::clamp(int(std::lround(s.materials.translucency * 100.f)), 0, 100));
+    m_imp_wobble->SetValue(std::clamp(int(std::lround(s.materials.imperfections.wobble * 100.f)), 0, 100));
+    m_imp_seam->SetValue(std::clamp(int(std::lround(s.materials.imperfections.seam * 100.f)), 0, 100));
+    m_imp_strings->SetValue(std::clamp(int(std::lround(s.materials.imperfections.strings * 100.f)), 0, 100));
+    m_imp_colour->SetValue(std::clamp(int(std::lround(s.materials.imperfections.colour * 100.f)), 0, 100));
     refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
@@ -2012,6 +2138,13 @@ void ShowcaseView::sync_controls()
     m_dof_on_model->SetValue(s.dof.focus_on_model);
     m_dof_focus->SetValue(std::clamp(int(std::lround(s.dof.focus_mm)), 10, 100000));
     m_dof_quality->SetSelection(int(s.dof.quality));
+    m_dof_bleed->SetValue(s.dof.near_bleed);
+    m_dof_highlights->SetValue(std::clamp(int(std::lround(s.dof.highlights * 100.f)), 0, 100));
+    m_lens_grain->SetValue(std::clamp(int(std::lround(s.lens.grain * 100.f)), 0, 100));
+    m_lens_vignette->SetValue(std::clamp(int(std::lround(s.lens.vignette * 100.f)), 0, 100));
+    m_lens_bloom->SetValue(std::clamp(int(std::lround(s.lens.bloom * 100.f)), 0, 100));
+    m_lens_chromatic->SetValue(std::clamp(int(std::lround(s.lens.chromatic * 100.f)), 0, 100));
+    m_lens_distortion->SetValue(std::clamp(int(std::lround(s.lens.distortion * 100.f)), 0, 100));
 
     int size_sel = SHOWCASE_SIZE_COUNT;
     for (int i = 0; i < SHOWCASE_SIZE_COUNT; ++i)
@@ -2214,7 +2347,9 @@ void ShowcaseView::update_enabled()
                                                           m_plate_horizon, m_plate_focal, m_plate_match, m_lens, m_dof, m_dof_fnumber,
                                                           m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
                                                           m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
-                                                          m_plate_offset_y, m_plate_fit })
+                                                          m_plate_offset_y, m_plate_fit, m_translucency, m_imp_wobble, m_imp_seam, m_imp_strings,
+                                                          m_imp_colour, m_dof_bleed, m_dof_highlights, m_lens_grain, m_lens_vignette, m_lens_bloom,
+                                                          m_lens_chromatic, m_lens_distortion, m_bg_ground_auto, m_env_more, m_light_env_more })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2389,6 +2524,8 @@ void ShowcaseView::apply_row_visibility()
 
     // Background
     set(m_environment, v.bg_environment);
+    set(m_env_more, v.bg_environment);
+    set(m_light_env_more, v.light_environment);
     set(m_bg_color1, v.bg_colour1);
     set(m_bg_color2, v.bg_colour2);
     set(m_bg_image, v.bg_image);
@@ -2416,6 +2553,9 @@ void ShowcaseView::apply_row_visibility()
     set(m_dof_on_model, v.cam_dof_detail);
     set(m_dof_quality, v.cam_dof_detail);
     set(m_dof_focus, v.cam_dof_focus);
+    set(m_dof_bleed, v.cam_dof_detail);
+    set(m_dof_highlights, v.cam_dof_detail);
+    set(m_bg_ground_auto, v.bg_ground_reset);
     // Floor
     set(m_floor_color, v.floor_colour);
     set(m_floor_shadow, v.floor_shadow);
@@ -2439,6 +2579,9 @@ void ShowcaseView::apply_row_visibility()
     set(m_layer_lines, v.mat_layer_lines);
     set(m_smooth_auto, v.mat_toolpath);
     set(m_lights_ambient, v.mat_light_left);
+    set(m_translucency, v.mat_translucency);
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_imp_wobble, m_imp_seam, m_imp_strings, m_imp_colour })
+        set(w, v.mat_imperfections);
     // Callouts
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_once, m_co_style, m_co_font, m_co_size, m_co_leader,
                                                           m_co_auto_colors, m_co_list, m_co_hint })
@@ -2457,6 +2600,7 @@ void ShowcaseView::apply_row_visibility()
     set(m_vid_co_motion, v.vid_co_position);
     set(m_vid_co_appear, v.vid_co_appearance);
     set_box(m_vid_build_infill, v.vid_build_parts);
+    set(m_vid_build_source, v.vid_build_source);
     // Export
     const bool custom = m_size->GetSelection() == SHOWCASE_SIZE_COUNT;
     set(m_width, custom);
@@ -3454,6 +3598,104 @@ void ShowcaseView::callouts_apply_to_export(ShowcaseImage &image, bool has_alpha
     opt.model_center_x = callouts_model_center_x();
     opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, has_alpha, s, callouts_draw_list(labels), opt);
+}
+
+void ShowcaseView::refresh_environment_choices()
+{
+    for (wxChoice *c : { m_environment, m_light_env }) {
+        if (c == nullptr)
+            continue;
+        wxArrayString envs;
+        envs.Add(_L("None"));
+        for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
+            envs.Add(showcase_environment_name(e));
+        for (const Showcase::HdriInfo &h : showcase_hdris().hdris)
+            envs.Add(showcase_hdri_name(h));
+        c->Set(envs);
+    }
+}
+
+void ShowcaseView::on_manage_environments()
+{
+    if (read_only())
+        return;
+    ShowcaseHdriDialog dlg(wxGetTopLevelParent(this));
+    dlg.ShowModal();
+    if (!dlg.changed())
+        return;
+    showcase_hdris_reload();
+    refresh_environment_choices();
+    // A download or an own HDRI just added becomes the scene's environment, as if picked from the list.
+    if (const Showcase::HdriInfo *info = dlg.added_id().empty() ? nullptr : showcase_hdris().find(dlg.added_id())) {
+        const std::string id    = info->id;
+        const float       pitch = info->backdrop_pitch;
+        edit([&id, pitch](Showcase::Scene &s) {
+            s.lighting.environment      = id;
+            s.lighting.sun_from_env     = true;
+            s.background.backdrop_pitch = pitch;
+        }, true);
+    } else
+        sync_controls();
+    fit_side_width();
+    m_side->Layout();
+    set_as_dirty();
+}
+
+bool ShowcaseView::horizon_on_mouse(wxMouseEvent &evt)
+{
+    if (!m_active || m_renderer == nullptr || m_canvas_widget == nullptr)
+        return false;
+    const Showcase::Scene &s = scene();
+    const Showcase::RectI  f = m_renderer->live_frame();
+    const bool usable = s.background.type == Showcase::BackgroundType::Backplate && !read_only() && !f.empty();
+    if (!usable) {
+        m_horizon_drag = false;
+        return false;
+    }
+    // Where the line is drawn (draw_overlay): the photo's horizon through the zoom and the pan.
+    const double ia = m_renderer->background_aspect();
+    const double fa = double(f.w) / double(std::max(1, f.h));
+    const Showcase::PlateMapping pm = Showcase::plate_mapping(ia > 0. ? ia : fa, fa, double(s.background.plate_zoom),
+                                                              double(s.background.plate_offset_x), double(s.background.plate_offset_y));
+    const double line_y = double(f.y) + (1. - pm.frame_y(double(s.background.plate_horizon))) * double(f.h);
+    const double mx = double(evt.GetX()), my = double(evt.GetY());
+    const bool   on_line = mx >= double(f.x) && mx <= double(f.x + f.w) && std::abs(my - line_y) <= 6.;
+    auto horizon_at = [&](double y) {
+        const double fy = std::clamp(1. - (y - double(f.y)) / double(std::max(1, f.h)), 0., 1.);
+        return float(std::clamp(pm.photo_v(fy), -1., 2.));
+    };
+
+    if (m_horizon_drag) {
+        if (evt.Dragging() && evt.LeftIsDown()) {
+            const float h = horizon_at(my);
+            edit([h](Showcase::Scene &sc) { sc.background.plate_horizon = h; });
+            m_plate_horizon->SetValue(std::clamp(int(std::lround(h * 100.f)), 0, 100));
+            return true;
+        }
+        if (evt.LeftUp() || !evt.LeftIsDown()) {
+            m_horizon_drag = false;
+            if (m_canvas_widget->HasCapture())
+                m_canvas_widget->ReleaseMouse();
+            return true;
+        }
+        return true;
+    }
+    if (evt.Moving()) {
+        // The resize cursor over the line; the callouts set theirs again when the mouse leaves it.
+        if (on_line) {
+            m_canvas_widget->SetCursor(wxCursor(wxCURSOR_SIZENS));
+            m_callouts.cursor = -1;
+            return true;
+        }
+        return false;
+    }
+    if (evt.LeftDown() && on_line) {
+        m_horizon_drag = true;
+        if (!m_canvas_widget->HasCapture())
+            m_canvas_widget->CaptureMouse();
+        return true;
+    }
+    return false;
 }
 
 bool ShowcaseView::callouts_on_mouse(wxMouseEvent &evt)

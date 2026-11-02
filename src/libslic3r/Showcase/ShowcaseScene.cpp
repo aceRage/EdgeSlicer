@@ -259,7 +259,8 @@ bool Scene::operator==(const Scene &o) const
 {
     return id == o.id && name == o.name && plate_index == o.plate_index && view_frame_height == o.view_frame_height && source == o.source &&
            preset_base == o.preset_base &&
-           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && dof == o.dof && views == o.views &&
+           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && dof == o.dof && lens == o.lens &&
+           views == o.views &&
            export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
 }
 
@@ -846,9 +847,29 @@ json scene_to_json_object(const Scene &s)
         d["focus_on_model"] = s.dof.focus_on_model;
         d["focus_mm"]       = s.dof.focus_mm;
         d["quality"]        = to_string(s.dof.quality);
-        j["dof"] = merged(raw, "dof", d);
+        d["near_bleed"]     = s.dof.near_bleed;
+        d["highlights"]     = s.dof.highlights;
+        json out = merged(raw, "dof", d);
+        // The deferred 1h-2 settings only when set, so a 1h-2 scene writes back as it was read.
+        if (!s.dof.near_bleed)
+            out.erase("near_bleed");
+        if (s.dof.highlights <= 0.f)
+            out.erase("highlights");
+        j["dof"] = out;
     } else
         j.erase("dof");
+
+    // Realism 1g: the camera effects, only when one is on.
+    if (s.lens.any()) {
+        json l;
+        l["grain"]      = s.lens.grain;
+        l["vignette"]   = s.lens.vignette;
+        l["bloom"]      = s.lens.bloom;
+        l["chromatic"]  = s.lens.chromatic;
+        l["distortion"] = s.lens.distortion;
+        j["lens"] = merged(raw, "lens", l);
+    } else
+        j.erase("lens");
 
     json views = json::array();
     for (const CameraView &v : s.views)
@@ -886,8 +907,25 @@ json scene_to_json_object(const Scene &s)
     ma["toolpath_supports"] = s.materials.toolpath_supports;
     ma["toolpath_skirt"]    = s.materials.toolpath_skirt;
     ma["toolpath_infill"]   = s.materials.toolpath_infill;
+    ma["translucency"]      = s.materials.translucency;
+    {
+        const Imperfections &im = s.materials.imperfections;
+        json imp;
+        imp["wobble"]  = im.wobble;
+        imp["seam"]    = im.seam;
+        imp["strings"] = im.strings;
+        imp["colour"]  = im.colour;
+        json raw_ma    = raw.is_object() && raw.contains("materials") ? raw["materials"] : json();
+        ma["imperfections"] = merged(raw_ma, "imperfections", imp);
+    }
     {
         json out = merged(raw, "materials", ma);
+        // Realism 1d: only when set.
+        if (s.materials.translucency <= 0.f)
+            out.erase("translucency");
+        // Realism 1f: only when one is on.
+        if (!s.materials.imperfections.any())
+            out.erase("imperfections");
         // 1h-2b: only when off (and dropped again when back on).
         if (s.materials.toolpath_supports)
             out.erase("toolpath_supports");
@@ -987,6 +1025,17 @@ bool scene_from_json_object(const json &j, Scene &s)
         s.dof.focus_on_model = get_or<bool>(d, "focus_on_model", true);
         s.dof.focus_mm       = clamp_or(get_or<float>(d, "focus_mm", 300.f), 1.f, 100000.f, 300.f);
         s.dof.quality        = enum_or(d, "quality", s.dof.quality);
+        s.dof.near_bleed     = get_or<bool>(d, "near_bleed", false);
+        s.dof.highlights     = clamp_or(get_or<float>(d, "highlights", 0.f), 0.f, 1.f, 0.f);
+    }
+    // Realism 1g (absent = all off).
+    if (j.contains("lens") && j["lens"].is_object()) {
+        const json &l       = j["lens"];
+        s.lens.grain        = clamp_or(get_or<float>(l, "grain", 0.f), 0.f, 1.f, 0.f);
+        s.lens.vignette     = clamp_or(get_or<float>(l, "vignette", 0.f), 0.f, 1.f, 0.f);
+        s.lens.bloom        = clamp_or(get_or<float>(l, "bloom", 0.f), 0.f, 1.f, 0.f);
+        s.lens.chromatic    = clamp_or(get_or<float>(l, "chromatic", 0.f), 0.f, 1.f, 0.f);
+        s.lens.distortion   = clamp_or(get_or<float>(l, "distortion", 0.f), 0.f, 1.f, 0.f);
     }
     if (j.contains("views") && j["views"].is_array())
         for (const json &v : j["views"]) {
@@ -1017,6 +1066,14 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.materials.toolpath_supports  = get_or<bool>(ma, "toolpath_supports", true);
     s.materials.toolpath_skirt     = get_or<bool>(ma, "toolpath_skirt", true);
     s.materials.toolpath_infill    = get_or<bool>(ma, "toolpath_infill", true);
+    s.materials.translucency       = clamp_or(get_or<float>(ma, "translucency", 0.f), 0.f, 1.f, 0.f);
+    if (ma.is_object() && ma.contains("imperfections") && ma["imperfections"].is_object()) {
+        const json &im = ma["imperfections"];
+        s.materials.imperfections.wobble  = clamp_or(get_or<float>(im, "wobble", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.seam    = clamp_or(get_or<float>(im, "seam", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.strings = clamp_or(get_or<float>(im, "strings", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.colour  = clamp_or(get_or<float>(im, "colour", 0.f), 0.f, 1.f, 0.f);
+    }
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);

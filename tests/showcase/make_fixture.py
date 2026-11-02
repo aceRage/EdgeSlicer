@@ -15,7 +15,8 @@ scene's pictures; "@IMAGE0@", "@IMAGE1@", ... in the scenes text become the firs
 A JPEG is stored as .jpg (as the app stores one), anything else as .png.
 
 "_fixture" (1h-2b, top level of the scenes file, removed before it is stored): {"settings": {key: value}}
-overrides keys of the copied project_settings.config, e.g. supports on for a toolpath fixture.
+overrides keys of the copied project_settings.config, e.g. supports on for a toolpath fixture; a list
+value (e.g. "filament_colour": ["#E9E4D4"]) is stored as a list.
 """
 import hashlib
 import json
@@ -67,12 +68,13 @@ def main(argv):
                 sys.stderr.write("_fixture.settings needs <settings.3mf>" + chr(10))
                 return 2
             cfg = json.loads(settings.decode("utf-8"))
-            cfg.update({k: str(v) for k, v in overrides.items()})
+            # Lists (filament_colour, ...) stay lists; everything else is a string, as the file keeps it.
+            cfg.update({k: (v if isinstance(v, list) else str(v)) for k, v in overrides.items()})
             # The project keeps only the process keys listed as changed from its system preset.
             diff = cfg.get("different_settings_to_system")
             if isinstance(diff, list) and diff:
                 listed = [k for k in diff[0].split(";") if k]
-                diff[0] = ";".join(listed + [k for k in overrides if k not in listed])
+                diff[0] = ";".join(listed + [k for k in overrides if k not in listed and not isinstance(overrides[k], list)])
             settings = json.dumps(cfg, indent=4).encode("utf-8")
     skip = {SCENES_ENTRY.lower()}
     if settings is not None:
