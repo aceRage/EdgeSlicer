@@ -4,6 +4,8 @@
 #include "Model.hpp"
 #include "Flow.hpp"
 #include "TriangleMesh.hpp"
+#include "I18N.hpp"
+#include "format.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -1063,6 +1065,11 @@ std::vector<double> stringing_grid_retract_schedule(const Calib_Params &params)
     return out;
 }
 
+int stringing_grid_column_count(const Calib_Params &params)
+{
+    return int(stringing_grid_retract_schedule(params).size());
+}
+
 int stringing_grid_max_columns(double bed_width)
 {
     const double usable = bed_width - 2. * stringing_grid_bed_margin - stringing_grid_prime_tower_size;
@@ -1074,6 +1081,215 @@ int stringing_grid_max_columns(double bed_width)
 bool stringing_grid_columns_fit(int columns, double bed_width)
 {
     return columns >= 2 && columns <= stringing_grid_max_columns(bed_width);
+}
+
+double stringing_grid_bed_width(const ConfigBase &printer_config)
+{
+    const auto *pts = printer_config.option<ConfigOptionPoints>("printable_area");
+    if (pts == nullptr || pts->values.size() < 2)
+        return 270.;
+    return get_extents(pts->values).size().x();
+}
+
+bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, std::string *error)
+{
+    auto fail = [&](const std::string &msg) {
+        if (error)
+            *error = msg;
+        return false;
+    };
+    if (params.start < 150. || params.start > 350. || params.end < 150. || params.end > 350.)
+        return fail(_u8L("Temperature must be between 150 and 350 C"));
+    if (params.end > params.start)
+        return fail(_u8L("Start temperature must be >= end temperature"));
+    if (params.step < 1. || params.step > 20.)
+        return fail(_u8L("Temperature step must be between 1 and 20 C"));
+    // F5: the temperature range must be a whole number of steps, so every band is an exact step.
+    {
+        const double steps = (params.start - params.end) / params.step;
+        if (std::abs(steps - std::round(steps)) > 1e-6)
+            return fail(_u8L("The temperature range must be a multiple of the temperature step"));
+    }
+    const int bands = stringing_grid_band_count(params);
+    if (bands < 2 || bands > 10)
+        return fail(_u8L("Band count must be between 2 and 10"));
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    if (band_h < 5. || band_h > 20.)
+        return fail(_u8L("Band height must be between 5 and 20 mm"));
+    if (double(bands) * band_h > 150.)
+        return fail(_u8L("Total height must be <= 150 mm"));
+    if (params.retract_lengths.empty()) {
+        if (params.retract_start < 0. || params.retract_start > 10. || params.retract_end < 0. || params.retract_end > 10.)
+            return fail(_u8L("Retraction must be between 0 and 10 mm"));
+        if (params.retract_end < params.retract_start)
+            return fail(_u8L("Retraction end must be >= start"));
+        if (params.retract_step <= 0.)
+            return fail(_u8L("Retraction step must be > 0"));
+    }
+    const int cols     = stringing_grid_column_count(params);
+    const int max_cols = std::min(17, stringing_grid_max_columns(bed_width));
+    if (cols < 2)
+        return fail(_u8L("Column count must be at least 2"));
+    // Over 17 columns, or more than fit the bed, both report the max so the dialog can show it.
+    if (cols > max_cols) {
+        return fail(Slic3r::format(_u8L("Grid does not fit the bed (max %1% columns at 12 mm pitch)"), max_cols));
+    }
+    return true;
+}
+
+bool stringing_grid_default_params(
+    Calib_Params &params, double center, double range_low, double range_high, double step, double printer_max_nozzle_temp)
+{
+    params                      = Calib_Params();
+    params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
+    params.step                 = step > 0. ? step : 5.;
+    params.band_height          = 8.;
+    params.retract_start        = 0.2;
+    params.retract_end          = 1.6;
+    params.retract_step         = 0.2;
+    params.print_labels         = false;
+    params.wait_for_temperature = true;
+
+    // Lance (2026-11-01): build outward from the filament's other-layers temperature,
+    // center +step, -step, +2 step, -2 step, ... When one side reaches its limit, keep adding on the
+    // other side. Stop at the 10-band cap or when both sides are at their limits. Bands are
+    // center + k * step, so (start - end) is always a step multiple.
+    // Bands stay inside [max(range_low, 150), upper], upper = min(filament range high, printer max nozzle
+    // temperature, 350) (F14, Lance 2026-11-01; printer max <= 0 means unknown). The center is clipped to
+    // that window. F17 (Lance 2026-11-01): never below range_low, so there is no widening past the filament
+    // range. If fewer than 2 bands fit (single-temperature or narrower-than-a-step range, or a cap below
+    // range_low), start = end = the clipped center (the cap when the window is empty) and the function
+    // returns true so the dialog asks for a temperature range; the validator blocks OK until then.
+    // Missing or invalid values fall back to 230/205.
+    const double eps       = 1e-6;
+    const double abs_low   = 150.;
+    const double abs_high  = 350.;
+    const int    min_bands = 2;
+    const int    max_bands = 10;
+    auto set_fallback = [&params]() {
+        params.start = 230.;
+        params.end   = 205.;
+    };
+    if (center <= 0. || range_low <= 0. || range_high <= 0. || range_low > range_high || center < range_low - eps ||
+        center > range_high + eps) {
+        set_fallback();
+        return false;
+    }
+    auto build = [&](double c, double lim_low, double lim_high, double &hi, double &lo) {
+        hi = lo = c;
+        int bands = 1;
+        while (bands < max_bands) {
+            const bool can_up   = hi + params.step <= lim_high + eps;
+            const bool can_down = lo - params.step >= lim_low - eps;
+            if (!can_up && !can_down)
+                break;
+            if (can_up) {
+                hi += params.step;
+                if (++bands >= max_bands)
+                    break;
+            }
+            if (can_down) {
+                lo -= params.step;
+                ++bands;
+            }
+        }
+        return bands;
+    };
+    double upper = std::min(range_high, abs_high);
+    if (printer_max_nozzle_temp > 0.)
+        upper = std::min(upper, printer_max_nozzle_temp);
+    if (upper < abs_low) {
+        set_fallback();
+        return false;
+    }
+    const double in_low = std::max(range_low, abs_low);
+    if (in_low > upper + eps) {
+        // Cap below the filament minimum (e.g. PEEK 380-460 with the 350 C cap): one band at the cap.
+        params.start = params.end = upper;
+        return true;
+    }
+    const double c_clipped = std::clamp(center, in_low, upper);
+    double       hi = c_clipped, lo = c_clipped;
+    const int    bands = build(c_clipped, in_low, upper, hi, lo);
+    params.start = hi;
+    params.end   = lo;
+    if (bands < min_bands)
+        return true;
+    if (!stringing_grid_params_valid(params, 1000.))
+        set_fallback();
+    return false;
+}
+
+double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
+{
+    return print_z - first_printed_layer_bottom;
+}
+
+namespace {
+// Sets entry idx (clamped to the last entry), or every entry when idx < 0, of a vector option that may be
+// stored either as the plain or as the nullable class.
+template<class Plain, class Nullable, class Value>
+void set_vector_option(DynamicPrintConfig &cfg, const char *key, int idx, Value value)
+{
+    ConfigOption *opt = cfg.optptr(key);
+    if (opt == nullptr || opt->type() != Plain::static_type())
+        return;
+    auto apply = [idx, value](auto &values) {
+        if (values.empty())
+            return;
+        if (idx < 0)
+            for (auto &v : values)
+                v = value;
+        else
+            values[size_t(std::min(idx, int(values.size()) - 1))] = value;
+    };
+    if (opt->nullable())
+        apply(static_cast<Nullable *>(opt)->values);
+    else
+        apply(static_cast<Plain *>(opt)->values);
+}
+} // namespace
+
+void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
+                                        DynamicPrintConfig &filament_config,
+                                        DynamicPrintConfig &printer_config,
+                                        int                 filament_idx)
+{
+    print_config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
+    print_config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+    print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config.set_key_value("raft_layers", new ConfigOptionInt(0));
+    print_config.set_key_value("enable_support", new ConfigOptionBool(false));
+    print_config.set_key_value("reduce_crossing_wall", new ConfigOptionBool(false));
+
+    printer_config.set_key_value("use_firmware_retraction", new ConfigOptionBool(false));
+    printer_config.set_key_value("resonance_avoidance", new ConfigOptionBool(false));
+    if (auto *opt = printer_config.option<ConfigOptionBools>("wipe"))
+        for (auto &v : opt->values)
+            v = false;
+    if (auto *opt = printer_config.option<ConfigOptionBools>("retract_when_changing_layer"))
+        for (auto &v : opt->values)
+            v = true;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("retraction_minimum_travel"))
+        for (auto &v : opt->values)
+            v = 1.;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("z_hop"))
+        for (auto &v : opt->values)
+            v = 0.;
+    if (auto *opt = printer_config.option<ConfigOptionFloats>("retract_restart_extra"))
+        for (auto &v : opt->values)
+            v = 0.;
+
+    // F12: the filament_* overrides are registered nullable (PrintConfig add_nullable), but a config built
+    // elsewhere can carry the plain vector type; ConfigBase::option<T>() only compares type(), so pick the
+    // concrete class from nullable() instead of casting blindly.
+    const int idx = std::max(filament_idx, 0);
+    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_wipe", idx, false);
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retract_restart_extra", idx, 0.);
+    // F6: filament-level overrides win over the printer values forced above; neutralise them on every entry.
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_z_hop", -1, 0.);
+    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_retract_when_changing_layer", -1, true);
+    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retraction_minimum_travel", -1, 1.);
 }
 
 std::string stringing_grid_column_name(int column)

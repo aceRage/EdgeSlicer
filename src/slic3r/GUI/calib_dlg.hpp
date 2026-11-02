@@ -123,6 +123,38 @@ protected:
     Plater* m_plater;
 };
 
+class TempRetract_Calibration_Dlg : public DPIDialog
+{
+public:
+    TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater);
+    ~TempRetract_Calibration_Dlg();
+    int  ShowModal() override;
+    void on_dpi_changed(const wxRect &suggested_rect) override;
+
+protected:
+    virtual void on_start(wxCommandEvent &event);
+    void         update_summary();
+    void         reset_to_defaults();
+    static bool  filament_default_params(Calib_Params &params);
+    bool         read_params(Calib_Params &params, wxString *error) const;
+    double       bed_width() const;
+
+    Calib_Params m_params;
+
+    TextInput *m_tiStartTemp;
+    TextInput *m_tiEndTemp;
+    TextInput *m_tiTempStep;
+    TextInput *m_tiBandHeight;
+    TextInput *m_tiRetractStart;
+    TextInput *m_tiRetractEnd;
+    TextInput *m_tiRetractStep;
+    CheckBox  *m_cbLabels;
+    CheckBox  *m_cbWaitTemp;
+    wxStaticText *m_stSummary;
+    wxStaticText *m_stRangeNote;
+    Plater    *m_plater;
+};
+
 class Input_Shaping_Freq_Test_Dlg : public DPIDialog
 {
 public:

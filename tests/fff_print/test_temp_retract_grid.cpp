@@ -3,12 +3,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/calib.hpp"
@@ -417,6 +420,33 @@ TEST_CASE("Layer 1 prints at the first-layer temperature and band 0 starts at la
         REQUIRE_FALSE(bands.empty());
         CHECK(bands[0].cmd.find("S230") != std::string::npos);
     }
+    {
+        // F14: last nozzle-temp command before the first Z move above 0.2 mm is S210.
+        std::string last_temp;
+        bool        saw_layer1 = false;
+        bool        found_z    = false;
+        for (const std::string &line : gcode_lines(g)) {
+            if (is_nozzle_temp_cmd(line))
+                last_temp = line;
+            if (is_layer_z_line(line) && std::abs(layer_z_of(line) - 0.2) < 0.05)
+                saw_layer1 = true;
+            if (!saw_layer1)
+                continue;
+            if ((line.rfind("G1", 0) == 0 || line.rfind("G0", 0) == 0) && line.find('Z') != std::string::npos) {
+                const auto zpos = line.find('Z');
+                try {
+                    const double z = std::stod(line.substr(zpos + 1));
+                    if (z > 0.2 + 1e-6) {
+                        found_z = true;
+                        break;
+                    }
+                } catch (...) {}
+            }
+        }
+        REQUIRE(found_z);
+        INFO("last nozzle temperature command before first z>0.2 move: " << last_temp);
+        CHECK(last_temp.find("S210") != std::string::npos);
+    }
     INFO("last nozzle temperature command before z > 1.2: " << last_temp_cmd);
     CHECK(last_temp_cmd.find("S230") != std::string::npos);
     // And nothing between the first layer and band 1 drops back to the filament temperature.
@@ -536,6 +566,9 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
     // (shortest) crosses the whole grid. It keeps the longer retraction: giving the difference back
     // before the travel (review F9) was a stationary unretract followed by a long, barely retracted
     // travel that strung over every column. The unretract at the new column gives it all back.
+    // So the switch never reduces what is held: the travel holds the longer of the new column's length
+    // and whatever was already retracted at the marker (the previous column's length, or for the very
+    // first column the printer's own retraction from the start-of-print layer change, 0.8 here).
     const Calib_Params params = small_grid_params();
     const std::string  g      = slice_grid(params, grid_print_config());
     REQUIRE_FALSE(lines_starting_with(g, "G1 E").empty());
@@ -553,7 +586,7 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
         std::smatch m;
         if (std::regex_search(line, m, col_re)) {
             want   = std::stod(m[2]);
-            expect = std::max(want, prev_L);
+            expect = std::max(want, rs.held);
             if (prev_L > want + 1e-6)
                 ++shrinking;
             prev_L = want;
@@ -562,7 +595,7 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
         const bool travel = line.rfind("G1 ", 0) == 0 && line.find('E') == std::string::npos &&
                             (line.find('X') != std::string::npos || line.find('Y') != std::string::npos);
         if (want > 0. && travel) {
-            // First XY travel after the switch: the longer of the previous and the new column's length.
+            // First XY travel after the switch: the longer of what was held and the new column's length.
             if (rs.held > 1e-6) {
                 CHECK(rs.held == Approx(expect).margin(1e-3));
                 ++checked;
@@ -572,4 +605,169 @@ TEST_CASE("A column switch keeps the longer retraction for the travel into the c
     }
     CHECK(shrinking >= 1);
     CHECK(checked >= 3);
+}
+
+TEST_CASE("Raft layers hold first-layer temp; band 0 starts at object layer 2", "[Calib][TempRetract][Slice]")
+{
+    // F11: raft_layers > 0 shifts absolute print_z. Layer 1 of the object still holds
+    // the first-layer temperature; band 0 opens on the object's second printed layer.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"raft_layers", "2"},
+                                   {"nozzle_temperature_initial_layer", "210"},
+                                   {"nozzle_temperature", "200"},
+                                   {"enable_support", "0"}});
+    const Calib_Params params = small_grid_params();
+    const std::string  g      = slice_grid(params, config);
+
+    std::set<double> object_z_before_band0;
+    double           current_z = 0.;
+    std::string      last_temp;
+    bool             found_band0 = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (is_layer_z_line(line))
+            current_z = layer_z_of(line);
+        if (is_nozzle_temp_cmd(line))
+            last_temp = line;
+        if (line.rfind("; Calib_TempRetract: band=0", 0) == 0) {
+            found_band0 = true;
+            break;
+        }
+        if (line.rfind("; Calib_TempRetract: col=", 0) == 0)
+            object_z_before_band0.insert(current_z);
+    }
+    REQUIRE(found_band0);
+    // Column markers also appear on the 2 raft layers (support is printed per column object);
+    // those keep the first-layer temperature too. The top Z is the object's first layer.
+    REQUIRE(object_z_before_band0.size() == 3);
+    CHECK(last_temp.find("S210") != std::string::npos);
+
+    const auto bands = parse_band_events(g);
+    REQUIRE_FALSE(bands.empty());
+    CHECK(bands[0].temp == 230);
+    const double first_object_z = *object_z_before_band0.rbegin();
+    // Band 1 is ~9 mm up the object, not 9 mm including the raft.
+    if (bands.size() >= 2)
+        CHECK(bands[1].z - first_object_z == Approx(stringing_grid_base_height + params.band_height - 0.2).margin(0.4));
+}
+
+TEST_CASE("Nonzero z_offset does not steal layer 1 from the first-layer temperature", "[Calib][TempRetract][Slice]")
+{
+    // F11: z_offset shifts G1 Z and can break first-layer detection that keys on bottom_z ~= 0.
+    DynamicPrintConfig config = grid_print_config();
+    config.set_deserialize_strict({{"z_offset", "0.4"},
+                                   {"nozzle_temperature_initial_layer", "210"},
+                                   {"nozzle_temperature", "200"}});
+    const Calib_Params params = small_grid_params();
+    const std::string  g      = slice_grid(params, config);
+
+    std::set<double> object_z_before_band0;
+    double           current_z = 0.;
+    std::string      last_temp;
+    bool             found_band0 = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (is_layer_z_line(line))
+            current_z = layer_z_of(line);
+        if (is_nozzle_temp_cmd(line))
+            last_temp = line;
+        if (line.rfind("; Calib_TempRetract: band=0", 0) == 0) {
+            found_band0 = true;
+            break;
+        }
+        if (line.rfind("; Calib_TempRetract: col=", 0) == 0)
+            object_z_before_band0.insert(current_z);
+    }
+    REQUIRE(found_band0);
+    REQUIRE(object_z_before_band0.size() == 1);
+    CHECK(last_temp.find("S210") != std::string::npos);
+
+    const auto bands = parse_band_events(g);
+    REQUIRE(bands.size() == 2);
+    CHECK(bands[0].temp == 230);
+    CHECK(bands[1].temp == 225);
+    // Comment Z is object-space (no z_offset); band 1 still opens at the 9 mm object boundary.
+    CHECK(bands[1].z == Approx(stringing_grid_base_height + params.band_height).margin(0.21));
+}
+
+namespace {
+
+// The grid the dialog makes by default for a PLA-like filament (220 C, range 190-240), with the
+// slicer settings Plater::calib_temp_retraction forces.
+Calib_Params dialog_default_grid(DynamicPrintConfig &config)
+{
+    config.set_deserialize_strict({{"nozzle_temperature_initial_layer", "220"}, {"nozzle_temperature", "220"}});
+    Calib_Params params;
+    stringing_grid_default_params(params, 220., 190., 240., 5.);
+    apply_stringing_grid_slicer_config(config, config, config, 0);
+    return params;
+}
+
+} // namespace
+
+TEST_CASE("Dialog-default grid: a band at every band edge, retraction within the column range", "[Calib][TempRetract][Slice]")
+{
+    DynamicPrintConfig config = grid_print_config();
+    const Calib_Params params = dialog_default_grid(config);
+    REQUIRE(stringing_grid_params_valid(params, 300.));
+    const int                 n_bands = stringing_grid_band_count(params);
+    const std::vector<double> lens    = stringing_grid_retract_schedule(params);
+    REQUIRE(n_bands == 10);
+    REQUIRE(lens.size() == 8);
+
+    const std::string g = slice_grid(params, config);
+
+    // Temperature: one command per band, start - k * step, at the band's bottom edge (band 0 on layer 2).
+    const auto bands = parse_band_events(g);
+    REQUIRE(int(bands.size()) == n_bands);
+    for (int k = 0; k < n_bands; ++k) {
+        CHECK(bands[k].band == k);
+        CHECK(bands[k].temp == int(std::lround(params.start - k * params.step)));
+        CHECK(bands[k].cmd.rfind("M109", 0) == 0);
+        CHECK(bands[k].cmd.find("S" + std::to_string(bands[k].temp)) != std::string::npos);
+        if (k == 0)
+            CHECK(bands[k].z == Approx(0.4).margin(1e-3));
+        else
+            CHECK(bands[k].z == Approx(stringing_grid_base_height + k * params.band_height).margin(0.21));
+    }
+
+    // Retraction: every column announced with its scheduled length, no held retraction above the
+    // longest column (or the 0.8 mm preset used after the restore), no firmware retraction.
+    const std::regex col_re(R"(; Calib_TempRetract: col=(\d+) retract=([0-9.]+))");
+    const double     cap      = std::max(lens.back(), 0.8) + 1e-3;
+    RetractState     rs;
+    double           max_held = 0.;
+    std::set<int>    cols_seen;
+    bool             restored = false;
+    for (const std::string &line : gcode_lines(g)) {
+        if (rs.feed(line)) {
+            max_held = std::max(max_held, rs.held);
+            CHECK(rs.held <= cap);
+        }
+        std::smatch m;
+        if (std::regex_search(line, m, col_re)) {
+            const int col = std::stoi(m[1]);
+            REQUIRE(col >= 0);
+            REQUIRE(col < int(lens.size()));
+            CHECK(std::stod(m[2]) == Approx(lens[size_t(col)]).margin(1e-6));
+            cols_seen.insert(col);
+        }
+        if (line.rfind("; Calib_TempRetract: restore retract=0.8", 0) == 0)
+            restored = true;
+        CHECK(line.rfind("G10", 0) != 0);
+    }
+    CHECK(cols_seen.size() == lens.size());
+    CHECK(max_held == Approx(lens.back()).margin(1e-3));
+    CHECK(restored);
+}
+
+// Hidden ([.], not in default runs): writes the dialog-default grid's G-code to the system temp
+// directory for a manual look. Run with: fff_print_tests "[TempRetractDump]"
+TEST_CASE("Write the dialog-default grid G-code", "[.][TempRetractDump]")
+{
+    DynamicPrintConfig                  config = grid_print_config();
+    const Calib_Params                  params = dialog_default_grid(config);
+    const std::filesystem::path path   = std::filesystem::temp_directory_path() / "stringcalib_default_grid.gcode";
+    std::ofstream                       out(path, std::ios::binary);
+    out << slice_grid(params, config);
+    CHECK(out.good());
+    INFO("G-code written to " << path.string());
 }

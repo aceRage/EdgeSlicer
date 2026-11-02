@@ -21440,6 +21440,77 @@ void Plater::calib_retraction(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
+void Plater::calib_temp_retraction(const Calib_Params& params)
+{
+    const auto calib_name = wxString::Format(L"Stringing temp × retraction");
+    new_project(false, false, calib_name);
+    wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+    if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
+        return;
+
+    auto print_config    = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const int filament_idx = std::max(params.extruder_id, 0);
+
+    make_stringing_grid(model(), params);
+
+    // Centre the grid on the current plate. Columns are named SG_col_NN so arrange cannot scramble them.
+    if (const auto *bed_pts = printer_config->option<ConfigOptionPoints>("printable_area");
+        bed_pts && bed_pts->values.size() >= 2 && !model().objects.empty()) {
+        BoundingBoxf  bed_ext = get_extents(bed_pts->values);
+        BoundingBoxf3 bbox    = model().bounding_box_exact();
+        auto         *plate   = get_partplate_list().get_curr_plate();
+        const Vec3d   origin  = plate ? plate->get_origin() : Vec3d::Zero();
+        const Vec3d   shift(origin.x() + bed_ext.center().x() - bbox.center().x(),
+                            origin.y() + bed_ext.center().y() - bbox.center().y(), 0.);
+        for (ModelObject *obj : model().objects) {
+            if (obj->instances.empty())
+                continue;
+            obj->instances[0]->set_offset(obj->instances[0]->get_offset() + shift);
+            obj->ensure_on_bed();
+        }
+    }
+
+    apply_stringing_grid_slicer_config(*print_config, *filament_config, *printer_config, filament_idx);
+
+    auto *max_lh = printer_config->option<ConfigOptionFloats>("max_layer_height");
+    if (max_lh && !max_lh->values.empty() && max_lh->values[0] < 0.2)
+        max_lh->values[0] = 0.2;
+
+    print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.2));
+
+    std::vector<size_t> object_idxs;
+    object_idxs.reserve(model().objects.size());
+    for (size_t i = 0; i < model().objects.size(); ++i) {
+        ModelObject *obj = model().objects[i];
+        obj->config.set_key_value("extruder", new ConfigOptionInt(filament_idx + 1));
+        obj->config.set_key_value("wall_loops", new ConfigOptionInt(2));
+        obj->config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+        obj->config.set_key_value("bottom_shell_layers", new ConfigOptionInt(3));
+        obj->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
+        obj->config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+        obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
+        obj->config.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spAligned));
+        obj->config.set_key_value("wall_sequence", new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
+        obj->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
+        obj->config.set_key_value("enable_support", new ConfigOptionBool(false));
+        obj->config.set_key_value("raft_layers", new ConfigOptionInt(0));
+        sidebar().obj_list()->add_object_to_list(i, i + 1 == model().objects.size());
+        object_idxs.push_back(i);
+    }
+
+    changed_objects(object_idxs);
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINTER)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_PRINTER)->reload_config();
+
+    p->background_process.fff_print()->set_calib_params(params);
+}
+
 void Plater::calib_VFA(const Calib_Params& params)
 {
     const auto calib_vfa_name = wxString::Format(L"VFA test");

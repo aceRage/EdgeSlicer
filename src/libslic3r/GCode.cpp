@@ -7443,10 +7443,20 @@ LayerResult GCode::process_layer(const Print& print,
         // lands on a band boundary (8.9999 vs 9.0) always resolves to the same band.
         // F10 (Lance): layer 1 prints at nozzle_temperature_initial_layer like a normal print; band 0
         // starts at layer 2. By object, every object's first layer goes back to the first-layer temperature.
-        if (first_layer)
+        // F11: raft layers and z_offset shift absolute print_z. Band Z and first-layer detection
+        // are relative to the object's first printed layer (Layer::id() starts at raft_layers()).
+        // Raft-only layers keep the first-layer temperature. The dialog also forces raft_layers=0.
+        if (object_layer == nullptr)
+            break;
+        const PrintObject *po     = object_layer->object();
+        const size_t       raft_n = po != nullptr ? po->slicing_parameters().raft_layers() : 0;
+        if (object_layer->id() == raft_n)
             gcode += this->reset_temp_retract_grid_first_layer(print);
-        else
-            gcode += this->apply_temp_retract_grid_layer(print, 0.5 * (print_z + layer.bottom_z()));
+        else {
+            const double first_bottom = (po != nullptr && !po->layers().empty()) ? po->layers().front()->bottom_z() : 0.;
+            const double mid          = 0.5 * (object_layer->print_z + object_layer->bottom_z());
+            gcode += this->apply_temp_retract_grid_layer(print, temp_retract_relative_z(mid, first_bottom));
+        }
         break;
     }
     }

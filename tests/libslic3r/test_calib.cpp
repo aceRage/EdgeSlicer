@@ -2,8 +2,11 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <string>
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/calib.hpp"
 
@@ -172,6 +175,52 @@ TEST_CASE("Stringing grid column names parse strictly", "[Calib][TempRetract]")
     CHECK(stringing_grid_column_from_name("xSG_col_3") == -1);
 }
 
+TEST_CASE("Stringing grid band Z is relative to the first printed layer", "[Calib][TempRetract]")
+{
+    // F11: raft and z_offset shift absolute print_z. Band 0 still starts at the object's
+    // first-layer height (1 mm base), measured from the first printed layer bottom.
+    const Calib_Params params = grid_params();
+    CHECK(temp_retract_relative_z(0.4, 0.) == Approx(0.4));
+    CHECK(temp_retract_relative_z(1.9, 1.5) == Approx(0.4));
+    CHECK(temp_retract_relative_z(0.8, 0.4) == Approx(0.4));
+
+    const double raft_bottom = 1.5;
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(raft_bottom + 0.3, raft_bottom)) == 0);
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(raft_bottom + 9.0, raft_bottom)) == 1);
+    CHECK(temp_for_z(params, temp_retract_relative_z(raft_bottom + 9.0, raft_bottom)) == Approx(225.));
+
+    const double z_off_bottom = 0.4;
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(z_off_bottom + 0.3, z_off_bottom)) == 0);
+    CHECK(temp_retract_band_index(params, temp_retract_relative_z(z_off_bottom + 9.0, z_off_bottom)) == 1);
+}
+
+TEST_CASE("Stringing grid dialog defaults validate and 18 columns do not fit", "[Calib][TempRetract]")
+{
+    Calib_Params params = grid_params();
+    CHECK(stringing_grid_column_count(params) == 8);
+    CHECK(stringing_grid_params_valid(params, 270.));
+    CHECK(calib_temp_retract_grid_mode_name == std::string("temp_retract_grid_calib_mode"));
+
+    params.retract_end  = 3.6;
+    params.retract_step = 0.2;
+    CHECK(stringing_grid_column_count(params) == 18);
+    std::string err;
+    CHECK_FALSE(stringing_grid_params_valid(params, 270., &err));
+    CHECK(err.find("max") != std::string::npos);
+}
+
+TEST_CASE("Stringing grid slicer config disables raft and the prime tower", "[Calib][TempRetract]")
+{
+    DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig filament = print;
+    DynamicPrintConfig printer  = print;
+    apply_stringing_grid_slicer_config(print, filament, printer, 0);
+    CHECK(print.opt_int("raft_layers") == 0);
+    CHECK_FALSE(print.opt_bool("enable_prime_tower"));
+    CHECK(print.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByLayer);
+    CHECK_FALSE(printer.opt_bool("use_firmware_retraction"));
+}
+
 TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][TempRetract]")
 {
     // Review F4/F6: the G-code asks for the band at the middle of a layer and the labels at the middle of
@@ -190,4 +239,206 @@ TEST_CASE("Stringing grid band index is stable at the layer middle", "[Calib][Te
     CHECK(temp_retract_band_index(p, 0.5 * (9.2 + 9.0)) == 1);
     CHECK(temp_for_z(p, stringing_grid_base_height + 0.5 * p.band_height) == Approx(230.));
     CHECK(temp_for_z(p, stringing_grid_base_height + 1.5 * p.band_height) == Approx(225.));
+}
+
+TEST_CASE("Stringing grid defaults build outward from the other-layers temperature", "[Calib][TempRetract]")
+{
+    // Lance 2026-11-01: center +5, -5, +10, -10, ... within the filament range, at most 10 bands.
+    struct Case { double center, low, high, start, end; int bands; };
+    const Case cases[] = {
+        {220., 190., 240., 240., 195., 10}, // 220,225,215,...,240,200 then 195 (245 is out of range)
+        {220., 210., 230., 230., 210., 5},  // both sides reach the range limits
+        {235., 190., 240., 240., 195., 10}, // high side stops at 240, low side fills
+        {215., 190., 240., 240., 195., 10}, // 240/190 PLA profile, nozzle 215
+    };
+    for (const Case &c : cases) {
+        CAPTURE(c.center, c.low, c.high);
+        Calib_Params p;
+        stringing_grid_default_params(p, c.center, c.low, c.high, 5.);
+        CHECK(p.start == Approx(c.start));
+        CHECK(p.end == Approx(c.end));
+        CHECK(p.step == Approx(5.));
+        CHECK(stringing_grid_band_count(p) == c.bands);
+        CHECK(std::fmod(p.start - p.end, p.step) == Approx(0.).margin(1e-9));
+        CHECK(p.mode == CalibMode::Calib_Temp_Retract_Grid);
+        CHECK_FALSE(p.print_labels);
+        CHECK(p.wait_for_temperature);
+        std::string err;
+        CHECK(stringing_grid_params_valid(p, 270., &err));
+        CHECK(err.empty());
+    }
+}
+
+TEST_CASE("Stringing grid defaults never go below the filament minimum", "[Calib][TempRetract]")
+{
+    // F17 (Lance): bands stay in [range_low, min(range_high, printer max, 350)]. Fewer than 2 bands gives
+    // one band (start = end) and the range-note flag; the validator blocks OK until a range is set.
+    auto check_single = [](double center, double low, double high, double printer_max, double temp) {
+        CAPTURE(center, low, high, printer_max);
+        Calib_Params p;
+        CHECK(stringing_grid_default_params(p, center, low, high, 5., printer_max));
+        CHECK(p.start == Approx(temp));
+        CHECK(p.end == Approx(temp));
+        CHECK(stringing_grid_band_count(p) == 1);
+        std::string err;
+        CHECK_FALSE(stringing_grid_params_valid(p, 270., &err));
+        CHECK_FALSE(err.empty());
+    };
+    SECTION("single-temperature PPS profile 300/300/300 opens on 300 with the note")
+    {
+        check_single(300., 300., 300., 0., 300.);
+    }
+    SECTION("range narrower than one step, 222 in 220-224, opens on 222 with the note")
+    {
+        check_single(222., 220., 224., 0., 222.);
+    }
+    SECTION("PEEK 420 in 380-460: the 350 cap is below the minimum, one band at the cap")
+    {
+        check_single(420., 380., 460., 0., 350.);
+    }
+    SECTION("PEEK 420 in 380-460 with a 300 C printer max: one band at 300")
+    {
+        check_single(420., 380., 460., 300., 300.);
+    }
+    SECTION("range partly above the limit stays inside it, 340 in 300-380")
+    {
+        Calib_Params p;
+        CHECK_FALSE(stringing_grid_default_params(p, 340., 300., 380., 5.));
+        CHECK(p.start == Approx(350.));
+        CHECK(p.end == Approx(305.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    SECTION("center at the minimum only builds upward, 190 in 190-240")
+    {
+        Calib_Params p;
+        CHECK_FALSE(stringing_grid_default_params(p, 190., 190., 240., 5.));
+        CHECK(p.start == Approx(235.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+}
+
+TEST_CASE("Stringing grid defaults are capped at the printer's max nozzle temperature", "[Calib][TempRetract]")
+{
+    // F14 (Lance): upper = min(filament max, printer max, 350).
+    SECTION("printer max at or above the filament max changes nothing")
+    {
+        for (double printer_max : {0., 240., 300.}) {
+            CAPTURE(printer_max);
+            Calib_Params p;
+            stringing_grid_default_params(p, 220., 190., 240., 5., printer_max);
+            CHECK(p.start == Approx(240.));
+            CHECK(p.end == Approx(195.));
+            CHECK(stringing_grid_params_valid(p, 270.));
+        }
+    }
+    SECTION("printer max 230 caps 220 in 190-240 at 230")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 220., 190., 240., 5., 230.);
+        CHECK(p.start == Approx(230.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_band_count(p) == 9);
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    SECTION("printer max below the center clips the center")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 220., 190., 240., 5., 210.);
+        CHECK(p.start == Approx(210.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+}
+
+TEST_CASE("Stringing grid defaults fall back to 230/205 on invalid filament temperatures", "[Calib][TempRetract]")
+{
+    struct Case { double center, low, high; };
+    const Case cases[] = {
+        {0., 190., 240.},   // missing nozzle temperature
+        {220., 0., 0.},     // missing range
+        {220., 240., 190.}, // low > high
+        {250., 190., 240.}, // center above the range
+        {180., 190., 240.}, // center below the range
+    };
+    for (const Case &c : cases) {
+        CAPTURE(c.center, c.low, c.high);
+        Calib_Params p;
+        CHECK_FALSE(stringing_grid_default_params(p, c.center, c.low, c.high, 5.));
+        CHECK(p.start == Approx(230.));
+        CHECK(p.end == Approx(205.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    // The raw 240/190 range is still over the cap when typed in by hand.
+    Calib_Params ranged;
+    stringing_grid_default_params(ranged, 220., 190., 240., 5.);
+    ranged.start = 240.;
+    ranged.end   = 190.;
+    CHECK_FALSE(stringing_grid_params_valid(ranged, 270.));
+}
+
+TEST_CASE("Stringing grid rejects a temperature range that is not a whole number of steps", "[Calib][TempRetract]")
+{
+    // F5: temp_for_z must never land between steps.
+    Calib_Params p = grid_params();
+    p.end          = 207.;
+    std::string err;
+    CHECK_FALSE(stringing_grid_params_valid(p, 270., &err));
+    CHECK(err.find("multiple") != std::string::npos);
+    p.end = 205.;
+    CHECK(stringing_grid_params_valid(p, 270.));
+    for (int b = 0; b < stringing_grid_band_count(p); ++b) {
+        const double t = temp_for_z(p, stringing_grid_base_height + (b + 0.5) * p.band_height);
+        CHECK(std::fmod(p.start - t, p.step) == Approx(0.).margin(1e-9));
+    }
+}
+
+TEST_CASE("Stringing grid slicer config neutralises filament retraction overrides", "[Calib][TempRetract]")
+{
+    // F6
+    DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig filament = print;
+    DynamicPrintConfig printer  = print;
+    filament.set_deserialize_strict({{"filament_z_hop", "0.6"},
+                                     {"filament_retract_when_changing_layer", "0"},
+                                     {"filament_retraction_minimum_travel", "5"}});
+    apply_stringing_grid_slicer_config(print, filament, printer, 0);
+    const auto *zh = filament.option<ConfigOptionFloatsNullable>("filament_z_hop");
+    const auto *rl = filament.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
+    const auto *mt = filament.option<ConfigOptionFloatsNullable>("filament_retraction_minimum_travel");
+    REQUIRE(zh != nullptr);
+    REQUIRE(rl != nullptr);
+    REQUIRE(mt != nullptr);
+    CHECK(zh->get_at(0) == Approx(0.));
+    CHECK(rl->get_at(0));
+    CHECK(mt->get_at(0) == Approx(1.));
+}
+
+TEST_CASE("Stringing grid slicer config neutralises plain (non-nullable) filament overrides", "[Calib][TempRetract]")
+{
+    // F12: the same keys stored as the plain vector classes are set too.
+    DynamicPrintConfig print   = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig printer = print;
+    DynamicPrintConfig filament;
+    filament.set_key_value("filament_z_hop", new ConfigOptionFloats({0.6, 0.4}));
+    filament.set_key_value("filament_retract_when_changing_layer", new ConfigOptionBools({false, false}));
+    filament.set_key_value("filament_retraction_minimum_travel", new ConfigOptionFloats({5., 3.}));
+    filament.set_key_value("filament_wipe", new ConfigOptionBools({true, true}));
+    REQUIRE_FALSE(filament.optptr("filament_z_hop")->nullable());
+    apply_stringing_grid_slicer_config(print, filament, printer, 1);
+    const auto *zh = filament.option<ConfigOptionFloats>("filament_z_hop");
+    const auto *rl = filament.option<ConfigOptionBools>("filament_retract_when_changing_layer");
+    const auto *mt = filament.option<ConfigOptionFloats>("filament_retraction_minimum_travel");
+    const auto *wp = filament.option<ConfigOptionBools>("filament_wipe");
+    REQUIRE(zh != nullptr);
+    REQUIRE(rl != nullptr);
+    REQUIRE(mt != nullptr);
+    REQUIRE(wp != nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+        CHECK(zh->get_at(i) == Approx(0.));
+        CHECK(rl->get_at(i));
+        CHECK(mt->get_at(i) == Approx(1.));
+    }
+    CHECK(wp->get_at(0));       // only the selected filament's entry is touched
+    CHECK_FALSE(wp->get_at(1));
 }
