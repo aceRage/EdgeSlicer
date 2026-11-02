@@ -2700,11 +2700,13 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
     dof->set_uniform("highlights", highlight);
     dof->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
     dof->set_uniform("hdr_tex", 3);
-    if (hdr_tex != 0) {
-        glsafe(::glActiveTexture(GL_TEXTURE3));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, hdr_tex));
-        glsafe(::glActiveTexture(GL_TEXTURE0));
-    }
+    // Unit 3 always holds a complete texture: without highlights the shader never reads it, but macOS
+    // validates every sampler a program declares and logs an "unloadable" unit 3 otherwise. The
+    // frame's colour copy is never drawn into by either pass, so it is safe there; the output is the
+    // same.
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, hdr_tex != 0 ? hdr_tex : m_dof_color));
+    glsafe(::glActiveTexture(GL_TEXTURE0));
 
     // 1. The circles of confusion.
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
