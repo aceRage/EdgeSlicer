@@ -8,9 +8,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <map>
 #include <set>
+#include <sstream>
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -1072,6 +1075,524 @@ std::vector<int> map_colours_to_filaments(const std::vector<std::string> &colour
     }
     return out;
 }
+
+// ------------------------------------------------------------------------------------ source ----
+
+Source select_source(const std::string &source_key, const std::string &base_url)
+{
+    const bool        usable = !origin_of(base_url).empty();
+    const std::string k      = lower(trim(source_key));
+    if (k == "builtin")
+        return Source::BuiltIn;
+    // "custom", or phase 1's hidden base URL without a source key.
+    return usable ? Source::Custom : Source::BuiltIn;
+}
+
+const char *source_key(Source source) { return source == Source::Custom ? "custom" : "builtin"; }
+
+CustomUrl normalize_custom_url(const std::string &input)
+{
+    CustomUrl   r;
+    std::string s = trim(input);
+    if (s.empty()) {
+        r.error = "no address";
+        return r;
+    }
+    for (unsigned char c : s)
+        if (c < 0x20 || c == 0x7F || std::isspace(c)) {
+            r.error = "the address contains spaces or control characters";
+            return r;
+        }
+    const size_t sep = s.find("://");
+    if (sep == std::string::npos) {
+        // "nas.local:3000", "192.168.1.5", "layerling.com/x": no scheme. "javascript:..." or
+        // "file:/x" have one, without "//".
+        const size_t colon        = s.find(':');
+        const bool   port_follows = colon != std::string::npos && colon + 1 < s.size() && std::isdigit((unsigned char) s[colon + 1]);
+        if (colon != std::string::npos && !port_follows) {
+            r.error = "only http:// and https:// addresses can be used";
+            return r;
+        }
+        s = "http://" + s;
+    }
+    untrusted::Url u;
+    if (!untrusted::parse_url(s, u)) {
+        r.error = "this is not a valid address";
+        return r;
+    }
+    if (u.scheme != "http" && u.scheme != "https") {
+        r.error = "only http:// and https:// addresses can be used";
+        return r;
+    }
+    if (u.has_userinfo) {
+        r.error = "an address with a user name or password cannot be used";
+        return r;
+    }
+    const std::string o = origin_of(s);
+    if (o.empty()) {
+        r.error = "this is not a valid address";
+        return r;
+    }
+    const size_t after_authority = s.find_first_of("/?#", s.find("://") + 3);
+    if (after_authority != std::string::npos)
+        r.path_dropped = s.substr(after_authority) != "/";
+    r.ok  = true;
+    r.url = o + "/";
+    return r;
+}
+
+std::vector<std::string> local_candidates()
+{
+    return {"http://127.0.0.1:3000/", "http://localhost:3000/", "http://127.0.0.1:3100/", "http://127.0.0.1:8080/"};
+}
+
+bool parse_version_json(const std::string &body, std::string &version)
+{
+    version.clear();
+    try {
+        const nlohmann::json j = nlohmann::json::parse(body);
+        if (!j.is_object() || !j.contains("version") || !j["version"].is_string())
+            return false;
+        const std::string v = normalize_version(j["version"].get<std::string>());
+        if (!is_safe_version(v))
+            return false;
+        version = v;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+ProbeResult classify_probe(unsigned version_status, const std::string &version_body, unsigned page_status, const std::string &page_body)
+{
+    ProbeResult r;
+    std::string v;
+    if (version_status == 200 && parse_version_json(version_body, v)) {
+        r.ok      = true;
+        r.version = v;
+        return r;
+    }
+    if (page_status == 200) {
+        const std::string l = lower(page_body.substr(0, std::min<size_t>(page_body.size(), 512 * 1024)));
+        if (l.find("layerling") != std::string::npos && l.find("/_next/") != std::string::npos) {
+            r.ok = true;
+            return r;
+        }
+        r.error = "the address answers, but it is not Layerling";
+        return r;
+    }
+    if (page_status == 0 && version_status == 0)
+        r.error = "no answer from this address";
+    else
+        r.error = "the address answered with HTTP " + std::to_string(page_status != 0 ? page_status : version_status);
+    return r;
+}
+
+// ------------------------------------------------------------------------------- design links ----
+
+namespace {
+
+std::string percent_encode(const std::string &s)
+{
+    static const char *hex = "0123456789ABCDEF";
+    std::string        out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+            out += char(c);
+        else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+// "a=1&b=2" -> {a: 1, b: 2}, percent-decoded; later keys win.
+std::map<std::string, std::string> parse_query(const std::string &q)
+{
+    std::map<std::string, std::string> out;
+    size_t                             pos = 0;
+    while (pos <= q.size()) {
+        size_t amp = q.find('&', pos);
+        if (amp == std::string::npos)
+            amp = q.size();
+        const std::string part = q.substr(pos, amp - pos);
+        const size_t      eq   = part.find('=');
+        if (!part.empty())
+            out[untrusted::percent_decode(part.substr(0, eq))] = eq == std::string::npos ? std::string() :
+                                                                                           untrusted::percent_decode(part.substr(eq + 1));
+        pos = amp + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+bool is_safe_project_id(const std::string &id)
+{
+    if (id.empty() || id.size() > 128 || id == "." || id == "..")
+        return false;
+    for (unsigned char c : id)
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.'))
+            return false;
+    return true;
+}
+
+bool DesignLink::valid() const { return !origin.empty() && origin_of(origin) == origin && is_safe_project_id(project); }
+
+std::string serialize_link(const DesignLink &link)
+{
+    if (!link.valid())
+        return std::string();
+    return "v=1&origin=" + percent_encode(link.origin) + "&project=" + percent_encode(link.project) + "&name=" + percent_encode(link.name.substr(0, 200));
+}
+
+bool parse_link(const std::string &text, DesignLink &out)
+{
+    out = DesignLink();
+    if (text.empty() || text.size() > 2048)
+        return false;
+    const auto q = parse_query(text);
+    auto       v = q.find("v");
+    if (v == q.end() || v->second != "1")
+        return false;
+    DesignLink l;
+    if (auto it = q.find("origin"); it != q.end())
+        l.origin = it->second;
+    if (auto it = q.find("project"); it != q.end())
+        l.project = it->second;
+    if (auto it = q.find("name"); it != q.end())
+        l.name = it->second.substr(0, 200);
+    if (!l.valid())
+        return false;
+    out = l;
+    return true;
+}
+
+std::string project_from_page_url(const std::string &url)
+{
+    untrusted::Url u;
+    if (origin_of(url).empty() || !untrusted::parse_url(url, u))
+        return std::string();
+    std::string  query = u.query;
+    const size_t hash  = query.find('#');
+    if (hash != std::string::npos)
+        query = query.substr(0, hash);
+    const auto q = parse_query(query);
+    auto       e = q.find("editor");
+    auto       p = q.find("project");
+    if (e == q.end() || e->second != "1" || p == q.end() || !is_safe_project_id(p->second))
+        return std::string();
+    return p->second;
+}
+
+std::string editor_url(const std::string &base_url, const std::string &project)
+{
+    const std::string o = origin_of(base_url);
+    if (o.empty())
+        return std::string();
+    if (project.empty())
+        return o + "/?editor=1";
+    if (!is_safe_project_id(project))
+        return std::string();
+    return o + "/?editor=1&project=" + percent_encode(project);
+}
+
+EditFormat choose_edit_format(const EditSource &source)
+{
+    if (source.linked_here)
+        return EditFormat::OpenLinked;
+    if (source.all_exact)
+        return EditFormat::Step;
+    if (source.colours > 1)
+        return EditFormat::ThreeMF;
+    return EditFormat::Stl;
+}
+
+std::string strip_model_extension(const std::string &name)
+{
+    for (const char *ext : {".3mf", ".stl", ".obj", ".step", ".stp", ".amf", ".lyl"})
+        if (name.size() > std::strlen(ext) && ends_with_ci(name, ext))
+            return name.substr(0, name.size() - std::strlen(ext));
+    return name;
+}
+
+const char *edit_format_extension(EditFormat format)
+{
+    switch (format) {
+    case EditFormat::Step: return ".step";
+    case EditFormat::ThreeMF: return ".3mf";
+    case EditFormat::Stl: return ".stl";
+    default: return "";
+    }
+}
+
+namespace {
+
+std::string xml_attr(const std::string &s)
+{
+    std::string out;
+    for (char c : s) {
+        switch (c) {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        case '"': out += "&quot;"; break;
+        case '\'': out += "&apos;"; break;
+        default:
+            if ((unsigned char) c >= 0x20)
+                out += c;
+        }
+    }
+    return out;
+}
+
+bool is_hex_colour(const std::string &c)
+{
+    if (c.size() != 7 || c[0] != '#')
+        return false;
+    for (size_t i = 1; i < 7; ++i)
+        if (!std::isxdigit((unsigned char) c[i]))
+            return false;
+    return true;
+}
+
+} // namespace
+
+bool write_colour_3mf(const fs::path &file, const std::vector<ColouredMesh> &bodies, std::string *error)
+{
+    auto fail = [error](const std::string &why) {
+        if (error)
+            *error = why;
+        return false;
+    };
+    if (bodies.empty())
+        return fail("nothing to write");
+    std::ostringstream m;
+    m.imbue(std::locale::classic());
+    m << std::setprecision(9);
+    m << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+         "<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n"
+         " <metadata name=\"Application\">EdgeSlicer</metadata>\n"
+         " <resources>\n"
+         "  <basematerials id=\"1\">\n";
+    for (const ColouredMesh &b : bodies) {
+        std::string c = is_hex_colour(b.colour) ? b.colour : std::string("#808080");
+        std::transform(c.begin(), c.end(), c.begin(), [](unsigned char ch) { return char(std::toupper(ch)); });
+        m << "   <base name=\"" << xml_attr(b.name) << "\" displaycolor=\"" << c << "FF\"/>\n";
+    }
+    m << "  </basematerials>\n";
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        const ColouredMesh &b  = bodies[i];
+        const size_t        nv = b.vertices.size() / 3;
+        if (b.vertices.size() % 3 != 0 || b.triangles.size() % 3 != 0 || b.triangles.empty())
+            return fail("body \"" + b.name + "\" has no valid mesh");
+        for (int idx : b.triangles)
+            if (idx < 0 || size_t(idx) >= nv)
+                return fail("body \"" + b.name + "\" refers to a missing vertex");
+        m << "  <object id=\"" << (i + 2) << "\" type=\"model\" name=\"" << xml_attr(b.name) << "\" pid=\"1\" pindex=\"" << i << "\">\n"
+          << "   <mesh>\n    <vertices>\n";
+        for (size_t v = 0; v < nv; ++v)
+            m << "     <vertex x=\"" << b.vertices[v * 3] << "\" y=\"" << b.vertices[v * 3 + 1] << "\" z=\"" << b.vertices[v * 3 + 2] << "\"/>\n";
+        m << "    </vertices>\n    <triangles>\n";
+        for (size_t t = 0; t + 2 < b.triangles.size(); t += 3)
+            m << "     <triangle v1=\"" << b.triangles[t] << "\" v2=\"" << b.triangles[t + 1] << "\" v3=\"" << b.triangles[t + 2] << "\"/>\n";
+        m << "    </triangles>\n   </mesh>\n  </object>\n";
+    }
+    m << " </resources>\n <build>\n";
+    for (size_t i = 0; i < bodies.size(); ++i)
+        m << "  <item objectid=\"" << (i + 2) << "\"/>\n";
+    m << " </build>\n</model>\n";
+
+    const std::string types = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                              "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n"
+                              " <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n"
+                              " <Default Extension=\"model\" ContentType=\"application/vnd.ms-package.3dmanufacturing-3dmodel+xml\"/>\n"
+                              "</Types>\n";
+    const std::string rels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                             "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n"
+                             " <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel0\" "
+                             "Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n"
+                             "</Relationships>\n";
+    const std::string model = m.str();
+
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    if (!open_zip_writer(&zip, path_utf8(file)))
+        return fail("the file could not be created");
+    bool ok = mz_zip_writer_add_mem(&zip, "[Content_Types].xml", types.data(), types.size(), MZ_DEFAULT_COMPRESSION) &&
+              mz_zip_writer_add_mem(&zip, "_rels/.rels", rels.data(), rels.size(), MZ_DEFAULT_COMPRESSION) &&
+              mz_zip_writer_add_mem(&zip, "3D/3dmodel.model", model.data(), model.size(), MZ_DEFAULT_COMPRESSION);
+    ok = ok && mz_zip_writer_finalize_archive(&zip);
+    close_zip_writer(&zip);
+    if (!ok) {
+        boost::system::error_code ec;
+        fs::remove(file, ec);
+        return fail("the file could not be written");
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------- the hand-over ----
+
+std::string base64_encode(const std::string &bytes)
+{
+    static const char *table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string        out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 2 < bytes.size(); i += 3) {
+        const unsigned v = (unsigned((unsigned char) bytes[i]) << 16) | (unsigned((unsigned char) bytes[i + 1]) << 8) |
+                           unsigned((unsigned char) bytes[i + 2]);
+        out += table[(v >> 18) & 63];
+        out += table[(v >> 12) & 63];
+        out += table[(v >> 6) & 63];
+        out += table[v & 63];
+    }
+    if (i < bytes.size()) {
+        unsigned v = unsigned((unsigned char) bytes[i]) << 16;
+        if (i + 1 < bytes.size())
+            v |= unsigned((unsigned char) bytes[i + 1]) << 8;
+        out += table[(v >> 18) & 63];
+        out += table[(v >> 12) & 63];
+        out += i + 1 < bytes.size() ? table[(v >> 6) & 63] : '=';
+        out += '=';
+    }
+    return out;
+}
+
+std::string js_string_literal(const std::string &text, bool html_safe)
+{
+    static const char *hex = "0123456789abcdef";
+    std::string        out = "\"";
+    for (size_t i = 0; i < text.size(); ++i) {
+        const unsigned char c = (unsigned char) text[i];
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        case '<': out += html_safe ? "\\u003c" : "<"; break;
+        case '>': out += html_safe ? "\\u003e" : ">"; break;
+        default:
+            if (c < 0x20 || c == 0x7F) {
+                out += "\\u00";
+                out += hex[c >> 4];
+                out += hex[c & 15];
+            } else if (c == 0xE2 && i + 2 < text.size() && (unsigned char) text[i + 1] == 0x80 &&
+                       ((unsigned char) text[i + 2] == 0xA8 || (unsigned char) text[i + 2] == 0xA9)) {
+                // U+2028 / U+2029 end a line in older JavaScript.
+                out += (unsigned char) text[i + 2] == 0xA8 ? "\\u2028" : "\\u2029";
+                i += 2;
+            } else
+                out += char(c);
+        }
+    }
+    out += "\"";
+    return out;
+}
+
+namespace {
+
+// The start page's import input: several files, an accept list naming .lyl and .3mf. (The editor
+// has an "insert into this design" input with .3mf but without .lyl; that is not the one.)
+const char *FIND_IMPORT_INPUT = "function(){var l=document.querySelectorAll('input[type=file][multiple]');"
+                                "for(var i=0;i<l.length;i++){var a=(l[i].getAttribute('accept')||'').toLowerCase();"
+                                "if(a.indexOf('.lyl')>=0&&a.indexOf('.3mf')>=0)return l[i];}return null;}";
+
+} // namespace
+
+std::string import_probe_script()
+{
+    return std::string("(function(){try{var f=") + FIND_IMPORT_INPUT + ";return f()?'" + SCRIPT_READY + "':'" + SCRIPT_WAIT +
+           "';}catch(e){return '" + SCRIPT_WAIT + "';}})()";
+}
+
+std::string import_file_script(const std::string &name, const std::string &bytes)
+{
+    return std::string("(function(){try{var f=") + FIND_IMPORT_INPUT + ";var input=f();if(!input)return '" + SCRIPT_NO_INPUT +
+           "';var s=atob(" + js_string_literal(base64_encode(bytes)) +
+           ");var b=new Uint8Array(s.length);for(var i=0;i<s.length;i++)b[i]=s.charCodeAt(i);"
+           "var file=new File([b]," +
+           js_string_literal(name) +
+           ",{type:'application/octet-stream',lastModified:Date.now()});"
+           "var dt=new DataTransfer();dt.items.add(file);input.files=dt.files;"
+           "input.dispatchEvent(new Event('change',{bubbles:true}));return '" +
+           SCRIPT_OK + "';}catch(e){return 'edgeslicer-error: '+e;}})()";
+}
+
+// ----------------------------------------------------------------------------------------- MCP ----
+
+bool is_local_bridge_origin(const std::string &origin)
+{
+    untrusted::Url u;
+    if (origin_of(origin).empty() || !untrusted::parse_url(origin, u))
+        return false;
+    std::string h = u.host;
+    if (h.size() >= 2 && h.front() == '[' && h.back() == ']')
+        h = h.substr(1, h.size() - 2);
+    return h == "localhost" || h == "127.0.0.1" || h == "::1" || ends_with_ci(h, ".localhost");
+}
+
+std::string mcp_script_in_checkout(const std::string &checkout_dir)
+{
+    std::string d = trim(checkout_dir);
+    std::replace(d.begin(), d.end(), '\\', '/');
+    while (d.size() > 1 && d.back() == '/')
+        d.pop_back();
+    return d.empty() ? std::string() : d + "/scripts/layerling-mcp-server.mjs";
+}
+
+std::string mcp_config_text(McpClient client, const std::string &origin, const std::string &script_path, bool token)
+{
+    std::string script = script_path.empty() ? std::string(MCP_SCRIPT_PLACEHOLDER) : script_path;
+    std::replace(script.begin(), script.end(), '\\', '/');
+    std::string url = origin_of(origin);
+    if (url.empty())
+        url = MCP_DEFAULT_URL;
+    std::string out;
+    if (client == McpClient::Codex) {
+        // TOML basic strings take the same escapes as JSON for what can occur here.
+        out += "[mcp_servers.layerling]\n";
+        out += "command = \"node\"\n";
+        out += "args = [" + js_string_literal(script, false) + "]\n";
+        out += "startup_timeout_sec = 20\n\n";
+        out += "[mcp_servers.layerling.env]\n";
+        out += "LAYERLING_URL = " + js_string_literal(url, false) + "\n";
+        if (token)
+            out += "LAYERLING_MCP_TOKEN = " + js_string_literal(MCP_TOKEN_PLACEHOLDER, false) + "\n";
+        return out;
+    }
+    out += "{\n";
+    out += "  \"mcpServers\": {\n";
+    out += "    \"layerling\": {\n";
+    out += "      \"command\": \"node\",\n";
+    out += "      \"args\": [" + js_string_literal(script, false) + "],\n";
+    out += "      \"env\": {\n";
+    out += "        \"LAYERLING_URL\": " + js_string_literal(url, false) + (token ? ",\n" : "\n");
+    if (token)
+        out += "        \"LAYERLING_MCP_TOKEN\": " + js_string_literal(MCP_TOKEN_PLACEHOLDER, false) + "\n";
+    out += "      }\n";
+    out += "    }\n";
+    out += "  }\n";
+    out += "}\n";
+    return out;
+}
+
+McpBridge mcp_bridge_from_status(unsigned status)
+{
+    switch (status) {
+    case 200: return McpBridge::Open;
+    case 401:
+    case 403: return McpBridge::NeedsToken;
+    case 404: return McpBridge::Off;
+    default: return McpBridge::Unknown;
+    }
+}
+
+bool mcp_needs_token(const std::string &origin, McpBridge bridge) { return !is_local_bridge_origin(origin) || bridge == McpBridge::NeedsToken; }
 
 } // namespace layerling
 } // namespace Slic3r

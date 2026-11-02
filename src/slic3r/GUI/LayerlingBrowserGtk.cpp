@@ -120,6 +120,16 @@ public:
 
     void set_dark(bool) override {}
 
+    std::string current_url() const override { return m_view != nullptr ? m_view->GetCurrentURL().ToUTF8().data() : std::string(); }
+
+    void run_script(const std::string &script, std::function<void(bool, const std::string &)> done) override
+    {
+        wxString   output;
+        const bool ok = m_view != nullptr && m_view->RunScript(wxString::FromUTF8(script), &output);
+        if (done)
+            done(ok, ok ? std::string(output.ToUTF8().data()) : std::string("the script could not be run"));
+    }
+
 private:
     struct Pending
     {
@@ -220,8 +230,10 @@ private:
         }
         const std::string name = layerling::sanitize_export_name(suggested != nullptr ? suggested : "");
         boost::system::error_code ec;
-        const fs::path dir = self->m_download_dir / fs::unique_path("%%%%%%%%%%%%");
-        fs::create_directories(dir, ec);
+        // The error_code overloads: nothing may throw inside a GLib callback.
+        const fs::path dir = self->m_download_dir / fs::unique_path("%%%%%%%%%%%%", ec);
+        if (!ec)
+            fs::create_directories(dir, ec);
         const fs::path file = dir / name;
         gchar *uri = ec ? nullptr : g_filename_to_uri(file.string().c_str(), nullptr, nullptr);
         if (uri == nullptr || !untrusted::is_path_within_root(self->m_download_dir, file)) {

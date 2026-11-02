@@ -234,6 +234,169 @@ std::vector<std::string> distinct_colours(const std::vector<BodyColour> &bodies)
 std::vector<int> map_colours_to_filaments(const std::vector<std::string> &colours, const std::vector<std::string> &existing,
                                           std::size_t max_filaments, std::vector<std::string> &added);
 
+// ---- the source: the built-in copy or the user's own Layerling ---------------------------------
+//
+// "Use my own Layerling": the tab can show a Layerling the user already runs (Docker on a NAS, a
+// home server, a static copy on a web server, a dev server, or https://layerling.com) instead of
+// the downloaded copy. Designs live in the browser storage of the page's origin, so every source
+// has its own designs; a self-hosted server with a shared project folder
+// (LAYERLING_SHARED_PROJECTS_DIR) keeps them on the server, the same on every device.
+
+enum class Source {
+    BuiltIn, // the downloaded copy, served from 127.0.0.1
+    Custom   // app_config "layerling_base_url"
+};
+
+// app_config "layerling_source" ("builtin" / "custom") and "layerling_base_url". Phase 1 had only
+// the base URL (no UI): a usable base URL without a source key counts as Custom. Custom without a
+// usable base URL is BuiltIn.
+Source      select_source(const std::string &source_key, const std::string &base_url);
+const char *source_key(Source source);
+
+struct CustomUrl
+{
+    bool        ok = false;
+    std::string url;                  // "scheme://host[:port]/"
+    bool        path_dropped = false; // the input had a path, query or fragment
+    std::string error;                // why not ok
+};
+// What the user typed -> the base URL the tab loads. Blanks trimmed; without a scheme, http:// is
+// assumed; only http and https; no "user:password@"; a host is required. Layerling's files refer
+// to each other from the root of the address (/_next/...), so it only runs at the root: a path,
+// query or fragment is dropped (path_dropped says so).
+CustomUrl normalize_custom_url(const std::string &input);
+
+// Where a Layerling the user runs on this computer usually answers: its dev server and its Docker
+// image listen on 3000 (README "Install and Run", "Docker"), the start script's documented
+// alternative is 3100, and the README's static-hosting example uses 8080. 127.0.0.1 and localhost
+// are different origins (different designs), so both are offered for 3000. Only these are tried:
+// no other addresses, no network scan.
+std::vector<std::string> local_candidates();
+
+// Layerling's /version.json (static export: {"version":"1.131.1","build":...}). False when the
+// body is not that.
+bool parse_version_json(const std::string &body, std::string &version);
+
+struct ProbeResult
+{
+    bool        ok = false;
+    std::string version; // "" when the address answers but publishes no version (server builds)
+    std::string error;
+};
+// Is this address a Layerling? Its /version.json (the static export has one), else its start page
+// (the Node server and the Docker image have no version.json): a page that names layerling and
+// loads Next.js files. A status of 0 means no answer.
+ProbeResult classify_probe(unsigned version_status, const std::string &version_body, unsigned page_status, const std::string &page_body);
+
+// ---- designs on the plate (Edit in Layerling, the round trip) ----------------------------------
+
+// The Layerling design an object on the plate came from. Kept with the object
+// (ModelObject::layerling_design, saved in the project 3MF) so "Edit in Layerling" opens that
+// design again and Send to Plate can offer to replace the object. A project id belongs to the
+// origin's storage: on another origin the link does not apply.
+struct DesignLink
+{
+    std::string origin;  // as origin_of() returns it
+    std::string project; // Layerling's project id (its "?editor=1&project=<id>")
+    std::string name;    // the design's name when it was sent, for messages
+    bool        valid() const;
+};
+// "v=1&origin=<enc>&project=<enc>&name=<enc>" (percent-encoded), "" for an invalid link.
+std::string serialize_link(const DesignLink &link);
+// False (and `out` cleared) for anything that is not a valid link.
+bool parse_link(const std::string &text, DesignLink &out);
+// A Layerling project id: 1-128 characters of [A-Za-z0-9_.-].
+bool is_safe_project_id(const std::string &id);
+// The project an editor page shows: "<origin>/?editor=1&project=<id>" -> <id>; "" otherwise.
+std::string project_from_page_url(const std::string &url);
+// The page that opens `project` in the editor ("" project: a new design): <origin>/?editor=1[&project=<id>].
+// "" when the base has no origin or the id is not safe.
+std::string editor_url(const std::string &base_url, const std::string &project);
+
+enum class EditFormat {
+    OpenLinked, // the object came from a design of this origin: open that design, nothing exported
+    Step,       // every part has exact CAD geometry (imported from STEP, or a CAD body)
+    ThreeMF,    // several colours: one body per part, with its filament colour
+    Stl         // one colour
+};
+struct EditSource
+{
+    bool        linked_here = false; // a DesignLink of the current origin
+    bool        all_exact   = false; // every part exportable as an exact B-rep
+    std::size_t colours     = 0;     // distinct filament colours of the parts
+};
+EditFormat  choose_edit_format(const EditSource &source);
+// "Benchy.stl" -> "Benchy": drops a model file extension (3mf stl obj step stp amf lyl), case-insensitive.
+std::string strip_model_extension(const std::string &name);
+const char *edit_format_extension(EditFormat format); // ".step" ".3mf" ".stl", "" for OpenLinked
+
+struct ColouredMesh
+{
+    std::string             name;
+    std::string             colour; // "#RRGGBB"; "" -> grey
+    std::vector<float>      vertices; // x, y, z, x, y, z, ... in millimetres
+    std::vector<int>        triangles; // three vertex indices per triangle
+};
+// A plain core-spec 3MF: one object per body, coloured through <basematerials> displaycolor (what
+// Layerling reads as "one body per colour"; parse_3mf_body_colours reads it back).
+bool write_colour_3mf(const boost::filesystem::path &file, const std::vector<ColouredMesh> &bodies, std::string *error = nullptr);
+
+// ---- handing a file to Layerling -----------------------------------------------------------------
+//
+// Layerling has no host API (no postMessage hook, no import URL). Its start page keeps a hidden
+// multi-file input (accept list with .lyl and .3mf; rendered under the dashboard and the editor
+// alike) whose change event imports the chosen files into a NEW design and opens that design in
+// the editor - what its own "Import" on the start page does (checked in the 1.131.1 bundle).
+// The tab hands a file over the same way a user picking it would: the app runs a script in the page
+// that builds a File from the bytes, puts it into that input and fires "change". Nothing of
+// Layerling's is changed and the page gets no way to call the app (the script is one-way).
+constexpr const char *SCRIPT_READY    = "edgeslicer-ready";
+constexpr const char *SCRIPT_WAIT     = "edgeslicer-wait";
+constexpr const char *SCRIPT_OK       = "edgeslicer-ok";
+constexpr const char *SCRIPT_NO_INPUT = "edgeslicer-noinput";
+// Bigger files are not pushed through a script; the user imports them from the folder instead.
+constexpr std::uint64_t MAX_HANDOVER_BYTES = std::uint64_t(64) * 1024 * 1024;
+// Returns SCRIPT_READY once the import input exists, else SCRIPT_WAIT.
+std::string import_probe_script();
+// Imports `bytes` as a file called `name`; returns SCRIPT_OK, or SCRIPT_NO_INPUT when the input is
+// missing. The name and bytes are embedded as a JSON string and base64.
+std::string import_file_script(const std::string &name, const std::string &bytes);
+std::string base64_encode(const std::string &bytes);
+// A JSON / JavaScript string literal, quotes included; U+2028/9 escaped too, and with `html_safe`
+// '<' and '>' (for a script; not for text a person reads, like the MCP setup).
+std::string js_string_literal(const std::string &text, bool html_safe = true);
+
+// ---- AI clients (MCP) ----------------------------------------------------------------------------
+//
+// Layerling's MCP server (scripts/layerling-mcp-server.mjs in its source, run by the AI client
+// with Node) drives open editor pages through the route /api/layerling-mcp of a Layerling *server*:
+// the dev server ("npm run dev", http://127.0.0.1:3000), or a self-hosted server with
+// LAYERLING_MCP_REMOTE and LAYERLING_MCP_TOKEN set. The static web build (what the tab downloads)
+// and layerling.com have no such route.
+enum class McpClient {
+    Json, // Claude Desktop, Claude Code (.mcp.json), Gemini CLI, Antigravity: {"mcpServers": ...}
+    Codex // Codex config.toml: [mcp_servers.layerling]
+};
+constexpr const char *MCP_ROUTE                = "/api/layerling-mcp";
+constexpr const char *MCP_DEFAULT_URL          = "http://127.0.0.1:3000";
+constexpr const char *MCP_SCRIPT_PLACEHOLDER   = "/absolute/path/to/layerling/scripts/layerling-mcp-server.mjs";
+constexpr const char *MCP_TOKEN_PLACEHOLDER    = "<the LAYERLING_MCP_TOKEN set on the server>";
+// What Layerling's MCP server counts as this computer (no token, it may open an editor itself).
+bool is_local_bridge_origin(const std::string &origin);
+// The server entry for the client's config: node + the script, LAYERLING_URL = `origin` (an origin
+// that is not one -> MCP_DEFAULT_URL), and with `token`, LAYERLING_MCP_TOKEN with a placeholder
+// (never a real token). `script_path` "" -> MCP_SCRIPT_PLACEHOLDER; backslashes become '/'.
+std::string mcp_config_text(McpClient client, const std::string &origin, const std::string &script_path, bool token);
+// The MCP server script inside a Layerling checkout folder.
+std::string mcp_script_in_checkout(const std::string &checkout_dir);
+enum class McpBridge { Open, NeedsToken, Off, Unknown };
+// From the HTTP status of a GET on <origin>/api/layerling-mcp: 200 open, 401/403 needs the token
+// (or answers only to localhost), 404 off (production build / static copy), anything else unknown.
+McpBridge mcp_bridge_from_status(unsigned status);
+// The client must send LAYERLING_MCP_TOKEN: always for a server elsewhere, and for one on this
+// computer that answered as a production server with remote use switched on (401/403).
+bool mcp_needs_token(const std::string &origin, McpBridge bridge);
+
 } // namespace layerling
 } // namespace Slic3r
 
