@@ -67,6 +67,9 @@ struct Calib_Params
     // Radius is clamped to stringing_grid_max_fillet_radius() so the foot stays on the plate.
     bool   fillet_base         = true;
     double fillet_radius       = 3.0;
+    // Owner: keep the user's z-hop by default (no z-hop can itself reduce stringing, and a hop-free
+    // nozzle knocks tall towers over more easily). True sets z_hop and filament_z_hop to 0 for the test.
+    bool   disable_z_hop       = false;
 
     CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
@@ -144,12 +147,23 @@ void                 make_stringing_grid(Model &model, const Calib_Params &param
 // Persisted name for Calib_Temp_Retract_Grid. Never serialize CalibMode as an int (F12).
 static constexpr const char *calib_temp_retract_grid_mode_name = "temp_retract_grid_calib_mode";
 
-// Forced slicer settings for the stringing grid. Raft is disabled: band Z is relative
-// to the object's first printed layer, and a raft would only add unused layers (F11).
+// The slicer settings the stringing grid needs, and nothing else (owner: keep the user's retraction setup):
+//   print_sequence = by layer        columns in a fixed order every layer
+//   enable_prime_tower = false       single toolhead v1, and the bed fit leaves no room for it
+//   wipe_inward = false              no inward wipe hiding the strings (the G-code also forces it)
+//   raft_layers = 0                  band Z is relative to the object's first printed layer (F11)
+//   enable_support = false           nothing to support; support would add travels between pillars
+//   reduce_crossing_wall = false     the travel must cross the gap between the pillars, not detour
+//   use_firmware_retraction = false  each column's length is written as G1 E (G10 has no length)
+// With disable_z_hop also z_hop and filament_z_hop = 0. z_hop_types, retract_lift_above/below, wipe,
+// retract_when_changing_layer, retraction_minimum_travel, restart extra and resonance avoidance are left
+// as the user has them. Wipe still retracts each column's length: the wipe reads the extruder's
+// retraction_length, which the per-column hook sets.
 void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
                                         DynamicPrintConfig &filament_config,
                                         DynamicPrintConfig &printer_config,
-                                        int                 filament_idx);
+                                        int                 filament_idx,
+                                        bool                disable_z_hop = false);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.

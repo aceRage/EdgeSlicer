@@ -1055,6 +1055,18 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     wait_sizer->Add(wait_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     settings_sizer->Add(wait_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
 
+    // Owner: keep the user's z-hop unless asked (no z-hop can itself reduce stringing and makes the towers
+    // easier to knock over). Unticked = "Keep my z-hop".
+    auto zhop_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbNoZHop      = new CheckBox(this);
+    m_cbNoZHop->SetValue(false);
+    auto zhop_text = new wxStaticText(this, wxID_ANY, _L("Disable z-hop for this test"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbNoZHop->SetToolTip(_L("Off (default): keep your z-hop and lift settings. On: z-hop 0 for this test only."));
+    zhop_text->SetToolTip(m_cbNoZHop->GetToolTipText());
+    zhop_sizer->Add(m_cbNoZHop, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    zhop_sizer->Add(zhop_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(zhop_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
     // Owner (real print): the towers snapped at the plate. Concave fillet foot under every pillar.
     auto fillet_sizer = new wxBoxSizer(wxHORIZONTAL);
     m_cbFillet        = new CheckBox(this);
@@ -1114,6 +1126,7 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     // looked locked (owner hand test).
     m_cbLabels->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
     m_cbWaitTemp->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
+    m_cbNoZHop->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
 
     wxGetApp().UpdateDlgDarkUI(this);
     update_summary();
@@ -1168,6 +1181,7 @@ void TempRetract_Calibration_Dlg::reset_to_defaults()
     m_tiRetractStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_step));
     m_cbLabels->SetValue(p.print_labels);
     m_cbWaitTemp->SetValue(p.wait_for_temperature);
+    m_cbNoZHop->SetValue(p.disable_z_hop);
     m_cbFillet->SetValue(p.fillet_base);
     m_tiFilletRadius->GetTextCtrl()->SetValue(wxString::FromDouble(p.fillet_radius));
     m_tiFilletRadius->Enable(p.fillet_base);
@@ -1213,6 +1227,7 @@ bool TempRetract_Calibration_Dlg::read_params(Calib_Params &params, wxString *er
     params.retract_lengths.clear();
     params.print_labels         = m_cbLabels->GetValue();
     params.wait_for_temperature = m_cbWaitTemp->GetValue();
+    params.disable_z_hop        = m_cbNoZHop->GetValue();
     params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
     std::string err;
     if (!stringing_grid_params_valid(params, bed_width(), &err)) {

@@ -608,52 +608,80 @@ TEST_CASE("Stringing grid rejects a temperature range that is not a whole number
     }
 }
 
-TEST_CASE("Stringing grid slicer config neutralises filament retraction overrides", "[Calib][TempRetract]")
+TEST_CASE("Stringing grid slicer config keeps the user's z-hop and retraction setup by default", "[Calib][TempRetract]")
 {
-    // F6
-    DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();
-    DynamicPrintConfig filament = print;
-    DynamicPrintConfig printer  = print;
-    filament.set_deserialize_strict({{"filament_z_hop", "0.6"},
-                                     {"filament_retract_when_changing_layer", "0"},
-                                     {"filament_retraction_minimum_travel", "5"}});
-    apply_stringing_grid_slicer_config(print, filament, printer, 0);
-    const auto *zh = filament.option<ConfigOptionFloatsNullable>("filament_z_hop");
-    const auto *rl = filament.option<ConfigOptionBoolsNullable>("filament_retract_when_changing_layer");
-    const auto *mt = filament.option<ConfigOptionFloatsNullable>("filament_retraction_minimum_travel");
-    REQUIRE(zh != nullptr);
-    REQUIRE(rl != nullptr);
-    REQUIRE(mt != nullptr);
-    CHECK(zh->get_at(0) == Approx(0.));
-    CHECK(rl->get_at(0));
-    CHECK(mt->get_at(0) == Approx(1.));
+    // Owner (after a real print): keep my z-hop by default; only the option sets it to 0. Wipe, retract on
+    // layer change, minimum travel, restart extra and resonance avoidance are never touched.
+    DynamicPrintConfig base = DynamicPrintConfig::full_print_config();
+    base.set_deserialize_strict({{"z_hop", "0.4"},
+                                 {"wipe", "1"},
+                                 {"retract_when_changing_layer", "0"},
+                                 {"retraction_minimum_travel", "3"},
+                                 {"retract_restart_extra", "0.1"},
+                                 {"filament_z_hop", "0.6"},
+                                 {"filament_wipe", "1"},
+                                 {"filament_retract_when_changing_layer", "0"},
+                                 {"filament_retraction_minimum_travel", "5"},
+                                 {"filament_retract_restart_extra", "0.2"}});
+    const std::string keys[] = {"wipe", "retract_when_changing_layer", "retraction_minimum_travel", "retract_restart_extra",
+                                "resonance_avoidance", "z_hop_types", "retract_lift_above", "retract_lift_below",
+                                "filament_wipe", "filament_retract_when_changing_layer", "filament_retraction_minimum_travel",
+                                "filament_retract_restart_extra"};
+    auto untouched = [&](const DynamicPrintConfig &after) {
+        for (const std::string &key : keys) {
+            CAPTURE(key);
+            const ConfigOption *a = after.option(key);
+            const ConfigOption *b = base.option(key);
+            REQUIRE(a != nullptr);
+            REQUIRE(b != nullptr);
+            CHECK(a->serialize() == b->serialize());
+        }
+    };
+    SECTION("default: z-hop kept")
+    {
+        DynamicPrintConfig print = base, filament = base, printer = base;
+        apply_stringing_grid_slicer_config(print, filament, printer, 0);
+        CHECK(printer.option<ConfigOptionFloats>("z_hop")->get_at(0) == Approx(0.4));
+        CHECK(filament.option<ConfigOptionFloatsNullable>("filament_z_hop")->get_at(0) == Approx(0.6));
+        untouched(printer);
+        untouched(filament);
+        // What the test does need.
+        CHECK(print.opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByLayer);
+        CHECK_FALSE(printer.opt_bool("use_firmware_retraction"));
+    }
+    SECTION("Disable z-hop for this test: printer and filament z-hop 0, nothing else")
+    {
+        DynamicPrintConfig print = base, filament = base, printer = base;
+        apply_stringing_grid_slicer_config(print, filament, printer, 0, true);
+        CHECK(printer.option<ConfigOptionFloats>("z_hop")->get_at(0) == Approx(0.));
+        CHECK(filament.option<ConfigOptionFloatsNullable>("filament_z_hop")->get_at(0) == Approx(0.));
+        untouched(printer);
+        untouched(filament);
+    }
+    SECTION("the dialog defaults keep z-hop")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 220., 190., 240., 5.);
+        CHECK_FALSE(p.disable_z_hop);
+    }
 }
 
-TEST_CASE("Stringing grid slicer config neutralises plain (non-nullable) filament overrides", "[Calib][TempRetract]")
+TEST_CASE("Stringing grid slicer config disables a plain (non-nullable) filament z-hop", "[Calib][TempRetract]")
 {
-    // F12: the same keys stored as the plain vector classes are set too.
+    // F12: filament_z_hop stored as the plain vector class is set too, on every entry.
     DynamicPrintConfig print   = DynamicPrintConfig::full_print_config();
     DynamicPrintConfig printer = print;
     DynamicPrintConfig filament;
     filament.set_key_value("filament_z_hop", new ConfigOptionFloats({0.6, 0.4}));
-    filament.set_key_value("filament_retract_when_changing_layer", new ConfigOptionBools({false, false}));
-    filament.set_key_value("filament_retraction_minimum_travel", new ConfigOptionFloats({5., 3.}));
     filament.set_key_value("filament_wipe", new ConfigOptionBools({true, true}));
     REQUIRE_FALSE(filament.optptr("filament_z_hop")->nullable());
-    apply_stringing_grid_slicer_config(print, filament, printer, 1);
+    apply_stringing_grid_slicer_config(print, filament, printer, 1, true);
     const auto *zh = filament.option<ConfigOptionFloats>("filament_z_hop");
-    const auto *rl = filament.option<ConfigOptionBools>("filament_retract_when_changing_layer");
-    const auto *mt = filament.option<ConfigOptionFloats>("filament_retraction_minimum_travel");
     const auto *wp = filament.option<ConfigOptionBools>("filament_wipe");
     REQUIRE(zh != nullptr);
-    REQUIRE(rl != nullptr);
-    REQUIRE(mt != nullptr);
     REQUIRE(wp != nullptr);
     for (size_t i = 0; i < 2; ++i) {
         CHECK(zh->get_at(i) == Approx(0.));
-        CHECK(rl->get_at(i));
-        CHECK(mt->get_at(i) == Approx(1.));
+        CHECK(wp->get_at(i)); // wipe is the user's
     }
-    CHECK(wp->get_at(0));       // only the selected filament's entry is touched
-    CHECK_FALSE(wp->get_at(1));
 }

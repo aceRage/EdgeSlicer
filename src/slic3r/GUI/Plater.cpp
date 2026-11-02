@@ -21545,7 +21545,7 @@ void Plater::calib_temp_retraction(const Calib_Params& params)
         }
     }
 
-    apply_stringing_grid_slicer_config(*print_config, *filament_config, *printer_config, filament_idx);
+    apply_stringing_grid_slicer_config(*print_config, *filament_config, *printer_config, filament_idx, params.disable_z_hop);
 
     auto *max_lh = printer_config->option<ConfigOptionFloats>("max_layer_height");
     if (max_lh && !max_lh->values.empty() && max_lh->values[0] < 0.2)

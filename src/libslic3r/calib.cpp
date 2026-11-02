@@ -1271,8 +1271,12 @@ void set_vector_option(DynamicPrintConfig &cfg, const char *key, int idx, Value 
 void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
                                         DynamicPrintConfig &filament_config,
                                         DynamicPrintConfig &printer_config,
-                                        int                 filament_idx)
+                                        int                 filament_idx,
+                                        bool                disable_z_hop)
 {
+    // Only what the test needs; see the list in calib.hpp. Owner (after a real print): the earlier version
+    // also forced z-hop 0, wipe off, retract on layer change, 1 mm minimum travel, no restart extra and no
+    // resonance avoidance, which skewed the result away from how the user actually prints.
     print_config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(PrintSequence::ByLayer));
     print_config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
     print_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
@@ -1281,33 +1285,16 @@ void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
     print_config.set_key_value("reduce_crossing_wall", new ConfigOptionBool(false));
 
     printer_config.set_key_value("use_firmware_retraction", new ConfigOptionBool(false));
-    printer_config.set_key_value("resonance_avoidance", new ConfigOptionBool(false));
-    if (auto *opt = printer_config.option<ConfigOptionBools>("wipe"))
-        for (auto &v : opt->values)
-            v = false;
-    if (auto *opt = printer_config.option<ConfigOptionBools>("retract_when_changing_layer"))
-        for (auto &v : opt->values)
-            v = true;
-    if (auto *opt = printer_config.option<ConfigOptionFloats>("retraction_minimum_travel"))
-        for (auto &v : opt->values)
-            v = 1.;
-    if (auto *opt = printer_config.option<ConfigOptionFloats>("z_hop"))
-        for (auto &v : opt->values)
-            v = 0.;
-    if (auto *opt = printer_config.option<ConfigOptionFloats>("retract_restart_extra"))
-        for (auto &v : opt->values)
-            v = 0.;
 
-    // F12: the filament_* overrides are registered nullable (PrintConfig add_nullable), but a config built
-    // elsewhere can carry the plain vector type; ConfigBase::option<T>() only compares type(), so pick the
-    // concrete class from nullable() instead of casting blindly.
-    const int idx = std::max(filament_idx, 0);
-    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_wipe", idx, false);
-    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retract_restart_extra", idx, 0.);
-    // F6: filament-level overrides win over the printer values forced above; neutralise them on every entry.
-    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_z_hop", -1, 0.);
-    set_vector_option<ConfigOptionBools, ConfigOptionBoolsNullable>(filament_config, "filament_retract_when_changing_layer", -1, true);
-    set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_retraction_minimum_travel", -1, 1.);
+    if (disable_z_hop) {
+        if (auto *opt = printer_config.option<ConfigOptionFloats>("z_hop"))
+            for (auto &v : opt->values)
+                v = 0.;
+        // F6/F12: the filament override wins over the printer value, and may be stored as the plain or the
+        // nullable class; set it on every entry.
+        set_vector_option<ConfigOptionFloats, ConfigOptionFloatsNullable>(filament_config, "filament_z_hop", -1, 0.);
+    }
+    (void) filament_idx; // kept for callers; no per-filament override is needed any more
 }
 
 std::string stringing_grid_column_name(int column)

@@ -153,6 +153,7 @@ protected:
     CheckBox  *m_cbLabels;
     CheckBox  *m_cbWaitTemp;
     CheckBox  *m_cbFillet;
+    CheckBox  *m_cbNoZHop;
     wxStaticText *m_stSummary;
     wxStaticText *m_stRangeNote;
     Plater    *m_plater;
