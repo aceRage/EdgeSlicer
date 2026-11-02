@@ -70,7 +70,7 @@ else()
     set(SLIC3R_SENTRY_DEFAULT OFF)
 endif()
 option(SLIC3R_SENTRY "Enable Sentry crash reporting SDK" ${SLIC3R_SENTRY_DEFAULT})
-# Must match the main project's SLIC3R_CAD. Default OFF until Design-tab sources land (P1).
+# Must match the main project's SLIC3R_CAD. Default OFF (Design tab stays dark until P2 GUI).
 # OFF (default): OCCT 7.6.0 and no SolveSpace, exactly the deps every shared prefix, CI and
 # release build use. ON: OCCT 8.0.1 (deps/OCCT/OCCT.cmake) plus the SolveSpace solver (deps/SLVS),
 # e.g. edgebuild's "cad" deps profile (C:/Dev/edgebuild/deps_profile/build_deps_profile.bat passes
