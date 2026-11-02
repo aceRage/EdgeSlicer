@@ -140,12 +140,6 @@ std::array<double, 3> blender_from_mm(const std::array<double, 3> &mm)
     return { mm[0] * BLENDER_MM_TO_M, mm[1] * BLENDER_MM_TO_M, mm[2] * BLENDER_MM_TO_M };
 }
 
-float srgb_to_linear(float c)
-{
-    c = std::clamp(c, 0.f, 1.f);
-    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-}
-
 std::array<float, 3> hex_to_linear(const std::string &hex, const std::array<float, 3> &fallback)
 {
     std::array<float, 4> rgba;

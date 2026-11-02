@@ -51,8 +51,7 @@ std::array<float, 3>  gltf_from_mm(double x, double y, double z);
 // EdgeSlicer (Z up, mm) -> Blender (Z up, m).
 std::array<double, 3> blender_from_mm(const std::array<double, 3> &mm);
 
-// sRGB 0..1 -> linear.
-float                srgb_to_linear(float c);
+// "#RRGGBB" -> linear RGB (srgb_to_linear() of ShowcaseTone.hpp per channel).
 std::array<float, 3> hex_to_linear(const std::string &hex, const std::array<float, 3> &fallback = { { 1.f, 1.f, 1.f } });
 
 // --- materials -----------------------------------------------------------------------------------

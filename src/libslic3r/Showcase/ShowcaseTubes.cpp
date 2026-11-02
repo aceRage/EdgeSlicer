@@ -103,7 +103,7 @@ void tube_emit(const TubeRun &run, int sides, float bulge, TubeMesh &mesh)
 
     const double p_exp = std::max(2., double(bulge));
     // The ring's shape, the same for every point: unit superellipse positions and their normals' parts.
-    std::vector<std::array<double, 4>> ring(size_t(sides));
+    std::vector<std::array<double, 4>> ring(static_cast<size_t>(sides));
     for (int j = 0; j < sides; ++j) {
         const double th = TUBE_PI / double(sides) + 2. * TUBE_PI * double(j) / double(sides);
         const double c = std::cos(th), s = std::sin(th);
