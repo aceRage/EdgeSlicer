@@ -271,7 +271,7 @@ private:
             return false;
         if (messages != FALSE || host_objects != FALSE)
             return false;
-        m_view->AddScriptToExecuteOnDocumentCreated(boost::nowide::widen(layerling::hide_save_picker_script()).c_str(), nullptr);
+        m_view->AddScriptToExecuteOnDocumentCreated(boost::nowide::widen(layerling::document_start_script()).c_str(), nullptr);
         return true;
     }
 

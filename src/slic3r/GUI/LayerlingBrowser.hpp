@@ -29,7 +29,10 @@ namespace GUI {
 //    of saving them; that works whatever the page's origin is.
 //  - window.showSaveFilePicker is hidden before the page's scripts run, so Layerling's exports
 //    take its download path (the one it uses in Firefox and Safari) instead of a save dialog that
-//    writes past us. Nothing of Layerling's own files is changed.
+//    writes past us. The same document-start script (layerling::document_start_script) sets
+//    Layerling's own "install hint dismissed" flag, so its "Install as an app" banner, which
+//    points at browser controls this view does not have, stays away. Nothing of Layerling's own
+//    files is changed.
 //  - Permissions are denied except the ones an editor in a tab needs (clipboard, several
 //    downloads in a row, opening local files the user picks).
 class LayerlingBrowser

@@ -448,6 +448,25 @@ TEST_CASE("Layerling: what stays in the tab", "[Layerling]")
     CHECK(std::string(hide_save_picker_script()).find("showSaveFilePicker") != std::string::npos);
 }
 
+TEST_CASE("Layerling: the document-start script hides the save picker and the install banner", "[Layerling]")
+{
+    const std::string hint = suppress_install_hint_script();
+    // Layerling 1.131.1 skips its "Install layerling as an app" banner when this key holds "1".
+    CHECK(std::string(INSTALL_HINT_DISMISSED_KEY) == "layerling.installHintDismissed");
+    CHECK(hint.find(std::string("'") + INSTALL_HINT_DISMISSED_KEY + "'") != std::string::npos);
+    CHECK(hint.find("setItem(k,'1')") != std::string::npos);
+    CHECK(hint.find("window.top!==window") != std::string::npos); // top frame only
+    CHECK(hint.find("try{") != std::string::npos);                // storage errors never break the page
+    // Not by pretending to be an installed app: that changes Layerling's tooltips too.
+    CHECK(hint.find("display-mode") == std::string::npos);
+    const std::string all = document_start_script();
+    CHECK(all.find("showSaveFilePicker") != std::string::npos);
+    CHECK(all.find(INSTALL_HINT_DISMISSED_KEY) != std::string::npos);
+    // Two independent statements: one failing cannot skip the other.
+    CHECK(all == std::string(hide_save_picker_script()) + hint);
+    CHECK(all.find("})();(function(){") != std::string::npos);
+}
+
 TEST_CASE("Layerling: SHA-256 of a stream", "[Layerling]")
 {
     Sha256 a;

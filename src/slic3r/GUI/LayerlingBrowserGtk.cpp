@@ -185,7 +185,7 @@ private:
         m_native = static_cast<WebKitWebView *>(m_view->GetNativeBackend());
         if (m_native != nullptr) {
             if (WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(m_native)) {
-                WebKitUserScript *script = webkit_user_script_new(layerling::hide_save_picker_script(), WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+                WebKitUserScript *script = webkit_user_script_new(layerling::document_start_script().c_str(), WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
                                                                   WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
                 webkit_user_content_manager_add_script(ucm, script);
                 webkit_user_script_unref(script);

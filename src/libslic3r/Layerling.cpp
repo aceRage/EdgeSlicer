@@ -551,6 +551,17 @@ const char *hide_save_picker_script()
            "catch(e){try{delete window.showSaveFilePicker;}catch(e2){}}})();";
 }
 
+const char *suppress_install_hint_script()
+{
+    return "(function(){try{if(window.top!==window)return;var k='layerling.installHintDismissed';"
+           "if(window.localStorage.getItem(k)!=='1')window.localStorage.setItem(k,'1');}catch(e){}})();";
+}
+
+std::string document_start_script()
+{
+    return std::string(hide_save_picker_script()) + suppress_install_hint_script();
+}
+
 std::string start_url(const std::string &base_url)
 {
     const std::string o = origin_of(base_url);

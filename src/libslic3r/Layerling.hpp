@@ -149,6 +149,18 @@ Navigation decide_navigation(const std::string &url, const std::string &allowed_
 // downloads (which the tab hands to the plate) rather than writes through a save dialog.
 const char *hide_save_picker_script();
 
+// Layerling's own "Install layerling as an app" banner, which points at browser controls our view
+// does not have (and an installed app would keep its designs apart from the tab's). The banner is
+// skipped when localStorage "layerling.installHintDismissed" is "1" - what its own Dismiss writes
+// (checked in the 1.131.1 bundle) - so this script writes that flag before the page's scripts run,
+// in the top frame only. Unlike pretending to be an installed app (display-mode: standalone), it
+// changes nothing else in Layerling.
+constexpr const char *INSTALL_HINT_DISMISSED_KEY = "layerling.installHintDismissed";
+const char *suppress_install_hint_script();
+
+// Everything the tab runs before the page's own scripts: the two above, each in its own try block.
+std::string document_start_script();
+
 // The page URL for a base URL: the base itself, with a trailing '/' added to a bare origin.
 std::string start_url(const std::string &base_url);
 

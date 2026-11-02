@@ -329,7 +329,7 @@ private:
             m_store = [[WKWebsiteDataStore dataStoreForIdentifier:uuid] retain];
         }
         config.websiteDataStore = m_store != nil ? m_store : [WKWebsiteDataStore defaultDataStore];
-        WKUserScript *script = [[[WKUserScript alloc] initWithSource:to_ns(layerling::hide_save_picker_script())
+        WKUserScript *script = [[[WKUserScript alloc] initWithSource:to_ns(layerling::document_start_script())
                                                        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                                                     forMainFrameOnly:YES] autorelease];
         [config.userContentController addUserScript:script];
