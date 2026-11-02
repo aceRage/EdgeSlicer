@@ -4075,6 +4075,17 @@ void TabPrint::create_tool_selector()
         wxGetApp().CallAfter([this]() { refresh_tool_selector(); toggle_options(); });
     });
     m_tool_row->Add(m_tool_expand_btn, 0, wxALIGN_CENTER_VERTICAL);
+    // Per-nozzle process P9 (owner hand test 2026-11-02): the way back. One process for every nozzle again: the per-nozzle choices
+    // and changes of this project go (after a confirm) and the selector folds back to the "Process per nozzle..." button.
+    m_tool_collapse_btn = new Button(m_tool_panel, _L("Use one process"));
+    m_tool_collapse_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    m_tool_collapse_btn->SetToolTip(_L("Print every nozzle with the plate's process again: the processes chosen per nozzle (or rack slot) and "
+                                       "their changes in this project are removed. Nozzles of another size still get a process of their size."));
+    m_tool_collapse_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        wxGetApp().CallAfter([this]() { use_one_process(); });
+    });
+    m_tool_row->Add(m_tool_collapse_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    m_tool_collapse_btn->Hide();
     m_tool_note = new wxStaticText(m_tool_panel, wxID_ANY, wxEmptyString);
     m_tool_note->SetFont(Label::Body_12);
     m_tool_note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
@@ -4184,6 +4195,9 @@ void TabPrint::refresh_tool_selector()
         m_tool_selector->Show(expanded);
     }
     m_tool_expand_btn->Show(available && !expanded);
+    // P9: the way back, while the selector is open.
+    if (m_tool_collapse_btn != nullptr)
+        m_tool_collapse_btn->Show(available && expanded);
     // Owner hand test 2026-11-01: no help text under the selector; each button's tooltip says what it prints with.
     m_tool_note->Hide();
     if (m_tool_selector != nullptr && expanded) {
@@ -4205,6 +4219,32 @@ void TabPrint::refresh_tool_selector()
     mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
     m_tool_panel->Layout();
     Layout();
+}
+
+void TabPrint::use_one_process()
+{
+    if (m_preset_bundle == nullptr)
+        return;
+    MessageDialog dlg(wxGetApp().mainframe,
+                      _L("Use the plate's process for every nozzle again?\n\nThe processes chosen per nozzle (or rack slot) and their unsaved "
+                         "changes in this project are removed. Nozzles of another size than the plate's process still get a process of "
+                         "their size automatically."),
+                      _L("Use one process"), wxICON_QUESTION | wxYES_NO);
+    dlg.SetButtonLabel(wxID_YES, _L("Use one process"));
+    dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
+    // NO is the harmless answer (MessageDialog answers YES for a phone / agent request): a remote YES only clears choices.
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+    show_tool(-1);
+    m_preset_bundle->clear_nozzle_processes();
+    m_tools_expanded = false;
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: one process for every nozzle again (per-nozzle choices and changes cleared)";
+    refresh_tool_selector();
+    toggle_options();
+    if (wxGetApp().plater() != nullptr) {
+        wxGetApp().plater()->update_project_dirty_from_presets();
+        wxGetApp().plater()->on_config_change(m_preset_bundle->full_config());
+    }
 }
 
 std::string TabPrint::shown_tool_id() const
@@ -7729,10 +7769,11 @@ if (is_marlin_flavor)
                         label->Hide();
                         sizer->Add(edit, 0);
                         sizer->Add(label, 0, wxTOP, em / 4);
-                        auto commit = [this, extruder_idx, edit]() {
+                        // P9 (owner crash report 2026-11-02): the text is read when the box is left and stored after the event,
+                        // never inside the focus change: storing it refreshes the printer pages, which can destroy this box.
+                        auto commit = [this, extruder_idx](const std::string& text) {
                             if (m_config == nullptr)
                                 return;
-                            const std::string text = into_u8(edit->GetValue());
                             std::vector<std::string> values;
                             if (const auto* racks = m_config->option<ConfigOptionStrings>("extruder_rack_nozzle_diameter"))
                                 values = racks->values;
@@ -7749,8 +7790,17 @@ if (is_marlin_flavor)
                             on_value_change("extruder_rack_nozzle_diameter", boost::any(text));
                             update_rack_controls(extruder_idx);
                         };
-                        edit->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent&) { commit(); });
-                        edit->Bind(wxEVT_KILL_FOCUS, [commit](wxFocusEvent& evt) { evt.Skip(); commit(); });
+                        edit->Bind(wxEVT_TEXT_ENTER, [commit, edit](wxCommandEvent&) {
+                            const std::string text = into_u8(edit->GetValue());
+                            wxGetApp().CallAfter([commit, text]() { commit(text); });
+                        });
+                        edit->Bind(wxEVT_KILL_FOCUS, [commit, edit](wxFocusEvent& evt) {
+                            evt.Skip();
+                            if (edit->IsBeingDeleted())
+                                return;
+                            const std::string text = into_u8(edit->GetValue());
+                            wxGetApp().CallAfter([commit, text]() { commit(text); });
+                        });
                         // Live: what is wrong with the text as it is typed (stored on Enter or on leaving the box).
                         edit->Bind(wxEVT_TEXT, [this, extruder_idx, edit](wxCommandEvent& evt) {
                             evt.Skip();
@@ -7811,7 +7861,11 @@ if (is_marlin_flavor)
                             });
                         };
                         edit->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent&) { commit(); });
-                        edit->Bind(wxEVT_KILL_FOCUS, [commit](wxFocusEvent& evt) { evt.Skip(); commit(); });
+                        edit->Bind(wxEVT_KILL_FOCUS, [commit, edit](wxFocusEvent& evt) {
+                            evt.Skip();
+                            if (!edit->IsBeingDeleted()) // a page switch destroying the box (owner crash report 2026-11-02)
+                                commit();
+                        });
                         edit->Bind(wxEVT_TEXT, [this, extruder_idx, edit](wxCommandEvent& evt) {
                             evt.Skip();
                             update_project_rack_error(extruder_idx, into_u8(edit->GetValue()));
@@ -8227,8 +8281,9 @@ void TabPrinter::update_project_rack(size_t extruder)
     if (it == m_project_rack_controls.end() || bundle == nullptr || m_config == nullptr)
         return;
     const std::string text   = bundle->rack_nozzle_override(extruder);
-    const auto*       counts = m_config->option<ConfigOptionInts>("extruder_max_nozzle_count");
-    const bool        rack   = counts != nullptr && extruder < counts->values.size() && counts->values[extruder] > 1;
+    // A nullable vector: read it as one (a nil entry is no rack).
+    const auto*       counts = dynamic_cast<const ConfigOptionIntsNullable*>(m_config->option("extruder_max_nozzle_count"));
+    const bool        rack   = counts != nullptr && extruder < counts->values.size() && !counts->is_nil(extruder) && counts->values[extruder] > 1;
     wxTextCtrl*       edit   = it->second.first;
     if (into_u8(edit->GetValue()) != text)
         edit->ChangeValue(from_u8(text));
@@ -8719,17 +8774,33 @@ void Tab::release_page()
     if (m_held_page_depth <= 0)
         return;
     const wxString title = m_held_page;
-    select_page_by_title(title);
-    // A refresh still queued (CallAfter, the sidebar's rebuild) may rebuild the pages once more: show it again after those, then
-    // let go.
-    wxGetApp().CallAfter([this, title]() {
+    // Never switch pages from here synchronously: release_page() runs inside a field's handler, and showing another page
+    // destroys that page's fields under the running callback (owner crash report 2026-11-02). Once the handler and the refreshes
+    // it queued are done (two idle passes), put the page back, but only when the refresh left the tab on the page a rebuild
+    // falls back to (the first extruder page or the first page): a page the user clicked meanwhile is left alone.
+    auto restore = [this, title]() {
+        if (!wxGetApp().checked_tab(this) || m_tabctrl == nullptr)
+            return;
+        const int      sel            = m_tabctrl->GetSelection();
+        const wxString shown          = sel >= 0 ? m_tabctrl->GetItemText(sel) : wxString();
+        const wxString held           = translate_category(title, m_type);
+        const wxString first_extruder = translate_category(wxString::Format(_L("Extruder %d"), 1), m_type);
+        if (shown != held && (sel <= 0 || shown == first_extruder || m_active_page == nullptr))
+            select_page_by_title(title);
+    };
+    wxGetApp().CallAfter([this, restore]() {
         if (!wxGetApp().checked_tab(this))
             return;
-        select_page_by_title(title);
-        if (--m_held_page_depth <= 0) {
-            m_held_page_depth = 0;
-            m_held_page.Clear();
-        }
+        restore();
+        wxGetApp().CallAfter([this, restore]() {
+            if (!wxGetApp().checked_tab(this))
+                return;
+            restore();
+            if (--m_held_page_depth <= 0) {
+                m_held_page_depth = 0;
+                m_held_page.Clear();
+            }
+        });
     });
 }
 
@@ -8741,10 +8812,13 @@ void Tab::rebuild_page_tree()
     // BBS: fix new layout, record last select
     if (sel_item < 0)
         sel_item = m_last_select_item;
-    // Per-nozzle process P9: a held page wins over whatever the tab control shows (owner bug: Extruder 1 after a diameter change).
-    const wxString selected = !m_held_page.IsEmpty() ? translate_category(m_held_page, m_type) :
-                              sel_item >= 0          ? m_tabctrl->GetItemText(sel_item) :
-                                                       wxString();
+    // Per-nozzle process P9: a held page wins when the page list lost its selection (the shown page was erased and is rebuilt).
+    // Only then: switching away from a page that is still shown, inside its own field's handler, would destroy that field
+    // under the running callback (owner crash report 2026-11-02, Extruder 2 on the H2C).
+    const bool     use_held = !m_held_page.IsEmpty() && (m_active_page == nullptr || sel_item < 0);
+    const wxString selected = use_held      ? translate_category(m_held_page, m_type) :
+                              sel_item >= 0 ? m_tabctrl->GetItemText(sel_item) :
+                                              wxString();
     if (!m_held_page.IsEmpty() && (sel_item < 0 || m_tabctrl->GetItemText(sel_item) != selected))
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: page list rebuilt while '" << into_u8(m_held_page) << "' is held; the tab control was on '"
                                 << (sel_item >= 0 ? into_u8(m_tabctrl->GetItemText(sel_item)) : std::string("none")) << "'";

@@ -692,6 +692,9 @@ public:
     std::string                 nozzle_tool_name(size_t tool) const;
     // The process chosen for a tool ("" = none).
     std::string                 nozzle_tool_selection(size_t tool) const;
+    // "Use one process" (the Process tab's way back): every per-nozzle and per-slot choice and change of the project is dropped
+    // (the tool view ends first). True when something was set.
+    bool                        clear_nozzle_processes();
     // The project's rack sizes (extruder_rack_nozzle_override): extruder `extruder`'s text, "" = the printer preset's rack.
     std::string                 rack_nozzle_override(size_t extruder) const;
     // Set one extruder's text, or all of them; prunes the slot choices that went away. True when it changed.

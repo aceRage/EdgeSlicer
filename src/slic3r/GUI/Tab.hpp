@@ -606,6 +606,8 @@ private:
 	wxBoxSizer*				m_tool_row          = nullptr;
 	SegmentedToggle*		m_tool_selector     = nullptr;
 	Button*					m_tool_expand_btn   = nullptr;
+	Button*					m_tool_collapse_btn = nullptr; // P9: "Use one process", the way back
+	void					use_one_process();
 	wxStaticText*			m_tool_note         = nullptr;
 	std::vector<wxString>	m_tool_labels;
 	// Per-nozzle process P9: the tool (PresetBundle tool index: extruders, then rack slots) of each selector entry after Plate.

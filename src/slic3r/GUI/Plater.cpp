@@ -56,6 +56,7 @@
 
 #include <wx/sizer.h>
 #include <wx/stattext.h>
+#include <wx/textdlg.h>
 #include <wx/button.h>
 #include <wx/bmpcbox.h>
 #include <wx/statbox.h>
@@ -4034,6 +4035,35 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
 
     combobox->edit_btn = edit_btn;
 
+    // Per-nozzle process P9 (owner idea 2026-11-02): on a toolchanger without an AMS (U1 class), the toolhead this filament prints
+    // on, always visible: click = the next toolhead, right-click = pick one. The filament menu's "Print on nozzle" is the same
+    // setting (filament_nozzle_assignment).
+    Button* tool_btn = new Button(p->m_panel_scrolled_filament_content, "T1");
+    tool_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    tool_btn->Bind(wxEVT_BUTTON, [this, filament_idx](wxCommandEvent&) {
+        wxGetApp().CallAfter([this, filament_idx]() { cycle_filament_tool(size_t(filament_idx)); });
+    });
+    tool_btn->Bind(wxEVT_RIGHT_DOWN, [this, tool_btn, filament_idx](wxMouseEvent&) {
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
+            return;
+        const std::vector<size_t> tools = bundle->filament_nozzles();
+        const std::vector<double> sizes = bundle->effective_nozzle_diameters();
+        wxMenu                    menu;
+        for (size_t t = 0; t < sizes.size(); ++t) {
+            const int id = wxWindow::NewControlId();
+            menu.AppendCheckItem(id, wxString::Format("T%d  %s mm", int(t + 1), from_u8(format_diameter_to_str(sizes[t]))));
+            menu.Check(id, size_t(filament_idx) < tools.size() && tools[size_t(filament_idx)] == t);
+            menu.Bind(wxEVT_MENU, [this, filament_idx, t](wxCommandEvent&) {
+                wxGetApp().CallAfter([this, filament_idx, t]() { set_filament_nozzle(size_t(filament_idx), int(t + 1)); });
+            }, id);
+        }
+        tool_btn->PopupMenu(&menu);
+    });
+    tool_btn->Hide();
+    combobox->tool_btn = tool_btn;
+    combo_and_btn_sizer->Add(tool_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2));
+
     combo_and_btn_sizer->Add(edit_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2)); // ElementSpacing - 2 (from combo box))
 
     combo_and_btn_sizer->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
@@ -4786,6 +4816,56 @@ void Sidebar::update_filament_nozzle_summary()
         p->m_panel_filament_content->Layout();
         Layout();
     }
+    update_filament_tool_buttons();
+}
+
+void Sidebar::update_filament_tool_buttons()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+    // Toolchangers that take an assignment (U1 class, no AMS); Bambu's grouping machines route filaments themselves.
+    const bool                supported = bundle->filament_nozzle_assignment_supported();
+    const std::vector<size_t> tools     = supported ? bundle->filament_nozzles() : std::vector<size_t>();
+    const std::vector<double> sizes     = bundle->effective_nozzle_diameters();
+    bool                      changed   = false;
+    for (size_t f = 0; f < p->combos_filament.size(); ++f) {
+        PlaterPresetComboBox *combo = p->combos_filament[f];
+        if (combo == nullptr || combo->tool_btn == nullptr)
+            continue;
+        auto      *btn  = static_cast<Button *>(combo->tool_btn);
+        const bool show = supported && f < tools.size();
+        if (show) {
+            const size_t   t     = tools[f];
+            const wxString label = wxString::Format("T%d", int(t + 1));
+            if (btn->GetLabel() != label)
+                btn->SetLabel(label);
+            btn->SetToolTip(wxString::Format(_L("Filament %d prints on toolhead T%d (%s mm). Click: the next toolhead. Right-click: choose one."),
+                                             int(f + 1), int(t + 1), from_u8(format_diameter_to_str(t < sizes.size() ? sizes[t] : 0.))));
+        }
+        if (btn->IsShown() != show) {
+            btn->Show(show);
+            changed = true;
+        }
+    }
+    if (changed) {
+        p->m_panel_filament_content->Layout();
+        Layout();
+    }
+}
+
+void Sidebar::cycle_filament_tool(size_t filament)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
+        return;
+    const std::vector<size_t> tools = bundle->filament_nozzles();
+    const size_t              count = bundle->effective_nozzle_diameters().size();
+    if (filament >= tools.size() || count == 0)
+        return;
+    const size_t next = (tools[filament] + 1) % count;
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: filament " << filament + 1 << " toolhead button: T" << tools[filament] + 1 << " -> T" << next + 1;
+    set_filament_nozzle(filament, int(next + 1));
 }
 
 void Sidebar::set_filament_nozzle(size_t filament, int tool)
@@ -4820,6 +4900,43 @@ void Sidebar::set_filament_rack_pin(size_t filament, double diameter)
     BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filament " << filament + 1 << " pinned to rack nozzle size " << diameter;
     wxGetApp().plater()->update_project_dirty_from_presets();
     wxGetApp().plater()->on_config_change(bundle->full_config());
+}
+
+void Sidebar::edit_rack_nozzles(size_t extruder)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return;
+    const std::vector<double> sizes = bundle->effective_nozzle_diameters();
+    if (extruder >= sizes.size())
+        return;
+    // The rack as this project has it (the preset's when the project sets none); none at all: two slots of the extruder's size.
+    std::string text = bundle->rack_nozzle_override(extruder);
+    if (text.empty())
+        if (const auto *racks = bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter");
+            racks != nullptr && extruder < racks->values.size())
+            text = racks->values[extruder];
+    if (text.empty())
+        text = format_nozzle_diameter_word(sizes[extruder]) + ", " + format_nozzle_diameter_word(sizes[extruder]);
+    for (;;) {
+        wxTextEntryDialog dlg(wxGetApp().mainframe,
+                              _L("The nozzle in each rack slot, separated by commas, slot 1 first (e.g. 0.4, 0.4, 0.6). The extruder's own "
+                                 "nozzle size must be one of them. With two or more nozzles each slot is a tool of its own (Process tab, "
+                                 "filament menu > Rack slot). Empty: no rack slots.\nThe printer preset is not changed."),
+                              _L("Rack nozzles in this project"), from_u8(text));
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        text = into_u8(dlg.GetValue());
+        const std::string error = validate_rack_nozzle_text(text, sizes[extruder]);
+        if (error.empty())
+            break;
+        MessageDialog(wxGetApp().mainframe, _L("Not usable") + ": " + from_u8(error), _L("Rack nozzles in this project"), wxOK | wxICON_WARNING)
+            .ShowModal();
+    }
+    if (bundle->set_rack_nozzle_override(extruder, text)) {
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: rack of extruder " << extruder + 1 << " in this project: '" << text << "' (sidebar)";
+        on_nozzle_sizes_changed();
+    }
 }
 
 void Sidebar::set_filament_rack_slot(size_t filament, int slot)
@@ -10757,6 +10874,10 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
     wxWindowUpdateLocker noUpdates(p->m_nozzle_notebook);
 
+    // Per-nozzle process P9 (owner hand test 2026-11-02): the rebuild below put the notebook back on its first tab (Left Nozzle)
+    // after a Right Nozzle diameter change. Show the tab that was shown, when the printer still has it.
+    const int shown_nozzle_tab = p->m_nozzle_notebook->GetPageCount() > 0 ? p->m_nozzle_notebook->GetSelection() : -1;
+
     // Clear existing pages and controls
     p->m_nozzle_notebook->DeleteAllPages();
     p->m_nozzle_diameter_lists.clear();
@@ -10980,7 +11101,51 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
         tab_sizer->Add(diameter_sizer, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
 
-        nozzle_panel->SetSizer(tab_sizer);
+        // Per-nozzle process P9 (owner hand test 2026-11-02): an extruder with a nozzle rack (H2C right) shows its rack slots
+        // here, with Edit (the project's "Rack nozzles in this project") and Sync. Each slot of two or more is a tool of its
+        // own on the Process tab and in the filament menu.
+        wxBoxSizer* panel_sizer = new wxBoxSizer(wxVERTICAL);
+        panel_sizer->Add(tab_sizer, 0, wxEXPAND);
+        if (const auto* counts = dynamic_cast<const ConfigOptionIntsNullable*>(printer_cfg.option("extruder_max_nozzle_count"));
+            counts != nullptr && i < counts->values.size() && !counts->is_nil(i) && counts->values[i] > 1) {
+            const DynamicPrintConfig sized = bundle.printer_config_with_project_sizes();
+            const auto               racks = extruder_rack_nozzles(sized);
+            wxString                 rack_text;
+            if (i < racks.size())
+                for (size_t k = 0; k < racks[i].size(); ++k)
+                    rack_text += (k == 0 ? wxString() : wxString(", ")) + wxString::Format("%d: %s", int(k + 1),
+                                                                                         from_u8(format_nozzle_diameter_word(racks[i][k].diameter)));
+            wxBoxSizer*   rack_sizer = new wxBoxSizer(wxHORIZONTAL);
+            wxStaticText* rack_label = new wxStaticText(nozzle_panel, wxID_ANY, _L("Rack"));
+            rack_label->SetForegroundColour(is_dark ? wxColor(194, 194, 194) : wxColor(0, 0, 0));
+            rack_label->SetFont(Label::Body_14);
+            const bool    has_slots = i < racks.size() && racks[i].size() >= 2;
+            wxStaticText* rack_value = new wxStaticText(nozzle_panel, wxID_ANY,
+                                                        has_slots ? rack_text + " mm" : _L("not set up: one nozzle, no rack slots"));
+            rack_value->SetFont(Label::Body_12);
+            rack_value->SetToolTip(_L("The nozzles in this extruder's rack in this project, slot 1 first. With two or more, each slot is a "
+                                      "tool of its own: its size, its process (Process tab: Right slot 1..N) and the filaments pinned to "
+                                      "it (filament menu > Rack slot). The stock printer preset declares no rack: add the slots with Edit, "
+                                      "or Sync them from a connected printer."));
+            Button* rack_edit = new Button(nozzle_panel, has_slots ? _L("Edit") : _L("Add rack slots"));
+            rack_edit->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            rack_edit->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
+                // After the click: the dialog result rebuilds these pages.
+                wxGetApp().CallAfter([this, i]() { edit_rack_nozzles(i); });
+            });
+            Button* rack_sync = new Button(nozzle_panel, _L("Sync"));
+            rack_sync->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            rack_sync->SetToolTip(_L("Read the rack's nozzles from the connected printer (the Device page's state; nothing is sent)."));
+            rack_sync->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { wxGetApp().CallAfter([this]() { sync_nozzle_sizes_from_bambu_printer(); }); });
+            rack_sizer->AddSpacer(15);
+            rack_sizer->Add(rack_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
+            rack_sizer->Add(rack_value, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
+            rack_sizer->Add(rack_edit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
+            rack_sizer->Add(rack_sync, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(15));
+            panel_sizer->Add(rack_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(4));
+        }
+
+        nozzle_panel->SetSizer(panel_sizer);
 
         // Add tab
         wxString tab_name = "";
@@ -11009,6 +11174,10 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
         p->m_nozzle_notebook->AddPage(nozzle_panel, tab_name);
     }
 
+    if (shown_nozzle_tab > 0 && size_t(shown_nozzle_tab) < p->m_nozzle_notebook->GetPageCount()) {
+        p->m_nozzle_notebook->SetSelection(size_t(shown_nozzle_tab));
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: sidebar nozzle tab " << shown_nozzle_tab + 1 << " shown again after the rebuild";
+    }
     p->m_nozzle_notebook->Layout();
 
     if (switch_machine) {

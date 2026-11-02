@@ -495,10 +495,45 @@ TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked 
         b.end_nozzle_tool_view();
         CHECK(b.nozzle_process_edits_map().count("T2.3") == 1);
         CHECK(b.prints.get_selected_preset_name() == "0.20mm Standard @BBL H2C");
+        // "Use one process": every choice and change goes.
+        {
+            const std::vector<std::string> keep  = b.project_config.option<ConfigOptionStrings>("nozzle_slot_process_presets")->values;
+            const std::vector<std::string> edits = b.project_config.option<ConfigOptionStrings>("nozzle_process_edits")->values;
+            CHECK(b.clear_nozzle_processes());
+            CHECK(nozzle_slot_process_names(b.project_config).empty());
+            CHECK(b.nozzle_process_edits_map().empty());
+            CHECK_FALSE(b.clear_nozzle_processes());
+            b.project_config.option<ConfigOptionStrings>("nozzle_slot_process_presets")->values = keep;
+            b.project_config.option<ConfigOptionStrings>("nozzle_process_edits")->values        = edits;
+        }
         // The rack shrinks to two slots: slot 3's choice and changes are dropped.
         b.set_rack_nozzle_override({ "", "0.4,0.4" });
         CHECK(nozzle_slot_process_names(b.project_config).empty());
         CHECK(b.nozzle_process_edits_map().count("T2.3") == 0);
         b.set_rack_nozzle_override({});
+    }
+    SECTION("what the Extruder pages and the sidebar read for the stock H2C (owner crash report on Extruder 2)")
+    {
+        PresetBundle &b = h2c_bundle({});
+        // The stock preset declares no rack; its rack count is a nullable vector.
+        const DynamicPrintConfig sized  = b.printer_config_with_project_sizes();
+        const auto              *counts = dynamic_cast<const ConfigOptionIntsNullable *>(sized.option("extruder_max_nozzle_count"));
+        REQUIRE(counts != nullptr);
+        REQUIRE(counts->values.size() == 2);
+        CHECK(counts->values[1] > 1);
+        const auto racks = extruder_rack_nozzles(sized);
+        REQUIRE(racks.size() == 2);
+        CHECK(racks[1].empty());
+        for (size_t e = 0; e < 2; ++e) {
+            CHECK(b.rack_nozzle_override(e).empty());
+            CHECK(validate_rack_nozzle_text(b.rack_nozzle_override(e), b.effective_nozzle_diameters()[e]).empty());
+        }
+        // Out of range and odd texts are taken without harm.
+        CHECK_FALSE(b.set_rack_nozzle_override(5, "0.4,0.6"));
+        CHECK(b.set_rack_nozzle_override(1, " 0.4, x, 0.6 "));
+        CHECK(b.nozzle_tool_count() == 4);
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 2, 3 });
+        CHECK(b.set_rack_nozzle_override(1, ""));
+        CHECK(b.nozzle_tool_count() == 2);
     }
 }

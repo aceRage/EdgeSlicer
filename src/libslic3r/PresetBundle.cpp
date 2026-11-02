@@ -3650,6 +3650,18 @@ bool PresetBundle::set_rack_nozzle_override(const std::vector<std::string> &text
     return true;
 }
 
+bool PresetBundle::clear_nozzle_processes()
+{
+    this->end_nozzle_tool_view();
+    bool changed = false;
+    for (const char *key : { "nozzle_process_presets", "nozzle_process_edits", "nozzle_slot_process_presets" }) {
+        auto *opt = this->project_config.option<ConfigOptionStrings>(key, true);
+        changed |= !opt->values.empty();
+        opt->values.clear();
+    }
+    return changed;
+}
+
 std::string PresetBundle::rack_nozzle_override(size_t extruder) const
 {
     if (const auto *opt = this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override"))
