@@ -73,6 +73,11 @@ def main():
         checks["units_metres"] = all(abs(mn[i] - want_mn[i]) < 1e-4 and abs(mx[i] - want_mx[i]) < 1e-4 for i in range(3))
     else:
         checks["units_metres"] = max(mx) - min(mn) < 1.0   # a print is less than a metre across
+    # Toolpaths: the extrusion direction arrives in Blender's Z-up frame (flat walls run horizontally).
+    silk = [o.data.attributes.get("_SILK_DIR") for o in meshes if o.data.attributes.get("_SILK_DIR") is not None]
+    if silk:
+        zs = [abs(d.vector[2]) for a in silk for d in a.data]
+        checks["silk_dir_z_up"] = sum(zs) / max(1, len(zs)) < 0.2
     frames = pkg.frames
     if frames:
         cam_curves = edgeslicer_render.compat.action_fcurves(sc.camera)

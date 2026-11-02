@@ -6,7 +6,7 @@
 // Blender"); the add-on in resources/blender/edgeslicer_render reads it and builds a Cycles scene.
 //
 //   scene.glb          the plate's parts (model mode: one node per part and filament) or the toolpath
-//                      tubes (one node per filament), glTF Y-up in metres; materials core PBR + KHR
+//                      tubes (one node per filament, extrusion direction as _SILK_DIR in Z-up), glTF Y-up in metres; materials core PBR + KHR
 //                      extensions, our parameters in each material's extras ("edgeslicer")
 //   showcase.json      everything else, in Blender's frame (Z up, metres): camera, lights,
 //                      environment, background, floor, materials by filament, output, look

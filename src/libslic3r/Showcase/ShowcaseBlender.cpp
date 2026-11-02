@@ -590,16 +590,19 @@ bool build_blender_package(const PackageInput &in, PackageResult &out, std::stri
             mesh.positions.reserve(t.positions.size());
             mesh.normals.reserve(t.normals.size());
             GltfAttribute dir{ "_SILK_DIR", 3, {} };
-            GltfAttribute build{ "_BUILD", 1, t.build };
             dir.data.reserve(t.direction.size());
             for (size_t i = 0; i + 2 < t.positions.size(); i += 3) {
                 const std::array<float, 3> p = gltf_from_mm(t.positions[i], t.positions[i + 1], t.positions[i + 2]);
                 mesh.positions.insert(mesh.positions.end(), p.begin(), p.end());
                 mesh.normals.insert(mesh.normals.end(), { t.normals[i], t.normals[i + 2], -t.normals[i + 1] });
-                dir.data.insert(dir.data.end(), { t.direction[i], t.direction[i + 2], -t.direction[i + 1] });
+                // Blender's importer keeps custom attributes as they are (no Y-up turn), so the
+                // direction is written in Blender's (and EdgeSlicer's) Z-up frame.
+                dir.data.insert(dir.data.end(), { t.direction[i], t.direction[i + 1], t.direction[i + 2] });
             }
+            // One custom attribute only: Blender 5.0's glTF importer mixes up custom attributes of
+            // different sizes (a scalar next to a VEC3), so the build fraction (TubeMesh::build) is not
+            // written; the add-on's build-up cuts by height.
             mesh.attributes.push_back(std::move(dir));
-            mesh.attributes.push_back(std::move(build));
             mesh.indices  = t.indices;
             mesh.material = material_for(slot, true);
             out.triangles += mesh.indices.size() / 3;

@@ -587,7 +587,7 @@ TEST_CASE("Package: the files, the schema and the bytes", "[ShowcaseBlender][Pac
         CHECK(sb_json(sb_file(vid, "showcase.json"))["camera_path"] == "camera_path.json");
     }
 
-    SECTION("toolpath tubes carry the silk direction and the build fraction")
+    SECTION("toolpath tubes carry the silk direction")
     {
         PackageInput t = in;
         t.toolpaths = true;
@@ -603,7 +603,7 @@ TEST_CASE("Package: the files, the schema and the bytes", "[ShowcaseBlender][Pac
         REQUIRE(read_glb(tg->bytes.data(), tg->bytes.size(), tc));
         const nlohmann::json tj = nlohmann::json::parse(tc.json);
         CHECK(tj["meshes"][0]["primitives"][0]["attributes"].contains("_SILK_DIR"));
-        CHECK(tj["meshes"][0]["primitives"][0]["attributes"].contains("_BUILD"));
+        CHECK(tj["meshes"][0]["primitives"][0]["attributes"].size() == 3);   // POSITION, NORMAL, _SILK_DIR
         CHECK(tj["nodes"][0]["name"] == "Toolpaths F1");
         CHECK(tj["materials"][0]["extras"]["edgeslicer"]["blender"]["tangent"] == "attribute");
         CHECK(sb_json(sb_file(rt, "showcase.json"))["toolpaths"]["sides"] == 6);

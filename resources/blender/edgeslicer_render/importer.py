@@ -176,5 +176,4 @@ def import_package(path, quality=None, device="AUTO", samples=None, imperfection
         "camera": cam.name,
         "view_transform": sc.view_settings.view_transform,
         "has_silk_attr": any(o.data.attributes.get(materials.LINEAR_ATTR) is not None for o in model_objects),
-        "has_build_attr": any(o.data.attributes.get("_BUILD") is not None for o in model_objects),
     }
