@@ -259,6 +259,7 @@ static std::vector<std::string> s_project_options {
     "nozzle_diameter_override",
     // Per-nozzle process P9: the rack slot each filament is pinned to, each slot's process, the rack's sizes in this project.
     "filament_rack_nozzle_slot",
+    "filament_side_pin",
     "nozzle_slot_process_presets",
     "extruder_rack_nozzle_override",
     // Ultra (dual-nozzle): plate-level filament grouping state.
@@ -2798,11 +2799,12 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
     if (auto *rack = project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter");
         rack != nullptr && rack->values.size() > to_del_filament_id)
         rack->values.erase(rack->values.begin() + to_del_filament_id);
-    // Per-nozzle process P9: and its rack slot pin.
-    if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > to_del_filament_id) {
-        slots->values.erase(slots->values.begin() + to_del_filament_id);
-        slots->values = set_filament_rack_slot_pin(slots->values, 0, 0, slots->values.empty() ? 0 : slots->values.front());
-    }
+    // Per-nozzle process P9: and its rack slot pin and side pin.
+    for (const char *key : { "filament_rack_nozzle_slot", "filament_side_pin" })
+        if (auto *slots = project_config.option<ConfigOptionInts>(key); slots != nullptr && slots->values.size() > to_del_filament_id) {
+            slots->values.erase(slots->values.begin() + to_del_filament_id);
+            slots->values = set_filament_rack_slot_pin(slots->values, 0, 0, slots->values.empty() ? 0 : slots->values.front());
+        }
     EnsureFilamentVolumeTypesAligned(project_config, filament_presets.size());
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
@@ -2838,6 +2840,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     // Per-nozzle process P9: and the rack slot pin.
     if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > n)
         slots->values = set_filament_rack_slot_pin(std::vector<int>(slots->values.begin(), slots->values.begin() + n), 0, 0, n > 0 ? slots->values.front() : 0);
+    // And the side pin.
+    if (auto *sides = project_config.option<ConfigOptionInts>("filament_side_pin"); sides != nullptr && sides->values.size() > n)
+        sides->values = set_filament_side_pin(std::vector<int>(sides->values.begin(), sides->values.begin() + n), 0, 0, n > 0 ? sides->values.front() : 0);
     // BBS set new filament color to new_color
     if (old_slot_count < n) {
         if (!new_colors.empty()) {
@@ -2880,6 +2885,9 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     // Per-nozzle process P9: and the rack slot pin.
     if (auto *slots = project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot"); slots != nullptr && slots->values.size() > n)
         slots->values = set_filament_rack_slot_pin(std::vector<int>(slots->values.begin(), slots->values.begin() + n), 0, 0, n > 0 ? slots->values.front() : 0);
+    // And the side pin.
+    if (auto *sides = project_config.option<ConfigOptionInts>("filament_side_pin"); sides != nullptr && sides->values.size() > n)
+        sides->values = set_filament_side_pin(std::vector<int>(sides->values.begin(), sides->values.begin() + n), 0, 0, n > 0 ? sides->values.front() : 0);
 
     //BBS set new filament color to new_color
     if (old_slot_count < n) {
@@ -4838,6 +4846,8 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // Per-nozzle process P9: and no rack slot pins, slot processes or rack sizes of the project.
         if (!config.has("filament_rack_nozzle_slot"))
             this->project_config.set_key_value("filament_rack_nozzle_slot", new ConfigOptionInts{ 0 });
+        if (!config.has("filament_side_pin"))
+            this->project_config.set_key_value("filament_side_pin", new ConfigOptionInts{ 0 });
         if (!config.has("nozzle_slot_process_presets"))
             this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings());
         if (!config.has("extruder_rack_nozzle_override"))

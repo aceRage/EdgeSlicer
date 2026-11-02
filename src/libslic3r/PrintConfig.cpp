@@ -4674,6 +4674,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts { 0 }); // 0 = unused; an empty vector would load back as { 0 }
 
+    // Per-nozzle process P9 (owner hand test 2026-11-02): project-level, Bambu's two-extruder machines. The side each filament is
+    // pinned to: 0 = auto (the grouping decides), 1 = left, 2 = right. The pins are applied as the plate's manual filament map,
+    // the unpinned filaments keeping the side the grouping gave them; a filament's pin never changes another's.
+    def = this->add("filament_side_pin", coInts);
+    def->label = L("Print on side");
+    def->tooltip = L("The side (extruder) each filament is pinned to: 0 = auto, 1 = left, 2 = right.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts { 0 }); // 0 = unused; an empty vector would load back as { 0 }
+
     // Per-nozzle process P9: project-level. The process profile each rack slot uses, one entry per slot with a choice:
     // the slot id ("T2.3": extruder 2, slot 3) on the first line, the process preset's name on the second.
     def = this->add("nozzle_slot_process_presets", coStrings);

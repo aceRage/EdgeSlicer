@@ -657,6 +657,31 @@ std::vector<int> set_filament_rack_slot_pin(std::vector<int> pins, size_t filame
     return pins;
 }
 
+std::vector<int> set_filament_side_pin(std::vector<int> pins, size_t filament, size_t filaments, int side)
+{
+    if (pins.size() < filaments)
+        pins.resize(filaments, 0);
+    if (filament < pins.size())
+        pins[filament] = side == 1 || side == 2 ? side : 0;
+    if (std::all_of(pins.begin(), pins.end(), [](int s) { return s != 1 && s != 2; }))
+        return { 0 };
+    return pins;
+}
+
+std::vector<int> manual_filament_map_from_pins(const std::vector<int> &pins, const std::vector<int> &auto_map, size_t filaments)
+{
+    if (std::none_of(pins.begin(), pins.end(), [](int s) { return s == 1 || s == 2; }))
+        return {};
+    std::vector<int> map(filaments, 1);
+    for (size_t f = 0; f < filaments; ++f) {
+        if (f < pins.size() && (pins[f] == 1 || pins[f] == 2))
+            map[f] = pins[f];
+        else if (f < auto_map.size() && (auto_map[f] == 1 || auto_map[f] == 2))
+            map[f] = auto_map[f]; // unpinned: where the grouping put it
+    }
+    return map;
+}
+
 int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);

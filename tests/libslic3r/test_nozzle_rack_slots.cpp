@@ -607,3 +607,26 @@ TEST_CASE("Every per-extruder value the Extruder N pages read exists for N = 1, 
         CHECK(nozzle_tool_entries(sized).size() == 2);
     }
 }
+
+TEST_CASE("H2C/H2D side pins are per filament: pinning one never changes another", "[NozzleRackSlots][Sides]")
+{
+    // Owner hand test 2026-11-02: setting filament 3 to Left showed L on all four filaments, Auto cleared all four.
+    std::vector<int> pins = { 0 };
+    pins = set_filament_side_pin(pins, 2, 4, 1); // filament 3 -> Left
+    CHECK(pins == std::vector<int>{ 0, 0, 1, 0 });
+    pins = set_filament_side_pin(pins, 0, 4, 2); // filament 1 -> Right
+    CHECK(pins == std::vector<int>{ 2, 0, 1, 0 });
+    pins = set_filament_side_pin(pins, 2, 4, 0); // filament 3 -> Auto: filament 1 keeps Right
+    CHECK(pins == std::vector<int>{ 2, 0, 0, 0 });
+    pins = set_filament_side_pin(pins, 0, 4, 0);
+    CHECK(pins == std::vector<int>{ 0 }); // nothing pinned: the unused value
+    CHECK(set_filament_side_pin({ 0 }, 1, 2, 7) == std::vector<int>{ 0 });
+
+    // The plate's manual map: pinned filaments on their side, the others where the grouping put them.
+    const std::vector<int> auto_map = { 1, 2, 2, 1 };
+    CHECK(manual_filament_map_from_pins({ 0 }, auto_map, 4).empty());
+    CHECK(manual_filament_map_from_pins({ 0, 0, 1, 0 }, auto_map, 4) == std::vector<int>{ 1, 2, 1, 1 });
+    CHECK(manual_filament_map_from_pins({ 2, 0, 0, 0 }, auto_map, 4) == std::vector<int>{ 2, 2, 2, 1 });
+    // No grouping known: unpinned filaments on the left.
+    CHECK(manual_filament_map_from_pins({ 0, 2 }, {}, 3) == std::vector<int>{ 1, 2, 1 });
+}

@@ -4854,11 +4854,13 @@ bool Sidebar::filament_sides_supported() const
 
 int Sidebar::filament_side(size_t filament) const
 {
-    PartPlate *plate = p->plater != nullptr ? p->plater->get_partplate_list().get_curr_plate() : nullptr;
-    if (plate == nullptr)
+    // The filament's own pin (filament_side_pin), not the plate's map: a manual map gives every filament a side, so reading it
+    // showed "L" on filaments nobody pinned (owner hand test 2026-11-02).
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
         return 0;
-    const std::vector<int> map = plate->get_manual_filament_map();
-    return filament < map.size() && (map[filament] == 1 || map[filament] == 2) ? map[filament] : 0;
+    const auto *pins = bundle->project_config.option<ConfigOptionInts>("filament_side_pin");
+    return pins != nullptr && filament < pins->values.size() && (pins->values[filament] == 1 || pins->values[filament] == 2) ? pins->values[filament] : 0;
 }
 
 void Sidebar::set_filament_side(size_t filament, int side)
@@ -4867,27 +4869,21 @@ void Sidebar::set_filament_side(size_t filament, int side)
     PartPlate    *plate  = p->plater != nullptr ? p->plater->get_partplate_list().get_curr_plate() : nullptr;
     if (bundle == nullptr || plate == nullptr || filament >= bundle->filament_presets.size())
         return;
+    // Per filament (owner hand test 2026-11-02): the pin is this filament's alone (filament_side_pin). The plate's manual map is
+    // made from the pins, every unpinned filament keeping the side the grouping gave it; no pin left = automatic grouping again.
+    auto *pins_opt = bundle->project_config.option<ConfigOptionInts>("filament_side_pin", true);
+    const std::vector<int> pins = Slic3r::set_filament_side_pin(pins_opt->values, filament, bundle->filament_presets.size(), side);
     const std::vector<int> old_map = plate->get_manual_filament_map();
-    if (side <= 0) {
-        // Auto: Bambu's grouping decides again (a manual map pins every filament, so Auto is for all of them).
-        if (old_map.empty())
-            return;
+    // Where the grouping puts the unpinned filaments: the plate's current map, else the global one.
+    const std::vector<int> auto_map = !old_map.empty() ? old_map : p->plater->get_global_filament_map();
+    const std::vector<int> map      = Slic3r::manual_filament_map_from_pins(pins, auto_map, bundle->filament_presets.size());
+    if (pins == pins_opt->values && map == old_map)
+        return;
+    pins_opt->values = pins;
+    if (map.empty())
         plate->clear_manual_filament_map();
-    } else {
-        std::vector<int> map = old_map;
-        if (map.size() != bundle->filament_presets.size()) {
-            // From the grouping the plate has now (the global map), else everything on the left.
-            map = p->plater->get_global_filament_map();
-            map.resize(bundle->filament_presets.size(), 1);
-            for (int &m : map)
-                if (m != 1 && m != 2)
-                    m = 1;
-        }
-        map[filament] = side;
-        if (map == old_map)
-            return;
+    else if (map != old_map)
         plate->set_manual_filament_map(map);
-    }
     // A filament on the left has no rack pin.
     if (side == 1) {
         bundle->set_filament_rack_slot(filament, 0);

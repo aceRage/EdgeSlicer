@@ -9860,7 +9860,7 @@ static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::s
     }
     // Per-nozzle process P9: the rack slot pins only when a filament is pinned; the internal per-filament process slots and the
     // missing slots never (the values are in the moves; such a job is refused).
-    if (key == "filament_rack_nozzle_slot") {
+    if (key == "filament_rack_nozzle_slot" || key == "filament_side_pin") {
         const auto *opt = cfg.option<ConfigOptionInts>(key);
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](int v) { return v <= 0; });
     }

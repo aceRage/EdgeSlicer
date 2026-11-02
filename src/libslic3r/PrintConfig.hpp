@@ -2333,6 +2333,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     // (one text per extruder, "" = the printer preset's), and two internal keys filled while slicing: the slot ids that
     // need a process and have none, and per filament the process slot it reads (-1 = the extruder's).
     ((ConfigOptionInts,                filament_rack_nozzle_slot))
+    ((ConfigOptionInts,                filament_side_pin))
     ((ConfigOptionStrings,             nozzle_slot_process_presets))
     ((ConfigOptionStrings,             extruder_rack_nozzle_override))
     ((ConfigOptionStrings,             nozzle_slot_process_missing))

@@ -154,6 +154,12 @@ bool has_filament_rack_slot_pins(const ConfigBase &config);
 // filament_rack_nozzle_slot with 0-based `filament` pinned to `slot` (0 = none), sized for `filaments`; { 0 } when nothing
 // is pinned.
 std::vector<int> set_filament_rack_slot_pin(std::vector<int> pins, size_t filament, size_t filaments, int slot);
+// Bambu's two-extruder machines (owner hand test 2026-11-02): filament_side_pin with 0-based `filament` pinned to `side`
+// (0 = auto, 1 = left, 2 = right), sized for `filaments`; { 0 } when nothing is pinned. Other filaments' pins are kept.
+std::vector<int> set_filament_side_pin(std::vector<int> pins, size_t filament, size_t filaments, int side);
+// The plate's manual filament map for the pins: each pinned filament on its side, every other one where the grouping put it
+// (`auto_map`, 1-based sides; left when unknown). Empty when nothing is pinned (the plate goes back to automatic grouping).
+std::vector<int> manual_filament_map_from_pins(const std::vector<int> &pins, const std::vector<int> &auto_map, size_t filaments);
 // The slot whose process 1-based `filament_id` prints with: its pin, else the first slot of its extruder's rack with the size
 // it prints with (two slots of one size print alike). 0 when its extruder shows no slots or no slot has that size.
 int filament_rack_slot(const ConfigBase &config, unsigned int filament_id);
