@@ -21,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcodewriter.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
+	test_temp_retract_grid.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_model.cpp
