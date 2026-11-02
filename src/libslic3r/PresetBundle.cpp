@@ -3582,7 +3582,9 @@ std::string PresetBundle::auto_nozzle_process(size_t extruder, bool *missing) co
         return std::string();
     const auto       *lh   = plate.config.option<ConfigOptionFloat>("layer_height");
     const std::string name = auto_nozzle_process_in(this->prints, this->printers, printer.opt_string("printer_model"), nozzles[extruder],
-                                                    lh != nullptr ? lh->value : 0., plate.name);
+                                                    lh != nullptr ? lh->value : 0.,
+                                                    // a user process names its kind through the system one it inherits
+                                                    !plate.is_system && !plate.inherits().empty() ? plate.inherits() : plate.name);
     if (name.empty() && missing != nullptr)
         *missing = true;
     return name;

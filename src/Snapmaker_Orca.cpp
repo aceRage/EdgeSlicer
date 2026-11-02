@@ -3715,8 +3715,8 @@ int CLI::run(int argc, char **argv)
             plate_name = config_string("print_settings_id");
         PresetBundle *plate_bundle = nullptr;
         double        plate_claim  = 0.;
+        std::string   system_name  = plate_name;
         {
-            std::string system_name = plate_name;
             if (named_presets().find_system(system_name, Preset::TYPE_PRINT) == nullptr) {
                 // A user process: the system process it inherits.
                 DynamicPrintConfig user;
@@ -3743,7 +3743,7 @@ int CLI::run(int argc, char **argv)
             std::string        name = names[e];
             if (name.empty() && plate_claim > 0. && std::abs(plate_claim - nozzles[e]) > EPSILON && plate_bundle != nullptr) {
                 name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
-                                                           nozzles[e], plate_lh, plate_name);
+                                                           nozzles[e], plate_lh, system_name.empty() ? plate_name : system_name);
                 if (name.empty()) {
                     missing.push_back(int(e) + 1);
                     BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits T" << e + 1 << " (" << nozzles[e] << " mm)";
