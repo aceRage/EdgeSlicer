@@ -2378,6 +2378,12 @@ TEST_CASE("Print: shared layers need the same center offset, not only the same t
     b->add_instance()->set_offset(Vec3d(40., 100., 0.));
     b->ensure_on_bed();
 
+    // C is a plain copy of A elsewhere on the bed: same trafo and same center_offset, so it must still share.
+    ModelObject *c = model.add_object(*a);
+    c->name        = "C";
+    c->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    c->ensure_on_bed();
+
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     Print print;
     for (ModelObject *obj : model.objects)
@@ -2393,10 +2399,14 @@ TEST_CASE("Print: shared layers need the same center offset, not only the same t
     // Without such a pair this test would not exercise the fix.
     REQUIRE(same_trafo_other_offset);
 
+    size_t num_shared = 0;
     for (const PrintObject *obj : print.objects()) {
         if (const PrintObject *shared = obj->get_shared_object()) {
+            ++num_shared;
             CAPTURE(obj->model_object()->name, shared->model_object()->name);
             CHECK(obj->center_offset() == shared->center_offset());
         }
     }
+    // Layer sharing itself must still happen (C with A), otherwise the check above proves nothing.
+    REQUIRE(num_shared >= 1);
 }
