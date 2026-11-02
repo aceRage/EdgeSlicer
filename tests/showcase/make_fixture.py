@@ -12,6 +12,10 @@ filament and does not validate). golden.sh uses a U1 project from tests/data for
 
 --image (1h-2): a PNG stored with the scenes as Metadata/showcase/<sha256>.png, as the app stores a
 scene's pictures; "@IMAGE0@", "@IMAGE1@", ... in the scenes text become the first, second, ... sha.
+A JPEG is stored as .jpg (as the app stores one), anything else as .png.
+
+"_fixture" (1h-2b, top level of the scenes file, removed before it is stored): {"settings": {key: value}}
+overrides keys of the copied project_settings.config, e.g. supports on for a toolpath fixture.
 """
 import hashlib
 import json
@@ -50,9 +54,21 @@ def main(argv):
         with open(path, "rb") as f:
             data = f.read()
         sha = hashlib.sha256(data).hexdigest()
-        blobs.append((IMAGE_DIR + sha + ".png", data))
+        ext = ".jpg" if data[:2] == bytes((0xFF, 0xD8)) else ".png"
+        blobs.append((IMAGE_DIR + sha + ext, data))
         text = text.replace(("@IMAGE%d@" % n).encode("ascii"), sha.encode("ascii"))
-    json.loads(text.decode("utf-8"))  # refuse a fixture that does not parse
+    doc = json.loads(text.decode("utf-8"))  # refuse a fixture that does not parse
+    fixture = doc.pop("_fixture", None) if isinstance(doc, dict) else None
+    if fixture is not None:
+        text = json.dumps(doc, indent=2).encode("utf-8")
+        overrides = fixture.get("settings", {})
+        if overrides:
+            if settings is None:
+                sys.stderr.write("_fixture.settings needs <settings.3mf>" + chr(10))
+                return 2
+            cfg = json.loads(settings.decode("utf-8"))
+            cfg.update({k: str(v) for k, v in overrides.items()})
+            settings = json.dumps(cfg, indent=4).encode("utf-8")
     skip = {SCENES_ENTRY.lower()}
     if settings is not None:
         skip.add(SETTINGS_ENTRY.lower())

@@ -916,28 +916,29 @@ bool ShowcaseRenderer::ensure_background_texture()
 {
     if (m_scene == nullptr || m_project == nullptr || m_scene->background.image.empty())
         return false;
-    if (m_bg_texture != 0 && m_bg_image_key == m_scene->background.image)
+    // 1h-2b: a backplate's own turn and mirror are part of the picture uploaded.
+    const Showcase::Background &bg = m_scene->background;
+    const bool        plate = bg.type == Showcase::BackgroundType::Backplate;
+    const int         turn  = plate ? Showcase::floor_rotation_snap(double(bg.plate_rotation)) : 0;
+    const bool        flip  = plate && bg.plate_flip;
+    const std::string key   = bg.image + (turn != 0 || flip ? "#" + std::to_string(turn) + (flip ? "f" : "") : std::string());
+    if (m_bg_texture != 0 && m_bg_image_key == key)
         return true;
-    const Showcase::ImageBlob *blob = m_project->find_image(m_scene->background.image);
+    const Showcase::ImageBlob *blob = m_project->find_image(bg.image);
     if (blob == nullptr || blob->bytes.empty())
         return false;
-    wxMemoryInputStream stream(blob->bytes.data(), blob->bytes.size());
-    wxImage             image;
-    if (!image.LoadFile(stream, wxBITMAP_TYPE_ANY) || !image.IsOk()) {
+    // Decoded with the file's EXIF orientation applied (a phone photo stored sideways).
+    ShowcaseImage decoded;
+    if (!showcase_decode_image(blob->bytes, decoded)) {
         BOOST_LOG_TRIVIAL(warning) << "Showcase: the backdrop image could not be decoded";
-        m_bg_image_key = m_scene->background.image;   // do not retry every frame
+        m_bg_image_key = key;   // do not retry every frame
         return false;
     }
-    const int w = image.GetWidth(), h = image.GetHeight();
-    std::vector<uint8_t> rgba(size_t(w) * size_t(h) * 4);
-    const unsigned char *rgb   = image.GetData();
-    const unsigned char *alpha = image.HasAlpha() ? image.GetAlpha() : nullptr;
-    for (size_t i = 0; i < size_t(w) * size_t(h); ++i) {
-        rgba[i * 4 + 0] = rgb[i * 3 + 0];
-        rgba[i * 4 + 1] = rgb[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb[i * 3 + 2];
-        rgba[i * 4 + 3] = alpha ? alpha[i] : 255;
-    }
+    int w = decoded.width, h = decoded.height;
+    std::vector<uint8_t> rgba = std::move(decoded.rgba);
+    if (flip)
+        Showcase::orient_rgba(rgba, w, h, 2);
+    Showcase::orient_rgba(rgba, w, h, Showcase::rotation_orientation(turn));
     if (m_bg_texture == 0)
         glsafe(::glGenTextures(1, &m_bg_texture));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_bg_texture));
@@ -952,7 +953,7 @@ bool ShowcaseRenderer::ensure_background_texture()
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     m_bg_image_w   = w;
     m_bg_image_h   = h;
-    m_bg_image_key = m_scene->background.image;
+    m_bg_image_key = key;
     return true;
 }
 
@@ -1042,6 +1043,7 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         // 1h-2: projected onto the ground the model stands on, or an infinite panorama, maybe tilted.
         m_bg_ground = scene_ground_dome(m_bg_dome);
         shader->set_uniform("ground_on", m_bg_ground);
+        shader->set_uniform("ortho_view", camera.get_type() == Camera::EType::Ortho);
         if (m_bg_ground) {
             shader->set_uniform("ground_center", Vec3d(m_bg_dome.center[0], m_bg_dome.center[1], m_bg_dome.center[2]));
             shader->set_uniform("ground_radius", float(m_bg_dome.radius));
@@ -1085,6 +1087,9 @@ void ShowcaseRenderer::draw_background(const DrawTarget &t)
         const float oy = fit == Showcase::ImageFit::Tile ? 0.f : 0.5f - 0.5f * sy;
         shader->set_uniform("uv_transform", std::array<float, 4>{ sx, sy, ox, oy });
         shader->set_uniform("tile", fit == Showcase::ImageFit::Tile);
+        // 1h-2b: a backplate continues past the safe frame (the live view's margins show more photo, not
+        // the backdrop colour); inside the frame it is the same.
+        shader->set_uniform("extend", type == Showcase::BackgroundType::Backplate);
         shader->set_uniform("image_tex", 0);
         glsafe(::glActiveTexture(GL_TEXTURE0));
         glsafe(::glBindTexture(GL_TEXTURE_2D, m_bg_texture));
@@ -2934,6 +2939,10 @@ bool ShowcaseRenderer::draw_toolpaths(bool material, bool hdr)
     // S5b: only a build-up leaves out infill or supports; the toolpath source shows the whole slice.
     look.show_infill   = m_build_fraction < 0. || m_build_infill;
     look.show_supports = m_build_fraction < 0. || m_build_supports;
+    // 1h-2b: the scene's own switches (Materials, under Show) for stills and the live view, on top.
+    look.show_infill   = look.show_infill && m_scene->materials.toolpath_infill;
+    look.show_supports = look.show_supports && m_scene->materials.toolpath_supports;
+    look.show_skirt    = m_scene->materials.toolpath_skirt;
     if (m_build_fraction >= 0. && m_build_fraction < 1.) {
         // Every layer takes the same time, the top one laid move by move.
         const std::vector<double>     zs = gv.get_layers_zs();

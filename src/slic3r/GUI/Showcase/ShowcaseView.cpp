@@ -448,6 +448,7 @@ void ShowcaseView::on_idle_check()
         refresh_plates();
     else
         refresh_materials(false);   // the filament list may have changed in the sidebar
+    refresh_lens();   // 1h-2b: the mouse wheel changes the angle of view
 }
 
 // Another plate became current: its own scene, with its own camera.
@@ -643,6 +644,17 @@ void ShowcaseView::build_panel()
     fits.Add(_L("Tile"));
     m_bg_fit = choice(fits);
     row(_L("Image fit"), m_bg_fit);
+    {
+        wxArrayString turns;
+        for (const char *t : { "0", "90", "180", "270" })
+            turns.Add(wxString::FromUTF8(t));
+        m_plate_rotation = choice(turns);
+        m_plate_rotation->SetToolTip(_L("Turns the photo counter-clockwise, after the turn stored in the file."));
+        row(_L("Rotate photo"), m_plate_rotation);
+    }
+    m_plate_flip = new wxCheckBox(m_side, wxID_ANY, _L("Flip photo left to right"));
+    grid->AddSpacer(0);
+    grid->Add(m_plate_flip);
     // 1h-2: the photo backplate's camera match.
     m_plate_horizon = slider(50, 0, 100);
     m_plate_horizon->SetToolTip(_L("Where the photo's horizon is, from the bottom of the frame. The live view draws it as a line."));
@@ -788,6 +800,18 @@ void ShowcaseView::build_panel()
     m_source->SetToolTip(_L("Toolpaths show the plate's slice as it will print: seams, the top pattern, supports and colour changes. "
                             "Slice the plate first; until then the model is shown."));
     row(_L("Show"), m_source);
+    // 1h-2b: right under Show, for the toolpaths only.
+    m_tp_supports = new wxCheckBox(m_side, wxID_ANY, _L("Supports"));
+    m_tp_supports->SetToolTip(_L("Shows the supports and their interfaces."));
+    grid->AddSpacer(0);
+    grid->Add(m_tp_supports);
+    m_tp_skirt = new wxCheckBox(m_side, wxID_ANY, _L("Brim and skirt"));
+    grid->AddSpacer(0);
+    grid->Add(m_tp_skirt);
+    m_tp_infill = new wxCheckBox(m_side, wxID_ANY, _L("Infill"));
+    m_tp_infill->SetToolTip(_L("The inside of the print, seen through gaps and open tops."));
+    grid->AddSpacer(0);
+    grid->Add(m_tp_infill);
     wxArrayString layer_lines;
     layer_lines.Add(_L("Off"));
     layer_lines.Add(_L("Subtle"));
@@ -849,6 +873,7 @@ void ShowcaseView::build_panel()
     wxArrayString lenses;
     for (int mm : { 24, 35, 50, 85, 135 })
         lenses.Add(wxString::Format(_L("%d mm"), mm));
+    lenses.Add("-");   // the camera's own lens when it is none of the above (refresh_lens)
     m_lens = choice(lenses);
     m_lens->SetToolTip(_L("A wide lens shows more of the surroundings, a long one less. The model keeps its size in the frame."));
     row(_L("Lens"), m_lens);
@@ -1216,6 +1241,27 @@ void ShowcaseView::build_panel()
         const float mm = float(m_plate_focal->GetValue());
         edit([mm](Showcase::Scene &s) { s.background.plate_focal = mm; });
     });
+    m_plate_rotation->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
+        const int sel = m_plate_rotation->GetSelection();
+        if (sel >= 0 && sel < 4)
+            edit([sel](Showcase::Scene &s) { s.background.plate_rotation = sel * 90; });
+    });
+    m_plate_flip->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_plate_flip->GetValue();
+        edit([on](Showcase::Scene &s) { s.background.plate_flip = on; });
+    });
+    m_tp_supports->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_tp_supports->GetValue();
+        edit([on](Showcase::Scene &s) { s.materials.toolpath_supports = on; });
+    });
+    m_tp_skirt->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_tp_skirt->GetValue();
+        edit([on](Showcase::Scene &s) { s.materials.toolpath_skirt = on; });
+    });
+    m_tp_infill->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_tp_infill->GetValue();
+        edit([on](Showcase::Scene &s) { s.materials.toolpath_infill = on; });
+    });
     m_plate_match->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         const Showcase::Scene &s = scene();
         const Showcase::RectI  f = m_renderer->live_frame();
@@ -1417,9 +1463,9 @@ void ShowcaseView::build_panel()
     m_lens->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_lens->GetSelection();
         const int mm[] = { 24, 35, 50, 85, 135 };
-        m_lens->SetSelection(-1);   // an action, not a state
         if (sel >= 0 && sel < 5)
             apply_camera_lens(double(mm[sel]));
+        refresh_lens();
     });
     m_dof->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
         const bool on = m_dof->GetValue();
@@ -1828,6 +1874,11 @@ void ShowcaseView::sync_controls()
     m_bg_pitch->SetValue(std::clamp(int(std::lround(s.background.backdrop_pitch)), -45, 45));
     m_plate_horizon->SetValue(std::clamp(int(std::lround(s.background.plate_horizon * 100.f)), 0, 100));
     m_plate_focal->SetValue(std::clamp(int(std::lround(s.background.plate_focal)), 8, 600));
+    m_plate_rotation->SetSelection(std::clamp(Showcase::floor_rotation_snap(double(s.background.plate_rotation)) / 90, 0, 3));
+    m_plate_flip->SetValue(s.background.plate_flip);
+    m_tp_supports->SetValue(s.materials.toolpath_supports);
+    m_tp_skirt->SetValue(s.materials.toolpath_skirt);
+    m_tp_infill->SetValue(s.materials.toolpath_infill);
 
     m_floor_type->SetSelection(int(s.floor.type));
     m_floor_color->SetColour(showcase_wx_colour(s.floor.color));
@@ -1902,7 +1953,7 @@ void ShowcaseView::sync_controls()
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
     refresh_views();
     // 1h-2
-    m_lens->SetSelection(-1);   // an action, not a state
+    refresh_lens();
     m_dof->SetValue(s.dof.enabled);
     {
         const float stops[] = { 1.4f, 2.f, 2.8f, 4.f, 5.6f, 8.f, 11.f, 16.f, 22.f };
@@ -2115,7 +2166,8 @@ void ShowcaseView::update_enabled()
                                                           m_exposure, m_tone, m_coextruded, m_lights_off, m_use_as_cover, m_source, m_smooth_auto,
                                                           m_bg_ground, m_bg_ground_height, m_bg_ground_radius, m_bg_ground_scale, m_bg_pitch,
                                                           m_plate_horizon, m_plate_focal, m_plate_match, m_lens, m_dof, m_dof_fnumber,
-                                                          m_dof_on_model, m_dof_focus, m_dof_quality })
+                                                          m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
+                                                          m_tp_supports, m_tp_skirt, m_tp_infill })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2303,6 +2355,11 @@ void ShowcaseView::apply_row_visibility()
     set(m_plate_horizon, v.bg_plate_match);
     set(m_plate_focal, v.bg_plate_match);
     set(m_plate_match, v.bg_plate_match);
+    set(m_plate_rotation, v.bg_plate_match);
+    set(m_plate_flip, v.bg_plate_match);
+    set(m_tp_supports, v.mat_toolpath);
+    set(m_tp_skirt, v.mat_toolpath);
+    set(m_tp_infill, v.mat_toolpath);
     // Camera
     set(m_dof_fnumber, v.cam_dof_detail);
     set(m_dof_on_model, v.cam_dof_detail);
@@ -2444,6 +2501,37 @@ void ShowcaseView::apply_camera_lens(double focal_mm, const double *pitch)
     store_scene_camera(true);
     sync_controls();
     set_as_dirty();
+}
+
+void ShowcaseView::refresh_lens()
+{
+    if (m_lens == nullptr || m_renderer == nullptr)
+        return;
+    const bool syncing = m_syncing;
+    m_syncing          = true;
+    Camera               &camera = wxGetApp().plater()->get_camera();
+    const Showcase::RectI f      = m_renderer->live_frame();
+    const double          dist   = camera.get_distance();
+    int                   sel    = -1;
+    wxString              custom = "-";
+    if (camera.get_type() == Camera::EType::Perspective && !f.empty() && dist > 0. && camera.get_zoom() > 0.) {
+        // The frame's angle of view: half its height over the zoom (pixels per mm at the target) and distance.
+        const double fov_y = 2. * std::atan(0.5 * double(f.h) / (camera.get_zoom() * dist));
+        const double mm    = Showcase::focal_from_fov_y(fov_y, double(f.w) / double(f.h));
+        const int    presets[] = { 24, 35, 50, 85, 135 };
+        for (int i = 0; i < 5; ++i)
+            if (std::abs(mm / double(presets[i]) - 1.) < 0.03)
+                sel = i;
+        if (sel < 0 && std::isfinite(mm)) {
+            custom = wxString::Format(_L("~%d mm"), int(std::lround(mm)));
+            sel    = 5;
+        }
+    }
+    if (m_lens->GetCount() > 5 && m_lens->GetString(5) != custom)
+        m_lens->SetString(5, custom);
+    if (m_lens->GetSelection() != sel)
+        m_lens->SetSelection(sel);
+    m_syncing = syncing;
 }
 
 void ShowcaseView::ground_auto_values(double &height, double &radius)

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include <boost/log/trivial.hpp>
 #include <nlohmann/json.hpp>
@@ -189,7 +190,7 @@ bool Background::operator==(const Background &o) const
     return type == o.type && color1 == o.color1 && color2 == o.color2 && image == o.image && fit == o.fit && blur == o.blur &&
            backdrop_pitch == o.backdrop_pitch && ground == o.ground && ground_height == o.ground_height &&
            ground_radius == o.ground_radius && ground_scale == o.ground_scale && plate_horizon == o.plate_horizon &&
-           plate_focal == o.plate_focal;
+           plate_focal == o.plate_focal && plate_rotation == o.plate_rotation && plate_flip == o.plate_flip;
 }
 
 int floor_rotation_snap(double degrees)
@@ -755,6 +756,8 @@ json scene_to_json_object(const Scene &s)
     bg["ground_scale"]   = s.background.ground_scale;
     bg["plate_horizon"]  = s.background.plate_horizon;
     bg["plate_focal"]    = s.background.plate_focal;
+    bg["plate_rotation"] = s.background.plate_rotation;
+    bg["plate_flip"]     = s.background.plate_flip;
     {
         json out = merged(raw, "background", bg);
         // 1h-2: only when changed, so an older scene writes back as it was read (and a value set back
@@ -774,6 +777,10 @@ json scene_to_json_object(const Scene &s)
             out.erase("plate_horizon");
         if (s.background.plate_focal == def.plate_focal)
             out.erase("plate_focal");
+        if (s.background.plate_rotation == def.plate_rotation)
+            out.erase("plate_rotation");
+        if (s.background.plate_flip == def.plate_flip)
+            out.erase("plate_flip");
         j["background"] = out;
     }
 
@@ -866,7 +873,20 @@ json scene_to_json_object(const Scene &s)
         ma["lights_off"]         = true;
         ma["lights_off_ambient"] = s.materials.lights_off_ambient;
     }
-    j["materials"] = merged(raw, "materials", ma);
+    ma["toolpath_supports"] = s.materials.toolpath_supports;
+    ma["toolpath_skirt"]    = s.materials.toolpath_skirt;
+    ma["toolpath_infill"]   = s.materials.toolpath_infill;
+    {
+        json out = merged(raw, "materials", ma);
+        // 1h-2b: only when off (and dropped again when back on).
+        if (s.materials.toolpath_supports)
+            out.erase("toolpath_supports");
+        if (s.materials.toolpath_skirt)
+            out.erase("toolpath_skirt");
+        if (s.materials.toolpath_infill)
+            out.erase("toolpath_infill");
+        j["materials"] = out;
+    }
 
     j["callouts"] = callouts_to_json(s.callouts, raw.is_object() && raw.contains("callouts") ? raw["callouts"] : json());
     // S4: the video's camera path and output, unknown keys of the section kept.
@@ -904,6 +924,8 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.background.ground_scale   = clamp_or(get_or<float>(bg, "ground_scale", 1.f), 0.05f, 20.f, 1.f);
     s.background.plate_horizon  = clamp_or(get_or<float>(bg, "plate_horizon", 0.5f), -1.f, 2.f, 0.5f);
     s.background.plate_focal    = clamp_or(get_or<float>(bg, "plate_focal", 50.f), 8.f, 600.f, 50.f);
+    s.background.plate_rotation = floor_rotation_snap(get_or<double>(bg, "plate_rotation", 0.));
+    s.background.plate_flip     = get_or<bool>(bg, "plate_flip", false);
 
     const json fl             = j.contains("floor") ? j["floor"] : json();
     s.floor.type              = enum_or(fl, "type", s.floor.type);
@@ -979,6 +1001,9 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.materials.coextruded_look = get_or<bool>(ma, "coextruded_look", true);
     s.materials.lights_off         = get_or<bool>(ma, "lights_off", false);
     s.materials.lights_off_ambient = clamp_or(get_or<float>(ma, "lights_off_ambient", 0.05f), 0.f, 0.5f, 0.05f);
+    s.materials.toolpath_supports  = get_or<bool>(ma, "toolpath_supports", true);
+    s.materials.toolpath_skirt     = get_or<bool>(ma, "toolpath_skirt", true);
+    s.materials.toolpath_infill    = get_or<bool>(ma, "toolpath_infill", true);
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);
@@ -1480,6 +1505,97 @@ void blend_over_rgba(std::vector<uint8_t> &dst, int dst_w, int dst_h, const std:
             }
             d[3] = uint8_t(std::lround(std::clamp(oa * 255.f, 0.f, 255.f)));
         }
+    }
+}
+
+int exif_orientation(const uint8_t *data, size_t size)
+{
+    if (data == nullptr || size < 4 || data[0] != 0xFF || data[1] != 0xD8)
+        return 1;
+    size_t pos = 2;
+    while (pos + 4 <= size) {
+        if (data[pos] != 0xFF)
+            return 1;
+        const uint8_t marker = data[pos + 1];
+        if (marker == 0xFF) {   // fill byte
+            ++pos;
+            continue;
+        }
+        if (marker == 0xD9 || marker == 0xDA)   // end of image, start of scan: no EXIF before the pixels
+            return 1;
+        const size_t len = (size_t(data[pos + 2]) << 8) | size_t(data[pos + 3]);
+        if (len < 2 || pos + 2 + len > size)
+            return 1;
+        const uint8_t *seg = data + pos + 4;
+        const size_t   n   = len - 2;
+        if (marker == 0xE1 && n >= 14 && std::memcmp(seg, "Exif\0\0", 6) == 0) {
+            const uint8_t *t  = seg + 6;
+            const size_t   tn = n - 6;
+            const bool     le = t[0] == 'I' && t[1] == 'I';
+            if (!le && !(t[0] == 'M' && t[1] == 'M'))
+                return 1;
+            auto u16 = [t, le](size_t o) { return le ? unsigned(t[o]) | (unsigned(t[o + 1]) << 8) : (unsigned(t[o]) << 8) | unsigned(t[o + 1]); };
+            auto u32 = [t, le](size_t o) {
+                return le ? uint32_t(t[o]) | (uint32_t(t[o + 1]) << 8) | (uint32_t(t[o + 2]) << 16) | (uint32_t(t[o + 3]) << 24) :
+                            (uint32_t(t[o]) << 24) | (uint32_t(t[o + 1]) << 16) | (uint32_t(t[o + 2]) << 8) | uint32_t(t[o + 3]);
+            };
+            if (u16(2) != 42)
+                return 1;
+            const size_t ifd = u32(4);
+            if (ifd + 2 > tn)
+                return 1;
+            const unsigned count = u16(ifd);
+            for (unsigned i = 0; i < count; ++i) {
+                const size_t e = ifd + 2 + size_t(i) * 12;
+                if (e + 12 > tn)
+                    return 1;
+                if (u16(e) == 0x0112) {
+                    // SHORT, one value, held in the first two bytes of the value field.
+                    const unsigned v = u16(e + 8);
+                    return v >= 1 && v <= 8 ? int(v) : 1;
+                }
+            }
+            return 1;
+        }
+        pos += 2 + len;
+    }
+    return 1;
+}
+
+void orient_rgba(std::vector<uint8_t> &rgba, int &w, int &h, int orientation)
+{
+    if (orientation < 2 || orientation > 8 || w <= 0 || h <= 0 || rgba.size() != size_t(w) * size_t(h) * 4)
+        return;
+    const bool swap = orientation >= 5;
+    const int  ow = swap ? h : w, oh = swap ? w : h;
+    std::vector<uint8_t> out(rgba.size());
+    for (int y = 0; y < oh; ++y)
+        for (int x = 0; x < ow; ++x) {
+            int sx = x, sy = y;
+            switch (orientation) {
+            case 2: sx = w - 1 - x; sy = y; break;
+            case 3: sx = w - 1 - x; sy = h - 1 - y; break;
+            case 4: sx = x; sy = h - 1 - y; break;
+            case 5: sx = y; sy = x; break;
+            case 6: sx = y; sy = h - 1 - x; break;
+            case 7: sx = w - 1 - y; sy = h - 1 - x; break;
+            case 8: sx = w - 1 - y; sy = x; break;
+            default: break;
+            }
+            std::memcpy(&out[(size_t(y) * size_t(ow) + size_t(x)) * 4], &rgba[(size_t(sy) * size_t(w) + size_t(sx)) * 4], 4);
+        }
+    rgba.swap(out);
+    w = ow;
+    h = oh;
+}
+
+int rotation_orientation(int rotation_ccw)
+{
+    switch (floor_rotation_snap(double(rotation_ccw))) {
+    case 90: return 8;
+    case 180: return 3;
+    case 270: return 6;
+    default: return 1;
     }
 }
 

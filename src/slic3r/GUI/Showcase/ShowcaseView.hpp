@@ -131,6 +131,9 @@ private:
     // 1h-2: the ground projection's camera height and dome radius as drawn when the scene leaves them
     // automatic (0), before the world scale; for the panel.
     void                     ground_auto_values(double &height, double &radius);
+    // 1h-2b: the Lens choice shows the camera's lens now: a preset within 3 %, else "~42 mm" (the last
+    // entry), or nothing for an orthographic camera.
+    void                     refresh_lens();
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -377,6 +380,12 @@ private:
     wxSlider                *m_plate_horizon = nullptr;
     wxSpinCtrl              *m_plate_focal = nullptr;
     wxButton                *m_plate_match = nullptr;
+    wxChoice                *m_plate_rotation = nullptr;   // 1h-2b: the photo's own turn and mirror
+    wxCheckBox              *m_plate_flip = nullptr;
+    // 1h-2b: what the toolpaths view shows besides the model (Materials, under Show).
+    wxCheckBox              *m_tp_supports = nullptr;
+    wxCheckBox              *m_tp_skirt = nullptr;
+    wxCheckBox              *m_tp_infill = nullptr;
     wxChoice                *m_floor_type = nullptr;
     wxColourPickerCtrl      *m_floor_color = nullptr;
     wxSlider                *m_floor_shadow = nullptr;

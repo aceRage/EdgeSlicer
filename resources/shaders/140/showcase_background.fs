@@ -14,6 +14,7 @@ uniform float frame_aspect; // frame width / height
 uniform sampler2D image_tex;
 uniform vec4 uv_transform;  // image: uv = f * xy + zw, f = position in the frame (0..1)
 uniform bool tile;
+uniform bool extend;        // 1h-2b: a photo backplate: past the picture's edge keep its edge pixels, not color1
 uniform vec2 viewport_size; // pixels (checkerboard)
 
 // S2: a soft focus look. 0 = sharp; the image is mipmapped and image_lod is the level to read.
@@ -36,6 +37,7 @@ uniform float scene_dim;
 // the floor disc where the sphere meets it (ground_floor_radius). Otherwise an infinite panorama,
 // optionally tilted about the camera's horizontal axis (backdrop_tilt). ShowcaseLens.cpp mirrors it.
 uniform bool  ground_on;
+uniform bool  ortho_view;          // 1h-2b: parallel view rays, one per pixel
 uniform vec3  ground_center;
 uniform float ground_radius;
 uniform float ground_floor_radius;
@@ -81,10 +83,21 @@ vec3 ground_lookup(vec3 o, vec3 d)
     return d;
 }
 
+// 1h-2b: the pixel's view ray from the near plane to the far plane: correct for an orthographic
+// camera too, whose rays are parallel and start on the view plane, not at one eye point.
 vec3 view_lookup(vec3 dir)
 {
-    if (ground_on)
-        return normalize(ground_lookup(camera_position, dir));
+    if (ground_on) {
+        if (!ortho_view)
+            return normalize(ground_lookup(camera_position, dir));
+        vec2 ndc = tex_coord * 2.0 - 1.0;
+        vec4 pn = inv_view_projection * vec4(ndc, -1.0, 1.0);
+        vec4 pf = inv_view_projection * vec4(ndc, 1.0, 1.0);
+        vec3 d = normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+        // Well behind the view plane along the parallel ray, so it starts above the floor.
+        vec3 o = pn.xyz / pn.w - d * 1.0e4;
+        return normalize(ground_lookup(o, d));
+    }
     if (tilt_on)
         return backdrop_tilt * dir;
     return dir;
@@ -171,6 +184,8 @@ void main()
         vec2 uv = f * uv_transform.xy + uv_transform.zw;
         if (tile)
             uv = fract(uv);
+        if (extend)
+            uv = clamp(uv, 0.0, 1.0);
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
             c = color1;
         else

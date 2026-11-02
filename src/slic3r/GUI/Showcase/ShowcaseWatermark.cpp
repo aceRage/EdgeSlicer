@@ -105,6 +105,8 @@ bool showcase_decode_image(const std::vector<uint8_t> &bytes, ShowcaseImage &out
     if (!image.LoadFile(stream, wxBITMAP_TYPE_ANY) || !image.IsOk())
         return false;
     showcase_wx_to_rgba(image, out);
+    // 1h-2b: a phone photo's EXIF orientation (wxWidgets 3.1 does not apply it).
+    Showcase::orient_rgba(out.rgba, out.width, out.height, Showcase::exif_orientation(bytes.data(), bytes.size()));
     return !out.empty();
 }
 
@@ -221,6 +223,22 @@ bool showcase_load_image_file(const std::string &path, int max_side, bool always
     if (!image.LoadFile(wxString::FromUTF8(path), wxBITMAP_TYPE_ANY) || !image.IsOk()) {
         error = "The image could not be read.";
         return false;
+    }
+    // 1h-2b: turn a phone photo the way its EXIF orientation says before it is re-encoded (which drops
+    // the tag): wxWidgets 3.1 shows the sensor's pixels as stored.
+    {
+        boost::nowide::ifstream in(path, std::ios::binary);
+        std::vector<uint8_t>    head((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const int               orientation = Showcase::exif_orientation(head.data(), head.size());
+        if (orientation != 1 && image.GetWidth() > 0 && image.GetHeight() > 0) {
+            const bool    had_alpha = image.HasAlpha();
+            ShowcaseImage tmp;
+            showcase_wx_to_rgba(image, tmp);
+            Showcase::orient_rgba(tmp.rgba, tmp.width, tmp.height, orientation);
+            image = showcase_rgba_to_wx(tmp);
+            if (!had_alpha)
+                image.ClearAlpha();
+        }
     }
     const int w = image.GetWidth(), h = image.GetHeight();
     if (w <= 0 || h <= 0) {

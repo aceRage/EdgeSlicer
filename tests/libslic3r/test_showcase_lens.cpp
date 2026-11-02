@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
+#include <vector>
 
 using namespace Slic3r::Showcase;
 
@@ -336,4 +338,141 @@ TEST_CASE("Showcase panel: environment placement, backplate and depth of field r
     CHECK_FALSE(v.cam_dof_focus);
     s.dof.focus_on_model = false;
     CHECK(panel_visibility(s, false).cam_dof_focus);
+}
+
+// ---- 1h-2b ------------------------------------------------------------------------------------
+
+namespace {
+// A minimal JPEG head: SOI, an APP1 Exif segment with one IFD0 entry (Orientation), then SOS.
+std::vector<uint8_t> exif_jpeg(int orientation, bool little_endian)
+{
+    std::vector<uint8_t> tiff;
+    auto u16 = [&tiff, little_endian](unsigned v) {
+        if (little_endian) { tiff.push_back(uint8_t(v)); tiff.push_back(uint8_t(v >> 8)); }
+        else { tiff.push_back(uint8_t(v >> 8)); tiff.push_back(uint8_t(v)); }
+    };
+    auto u32 = [&tiff, little_endian](uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            tiff.push_back(uint8_t(little_endian ? v >> (8 * i) : v >> (8 * (3 - i))));
+    };
+    tiff.push_back(little_endian ? 'I' : 'M');
+    tiff.push_back(little_endian ? 'I' : 'M');
+    u16(42);
+    u32(8);          // IFD0 right after the header
+    u16(2);          // two entries: something else, then the orientation
+    u16(0x010F); u16(2); u32(4); u32(0);       // Make (ASCII), value not used
+    u16(0x0112); u16(3); u32(1); u16(unsigned(orientation)); u16(0);
+    u32(0);          // no next IFD
+    std::vector<uint8_t> j = { 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00 };   // SOI, a tiny APP0
+    const size_t len = 2 + 6 + tiff.size();
+    j.insert(j.end(), { 0xFF, 0xE1, uint8_t(len >> 8), uint8_t(len), 'E', 'x', 'i', 'f', 0, 0 });
+    j.insert(j.end(), tiff.begin(), tiff.end());
+    j.insert(j.end(), { 0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9 });
+    return j;
+}
+
+// A 3 x 2 image whose pixel (x, y) has red = x, green = y.
+std::vector<uint8_t> coord_image(int w, int h)
+{
+    std::vector<uint8_t> rgba;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            rgba.insert(rgba.end(), { uint8_t(x), uint8_t(y), 0, 255 });
+    return rgba;
+}
+} // namespace
+
+TEST_CASE("Showcase lens: EXIF orientation is read from a JPEG", "[showcase][lens]")
+{
+    for (int o = 1; o <= 8; ++o) {
+        CHECK(exif_orientation(exif_jpeg(o, true).data(), exif_jpeg(o, true).size()) == o);
+        CHECK(exif_orientation(exif_jpeg(o, false).data(), exif_jpeg(o, false).size()) == o);
+    }
+    // Out of range, not a JPEG, cut short: as stored.
+    CHECK(exif_orientation(exif_jpeg(9, true).data(), exif_jpeg(9, true).size()) == 1);
+    const std::vector<uint8_t> png = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    CHECK(exif_orientation(png.data(), png.size()) == 1);
+    std::vector<uint8_t> cut = exif_jpeg(6, true);
+    cut.resize(20);
+    CHECK(exif_orientation(cut.data(), cut.size()) == 1);
+    CHECK(exif_orientation(nullptr, 0) == 1);
+}
+
+TEST_CASE("Showcase lens: orientations turn the pixels the EXIF way", "[showcase][lens]")
+{
+    const int W = 3, H = 2;
+    auto at = [](const std::vector<uint8_t> &img, int w, int x, int y) {
+        const size_t i = (size_t(y) * size_t(w) + size_t(x)) * 4;
+        return std::make_pair(int(img[i]), int(img[i + 1]));   // the source (x, y) it came from
+    };
+    struct Expect { int o; int w; int h; int x; int y; int sx; int sy; };
+    // The output's top-left pixel and where it comes from in the stored image.
+    const Expect cases[] = {
+        { 1, 3, 2, 0, 0, 0, 0 }, { 2, 3, 2, 0, 0, 2, 0 }, { 3, 3, 2, 0, 0, 2, 1 }, { 4, 3, 2, 0, 0, 0, 1 },
+        { 5, 2, 3, 0, 0, 0, 0 }, { 6, 2, 3, 0, 0, 0, 1 }, { 7, 2, 3, 0, 0, 2, 1 }, { 8, 2, 3, 0, 0, 2, 0 },
+        // Turned 90 clockwise: the stored top-left ends at the top right.
+        { 6, 2, 3, 1, 0, 0, 0 },
+        // Turned 90 counter-clockwise: the stored top-left ends at the bottom left.
+        { 8, 2, 3, 0, 2, 0, 0 },
+    };
+    for (const Expect &e : cases) {
+        std::vector<uint8_t> img = coord_image(W, H);
+        int w = W, h = H;
+        orient_rgba(img, w, h, e.o);
+        INFO("orientation " << e.o);
+        CHECK(w == e.w);
+        CHECK(h == e.h);
+        CHECK(at(img, w, e.x, e.y) == std::make_pair(e.sx, e.sy));
+    }
+    // The user's turn: counter-clockwise; 90 then 270 is the stored image again.
+    CHECK(rotation_orientation(0) == 1);
+    CHECK(rotation_orientation(90) == 8);
+    CHECK(rotation_orientation(180) == 3);
+    CHECK(rotation_orientation(270) == 6);
+    std::vector<uint8_t> img = coord_image(W, H);
+    int w = W, h = H;
+    orient_rgba(img, w, h, rotation_orientation(90));
+    orient_rgba(img, w, h, rotation_orientation(270));
+    CHECK(img == coord_image(W, H));
+    CHECK(w == W);
+}
+
+TEST_CASE("Showcase lens: backplate turn and toolpath switches are saved only when set", "[showcase][lens]")
+{
+    Project p;
+    Scene  &s = p.ensure_scene_for_plate(0);
+    nlohmann::json out = nlohmann::json::parse(scenes_to_json(p));
+    for (const char *k : { "toolpath_supports", "toolpath_skirt", "toolpath_infill" })
+        CHECK_FALSE(out["scenes"][0]["materials"].contains(k));
+    CHECK_FALSE(out["scenes"][0]["background"].contains("plate_rotation"));
+    CHECK_FALSE(out["scenes"][0]["background"].contains("plate_flip"));
+
+    s.background.plate_rotation = 270;
+    s.background.plate_flip     = true;
+    s.materials.toolpath_supports = false;
+    s.materials.toolpath_skirt    = false;
+    s.materials.toolpath_infill   = false;
+    Project back;
+    REQUIRE(scenes_from_json(scenes_to_json(p), back));
+    REQUIRE(back.scenes.size() == 1);
+    CHECK(back.scenes[0] == s);
+
+    // Back on: the keys go again.
+    back.scenes[0].materials.toolpath_supports = true;
+    back.scenes[0].background.plate_flip       = false;
+    out = nlohmann::json::parse(scenes_to_json(back));
+    CHECK_FALSE(out["scenes"][0]["materials"].contains("toolpath_supports"));
+    CHECK(out["scenes"][0]["materials"].contains("toolpath_skirt"));
+    CHECK_FALSE(out["scenes"][0]["background"].contains("plate_flip"));
+}
+
+TEST_CASE("Showcase panel: toolpath switches and the backplate's turn", "[showcase][panel]")
+{
+    Scene s;
+    s.source = "model";
+    CHECK_FALSE(panel_visibility(s, false).mat_toolpath);
+    s.source = "toolpaths";
+    CHECK(panel_visibility(s, false).mat_toolpath);   // Supports, Brim and skirt, Infill under Show
+    s.background.type = BackgroundType::Backplate;
+    CHECK(panel_visibility(s, false).bg_plate_match);   // Rotate photo, Flip, horizon, lens, Match camera
 }

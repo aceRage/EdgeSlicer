@@ -111,6 +111,10 @@ struct Background
     // equivalent focal length it was taken with. "Match camera" turns the camera to them.
     float          plate_horizon = 0.5f;
     float          plate_focal   = 50.f;
+    // Backplate: the photo turned counter-clockwise by 0 / 90 / 180 / 270 degrees and mirrored left to
+    // right (before the turn), on top of the EXIF orientation of the file (which is always applied).
+    int            plate_rotation = 0;
+    bool           plate_flip     = false;
 
     bool operator==(const Background &o) const;
     bool operator!=(const Background &o) const { return !(*this == o); }
@@ -283,6 +287,11 @@ struct Materials
     // glow (the project's filament_glow keys) shine in their glow colour. Written only when on.
     bool                          lights_off         = false;
     float                         lights_off_ambient = 0.05f;
+    // 1h-2b: what the toolpaths view shows besides the model's own extrusions (the stills and the live
+    // view; a video's build-up has its own Infill / Supports switches on top). Written only when off.
+    bool                          toolpath_supports  = true;   // supports, their interfaces and transitions
+    bool                          toolpath_skirt     = true;   // skirt and brim
+    bool                          toolpath_infill    = true;   // sparse and internal solid infill (seen through gaps)
     // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
     float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
@@ -296,7 +305,8 @@ struct Materials
     bool operator==(const Materials &o) const
     {
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
-               coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient;
+               coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient &&
+               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };
@@ -505,6 +515,19 @@ void blend_over_rgba(std::vector<uint8_t> &dst, int dst_w, int dst_h, const std:
                      int x, int y, float opacity);
 // Flattens an RGBA image onto an opaque colour (JPEG has no alpha).
 void flatten_rgba(std::vector<uint8_t> &rgba, uint8_t r, uint8_t g, uint8_t b);
+
+// 1h-2b: the EXIF Orientation (tag 0x0112, 1..8) of a JPEG held in memory; 1 (as stored) for anything
+// else, a file without the tag, or one that does not parse. Phones store the sensor's pixels and this
+// tag; wxWidgets 3.1 ignores it, so Showcase applies it itself.
+int  exif_orientation(const uint8_t *data, size_t size);
+// Turns an RGBA image (top row first) by an EXIF orientation code into how it is meant to be seen:
+// 2 mirror, 3 turn 180, 4 flip upside down, 5 transpose, 6 turn 90 clockwise, 7 transverse,
+// 8 turn 90 counter-clockwise. Width and height swap for 5..8. 1 and anything else leave it as is.
+void orient_rgba(std::vector<uint8_t> &rgba, int &w, int &h, int orientation);
+// The orientation code of the user's own turn (counter-clockwise, snapped to 0 / 90 / 180 / 270)
+// after an optional mirror left to right, applied on top of the file's (backplate Rotate / Flip):
+// orient_rgba with exif first, then with the mirror (2), then with the turn.
+int  rotation_orientation(int rotation_ccw);
 
 } // namespace Showcase
 } // namespace Slic3r
