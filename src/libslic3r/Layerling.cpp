@@ -565,6 +565,25 @@ std::string document_start_script()
     return std::string(hide_save_picker_script()) + suppress_install_hint_script();
 }
 
+std::string release_link_version(const std::string &url)
+{
+    const std::string prefix = RELEASE_TAG_URL_PREFIX;
+    if (url.size() <= prefix.size() || lower(url.substr(0, prefix.size())) != prefix)
+        return std::string();
+    std::string tag = url.substr(prefix.size());
+    const size_t end = tag.find_first_of("?#");
+    if (end != std::string::npos)
+        tag = tag.substr(0, end);
+    if (!tag.empty() && tag.back() == '/')
+        tag.pop_back();
+    if (tag.find('/') != std::string::npos)
+        return std::string();
+    const std::string v = normalize_version(untrusted::percent_decode(tag));
+    if (!is_safe_version(v) || !std::isdigit((unsigned char) v[0]))
+        return std::string();
+    return v;
+}
+
 std::string start_url(const std::string &base_url)
 {
     const std::string o = origin_of(base_url);

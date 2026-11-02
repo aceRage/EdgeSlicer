@@ -759,6 +759,28 @@ TEST_CASE("Layerling: handing a file to Layerling's own import", "[Layerling]")
     CHECK(MAX_HANDOVER_BYTES >= std::uint64_t(16) * 1024 * 1024);
 }
 
+TEST_CASE("Layerling: the update banner's release link", "[Layerling]")
+{
+    // What Layerling 1.132.1's banner links to: GitHub's html_url of the latest release.
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1") == "1.132.1");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/1.133.0") == "1.133.0");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1/") == "1.132.1");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1?x=1#notes") == "1.132.1");
+    CHECK(release_link_version("HTTPS://GITHUB.COM/henmedia/layerling/releases/tag/v2.0.0") == "2.0.0");
+    // Not the update link: the footer's release notes, other repositories and hosts, http, odd tags.
+    for (const char *other : {"https://github.com/henmedia/layerling/releases", "https://github.com/henmedia/layerling/releases/",
+                              "https://github.com/henmedia/layerling/releases/latest", "https://github.com/henmedia/layerling",
+                              "https://github.com/other/layerling/releases/tag/v1.132.1",
+                              "https://github.com.evil.example/henmedia/layerling/releases/tag/v1.132.1",
+                              "http://github.com/henmedia/layerling/releases/tag/v1.132.1",
+                              "https://github.com/henmedia/layerling/releases/tag/v1.132.1/assets",
+                              "https://github.com/henmedia/layerling/releases/tag/..%2F..", "https://github.com/henmedia/layerling/releases/tag/",
+                              "https://github.com/henmedia/layerling/releases/tag/nightly", "https://layerling.com/"}) {
+        INFO(other);
+        CHECK(release_link_version(other).empty());
+    }
+}
+
 TEST_CASE("Layerling: the MCP setup text", "[Layerling]")
 {
     CHECK(is_local_bridge_origin("http://127.0.0.1:3000"));

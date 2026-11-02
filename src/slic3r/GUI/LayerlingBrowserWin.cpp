@@ -324,6 +324,14 @@ private:
             c2->put_DefaultBackgroundColor(m_dark ? COREWEBVIEW2_COLOR{255, 0x24, 0x24, 0x28} : COREWEBVIEW2_COLOR{255, 255, 255, 255});
     }
 
+    // The panel first (Layerling's update banner), else the system browser.
+    void external(const std::string &url)
+    {
+        if (m_cb.on_external_link && m_cb.on_external_link(url))
+            return;
+        open_external(url);
+    }
+
     static void open_external(const std::string &url)
     {
         if (!untrusted::is_safe_to_open_externally(url))
@@ -350,7 +358,7 @@ private:
                                                BOOL user = FALSE;
                                                args->get_IsUserInitiated(&user);
                                                if (d == layerling::Navigation::External && user)
-                                                   open_external(url);
+                                                   external(url);
                                                return S_OK;
                                            })
                                            .Get(),
@@ -369,7 +377,7 @@ private:
                                                 .Get(),
                                             &token);
         m_view->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-                                           [alive](ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
+                                           [this, alive](ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
                                                args->put_Handled(TRUE); // never a second browser window
                                                if (!*alive)
                                                    return S_OK;
@@ -377,7 +385,7 @@ private:
                                                args->get_Uri(&uri);
                                                const std::string url = take_wstring(uri);
                                                if (!layerling::origin_of(url).empty())
-                                                   open_external(url);
+                                                   external(url);
                                                return S_OK;
                                            })
                                            .Get(),

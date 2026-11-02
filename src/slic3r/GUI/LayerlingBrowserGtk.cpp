@@ -170,14 +170,18 @@ private:
             if (d == layerling::Navigation::External && evt.GetTarget().empty()) {
                 // A frame showing another site may load; a top-level link opens outside.
                 evt.Veto();
+                if (m_cb.on_external_link && m_cb.on_external_link(url))
+                    return;
                 if (untrusted::is_safe_to_open_externally(url))
                     wxLaunchDefaultBrowser(evt.GetURL());
                 return;
             }
             evt.Veto();
         });
-        m_view->Bind(wxEVT_WEBVIEW_NEWWINDOW, [](wxWebViewEvent &evt) {
+        m_view->Bind(wxEVT_WEBVIEW_NEWWINDOW, [this](wxWebViewEvent &evt) {
             const std::string url = into_u8(evt.GetURL());
+            if (m_cb.on_external_link && m_cb.on_external_link(url))
+                return;
             if (!layerling::origin_of(url).empty() && untrusted::is_safe_to_open_externally(url))
                 wxLaunchDefaultBrowser(evt.GetURL());
         });

@@ -274,7 +274,7 @@ public:
         if (!main_frame && d == layerling::Navigation::External)
             return WKNavigationActionPolicyAllow; // a frame showing another site
         if (d == layerling::Navigation::External && action.navigationType == WKNavigationTypeLinkActivated)
-            open_external(url);
+            external(url);
         return WKNavigationActionPolicyCancel;
     }
 
@@ -294,8 +294,16 @@ public:
     {
         const std::string url = url_string(action.request.URL);
         if (!layerling::origin_of(url).empty())
-            open_external(url);
+            external(url);
         return nil; // never a second browser window
+    }
+
+    // The panel first (Layerling's update banner), else the system browser.
+    void external(const std::string &url)
+    {
+        if (m_cb.on_external_link && m_cb.on_external_link(url))
+            return;
+        open_external(url);
     }
 
     void adopt_download(WKDownload *download)

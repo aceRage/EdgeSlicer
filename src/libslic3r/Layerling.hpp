@@ -145,6 +145,16 @@ enum class Navigation {
 // `allowed_origin` as origin_of() returns it.
 Navigation decide_navigation(const std::string &url, const std::string &allowed_origin);
 
+// Layerling's own "A newer version of layerling is available" banner (and the matching footer link)
+// links to the release on GitHub: its update check stores GitHub's html_url,
+// "https://github.com/henmedia/layerling/releases/tag/v<version>" (checked in the 1.132.1 bundle:
+// dashboard-update-link, target=_blank). For the downloaded copy the tab runs its own updater for
+// that link instead. Returns the version ("1.132.1") such a link names, "" for anything else -
+// the plain ".../releases" release notes link, other repositories, other hosts, http, a tag that
+// is not a safe version. A query or fragment is ignored.
+constexpr const char *RELEASE_TAG_URL_PREFIX = "https://github.com/henmedia/layerling/releases/tag/";
+std::string release_link_version(const std::string &url);
+
 // Script run in every page before its own: hides window.showSaveFilePicker so exports are
 // downloads (which the tab hands to the plate) rather than writes through a save dialog.
 const char *hide_save_picker_script();

@@ -680,6 +680,21 @@ void LayerlingPanel::Impl::refresh()
                         show_notice(format_wxstr(_L("The export \"%1%\" did not arrive: %2%"), from_u8(name), from_u8(error)), NoticeKind::Error);
                 });
         };
+        // Layerling's "newer version available" banner links to the GitHub release: for the
+        // downloaded copy that runs the tab's own updater (the same as "Update to vX").
+        cb.on_external_link = [this, alive_](const std::string &url) {
+            if (!*alive_ || custom_base())
+                return false;
+            const std::string v = layerling::release_link_version(url);
+            if (v.empty() || layerling::compare_versions(v, cfg(KEY_VERSION)) <= 0)
+                return false;
+            BOOST_LOG_TRIVIAL(info) << "Layerling: the page's update link for " << v << " runs the tab's updater";
+            owner->CallAfter([this, alive_]() {
+                if (*alive_)
+                    start_download(true);
+            });
+            return true;
+        };
         cb.on_error = [this, alive_](const std::string &error) {
             if (*alive_)
                 owner->CallAfter([this, alive_, error]() {

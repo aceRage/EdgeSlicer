@@ -53,6 +53,10 @@ public:
         std::function<void(const std::string &suggested_name, const std::string &error)> on_download_failed;
         // The browser could not start, or its content process died.
         std::function<void(const std::string &error)> on_error;
+        // A link the page opens outside the tab (a navigation elsewhere or a new window), before it
+        // goes to the system browser: true when the panel took it (Layerling's update banner, see
+        // layerling::release_link_version), then nothing opens. Runs on the GUI thread.
+        std::function<bool(const std::string &url)> on_external_link;
     };
 
     // `host`: the window the view fills. `allowed_origin`: e.g. "http://127.0.0.1:23456".
