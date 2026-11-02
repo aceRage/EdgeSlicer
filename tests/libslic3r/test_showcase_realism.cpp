@@ -645,14 +645,14 @@ TEST_CASE("Showcase 1h-3: OpenEXR files this reader does not handle are refused 
 TEST_CASE("Showcase 1h-3: a large panorama is halved until it fits", "[Showcase][Realism][HDR]")
 {
     const HdrImage big   = gradient_panorama(256, 128);
-    const HdrImage small = downscale_hdr(big, 64);
-    CHECK(small.width == 64);
-    CHECK(small.height == 32);
+    const HdrImage halved = downscale_hdr(big, 64);
+    CHECK(halved.width == 64);
+    CHECK(halved.height == 32);
     // A box filter keeps the average light.
     double a = 0., b = 0.;
     for (float v : big.rgb)
         a += v;
-    for (float v : small.rgb)
+    for (float v : halved.rgb)
         b += v;
     CHECK_THAT(b * 16., WithinAbs(a, a * 1e-4));
     CHECK(downscale_hdr(big, 1000).width == 256);   // already small enough

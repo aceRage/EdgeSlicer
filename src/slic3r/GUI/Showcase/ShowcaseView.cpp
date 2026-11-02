@@ -3638,7 +3638,7 @@ bool ShowcaseView::horizon_on_mouse(wxMouseEvent &evt)
                                                               double(s.background.plate_offset_x), double(s.background.plate_offset_y));
     const double line_y = double(f.y) + (1. - pm.frame_y(double(s.background.plate_horizon))) * double(f.h);
     const double mx = double(evt.GetX()), my = double(evt.GetY());
-    const bool   near = mx >= double(f.x) && mx <= double(f.x + f.w) && std::abs(my - line_y) <= 6.;
+    const bool   on_line = mx >= double(f.x) && mx <= double(f.x + f.w) && std::abs(my - line_y) <= 6.;
     auto horizon_at = [&](double y) {
         const double fy = std::clamp(1. - (y - double(f.y)) / double(std::max(1, f.h)), 0., 1.);
         return float(std::clamp(pm.photo_v(fy), -1., 2.));
@@ -3661,14 +3661,14 @@ bool ShowcaseView::horizon_on_mouse(wxMouseEvent &evt)
     }
     if (evt.Moving()) {
         // The resize cursor over the line; the callouts set theirs again when the mouse leaves it.
-        if (near) {
+        if (on_line) {
             m_canvas_widget->SetCursor(wxCursor(wxCURSOR_SIZENS));
             m_callouts.cursor = -1;
             return true;
         }
         return false;
     }
-    if (evt.LeftDown() && near) {
+    if (evt.LeftDown() && on_line) {
         m_horizon_drag = true;
         if (!m_canvas_widget->HasCapture())
             m_canvas_widget->CaptureMouse();
