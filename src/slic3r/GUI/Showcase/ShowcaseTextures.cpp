@@ -132,6 +132,12 @@ wxString showcase_finish_name(Showcase::Finish finish)
     case Showcase::Finish::Transparent: return _L("Transparent");
     case Showcase::Finish::Metallic: return _L("Metallic");
     case Showcase::Finish::CarbonFiber: return _L("Carbon / glass fibre");
+    case Showcase::Finish::Translucent: return _L("Translucent");
+    case Showcase::Finish::Satin: return _L("Satin");
+    case Showcase::Finish::Sparkle: return _L("Sparkle / galaxy");
+    case Showcase::Finish::Marble: return _L("Marble / stone fill");
+    case Showcase::Finish::Wood: return _L("Wood fill");
+    case Showcase::Finish::MatteTextured: return _L("Textured matte");
     default: return _L("Standard");
     }
 }

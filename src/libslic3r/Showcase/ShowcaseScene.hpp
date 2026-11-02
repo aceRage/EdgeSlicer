@@ -299,6 +299,10 @@ struct Materials
     bool                          toolpath_supports  = true;   // supports, their interfaces and transitions
     bool                          toolpath_skirt     = true;   // skirt and brim
     bool                          toolpath_infill    = true;   // sparse and internal solid infill (seen through gaps)
+    // Realism 1d: light through thin walls and soft edges of the plastic (0 = off .. 1), model mode.
+    // Translucent filaments glow through thin walls at any value (effective_translucency()). Written
+    // only when set.
+    float                         translucency       = 0.f;
     // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
     float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
@@ -313,7 +317,8 @@ struct Materials
     {
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
                coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient &&
-               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill;
+               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill &&
+               translucency == o.translucency;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };

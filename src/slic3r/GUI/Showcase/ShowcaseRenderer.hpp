@@ -43,6 +43,7 @@ class wxMouseEvent;
 
 namespace Slic3r {
 
+class GLVolume;
 class ModelVolume;
 
 namespace GUI {
@@ -51,6 +52,7 @@ struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differen
 class GLCanvas3D;
 class GLModel;
 struct ShowcaseFramebuffers;
+struct ShowcaseFilament;
 
 // An RGBA image, top row first, straight (not premultiplied) alpha.
 struct ShowcaseImage
@@ -304,6 +306,17 @@ private:
     void            render_reflection();
     // Frees the contact shadow and mirror buffers (an export may have sized them large).
     void            release_offscreen();
+    // Realism 1d: the finish a filament slot renders with (the scene's override or the inference).
+    Showcase::Finish filament_finish(int filament, const std::vector<ShowcaseFilament> &filaments) const;
+    // Realism 1d: the thickness pass. The back faces of `items` (a volume, and its painted part or -1)
+    // write their distance from `eye` into an R32F target at half the bound viewport's size; the
+    // material pass reads it (m_thick_valid). The caller's framebuffer and viewport come back.
+    bool            render_thickness(const std::vector<std::pair<GLVolume *, int>> &items, const Transform3d &view,
+                                     const Transform3d &projection, const Vec3d &eye);
+    // Realism 1d: the coloured shadows. Every shadow caster seen from the key light, multiplied into a
+    // white RGBA8 map by the light it lets through (m_transmit_valid; only when a caster lets light
+    // through, else the floor's shadow stays grey as before).
+    void            render_transmit_map();
 
     GLCanvas3D                &m_canvas;
     const Showcase::Scene     *m_scene   = nullptr;
@@ -356,6 +369,17 @@ private:
     int                        m_refl_w = 0;
     int                        m_refl_h = 0;
     bool                       m_refl_valid = false;
+    // Realism 1d: the thickness pass (R32F distance + its depth) and the coloured shadows' map.
+    unsigned int               m_thick_fbo = 0;
+    unsigned int               m_thick_tex = 0;
+    unsigned int               m_thick_depth = 0;
+    int                        m_thick_w = 0;
+    int                        m_thick_h = 0;
+    bool                       m_thick_valid = false;
+    float                      m_thick_viewport[4] = { 0.f, 0.f, 1.f, 1.f };
+    unsigned int               m_transmit_fbo = 0;
+    unsigned int               m_transmit_tex = 0;
+    bool                       m_transmit_valid = false;
     // 1h-2: depth of field: a copy of the colour and depth, and the circles of confusion (RG16F).
     unsigned int               m_dof_copy_fbo = 0;
     unsigned int               m_dof_color = 0;

@@ -429,6 +429,7 @@ private:
     wxCheckBox              *m_lights_off = nullptr;
     wxSlider                *m_lights_ambient = nullptr;
     wxSlider                *m_glow_intensity = nullptr;
+    wxSlider                *m_translucency = nullptr;   // realism 1d
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
     std::string              m_mat_signature;

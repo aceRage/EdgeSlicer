@@ -14,7 +14,9 @@
 #                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
 #                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated,
 #                        hdri_outdoor_tilt, ground_workshop_dof, ground_sunset_sill, ground_loft, backplate_desk,
-#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait, video)
+#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait,
+#                        translucent_backlit, translucency_plain, finish_sparkle, finish_marble, finish_wood,
+#                        finish_textured, finish_satin, video)
 #                        The 1h-2 fixtures (hdri_outdoor_tilt, ground_*, backplate_desk) need the backdrop
 #                        placement, ground projection, photo backplate and depth of field, which a golden
 #                        install from before 1h-2 does not have: they are expected to change until the
@@ -102,6 +104,9 @@ echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$RE
 # 1h-2: fixtures the shared baseline cannot render yet differ on purpose. (The 1h-1 HDRI fixtures are
 # compared strictly: the baseline has them since c5b7546a45.)
 NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden,backplate_portrait"
+# Realism 1d-1g, 1h-2 rest: new looks the shared baseline cannot render (compare them with a golden install of
+# the 1h-2 branch to see that everything else is unchanged).
+NEW_FIXTURES="$NEW_FIXTURES,translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
@@ -243,6 +248,14 @@ run_still backplate_catcher --photo
 run_still ground_ortho
 run_still toolpaths_hidden --slice
 run_still backplate_portrait --photo-portrait
+# Realism 1d / 1e
+run_still translucent_backlit --settings
+run_still translucency_plain --settings
+run_still finish_sparkle --settings
+run_still finish_marble --settings
+run_still finish_wood --settings
+run_still finish_textured --settings
+run_still finish_satin --settings
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

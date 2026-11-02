@@ -862,6 +862,10 @@ void ShowcaseView::build_panel()
                             "skin widened and flattened into one surface."));
     grid->Add(m_smooth_auto, 0, wxALIGN_CENTER_VERTICAL);
     grid->Add(m_smooth, 1, wxEXPAND);
+    // Realism 1d: light through thin walls and soft edges (model mode).
+    m_translucency = slider(0, 0, 100);
+    m_translucency->SetToolTip(_L("Light shines through thin walls and softens the edges of the plastic. Translucent filaments glow on their own."));
+    row(_L("Translucency"), m_translucency);
     {
         auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
                                                            "Pick another one where the guess is wrong."));
@@ -1502,6 +1506,11 @@ void ShowcaseView::build_panel()
         const int v = m_smooth->GetValue();
         edit([v](Showcase::Scene &s) { s.materials.toolpath_smoothness = float(v) / 100.f; });
     });
+    // Realism 1d.
+    m_translucency->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_translucency->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.materials.translucency = v; });
+    });
 
     m_lens->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_lens->GetSelection();
@@ -1994,6 +2003,7 @@ void ShowcaseView::sync_controls()
     m_smooth_auto->SetValue(s.materials.toolpath_smoothness < 0.f);
     if (s.materials.toolpath_smoothness >= 0.f)
         m_smooth->SetValue(int(std::lround(s.materials.toolpath_smoothness * 100.f)));
+    m_translucency->SetValue(std::clamp(int(std::lround(s.materials.translucency * 100.f)), 0, 100));
     refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
@@ -2214,7 +2224,7 @@ void ShowcaseView::update_enabled()
                                                           m_plate_horizon, m_plate_focal, m_plate_match, m_lens, m_dof, m_dof_fnumber,
                                                           m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
                                                           m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
-                                                          m_plate_offset_y, m_plate_fit })
+                                                          m_plate_offset_y, m_plate_fit, m_translucency })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2439,6 +2449,7 @@ void ShowcaseView::apply_row_visibility()
     set(m_layer_lines, v.mat_layer_lines);
     set(m_smooth_auto, v.mat_toolpath);
     set(m_lights_ambient, v.mat_light_left);
+    set(m_translucency, v.mat_translucency);
     // Callouts
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_once, m_co_style, m_co_font, m_co_size, m_co_leader,
                                                           m_co_auto_colors, m_co_list, m_co_hint })

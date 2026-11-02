@@ -286,7 +286,7 @@ ShowcaseRenderer::~ShowcaseRenderer()
     // them here only while the canvas can still be made current.
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
                         m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
-                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0;
+                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0 || m_thick_fbo != 0 || m_transmit_fbo != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     for (std::unique_ptr<ShowcaseFramebuffers> *fb : { &m_batch_fb, &m_live_fb })
@@ -372,6 +372,23 @@ void ShowcaseRenderer::release_offscreen()
     }
     m_refl_w = m_refl_h = 0;
     m_contact_valid = m_refl_valid = false;
+    // Realism 1d: the thickness pass (sized like the frame) and the coloured shadows' map.
+    for (unsigned int *fbo : { &m_thick_fbo, &m_transmit_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_thick_tex, &m_transmit_tex })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    if (m_thick_depth != 0) {
+        glsafe(::glDeleteRenderbuffers(1, &m_thick_depth));
+        m_thick_depth = 0;
+    }
+    m_thick_w = m_thick_h = 0;
+    m_thick_valid = m_transmit_valid = false;
     release_dof();
 }
 
@@ -1192,7 +1209,15 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
         glsafe(::glActiveTexture(GL_TEXTURE0 + SHOWCASE_CONTACT_UNIT));
         glsafe(::glBindTexture(GL_TEXTURE_2D, m_contact_tex[0]));
     }
+    // Realism 1d: coloured, lighter shadows under translucent filaments (unit 3).
+    const bool transmit = shadows && m_transmit_valid;
+    if (transmit) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 3));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_transmit_tex));
+    }
     glsafe(::glActiveTexture(GL_TEXTURE0));
+    shader->set_uniform("use_transmit", transmit);
+    shader->set_uniform("transmit_map", 3);
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * model);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
     shader->set_uniform("model_matrix", model);
@@ -1225,7 +1250,7 @@ void ShowcaseRenderer::draw_floor(const DrawTarget &t)
     shader->set_uniform("viewport_size", Vec2f(float(vp[2]), float(vp[3])));
     shader->set_uniform("camera_position", camera.get_position());
     m_floor_model->render();
-    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_FLOOR_TEX_UNIT, SHOWCASE_REFLECTION_UNIT, SHOWCASE_CONTACT_UNIT }) {
+    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_FLOOR_TEX_UNIT, SHOWCASE_REFLECTION_UNIT, SHOWCASE_CONTACT_UNIT, 3 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -1453,8 +1478,30 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     }
     std::sort(translucent.begin(), translucent.end(), [](const Item &a, const Item &b) { return a.depth < b.depth; });
 
+    // Realism 1d: how thick the plastic is, for the filaments that let light through (not in the
+    // mirror: it takes a typical wall). Nothing is drawn when none does.
+    const float translucency = m_scene->materials.translucency;
+    m_thick_valid            = false;
+    if (!mirrored) {
+        std::vector<std::pair<GLVolume *, int>> thick_items;
+        for (const std::vector<Item> *list : { &opaque, &translucent })
+            for (const Item &it : *list)
+                if (!it.volume->is_wipe_tower && Showcase::effective_translucency(it.finish, translucency).transmission > 0.f)
+                    thick_items.emplace_back(it.volume, it.sub);
+        if (!thick_items.empty())
+            m_thick_valid = render_thickness(thick_items, view, projection, eye);
+    }
+
     // Frame uniforms.
     shader->start_using();
+    shader->set_uniform("use_thickness", m_thick_valid);
+    shader->set_uniform("thickness_map", 8);
+    shader->set_uniform("thickness_viewport", std::array<float, 4>{ m_thick_viewport[0], m_thick_viewport[1], m_thick_viewport[2], m_thick_viewport[3] });
+    if (m_thick_valid) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 8));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_thick_tex));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
     if (mc)
         showcase_set_multicolour_uniforms(*shader, multicolour);
     const bool sample_shadows = m_canvas.m_shadow_map_valid && m_canvas.m_shadow_map_texture_id != 0;
@@ -1522,6 +1569,18 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         shader->set_uniform("mat_alpha", v->is_wipe_tower ? 1.f : mp.alpha);
         shader->set_uniform("mat_line_shade", mp.line_shade);
         shader->set_uniform("mat_fiber_noise", mp.fiber_noise);
+        // Realism 1d / 1e (0 for the wipe tower and the older finishes: the plain material).
+        {
+            const Showcase::Translucency tr = v->is_wipe_tower ? Showcase::Translucency() : Showcase::effective_translucency(it.finish, translucency);
+            shader->set_uniform("mat_transmission", tr.transmission);
+            shader->set_uniform("mat_density", tr.density);
+            shader->set_uniform("mat_sss", tr.sss);
+            const bool wt = v->is_wipe_tower;
+            shader->set_uniform("mat_sheen", wt ? 0.f : mp.sheen);
+            shader->set_uniform("mat_sparkle", wt ? 0.f : mp.sparkle);
+            shader->set_uniform("mat_speckle", wt ? 0.f : mp.speckle);
+            shader->set_uniform("mat_speckle_kind", wt ? 0 : int(mp.speckle_kind));
+        }
         // Glow G1: this slot's glow (none for the wipe tower and with the lights on).
         {
             std::array<float, 4> glow{ 0.f, 0.f, 0.f, 0.f };
@@ -1662,7 +1721,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glCullFace(GL_BACK));
 
-    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT }) {
+    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT, 8 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -1847,6 +1906,191 @@ void ShowcaseRenderer::render_reflection()
     m_refl_valid = true;
 }
 
+// ------------------------------------------------------------------------------------------------
+// Realism 1d: thickness and coloured shadows
+// ------------------------------------------------------------------------------------------------
+
+Showcase::Finish ShowcaseRenderer::filament_finish(int filament, const std::vector<ShowcaseFilament> &filaments) const
+{
+    if (m_scene == nullptr)
+        return Showcase::Finish::Standard;
+    if (filament >= 1 && size_t(filament) <= filaments.size())
+        return m_scene->materials.finish_for(filament, filaments[size_t(filament - 1)].preset_name, filaments[size_t(filament - 1)].type);
+    const Showcase::Finish *f = m_scene->materials.override_for(filament);
+    return f != nullptr ? *f : Showcase::Finish::Standard;
+}
+
+bool ShowcaseRenderer::render_thickness(const std::vector<std::pair<GLVolume *, int>> &items, const Transform3d &view,
+                                        const Transform3d &projection, const Vec3d &eye)
+{
+    GLShaderProgram *shader = wxGetApp().get_shader("showcase_thickness");
+    if (shader == nullptr || items.empty())
+        return false;
+    ShowcaseTargetState keep;
+    m_thick_viewport[0] = float(keep.viewport[0]);
+    m_thick_viewport[1] = float(keep.viewport[1]);
+    m_thick_viewport[2] = float(std::max(1, keep.viewport[2]));
+    m_thick_viewport[3] = float(std::max(1, keep.viewport[3]));
+    // Half the frame: the thickness changes slowly across a wall, and it is read with linear filtering.
+    const int w = std::max(1, keep.viewport[2] / 2);
+    const int h = std::max(1, keep.viewport[3] / 2);
+    if (m_thick_fbo == 0 || m_thick_w != w || m_thick_h != h) {
+        for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i) {}
+        if (m_thick_tex != 0)
+            glsafe(::glDeleteTextures(1, &m_thick_tex));
+        if (m_thick_depth != 0)
+            glsafe(::glDeleteRenderbuffers(1, &m_thick_depth));
+        if (m_thick_fbo == 0)
+            glsafe(::glGenFramebuffers(1, &m_thick_fbo));
+        glsafe(::glGenTextures(1, &m_thick_tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_thick_tex));
+        // R32F is colour-renderable in core 3.0 (macOS 4.1 too); sized format only.
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        glsafe(::glGenRenderbuffers(1, &m_thick_depth));
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, m_thick_depth));
+        glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h));
+        glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
+        m_thick_w = w;
+        m_thick_h = h;
+    }
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_thick_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_thick_tex, 0));
+    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_thick_depth));
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, bufs));
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: no thickness buffer at " << w << "x" << h << "; translucent plastics take a typical wall";
+        return false;
+    }
+    glsafe(::glViewport(0, 0, w, h));
+    glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    GLboolean blend = ::glIsEnabled(GL_BLEND);
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glCullFace(GL_FRONT));   // the back faces
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", projection);
+    shader->set_uniform("camera_position", eye);
+    shader->set_uniform("clip_floor", floor_drawn());
+    shader->set_uniform("build_clip_z", m_build_clip_z < 1e9 ? float(m_build_clip_z) : 1e30f);
+    for (const auto &[v, sub] : items) {
+        const Transform3d world = v->world_matrix();
+        shader->set_uniform("view_model_matrix", view * world);
+        shader->set_uniform("volume_world_matrix", world);
+        shader->set_uniform("world_normal_matrix", Matrix3d(world.matrix().block<3, 3>(0, 0).inverse().transpose()));
+        // A mirrored instance turns its winding over.
+        if (v->is_left_handed())
+            glsafe(::glFrontFace(GL_CW));
+        if (sub >= 0 && size_t(sub) < v->mmuseg_models.size())
+            v->mmuseg_models[size_t(sub)].render();
+        else
+            v->model.render();
+        if (v->is_left_handed())
+            glsafe(::glFrontFace(GL_CCW));
+    }
+    shader->stop_using();
+    glsafe(::glCullFace(GL_BACK));
+    if (blend)
+        glsafe(::glEnable(GL_BLEND));
+    return true;
+}
+
+void ShowcaseRenderer::render_transmit_map()
+{
+    m_transmit_valid = false;
+    if (m_scene == nullptr || !m_canvas.m_shadow_map_valid || m_canvas.m_shadow_map_texture_id == 0)
+        return;
+    GLShaderProgram *shader = wxGetApp().get_shader("showcase_transmit");
+    if (shader == nullptr)
+        return;
+    const std::vector<ColorRGBA>        colors    = get_extruders_colors();
+    const std::vector<ShowcaseFilament> filaments = showcase_filaments();
+    const ModelObjectPtrs              &objects   = wxGetApp().model().objects;
+    struct Caster
+    {
+        GLVolume *volume = nullptr;
+        Vec3f     transmit{ 0.f, 0.f, 0.f };
+    };
+    std::vector<Caster> casters;
+    bool                any_light = false;
+    for (GLVolume *v : m_canvas.m_volumes.volumes) {
+        if (v == nullptr || !v->is_active || (v->is_modifier && !v->is_wipe_tower))
+            continue;
+        Caster c;
+        c.volume = v;
+        if (!v->is_wipe_tower) {
+            const ModelObject *mo = v->object_idx() >= 0 && size_t(v->object_idx()) < objects.size() ? objects[size_t(v->object_idx())] : nullptr;
+            const ModelVolume *mv = mo != nullptr && v->volume_idx() >= 0 && size_t(v->volume_idx()) < mo->volumes.size() ?
+                                        mo->volumes[size_t(v->volume_idx())] : nullptr;
+            int extruder = mv != nullptr ? mv->extruder_id() : v->extruder_id;
+            if (extruder <= 0)
+                extruder = 1;
+            const Showcase::Translucency tr = Showcase::effective_translucency(filament_finish(extruder, filaments), m_scene->materials.translucency);
+            if (tr.transmission > 0.f) {
+                const ColorRGBA col = extruder >= 1 && size_t(extruder) <= colors.size() ? colors[size_t(extruder - 1)] : v->color;
+                auto lin = [](float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };
+                const std::array<float, 3> t = Showcase::shadow_transmittance({ lin(col.r()), lin(col.g()), lin(col.b()) }, tr.transmission);
+                c.transmit = Vec3f(t[0], t[1], t[2]);
+                any_light  = true;
+            }
+        }
+        casters.push_back(c);
+    }
+    if (!any_light)
+        return;
+
+    const int n = 1024;
+    ShowcaseTargetState keep;
+    if (m_transmit_fbo == 0) {
+        glsafe(::glGenFramebuffers(1, &m_transmit_fbo));
+        m_transmit_tex = showcase_render_texture(n, n, false);
+    }
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_transmit_fbo));
+    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_transmit_tex, 0));
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    glsafe(::glDrawBuffers(1, bufs));
+    if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return;
+    glsafe(::glViewport(0, 0, n, n));
+    glsafe(::glClearColor(1.f, 1.f, 1.f, 1.f));
+    glsafe(::glClear(GL_COLOR_BUFFER_BIT));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+    glsafe(::glEnable(GL_BLEND));
+    // Multiply: every caster along the light's ray takes its share of the light away.
+    glsafe(::glBlendFunc(GL_ZERO, GL_SRC_COLOR));
+    shader->start_using();
+    shader->set_uniform("projection_matrix", m_canvas.m_shadow_light_vp);
+    for (const Caster &c : casters) {
+        const Transform3d world = c.volume->world_matrix();
+        shader->set_uniform("view_model_matrix", world);
+        shader->set_uniform("volume_world_matrix", world);
+        shader->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+        // Each face counts once on the way in: a closed mesh is crossed by a ray twice, so the
+        // transmittance is taken as its square root per face.
+        shader->set_uniform("transmit", Vec3f(std::sqrt(c.transmit.x()), std::sqrt(c.transmit.y()), std::sqrt(c.transmit.z())));
+        c.volume->model.render();
+    }
+    shader->stop_using();
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    glsafe(::glEnable(GL_CULL_FACE));
+    m_transmit_valid = true;
+}
+
 void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 {
     Camera &camera = wxGetApp().plater()->get_camera();
@@ -1896,10 +2140,12 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
         m_canvas._render_shadows(view, proj);
 
     // 4. The floor, receiving those shadows, with S2's contact shadow and mirror image when on.
-    m_contact_valid = m_refl_valid = false;
+    m_contact_valid = m_refl_valid = m_transmit_valid = false;
     if (!show_plate) {
         render_contact_shadow();
         render_reflection();
+        // Realism 1d: the light translucent casters let through onto the floor.
+        render_transmit_map();
         draw_floor(t);
     }
 

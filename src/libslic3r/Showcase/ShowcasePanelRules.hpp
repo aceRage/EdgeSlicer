@@ -45,6 +45,7 @@ struct PanelVisibility
     bool mat_layer_lines  = false;
     bool mat_toolpath     = false;    // smoothing
     bool mat_light_left   = false;
+    bool mat_translucency = false;    // realism 1d: model mode (the toolpaths have no thickness pass)
     // Camera (1h-2)
     bool cam_dof_detail   = false;   // aperture, focus on model, bokeh quality
     bool cam_dof_focus    = false;   // the focus distance when not on the model
@@ -108,6 +109,7 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.mat_layer_lines = s.source != "toolpaths";   // the toolpaths view already shows the real layers
     v.mat_toolpath    = s.source == "toolpaths";
     v.mat_light_left  = s.materials.lights_off;
+    v.mat_translucency = s.source != "toolpaths";
 
     v.cam_dof_detail = s.dof.enabled;
     v.cam_dof_focus  = s.dof.enabled && !s.dof.focus_on_model;

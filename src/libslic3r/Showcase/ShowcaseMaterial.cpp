@@ -13,7 +13,8 @@ namespace Showcase {
 
 namespace {
 
-const char *const FINISH_NAMES[]      = { "standard", "matte", "silk", "gloss", "transparent", "metallic", "carbon_fiber" };
+const char *const FINISH_NAMES[]      = { "standard", "matte", "silk", "gloss", "transparent", "metallic", "carbon_fiber",
+                                          "translucent", "satin", "sparkle", "marble", "wood", "matte_textured" };
 const char *const LAYER_LINES_NAMES[] = { "off", "subtle", "real", "exaggerated" };
 
 template<class E, size_t N> const char *material_enum_name(E v, const char *const (&names)[N])
@@ -88,7 +89,10 @@ bool        from_string(const std::string &s, LayerLines &v) { return material_e
 
 std::vector<Finish> all_finishes()
 {
-    return { Finish::Standard, Finish::Matte, Finish::Silk, Finish::Gloss, Finish::Transparent, Finish::Metallic, Finish::CarbonFiber };
+    // The panel's order: the plain ones, then the effects.
+    return { Finish::Standard,    Finish::Matte,  Finish::Satin,  Finish::Gloss,         Finish::Silk,
+             Finish::Metallic,    Finish::Transparent, Finish::Translucent, Finish::CarbonFiber, Finish::MatteTextured,
+             Finish::Marble,      Finish::Wood,   Finish::Sparkle };
 }
 
 Finish infer_finish(const std::string &preset_name, const std::string &filament_type)
@@ -97,11 +101,25 @@ Finish infer_finish(const std::string &preset_name, const std::string &filament_
     const std::vector<std::string> type = words(filament_type);
     ws.insert(ws.end(), type.begin(), type.end());
 
-    if (has_word(ws, { "translucent", "transparent", "clear", "crystal" }))
+    // 1e: glitter first (a "galaxy black" PETG is still glitter, not gloss).
+    if (has_word(ws, { "sparkle", "sparkly", "glitter", "galaxy", "starlight", "stardust", "twinkle" }))
+        return Finish::Sparkle;
+    if (has_word(ws, { "transparent", "crystal" }))
         return Finish::Transparent;
-    if (has_word(ws, { "silk", "silky", "shiny", "satin" }))
+    // Fills before "natural" ("Natural Wood PLA" is wood).
+    if (has_word(ws, { "marble", "granite", "stone", "terrazzo", "rock" }))
+        return Finish::Marble;
+    if (has_word(ws, { "wood", "woodfill", "timber", "bamboo" }))
+        return Finish::Wood;
+    // D-R4: natural and clear plastics are milky, not glass.
+    if (has_word(ws, { "translucent", "natural", "clear" }))
+        return Finish::Translucent;
+    if (has_word(ws, { "silk", "silky", "shiny" }))
         return Finish::Silk;
-    if (has_word(ws, { "metal", "metallic", "bronze", "copper", "steel", "brass", "aluminium", "aluminum", "iron" }))
+    if (has_word(ws, { "satin" }))
+        return Finish::Satin;
+    if (has_word(ws, { "metal", "metallic", "bronze", "copper", "steel", "brass", "aluminium", "aluminum", "iron", "metalfill", "copperfill",
+                       "bronzefill", "brassfill", "steelfill", "ironfill" }))
         return Finish::Metallic;
     if (has_word(ws, { "carbon", "fiber", "fibre" }) || std::any_of(ws.begin(), ws.end(), fibre_word))
         return Finish::CarbonFiber;
@@ -121,6 +139,12 @@ float default_toolpath_smoothness(Finish finish)
     case Finish::Transparent: return 0.7f;
     case Finish::Metallic: return 0.7f;
     case Finish::CarbonFiber: return 0.45f;
+    case Finish::Translucent: return 0.7f;
+    case Finish::Satin: return 0.7f;
+    case Finish::Sparkle: return 0.7f;
+    case Finish::MatteTextured: return 0.45f;
+    case Finish::Marble:
+    case Finish::Wood: return 0.5f;
     default: return 0.6f;
     }
 }
@@ -202,9 +226,122 @@ MaterialParams material_params(Finish finish)
         p.fiber_noise = 0.6f;
         p.line_shade  = 0.6f;
         break;
+    // Realism 1d / 1e.
+    case Finish::Translucent:
+        // Milky natural PETG / PLA: mostly solid to the eye, glowing where it is thin.
+        p.roughness    = 0.32f;
+        p.f0           = 0.045f;
+        p.clearcoat    = 0.25f;
+        p.alpha        = 0.82f;
+        p.line_shade   = 0.25f;
+        p.transmission = 0.85f;
+        p.density      = 0.55f;
+        p.sss          = 0.6f;
+        break;
+    case Finish::Satin:
+        p.roughness  = 0.45f;
+        p.f0         = 0.05f;
+        p.metal_tint = 0.2f;
+        p.anisotropy = 0.3f;
+        p.line_shade = 0.38f;
+        p.sheen      = 0.25f;
+        break;
+    case Finish::Sparkle:
+        // A glossy base with flakes in it.
+        p.roughness  = 0.38f;
+        p.f0         = 0.05f;
+        p.clearcoat  = 0.35f;
+        p.line_shade = 0.4f;
+        p.sparkle    = 0.35f;
+        break;
+    case Finish::Marble:
+        p.roughness    = 0.7f;
+        p.f0           = 0.035f;
+        p.line_shade   = 0.55f;
+        p.speckle      = 0.8f;
+        p.speckle_kind = SpeckleKind::Stone;
+        break;
+    case Finish::Wood:
+        p.roughness    = 0.85f;
+        p.f0           = 0.025f;
+        p.line_shade   = 0.7f;
+        p.sheen        = 0.2f;
+        p.speckle      = 0.7f;
+        p.speckle_kind = SpeckleKind::Wood;
+        break;
+    case Finish::MatteTextured:
+        // Velvet-like: the fibres catch the light at grazing angles, in short streaks along the lines.
+        p.roughness   = 0.92f;
+        p.f0          = 0.025f;
+        p.fiber_noise = 0.45f;
+        p.line_shade  = 0.65f;
+        p.sheen       = 0.6f;
+        p.anisotropy  = 0.f;
+        break;
     }
     return p;
 }
+
+Translucency effective_translucency(Finish finish, float strength)
+{
+    Translucency t;
+    const float s = std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f;
+    const MaterialParams p = material_params(finish);
+    switch (finish) {
+    case Finish::Translucent:
+        // Its own look: on at 0, a little more at 1.
+        t.transmission = std::min(1.f, p.transmission * (1.f + 0.2f * s));
+        t.density      = p.density;
+        t.sss          = std::min(1.f, p.sss * (1.f + 0.3f * s));
+        break;
+    case Finish::Transparent:
+        // Clear plastic: very little scattering, light goes straight through.
+        t.transmission = 0.9f * s;
+        t.density      = 0.12f;
+        t.sss          = 0.1f * s;
+        break;
+    case Finish::Metallic:
+        // Metal pigment stops the light.
+        break;
+    case Finish::CarbonFiber:
+    case Finish::MatteTextured:
+    case Finish::Marble:
+    case Finish::Wood:
+        // Filled plastics: a little softness at the edges, nothing comes through.
+        t.sss = 0.25f * s;
+        break;
+    default:
+        // Plain PLA and PETG: soft edges, thin walls glow a little.
+        t.transmission = 0.3f * s;
+        t.density      = 2.2f;
+        t.sss          = 0.5f * s;
+        break;
+    }
+    if (t.transmission <= 0.f)
+        t.density = 0.f;
+    return t;
+}
+
+float transmittance(float density, float thickness_mm)
+{
+    if (!(density > 0.f) || !std::isfinite(thickness_mm))
+        return 1.f;
+    return std::exp(-density * std::max(thickness_mm, 0.f));
+}
+
+std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_linear, float transmission)
+{
+    const float t = std::isfinite(transmission) ? std::clamp(transmission, 0.f, 1.f) : 0.f;
+    std::array<float, 3> out;
+    for (size_t i = 0; i < 3; ++i) {
+        // The light let through takes the filament's colour; a clearer plastic lets more through.
+        const float a = std::clamp(albedo_linear[i], 0.f, 1.f);
+        out[i]        = t * (0.35f + 0.65f * a);
+    }
+    return out;
+}
+
+float sparkle_lod(float cell_px) { return std::isfinite(cell_px) ? smoothstep01(0.75f, 2.f, cell_px) : 1.f; }
 
 std::array<float, 3> color_temperature_rgb(float kelvin)
 {
