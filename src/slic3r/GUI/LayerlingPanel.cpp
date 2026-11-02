@@ -82,6 +82,7 @@ constexpr const char *KEY_VERIFIED    = "layerling_verified";         // "1" onc
 constexpr const char *KEY_LAST_CHECK  = "layerling_last_check";       // seconds since the epoch
 constexpr const char *KEY_LATEST     = "layerling_latest_version";   // newest release seen by the last check
 constexpr const char *KEY_BASE_URL    = "layerling_base_url";         // a self-hosted Layerling (no UI yet)
+constexpr const char *KEY_ONE_OBJECT  = "layerling_send_as_one_object"; // "0": Send to Plate keeps bodies as separate objects
 
 std::int64_t now_seconds() { return std::int64_t(std::time(nullptr)); }
 
@@ -98,6 +99,9 @@ void        set_cfg(const char *key, const std::string &value)
     if (wxGetApp().app_config)
         wxGetApp().app_config->set(key, value);
 }
+
+// Send to Plate: several bodies become one object with parts (default) or stay separate objects.
+bool send_as_one_object() { return cfg(KEY_ONE_OBJECT) != "0"; }
 
 fs::path installed_app_root(const std::string &version)
 {
@@ -1112,6 +1116,14 @@ void LayerlingPanel::Impl::send_to_plate(const fs::path &file, const std::string
     {
         Plater::TakeSnapshot snapshot(plater, "Send to Plate from Layerling");
         // Geometry only: Layerling's 3MF carries no print settings, and the plate's stay as they are.
+        // No "multi-part object?" question: the tab's setting answers it, for this load only.
+        struct MultipartAnswer
+        {
+            Plater *plater;
+            int     previous;
+            MultipartAnswer(Plater *p, int answer) : plater(p), previous(p->multipart_answer()) { plater->set_multipart_answer(answer); }
+            ~MultipartAnswer() { plater->set_multipart_answer(previous); }
+        } answer(plater, send_as_one_object() ? 1 : 0);
         added = plater->load_files(std::vector<fs::path>{file}, LoadStrategy::LoadModel);
         if (!added.empty() && !bodies.empty())
             apply_colours_to_objects(added, bodies);
@@ -1203,20 +1215,26 @@ void LayerlingPanel::Impl::on_send_button()
     const wxString how = _L("In Layerling, export the design (Export > 3MF keeps its colours; STL, OBJ and STEP work too). "
                             "EdgeSlicer takes the export and puts it on the plate.");
     boost::system::error_code ec;
-    if (last_export.empty() || !fs::is_regular_file(last_export, ec)) {
-        show_notice(how, NoticeKind::Info);
-        return;
-    }
-    wxMenu menu;
-    const int again = wxWindow::NewControlId();
-    const int help  = wxWindow::NewControlId();
-    menu.Append(again, format_wxstr(_L("Send \"%1%\" to the plate again"), from_u8(last_export_name)));
+    const bool has_last = !last_export.empty() && fs::is_regular_file(last_export, ec);
+    wxMenu     menu;
+    const int  again = wxWindow::NewControlId();
+    const int  help  = wxWindow::NewControlId();
+    const int  whole = wxWindow::NewControlId();
+    if (has_last)
+        menu.Append(again, format_wxstr(_L("Send \"%1%\" to the plate again"), from_u8(last_export_name)));
     menu.Append(help, _L("How to send a design"));
+    menu.AppendSeparator();
+    menu.AppendCheckItem(whole, _L("Send multi-body designs as one object"),
+                         _L("On: a design of several bodies becomes one object with a part per body (each keeps its filament). "
+                            "Off: each body becomes an object of its own."))
+        ->Check(send_as_one_object());
     const int chosen = toolbar->GetPopupMenuSelectionFromUser(menu, btn_send->GetPosition() + wxPoint(0, btn_send->GetSize().y));
-    if (chosen == again)
+    if (chosen == again && has_last)
         send_to_plate(last_export, last_export_name);
     else if (chosen == help)
         show_notice(how, NoticeKind::Info);
+    else if (chosen == whole)
+        set_cfg(KEY_ONE_OBJECT, send_as_one_object() ? "0" : "1");
 }
 
 void LayerlingPanel::Impl::on_support_button()
