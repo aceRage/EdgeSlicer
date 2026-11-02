@@ -9,6 +9,7 @@
 #include "ShowcaseRenderer.hpp"   // ShowcaseImage
 
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
+#include "libslic3r/Showcase/ShowcaseHdr.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterial.hpp"
 
 #include <string>
@@ -23,6 +24,12 @@ namespace GUI {
 // environments or photo floors, nothing fails).
 const Showcase::EnvironmentManifest &showcase_environments();
 const Showcase::FloorManifest       &showcase_floors();
+// 1h-1: the HDRI environments (resources/showcase/hdri/hdri.json); empty when the file is missing.
+const Showcase::HdriManifest        &showcase_hdris();
+// <resources>/showcase/hdri/<file>; empty for a procedural HDRI.
+std::string showcase_hdri_path(const Showcase::HdriInfo &hdri);
+// The translated name of a known HDRI id, else the manifest's.
+wxString    showcase_hdri_name(const Showcase::HdriInfo &hdri);
 // <resources>/<ENVIRONMENTS_DIR or FLOORS_DIR>/<file>
 std::string showcase_environment_path(const Showcase::EnvironmentInfo &env);
 std::string showcase_floor_path(const Showcase::FloorTextureInfo &floor);
@@ -40,6 +47,9 @@ bool showcase_load_rgba_file(const std::string &path, ShowcaseImage &out);
 unsigned int showcase_upload_texture(const ShowcaseImage &image, bool repeat);
 // An environment atlas (layout of Showcase::env_atlas_face) as a cube map with `levels` mips.
 unsigned int showcase_upload_environment(const ShowcaseImage &atlas, int face_size, int levels);
+// 1h-1: a panorama (times `scale`) as a mipmapped GL_RGBA16F 2D texture, repeating in u, for the sharp
+// HDRI backdrop. 0 on failure.
+unsigned int showcase_upload_equirect(const Showcase::HdrImage &image, float scale);
 
 // One filament slot of the project (1-based `slot`).
 struct ShowcaseFilament
