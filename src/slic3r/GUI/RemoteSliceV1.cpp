@@ -3,6 +3,7 @@
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include <boost/format.hpp>
@@ -28,10 +29,12 @@ const std::vector<std::string>& pair_features()
     // /plates, arrange one plate or all, the printable toggle and transform plate=;
     // slice_orient: POST /plates/{i}/orient; slice_undo: POST /undo;
     // slice_filament_settings: PR F - settings/filament (+ revert, save, save as) and filament_remove;
-    // slice_preview_v2: PR E - colour by, options, from and hide on the preview, legend, layer times.
+    // slice_preview_v2: PR E - colour by, options, from and hide on the preview, legend, layer times;
+    // slice_plates_edit / slice_objects_edit / slice_project_save: PR G - plates add, delete, rename and
+    // bed type; objects delete and duplicate; project/save.
     static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live",
                                                 "slice_arrange", "slice_orient", "slice_undo", "slice_filament_settings",
-                                                "slice_preview_v2" };
+                                                "slice_preview_v2", "slice_plates_edit", "slice_objects_edit", "slice_project_save" };
     return f;
 }
 
@@ -663,6 +666,80 @@ unsigned int preview_from_layer(int from, unsigned int top)
 {
     if (from <= 0) return 0u;
     return std::min<unsigned int>((unsigned int) from, top);
+}
+
+// ---- PR G: plates, objects and save ----
+
+std::string clean_plate_name(const std::string& name)
+{
+    std::string out;
+    out.reserve(name.size());
+    for (unsigned char c : name)
+        if (c >= 0x20 && c != 0x7f) out += (char) c; // control characters (tabs, new lines) go
+    const size_t first = out.find_first_not_of(' ');
+    if (first == std::string::npos) return "";
+    out = out.substr(first, out.find_last_not_of(' ') - first + 1);
+    // Cut at PLATE_NAME_MAX code points: count lead bytes, never split a sequence.
+    size_t points = 0;
+    for (size_t i = 0; i < out.size(); ++i)
+        if ((((unsigned char) out[i]) & 0xC0) != 0x80 && ++points > PLATE_NAME_MAX) {
+            out.resize(i);
+            const size_t last = out.find_last_not_of(' ');
+            out.resize(last == std::string::npos ? 0 : last + 1);
+            break;
+        }
+    return out;
+}
+
+Refusal plate_add_check(int plates, int max_plates)
+{
+    if (plates >= max_plates) return { 409, "the PC takes at most " + std::to_string(max_plates) + " plates" };
+    return {};
+}
+
+Refusal plate_delete_check(int plate, int plates, int objects_on_plate, const std::string& objects, bool confirm, int cut_objects)
+{
+    if (!objects.empty() && objects != "keep" && objects != "delete") return { 400, "objects must be keep or delete" };
+    if (plate < 0 || plate >= plates) return { 404, "no such plate" };
+    if (plates <= 1) return { 409, "the last plate cannot be deleted" };
+    if (objects_on_plate > 0 && !confirm)
+        return { 409, std::to_string(objects_on_plate) + (objects_on_plate == 1 ? " object is" : " objects are") +
+                          " on this plate: confirm=1 to delete it (objects=keep leaves them off the plates, objects=delete deletes them)" };
+    if (objects == "delete" && cut_objects > 0)
+        return { 409, "a part of a cut object is on this plate: delete it on the PC, or keep the objects" };
+    return {};
+}
+
+Refusal object_delete_check(int obj, int objects, int inst, int instances, bool is_cut)
+{
+    if (obj < 0 || obj >= objects) return { 404, "no such object" };
+    if (inst < -1 || inst >= instances) return { 404, "no such instance" };
+    if (is_cut) return { 409, "this object is part of a cut object: delete it on the PC" };
+    return {};
+}
+
+Refusal object_duplicate_check(int obj, int objects, int inst, int instances, int count)
+{
+    if (count < 1 || count > DUPLICATE_MAX) return { 400, "count must be between 1 and " + std::to_string(DUPLICATE_MAX) };
+    if (obj < 0 || obj >= objects) return { 404, "no such object" };
+    if (inst < 0 || inst >= instances) return { 404, "no such instance" };
+    return {};
+}
+
+std::string bed_type_id(int bed_type)
+{
+    if (bed_type == btDefault) return "default";
+    for (const auto& kv : ConfigOptionEnum<BedType>::get_enum_values())
+        if (kv.second == bed_type) return kv.first;
+    return "";
+}
+
+int bed_type_from_id(const std::string& id)
+{
+    if (id == "default") return btDefault;
+    const auto& map = ConfigOptionEnum<BedType>::get_enum_values();
+    const auto  it  = map.find(id);
+    return it == map.end() || it->second == btDefault ? -1 : it->second;
 }
 
 } // namespace SliceV1

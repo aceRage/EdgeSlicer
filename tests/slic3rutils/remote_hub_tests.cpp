@@ -8,6 +8,7 @@
 
 #include "slic3r/GUI/RemoteHub.hpp"
 #include "slic3r/GUI/RemoteSliceV1.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -1252,12 +1253,12 @@ TEST_CASE("filament settings: when a slot may be removed", "[RemoteHub][filament
 
 // ---- PR E: preview v2 (EdgeSlicerApp docs/design_native_slice_parity.md section 2.3) ----
 
-TEST_CASE("preview v2: /pair lists slice_preview_v2, the manifest is v6, the routes are allowed", "[RemoteHub][preview_v2]")
+TEST_CASE("preview v2: /pair lists slice_preview_v2, the manifest is v6 or later, the routes are allowed", "[RemoteHub][preview_v2]")
 {
     const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
     CHECK(std::find(f.begin(), f.end(), "slice_preview_v2") != f.end());
     CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
-    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 6);
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 6);
 
     using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
     CHECK(instance_api_allowed("GET", "/api/plates/0/preview/legend"));
@@ -1338,4 +1339,101 @@ TEST_CASE("preview v2: layer rows", "[RemoteHub][preview_v2]")
     const auto untimed = layer_rows({ 0.2, 0.4 }, { 5.f });
     CHECK(untimed[1]["time_s"].is_null());
     CHECK(layer_rows({}, {}).empty());
+}
+
+TEST_CASE("plates edit: /pair lists the PR G features, the manifest is v7, the routes are allowed", "[RemoteHub][plates_edit]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    for (const char* name : { "slice_plates_edit", "slice_objects_edit", "slice_project_save" })
+        CHECK(std::find(f.begin(), f.end(), name) != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 7);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("POST", "/api/plates/add"));
+    CHECK(instance_api_allowed("POST", "/api/plates/0/delete"));
+    CHECK(instance_api_allowed("POST", "/api/plates/3/rename"));
+    CHECK(instance_api_allowed("POST", "/api/plates/12/bed_type"));
+    CHECK(instance_api_allowed("POST", "/api/objects/delete"));
+    CHECK(instance_api_allowed("POST", "/api/objects/duplicate"));
+    CHECK(instance_api_allowed("POST", "/api/project/save"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/add"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/add/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/delete"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/plates/0/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/rename"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/duplicate")); // a plate copy is not offered
+    CHECK_FALSE(instance_api_allowed("GET", "/api/objects/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/objects/delete/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/project/save"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/project/save_as"));
+}
+
+TEST_CASE("plates edit: a plate name is cleaned", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(clean_plate_name("  Plate A  ") == "Plate A");
+    CHECK(clean_plate_name("Two\tlines\nhere") == "Twolineshere");
+    CHECK(clean_plate_name("   ").empty());
+    CHECK(clean_plate_name("").empty());
+    CHECK(clean_plate_name("Grüße 🙂") == "Grüße 🙂");
+    // cut at 250 code points, never inside a UTF-8 sequence
+    std::string long_name;
+    for (int i = 0; i < 300; ++i) long_name += "é";
+    const std::string cut = clean_plate_name(long_name);
+    CHECK(cut.size() == 250 * 2);
+    CHECK(clean_plate_name(std::string(251, 'a')).size() == 250);
+    // a blank at the cut is trimmed too
+    CHECK(clean_plate_name(std::string(249, 'a') + "  b") == std::string(249, 'a'));
+}
+
+TEST_CASE("plates edit: when a plate may be added or deleted", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(plate_add_check(1, 36).ok());
+    CHECK(plate_add_check(36, 36).status == 409);
+
+    CHECK(plate_delete_check(1, 3, 0, "", false, 0).ok());
+    CHECK(plate_delete_check(3, 3, 0, "", false, 0).status == 404);
+    CHECK(plate_delete_check(-1, 3, 0, "", false, 0).status == 404);
+    CHECK(plate_delete_check(0, 1, 0, "", false, 0).status == 409);   // the last plate
+    CHECK(plate_delete_check(0, 2, 4, "keep", false, 0).status == 409); // objects need confirm
+    CHECK(plate_delete_check(0, 2, 4, "keep", true, 0).ok());
+    CHECK(plate_delete_check(0, 2, 4, "delete", true, 0).ok());
+    CHECK(plate_delete_check(0, 2, 4, "delete", true, 1).status == 409); // a cut part
+    CHECK(plate_delete_check(0, 2, 4, "keep", true, 1).ok());            // keeping it is fine
+    CHECK(plate_delete_check(0, 2, 0, "move", true, 0).status == 400);
+    CHECK(plate_delete_check(0, 2, 1, "", false, 0).error.find("1 object is") == 0);
+}
+
+TEST_CASE("plates edit: object delete and duplicate checks", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(object_delete_check(0, 2, -1, 1, false).ok());
+    CHECK(object_delete_check(1, 2, 2, 3, false).ok());
+    CHECK(object_delete_check(2, 2, -1, 0, false).status == 404);
+    CHECK(object_delete_check(0, 2, 3, 3, false).status == 404);
+    CHECK(object_delete_check(0, 2, -1, 1, true).status == 409);
+
+    CHECK(object_duplicate_check(0, 1, 0, 1, 1).ok());
+    CHECK(object_duplicate_check(0, 1, 0, 1, DUPLICATE_MAX).ok());
+    CHECK(object_duplicate_check(0, 1, 0, 1, 0).status == 400);
+    CHECK(object_duplicate_check(0, 1, 0, 1, DUPLICATE_MAX + 1).status == 400);
+    CHECK(object_duplicate_check(1, 1, 0, 1, 2).status == 404);
+    CHECK(object_duplicate_check(0, 1, 1, 1, 2).status == 404);
+}
+
+TEST_CASE("plates edit: bed type ids", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(bed_type_id(Slic3r::btDefault) == "default");
+    CHECK(bed_type_id(Slic3r::btPTE) == "Textured PEI Plate");
+    CHECK(bed_type_id(Slic3r::btPC) == "Cool Plate");
+    CHECK(bed_type_from_id("default") == Slic3r::btDefault);
+    CHECK(bed_type_from_id("Textured PEI Plate") == Slic3r::btPTE);
+    CHECK(bed_type_from_id("Default Plate") == -1); // "default" is the one way to follow the project
+    CHECK(bed_type_from_id("Glass Plate") == -1);
+    CHECK(bed_type_from_id("") == -1);
+    for (int bt = Slic3r::btDefault; bt < Slic3r::btCount; ++bt)
+        CHECK(bed_type_from_id(bed_type_id(bt)) == bt);
 }
