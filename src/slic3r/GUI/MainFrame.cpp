@@ -1910,7 +1910,8 @@ bool MainFrame::can_save_as() const
 
 void MainFrame::save_project()
 {
-    save_project_as(m_plater->get_project_filename(".3mf"));
+    if (m_plater)
+        m_plater->save_project(false);
 }
 
 bool MainFrame::save_project_as(const wxString& filename)

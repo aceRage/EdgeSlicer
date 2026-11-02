@@ -1041,13 +1041,13 @@ static const FileWildcards file_wildcards_by_type[FT_SIZE] = {
     /* FT_GCODE_3MF */ {"Gcode 3MF files"sv, {".gcode.3mf"sv}},
     /* FT_GCODE */ {"G-code files"sv, {".gcode"sv}},
 #ifdef __APPLE__
-    /* FT_MODEL */
+    /* FT_MODEL — keep in sync with zip_model_extensions() plus .zip */
     {"Supported files"sv,
      {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv, ".glb"sv, ".gltf"sv, ".usd"sv, ".usda"sv, ".usdc"sv,
-      ".usdz"sv, ".abc"sv, ".ply"sv}},
+      ".usdz"sv, ".abc"sv, ".ply"sv, ".zip"sv}},
 #else
-    /* FT_MODEL */
-    {"Supported files"sv, {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv, ".glb"sv, ".gltf"sv}},
+    /* FT_MODEL — keep in sync with zip_model_extensions() plus .zip */
+    {"Supported files"sv, {".3mf"sv, ".stl"sv, ".oltp"sv, ".stp"sv, ".step"sv, ".svg"sv, ".amf"sv, ".obj"sv, ".glb"sv, ".gltf"sv, ".zip"sv}},
 #endif
     /* FT_ZIP */ {"ZIP files"sv, {".zip"sv}},
     /* FT_PROJECT */ {"Project files"sv, {".3mf"sv}},
