@@ -1103,7 +1103,10 @@ void TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
         low    = first("nozzle_temperature_range_low");
         high   = first("nozzle_temperature_range_high");
     }
-    stringing_grid_default_params(params, center, low, high, 5.);
+    // F14: the printer preset has no max nozzle temperature option (PrintConfig defines none), so the
+    // cap is the filament's nozzle_temperature_range_high and 350 C. Pass the printer max here if one is added.
+    const double printer_max_nozzle_temp = 0.;
+    stringing_grid_default_params(params, center, low, high, 5., printer_max_nozzle_temp);
 }
 
 void TempRetract_Calibration_Dlg::reset_to_defaults()

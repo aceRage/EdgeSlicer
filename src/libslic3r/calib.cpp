@@ -1137,7 +1137,8 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
     return true;
 }
 
-void stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high, double step)
+void stringing_grid_default_params(
+    Calib_Params &params, double center, double range_low, double range_high, double step, double printer_max_nozzle_temp)
 {
     params                      = Calib_Params();
     params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
@@ -1157,6 +1158,9 @@ void stringing_grid_default_params(Calib_Params &params, double center, double r
     //     2) if that gives fewer than 2 bands (single-temperature or narrower-than-a-step range, or a
     //        range entirely outside the limits), build again from the center inside the limits only;
     //     3) the center itself is clipped to the limits (e.g. a 420 C PEEK profile starts at 350 C);
+    // F14 (Lance 2026-11-01): no band goes above upper = min(filament range high, printer max nozzle
+    //     temperature, 350), in either stage. Stage 2 may still go below the filament's low end, to 150.
+    //     The printer max is unknown (<= 0) when the printer preset has no such option.
     //     4) anything that still fails stringing_grid_params_valid falls back to 230/205.
     const double eps       = 1e-6;
     const double abs_low   = 150.;
@@ -1192,15 +1196,22 @@ void stringing_grid_default_params(Calib_Params &params, double center, double r
         }
         return bands;
     };
-    const double c_clipped = std::clamp(center, abs_low, abs_high);
+    double upper = std::min(range_high, abs_high);
+    if (printer_max_nozzle_temp > 0.)
+        upper = std::min(upper, printer_max_nozzle_temp);
+    if (upper < abs_low) {
+        set_fallback();
+        return;
+    }
+    const double c_clipped = std::clamp(center, abs_low, upper);
     const double in_low    = std::max(range_low, abs_low);
-    const double in_high   = std::min(range_high, abs_high);
+    const double in_high   = upper;
     double       hi = c_clipped, lo = c_clipped;
     int          bands = 0;
     if (in_low <= in_high + eps && c_clipped >= in_low - eps && c_clipped <= in_high + eps)
         bands = build(c_clipped, in_low, in_high, hi, lo);
     if (bands < min_bands)
-        bands = build(c_clipped, abs_low, abs_high, hi, lo);
+        bands = build(c_clipped, abs_low, upper, hi, lo);
     params.start = hi;
     params.end   = lo;
     if (bands < min_bands || !stringing_grid_params_valid(params, 1000.))

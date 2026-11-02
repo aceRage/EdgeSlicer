@@ -282,31 +282,38 @@ TEST_CASE("Stringing grid defaults widen single-temperature, narrow and out-of-l
         CHECK(stringing_grid_band_count(p) <= 10);
         CHECK(std::fmod(p.start - p.end, p.step) == Approx(0.).margin(1e-9));
     };
-    SECTION("single-temperature PPS profile 300/300/300 is centred on 300")
+    SECTION("single-temperature PPS profile 300/300/300 builds down from 300")
     {
         Calib_Params p;
         stringing_grid_default_params(p, 300., 300., 300., 5.);
         check_valid(p);
-        CHECK(p.start == Approx(325.));
-        CHECK(p.end == Approx(280.));
-        CHECK(p.start >= 300.);
-        CHECK(p.end <= 300.);
+        CHECK(p.start == Approx(300.));
+        CHECK(p.end == Approx(255.));
     }
-    SECTION("range narrower than one step, 222 in 220-224")
+    SECTION("range narrower than one step, 222 in 220-224, stays at or below 224")
     {
         Calib_Params p;
         stringing_grid_default_params(p, 222., 220., 224., 5.);
         check_valid(p);
-        CHECK(p.start == Approx(247.));
-        CHECK(p.end == Approx(202.));
+        CHECK(p.start <= 224.);
+        CHECK(p.start == Approx(222.));
+        CHECK(p.end == Approx(177.));
     }
-    SECTION("PEEK 420 in 380-460 is clipped to the 350 C limit")
+    SECTION("PEEK 420 in 380-460 is capped at 350 without a printer max")
     {
         Calib_Params p;
         stringing_grid_default_params(p, 420., 380., 460., 5.);
         check_valid(p);
         CHECK(p.start == Approx(350.));
         CHECK(p.end == Approx(305.));
+    }
+    SECTION("PEEK 420 in 380-460 is capped at a 300 C printer max")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 420., 380., 460., 5., 300.);
+        check_valid(p);
+        CHECK(p.start == Approx(300.));
+        CHECK(p.end == Approx(255.));
     }
     SECTION("range partly above the limit stays inside it, 340 in 300-380")
     {
@@ -315,6 +322,39 @@ TEST_CASE("Stringing grid defaults widen single-temperature, narrow and out-of-l
         check_valid(p);
         CHECK(p.start == Approx(350.));
         CHECK(p.end == Approx(305.));
+    }
+}
+
+TEST_CASE("Stringing grid defaults are capped at the printer's max nozzle temperature", "[Calib][TempRetract]")
+{
+    // F14 (Lance): upper = min(filament max, printer max, 350).
+    SECTION("printer max at or above the filament max changes nothing")
+    {
+        for (double printer_max : {0., 240., 300.}) {
+            CAPTURE(printer_max);
+            Calib_Params p;
+            stringing_grid_default_params(p, 220., 190., 240., 5., printer_max);
+            CHECK(p.start == Approx(240.));
+            CHECK(p.end == Approx(195.));
+            CHECK(stringing_grid_params_valid(p, 270.));
+        }
+    }
+    SECTION("printer max 230 caps 220 in 190-240 at 230")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 220., 190., 240., 5., 230.);
+        CHECK(p.start == Approx(230.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_band_count(p) == 9);
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    SECTION("printer max below the center clips the center")
+    {
+        Calib_Params p;
+        stringing_grid_default_params(p, 220., 190., 240., 5., 210.);
+        CHECK(p.start == Approx(210.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_params_valid(p, 270.));
     }
 }
 
