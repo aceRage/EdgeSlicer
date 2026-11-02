@@ -48,6 +48,7 @@
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
 #include "HomePanel.hpp"
+#include "LayerlingPanel.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
 // BBS
@@ -452,6 +453,8 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     //BBS
     Bind(EVT_SELECT_TAB, [this](wxCommandEvent&evt) {
         TabPosition pos = (TabPosition)evt.GetInt();
+        if (m_layerling != nullptr && pos >= 0 && pos < (int) m_tabpanel->GetPageCount() && m_tabpanel->GetPage(pos) == m_layerling)
+            return;
         m_tabpanel->SetSelection(pos);
     });
 
@@ -1178,6 +1181,9 @@ void MainFrame::shutdown(bool isRecreate)
     RemoteAccess::close_gui_gate(!isRecreate);
     if (!isRecreate)
         RemoteAccess::get().stop();
+    // The Layerling tab's local server and any download in progress.
+    if (m_layerling)
+        m_layerling->shutdown();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)
@@ -1500,6 +1506,9 @@ void MainFrame::init_tabpanel() {
             }
         }
 
+        if (m_layerling)
+            m_layerling->set_active(panel == m_layerling);
+
         if (panel)
             panel->SetFocus();
 
@@ -1617,6 +1626,11 @@ void MainFrame::init_tabpanel() {
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
     }
 
+    // Layerling: the last page, when Preferences shows it. Nothing is built or started before the
+    // tab is first opened.
+    if (wxGetApp().is_editor())
+        update_layerling_tab();
+
     if (m_plater) {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=initial_config");
         // load initial config
@@ -1640,6 +1654,37 @@ int MainFrame::device_page_position() const
     if (m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND)
         return std::min<int>(tpMonitor, count);
     return std::min(1, count);
+}
+
+int MainFrame::calibration_page_position() const
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    const int idx   = m_layerling != nullptr ? m_tabpanel->FindPage(m_layerling) : wxNOT_FOUND;
+    return idx != wxNOT_FOUND ? idx : count;
+}
+
+void MainFrame::update_layerling_tab()
+{
+    if (m_tabpanel == nullptr)
+        return;
+    const bool want = layerling_tab_enabled();
+    const int  idx  = m_layerling != nullptr ? m_tabpanel->FindPage(m_layerling) : wxNOT_FOUND;
+    if (want && idx == wxNOT_FOUND) {
+        if (m_layerling == nullptr)
+            m_layerling = new LayerlingPanel(m_tabpanel);
+        m_layerling->Show(false);
+        m_tabpanel->AddPage(m_layerling, _L("Layerling"), std::string("tab_layerling_active"), std::string("tab_layerling_active"), false);
+#ifdef _MSW_DARK_MODE
+        wxGetApp().UpdateDarkUIWin(this);
+#endif
+    } else if (!want && idx != wxNOT_FOUND) {
+        if (m_tabpanel->GetSelection() == idx)
+            m_tabpanel->SetSelection(m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND ? int(tp3DEditor) : 0);
+        m_layerling->set_active(false);
+        m_layerling->shutdown(); // the local server stops; the panel is kept for a later show
+        m_layerling->Show(false);
+        m_tabpanel->RemovePage(idx);
+    }
 }
 
 // SoftFever
@@ -1670,10 +1715,10 @@ void MainFrame::show_device(bool bBBLPrinter) {
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
         m_calibration_holder->Show(false);
-        // Calibration is always the last page, so don't use InsertPage here: AddPage needs no index to agree
-        // with TabPosition::tpCalibration.
-        m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
-                               std::string("tab_calibration_active"), false);
+        // Calibration is the last TabPosition page (only the Layerling tab, which has no TabPosition,
+        // comes after it), so its index agrees with TabPosition::tpCalibration.
+        m_tabpanel->InsertPage(calibration_page_position(), m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
+                               std::string("tab_calibration_active"));
 
 #ifdef _MSW_DARK_MODE
         wxGetApp().UpdateDarkUIWin(this);
@@ -2811,6 +2856,8 @@ void MainFrame::on_sys_color_changed()
     // So does the Printers page.
     if (m_printers)
         m_printers->sys_color_changed();
+    if (m_layerling)
+        m_layerling->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
