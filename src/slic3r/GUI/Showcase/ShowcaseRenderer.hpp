@@ -24,6 +24,7 @@
 // GLCanvas3D::set_render_settings_override(), never through the user's preferences.
 
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Color.hpp"
 #include "libslic3r/RealisticRenderSettings.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
