@@ -2439,6 +2439,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    // EdgeSlicer: the Layerling design the object came from (LayerlingPanel)
+                    else if (metadata.key == "layerling_design")
+                        model_object->layerling_design = metadata.value;
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -9299,6 +9302,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 //BBS: store object's module name
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
+
+                // EdgeSlicer: the Layerling design the object came from; not in a Bambu-compatible export
+                if (!obj->layerling_design.empty() && !m_bambu_compat)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"layerling_design\" " << VALUE_ATTR << "=\""
+                           << xml_escape(obj->layerling_design) << "\"/>\n";
 
                 // stores object's config data
                 if (m_bambu_compat) {

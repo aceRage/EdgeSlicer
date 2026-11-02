@@ -17,8 +17,15 @@
 namespace Slic3r {
 namespace Showcase {
 
-// The look of one filament. The JSON names (to_string) are stable; never translate them.
-enum class Finish : int { Standard = 0, Matte, Silk, Gloss, Transparent, Metallic, CarbonFiber };
+// The look of one filament. The JSON names (to_string) are stable; never translate them. New values go
+// at the end (realism 1d / 1e): "translucent" (milky natural / clear PETG and PLA, light through thin
+// walls), "satin", "sparkle" (glitter, galaxy), "marble" (stone fill), "wood" (wood fill),
+// "matte_textured" (fuzzy matte, the fibre sheen of carbon-fibre blends). An older build reads them as
+// unknown and falls back to the inferred finish.
+enum class Finish : int {
+    Standard = 0, Matte, Silk, Gloss, Transparent, Metallic, CarbonFiber,
+    Translucent, Satin, Sparkle, Marble, Wood, MatteTextured
+};
 
 const char *to_string(Finish v);
 bool        from_string(const std::string &s, Finish &v);
@@ -30,11 +37,17 @@ std::vector<Finish> all_finishes();
 
 // D4: the finish a filament preset most likely has, from its name (e.g. "Snapmaker PLA Silk @U1",
 // "Generic PETG-CF") and its filament_type ("PLA", "PETG", "PLA-CF", ...). Whole words only, so a
-// vendor called "MatterHackers" is not matte. Order of precedence: transparent, silk, metallic,
+// vendor called "MatterHackers" is not matte. Order of precedence: sparkle (glitter, galaxy ...),
+// transparent ("transparent", "crystal"), translucent (D-R4: "translucent", "natural", "clear"),
+// silk, satin, marble / stone fill, wood fill, metallic (and metal fills: "copperfill", "bronze fill"),
 // carbon/glass fibre, matte, gloss (PETG family), standard.
 Finish infer_finish(const std::string &preset_name, const std::string &filament_type);
 
-// The parameters the material shader takes for a finish (design 2.5).
+// Realism 1e: the speckle of a filled filament, mixed into its colour (mesh mode).
+enum class SpeckleKind : int { None = 0, Stone, Wood };
+
+// The parameters the material shader takes for a finish (design 2.5). Everything after fiber_noise is
+// realism 1d / 1e and 0 for the seven finishes from before, so they render exactly as they did.
 struct MaterialParams
 {
     float roughness   = 0.55f;   // GGX roughness (perceptual), 0..1
@@ -45,8 +58,100 @@ struct MaterialParams
     float alpha       = 1.f;     // < 1: drawn translucent, sorted per object (D15)
     float line_shade  = 0.5f;    // how much the groove between two layers darkens (matte hides less)
     float fiber_noise = 0.f;     // micro speckle of carbon / glass fibre
+    // 1d: light through the plastic. `transmission` is how much of the light behind a wall comes
+    // through it (0 = none), `density` how fast it dies away inside (Beer's law: per mm), `sss` a soft
+    // wrap of the light round the edges (plain plastics). The scene's Translucency scales all three
+    // (effective_translucency()); a Translucent filament transmits on its own.
+    float transmission = 0.f;
+    float density      = 0.f;
+    float sss          = 0.f;
+    // 1e: a velvet-like sheen at grazing angles (matte, textured), flakes that wink (sparkle: the share
+    // of cells holding a flake), and the speckle of a filled filament.
+    float       sheen    = 0.f;
+    float       sparkle  = 0.f;
+    float       speckle  = 0.f;
+    SpeckleKind speckle_kind = SpeckleKind::None;
 };
 MaterialParams material_params(Finish finish);
+
+// --- realism 1d: translucency --------------------------------------------------------------------
+
+// What the shader uses for a finish at the scene's Translucency `strength` (0..1, Materials). At 0
+// nothing changes except for a Translucent filament, which always lets light through (its look).
+struct Translucency
+{
+    float transmission = 0.f;   // 0 = off: no thickness pass for it, no transmitted light
+    float density      = 0.f;   // per mm
+    float sss          = 0.f;
+    bool  active() const { return transmission > 0.f || sss > 0.f; }
+};
+Translucency effective_translucency(Finish finish, float strength);
+// Beer-Lambert: the share of the light left after `thickness_mm` of plastic of `density` (per mm).
+float transmittance(float density, float thickness_mm);
+// The thickness the shader assumes where it has no thickness pass (the mirror, or no buffers), mm.
+constexpr float DEFAULT_WALL_THICKNESS = 1.6f;
+// The colour a translucent filament throws as its shadow on the floor (linear, 1 = no shadow): the
+// filament's colour (linear) let through by `transmission`, lighter for clearer plastics. Mirrored in
+// showcase_transmit.fs.
+std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_linear, float transmission);
+
+// --- realism 1e: sparkle -------------------------------------------------------------------------
+
+// The flake cells' size, mm (design 2.5: ~0.15 mm, in world space so they stay on the part in a video).
+constexpr float SPARKLE_CELL_MM = 0.15f;
+// How much of the flakes is drawn as flakes (1) rather than their average haze (0) when one cell
+// covers `cell_px` pixels: 0 at 0.75 px and below, 1 at 2 px and above (no fizzing in a video).
+// Mirrored in showcase_material.fs as sparkle_lod().
+float sparkle_lod(float cell_px);
+
+// --- realism 1f: imperfections (design 2.6) -----------------------------------------------------
+//
+// What makes a print read as printed: the layers wobble a little (Z-banding), the seam shows as a
+// line of small bumps where the slicer put it, a few faint strings hang where the nozzle travelled
+// across a gap, and the colour and gloss vary a little. Each has a strength 0..1 in the scene
+// (Imperfections in ShowcaseScene.hpp), 0 = off. Model mode; the seam and the strings need the plate
+// sliced (no guessing).
+
+// One point of the sliced plate's moves, as far as the imperfections care.
+enum class PathKind : int { Travel = 0, Extrude, Seam, Other };
+struct PathPoint
+{
+    PathKind kind     = PathKind::Other;
+    float    x = 0.f, y = 0.f, z = 0.f;   // the end of the move, world mm
+    int      extruder = 0;                 // 0-based
+};
+
+struct SeamPoint
+{
+    float x = 0.f, y = 0.f, z = 0.f;
+};
+// The seam points of the moves, sorted by z then x, y (the shader searches them by z), duplicates
+// within 1 um dropped. At most `max_points`, evenly thinned beyond it.
+std::vector<SeamPoint> seam_points(const std::vector<PathPoint> &moves, size_t max_points = 65536);
+
+// A string of plastic left on a travel across a gap: from `a` to `b`, sagging by `sag` mm at the middle.
+struct StringWisp
+{
+    std::array<float, 3> a{ { 0.f, 0.f, 0.f } };
+    std::array<float, 3> b{ { 0.f, 0.f, 0.f } };
+    float                sag      = 0.f;
+    int                  extruder = 0;
+};
+// The travels a string could hang on: from the end of one extrusion to the start of the next on the
+// same layer, 2 to 30 mm apart (retractions and wipes between them do not count). `strength` 0..1
+// keeps that share of them, at most 15 %, picked by a fixed hash of the move so the same ones
+// stay from frame to frame; at most `max_count`.
+std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count = 400);
+// A point along a wisp, t in 0..1 (a parabola below the straight line).
+std::array<float, 3>    wisp_point(const StringWisp &w, float t);
+
+// The seam's bump across its width: 1 on the seam, 0 at `width_mm` from it and beyond, smooth.
+float seam_bump(float distance_mm, float width_mm);
+// The seam's width (mm) and how far it stands out (mm) at a strength.
+constexpr float SEAM_WIDTH_MM = 0.45f;
+float           seam_height_mm(float strength);
+// How far (mm) a layer may be shifted sideways at a strength (the wobble's amplitude).
+float           wobble_amplitude_mm(float strength);
 
 // --- toolpath realism (S5, D13; design 2.6.3) --------------------------------------------------
 

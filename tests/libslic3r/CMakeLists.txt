@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
 	test_zip_open.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_layerling.cpp
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_arrange_seq_print.cpp
@@ -196,7 +197,9 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_glsl.cpp
     test_showcase_hdr.cpp
     test_showcase_panel_rules.cpp
+    test_showcase_lens.cpp
     test_showcase_skin.cpp
+    test_showcase_realism.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

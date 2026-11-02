@@ -24,10 +24,12 @@
 // GLCanvas3D::set_render_settings_override(), never through the user's preferences.
 
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Color.hpp"
 #include "libslic3r/RealisticRenderSettings.hpp"
 #include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "libslic3r/Showcase/ShowcaseAssets.hpp"
 #include "libslic3r/Showcase/ShowcaseHdr.hpp"
+#include "libslic3r/Showcase/ShowcaseLens.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
 
 #include <array>
@@ -42,6 +44,8 @@ class wxMouseEvent;
 
 namespace Slic3r {
 
+class GLShaderProgram;
+class GLVolume;
 class ModelVolume;
 
 namespace GUI {
@@ -50,6 +54,7 @@ struct Camera; // a struct in Camera.hpp: MSVC mangles class and struct differen
 class GLCanvas3D;
 class GLModel;
 struct ShowcaseFramebuffers;
+struct ShowcaseFilament;
 
 // An RGBA image, top row first, straight (not premultiplied) alpha.
 struct ShowcaseImage
@@ -149,6 +154,12 @@ public:
     // S4: the live view's viewport and a projection fitted to the scene, for the camera as it is now
     // (a video frame's pose): what frame_view_projection() and the ID pass then use.
     void prepare_live_camera();
+    // Realism 1g: the film grain's seed, the video frame's index (0 for stills and the live view).
+    void set_frame_seed(int seed) { m_frame_seed = seed; }
+
+    // 1h-2b: the backdrop picture's width / height as uploaded (EXIF and the backplate's turn applied);
+    // 0 before it is loaded.
+    double background_aspect() const { return m_bg_texture != 0 && m_bg_image_h > 0 ? double(m_bg_image_w) / double(m_bg_image_h) : 0.; }
 
     // The safe frame of the last live frame, in canvas pixels, origin top-left.
     Showcase::RectI live_frame() const { return m_live_frame; }
@@ -205,6 +216,8 @@ private:
         unsigned hdr_fbo   = 0;
         // The safe frame in [0,1] GL coordinates (origin bottom-left): x0, y0, x1, y1.
         float    frame[4] = { 0.f, 0.f, 1.f, 1.f };
+        // Realism 1g: target pixels per output pixel (an export's supersampling; 1 live).
+        int      out_scale = 1;
     };
 
     bool            floor_drawn() const;
@@ -240,6 +253,25 @@ private:
     void            draw_post(const ShowcaseFramebuffers &fb);
     // 1a: the live view's finished frame from its off-screen buffer onto the window.
     void            present(unsigned int color_texture);
+    // 1h-2: depth of field over fb's finished, single-sampled colour (after the post pass and SSAO),
+    // read from its colour and depth. False (and the frame left as it is) when the scene has it off,
+    // the camera is orthographic, the shader is missing or the buffers cannot be made.
+    bool            apply_dof(const ShowcaseFramebuffers &fb, const DrawTarget &t);
+    bool            ensure_dof_buffers(int w, int h);
+    void            release_dof();
+    // 1h-2 (deferred part): GL_RENDERER names a weak GPU (or EDGESLICER_SHOWCASE_DRAFT_DOF is set): the
+    // live view's depth of field keeps to the draft quality. Asked once.
+    bool            weak_gpu();
+    // The objects' HDR layer as a single-sampled texture (the multisampled one averaged into it, once a
+    // frame); 0 without a layer or with nothing drawn into it. Bloom and bokeh highlights read it.
+    unsigned int    resolved_hdr(const ShowcaseFramebuffers &fb);
+    // Realism 1g: the camera effects over fb's finished, single-sampled colour (after the depth of
+    // field). False (the frame left as it is) when the scene has none on or the shader is missing.
+    bool            apply_lens(const ShowcaseFramebuffers &fb, const DrawTarget &t);
+    void            release_lens();
+    // 1h-2: the dome of a ground-projected environment (Showcase::ground_dome); false when the scene
+    // does not project its environment onto the ground.
+    bool            scene_ground_dome(Showcase::GroundDome &out) const;
     void            draw_overlay(int vp_w, int vp_h);
     void            ensure_fullscreen_quad();
     void            ensure_floor_model();
@@ -290,6 +322,24 @@ private:
     void            render_reflection();
     // Frees the contact shadow and mirror buffers (an export may have sized them large).
     void            release_offscreen();
+    // Realism 1d: the finish a filament slot renders with (the scene's override or the inference).
+    Showcase::Finish filament_finish(int filament, const std::vector<ShowcaseFilament> &filaments) const;
+    // Realism 1d: the thickness pass. The back faces of `items` (a volume, and its painted part or -1)
+    // write their distance from `eye` into an R32F target at half the bound viewport's size; the
+    // material pass reads it (m_thick_valid). The caller's framebuffer and viewport come back.
+    bool            render_thickness(const std::vector<std::pair<GLVolume *, int>> &items, const Transform3d &view,
+                                     const Transform3d &projection, const Vec3d &eye);
+    // Realism 1d: the coloured shadows. Every shadow caster seen from the key light, MIN-blended into a
+    // white RGBA8 map by the light it lets through (m_transmit_valid; only when a caster lets light
+    // through, else the floor's shadow stays grey as before).
+    void            render_transmit_map();
+    // Realism 1f: the seam points (a texture for the shader) and the string wisps of the plate's slice,
+    // worked out again when the slice or the strings' strength changes. False without a slice.
+    bool            ensure_slice_imperfections();
+    // Realism 1f: the wisps as thin ribbons facing the camera, through the bound material program
+    // (frame uniforms already set), translucent.
+    void            draw_strings(GLShaderProgram &shader, const Transform3d &view, const Transform3d &projection, const Vec3d &eye,
+                                 const std::vector<ColorRGBA> &colors);
 
     GLCanvas3D                &m_canvas;
     const Showcase::Scene     *m_scene   = nullptr;
@@ -342,6 +392,52 @@ private:
     int                        m_refl_w = 0;
     int                        m_refl_h = 0;
     bool                       m_refl_valid = false;
+    // Realism 1d: the thickness pass (R32F distance + its depth) and the coloured shadows' map.
+    unsigned int               m_thick_fbo = 0;
+    unsigned int               m_thick_tex = 0;
+    unsigned int               m_thick_depth = 0;
+    int                        m_thick_w = 0;
+    int                        m_thick_h = 0;
+    bool                       m_thick_valid = false;
+    float                      m_thick_viewport[4] = { 0.f, 0.f, 1.f, 1.f };
+    unsigned int               m_transmit_fbo = 0;
+    unsigned int               m_transmit_tex = 0;
+    bool                       m_transmit_valid = false;
+    // Realism 1f: the slice's seam table (RGBA32F) and string wisps, and what they were made from.
+    unsigned int               m_seam_tex = 0;
+    int                        m_seam_count = 0;
+    int                        m_seam_width = 0;
+    std::vector<Showcase::StringWisp> m_wisps;
+    std::string                m_slice_imp_key;
+    // One model of ribbons per extruder (they face the camera, so they are made again each frame).
+    std::vector<std::pair<int, std::shared_ptr<GLModel>>> m_strings_models;
+    // 1h-2: depth of field: a copy of the colour and depth, and the circles of confusion (RG16F).
+    unsigned int               m_dof_copy_fbo = 0;
+    unsigned int               m_dof_color = 0;
+    unsigned int               m_dof_depth = 0;
+    unsigned int               m_dof_coc_fbo = 0;
+    unsigned int               m_dof_coc = 0;
+    int                        m_dof_w = 0;
+    int                        m_dof_h = 0;
+    bool                       m_dof_failed_logged = false;
+    // What the last apply_dof() did, for the export report ("" = nothing).
+    std::string                m_dof_used;
+    int                        m_weak_gpu = -1;          // unknown until weak_gpu() asks
+    bool                       m_hdr_resolved = false;   // resolved_hdr() blitted this frame's layer
+    // Realism 1g: the camera effects' copy of the frame, and the bloom's two quarter-size RGBA16F buffers.
+    unsigned int               m_lens_fbo = 0;
+    unsigned int               m_lens_copy = 0;
+    int                        m_lens_w = 0;
+    int                        m_lens_h = 0;
+    unsigned int               m_bloom_fbo = 0;
+    unsigned int               m_bloom_tex[2] = { 0, 0 };
+    int                        m_bloom_w = 0;
+    int                        m_bloom_h = 0;
+    int                        m_frame_seed = 0;
+    std::string                m_lens_used;
+    // 1h-2: the last backdrop was projected onto the ground (draw_background), with this dome.
+    bool                       m_bg_ground = false;
+    Showcase::GroundDome       m_bg_dome;
 
     WatermarkProvider          m_watermark_provider;
     unsigned int               m_watermark_version = 1;
