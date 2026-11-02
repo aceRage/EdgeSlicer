@@ -21442,18 +21442,39 @@ void Plater::calib_retraction(const Calib_Params& params)
 
 void Plater::calib_temp_retraction(const Calib_Params& params)
 {
-    const auto calib_name = wxString::Format(L"Stringing temp × retraction");
-    new_project(false, false, calib_name);
-    wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
     if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
         return;
 
-    // The grid prints with filament slot 1 and its defaults came from slot 1's preset. The Filament tab
-    // may be editing another slot; bring slot 1's preset into the tab so the forced filament overrides
-    // below land on the filament that prints (the tab asks about unsaved edits of the other slot).
-    if (PresetBundle *bundle = wxGetApp().preset_bundle;
-        !bundle->filament_presets.empty() && bundle->filaments.get_edited_preset().name != bundle->filament_presets.front())
-        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(bundle->filament_presets.front());
+    // F19 (Russ): the grid prints with filament slot 1 and its defaults came from slot 1's preset. The
+    // Filament tab may be editing another slot k. Tab::select_preset() goes through update_presets(),
+    // which calls set_filament_preset(editing_filament, name): with editing_filament = k that would
+    // reassign slot k to slot 1's preset for good. Point editing_filament at slot 0 for the switch so
+    // only slot 1 (which already holds that preset) is written, and restore it if the switch is refused.
+    // If the tab has unsaved edits and the user cancels the discard prompt, the tab still edits slot k:
+    // abort before new_project() so nothing is created and no override lands on slot k's preset.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle != nullptr && !bundle->filament_presets.empty()) {
+        const std::string slot1_name = bundle->filament_presets.front();
+        if (bundle->filaments.get_edited_preset().name != slot1_name) {
+            const int                      previous_editing = sidebar().editing_filament_index();
+            const std::vector<std::string> previous_slots   = bundle->filament_presets;
+            sidebar().set_editing_filament(0);
+            wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(slot1_name);
+            const bool switched = bundle->filaments.get_edited_preset().name == slot1_name;
+            if (!switched)
+                sidebar().set_editing_filament(previous_editing);
+            // Slots other than slot 1 must never change here.
+            for (size_t i = 1; i < previous_slots.size() && i < bundle->filament_presets.size(); ++i)
+                if (bundle->filament_presets[i] != previous_slots[i])
+                    bundle->set_filament_preset(i, previous_slots[i]);
+            if (!switched)
+                return; // the user kept the other slot's unsaved edits: calibration aborted, nothing changed
+        }
+    }
+
+    const auto calib_name = wxString::Format(L"Stringing temp × retraction");
+    new_project(false, false, calib_name);
+    wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
 
     auto print_config    = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
