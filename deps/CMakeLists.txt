@@ -71,9 +71,13 @@ else()
 endif()
 option(SLIC3R_SENTRY "Enable Sentry crash reporting SDK" ${SLIC3R_SENTRY_DEFAULT})
 # Must match the main project's SLIC3R_CAD. Default OFF (Design tab stays dark until P2 GUI).
+# OFF (default): OCCT 7.6.0 and no SolveSpace, exactly the deps every shared prefix, CI and
+# release build use. ON: OCCT 8.0.1 (deps/OCCT/OCCT.cmake) plus the SolveSpace solver (deps/SLVS),
+# e.g. edgebuild's "cad" deps profile (C:/Dev/edgebuild/deps_profile/build_deps_profile.bat passes
+# -DSLIC3R_CAD=ON). OCCT 8 for every build is a later, separate step.
 # OCCT ModelingAlgorithms stays ON regardless — Edge B-rep (#163 STEP export/mesh-to-solid,
 # #218 fillet/chamfer) already needs it. Orca gates that module on this flag; we do not.
-option(SLIC3R_CAD "Build the SolveSpace solver the parametric Design/CAD tab needs. Must match the main project's SLIC3R_CAD." OFF)
+option(SLIC3R_CAD "Build OCCT 8.0.1 and the SolveSpace solver the parametric Design/CAD tab needs (OFF: OCCT 7.6.0). Must match the main project's SLIC3R_CAD." OFF)
 
 set(IS_CROSS_COMPILE FALSE)
 
