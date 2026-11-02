@@ -43,6 +43,7 @@ class wxMouseEvent;
 
 namespace Slic3r {
 
+class GLShaderProgram;
 class GLVolume;
 class ModelVolume;
 
