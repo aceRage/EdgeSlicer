@@ -27,8 +27,12 @@ namespace SliceV1 {
 const std::vector<std::string>& pair_features();
 
 // The instance API's manifest version (GET /api `version`). 3: slice_v1; 4: PR D, arrange (the
-// layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo).
-constexpr int INSTANCE_API_VERSION = 4;
+// layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo);
+// 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove);
+// 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers);
+// 7: PR G, plates, objects and save (plates/add, plates/{i}/delete|rename|bed_type, objects/delete,
+// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type).
+constexpr int INSTANCE_API_VERSION = 7;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
@@ -221,6 +225,128 @@ LooseRoute loose_route(bool on_plate, bool wholly_on_plate, bool user_locked, bo
 // whatever it is; otherwise it must name the topmost undo snapshot exactly, so a phone's Undo after
 // an Arrange never undoes something a person did at the PC in the meantime.
 bool undo_matches(const std::string& expect, const std::string& top);
+
+// ---- PR F: filament settings (feature "slice_filament_settings") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 4: a slot's filament preset edited like
+// the Process tab, saved, reverted, and a slot removed, from the phone.
+
+// The slots whose preset is the same as `slot`'s, `slot` included, in order. The Filament tab edits
+// one copy of a preset, so an edit made for one of them changes all of them ("also changes slot 3").
+std::vector<int> slots_sharing(const std::vector<std::string>& slot_presets, int slot);
+
+// A request that would make the Filament tab edit `slot`: HTTP status 200 when it may, otherwise the
+// status and the sentence. The tab holds one edited copy and is bound to one slot (`bound`, the slot
+// the sidebar last edited, 0 before any). Unsaved edits (`dirty`) belong to `edited`, the preset the
+// tab has open; the desktop asks Save / Discard before it opens another preset, which a phone cannot
+// answer, so that is refused (409) until the edits are saved or reverted. A slot using the same
+// preset shares the edits and may be opened.
+struct Refusal
+{
+    int         status { 200 };
+    std::string error;
+    bool        ok() const { return status == 200; }
+};
+Refusal bind_filament_slot(int slot, int slots, int bound, bool dirty, const std::string& slot_preset, const std::string& edited);
+
+// The name POST /settings/filament/save saves under: `requested` (Save as) when given, else the
+// preset's own name, or "<name> - Custom" for a system preset (the fork's no-prompt rule, as the
+// process save). Surrounding blanks are dropped from `requested`.
+std::string filament_save_name(const std::string& requested, const std::string& edited, bool is_system);
+
+// Save as names a preset for one slot: after the save the desktop moves every slot that used the old
+// preset to the new one (Sidebar::update_presets_from_to); the other slots go back to the old preset.
+std::vector<std::string> slots_after_save_as(std::vector<std::string> before, int slot, const std::string& saved);
+
+// POST /presets/filament_remove?index=[&replace=][&confirm=1]: whether slot `slot` of `slots`
+// physical slots may go. `replace` (-1: none, objects using it fall back to the first filament) is
+// the slot whose filament they take instead; `mixed_dependents` mixed filaments are built from it,
+// which the desktop asks about, so they need `confirm`.
+Refusal filament_remove_check(int slot, int slots, int replace, int mixed_dependents, bool confirm);
+
+// ---- PR E: preview v2 (feature "slice_preview_v2") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 2.3: the phone's preview colours the
+// toolpaths by any of the desktop's view types, hides features and moves (travel, seams...), starts
+// at a lower layer, and reads the legend and the per-layer times the PC already holds.
+
+// Stable ids of the G-code viewer's extrusion roles, indexed like libvgcode::EGCodeExtrusionRole
+// (RemoteAccess static_asserts the count), so a legend row and a `hide=` list mean the same feature
+// in every language.
+const std::vector<std::string>& preview_role_ids();
+// The role index of an id, or -1.
+int preview_role_index(const std::string& id);
+
+// Stable ids of the toggleable moves, indexed like libvgcode::EOptionType's first six.
+const std::vector<std::string>& preview_option_ids();
+int preview_option_index(const std::string& id);
+
+// A comma list of ids ("seam,travel"), blanks dropped, each once, in order.
+std::vector<std::string> split_ids(const std::string& list);
+
+// "#RRGGBB" of an 8-bit colour.
+std::string hex_color(unsigned char r, unsigned char g, unsigned char b);
+
+// The unit and the decimals the desktop's legend shows for a gradient view type (its config name):
+// "" and 0 for the discrete ones.
+std::string gradient_unit(const std::string& color_by);
+int gradient_decimals(const std::string& color_by);
+
+// The legend of a gradient: the colour range's bin values and palette (palette[i] colours
+// values[i]; one value is a single colour, two are the palette's ends) as stops ordered by value,
+// with min and max. Rounded to the legend's decimals (one more for layer times under 10 s).
+nlohmann::json gradient_legend(const std::string& color_by, const std::vector<float>& values, const std::vector<std::string>& palette_hex);
+
+// GET /plates/{i}/preview/layers: every layer's top Z, its height (from the layer below, the first
+// from 0) and its estimated time (seconds, 2 decimals; null when the times do not match the layers).
+nlohmann::json layer_rows(const std::vector<double>& zs, const std::vector<float>& times);
+
+// The lower layer of a frame: `from` clamped to 0..top (anything below 0 is 0).
+unsigned int preview_from_layer(int from, unsigned int top);
+
+// How the phone wants one preview frame to look, from preview.png's query. Empty `color_by`: the
+// PC's own; `options_given` false: the PC's own moves; `hide`: roles not drawn.
+struct PreviewLook
+{
+    std::string              color_by;
+    int                      from { 0 };
+    bool                     options_given { false };
+    std::vector<std::string> options;
+    std::vector<std::string> hide;
+};
+
+// ---- PR G: plates, objects and save (features "slice_plates_edit", "slice_objects_edit",
+// "slice_project_save") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 6.1 (G8-G10): the phone adds, deletes,
+// renames plates and sets their bed type, deletes and duplicates objects and saves the project,
+// each through the PC's own control. These are the checks and names that need no Plater.
+
+// The longest plate name the PC's Plate Settings dialog takes.
+constexpr size_t PLATE_NAME_MAX = 250;
+// The most copies one duplicate makes (the Clone dialog goes to 1000; a phone needs far fewer).
+constexpr int DUPLICATE_MAX = 50;
+
+// A plate name as the phone sent it, made safe to store: control characters dropped, blanks
+// trimmed, cut to PLATE_NAME_MAX characters (code points, on a UTF-8 boundary). "" clears the name.
+std::string clean_plate_name(const std::string& name);
+
+// POST /plates/add: the PC's Add plate stops at `max_plates`.
+Refusal plate_add_check(int plates, int max_plates);
+
+// POST /plates/{i}/delete[?objects=keep|delete][&confirm=1]. `objects_on_plate` instances are on it;
+// keep (the default, the PC's own way) leaves them loose, delete deletes them first. A plate with
+// objects needs confirm; the last plate cannot go; `cut_objects` among them stop objects=delete.
+Refusal plate_delete_check(int plate, int plates, int objects_on_plate, const std::string& objects, bool confirm, int cut_objects);
+
+// POST /objects/delete: `inst` -1 = the whole object. A part of a cut object is refused (the PC asks
+// first, as deleting it breaks the cut link: that stays a decision made at the PC).
+Refusal object_delete_check(int obj, int objects, int inst, int instances, bool is_cut);
+
+// POST /objects/duplicate: `count` copies of one instance, 1..DUPLICATE_MAX.
+Refusal object_duplicate_check(int obj, int objects, int inst, int instances, int count);
+
+// A bed type's id on the wire: "default" for btDefault (the plate follows the project), else its
+// config value ("Textured PEI Plate"). bed_type_from_id is the reverse, -1 for an unknown id.
+std::string bed_type_id(int bed_type);
+int         bed_type_from_id(const std::string& id);
 
 } // namespace SliceV1
 } // namespace GUI
