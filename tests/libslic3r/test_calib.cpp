@@ -32,12 +32,21 @@ Calib_Params grid_params()
 
 bool has_label_vertices(const TriangleMesh &mesh)
 {
-    // Raised base labels sit on z = 1..1.6 at the front edge (y < 2.5). The pillars start at y = 3.
+    // Raised base labels sit on z = 1..1.6 between the two pillars (the pillars cover y = 3..7 and 23..27).
     for (const auto &v : mesh.its.vertices)
         if (v.z() > stringing_grid_base_height + 0.05f && v.z() < stringing_grid_base_height + stringing_grid_label_height + 0.05f &&
-            v.y() < 2.5f)
+            v.y() > 8.f && v.y() < 22.f)
             return true;
     return false;
+}
+
+// Pillar footprints of a column (in column-mesh coordinates), as add_pillar() places them.
+BoundingBoxf pillar_footprint(int which)
+{
+    const double cx   = 0.5 * stringing_grid_base_x;
+    const double cy   = 0.5 * (stringing_grid_base_y - stringing_grid_pillar_gap) + which * stringing_grid_pillar_gap;
+    const double half = 0.5 * stringing_grid_pillar_xy;
+    return BoundingBoxf(Vec2d(cx - half, cy - half), Vec2d(cx + half, cy + half));
 }
 
 } // namespace
@@ -157,6 +166,76 @@ TEST_CASE("Stringing grid raised labels are optional and default off", "[Calib][
         REQUIRE(model.objects.size() == 3);
         CHECK(model.objects.back()->name == stringing_grid_label_name);
         CHECK(model.objects.back()->instances.front()->get_offset().x() == Approx(-stringing_grid_column_pitch));
+    }
+}
+
+TEST_CASE("Stringing grid band labels stand on the label tower's front face inside their band", "[Calib][TempRetract]")
+{
+    // Owner hand test: the digits hung off the back of the tower as horizontal slabs.
+    Calib_Params params = grid_params();
+    params.print_labels = true;
+    const int    bands  = stringing_grid_band_count(params);
+    const double band_h = params.band_height;
+    const double eps    = 1e-4;
+    REQUIRE(bands >= 2);
+    for (int band = 0; band < bands; ++band) {
+        CAPTURE(band);
+        const TriangleMesh label = make_stringing_grid_band_label_mesh(params, band);
+        REQUIRE_FALSE(label.empty());
+        const BoundingBoxf3 bb = label.bounding_box();
+        // Front face is y = 0: the label sticks out by the emboss height and reaches into the tower.
+        CHECK(bb.min.y() == Approx(-stringing_grid_label_height).margin(eps));
+        CHECK(bb.max.y() >= -eps);
+        CHECK(bb.max.y() <= stringing_grid_label_embed + eps);
+        // Inside the tower's width, and inside its band (not across a band boundary).
+        CHECK(bb.min.x() >= -eps);
+        CHECK(bb.max.x() <= stringing_grid_label_tower_x + eps);
+        const double band_lo = stringing_grid_base_height + band * band_h;
+        CHECK(bb.min.z() >= band_lo - eps);
+        CHECK(bb.max.z() <= band_lo + band_h + eps);
+        // Upright: as tall as a digit along Z, as thick as the emboss along Y.
+        CHECK(bb.size().z() == Approx(stringing_grid_label_glyph_height).margin(eps));
+    }
+    // The tower with labels: nothing behind or beside the tower body, labels only in front of it.
+    const BoundingBoxf3 tower = make_stringing_grid_label_tower_mesh(params).bounding_box();
+    CHECK(tower.max.y() == Approx(stringing_grid_label_tower_y).margin(eps));
+    CHECK(tower.min.y() == Approx(-stringing_grid_label_height).margin(eps));
+    CHECK(tower.min.x() == Approx(0.).margin(eps));
+    CHECK(tower.max.x() == Approx(stringing_grid_label_tower_x).margin(eps));
+    // The widest temperature label fits the tower with room to spare.
+    CHECK(3 * stringing_grid_label_glyph_width + 2 * 0.4 < stringing_grid_label_tower_x);
+}
+
+TEST_CASE("Stringing grid base labels sit between the pillars, clear of both footprints", "[Calib][TempRetract]")
+{
+    // Owner hand test: the base labels overlapped the front pillar and sliced to stray fragments.
+    Calib_Params params = grid_params();
+    params.print_labels    = true;
+    params.retract_lengths = {0.2, 1.6, 9.8, 10.};
+    const double eps    = 1e-4;
+    const double margin = 1.0;
+    CHECK(stringing_grid_label_stroke >= 0.9); // about two 0.45 mm lines
+    CHECK(stringing_grid_label_height >= 0.6 - eps); // three layers at 0.2 mm
+    CHECK(stringing_grid_retract_label(0.2) == "0.2");
+    CHECK(stringing_grid_retract_label(9.8) == "9.8");
+    CHECK(stringing_grid_retract_label(10.) == "10");
+    for (int col = 0; col < int(params.retract_lengths.size()); ++col) {
+        CAPTURE(col);
+        const TriangleMesh label = make_stringing_grid_column_label_mesh(params, col);
+        REQUIRE_FALSE(label.empty());
+        const BoundingBoxf3 bb = label.bounding_box();
+        // On the base top: reaches into the plate and rises the emboss height above it.
+        CHECK(bb.min.z() == Approx(stringing_grid_base_height - stringing_grid_label_embed).margin(eps));
+        CHECK(bb.max.z() == Approx(stringing_grid_base_height + stringing_grid_label_height).margin(eps));
+        // Inside the plate.
+        CHECK(bb.min.x() >= -eps);
+        CHECK(bb.max.x() <= stringing_grid_base_x + eps);
+        // Clear of both pillars by at least `margin`.
+        for (int p = 0; p < 2; ++p) {
+            const BoundingBoxf fp = pillar_footprint(p);
+            const bool clear = bb.max.y() + margin <= fp.min.y() || bb.min.y() - margin >= fp.max.y();
+            CHECK(clear);
+        }
     }
 }
 

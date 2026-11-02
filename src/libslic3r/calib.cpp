@@ -1390,32 +1390,52 @@ static constexpr unsigned k_digit_seg[10] = {
     0b1111011, // 9
 };
 
+// Owner hand test: the old strokes were 0.18 of the digit width (about 0.4 mm, one line or less) and met
+// only edge to edge, so the sliced labels came out as a few stray fragments. Strokes are now a fixed
+// stringing_grid_label_stroke (about two lines) and every vertical stroke overlaps the horizontal ones it
+// meets, so each digit slices as one solid shape (overlapping boxes of one volume are unioned when sliced).
 void merge_digit(TriangleMesh &dst, double ox, double oy, double oz, char ch, double w, double h, double t)
 {
+    const double s = stringing_grid_label_stroke;
     if (ch == '.') {
-        merge_cube_at(dst, ox + w * 0.35, oy, oz, w * 0.3, w * 0.3, t);
+        merge_cube_at(dst, ox + 0.5 * (w - s), oy, oz, s, s, t);
         return;
     }
     if (ch < '0' || ch > '9')
         return;
     const unsigned bits = k_digit_seg[ch - '0'];
-    const double   s    = std::min(w, h) * 0.18;
     const double   mid  = h * 0.5;
-    if (bits & 0b1000000) merge_cube_at(dst, ox + s, oy + h - s, oz, w - 2. * s, s, t);           // A
-    if (bits & 0b0100000) merge_cube_at(dst, ox + w - s, oy + mid, oz, s, mid - s, t);             // B
-    if (bits & 0b0010000) merge_cube_at(dst, ox + w - s, oy + s, oz, s, mid - s, t);               // C
-    if (bits & 0b0001000) merge_cube_at(dst, ox + s, oy, oz, w - 2. * s, s, t);                    // D
-    if (bits & 0b0000100) merge_cube_at(dst, ox, oy + s, oz, s, mid - s, t);                       // E
-    if (bits & 0b0000010) merge_cube_at(dst, ox, oy + mid, oz, s, mid - s, t);                     // F
-    if (bits & 0b0000001) merge_cube_at(dst, ox + s, oy + mid - s * 0.5, oz, w - 2. * s, s, t);    // G
+    const double   up   = h - (mid - 0.5 * s); // upper strokes: from the middle bar's bottom to the top
+    const double   low  = mid + 0.5 * s;       // lower strokes: from the bottom to the middle bar's top
+    if (bits & 0b1000000) merge_cube_at(dst, ox, oy + h - s, oz, w, s, t);                 // A
+    if (bits & 0b0100000) merge_cube_at(dst, ox + w - s, oy + mid - 0.5 * s, oz, s, up, t); // B
+    if (bits & 0b0010000) merge_cube_at(dst, ox + w - s, oy, oz, s, low, t);               // C
+    if (bits & 0b0001000) merge_cube_at(dst, ox, oy, oz, w, s, t);                         // D
+    if (bits & 0b0000100) merge_cube_at(dst, ox, oy, oz, s, low, t);                       // E
+    if (bits & 0b0000010) merge_cube_at(dst, ox, oy + mid - 0.5 * s, oz, s, up, t);         // F
+    if (bits & 0b0000001) merge_cube_at(dst, ox, oy + mid - 0.5 * s, oz, w, s, t);         // G
 }
 
+// Glyph metrics for merge_text: digit width, gap between characters, width of the '.' cell.
+static constexpr double k_glyph_w     = stringing_grid_label_glyph_width;
+static constexpr double k_glyph_gap   = 0.4;
+static constexpr double k_glyph_dot_w = stringing_grid_label_stroke;
+
+double text_width(const std::string &text)
+{
+    double w = 0.;
+    for (char ch : text)
+        w += (ch == '.' ? k_glyph_dot_w : k_glyph_w) + k_glyph_gap;
+    return text.empty() ? 0. : w - k_glyph_gap;
+}
+
+// Lays the text flat: glyph x along +X from ox, glyph up along +Y from oy, thickness t along +Z from oz.
 void merge_text(TriangleMesh &dst, double ox, double oy, double oz, const std::string &text, double t)
 {
-    const double w      = 2.2;
-    const double h      = 4.0;
-    const double gap    = 0.35;
-    const double dot_w  = 1.0;
+    const double w      = k_glyph_w;
+    const double h      = stringing_grid_label_glyph_height;
+    const double gap    = k_glyph_gap;
+    const double dot_w  = k_glyph_dot_w;
     double       x      = ox;
     for (char ch : text) {
         if (ch == '.') {
@@ -1428,12 +1448,19 @@ void merge_text(TriangleMesh &dst, double ox, double oy, double oz, const std::s
     }
 }
 
-std::string format_retract_label(double length)
+} // namespace
+
+std::string stringing_grid_retract_label(double length)
 {
     std::ostringstream os;
-    os << std::fixed << std::setprecision(1) << length;
+    if (length >= 10. - 1e-6)
+        os << int(std::lround(length));
+    else
+        os << std::fixed << std::setprecision(1) << length;
     return os.str();
 }
+
+namespace {
 
 std::string format_temp_label(double temp)
 {
@@ -1462,6 +1489,44 @@ void add_pillar(TriangleMesh &dst, double cx, double cy, const Calib_Params &par
 
 } // namespace
 
+TriangleMesh make_stringing_grid_column_label_mesh(const Calib_Params &params, int column)
+{
+    // Lies on the top of the base between the two pillars (the 3 mm strip in front of the front pillar is
+    // too shallow for a 4 mm digit, which used to run into the pillar), centred, read from the front (-Y)
+    // with the digits' up along +Y. It sinks stringing_grid_label_embed into the base so it fuses with it.
+    TriangleMesh      mesh;
+    const std::string label = stringing_grid_retract_label(retract_for_column(params, column));
+    const double      ox    = 0.5 * (stringing_grid_base_x - text_width(label));
+    const double      oy    = 0.5 * (stringing_grid_base_y - stringing_grid_label_glyph_height);
+    merge_text(mesh, ox, oy, stringing_grid_base_height - stringing_grid_label_embed, label,
+               stringing_grid_label_height + stringing_grid_label_embed);
+    return mesh;
+}
+
+TriangleMesh make_stringing_grid_band_label_mesh(const Calib_Params &params, int band)
+{
+    // Owner hand test: the digits used to be laid flat (thickness along Z) at y = tower depth, so each
+    // band's label was a set of horizontal slabs hanging off the back of the tower. Now they stand on the
+    // tower's FRONT face (y = 0, toward the default camera): built flat in XY, then turned +90 deg about X
+    // so glyph up -> +Z and thickness -> -Y. They stick out stringing_grid_label_height in front of the
+    // face and reach stringing_grid_label_embed into the tower, so they fuse with it.
+    TriangleMesh mesh;
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    // Review F6: same rule as the G-code (temp_retract_band_index on the middle of the band).
+    const double      z_mid = stringing_grid_base_height + (band + 0.5) * band_h;
+    const std::string label = format_temp_label(temp_for_z(params, z_mid));
+    TriangleMesh flat;
+    merge_text(flat, 0., 0., -stringing_grid_label_embed, label, stringing_grid_label_height + stringing_grid_label_embed);
+    // +90 deg about X, written out: (x, y, z) -> (x, -z, y). A proper rotation, so the faces keep their winding.
+    const double         ox  = 0.5 * (stringing_grid_label_tower_x - text_width(label));
+    const double         oz  = z_mid - 0.5 * stringing_grid_label_glyph_height;
+    indexed_triangle_set its = flat.its;
+    for (stl_vertex &v : its.vertices)
+        v = stl_vertex(float(v.x() + ox), -v.z(), float(v.y() + oz));
+    mesh = TriangleMesh(std::move(its));
+    return mesh;
+}
+
 TriangleMesh make_stringing_grid_column_mesh(const Calib_Params &params, int column)
 {
     TriangleMesh mesh;
@@ -1470,11 +1535,8 @@ TriangleMesh make_stringing_grid_column_mesh(const Calib_Params &params, int col
     const double y0 = (stringing_grid_base_y - stringing_grid_pillar_gap) * 0.5;
     add_pillar(mesh, cx, y0, params);
     add_pillar(mesh, cx, y0 + stringing_grid_pillar_gap, params);
-    if (params.print_labels) {
-        const std::string label = format_retract_label(retract_for_column(params, column));
-        // Raised on the base's front edge (low Y), sitting on the top of the 1 mm plate.
-        merge_text(mesh, 0.6, 0.4, stringing_grid_base_height, label, stringing_grid_label_height);
-    }
+    if (params.print_labels)
+        mesh.merge(make_stringing_grid_column_label_mesh(params, column));
     return mesh;
 }
 
@@ -1484,17 +1546,10 @@ TriangleMesh make_stringing_grid_label_tower_mesh(const Calib_Params &params)
     const int    bands  = stringing_grid_band_count(params);
     const double band_h = params.band_height > 0. ? params.band_height : 8.;
     const double height = stringing_grid_base_height + bands * band_h;
-    const double tw     = 8.0;
-    const double td     = 6.0;
-    merge_cube_at(mesh, 0., 0., 0., tw, td, height);
-    if (params.print_labels) {
-        for (int band = 0; band < bands; ++band) {
-            // Review F6: same rule as the G-code (temp_retract_band_index on the middle of the band).
-            const double      z     = stringing_grid_base_height + (band + 0.5) * band_h;
-            const std::string label = format_temp_label(temp_for_z(params, z));
-            merge_text(mesh, 0.4, td, stringing_grid_base_height + band * band_h + 1.5, label, stringing_grid_label_height);
-        }
-    }
+    merge_cube_at(mesh, 0., 0., 0., stringing_grid_label_tower_x, stringing_grid_label_tower_y, height);
+    if (params.print_labels)
+        for (int band = 0; band < bands; ++band)
+            mesh.merge(make_stringing_grid_band_label_mesh(params, band));
     return mesh;
 }
 
