@@ -4222,7 +4222,17 @@ void TabPrint::refresh_tool_selector()
     m_tool_expand_btn->Show(available && !expanded);
     // P9: the way back, while the selector is open.
     if (m_tool_collapse_btn != nullptr)
+    {
         m_tool_collapse_btn->Show(available && expanded);
+        // P9: with nozzles of different sizes the selector stays (each size needs its own process): the button only resets choices.
+        const bool mixed = tool_sizes_mixed();
+        const bool any   = m_preset_bundle->nozzle_process_choices_set();
+        m_tool_collapse_btn->SetLabel(mixed ? _L("Reset choices") : _L("Use one process"));
+        m_tool_collapse_btn->Enable(!mixed || any);
+        m_tool_collapse_btn->SetToolTip(mixed ? _L("Nozzles have different sizes - each size needs its own process. This resets the processes "
+                                                   "chosen per nozzle and their changes.") :
+                                                _L("Print every nozzle with the plate's process again."));
+    }
     // Owner hand test 2026-11-01: no help text under the selector; each button's tooltip says what it prints with.
     m_tool_note->Hide();
     if (m_tool_selector != nullptr && expanded) {
@@ -4250,12 +4260,14 @@ void TabPrint::use_one_process()
 {
     if (m_preset_bundle == nullptr)
         return;
-    MessageDialog dlg(wxGetApp().mainframe,
-                      _L("Use the plate's process for every nozzle again?\n\nThe processes chosen per nozzle (or rack slot) and their unsaved "
-                         "changes in this project are removed. Nozzles of another size than the plate's process still get a process of "
-                         "their size automatically."),
-                      _L("Use one process"), wxICON_QUESTION | wxYES_NO);
-    dlg.SetButtonLabel(wxID_YES, _L("Use one process"));
+    // Owner hand test 2026-11-02: with nozzles of different sizes one process cannot print them all (each size keeps its own), so
+    // the button only resets the choices then, and says so. Short texts.
+    const bool     mixed = tool_sizes_mixed();
+    const wxString title = mixed ? _L("Reset choices") : _L("Use one process");
+    MessageDialog  dlg(wxGetApp().mainframe,
+                       mixed ? _L("Reset the processes chosen per nozzle and their changes?") : _L("Use the plate's process for every nozzle?"),
+                       title, wxICON_QUESTION | wxYES_NO);
+    dlg.SetButtonLabel(wxID_YES, title);
     dlg.SetButtonLabel(wxID_NO, _L("Cancel"));
     // NO is the harmless answer (MessageDialog answers YES for a phone / agent request): a remote YES only clears choices.
     if (dlg.ShowModal() != wxID_YES)
@@ -4270,6 +4282,15 @@ void TabPrint::use_one_process()
         wxGetApp().plater()->update_project_dirty_from_presets();
         wxGetApp().plater()->on_config_change(m_preset_bundle->full_config());
     }
+}
+
+bool TabPrint::tool_sizes_mixed() const
+{
+    if (m_preset_bundle == nullptr)
+        return false;
+    // Different nozzle sizes on the extruders, or a rack with other sizes (size tools).
+    return has_mixed_nozzle_diameters(m_preset_bundle->effective_nozzle_diameters()) ||
+           m_preset_bundle->nozzle_tool_count() > m_preset_bundle->effective_nozzle_diameters().size();
 }
 
 std::string TabPrint::shown_tool_id() const

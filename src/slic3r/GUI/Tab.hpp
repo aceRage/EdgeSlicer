@@ -610,6 +610,7 @@ private:
 	Button*					m_tool_collapse_btn = nullptr; // P9: "Use one process", the way back
 	ComboBox*				m_tool_combo        = nullptr; // P9: the selector as a list when its buttons would not fit
 	void					use_one_process();
+	bool					tool_sizes_mixed() const;
 	wxStaticText*			m_tool_note         = nullptr;
 	std::vector<wxString>	m_tool_labels;
 	// Per-nozzle process P9: the tool (PresetBundle tool index: extruders, then rack slots) of each selector entry after Plate.
