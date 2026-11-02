@@ -1390,7 +1390,7 @@ void LayerlingPanel::Impl::on_about_button()
     const int id_licence = wxWindow::NewControlId();
     const int id_check   = wxWindow::NewControlId();
     const int id_reset   = wxWindow::NewControlId();
-    const int id_source  = wxWindow::NewControlId();
+    const int id_where   = wxWindow::NewControlId();
     const int id_mcp     = wxWindow::NewControlId();
     const std::string v  = cfg(KEY_VERSION);
     auto *head = menu.Append(wxID_ANY, custom_base() ? format_wxstr(_L("Layerling at %1%"), from_u8(layerling::origin_of(cfg(KEY_BASE_URL)))) :
@@ -1404,7 +1404,7 @@ void LayerlingPanel::Impl::on_about_button()
     if (!custom_base())
         menu.Append(id_check, _L("Check for a newer version"));
     menu.AppendSeparator();
-    menu.Append(id_source, _L("Layerling source..."), _L("The downloaded copy, or your own Layerling (a NAS, a home server, layerling.com)"));
+    menu.Append(id_where, _L("Layerling source..."), _L("The downloaded copy, or your own Layerling (a NAS, a home server, layerling.com)"));
     menu.Append(id_mcp, _L("Connect an AI client (MCP)..."), _L("The settings for an AI client that drives Layerling through its MCP server"));
     menu.AppendSeparator();
     auto *reset = menu.Append(id_reset, _L("Reset Layerling data..."));
@@ -1419,7 +1419,7 @@ void LayerlingPanel::Impl::on_about_button()
         check_for_update(true);
     else if (chosen == id_reset)
         reset_data();
-    else if (chosen == id_source)
+    else if (chosen == id_where)
         choose_source();
     else if (chosen == id_mcp)
         show_mcp_setup();
