@@ -2046,6 +2046,18 @@ wxWindow* PreferencesDialog::create_general_page()
            "The trade-off: if the PC really runs out of memory, the slicer may freeze or crash and unsaved work can be lost. "
            "Slicing started from the phone or hub is always stopped when memory runs out, regardless of this setting."),
         50, "warn_low_memory_slicing");
+#ifdef SLIC3R_CAD
+    // P4 / Orca Preferences General > Features. Shown only in SLIC3R_CAD builds.
+    // Toggling enable_cad_feature rebuilds the Design tab and the Prepare gizmos, so it
+    // needs a restart (P3 follow-up F8).
+    auto title_features   = create_item_title(_L("Features"), page, _L("Features"));
+    auto item_cad_feature = create_item_checkbox(
+        _L("CAD feature (experimental) (Takes effect after restarting EdgeSlicer)"), page,
+        _L("With this option enabled, the Design tab is shown, where models can be built and edited "
+           "parametrically. This feature is experimental and still under development. A restart is "
+           "required after changing this setting."),
+        50, "enable_cad_feature");
+#endif
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     //auto title_network = create_item_title(_L("Network"), page, _L("Network"));
     // User presets are never synced with a cloud account (PresetSyncPolicy.hpp): no checkbox for it.
@@ -2237,6 +2249,10 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_realistic_phong, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_realistic_ssao, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_realistic_shadows, 0, wxTOP, FromDIP(3));
+#ifdef SLIC3R_CAD
+    sizer_page->Add(title_features, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_cad_feature, 0, wxTOP, FromDIP(3));
+#endif
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_calc_mode, 0, wxTOP, FromDIP(3));
     if (item_user_sync)

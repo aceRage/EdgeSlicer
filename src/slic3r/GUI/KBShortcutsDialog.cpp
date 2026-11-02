@@ -67,6 +67,13 @@ KBShortcutsDialog::KBShortcutsDialog()
     m_sizer_top->Add(m_sizer_body, 1, wxEXPAND, 0);
 
     fill_shortcuts();
+#ifdef SLIC3R_CAD
+    if (wxGetApp().is_enable_cad_feature() && m_panel_selects->GetSizer() != nullptr) {
+        m_panel_selects->GetSizer()->Add(create_button((int) m_full_shortcuts.size() - 1, _L("Design")), 0, wxEXPAND, 0);
+        m_panel_selects->Layout();
+        m_panel_selects->GetSizer()->Fit(m_panel_selects);
+    }
+#endif
     for (size_t i = 0; i < m_full_shortcuts.size(); ++i) {
         wxPanel *page = create_page(m_simplebook, m_full_shortcuts[i], font, bold_font);
         m_pages.push_back(page);
@@ -266,6 +273,15 @@ void KBShortcutsDialog::fill_shortcuts()
             { L("Tab"), L("Switch between Prepare/Preview") },
 
         };
+#ifdef SLIC3R_CAD
+        // K and W were unused as Prepare gizmo letters (Ctrl+K clones the
+        // selection; plain K and W have no canvas binding). Hidden with the gizmos
+        // when the CAD feature preference is off (Orca #15762).
+        if (wxGetApp().is_enable_cad_feature()) {
+            plater_shortcuts.push_back({ "K", L("Gizmo sketch (opens Design)") });
+            plater_shortcuts.push_back({ "W", L("Gizmo primitive (opens Design)") });
+        }
+#endif
         m_full_shortcuts.push_back({ { _L("Plater"), "" }, plater_shortcuts });
 
         Shortcuts gizmos_shortcuts = {
@@ -324,6 +340,21 @@ void KBShortcutsDialog::fill_shortcuts()
         { L("End"),         L("Horizontal slider - Move to last position")},
     };
     m_full_shortcuts.push_back({ { _L("Preview"), "" }, preview_shortcuts });
+
+#ifdef SLIC3R_CAD
+    if (wxGetApp().is_enable_cad_feature()) {
+        Shortcuts design_shortcuts = {
+            { ctrl + shift + "P", L("Commit to Plate") },
+            { ctrl + shift + "O", L("Show/Hide reference planes (Origin)") },
+            { ctrl + shift + "B", L("Show/Hide the printer bed") },
+            { "K", L("Prepare: start a sketch in the Design tab") },
+            { "W", L("Prepare: add a 20 mm box in the Design tab") },
+            { L("Esc"), L("Unwind one Design interaction level") },
+            { L("Home"), L("Axonometric view, fitted") },
+        };
+        m_full_shortcuts.push_back({{_L("Design"), ""}, design_shortcuts});
+    }
+#endif
 }
 
 wxPanel* KBShortcutsDialog::create_page(wxWindow* parent, const ShortcutsItem& shortcuts, const wxFont& font, const wxFont& bold_font)

@@ -326,6 +326,12 @@ public:
     bool menu_can_undo_redo(bool redo) const;
     // Grey the app's Undo/Redo to this tab's history and gate (shown tab only).
     void update_undo_redo_buttons();
+    // Prepare-toolbar Sketch / Primitive gizmos (P4). Switch is already done by the
+    // gizmo; these start the matching Design action.
+    // when_built key shared by the Prepare Sketch/Primitive gizmo launches (latest wins).
+    static constexpr const char* k_launch_action_key = "prepare_launch";
+    void prepare_start_sketch();
+    void prepare_start_primitive();
 private:
     // The plane the Hole tool drills on: a picked face (inward, centred) or the dropdown.
     SketchPlane hole_plane() const;

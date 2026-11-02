@@ -2813,7 +2813,7 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     if(m_calibration)
         m_calibration->msw_rescale();
 #ifdef SLIC3R_CAD
-    DesignPanel::when_built([](DesignPanel& design) { design.msw_rescale(); });
+    DesignPanel::when_built("msw_rescale", [](DesignPanel& design) { design.msw_rescale(); });
 #endif
 
     // BBS
@@ -2889,7 +2889,7 @@ void MainFrame::on_sys_color_changed()
     if(m_calibration)
         m_calibration->on_sys_color_changed();
 #ifdef SLIC3R_CAD
-    DesignPanel::when_built([](DesignPanel& design) { design.on_sys_color_changed(); });
+    DesignPanel::when_built("sys_color_changed", [](DesignPanel& design) { design.on_sys_color_changed(); });
 #endif
     // update Tabs
     for (auto tab : wxGetApp().tabs_list)

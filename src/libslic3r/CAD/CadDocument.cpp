@@ -273,7 +273,8 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
     // that: (2,5+1)*2 is 7. Ambiguous forms are rejected rather than read as a prefix:
     //  - a number mixing '.' and ',' or carrying two commas ("1.000,5", "1,000,5");
     //  - exactly three digits after the comma ("1,000", "12,500"), which reads as a
-    //    thousands separator. 1-2 or 4+ fractional digits are accepted ("1,25", "1,2500").
+    //    thousands separator. 1-2 or 4+ fractional digits are accepted ("1,25", "1,0000").
+    //    F12: rejected forms tell the user to use '.' as the decimal separator.
     std::vector<bool> paren_is_call;   // one entry per open '(': true = function call
     auto digit_at = [&](size_t k) { return k < src.size() && isdigit((unsigned char)src[k]); };
     while (i < src.size()) {
@@ -300,14 +301,14 @@ static double eval_expr(const std::string& src, const std::map<std::string, doub
                     size_t k = i + 1;
                     while (digit_at(k)) ++k;
                     if (k - (i + 1) == 3)
-                        throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
+                        throw std::runtime_error(_u8L("ambiguous decimal separator in number; use '.' as the decimal separator"));
                     ++commas; ++i; continue;
                 }
                 break;
             }
             Token t{Token::Num, src.substr(start, i - start)};
             if (commas > 0 && (commas > 1 || dots > 0))
-                throw std::runtime_error(_u8L("ambiguous decimal separator in number"));
+                throw std::runtime_error(_u8L("ambiguous decimal separator in number; use '.' as the decimal separator"));
             if (dots > 1)
                 throw std::runtime_error(_u8L("bad number in expression"));
             for (char& ch : t.val)

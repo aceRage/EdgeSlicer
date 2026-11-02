@@ -5403,11 +5403,21 @@ TEST_CASE("function + pi in expression binding", "[CadDocument][variables]")
     REQUIRE_THAT(doc.features[sk].radius, WithinAbs(1.25, 1e-6));
 
     // Exactly three digits after the comma reads as a thousands separator: rejected.
-    for (const char* bad : {"1,000", "12,500"}) {
+    // F12: the error tells the user to use '.' as the decimal separator (e.g. 0.500).
+    for (const char* bad : {"1,000", "12,500", "0,500"}) {
         doc.variables = {{"r", bad}};
         REQUIRE_FALSE(doc.recompute());
         REQUIRE_CONTAINS(doc.error, "ambiguous decimal separator");
+        REQUIRE_CONTAINS(doc.error, "use '.' as the decimal separator");
     }
+
+    // F12: 1,0000 has four digits after the comma, so it is a decimal (1.0), not
+    // thousands grouping. 1-2 or 4+ fractional digits are accepted ("1,25", "1,0000").
+    doc.variables = {{"r", "1,0000"}};
+    doc.features[sk].expr = {{"radius", "r"}};
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_THAT(doc.features[sk].radius, WithinAbs(1.0, 1e-6));
 
     // Ambiguous thousands/decimal mixes are rejected, never silently read as 1.0.
     for (const char* bad : {"1.000,5", "1,000,5", "1.2.3"}) {
@@ -9609,4 +9619,31 @@ TEST_CASE("A hole owns its bore", "[CadDocument][highlight]")
     for (const auto& bf : bore)
         CHECK(made_face_type(doc, bf) == GeomAbs_Cylinder);
     CHECK(doc.faces_made_by(ex).size() == 6);
+}
+
+// Commit to Plate ships these meshes as ordinary ModelVolumes. The GUI path
+// (DesignPanel::on_commit) is not exercised here; this is the kernel contract
+// that path relies on: a box is a normal TriangleMesh, and an empty document
+// has nothing to ship (so a non-CAD project is a no-op).
+TEST_CASE("Commit to Plate payload is a normal mesh; an empty document ships nothing",
+          "[CadDocument][CommitToPlate]")
+{
+    CadDocument empty;
+    REQUIRE(empty.display_mesh.its.indices.empty());
+    REQUIRE(empty.display_body_meshes.empty());
+    REQUIRE(empty.features.empty());
+
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20, 20, 0, "Sketch");
+    REQUIRE(doc.add_extrude(sk, 20.0, false, BooleanMode::New, "Extrude") >= 0);
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE_FALSE(doc.display_mesh.its.indices.empty());
+    REQUIRE(doc.display_mesh.its.vertices.size() >= 8);
+    REQUIRE(doc.display_body_meshes.size() == 1);
+    REQUIRE_FALSE(doc.display_body_meshes[0].its.indices.empty());
+    const BoundingBoxf3 bb = doc.display_mesh.bounding_box();
+    REQUIRE_THAT(bb.size().x(), Catch::WithinAbs(20.0, 0.5));
+    REQUIRE_THAT(bb.size().y(), Catch::WithinAbs(20.0, 0.5));
+    REQUIRE_THAT(bb.size().z(), Catch::WithinAbs(20.0, 0.5));
 }

@@ -10,3 +10,13 @@ for EdgeSlicer.
   OrcaSlicer repository and its history.
 
 They are compiled only when SLIC3R_CAD is ON (src/slic3r/CMakeLists.txt).
+
+Prepare-toolbar Sketch / Primitive gizmos (P4) live next to the other gizmos:
+
+- src/slic3r/GUI/Gizmos/GLGizmoSketch.hpp/.cpp
+- src/slic3r/GUI/Gizmos/GLGizmoPrimitive.hpp/.cpp
+
+They are adapted from Orca PRs #15762 / #15238. Orca's ImGui/OCCT canvas gizmos
+(GeometryEngine PrimitiveParams / make_primitive) were removed upstream before
+3610d8bb; these files are Design-tab launchers at that pin (Sketch opens a
+sketch session; Primitive adds a 20 mm box). Same AGPL-3.0 license as above.
