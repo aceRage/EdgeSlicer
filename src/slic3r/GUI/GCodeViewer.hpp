@@ -300,6 +300,7 @@ private:
         bool                                                   hide_wipe_tower = false;
         bool                                                   show_infill     = true;   // S5b
         bool                                                   show_supports   = true;   // S5b
+        bool                                                   show_skirt      = true;   // 1h-2b
     };
     ShowcaseSaved m_showcase;
     // Realism 1b: the prelude libvgcode's material program was last built from, and why it failed.
@@ -389,6 +390,7 @@ public:
         bool   hide_wipe_tower = false;
         bool   show_infill     = true;  // S5b: sparse and internal solid infill, internal bridges
         bool   show_supports   = true;  // S5b: supports, their interfaces and transitions
+        bool   show_skirt      = true;  // Showcase 1h-2b: skirt and brim
         bool   smooth          = false; // the smooth bead look (D13)
         std::array<float, 128> looks{}; // per extruder: see libvgcode::Viewer::set_smooth_look()
         bool   set_light       = false;
