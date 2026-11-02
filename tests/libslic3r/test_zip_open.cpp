@@ -121,10 +121,43 @@ TEST_CASE("parse_mtl_texture_refs skips word options, unknown flags and quotes",
     CHECK(parse_mtl_texture_refs("map_Kd -clamp off -blendu on -blendv off t1.png\n") == std::vector<std::string>{"t1.png"});
     CHECK(parse_mtl_texture_refs("map_Kd -texres 512 -imfchan r t2.png\n") == std::vector<std::string>{"t2.png"});
     CHECK(parse_mtl_texture_refs("map_Kd -o 0.5 -s 2 2 t3.png\n") == std::vector<std::string>{"t3.png"});
-    CHECK(parse_mtl_texture_refs("map_Kd -foo 1 2 t4.png\n") == std::vector<std::string>{"t4.png"});
+    // Unknown flags also list the remainder as a possible name; the lookup keeps whichever exists.
+    CHECK(parse_mtl_texture_refs("map_Kd -foo 1 2 t4.png\n") == std::vector<std::string>{"-foo 1 2 t4.png", "t4.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -x.png\n") == std::vector<std::string>{"-x.png"});
     CHECK(parse_mtl_texture_refs("map_Kd -type sphere -mm 0 1 \"my tex.png\"\n") == std::vector<std::string>{"my tex.png"});
     CHECK(parse_mtl_texture_refs("map_Kd my tex.png\n") == std::vector<std::string>{"my tex.png"});
     CHECK(parse_mtl_texture_refs("map_Kd -cc on\n").empty());
+}
+
+TEST_CASE("parse_mtl_texture_refs reads numbers without the C locale", "[ZipOpen]")
+{
+    CHECK(parse_mtl_texture_refs("map_Bump -bm 0.5 n.png\n") == std::vector<std::string>{"n.png"});
+    CHECK(parse_mtl_texture_refs("map_Bump -bm -1.5e-1 n.png\n") == std::vector<std::string>{"n.png"});
+    CHECK(parse_mtl_texture_refs("map_Kd -o +2 .5 3. t.png\n") == std::vector<std::string>{"t.png"});
+    // "inf"/"0x1"/"0,5" are not numbers here, so they become the name.
+    CHECK(parse_mtl_texture_refs("map_Bump -bm 0,5 n.png\n") == std::vector<std::string>{"0,5 n.png"});
+    CHECK(parse_mtl_texture_refs("map_Bump -bm inf\n") == std::vector<std::string>{"inf"});
+}
+
+TEST_CASE("zip_obj_sidecar_indices resolves -x.png and stops at a whole mtllib name", "[ZipOpen]")
+{
+    const std::vector<ZipListedEntry> all = {listed(0, "a/part.obj"), listed(1, "a/My Part.mtl"), listed(2, "a/My"),
+                                             listed(3, "a/Part.mtl"), listed(4, "a/-x.png")};
+    const ZipEntryReader reader = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "mtllib My Part.mtl\n"; return true; }
+        if (index == 1) { out = "map_Kd -x.png\n"; return true; }
+        return false;
+    };
+    // The whole name exists, so "My" and "Part.mtl" are not pulled; "-x.png" is a file, not a flag.
+    CHECK(zip_obj_sidecar_indices(all[0], all, reader, false) == std::vector<std::uint32_t>{1, 4});
+
+    const std::vector<ZipListedEntry> split = {listed(0, "a/part.obj"), listed(1, "a/My"), listed(2, "a/Part.mtl")};
+    const ZipEntryReader reader2 = [](std::uint32_t index, std::string& out) {
+        if (index == 0) { out = "mtllib My Part.mtl\n"; return true; }
+        return false;
+    };
+    // No whole-name entry: fall back to the tokens.
+    CHECK(zip_obj_sidecar_indices(split[0], split, reader2, false) == std::vector<std::uint32_t>{1, 2});
 }
 
 TEST_CASE("zip_obj_sidecar_indices matches case only where the platform does", "[ZipOpen]")

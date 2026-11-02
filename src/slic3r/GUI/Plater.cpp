@@ -22178,6 +22178,18 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             BOOST_LOG_TRIVIAL(warning) << "Could not remove ZIP session " << session << ": " << ec.message();
         session.clear();
     };
+    // Any exit that does not load something (early returns, any exception type) removes the
+    // session; the successful paths set `keep` just before returning.
+    struct SessionGuard
+    {
+        std::function<void()> remove;
+        bool                  keep = false;
+        ~SessionGuard()
+        {
+            if (!keep)
+                remove();
+        }
+    } session_guard{remove_session};
     try
     {
         MZ_Archive archive;
@@ -22407,6 +22419,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             return false;
         }
         load_gcode(from_path(gcode_paths.front()));
+        session_guard.keep = true;
         return true;
     }
 
@@ -22440,6 +22453,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         }
         if (plater_was_empty || became_project)
             set_opened_from_zip(true);
+        session_guard.keep = true;
         return true;
     }
 
@@ -22451,6 +22465,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
     }
     if (plater_was_empty)
         set_opened_from_zip(true);
+    session_guard.keep = true;
     return true;
 }
 

@@ -307,13 +307,34 @@ std::vector<std::string> split_tokens(const std::string& text)
     return out;
 }
 
+// Plain ASCII number check ([+-]digits[.digits][e[+-]digits]); unlike strtod it does not depend
+// on the C locale's decimal separator and does not accept inf/nan/hex.
 bool is_number(const std::string& tok)
 {
-    if (tok.empty())
+    size_t i      = 0;
+    auto   digits = [&]() {
+        const size_t start = i;
+        while (i < tok.size() && tok[i] >= '0' && tok[i] <= '9')
+            ++i;
+        return i - start;
+    };
+    if (i < tok.size() && (tok[i] == '+' || tok[i] == '-'))
+        ++i;
+    size_t n = digits();
+    if (i < tok.size() && tok[i] == '.') {
+        ++i;
+        n += digits();
+    }
+    if (n == 0)
         return false;
-    char*       end = nullptr;
-    std::strtod(tok.c_str(), &end);
-    return end != nullptr && *end == '\0';
+    if (i < tok.size() && (tok[i] == 'e' || tok[i] == 'E')) {
+        ++i;
+        if (i < tok.size() && (tok[i] == '+' || tok[i] == '-'))
+            ++i;
+        if (digits() == 0)
+            return false;
+    }
+    return i == tok.size();
 }
 
 void push_unique(std::vector<std::string>& out, const std::string& v)
@@ -324,21 +345,35 @@ void push_unique(std::vector<std::string>& out, const std::string& v)
 
 } // namespace
 
-std::vector<std::string> parse_obj_mtllib(const std::string& obj_text)
+std::vector<ZipMtllibLine> parse_obj_mtllib_lines(const std::string& obj_text)
 {
-    // The OBJ spec allows several names per line, but exporters also write one name with spaces
-    // in it. Quoted names are taken as written; otherwise the whole remainder is tried first and
-    // then each whitespace token, so both styles resolve (only names present in the archive are
-    // ever used).
-    std::vector<std::string> out;
-    std::string              keyword, rest;
+    std::vector<ZipMtllibLine> out;
+    std::string                keyword, rest;
     for (const std::string& line : split_lines(obj_text)) {
         if (!split_keyword(line, keyword, rest) || keyword != "mtllib" || rest.empty())
             continue;
-        if (rest.find('"') == std::string::npos)
-            push_unique(out, rest);
-        for (const std::string& tok : split_tokens(rest))
-            push_unique(out, tok);
+        ZipMtllibLine l;
+        std::vector<std::string> toks = split_tokens(rest);
+        if (rest.find('"') == std::string::npos && toks.size() > 1)
+            l.whole = rest;
+        for (const std::string& tok : toks)
+            push_unique(l.names, tok);
+        out.push_back(std::move(l));
+    }
+    return out;
+}
+
+std::vector<std::string> parse_obj_mtllib(const std::string& obj_text)
+{
+    // The OBJ spec allows several names per line, but exporters also write one name with spaces
+    // in it. Quoted names are taken as written; otherwise the whole remainder is listed first and
+    // then each whitespace token. The sidecar lookup uses the tokens only if the whole name is
+    // not in the archive.
+    std::vector<std::string> out;
+    for (const ZipMtllibLine& l : parse_obj_mtllib_lines(obj_text)) {
+        push_unique(out, l.whole);
+        for (const std::string& n : l.names)
+            push_unique(out, n);
     }
     return out;
 }
@@ -369,6 +404,14 @@ std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text)
             for (const Opt& o : opts)
                 if (opt == o.name)
                     known = &o;
+            if (!known) {
+                // An unknown "-x..." may be a file whose name starts with '-' (`-x.png`). List
+                // the remainder as a candidate first; the lookup keeps whichever names exist.
+                std::string name = toks[i - 1];
+                for (size_t k = i; k < toks.size(); ++k)
+                    name += " " + toks[k];
+                push_unique(out, name);
+            }
             if (known && known->word) {
                 if (i < toks.size())
                     ++i;
@@ -451,9 +494,18 @@ std::vector<std::uint32_t> zip_obj_sidecar_indices(const ZipListedEntry&        
     std::vector<const ZipListedEntry*> mtls;
     std::string                 text;
     if (read_entry && read_entry(obj.index, text)) {
-        for (const std::string& name : parse_obj_mtllib(text))
-            if (const ZipListedEntry* e = find(resolve_zip_relative(obj_dir, name)); e && add(e))
-                mtls.push_back(e);
+        for (const ZipMtllibLine& line : parse_obj_mtllib_lines(text)) {
+            // A whole-line name that exists wins; its tokens are not tried.
+            if (!line.whole.empty())
+                if (const ZipListedEntry* e = find(resolve_zip_relative(obj_dir, line.whole))) {
+                    if (add(e))
+                        mtls.push_back(e);
+                    continue;
+                }
+            for (const std::string& name : line.names)
+                if (const ZipListedEntry* e = find(resolve_zip_relative(obj_dir, name)); e && add(e))
+                    mtls.push_back(e);
+        }
     }
     if (mtls.empty()) {
         // No readable mtllib line (or the OBJ is over the read cap): the same-stem MTL beside it.

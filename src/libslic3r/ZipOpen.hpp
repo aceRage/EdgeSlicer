@@ -68,12 +68,21 @@ bool zip_archive_is_all_encrypted(const std::vector<ZipListedEntry>& entries);
 
 // `mtllib` file names in an OBJ. Quoted names are taken as written; an unquoted line yields the
 // whole remainder (a name with spaces) and then each whitespace-separated name.
+// One `mtllib` line: `whole` is the unquoted remainder when it has spaces (one name with spaces,
+// tried first), `names` the separate (or quoted) names.
+struct ZipMtllibLine
+{
+    std::string              whole;
+    std::vector<std::string> names;
+};
+std::vector<ZipMtllibLine> parse_obj_mtllib_lines(const std::string& obj_text);
 std::vector<std::string> parse_obj_mtllib(const std::string& obj_text);
 // Texture file names referenced by an MTL (map_Kd, map_Ka, map_Ks, map_Ns, map_d, map_Bump,
 // bump, disp, decal, refl, norm, map_Pr/Pm/Ps/Ke). Option flags before the name are skipped:
 // word options (-cc/-clamp/-blendu/-blendv on|off, -imfchan, -type) take one token, numeric ones
 // (-o/-s/-t up to 3, -mm 2, -bm/-boost/-texres 1) take the numbers that follow, unknown flags
-// skip up to 3 numbers. A quoted name keeps its spaces.
+// skip up to 3 numbers. A quoted name keeps its spaces. An unknown flag is
+// also listed as the start of a name (`-x.png`), ahead of the name after the skipped flag.
 std::vector<std::string> parse_mtl_texture_refs(const std::string& mtl_text);
 // Archive-relative `dir/ref` with `.` / `..` folded and `\` as `/`. Empty when `..` climbs out.
 std::string resolve_zip_relative(const std::string& dir, const std::string& ref);
