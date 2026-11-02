@@ -598,7 +598,6 @@ private:
 	void					create_tool_selector();
 	std::vector<wxString>	tool_selector_labels() const;
 	bool					tool_selector_expanded() const;
-	wxString				tool_selector_note() const;
 	// On Plate (selector open): the per-tool fields are greyed out. On a tool: the plate-wide fields carry "(Plate)".
 	void					apply_tool_field_states();
 	void					mark_plate_fields(bool on);

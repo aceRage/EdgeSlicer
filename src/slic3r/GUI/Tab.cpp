@@ -4122,43 +4122,6 @@ bool TabPrint::tool_selector_expanded() const
     return false;
 }
 
-wxString TabPrint::tool_selector_note() const
-{
-    if (m_preset_bundle == nullptr)
-        return wxString();
-    const std::vector<double> nozzles = m_preset_bundle->effective_nozzle_diameters();
-    const int                 view    = m_preset_bundle->nozzle_tool_view();
-    auto tool_label = [this](size_t e) {
-        return (e + 1 < m_tool_labels.size() ? m_tool_labels[e + 1] : wxString::Format("T%d", int(e + 1)));
-    };
-    using Kind = PresetBundle::NozzleToolProcessKind;
-    if (view < 0) {
-        // Plate: what every tool prints with.
-        wxString note = _L("Plate: settings shared by every nozzle (layer height, supports, prime tower, brim...). The settings each "
-                           "nozzle takes from its own process are greyed out here; select a nozzle above to edit them.");
-        for (size_t e = 0; e < nozzles.size(); ++e) {
-            const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
-            wxString what = info.kind == Kind::FollowsPlate ? _L("the plate's process") :
-                            info.kind == Kind::Missing      ? _L("no process fits this nozzle size: slicing is refused") :
-                                                              from_u8(info.name) + (info.kind == Kind::AutoPicked ? " (" + _L("picked for its size") + ")" : wxString());
-            if (info.edited && info.kind != Kind::Missing)
-                what += " *";
-            note += "\n" + tool_label(e) + ": " + what;
-        }
-        return note;
-    }
-    const size_t                          e    = size_t(view);
-    const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
-    wxString note = info.kind == Kind::FollowsPlate ?
-        format_wxstr(_L("%1% uses the plate's process. Choose another process for it in the list above."), tool_label(e)) :
-        format_wxstr(_L("%1% uses its own process."), tool_label(e));
-    if (m_preset_bundle->nozzle_tool_process_info(e).kind == Kind::AutoPicked)
-        note = format_wxstr(_L("%1% uses \"%2%\", picked for its nozzle size."), tool_label(e), from_u8(info.name));
-    note += " " + format_wxstr(_L("Settings marked%1% are shared with the Plate: changing them here changes them for every nozzle."),
-                               plate_field_mark());
-    return note;
-}
-
 void TabPrint::refresh_tool_selector()
 {
     if (m_type != Preset::TYPE_PRINT)
@@ -4185,8 +4148,6 @@ void TabPrint::refresh_tool_selector()
         m_tool_labels = labels;
         if (available) {
             m_tool_selector = new SegmentedToggle(m_tool_panel, labels, m_preset_bundle->nozzle_tool_view() + 1, SegmentedToggle::Style::Pill);
-            m_tool_selector->SetToolTip(_L("Plate: the settings shared by every nozzle. A nozzle: its own process profile, shown in the "
-                                           "list below and on every page."));
             m_tool_selector->bindSelectionCallback([this](int index) {
                 // The toggle's own click is still running: switch after it returns.
                 wxGetApp().CallAfter([this, index]() { show_tool(index - 1); });
@@ -4199,12 +4160,23 @@ void TabPrint::refresh_tool_selector()
         m_tool_selector->Show(expanded);
     }
     m_tool_expand_btn->Show(available && !expanded);
-    const wxString note = expanded ? tool_selector_note() : wxString();
-    m_tool_note->SetLabel(note);
-    m_tool_note->SetToolTip(note);
-    if (m_tool_panel->GetClientSize().x > FromDIP(60))
-        m_tool_note->Wrap(m_tool_panel->GetClientSize().x - FromDIP(8));
-    m_tool_note->Show(!note.empty());
+    // Owner hand test 2026-11-01: no help text under the selector; each button's tooltip says what it prints with.
+    m_tool_note->Hide();
+    if (m_tool_selector != nullptr && expanded) {
+        using Kind = PresetBundle::NozzleToolProcessKind;
+        m_tool_selector->setSegmentToolTip(0, _L("Settings shared by all nozzles"));
+        for (size_t e = 0; e + 1 < m_tool_labels.size(); ++e) {
+            const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(e);
+            wxString tip = info.kind == Kind::FollowsPlate ? _L("The plate's process") :
+                           info.kind == Kind::Missing      ? _L("No process fits this nozzle size") :
+                                                             from_u8(info.name);
+            if (info.kind == Kind::AutoPicked)
+                tip += "\n" + _L("Picked for its size");
+            if (info.edited && info.kind != Kind::Missing)
+                tip += "\n" + _L("Changed in this project");
+            m_tool_selector->setSegmentToolTip(int(e + 1), tip);
+        }
+    }
     m_tool_panel->Show(available);
     mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
     m_tool_panel->Layout();
