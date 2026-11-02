@@ -99,7 +99,7 @@ jobs:
           for t in xcodebuild clang ninja pkg-config autoconf automake glibtoolize makeinfo xgettext lipo hdiutil; do
             if p=$(command -v "$t"); then echo "OK      $t  $p"; else echo "MISSING $t"; missing=1; fi
           done
-          xcodebuild -version | head -1
+          xcodebuild -version > "$RUNNER_TEMP/xcv.txt" 2>&1 || true; sed -n 1p "$RUNNER_TEMP/xcv.txt"
           clang --version | head -1
           if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
             echo "::error::Rosetta is not installed (softwareupdate --install-rosetta) - the x86_64 deps and UltraNet loadtest need it"; missing=1

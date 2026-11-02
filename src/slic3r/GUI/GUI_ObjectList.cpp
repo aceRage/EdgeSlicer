@@ -18,6 +18,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/MeshRepair.hpp"
 #include "libslic3r/MeshRemesh.hpp"
+#include "libslic3r/Airbrush/AirbrushBake.hpp"
 #include "libslic3r/MeshRound.hpp"
 #include "libslic3r/SliceBake.hpp"
 #include "libslic3r/Support/StabilizerBake.hpp"
@@ -3943,6 +3944,7 @@ void ObjectList::changed_object(const int obj_idx/* = -1*/) const
 void ObjectList::part_selection_changed()
 {
     if (m_extruder_editor) m_extruder_editor->Hide();
+    show_height_pattern_overlay(-1, 0);   // Color Pattern bands only while a pattern row is selected
     int obj_idx = -1;
     int volume_id = -1;
     m_config = nullptr;
@@ -4058,6 +4060,10 @@ void ObjectList::part_selection_changed()
                             gizmos_mgr.open_gizmo(gizmo_type);
                         break;
                     }
+                    case InfoItemType::HeightPattern:
+                        // The pattern's bands are drawn on the object while its row is selected.
+                        show_height_pattern_overlay(obj_idx, m_objects_model->GetHeightPatternId(item));
+                        break;
                     // BBS: remove Sinking
                     //case InfoItemType::Sinking: { break; }
                     default: { break; }
@@ -6499,9 +6505,14 @@ void ObjectList::repair_by_remesh()
                                 << " -> " << rep.triangles_after << " triangles, flat bottom "
                                 << (rep.kept_bottom_flat ? "kept" : (rep.fell_back ? "declined: " + rep.note : "off"))
                                 << ", sharp vertices snapped " << rep.sharp_snapped;
+        // Edge (Airbrush P3, A4): re-bake the colour field on the remeshed part (positions kept).
+        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
+        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
+        if (mv.airbrush_field)
+            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
         return true;
     };
 
@@ -6650,9 +6661,13 @@ void ObjectList::round_all_edges(bool close_gizmos)
                                                ? std::string("kept (mirrored base, no slab)")
                                                : "kept (slab " + std::to_string(rep.bottom_margin_used) + " mm)")
                                         : (rep.fell_back ? "declined: " + rep.note : std::string("off")));
+        const std::shared_ptr<const TriangleMesh>     old_mesh  = mv.mesh_ptr();
+        const TriangleSelector::TriangleSplittingData old_paint = mv.mmu_segmentation_facets.get_data();
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
+        if (mv.airbrush_field)
+            Airbrush::airbrush_after_mesh_replaced(mv, old_mesh->its, old_paint);
         return true;
     };
 

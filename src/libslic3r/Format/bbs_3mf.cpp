@@ -191,6 +191,10 @@ const std::string IMAGE_FILL_DIR = "Metadata/image_fill/";
 // Exact CAD bodies of parts (BRep/CadBody.hpp), one blob per part, referenced from the part's
 // CAD_BODY_FILE_KEY metadata. Versions that do not know the key ignore it and the file.
 const std::string CAD_BODY_DIR = "Metadata/cad_bodies/";
+// Airbrush colour fields (Airbrush/AirbrushField.hpp): one blob per volume that has one, named by
+// the volume's AIRBRUSH_FIELD_FILE_KEY metadata. EdgeSlicer-only and never in a Bambu-compatible
+// export; the baked paint_color is the copy every other slicer reads.
+const std::string AIRBRUSH_DIR = "Metadata/airbrush/";
 const std::string IMAGE_FILL_MANIFEST_FILE = "Metadata/image_fill/manifest.json";
 const std::string PROJECT_EMBEDDED_PRINT_PRESETS_FILE = "Metadata/print_setting_";
 const std::string PROJECT_EMBEDDED_SLICE_PRESETS_FILE = "Metadata/process_settings_";
@@ -420,6 +424,7 @@ static constexpr const char* SOURCE_OFFSET_X_KEY = "source_offset_x";
 static constexpr const char* SOURCE_OFFSET_Y_KEY = "source_offset_y";
 static constexpr const char* SOURCE_OFFSET_Z_KEY = "source_offset_z";
 static constexpr const char* CAD_BODY_FILE_KEY = "cad_body_file";
+static constexpr const char* AIRBRUSH_FIELD_FILE_KEY = "airbrush_field_file";
 static constexpr const char* SOURCE_IN_INCHES    = "source_in_inches";
 static constexpr const char* SOURCE_IN_METERS    = "source_in_meters";
 
@@ -681,11 +686,45 @@ bool bbs_is_valid_object_type(const std::string& type)
 }
 
 namespace Slic3r {
-
-static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
+// A missing attribute uses the documented default. A present but malformed numeric
+// attribute must reach validation as invalid, never quietly turn into that default.
+static TacJointParams bbs_read_tac_joint(const pt::ptree& tree)
 {
-    for (const char* key : {"filament_colour", "filament_settings_id",
-                             "filament_ids", "default_filament_colour"}) {
+    return tac_joint_from_attributes([&tree](const std::string& name) -> std::optional<double> {
+        if (!tree.get_optional<std::string>("<xmlattr>." + name))
+            return std::nullopt;
+        if (const auto value = tree.get_optional<double>("<xmlattr>." + name))
+            return *value;
+        return std::numeric_limits<double>::quiet_NaN();
+    });
+}
+
+static bool bbs_tac_recipe_pose_valid(const pt::ptree& tree)
+{
+    for (const char* field : {"x", "y", "z", "z_angle"}) {
+        const std::string path = std::string("<xmlattr>.") + field;
+        if (tree.get_optional<std::string>(path)) {
+            const auto value = tree.get_optional<double>(path);
+            if (!value || !std::isfinite(*value))
+                return false;
+        }
+    }
+    if (const auto matrix = tree.get_optional<std::string>("<xmlattr>.rotation")) {
+        std::istringstream stream(*matrix);
+        double             value;
+        for (int i = 0; i < 16; ++i)
+            if (!(stream >> value) || !std::isfinite(value))
+                return false;
+        stream >> std::ws;
+        if (!stream.eof())
+            return false;
+    }
+    return true;
+}
+
+static size_t physical_filament_count_from_project_config(const DynamicPrintConfig& config)
+{
+    for (const char* key : {"filament_colour", "filament_settings_id", "filament_ids", "default_filament_colour"}) {
         if (const auto* opt = config.option<ConfigOptionStrings>(key); opt && !opt->values.empty())
             return opt->values.size();
     }
@@ -1073,6 +1112,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // the file, the defaults stand.
                 bool             has_pushfit{ false };
                 PushFitParams    pushfit;
+                TacJointParams   tac_joint;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -1308,6 +1348,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
         // CAD body blobs by their path in the archive, read before the volumes are generated.
         std::map<std::string, std::string> m_cad_body_files;
+        std::map<std::string, std::string> m_airbrush_files;
         // Texture displacement: every file under Metadata/texture_displacement/, by archive path. Volumes
         // are built only after the whole archive has been walked, so by the time a volume names its JSON
         // every file it could refer to is already in here, whatever order the archive happened to be in.
@@ -2186,6 +2227,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 else if (_is_svg_shape_file(name)) {
                     _extract_embossed_svg_shape_file(name, archive, stat);
                 }
+                else if (boost::algorithm::istarts_with(name, AIRBRUSH_DIR)) {
+                    // A volume's airbrush field; attached in _generate_volumes_new(). A 2M-cell field is
+                    // about 12 MB, so anything past 256 MB is not one of ours.
+                    if (stat.m_uncomp_size > 0 && stat.m_uncomp_size < 256ull * 1024ull * 1024ull) {
+                        std::string blob(size_t(stat.m_uncomp_size), '\0');
+                        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, blob.data(), blob.size(), 0))
+                            m_airbrush_files[name] = std::move(blob);
+                    }
+                }
                 else if (boost::algorithm::istarts_with(name, CAD_BODY_DIR)) {
                     // A part's exact CAD body; attached in _generate_volumes_new() if its mesh still matches.
                     if (stat.m_uncomp_size > 0 && stat.m_uncomp_size < 1024ull * 1024ull * 1024ull) {
@@ -2390,6 +2440,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    // EdgeSlicer: the Layerling design the object came from (LayerlingPanel)
+                    else if (metadata.key == "layerling_design")
+                        model_object->layerling_design = metadata.value;
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -2449,7 +2502,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // a 3MF (a project saved with the joint placed but not yet cut), so the
                     // bound is the last enumerator instead - still a range check on untrusted
                     // file content, just one that covers the whole enum.
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::PushFit)) {
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::TacJoint)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
@@ -2463,6 +2516,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
                     if (connector.has_pushfit)
                         model_object->volumes[connector.volume_id]->cut_info.pushfit = connector.pushfit;
+                    if (connector.type == int(CutConnectorType::TacJoint))
+                        model_object->volumes[connector.volume_id]->cut_info.tac_joint = connector.tac_joint;
                 }
             }
 
@@ -3005,6 +3060,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 connector.processed   = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_pushfit = true;
                             }
+                            if (connector.type == int(CutConnectorType::TacJoint)) {
+                                connector.tac_joint                 = bbs_read_tac_joint(connector_tree);
+                                const TacJointValidation validation = tac_joint_validate(connector.tac_joint);
+                                if (!validation.valid) {
+                                    add_error("Invalid TAC Joint metadata: " + validation.message);
+                                    continue; // Keep the baked volume, without unsafe regenerative metadata.
+                                }
+                                connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -3325,12 +3389,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     const int type  = ct.get<int>("<xmlattr>.type", 0);
                     const int style = ct.get<int>("<xmlattr>.style", 0);
                     const int shape = ct.get<int>("<xmlattr>.shape", 0);
-                    rc.type  = (type  >= 0 && type  <= int(CutConnectorType::PushFit)) ? type  : 0;
+                    // Preserve an unknown type until recipe validation rejects it: never
+                    // silently reopen a newer connector as a Plug.
+                    rc.type  = type;
                     rc.style = (style >= 0 && style <= int(CutConnectorStyle::Undef))     ? style : 0;
                     rc.shape = (shape >= 0 && shape <= int(CutConnectorShape::Undef))     ? shape : 0;
                     // The Flexi joint's own parameters, when this is one. Same defaulting
                     // rule as cut_information.xml: every field falls back to the
                     // FlexiJointParams default, and the counts that drive loops are clamped.
+                    if (rc.type == int(CutConnectorType::TacJoint)) {
+                        rc.tac_joint = bbs_read_tac_joint(ct);
+                        if (!bbs_tac_recipe_pose_valid(ct))
+                            rc.z_angle = std::numeric_limits<float>::quiet_NaN();
+                    }
                     if (rc.type == int(CutConnectorType::PushFit))
                         rc.pushfit = pushfit_from_attributes([&ct](const std::string& name) -> std::optional<double> {
                             if (boost::optional<double> v = ct.get_optional<double>("<xmlattr>." + name))
@@ -6108,12 +6179,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // Apply the seam mode after all base-type metadata, regardless of XML key order.
             ModelVolumeType precise_seam_type = ModelVolumeType::INVALID;
             std::string     cad_body_file;
+            std::string     airbrush_file;
             // apply the remaining volume's metadata
             for (const Metadata& metadata : volume_data->metadata) {
                 if (metadata.key == NAME_KEY)
                     volume->name = metadata.value;
                 else if (metadata.key == CAD_BODY_FILE_KEY)
                     cad_body_file = metadata.value;
+                else if (metadata.key == AIRBRUSH_FIELD_FILE_KEY)
+                    airbrush_file = metadata.value;
                 else if (metadata.key == TEXTURE_DISPLACEMENT_KEY)
                     _apply_texture_displacement(*volume, metadata.value);
                 //else if ((metadata.key == MODIFIER_KEY) && (metadata.value == "1"))
@@ -6164,6 +6238,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                                    << "\" does not match its mesh and was dropped";
                 } else
                     BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the CAD body " << cad_body_file << " is missing from the archive";
+            }
+
+            // The airbrush field, moved with the mesh if the mesh was only moved (re-centred).
+            if (!airbrush_file.empty()) {
+                auto it = m_airbrush_files.find(airbrush_file);
+                std::shared_ptr<Airbrush::AirbrushField> field = it != m_airbrush_files.end() ? Airbrush::AirbrushField::from_blob(it->second) : nullptr;
+                if (field) {
+                    field->attach_to_mesh(volume->mesh().its);
+                    volume->airbrush_field = std::move(field);
+                } else
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": the airbrush field " << airbrush_file << " of \"" << volume->name
+                                               << "\" is missing or damaged and was dropped";
             }
 
             // Unknown seam modes must remain inert modifiers, even when dormant settings are present.
@@ -6950,6 +7036,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_bambu_compat { false };
         // Names the CAD body blobs of one export uniquely.
         int  m_cad_body_count { 0 };
+        // ... and the airbrush field blobs.
+        int  m_airbrush_count { 0 };
         BambuExport::Context m_bambu_ctx;
         BambuExport::Config  m_bambu_project;
         BambuExport::Report  m_bambu_report;
@@ -8649,7 +8737,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // with a differently shaped joint. Let such an object through as well.
             const bool carries_flexi = std::any_of(object->volumes.begin(), object->volumes.end(),
                                                    [](const ModelVolume* v) { return v->cut_info.is_flexi_joint(); });
-            if (!object->is_cut() && !carries_flexi)
+            const bool carries_tac   = std::any_of(object->volumes.begin(), object->volumes.end(),
+                                                 [](const ModelVolume* v) { return v->cut_info.is_tac_joint(); });
+            if (!object->is_cut() && !carries_flexi && !carries_tac)
                 continue;
             pt::ptree& obj_tree = tree.add("objects.object", "");
 
@@ -8668,7 +8758,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 ++volume_idx;
                 // is_cut_connector() also demands is_processed; an unprocessed Flexi joint is
                 // exactly the case that has to be written, so admit it too.
-                if (volume->is_cut_connector() || volume->cut_info.is_flexi_joint()) {
+                if (volume->is_cut_connector() || volume->cut_info.is_flexi_joint() || volume->cut_info.is_tac_joint()) {
                     pt::ptree& connectors_tree = obj_tree.add("connectors.connector", "");
                     connectors_tree.put("<xmlattr>.volume_id",   volume_idx);
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
@@ -8677,6 +8767,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // The push-fit Pin: its holes and the pin object are rebuilt from these by a
                     // re-cut, and a reopened project shows them in the panel. Pin volumes only, so
                     // nothing changes in a file without pins.
+                    if (volume->cut_info.is_tac_joint()) {
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        for (const auto& [name, value] : tac_joint_attributes(volume->cut_info.tac_joint))
+                            connectors_tree.put("<xmlattr>." + name, value);
+                    }
                     if (volume->cut_info.is_pushfit()) {
                         connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
                         for (const auto& [name, value] : pushfit_attributes(volume->cut_info.pushfit))
@@ -9209,6 +9304,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
 
+                // EdgeSlicer: the Layerling design the object came from; not in a Bambu-compatible export
+                if (!obj->layerling_design.empty() && !m_bambu_compat)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"layerling_design\" " << VALUE_ATTR << "=\""
+                           << xml_escape(obj->layerling_design) << "\"/>\n";
+
                 // stores object's config data
                 if (m_bambu_compat) {
                     for (const auto &kv : BambuExport::convert(obj->config.get(), m_bambu_ctx, BambuExport::Scope::Object, m_bambu_report, "object " + obj->name))
@@ -9301,6 +9401,21 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                                     else
                                         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not store the CAD body of " << volume->name;
                                 }
+
+                            // stores the part's airbrush field, anchored to the mesh as written. Not in a
+                            // Bambu-compatible export: there the baked paint_color is all there is.
+                            if (!m_bambu_compat && volume->airbrush_field) {
+                                const std::string path = AIRBRUSH_DIR + "field_" + std::to_string(++m_airbrush_count) + ".bin";
+                                BoundingBoxf3     anchor;
+                                for (const stl_vertex &v : volume->mesh().its.vertices)
+                                    anchor.merge(v.cast<double>());
+                                const std::string blob = volume->airbrush_field->to_blob(&anchor);
+                                if (mz_zip_writer_add_mem(&archive, path.c_str(), blob.data(), blob.size(), MZ_DEFAULT_COMPRESSION))
+                                    stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << AIRBRUSH_FIELD_FILE_KEY << "\" " << VALUE_ATTR
+                                           << "=\"" << xml_escape(path) << "\"/>\n";
+                                else
+                                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not store the airbrush field of " << volume->name;
+                            }
 
                             // stores volume's config data
                             if (m_bambu_compat) {
@@ -9827,6 +9942,9 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                     ct.put("<xmlattr>.type",        c.type);
                     ct.put("<xmlattr>.style",       c.style);
                     ct.put("<xmlattr>.shape",       c.shape);
+                    if (c.type == int(CutConnectorType::TacJoint))
+                        for (const auto& [name, value] : tac_joint_attributes(c.tac_joint))
+                            ct.put("<xmlattr>." + name, value);
                     // The push-fit Pin (recipe version 6), only for pins.
                     if (c.type == int(CutConnectorType::PushFit))
                         for (const auto& [name, value] : pushfit_attributes(c.pushfit))

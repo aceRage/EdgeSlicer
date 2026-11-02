@@ -217,6 +217,9 @@ public:
     void edit_filament();
     // The filament slot the Filament tab edits (0-based), -1 when none was chosen yet.
     int  editing_filament_index() const;
+    // RemoteAccess (phone filament settings): which slot the Filament tab edits, as edit_filament
+    // sets it from the slot menu; -1 while the tab switches presets, so no slot follows it.
+    void set_editing_filament(int index);
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
@@ -463,6 +466,12 @@ public:
     // snapmaker-orca:// URL, in which case from_url is true: the user has already
     // said which project to open, so do not ask them again.
     bool load_files(const wxArrayString& filenames, bool from_url = false);
+    // The answer to "load these objects as one object with multiple parts?" for the model loads that
+    // follow, instead of asking: 1 = always one object with parts (whenever a file holds several
+    // objects), 0 = always separate objects, -1 = ask as usual (the default). Send to Plate of the
+    // Layerling tab sets it around its own load and puts it back to -1; nothing else uses it.
+    void set_multipart_answer(int answer);
+    int  multipart_answer() const;
 
     const wxString& get_last_loaded_gcode() const { return m_last_loaded_gcode; }
 

@@ -102,6 +102,8 @@ set(lisbslic3r_sources
     FlexiJoint.hpp
     PushFit.cpp
     PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp
@@ -109,6 +111,13 @@ set(lisbslic3r_sources
     Showcase/ShowcaseScene.hpp
     Showcase/ShowcaseAssets.cpp
     Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseHdr.cpp
+    Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcaseHdriLibrary.cpp
+    Showcase/ShowcaseHdriLibrary.hpp
+    Showcase/ShowcaseLens.cpp
+    Showcase/ShowcaseLens.hpp
+    Showcase/ShowcasePanelRules.hpp
     Showcase/ShowcaseCallouts.cpp
     Showcase/ShowcaseCallouts.hpp
     Showcase/ShowcaseMaterial.cpp
@@ -242,6 +251,16 @@ set(lisbslic3r_sources
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp
     FillBedPack.hpp
+    Airbrush/AirbrushBake.cpp
+    Airbrush/AirbrushBake.hpp
+    Airbrush/AirbrushField.cpp
+    Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
+    Airbrush/AirbrushSession.cpp
+    Airbrush/AirbrushSession.hpp
+    Airbrush/BlueNoise.cpp
+    Airbrush/BlueNoise.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp
@@ -729,6 +748,8 @@ set(lisbslic3r_sources
     UntrustedInput.hpp
     ModelBrowserRules.cpp
     ModelBrowserRules.hpp
+    Layerling.cpp
+    Layerling.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp
@@ -794,6 +815,9 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
     Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
     Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
+    Showcase/ShowcaseHdr.cpp        # file-local hdr_* helpers and a TBB include; kept out of the unity batches
+    Showcase/ShowcaseHdriLibrary.cpp # file-local hdri_stem; OpenSSL through ImageFill
+    Layerling.cpp                   # file-local helpers (lower, trim, starts_with) with common names
 )
 
 if (SLIC3R_STATIC)

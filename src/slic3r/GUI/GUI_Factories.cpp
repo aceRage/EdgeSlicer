@@ -14,6 +14,7 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "Plater.hpp"
+#include "LayerlingPanel.hpp"
 #include "ObjectDataViewModel.hpp"
 
 #include "OptionsGroup.hpp"
@@ -1317,6 +1318,14 @@ void MenuFactory::append_menu_item_edit_in_freecad(wxMenu *menu)
         []() { return plater()->can_edit_in_freecad(); }, m_parent);
 }
 
+void MenuFactory::append_menu_item_edit_in_layerling(wxMenu *menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Edit in Layerling"),
+        _L("Open the selection in the Layerling tab. A design sent from Layerling opens again; anything else becomes a new design"),
+        [](wxCommandEvent &) { layerling_edit_selection(); }, "", menu,
+        []() { return layerling_can_edit_selection(); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
 {
     // BBS
@@ -2333,6 +2342,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_replace_with_stl(&m_object_menu);
     append_menu_item_edit_in_blender(&m_object_menu);
     append_menu_item_edit_in_freecad(&m_object_menu);
+    if (layerling_supported())
+        append_menu_item_edit_in_layerling(&m_object_menu);
     append_menu_item_cad_fillet(&m_object_menu);
     append_menu_item_export_stl(&m_object_menu);
     append_menu_item_export_step(&m_object_menu);
@@ -2476,6 +2487,8 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_replace_with_stl(menu);
     append_menu_item_edit_in_blender(menu);
     append_menu_item_edit_in_freecad(menu);
+    if (layerling_supported())
+        append_menu_item_edit_in_layerling(menu);
     append_menu_item_cad_fillet(menu);
     append_menu_item_export_stl_part(menu);
 }

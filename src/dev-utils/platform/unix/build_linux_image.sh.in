@@ -372,7 +372,7 @@ fi
 
 exec "\$@"
 EOF
-    chmod ug+x "$LIBEXEC_DIR/@SLIC3R_APP_CMD@-env"
+    chmod a+rx "$LIBEXEC_DIR/@SLIC3R_APP_CMD@-env"
 
 cat << EOF >@SLIC3R_APP_CMD@
 #!/bin/bash
@@ -402,7 +402,7 @@ fi
 exec "\$DIR/libexec/@SLIC3R_APP_CMD@-env" "\$DIR/bin/@SLIC3R_APP_CMD@" "\$@"
 EOF
 
-    chmod ug+x @SLIC3R_APP_CMD@
+    chmod a+rx @SLIC3R_APP_CMD@
     cp -fl @SLIC3R_APP_CMD@ "$APPDIR/@SLIC3R_APP_CMD@"
 
     if [ -f "${CHECK_SCRIPT}" ] && [ -z "${ORCA_SKIP_APPIMAGE_AUDIT}" ]; then
@@ -418,6 +418,9 @@ echo -n "Creating Appimage for distribution..."
     rm -rf package_appimage
     cp -Rf package package_appimage
     pushd package_appimage > /dev/null
+    # appimagetool (continuous) refuses an AppDir whose files are not readable, or executables not
+    # executable, by every user (the runner's umask left libexec/*-env at 0754).
+    chmod -R a+rX .
     chmod +x ../build_appimage.sh
     if ../build_appimage.sh; then
         popd > /dev/null

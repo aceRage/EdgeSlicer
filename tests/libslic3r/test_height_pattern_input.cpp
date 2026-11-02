@@ -41,7 +41,7 @@ HeightPatternInput hp_example()
     in.start    = 2.;
     in.band     = 10.;
     in.gap      = 10.;
-    in.repeat   = 3;
+    in.repeat   = 1;   // the whole 3-filament sequence once: 3 bands
     in.sequence = { 1, 2, 3 };
     return in;
 }
@@ -99,7 +99,7 @@ TEST_CASE("Height pattern input converts layers to millimetres", "[HeightPattern
     CHECK(p.start_z == Approx(2.0).margin(1e-6));
     CHECK(p.band_h == Approx(5.0).margin(1e-6));
     CHECK(p.gap_h == Approx(10.0).margin(1e-6));
-    CHECK(p.repeat == 3);
+    CHECK(p.repeat == 1);
 
     SECTION("start of zero layers is the bottom")
     {
@@ -134,7 +134,7 @@ TEST_CASE("Height pattern input round-trips through a record", "[HeightPattern]"
     CHECK(back.start == Approx(2.).margin(1e-9));
     CHECK(back.band == Approx(10.).margin(1e-9));
     CHECK(back.gap == Approx(10.).margin(1e-9));
-    CHECK(back.repeat == 3);
+    CHECK(back.repeat == 1);
     CHECK_FALSE(back.to_top);
     CHECK(back.sequence == in.sequence);
     CHECK(back.gap_mode == in.gap_mode);
@@ -153,6 +153,7 @@ TEST_CASE("Height pattern preview shows the snapped result", "[HeightPattern]")
     REQUIRE(pv.ok());
     CHECK(pv.expansion.bands == 3);
     CHECK(pv.summary.find("3 bands") == 0);
+    CHECK(height_pattern_short_summary(pv.expansion).find("1 repeat of 3 filaments") != std::string::npos);
     CHECK(pv.summary.find("(last band ends at") != std::string::npos);
     CHECK(pv.clashes.empty());
 
@@ -258,7 +259,7 @@ TEST_CASE("Height pattern row label counts distinct filaments and bands", "[Heig
     const std::vector<double> tops = hp_grid(120., 0.2, 0.2);
 
     HeightPatternInput in = hp_example();
-    in.repeat   = 4;
+    in.repeat   = 1;
     in.sequence = { 1, 2, 3, 4 };
     HeightColourPattern p = height_pattern_from_input(in, 0.2, tops);
     REQUIRE(apply_height_colour_pattern(*obj, p, tops, 0.2, false, 120., 4).ok);
@@ -342,7 +343,7 @@ TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
         REQUIRE(bands.size() == 3);
         CHECK(bands[0].extruder == 1);
         CHECK(bands[2].lo == Approx(42.).margin(1e-6));
-        CHECK(height_pattern_short_summary(pv.expansion) == "3 bands");
+        CHECK(height_pattern_short_summary(pv.expansion) == "3 bands (1 repeat of 3 filaments)");
     }
     SECTION("a clipped last band is named, and 50 bands stay one short line")
     {
@@ -351,6 +352,7 @@ TEST_CASE("Height pattern band list and short summary", "[HeightPattern]")
         in.start  = 0.;
         in.band   = 2.;
         in.gap    = 0.;
+        in.seq_gap = 0.;
         const HeightPatternPreview pv = preview_height_pattern(nullptr, in, 0, tops, 0.2, 120., 4);
         REQUIRE(pv.ok());
         CHECK(height_pattern_band_ranges(pv.expansion).size() == 60);
@@ -385,4 +387,124 @@ TEST_CASE("Color pattern axis is reserved and does not change the Phase 1 sideca
         CHECK(with_axis.find("axis") != std::string::npos);
         CHECK(height_patterns_from_json(with_axis).empty());
     }
+}
+
+namespace {
+
+HeightPatternChangeInput hp_change_input(int base = 1)
+{
+    HeightPatternChangeInput in;
+    in.base_filament   = base;
+    in.filament_count  = 3;
+    // from -> to, mm^3: 1->2 100, 1->3 200, 2->1 110, 2->3 300, 3->1 210, 3->2 310 (diagonal unused)
+    in.flush_matrix    = { 0, 100, 200,  110, 0, 300,  210, 310, 0 };
+    in.flush_multiplier = 1.;
+    in.density         = { 1.0, 2.0, 4.0 };
+    return in;
+}
+
+HeightPatternRange hp_range(double lo, double hi, int extruder)
+{
+    HeightPatternRange r;
+    r.lo = lo; r.hi = hi; r.extruder = extruder; r.layer_height = 0.2;
+    return r;
+}
+
+} // namespace
+
+TEST_CASE("Color pattern change count", "[HeightPattern]")
+{
+    SECTION("bands with gaps on the object's own filament: two changes per band")
+    {
+        // object on 1; bands 2-12 on 2, 22-32 on 3, 42-52 on 2, object top 60
+        const std::vector<HeightPatternRange> r = { hp_range(2, 12, 2), hp_range(22, 32, 3), hp_range(42, 52, 2) };
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes(r, 60., hp_change_input());
+        // 1->2, 2->1, 1->3, 3->1, 1->2, 2->1
+        CHECK(e.changes == 6);
+        CHECK(e.purge_known);
+        CHECK(e.purge_mm3 == Approx(100. + 110. + 200. + 210. + 100. + 110.).margin(1e-6));
+        // grams use the density of the filament changed TO: 2.0, 1.0, 4.0, 1.0, 2.0, 1.0 g/cm3
+        CHECK(e.purge_g == Approx((100 * 2. + 110 * 1. + 200 * 4. + 210 * 1. + 100 * 2. + 110 * 1.) / 1000.).margin(1e-9));
+    }
+    SECTION("a band at the bottom is the starting filament, a band at the top needs no change back")
+    {
+        const std::vector<HeightPatternRange> r = { hp_range(0, 10, 2), hp_range(50, 60, 3) };
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes(r, 60., hp_change_input());
+        // starts on 2; 2->1 (gap), 1->3 (band); ends at the top on 3
+        CHECK(e.changes == 2);
+        CHECK(e.purge_mm3 == Approx(110. + 200.).margin(1e-6));
+    }
+    SECTION("touching bands on different filaments change once, on the same filament not at all")
+    {
+        const std::vector<HeightPatternRange> r = { hp_range(0, 10, 2), hp_range(10, 20, 3), hp_range(20, 30, 3) };
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes(r, 30., hp_change_input());
+        CHECK(e.changes == 1);
+    }
+    SECTION("a gap filament counts as a band")
+    {
+        // object on 1; 2-12 on 2, gap 12-22 on 3, 22-32 on 2, top 32: 1->2, 2->3, 3->2
+        const std::vector<HeightPatternRange> r = { hp_range(2, 12, 2), hp_range(12, 22, 3), hp_range(22, 32, 2) };
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes(r, 32., hp_change_input());
+        CHECK(e.changes == 3);
+    }
+    SECTION("a flush matrix that does not cover the filaments leaves the purge unknown, not zero")
+    {
+        HeightPatternChangeInput in = hp_change_input();
+        in.flush_matrix.clear();
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes({ hp_range(2, 12, 2) }, 60., in);
+        CHECK(e.changes == 2);
+        CHECK_FALSE(e.purge_known);
+    }
+    SECTION("no ranges, no changes")
+    {
+        const HeightPatternChangeEstimate e = estimate_height_pattern_changes({}, 60., hp_change_input());
+        CHECK(e.changes == 0);
+        CHECK(e.purge_known);
+    }
+}
+
+TEST_CASE("Color pattern hand-edited bands are found and reset one by one", "[HeightPattern]")
+{
+    Model model;
+    ModelObject *obj = hp_cube(model, 120.);
+    const std::vector<double> tops = hp_grid(120., 0.2, 0.2);
+    HeightPatternInput in = hp_example();
+    in.gap_mode     = int(HeightPatternGapMode::Fixed);
+    in.gap_filament = 4;
+    HeightColourPattern p = height_pattern_from_input(in, 0.2, tops);
+    const HeightPatternApplyResult applied = apply_height_colour_pattern(*obj, p, tops, 0.2, false, 120., 4);
+    REQUIRE(applied.ok);
+    const int id = applied.pattern_id;
+    const HeightColourPattern &rec = *find_height_colour_pattern(*obj, id);
+    REQUIRE(rec.generated.size() == 5);   // band, gap, band, gap, band
+
+    CHECK(height_pattern_modified_ranges(*obj, rec).empty());
+    CHECK(reset_height_pattern_modified_ranges(*obj, id) == 0);
+
+    // Change band 2's filament (range 3 of 5) and delete band 3 (range 5), and make an unrelated edit to a gap.
+    obj->layer_config_ranges[{ rec.generated[2].lo, rec.generated[2].hi }].set_key_value("extruder", new ConfigOptionInt(4));
+    obj->layer_config_ranges.erase(t_layer_height_range(rec.generated[4].lo, rec.generated[4].hi));
+    obj->layer_config_ranges[{ rec.generated[1].lo, rec.generated[1].hi }].set_key_value("layer_height", new ConfigOptionFloat(0.1));
+
+    const std::vector<HeightPatternBandDiff> diff = height_pattern_modified_ranges(*obj, rec);
+    REQUIRE(diff.size() == 3);
+    CHECK(diff[0].band_number == 0);   // the gap
+    CHECK(diff[0].status == HeightPatternBandStatus::LayerHeightChanged);
+    CHECK(diff[1].band_number == 2);
+    CHECK(diff[1].status == HeightPatternBandStatus::FilamentChanged);
+    CHECK(diff[1].expected_extruder == 2);
+    CHECK(diff[1].actual_extruder == 4);
+    CHECK(diff[2].band_number == 3);
+    CHECK(diff[2].status == HeightPatternBandStatus::Removed);
+
+    // A hand-made range elsewhere and a hand-edit of an untouched band's neighbour must survive a reset.
+    hp_add_hand_range(*obj, 100., 110., 3);
+    // A hand range that replaced band 3 with another extent: it overlaps the removed band and goes.
+    hp_add_hand_range(*obj, 43., 50., 1);
+
+    CHECK(reset_height_pattern_modified_ranges(*obj, id) == 3);
+    CHECK(height_pattern_modified_ranges(*obj, rec).empty());
+    CHECK(obj->layer_config_ranges.count(t_layer_height_range(100., 110.)) == 1);          // untouched
+    CHECK(obj->layer_config_ranges.count(t_layer_height_range(43., 50.)) == 0);            // replaced by the restored band
+    CHECK(reset_height_pattern_modified_ranges(*obj, 99) == -1);
 }

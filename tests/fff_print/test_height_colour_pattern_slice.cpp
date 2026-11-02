@@ -148,7 +148,7 @@ std::vector<LayerSig> layer_sigs(const std::string &gcode)
     std::istringstream    in(gcode);
     std::string           line, type;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '')
+        if (!line.empty() && line.back() == '\r')
             line.pop_back();
         if (line.rfind(";LAYER_CHANGE", 0) == 0)
             out.emplace_back();
@@ -189,6 +189,7 @@ HeightColourPattern two_band_pattern()
     p.start_z  = 4.;
     p.band_h   = 4.;
     p.gap_h    = 4.;
+    p.seq_gap_h = 4.;   // one filament: every boundary is a sequence boundary
     p.repeat   = 2;
     p.sequence = { 2 };
     return p;

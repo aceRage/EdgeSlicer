@@ -9517,6 +9517,7 @@ void Sidebar::on_filaments_delete(size_t filament_id)
 }
 
 int Sidebar::editing_filament_index() const { return p->editing_filament; }
+void Sidebar::set_editing_filament(int index) { p->editing_filament = index; }
 
 void Sidebar::edit_filament() {
     const int previous_editing_filament = p->editing_filament;
@@ -12027,6 +12028,8 @@ struct Plater::priv
     int m_cur_slice_plate;
     //BBS: m_slice_all in .gcode.3mf file case, set true when slice all
     bool m_slice_all_only_has_gcode{ false };
+    // Plater::set_multipart_answer(): -1 asks, 0 separate objects, 1 one object with parts.
+    int  m_multipart_answer{ -1 };
 
     bool m_need_update{false};
     int  m_batch_physical_deletion{0}; // >0: skip per-deletion painting remap and ObjectList refresh
@@ -14613,7 +14616,17 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
              // A custom model with several objects at different heights stays several objects: turning
              // them into one multi-part object would throw their settings away.
-             if (!is_project_file && !keep_object_settings && model.looks_like_multipart_object()) {
+             if (!is_project_file && !keep_object_settings && m_multipart_answer >= 0) {
+                // Answered in advance (Send to Plate from the Layerling tab): a design of several bodies
+                // becomes one object with a part per body, wherever the bodies sit, or stays separate.
+                if (m_multipart_answer == 1 && model.objects.size() >= 2) {
+                    bool plain = true;
+                    for (const ModelObject *o : model.objects)
+                        plain = plain && o->config.keys().size() <= 1;
+                    if (plain)
+                        model.convert_multipart_object(filaments_cnt);
+                }
+             } else if (!is_project_file && !keep_object_settings && model.looks_like_multipart_object()) {
                MessageDialog msg_dlg(q, _L(
                     "This file contains several objects positioned at multiple heights.\n"
                     "Instead of considering them as multiple objects, should \n"
@@ -20309,6 +20322,9 @@ void Plater::priv::undo()
 {
     if (this->undo_redo_blocked_by_job())
         return;
+    // Edge (Airbrush P3, A3): a stroke still baking becomes its own undo step first, so this undo
+    // removes that stroke and not the step before it.
+    this->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(true);
     const std::vector<UndoRedo::Snapshot> &snapshots = this->undo_redo_stack().snapshots();
     auto it_current = std::lower_bound(snapshots.begin(), snapshots.end(), UndoRedo::Snapshot(this->undo_redo_stack().active_snapshot_time()));
     // BBS: undo-redo until modify record
@@ -20330,6 +20346,9 @@ void Plater::priv::redo()
 {
     if (this->undo_redo_blocked_by_job())
         return;
+    // Edge (Airbrush P3, A3): nothing to redo past a stroke the user just made; commit it so the
+    // redo stack it truncates is the one the user sees.
+    this->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(true);
     const std::vector<UndoRedo::Snapshot> &snapshots = this->undo_redo_stack().snapshots();
     auto it_current = std::lower_bound(snapshots.begin(), snapshots.end(), UndoRedo::Snapshot(this->undo_redo_stack().active_snapshot_time()));
     // BBS: undo-redo until modify record
@@ -22757,6 +22776,9 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_
 }
 
 // To be called when providing a list of files to the GUI slic3r on command line.
+void Plater::set_multipart_answer(int answer) { p->m_multipart_answer = answer < 0 ? -1 : (answer > 0 ? 1 : 0); }
+int  Plater::multipart_answer() const { return p->m_multipart_answer; }
+
 std::vector<size_t> Plater::load_files(const std::vector<std::string>& input_files, LoadStrategy strategy,  bool ask_multi)
 {
     std::vector<fs::path> paths;
@@ -26526,6 +26548,9 @@ void Plater::undo_to(int selection)
         p->undo();
         return;
     }
+    // Edge (Airbrush P3, A3): the list was built without the stroke still baking; drop it so the
+    // chosen index still names the step the user picked.
+    p->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(false);
 
     const int idx = p->get_active_snapshot_index() - selection - 1;
     p->undo_redo_to(p->undo_redo_stack().snapshots()[idx].timestamp);
@@ -26536,6 +26561,7 @@ void Plater::redo_to(int selection)
         p->redo();
         return;
     }
+    p->view3D->get_canvas3d()->get_gizmos_manager().flush_pending_paint(false);
 
     const int idx = p->get_active_snapshot_index() + selection + 1;
     p->undo_redo_to(p->undo_redo_stack().snapshots()[idx].timestamp);

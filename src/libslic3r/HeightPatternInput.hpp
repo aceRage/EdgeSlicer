@@ -38,6 +38,9 @@ struct HeightPatternInput
     std::vector<int>  sequence;                 // 1-based filament ids
     int               gap_mode       = int(HeightPatternGapMode::ObjectFilament);
     int               gap_filament   = 0;
+    double            seq_gap        = 10.;     // Sequence Gap height in `unit`; 0 = off
+    int               seq_gap_mode   = int(HeightPatternGapMode::ObjectFilament);
+    int               seq_gap_filament = 0;
     bool              snap_to_layers = true;
 };
 
@@ -112,6 +115,59 @@ struct HeightPatternHealth
 };
 HeightPatternHealth height_pattern_health(const ModelObject &object, const HeightColourPattern &p,
                                           int filament_count, double layer_height);
+
+// ---- filament changes the pattern adds (phase 3) ----------------------------------------------------
+
+struct HeightPatternChangeInput
+{
+    int                 base_filament = 1;     // the object's own filament (what the gaps print with)
+    // flush_volumes_matrix of the project: filament_count x filament_count, row = from, column = to, mm^3.
+    std::vector<float>  flush_matrix;
+    int                 filament_count = 0;
+    double              flush_multiplier = 1.;
+    std::vector<double> density;                // g/cm^3, index = filament id - 1
+};
+
+struct HeightPatternChangeEstimate
+{
+    int    changes      = 0;       // filament changes one object gets from the pattern
+    double purge_mm3    = 0.;      // flush volume of those changes (needs the matrix)
+    double purge_g      = 0.;      // ... as weight (needs the densities as well)
+    bool   purge_known  = false;   // the matrix covered every change
+};
+
+// Walk the object bottom to top: it starts on the filament at Z 0 (a band that starts at 0 is not a change),
+// every band or gap that prints another filament than the one before is one change, and the object's own
+// filament comes back in every gap with no range of its own and above the last band. An estimate: it counts
+// one object alone, and the slicer merges changes of objects that sit at the same layer.
+HeightPatternChangeEstimate estimate_height_pattern_changes(const std::vector<HeightPatternRange> &ranges,
+                                                            double                                  object_top,
+                                                            const HeightPatternChangeInput         &input);
+
+// ---- bands the user edited by hand (phase 3) --------------------------------------------------------
+
+enum class HeightPatternBandStatus : int {
+    Removed,            // no range at the band's place any more (moved, resized or deleted)
+    FilamentChanged,    // same place, another filament
+    LayerHeightChanged, // same place and filament, another layer height
+};
+
+struct HeightPatternBandDiff
+{
+    int                     band_number = 0;   // 1-based among the bands; 0 for a gap range
+    double                  lo = 0., hi = 0.;
+    HeightPatternBandStatus status = HeightPatternBandStatus::Removed;
+    int                     expected_extruder = 0;
+    int                     actual_extruder   = 0;   // 0 when removed
+};
+
+// Only the ranges that differ from what the pattern wrote, in Z order. Empty = untouched.
+std::vector<HeightPatternBandDiff> height_pattern_modified_ranges(const ModelObject &object, const HeightColourPattern &pattern);
+
+// Put back only those ranges: every other range of the pattern is left exactly as it is (including
+// ones the user changed on purpose elsewhere). A hand-made range that overlaps a restored band is
+// replaced by it. Returns how many were restored, -1 for an unknown pattern id.
+int reset_height_pattern_modified_ranges(ModelObject &object, int pattern_id);
 
 } // namespace Slic3r
 

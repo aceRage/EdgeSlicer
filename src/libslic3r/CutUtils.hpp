@@ -9,12 +9,135 @@
 #include "TriangleSelector.hpp"
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <vector>
 
 namespace Slic3r {
 
 using ModelObjectPtrs = std::vector<ModelObject*>;
+
+class AABBMesh;
+
+// ---------------------------------------------------------------------------
+// CONNECTORS ON A CURVED OR DRAWN CUT (owner, 2026-10-31).
+//
+// A connector stands on its own plane: the plane through its point, square to
+// its axis. On a flat cut that plane IS the cut. On a curved sheet or a drawn
+// strip it is only the tangent plane at the connector's centre, and the real
+// cut surface falls away from it (or rises) towards the rim of the connector's
+// footprint. A connector is only allowed where that deviation stays within
+// CutConnectorMaxSurfaceDeviation; the gizmo marks the others and Cut refuses
+// them before anything is cut.
+//
+// Half a millimetre: about two layers. Over that the halves no longer close
+// round a Pin or a TAC Joint without visibly losing engagement on one side. For
+// a footprint of radius r it allows a surface radius down to about r^2 / 1 mm
+// (a TAC Joint, r ~ 2.9 mm: ~8.5 mm; a 6 mm Pin's hole, r ~ 3.5 mm: ~12 mm).
+static constexpr double CutConnectorMaxSurfaceDeviation = 0.5;
+
+// The cut surface a connector stands on, asked two questions in the CUT PLANE's
+// frame: which side of the cut a point is on, and where a line meets the surface.
+// One per cut kind, so the fit below does not care which kind it is.
+class CutSurfaceProbe
+{
+public:
+    enum class Kind { Plane, Curved, Drawn };
+
+    // The flat cut (z == 0 in the plane frame), with its kerf.
+    static CutSurfaceProbe plane(double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred);
+    // The curved sheet, with its kerf (offset along the plane normal, the way curved_cut_split() offsets it).
+    static CutSurfaceProbe curved(const CurvedCutSheet& sheet, double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred);
+    // The drawn strip. `mesh` is the object in the plane frame (it decides a wrap from a plug, as
+    // in draw_cut_split()); the kerf comes from params.thickness. Builds the cutter solids.
+    static CutSurfaceProbe drawn(const DrawCutStroke& stroke, const DrawCutParams& params, const indexed_triangle_set& mesh);
+    // The drawn strip from a cutter the caller already built at face offset 0 (the gizmo's pick
+    // cutter, in the plane frame). No kerf faces: is_upper / is_lower use the mid surface.
+    static CutSurfaceProbe drawn_from_cutter(indexed_triangle_set cutter, bool closed);
+
+    Kind kind() const { return m_kind; }
+    bool valid() const;
+    double thickness() const { return m_face_hi - m_face_lo; }
+
+    // Which side of the MID surface (the cut with no kerf) `p` is on.
+    bool is_upper_mid(const Vec3d& p) const;
+    // Inside the material the upper / lower half keeps (past that half's own kerf face).
+    bool is_upper(const Vec3d& p) const;
+    bool is_lower(const Vec3d& p) const;
+    // Where the line p + t * dir meets the mid surface, the crossing nearest t = 0 within
+    // [-reach, reach]. `dir` must be a unit vector. False when there is none.
+    bool surface_along(const Vec3d& p, const Vec3d& dir, double reach, double& t) const;
+
+private:
+    Kind               m_kind{ Kind::Plane };
+    double             m_face_lo{ 0.0 };
+    double             m_face_hi{ 0.0 };
+    CurvedCutSheet     m_sheet;
+    bool               m_closed{ false };
+    std::shared_ptr<const indexed_triangle_set> m_cutter_mid;
+    std::shared_ptr<const indexed_triangle_set> m_cutter_lo;
+    std::shared_ptr<const indexed_triangle_set> m_cutter_hi;
+    std::shared_ptr<const AABBMesh>             m_cutter_tree;
+};
+
+// How a connector sits on the cut surface. `frame` is the connector's frame in the cut plane's
+// frame (no scale): its origin and its +Z axis.
+struct CutConnectorFit
+{
+    // The axis meets the surface near the origin and the two sides of it are told apart.
+    bool   on_surface{ false };
+    // +Z of the frame points into the UPPER half. When false the connector has to be turned over
+    // (Cut does that for the kinds that straddle the cut; the gizmo builds it the right way up).
+    bool   upper_along_z{ true };
+    // Where the axis meets the surface, along +Z from the origin, mm.
+    double centre_offset{ 0.0 };
+    // The largest distance, along the axis, between the cut surface and the connector's own plane
+    // anywhere over its footprint. Infinite when part of the footprint misses the surface.
+    double deviation{ 0.0 };
+    // The two halves' faces along the axis turned INTO the upper half, from the origin, mm.
+    double face_lo{ 0.0 };
+    double face_hi{ 0.0 };
+
+    bool fits() const { return on_surface && deviation <= CutConnectorMaxSurfaceDeviation; }
+};
+// `axial_reach` is how far along its axis the origin may sit from the surface (a Plug's origin is
+// the middle of its body, half its height above the face).
+CutConnectorFit cut_connector_fit(const CutSurfaceProbe& probe, const Transform3d& frame, double footprint_radius,
+                                  double axial_reach = 0.0);
+
+// The radius of the circle round a connector's footprint, in its own frame, mm: the TAC Joint's
+// cutter, the Pin's hole with its mouth flare, the plain kinds' radius and radius tolerance.
+// Flexi joints answer 0 (they take their own path and their own patch check).
+double cut_connector_footprint_radius(const CutConnector& connector);
+
+// Inside / outside a closed mesh (the object, in whatever frame the caller uses), by ray parity.
+// Built once, asked many times. An empty mesh contains nothing.
+class CutSolidTest
+{
+public:
+    CutSolidTest() = default;
+    explicit CutSolidTest(indexed_triangle_set solid);
+    bool empty() const { return !m_tree; }
+    bool contains(const Vec3d& p) const;
+
+private:
+    std::shared_ptr<const indexed_triangle_set> m_its;
+    std::shared_ptr<const AABBMesh>             m_tree;
+};
+
+// THE CROSS-SECTION of a curved or drawn cut: the part of the cut `surface` that lies inside
+// `object` (both in the same frame). Long triangles are split first, so the section follows the
+// object's outline to within about `max_edge` mm. This is what the gizmo shows and picks on
+// while connectors are placed: a connector belongs where the cut meets the part, never on the
+// parts of the sheet or the drawn strip that hang outside it.
+indexed_triangle_set cut_surface_section(const indexed_triangle_set& surface, const CutSolidTest& object, double max_edge);
+
+// THE CUT FACE of a half a curved cut produced (curved_cut_split()), in the plane frame: its
+// triangles that lie on the sheet offset by `face_offset` (the half's own kerf face), to within
+// `tol` mm, and face along the sheet. This is exactly the face the user sees on that half -
+// including where the cut runs on past the sheet's control grid, which the sheet's own sample
+// mesh does not cover - so it is what a click on that face has to be tested against.
+indexed_triangle_set curved_cut_face_of(const indexed_triangle_set& half, const CurvedCutSheet& sheet, double face_offset, double tol = 0.2);
 
 // Append the NEGATIVE_VOLUME that carries a flexi joint into `mo` before the cut runs.
 // The volume's mesh is the male body; Cut regenerates both bodies from cut_info.flexi, so
@@ -30,6 +153,10 @@ bool has_flexi_joint(const ModelObject* mo);
 // rotation_m, z_angle; no scale). The cut builds the pin object and both holes from
 // cut_info.pushfit, so the mesh is only for previews and overlap checks.
 ModelVolume* add_pushfit_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
+// TAC Joint meshes already have their physical dimensions and clearance. Never apply the
+// generic connector radius/height scaling to these reference meshes.
+ModelVolume* add_tac_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
 
 // A connector that leaves the cut as an object of its own (a Dowel or a Pin), with the transform
 // from its object frame to the frame the halves' meshes are built in (the source object's frame

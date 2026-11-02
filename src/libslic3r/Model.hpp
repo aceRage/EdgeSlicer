@@ -22,11 +22,13 @@
 #include "ImageFill.hpp"
 #include "FlexiJoint.hpp"
 #include "PushFit.hpp"
+#include "TacJoint.hpp"
 #include "CutRecipe.hpp"
 #include "HeightColourPattern.hpp"
 #include "CostPricing.hpp"
 #include "Showcase/ShowcaseScene.hpp"
 #include "BRep/CadBody.hpp"
+#include "Airbrush/AirbrushField.hpp"
 #include "TextureDisplacement.hpp"
 
 //BBS: add bbs 3mf
@@ -256,27 +258,36 @@ enum class CutMode : int {
 };
 
 enum class CutConnectorType : int {
-    Plug
-    , Dowel
-    , Snap
-    , Undef
+    Plug,
+    Dowel,
+    Snap,
+    Undef
     // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef so the values of
     // the three original types are untouched. Since phase 3 a flexi connector DOES reach a 3MF
     // - a project saved with the joint placed but not yet cut carries it, and its parameters,
     // in Metadata/cut_information.xml - so the 3MF reader's type range check bounds against
     // this enumerator rather than against Undef.
-    , FlexiJoint
+    ,
+    FlexiJoint
     // Push-fit "Pin": a separate printed pin pushed into a generated hole in each half
     // (tests/design_pushfit_connector.md). Appended after FlexiJoint so no stored value moves;
     // 3 is deliberately avoided (BambuStudio's Thread). The 3MF readers bound the type against
-    // this enumerator, so keep PushFit LAST.
-    , PushFit
+    // the last enumerator.
+    ,
+    PushFit
+    // Versioned reference-mesh joint, appended so existing project enum values stay unchanged.
+    ,
+    TacJoint
 };
 
 inline bool is_flexi_connector_type(CutConnectorType t) { return t == CutConnectorType::FlexiJoint; }
 inline bool is_pushfit_connector_type(CutConnectorType t) { return t == CutConnectorType::PushFit; }
+inline bool is_tac_joint_connector_type(CutConnectorType t) { return t == CutConnectorType::TacJoint; }
 // A connector that becomes a separate object of its own (CreateDowels): the Dowel and the Pin.
-inline bool is_separate_pin_connector_type(CutConnectorType t) { return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit; }
+inline bool is_separate_pin_connector_type(CutConnectorType t)
+{
+    return t == CutConnectorType::Dowel || t == CutConnectorType::PushFit || t == CutConnectorType::TacJoint;
+}
 
 enum class CutConnectorStyle : int {
     Prism
@@ -343,6 +354,7 @@ struct CutConnector
     FlexiJointParams flexi;
     // Only meaningful when attribs.type == CutConnectorType::PushFit.
     PushFitParams    pushfit;
+    TacJointParams   tac_joint;
 
     CutConnector()
         : pos(Vec3d::Zero()), rotation_m(Transform3d::Identity()), radius(5.f), height(10.f), radius_tolerance(0.f), height_tolerance(0.1f), z_angle(0.f)
@@ -354,14 +366,18 @@ struct CutConnector
 
     CutConnector(const CutConnector& rhs) :
         CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs)
-    { flexi = rhs.flexi; pushfit = rhs.pushfit; }
+    {
+        flexi     = rhs.flexi;
+        pushfit   = rhs.pushfit;
+        tac_joint = rhs.tac_joint;
+    }
 
     bool operator==(const CutConnector& other) const;
 
     bool operator!=(const CutConnector& other) const { return !(other == (*this)); }
 
     template<class Archive> inline void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi, pushfit, tac_joint);
     }
 };
 
@@ -431,6 +447,9 @@ public:
     //BBS: add module name for assemble
     std::string             module_name;
     std::string             input_file;    // XXX: consider fs::path
+    // The Layerling design this object came from (layerling::serialize_link: origin, project id,
+    // name), "" for none. Set by the Layerling tab's Send to Plate, saved in the project 3MF.
+    std::string             layerling_design;
     // Instances of this ModelObject. Each instance defines a shift on the print bed, rotation around the Z axis and a uniform scaling.
     // Instances are owned by this ModelObject.
     ModelInstancePtrs       instances;
@@ -783,7 +802,7 @@ private:
         ar(cereal::base_class<ObjectBase>(this));
         Internal::StaticSerializationWrapper<ModelConfigObject const> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
-        ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
+        ar(name, module_name, input_file, layerling_design, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
@@ -796,7 +815,7 @@ private:
         Internal::StaticSerializationWrapper<LayerHeightProfile> layer_heigth_profile_wrapper(layer_height_profile);
         // BBS: add backup, check modify
         SaveObjectGaurd gaurd(*this);
-        ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
+        ar(name, module_name, input_file, layerling_design, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
@@ -941,6 +960,7 @@ public:
         // Only meaningful when connector_type == CutConnectorType::PushFit: the cut builds the
         // pin and both holes from these.
         PushFitParams       pushfit;
+        TacJointParams      tac_joint;
 
         CutInfo() = default;
         CutInfo(CutConnectorType type, float rad_tolerance, float h_tolerance, bool processed = false) :
@@ -957,9 +977,10 @@ public:
 
         bool is_flexi_joint() const { return is_connector && is_flexi_connector_type(connector_type); }
         bool is_pushfit() const { return is_connector && is_pushfit_connector_type(connector_type); }
+        bool is_tac_joint() const { return is_connector && is_tac_joint_connector_type(connector_type); }
 
         template<class Archive> inline void serialize(Archive& ar) {
-            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit);
+            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi, pushfit, tac_joint);
         }
     };
     CutInfo             cut_info;
@@ -1092,6 +1113,8 @@ public:
 
     // Remap painting data from previous saved source to this mesh
     void restore_painting(const std::optional<TriangleSelector::SavedPainting>& saved, bool keep_existing_paint = false);
+    // Airbrush P3 (A4): the map from a saved painting's field space into this volume's mesh space.
+    Transform3d airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const;
 
     // BBS: quick access for volume extruders, 1 based
     mutable std::vector<int> mmuseg_extruders;
@@ -1112,6 +1135,12 @@ public:
     // (fillet, chamfer, shell, "Convert to CAD body") produced or sourced one. Only trusted while
     // the mesh still matches its fingerprint: use BRep::attached_cad_body(), not this directly.
     std::shared_ptr<const BRep::CadBody> cad_body;
+
+    // Airbrush (Airbrush/AirbrushField.hpp): the colour field this volume's MMU paint is baked
+    // from, or null. Immutable and shared like cad_body; a change replaces the pointer. Written to
+    // the 3MF as Metadata/airbrush/field_<n>.bin, never in a Bambu-compatible export, and carried
+    // through the undo stack as its blob.
+    std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
 
     // A parent object owning this modifier volume.
     ModelObject*        get_object() const { return this->object; }
@@ -1350,7 +1379,7 @@ private:
         texture_displacement_options(other.texture_displacement_options),
         texture_uv(other.texture_uv),
         cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
-        cad_body(other.cad_body)
+        cad_body(other.cad_body), airbrush_field(other.airbrush_field)
     {
 		assert(this->id().valid());
         assert(this->config.id().valid());
@@ -1373,7 +1402,11 @@ private:
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
         name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation),
-        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
+        // D15: the field is position-keyed and survives a split or cut; its bake record (facet indices
+        // of the old mesh) is stale now, so airbrush_bake() refuses it until
+        // airbrush_rebake_after_mesh_edit() has run on the new mesh.
+        airbrush_field(other.airbrush_field)
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
@@ -1458,6 +1491,14 @@ private:
             ar(cad_body);
         else
             cad_body.reset();
+        bool has_airbrush = false;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            std::string blob;
+            ar(blob);
+            airbrush_field = Airbrush::AirbrushField::from_blob(blob);
+        } else
+            airbrush_field.reset();
 		assert(m_mesh);
 		if (has_convex_hull) {
 			cereal::load_optional(ar, m_convex_hull);
@@ -1486,6 +1527,12 @@ private:
         ar(has_cad_body);
         if (has_cad_body)
             ar(cad_body);
+        const bool has_airbrush = airbrush_field != nullptr;
+        ar(has_airbrush);
+        if (has_airbrush) {
+            const std::string blob = airbrush_field->to_blob();
+            ar(blob);
+        }
 		if (has_convex_hull)
 			cereal::save_optional(ar, m_convex_hull);
 	}
