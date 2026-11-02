@@ -14,6 +14,7 @@ uniform float frame_aspect; // frame width / height
 uniform sampler2D image_tex;
 uniform vec4 uv_transform;  // image: uv = f * xy + zw, f = position in the frame (0..1)
 uniform bool tile;
+uniform bool extend;        // 1h-2b: a photo backplate: past the picture's edge a blurred stretch of it, not color1
 uniform vec2 viewport_size; // pixels (checkerboard)
 
 // S2: a soft focus look. 0 = sharp; the image is mipmapped and image_lod is the level to read.
@@ -31,6 +32,17 @@ uniform float env_exposure;
 uniform int   tone_curve;            // 0 Khronos PBR Neutral, 1 filmic (ToneCurve)
 // G1: 0 = lights on; otherwise the share of the light taken away (1 - the ambient level).
 uniform float scene_dim;
+// 1h-2 (modes 5 and 6): where the environment sits. Ground projection: the panorama projected onto a
+// dome (the panorama's camera at ground_center, ground_radius around it) with a flat floor at Z = 0,
+// the floor disc where the sphere meets it (ground_floor_radius). Otherwise an infinite panorama,
+// optionally tilted about the camera's horizontal axis (backdrop_tilt). ShowcaseLens.cpp mirrors it.
+uniform bool  ground_on;
+uniform bool  ortho_view;          // 1h-2b: parallel view rays, one per pixel
+uniform vec3  ground_center;
+uniform float ground_radius;
+uniform float ground_floor_radius;
+uniform bool  tilt_on;
+uniform mat3  backdrop_tilt;
 
 in vec2 tex_coord;
 out vec4 out_color;
@@ -43,6 +55,52 @@ vec2 equirect_uv(vec3 w)
 {
     const float pi = 3.14159265;
     return vec2(0.5 - atan(w.y, w.x) / (2.0 * pi), 0.5 - asin(clamp(w.z, -1.0, 1.0)) / pi);
+}
+
+// The direction to look the panorama up in for a view ray from the camera (unit `d`).
+vec3 ground_lookup(vec3 o, vec3 d)
+{
+    vec3 c = ground_center;
+    if (d.z < 0.0 && o.z > 0.0) {
+        float tg = -o.z / d.z;
+        vec3 p = o + tg * d;
+        vec2 q = p.xy - c.xy;
+        if (dot(q, q) <= ground_floor_radius * ground_floor_radius)
+            return p - c;
+    }
+    vec3 oc = o - c;
+    float b = dot(oc, d);
+    float k = dot(oc, oc) - ground_radius * ground_radius;
+    float disc = b * b - k;
+    if (disc >= 0.0) {
+        float t = -b + sqrt(disc);
+        if (t > 0.0) {
+            vec3 p = o + t * d;
+            if (p.z >= 0.0)
+                return p - c;
+        }
+    }
+    return d;
+}
+
+// 1h-2b: the pixel's view ray from the near plane to the far plane: correct for an orthographic
+// camera too, whose rays are parallel and start on the view plane, not at one eye point.
+vec3 view_lookup(vec3 dir)
+{
+    if (ground_on) {
+        if (!ortho_view)
+            return normalize(ground_lookup(camera_position, dir));
+        vec2 ndc = tex_coord * 2.0 - 1.0;
+        vec4 pn = inv_view_projection * vec4(ndc, -1.0, 1.0);
+        vec4 pf = inv_view_projection * vec4(ndc, 1.0, 1.0);
+        vec3 d = normalize(pf.xyz / pf.w - pn.xyz / pn.w);
+        // Well behind the view plane along the parallel ray, so it starts above the floor.
+        vec3 o = pn.xyz / pn.w - d * 1.0e4;
+        return normalize(ground_lookup(o, d));
+    }
+    if (tilt_on)
+        return backdrop_tilt * dir;
+    return dir;
 }
 
 vec3 env_rotate(vec3 w)
@@ -126,7 +184,13 @@ void main()
         vec2 uv = f * uv_transform.xy + uv_transform.zw;
         if (tile)
             uv = fract(uv);
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        if (extend && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) {
+            // A zoomed-out backplate (and the live view's margins): a soft, darker stretch of the
+            // photo's edge, like a phone's blurred fill, rather than flat bars.
+            vec2 e = clamp(uv, 0.0, 1.0);
+            float lod = max(image_lod, log2(max(float(textureSize(image_tex, 0).x), 1.0)) - 4.0);
+            c = vec4(textureLod(image_tex, vec2(e.x, 1.0 - e.y), lod).rgb * 0.8, 1.0);
+        } else if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
             c = color1;
         else
             c = sample_image(vec2(uv.x, 1.0 - uv.y));
@@ -136,12 +200,12 @@ void main()
         c = vec4(mix(vec3(0.80), vec3(0.92), k), 1.0);
     } else if (mode == 5) {
         vec4 p = inv_view_projection * vec4(tex_coord * 2.0 - 1.0, 1.0, 1.0);
-        vec3 dir = normalize(p.xyz / p.w - camera_position);
+        vec3 dir = view_lookup(normalize(p.xyz / p.w - camera_position));
         vec4 t = textureLod(env_map, to_cube(env_rotate(dir)), clamp(blur, 0.0, 1.0) * env_max_lod);
         c = vec4(linear_to_srgb(tone_curve_map(t.rgb * t.a * 16.0 * env_exposure)), 1.0);
     } else if (mode == 6) {
         vec4 p = inv_view_projection * vec4(tex_coord * 2.0 - 1.0, 1.0, 1.0);
-        vec3 dir = normalize(p.xyz / p.w - camera_position);
+        vec3 dir = view_lookup(normalize(p.xyz / p.w - camera_position));
         // The mip level that matches one screen pixel (from the direction's derivatives, so there is no
         // seam where the longitude wraps), or the blur's level when that is softer.
         vec2 tsize = vec2(textureSize(image_tex, 0));

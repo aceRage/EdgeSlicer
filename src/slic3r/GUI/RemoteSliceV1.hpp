@@ -29,8 +29,10 @@ const std::vector<std::string>& pair_features();
 // The instance API's manifest version (GET /api `version`). 3: slice_v1; 4: PR D, arrange (the
 // layout lists overhanging instances, /plates/loose, `blocked`, arrange / orient / printable / undo);
 // 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove);
-// 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers).
-constexpr int INSTANCE_API_VERSION = 6;
+// 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers);
+// 7: PR G, plates, objects and save (plates/add, plates/{i}/delete|rename|bed_type, objects/delete,
+// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type).
+constexpr int INSTANCE_API_VERSION = 7;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
@@ -310,6 +312,41 @@ struct PreviewLook
     std::vector<std::string> options;
     std::vector<std::string> hide;
 };
+
+// ---- PR G: plates, objects and save (features "slice_plates_edit", "slice_objects_edit",
+// "slice_project_save") ----
+// EdgeSlicerApp docs/design_native_slice_parity.md section 6.1 (G8-G10): the phone adds, deletes,
+// renames plates and sets their bed type, deletes and duplicates objects and saves the project,
+// each through the PC's own control. These are the checks and names that need no Plater.
+
+// The longest plate name the PC's Plate Settings dialog takes.
+constexpr size_t PLATE_NAME_MAX = 250;
+// The most copies one duplicate makes (the Clone dialog goes to 1000; a phone needs far fewer).
+constexpr int DUPLICATE_MAX = 50;
+
+// A plate name as the phone sent it, made safe to store: control characters dropped, blanks
+// trimmed, cut to PLATE_NAME_MAX characters (code points, on a UTF-8 boundary). "" clears the name.
+std::string clean_plate_name(const std::string& name);
+
+// POST /plates/add: the PC's Add plate stops at `max_plates`.
+Refusal plate_add_check(int plates, int max_plates);
+
+// POST /plates/{i}/delete[?objects=keep|delete][&confirm=1]. `objects_on_plate` instances are on it;
+// keep (the default, the PC's own way) leaves them loose, delete deletes them first. A plate with
+// objects needs confirm; the last plate cannot go; `cut_objects` among them stop objects=delete.
+Refusal plate_delete_check(int plate, int plates, int objects_on_plate, const std::string& objects, bool confirm, int cut_objects);
+
+// POST /objects/delete: `inst` -1 = the whole object. A part of a cut object is refused (the PC asks
+// first, as deleting it breaks the cut link: that stays a decision made at the PC).
+Refusal object_delete_check(int obj, int objects, int inst, int instances, bool is_cut);
+
+// POST /objects/duplicate: `count` copies of one instance, 1..DUPLICATE_MAX.
+Refusal object_duplicate_check(int obj, int objects, int inst, int instances, int count);
+
+// A bed type's id on the wire: "default" for btDefault (the plate follows the project), else its
+// config value ("Textured PEI Plate"). bed_type_from_id is the reverse, -1 for an unknown id.
+std::string bed_type_id(int bed_type);
+int         bed_type_from_id(const std::string& id);
 
 } // namespace SliceV1
 } // namespace GUI

@@ -7,6 +7,7 @@
 // value in the Background section when the backdrop is the environment, and in the Light section
 // ("Lighting environment") for every other backdrop. No scene key was added.
 
+#include "ShowcaseLens.hpp"
 #include "ShowcaseScene.hpp"
 
 namespace Slic3r { namespace Showcase {
@@ -20,6 +21,11 @@ struct PanelVisibility
     bool bg_image       = false;
     bool bg_fit         = false;
     bool bg_blur        = false;
+    // 1h-2
+    bool bg_ground        = false;   // the Ground projection box
+    bool bg_ground_detail = false;   // camera height, dome radius, world scale
+    bool bg_pitch         = false;   // the infinite backdrop's tilt
+    bool bg_plate_match   = false;   // a backplate's horizon, focal length and Match camera
     // Floor
     bool floor_colour      = false;
     bool floor_shadow      = false;
@@ -39,6 +45,9 @@ struct PanelVisibility
     bool mat_layer_lines  = false;
     bool mat_toolpath     = false;    // smoothing
     bool mat_light_left   = false;
+    // Camera (1h-2)
+    bool cam_dof_detail   = false;   // aperture, focus on model, bokeh quality
+    bool cam_dof_focus    = false;   // the focus distance when not on the model
     // Callouts
     bool co_detail      = false;      // everything but the on/off box
     bool co_plain_colours = false;    // text and line colour
@@ -67,11 +76,19 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.bg_colour1     = bt == BackgroundType::Solid || gradient || env_fallback ||
                    (bt == BackgroundType::Image && s.background.fit == ImageFit::Fit);   // the bars around a fitted picture
     v.bg_colour2     = gradient || env_fallback;
-    v.bg_image       = bt == BackgroundType::Image;
-    v.bg_fit         = bt == BackgroundType::Image;
-    v.bg_blur        = bt == BackgroundType::Image || (env_bg && env_set);
+    const bool backplate = bt == BackgroundType::Backplate;
+    v.bg_image       = bt == BackgroundType::Image || backplate;
+    v.bg_fit         = bt == BackgroundType::Image;   // a backplate always fills the frame
+    v.bg_blur        = bt == BackgroundType::Image || backplate || (env_bg && env_set);
+    // 1h-2: placing the environment (the box above the rows it decides).
+    v.bg_ground        = env_bg && env_set;
+    v.bg_ground_detail = env_bg && env_set && s.background.ground;
+    v.bg_pitch         = env_bg && env_set && !s.background.ground;
+    v.bg_plate_match   = backplate;
 
-    const FloorType ft = s.floor.type;
+    // 1h-2: with a ground-projected environment or a photo backplate the floor is drawn as a shadow
+    // catcher (the picture is the floor), so its own colour, grid and photo rows do not apply.
+    const FloorType ft = effective_floor_type(s);
     const bool      on = ft != FloorType::None;
     v.floor_colour      = ft == FloorType::Solid || ft == FloorType::Grid;
     v.floor_shadow      = on;
@@ -91,6 +108,9 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.mat_layer_lines = s.source != "toolpaths";   // the toolpaths view already shows the real layers
     v.mat_toolpath    = s.source == "toolpaths";
     v.mat_light_left  = s.materials.lights_off;
+
+    v.cam_dof_detail = s.dof.enabled;
+    v.cam_dof_focus  = s.dof.enabled && !s.dof.focus_on_model;
 
     const bool boxed = s.callouts.style.shape == CalloutShape::Card || s.callouts.style.shape == CalloutShape::Pill;
     v.co_detail        = s.callouts.enabled;

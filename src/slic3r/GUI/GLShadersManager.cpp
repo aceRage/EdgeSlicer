@@ -150,6 +150,10 @@ std::pair<bool, std::string> GLShadersManager::init()
         appendOptionalShader("showcase_post_ms", { prefix + "showcase_post_ms.vs", prefix + "showcase_post_ms.fs" });
         if (GLShaderProgram* s = get_shader("showcase_post_ms"); s != nullptr)
             s->set_sampler_units({ { "scene_ms", 1 }, { "hdr_ms", 2 } });
+        // Realism 1h-2: depth of field over the finished frame. Without it the frame stays sharp.
+        appendOptionalShader("showcase_dof", { prefix + "background.vs", prefix + "showcase_dof.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_dof"); s != nullptr)
+            s->set_sampler_units({ { "depth_tex", 0 }, { "color_tex", 1 }, { "coc_tex", 2 } });
         if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
             s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
         if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)

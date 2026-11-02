@@ -1151,6 +1151,13 @@ set(SLIC3R_GUI_SOURCES
     GUI/ThirdPartyFilamentMap.hpp
     GUI/ThirdPartyFilamentMapPanel.cpp
     GUI/ThirdPartyFilamentMapPanel.hpp
+    GUI/LayerlingPanel.cpp
+    GUI/LayerlingPanel.hpp
+    GUI/LayerlingBrowser.hpp
+    GUI/LayerlingBrowserWin.cpp
+    GUI/LayerlingBrowserGtk.cpp
+    GUI/LayerlingServer.cpp
+    GUI/LayerlingServer.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1177,6 +1184,7 @@ if (APPLE)
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
             GUI/ModelBrowserPanelMac.mm
+            GUI/LayerlingBrowserMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
             GUI/Showcase/ShowcaseVideoMac.mm
@@ -1271,6 +1279,10 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/UntrustedSettingsGuard.cpp                # namespace-scope using namespace Slic3r::untrusted
     GUI/CustomModelsMenu.cpp                      # file-local helpers with generic names (menu_label, add_item, ...)
     GUI/ModelBrowserPanel.cpp                     # WRL/WebView2 COM headers; namespace-scope using-directive
+    GUI/LayerlingBrowserWin.cpp                   # WRL/WebView2 COM headers; namespace-scope using-declarations
+    GUI/LayerlingBrowserGtk.cpp                   # declares WebKitGTK functions itself, as Widgets/WebView.cpp does
+    GUI/LayerlingPanel.cpp                        # file-local helpers with generic names (cfg, downloads_folder, ...)
+    GUI/LayerlingServer.cpp                       # file-local helpers with generic names (utf8_of, path_of, handle)
     GUI/Jobs/CreateFontStyleImagesJob.cpp         # namespace-scope using namespace Emboss
     GUI/Jobs/EmbossJob.cpp                        # namespace-scope using namespace Emboss
     GUI/TextLines.cpp                             # namespace-scope using namespace Emboss

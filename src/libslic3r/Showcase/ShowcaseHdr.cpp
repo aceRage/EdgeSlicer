@@ -1072,6 +1072,19 @@ bool parse_hdri_manifest(const std::string &text, HdriManifest &out, std::string
         info.source  = str(e, "source");
         info.authors = str(e, "authors");
         info.licence = str(e, "licence");
+        // 1h-2: placement defaults; anything missing or out of range keeps the built-in default.
+        auto num = [](const hdr_json &o, const char *key, float def, float lo, float hi) {
+            auto it = o.find(key);
+            if (it == o.end() || !it->is_number())
+                return def;
+            const double v = it->get<double>();
+            return std::isfinite(v) && v >= double(lo) && v <= double(hi) ? float(v) : def;
+        };
+        if (auto g = e.find("ground"); g != e.end() && g->is_object()) {
+            info.ground_height_mm = num(*g, "height_mm", info.ground_height_mm, 10.f, 100000.f);
+            info.ground_radius_mm = num(*g, "radius_mm", info.ground_radius_mm, 100.f, 10000000.f);
+        }
+        info.backdrop_pitch = num(e, "backdrop_pitch", info.backdrop_pitch, -60.f, 60.f);
         m.hdris.push_back(std::move(info));
     }
     out = std::move(m);
