@@ -5,6 +5,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/Showcase/ShowcaseLens.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterial.hpp"
 #include "libslic3r/Showcase/ShowcasePanelRules.hpp"
 #include "libslic3r/Showcase/ShowcaseScene.hpp"
@@ -395,4 +396,156 @@ TEST_CASE("Showcase 1f: the imperfection rows are for the model", "[Showcase][Re
     CHECK(panel_visibility(s, false).mat_imperfections);
     s.source = "toolpaths";
     CHECK_FALSE(panel_visibility(s, false).mat_imperfections);
+}
+
+// ------------------------------------------------------------------------------------------------
+// 1g: camera effects
+// ------------------------------------------------------------------------------------------------
+
+TEST_CASE("Showcase 1g: the frame radius and the vignette", "[Showcase][Realism]")
+{
+    CHECK_THAT(frame_radius(0.5, 0.5, 16. / 9.), WithinAbs(0., 1e-12));
+    CHECK_THAT(frame_radius(0., 0., 16. / 9.), WithinAbs(1., 1e-12));
+    CHECK_THAT(frame_radius(1., 1., 1.), WithinAbs(1., 1e-12));
+    CHECK(frame_radius(1., 0.5, 2.) < 1.);   // the middle of a side is nearer than a corner
+    // Off: nothing changes anywhere.
+    for (double r : { 0., 0.5, 1. })
+        CHECK(vignette_factor(0., r) == 1.);
+    // On: the centre stays, the corners darken, smoothly and monotonically.
+    CHECK_THAT(vignette_factor(1., 0.), WithinAbs(1., 1e-12));
+    CHECK(vignette_factor(1., 1.) < 0.6);
+    CHECK(vignette_factor(1., 1.) > 0.45);
+    CHECK(vignette_factor(1., 0.5) > vignette_factor(1., 1.));
+    CHECK(vignette_factor(0.3, 1.) > vignette_factor(1., 1.));
+    CHECK(vignette_factor(5., 1.) == vignette_factor(1., 1.));
+}
+
+TEST_CASE("Showcase 1g: barrel distortion keeps the corners and the centre", "[Showcase][Realism]")
+{
+    const auto c = distort_frame_point(0.5, 0.5, 1.5, 1.);
+    CHECK_THAT(c[0], WithinAbs(0.5, 1e-12));
+    CHECK_THAT(c[1], WithinAbs(0.5, 1e-12));
+    const auto k = distort_frame_point(1., 1., 1.5, 1.);
+    CHECK_THAT(k[0], WithinAbs(1., 1e-12));
+    CHECK_THAT(k[1], WithinAbs(1., 1e-12));
+    // In between, the picture is taken from nearer the centre: magnified in the middle.
+    const auto m = distort_frame_point(0.75, 0.5, 1.5, 1.);
+    CHECK(m[0] < 0.75);
+    CHECK(m[0] > 0.5);
+    const auto off = distort_frame_point(0.75, 0.3, 1.5, 0.);
+    CHECK(off[0] == 0.75);
+    CHECK(off[1] == 0.3);
+    CHECK(chromatic_offset_px(0., 1.) == 0.);
+    CHECK_THAT(chromatic_offset_px(1., 1.), WithinAbs(1.5, 1e-12));
+    CHECK(chromatic_offset_px(1., 0.) == 0.);
+}
+
+TEST_CASE("Showcase 1g: film grain is deterministic per frame and varies between frames", "[Showcase][Realism]")
+{
+    // The same pixel and seed: the same value, run after run (a video frame renders the same twice).
+    CHECK(grain_noise(10, 20, 3) == grain_noise(10, 20, 3));
+    double sum = 0., sum2 = 0.;
+    int    differ = 0;
+    const int n = 4096;
+    for (int i = 0; i < n; ++i) {
+        const double v = grain_noise(uint32_t(i % 64), uint32_t(i / 64), 7);
+        CHECK(v >= 0.);
+        CHECK(v < 1.);
+        sum += v;
+        sum2 += v * v;
+        if (grain_noise(uint32_t(i % 64), uint32_t(i / 64), 8) != v)
+            ++differ;
+    }
+    const double mean = sum / n, var = sum2 / n - mean * mean;
+    CHECK_THAT(mean, WithinAbs(0.5, 0.03));          // uniform: mean 1/2, variance 1/12
+    CHECK_THAT(var, WithinAbs(1. / 12., 0.01));
+    CHECK(differ > n * 9 / 10);                      // a new frame, new grain
+    // Most grain in the mid-tones.
+    CHECK(grain_weight(0.5) > grain_weight(0.05));
+    CHECK(grain_weight(0.5) > grain_weight(0.95));
+    CHECK(grain_weight(0.) > 0.);
+    CHECK(bloom_bright(0.5) == 0.);
+    CHECK_THAT(bloom_bright(3.), WithinAbs(2., 1e-12));
+    CHECK(bloom_bright(std::nan("")) == 0.);
+}
+
+TEST_CASE("Showcase 1g: the lens keys round-trip and are written only when on", "[Showcase][Realism]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    CHECK_FALSE(s.lens.any());
+    CHECK_FALSE(scene_json(s).contains("lens"));
+    s.lens.grain     = 0.2f;
+    s.lens.vignette  = 0.35f;
+    s.lens.bloom     = 0.5f;
+    s.lens.chromatic = 0.1f;
+    s.lens.distortion = 0.25f;
+    const json j = scene_json(s);
+    REQUIRE(j.contains("lens"));
+    CHECK(j["lens"]["vignette"].get<float>() == 0.35f);
+    Scene back = round_trip(s);
+    CHECK(back.lens == s.lens);
+    CHECK(back == s);
+    json bad = j;
+    bad["lens"]["grain"] = 4.0;
+    Scene clamped;
+    REQUIRE(scene_from_json(bad.dump(), clamped));
+    CHECK(clamped.lens.grain == 1.f);
+    back.lens = LensEffects();
+    CHECK_FALSE(scene_json(round_trip(back)).contains("lens"));
+}
+
+// ------------------------------------------------------------------------------------------------
+// 1h-2, the deferred part
+// ------------------------------------------------------------------------------------------------
+
+TEST_CASE("Showcase 1h-2: the depth of field's spill and highlights keys", "[Showcase][Realism]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    s.dof.enabled = true;
+    // A 1h-2 scene writes back without the new keys.
+    json j = scene_json(s);
+    REQUIRE(j.contains("dof"));
+    CHECK_FALSE(j["dof"].contains("near_bleed"));
+    CHECK_FALSE(j["dof"].contains("highlights"));
+    s.dof.near_bleed = true;
+    s.dof.highlights = 0.6f;
+    j = scene_json(s);
+    CHECK(j["dof"]["near_bleed"].get<bool>());
+    CHECK(j["dof"]["highlights"].get<float>() == 0.6f);
+    Scene back = round_trip(s);
+    CHECK(back.dof == s.dof);
+    // Highlights alone make the depth of field differ from the default (so it is written).
+    Scene h = make_scene(PresetId::StudioWhite, 0);
+    h.dof.highlights = 0.3f;
+    CHECK(scene_json(h).contains("dof"));
+}
+
+TEST_CASE("Showcase 1h-2: the live view's draft cap on weak GPUs", "[Showcase][Realism]")
+{
+    CHECK(weak_gpu_renderer("Intel(R) UHD Graphics 620"));
+    CHECK(weak_gpu_renderer("Intel(R) Iris(R) Xe Graphics"));
+    CHECK(weak_gpu_renderer("llvmpipe (LLVM 15.0.7, 256 bits)"));
+    CHECK(weak_gpu_renderer("Microsoft Basic Render Driver"));
+    CHECK_FALSE(weak_gpu_renderer("Intel(R) Arc(TM) A770 Graphics"));
+    CHECK_FALSE(weak_gpu_renderer("NVIDIA GeForce RTX 3060/PCIe/SSE2"));
+    CHECK_FALSE(weak_gpu_renderer("AMD Radeon RX 6800 XT"));
+    CHECK_FALSE(weak_gpu_renderer("Apple M2"));
+    CHECK_FALSE(weak_gpu_renderer(""));
+    CHECK(live_dof_taps(dof_taps(BokehQuality::Best), true) == dof_taps(BokehQuality::Draft));
+    CHECK(live_dof_taps(dof_taps(BokehQuality::Best), false) == dof_taps(BokehQuality::Best));
+    CHECK(live_dof_taps(dof_taps(BokehQuality::Draft), true) == dof_taps(BokehQuality::Draft));
+}
+
+TEST_CASE("Showcase 1h-2: Reset to auto shows once a ground size is typed in", "[Showcase][Realism][panel]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    s.background.type      = BackgroundType::Environment;
+    s.lighting.environment = "studio";
+    s.background.ground    = true;
+    CHECK(panel_visibility(s, false).bg_ground_detail);
+    CHECK_FALSE(panel_visibility(s, false).bg_ground_reset);   // already automatic
+    s.background.ground_height = 300.f;
+    CHECK(panel_visibility(s, false).bg_ground_reset);
+    s.background.ground = false;
+    CHECK_FALSE(panel_visibility(s, false).bg_ground_reset);
 }

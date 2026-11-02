@@ -1,6 +1,7 @@
 #include "ShowcaseLens.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 
@@ -245,6 +246,76 @@ double coc_px(const DofSetup &setup, double z)
         return std::min(setup.k_px, setup.max_px);
     return std::min(setup.k_px * std::abs(1. - setup.focus / z), setup.max_px);
 }
+
+bool weak_gpu_renderer(const std::string &renderer)
+{
+    std::string r;
+    r.reserve(renderer.size());
+    for (char c : renderer)
+        r.push_back(char(std::tolower((unsigned char) c)));
+    auto has = [&r](const char *w) { return r.find(w) != std::string::npos; };
+    if (has("llvmpipe") || has("softpipe") || has("swiftshader") || has("basic render") || has("software"))
+        return true;
+    // Intel's integrated graphics (HD, UHD, Iris), not its discrete Arc cards.
+    return has("intel") && !has("arc");
+}
+
+int live_dof_taps(int requested_taps, bool weak_gpu) { return weak_gpu ? std::min(requested_taps, dof_taps(BokehQuality::Draft)) : requested_taps; }
+
+// ---- Camera effects (realism 1g) ------------------------------------------------------------------
+
+double frame_radius(double x, double y, double aspect)
+{
+    const double a  = aspect > 0. && std::isfinite(aspect) ? aspect : 1.;
+    const double px = (x - 0.5) * a, py = y - 0.5;
+    const double half_diag = 0.5 * std::sqrt(a * a + 1.);
+    return std::sqrt(px * px + py * py) / half_diag;
+}
+
+double vignette_factor(double strength, double r)
+{
+    const double s = std::isfinite(strength) ? std::clamp(strength, 0., 1.) : 0.;
+    const double c = std::cos(std::atan(std::max(r, 0.) * 0.6));
+    return 1. + s * (c * c * c * c - 1.);
+}
+
+std::array<double, 2> distort_frame_point(double x, double y, double aspect, double strength)
+{
+    const double s = std::isfinite(strength) ? std::clamp(strength, 0., 1.) : 0.;
+    if (s <= 0.)
+        return { x, y };
+    const double a  = aspect > 0. && std::isfinite(aspect) ? aspect : 1.;
+    const double k  = 0.15 * s;
+    const double r  = frame_radius(x, y, a);
+    const double f  = (1. + k * r * r) / (1. + k);
+    return { 0.5 + (x - 0.5) * f, 0.5 + (y - 0.5) * f };
+}
+
+double chromatic_offset_px(double strength, double r)
+{
+    const double s = std::isfinite(strength) ? std::clamp(strength, 0., 1.) : 0.;
+    return 1.5 * s * r * r;
+}
+
+double grain_noise(uint32_t x, uint32_t y, uint32_t seed)
+{
+    // Wang's integer hash of the pixel and the seed (showcase_lens.fs grain_hash()).
+    uint32_t h = x * 1973u + y * 9277u + seed * 26699u;
+    h = (h ^ 61u) ^ (h >> 16);
+    h *= 9u;
+    h ^= h >> 4;
+    h *= 0x27d4eb2du;
+    h ^= h >> 15;
+    return double(h & 0xFFFFFFu) / 16777216.;
+}
+
+double grain_weight(double luma)
+{
+    const double l = std::clamp(luma, 0., 1.);
+    return 0.25 + 3. * l * (1. - l);
+}
+
+double bloom_bright(double linear, double threshold) { return std::isfinite(linear) ? std::max(linear - threshold, 0.) : 0.; }
 
 } // namespace Showcase
 } // namespace Slic3r

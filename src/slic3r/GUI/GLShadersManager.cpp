@@ -164,6 +164,11 @@ std::pair<bool, std::string> GLShadersManager::init()
         // Without them translucent plastics take a typical wall thickness and shadows stay grey.
         appendOptionalShader("showcase_thickness", { prefix + "showcase_material.vs", prefix + "showcase_thickness.fs" });
         appendOptionalShader("showcase_transmit", { prefix + "showcase_material.vs", prefix + "showcase_transmit.fs" });
+        // Realism 1g: the camera effects over the finished frame (grain, vignette, bloom, colour
+        // fringes, distortion) and the bloom's bright pass. Without it the frame is left as it is.
+        appendOptionalShader("showcase_lens", { prefix + "background.vs", prefix + "showcase_lens.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_lens"); s != nullptr)
+            s->set_sampler_units({ { "color_tex", 0 }, { "bloom_tex", 1 }, { "hdr_tex", 2 } });
         // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): the same material with
         // the coextruded-colour functions put in after its #version line (they live in C++, shared
         // with the toolpaths and the unit tests). Optional: without it coextruded slots show their

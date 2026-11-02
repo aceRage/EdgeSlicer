@@ -16,7 +16,7 @@
 #                        hdri_outdoor_tilt, ground_workshop_dof, ground_sunset_sill, ground_loft, backplate_desk,
 #                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait,
 #                        translucent_backlit, translucency_plain, finish_sparkle, finish_marble, finish_wood,
-#                        finish_textured, finish_satin, imperfections_visible, video)
+#                        finish_textured, finish_satin, imperfections_visible, lens_effects, dof_spill_highlights, video)
 #                        The 1h-2 fixtures (hdri_outdoor_tilt, ground_*, backplate_desk) need the backdrop
 #                        placement, ground projection, photo backplate and depth of field, which a golden
 #                        install from before 1h-2 does not have: they are expected to change until the
@@ -106,7 +106,7 @@ echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$RE
 NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden,backplate_portrait"
 # Realism 1d-1g, 1h-2 rest: new looks the shared baseline cannot render (compare them with a golden install of
 # the 1h-2 branch to see that everything else is unchanged).
-NEW_FIXTURES="$NEW_FIXTURES,translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible"
+NEW_FIXTURES="$NEW_FIXTURES,translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
@@ -258,6 +258,9 @@ run_still finish_textured --settings
 run_still finish_satin --settings
 # Realism 1f (the seam and the strings need the slice)
 run_still imperfections_visible --slice
+# Realism 1g, and the deferred part of 1h-2
+run_still lens_effects --settings
+run_still dof_spill_highlights
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

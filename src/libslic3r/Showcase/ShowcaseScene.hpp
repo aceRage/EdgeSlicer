@@ -349,13 +349,38 @@ struct DepthOfField
     bool         focus_on_model = true;   // focus on the middle of the plate's objects
     float        focus_mm       = 300.f;  // otherwise this far along the view (mm)
     BokehQuality quality        = BokehQuality::Good;
+    // Realism 1h-2, the deferred part (written only when set): a blurred foreground spills over the
+    // sharper background behind it, and bright highlights (from the HDR layer) bloom into bokeh discs
+    // (0 = off .. 1).
+    bool         near_bleed     = false;
+    float        highlights     = 0.f;
 
     bool operator==(const DepthOfField &o) const
     {
         return enabled == o.enabled && f_number == o.f_number && focus_on_model == o.focus_on_model && focus_mm == o.focus_mm &&
-               quality == o.quality;
+               quality == o.quality && near_bleed == o.near_bleed && highlights == o.highlights;
     }
     bool operator!=(const DepthOfField &o) const { return !(*this == o); }
+};
+
+// Realism 1g (design 2.7): camera effects over the finished frame, each 0 (off) .. 1. Written as the
+// scene's "lens" only when one is on. Relative to the safe frame, so the live view and the export
+// agree; the grain is drawn at the output's pixels (not the supersampled ones) and changes with each
+// video frame.
+struct LensEffects
+{
+    float grain      = 0.f;   // luma-weighted film grain
+    float vignette   = 0.f;   // cos^4-style darkening towards the corners
+    float bloom      = 0.f;   // a glow around the brightest highlights (from the HDR layer)
+    float chromatic  = 0.f;   // colour fringes towards the corners (up to ~1.5 px)
+    float distortion = 0.f;   // barrel distortion
+
+    bool any() const { return grain > 0.f || vignette > 0.f || bloom > 0.f || chromatic > 0.f || distortion > 0.f; }
+    bool operator==(const LensEffects &o) const
+    {
+        return grain == o.grain && vignette == o.vignette && bloom == o.bloom && chromatic == o.chromatic && distortion == o.distortion;
+    }
+    bool operator!=(const LensEffects &o) const { return !(*this == o); }
 };
 
 struct Scene
@@ -376,6 +401,7 @@ struct Scene
     Lighting                lighting;
     CameraView              camera;
     DepthOfField            dof;                    // 1h-2
+    LensEffects             lens;                   // realism 1g
     std::vector<CameraView> views;                  // saved, named views
     ExportSettings          export_settings;
     Materials               materials;

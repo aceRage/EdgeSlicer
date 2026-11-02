@@ -162,11 +162,15 @@ ShowcaseView::ShowcaseView(wxWindow *parent, Bed3D &bed, Model *model, DynamicPr
             return true;
         if (m_video.borrowed && (evt.ButtonDown() || evt.GetWheelRotation() != 0))
             video_restore_view();
+        // 1h-2, the deferred part: the photo horizon's line can be dragged on the view.
+        if (horizon_on_mouse(evt))
+            return true;
         return callouts_on_mouse(evt);
     });
     // A callout drag holds the mouse; losing it ends the drag where it is.
     m_canvas_widget->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent &evt) {
         m_callouts.drag = CalloutUi::Drag::None;
+        m_horizon_drag  = false;
         evt.Skip();
     });
 
@@ -626,6 +630,11 @@ void ShowcaseView::build_panel()
     m_bg_ground_radius = new wxSpinCtrl(m_side, wxID_ANY, "1500", wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 50, 1000000, 1500);
     m_bg_ground_radius->SetToolTip(_L("How far away the walls and the horizon are."));
     row(_L("Dome radius (mm)"), m_bg_ground_radius);
+    // 1h-2, the deferred part: back to the sizes worked out from the model and the panorama.
+    m_bg_ground_auto = new wxButton(m_side, wxID_ANY, _L("Reset to auto"));
+    m_bg_ground_auto->SetToolTip(_L("Camera height and dome radius from the model's size and the environment again."));
+    grid->AddSpacer(0);
+    grid->Add(m_bg_ground_auto);
     m_bg_ground_scale = slider(100, 25, 400);
     m_bg_ground_scale->SetToolTip(_L("Makes the whole surrounding larger or smaller around the model."));
     row(_L("World scale"), m_bg_ground_scale);
@@ -948,6 +957,30 @@ void ShowcaseView::build_panel()
     m_dof_quality = choice(bokeh);
     m_dof_quality->SetToolTip(_L("Smoother blur, slower to render."));
     row(_L("Bokeh quality"), m_dof_quality);
+    // 1h-2, the deferred part.
+    m_dof_bleed = new wxCheckBox(m_side, wxID_ANY, _L("Soft foreground edges"));
+    m_dof_bleed->SetToolTip(_L("A blurred foreground spills over the sharper background behind it, as through a real lens."));
+    grid->AddSpacer(0);
+    grid->Add(m_dof_bleed);
+    m_dof_highlights = slider(0, 0, 100);
+    m_dof_highlights->SetToolTip(_L("Bright highlights out of focus grow into bright discs."));
+    row(_L("Bokeh highlights"), m_dof_highlights);
+    // Realism 1g: the camera effects, all off by default.
+    m_lens_grain = slider(0, 0, 100);
+    m_lens_grain->SetToolTip(_L("Fine film grain, at the size of the exported image."));
+    row(_L("Film grain"), m_lens_grain);
+    m_lens_vignette = slider(0, 0, 100);
+    m_lens_vignette->SetToolTip(_L("Darkens the corners of the frame a little."));
+    row(_L("Vignette"), m_lens_vignette);
+    m_lens_bloom = slider(0, 0, 100);
+    m_lens_bloom->SetToolTip(_L("A soft glow around the brightest highlights."));
+    row(_L("Bloom"), m_lens_bloom);
+    m_lens_chromatic = slider(0, 0, 100);
+    m_lens_chromatic->SetToolTip(_L("Faint colour fringes towards the corners."));
+    row(_L("Colour fringing"), m_lens_chromatic);
+    m_lens_distortion = slider(0, 0, 100);
+    m_lens_distortion->SetToolTip(_L("Bulges straight lines a little, like a wide lens."));
+    row(_L("Lens distortion"), m_lens_distortion);
 
     // --- Callouts (S3) ------------------------------------------------------------------------
     header(_L("Callouts"), "callouts");
@@ -1252,6 +1285,12 @@ void ShowcaseView::build_panel()
     m_bg_ground_radius->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent &) {
         const float mm = float(m_bg_ground_radius->GetValue());
         edit([mm](Showcase::Scene &s) { s.background.ground_radius = mm; });
+    });
+    m_bg_ground_auto->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        edit([](Showcase::Scene &s) {
+            s.background.ground_height = 0.f;
+            s.background.ground_radius = 0.f;
+        }, true);
     });
     m_bg_ground_scale->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
         const float k = float(m_bg_ground_scale->GetValue()) / 100.f;
@@ -1564,6 +1603,25 @@ void ShowcaseView::build_panel()
         if (sel >= 0 && sel < 3)
             edit([sel](Showcase::Scene &s) { s.dof.quality = Showcase::BokehQuality(sel); });
     });
+    // 1h-2, the deferred part.
+    m_dof_bleed->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &) {
+        const bool on = m_dof_bleed->GetValue();
+        edit([on](Showcase::Scene &s) { s.dof.near_bleed = on; });
+    });
+    m_dof_highlights->Bind(wxEVT_SLIDER, [this](wxCommandEvent &) {
+        const float v = float(m_dof_highlights->GetValue()) / 100.f;
+        edit([v](Showcase::Scene &s) { s.dof.highlights = v; });
+    });
+    // Realism 1g.
+    for (wxSlider *sl : { m_lens_grain, m_lens_vignette, m_lens_bloom, m_lens_chromatic, m_lens_distortion })
+        sl->Bind(wxEVT_SLIDER, [this, sl](wxCommandEvent &) {
+            const float v = float(sl->GetValue()) / 100.f;
+            edit([this, sl, v](Showcase::Scene &s) {
+                Showcase::LensEffects &l = s.lens;
+                (sl == m_lens_grain ? l.grain : sl == m_lens_vignette ? l.vignette : sl == m_lens_bloom ? l.bloom :
+                 sl == m_lens_chromatic ? l.chromatic : l.distortion) = v;
+            });
+        });
     m_projection->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         if (m_syncing || read_only())
             return;
@@ -2048,6 +2106,13 @@ void ShowcaseView::sync_controls()
     m_dof_on_model->SetValue(s.dof.focus_on_model);
     m_dof_focus->SetValue(std::clamp(int(std::lround(s.dof.focus_mm)), 10, 100000));
     m_dof_quality->SetSelection(int(s.dof.quality));
+    m_dof_bleed->SetValue(s.dof.near_bleed);
+    m_dof_highlights->SetValue(std::clamp(int(std::lround(s.dof.highlights * 100.f)), 0, 100));
+    m_lens_grain->SetValue(std::clamp(int(std::lround(s.lens.grain * 100.f)), 0, 100));
+    m_lens_vignette->SetValue(std::clamp(int(std::lround(s.lens.vignette * 100.f)), 0, 100));
+    m_lens_bloom->SetValue(std::clamp(int(std::lround(s.lens.bloom * 100.f)), 0, 100));
+    m_lens_chromatic->SetValue(std::clamp(int(std::lround(s.lens.chromatic * 100.f)), 0, 100));
+    m_lens_distortion->SetValue(std::clamp(int(std::lround(s.lens.distortion * 100.f)), 0, 100));
 
     int size_sel = SHOWCASE_SIZE_COUNT;
     for (int i = 0; i < SHOWCASE_SIZE_COUNT; ++i)
@@ -2251,7 +2316,8 @@ void ShowcaseView::update_enabled()
                                                           m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
                                                           m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
                                                           m_plate_offset_y, m_plate_fit, m_translucency, m_imp_wobble, m_imp_seam, m_imp_strings,
-                                                          m_imp_colour })
+                                                          m_imp_colour, m_dof_bleed, m_dof_highlights, m_lens_grain, m_lens_vignette, m_lens_bloom,
+                                                          m_lens_chromatic, m_lens_distortion, m_bg_ground_auto })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2453,6 +2519,9 @@ void ShowcaseView::apply_row_visibility()
     set(m_dof_on_model, v.cam_dof_detail);
     set(m_dof_quality, v.cam_dof_detail);
     set(m_dof_focus, v.cam_dof_focus);
+    set(m_dof_bleed, v.cam_dof_detail);
+    set(m_dof_highlights, v.cam_dof_detail);
+    set(m_bg_ground_auto, v.bg_ground_reset);
     // Floor
     set(m_floor_color, v.floor_colour);
     set(m_floor_shadow, v.floor_shadow);
@@ -3494,6 +3563,63 @@ void ShowcaseView::callouts_apply_to_export(ShowcaseImage &image, bool has_alpha
     opt.model_center_x = callouts_model_center_x();
     opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, has_alpha, s, callouts_draw_list(labels), opt);
+}
+
+bool ShowcaseView::horizon_on_mouse(wxMouseEvent &evt)
+{
+    if (!m_active || m_renderer == nullptr || m_canvas_widget == nullptr)
+        return false;
+    const Showcase::Scene &s = scene();
+    const Showcase::RectI  f = m_renderer->live_frame();
+    const bool usable = s.background.type == Showcase::BackgroundType::Backplate && !read_only() && !f.empty();
+    if (!usable) {
+        m_horizon_drag = false;
+        return false;
+    }
+    // Where the line is drawn (draw_overlay): the photo's horizon through the zoom and the pan.
+    const double ia = m_renderer->background_aspect();
+    const double fa = double(f.w) / double(std::max(1, f.h));
+    const Showcase::PlateMapping pm = Showcase::plate_mapping(ia > 0. ? ia : fa, fa, double(s.background.plate_zoom),
+                                                              double(s.background.plate_offset_x), double(s.background.plate_offset_y));
+    const double line_y = double(f.y) + (1. - pm.frame_y(double(s.background.plate_horizon))) * double(f.h);
+    const double mx = double(evt.GetX()), my = double(evt.GetY());
+    const bool   near = mx >= double(f.x) && mx <= double(f.x + f.w) && std::abs(my - line_y) <= 6.;
+    auto horizon_at = [&](double y) {
+        const double fy = std::clamp(1. - (y - double(f.y)) / double(std::max(1, f.h)), 0., 1.);
+        return float(std::clamp(pm.photo_v(fy), -1., 2.));
+    };
+
+    if (m_horizon_drag) {
+        if (evt.Dragging() && evt.LeftIsDown()) {
+            const float h = horizon_at(my);
+            edit([h](Showcase::Scene &sc) { sc.background.plate_horizon = h; });
+            m_plate_horizon->SetValue(std::clamp(int(std::lround(h * 100.f)), 0, 100));
+            return true;
+        }
+        if (evt.LeftUp() || !evt.LeftIsDown()) {
+            m_horizon_drag = false;
+            if (m_canvas_widget->HasCapture())
+                m_canvas_widget->ReleaseMouse();
+            return true;
+        }
+        return true;
+    }
+    if (evt.Moving()) {
+        // The resize cursor over the line; the callouts set theirs again when the mouse leaves it.
+        if (near) {
+            m_canvas_widget->SetCursor(wxCursor(wxCURSOR_SIZENS));
+            m_callouts.cursor = -1;
+            return true;
+        }
+        return false;
+    }
+    if (evt.LeftDown() && near) {
+        m_horizon_drag = true;
+        if (!m_canvas_widget->HasCapture())
+            m_canvas_widget->CaptureMouse();
+        return true;
+    }
+    return false;
 }
 
 bool ShowcaseView::callouts_on_mouse(wxMouseEvent &evt)

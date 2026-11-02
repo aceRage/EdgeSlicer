@@ -287,7 +287,7 @@ ShowcaseRenderer::~ShowcaseRenderer()
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
                         m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
                         m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0 || m_thick_fbo != 0 || m_transmit_fbo != 0 ||
-                        m_seam_tex != 0 || !m_strings_models.empty();
+                        m_seam_tex != 0 || !m_strings_models.empty() || m_lens_fbo != 0 || m_bloom_fbo != 0;
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     for (std::unique_ptr<ShowcaseFramebuffers> *fb : { &m_batch_fb, &m_live_fb })
@@ -399,6 +399,7 @@ void ShowcaseRenderer::release_offscreen()
     m_thick_w = m_thick_h = 0;
     m_thick_valid = m_transmit_valid = false;
     release_dof();
+    release_lens();
 }
 
 void ShowcaseRenderer::release_layers()
@@ -2284,6 +2285,7 @@ void ShowcaseRenderer::draw_scene(const DrawTarget &t)
 
     glsafe(::glClearColor(0.f, 0.f, 0.f, 0.f));
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    m_hdr_resolved = false;
 
     update_visibility();
     // 1h-1: an HDRI environment is loaded (and its sun found) before the render settings and the lights use it.
@@ -2632,7 +2634,11 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
             focus = (box.center() - eye).dot(fwd);
     }
     focus = std::max(focus, std::max(camera.get_near_z(), 1.));
-    const Showcase::DofSetup setup = Showcase::dof_setup(m_scene->dof, p11_frame, frame_w / frame_h, frame_h, focus);
+    Showcase::DofSetup setup = Showcase::dof_setup(m_scene->dof, p11_frame, frame_w / frame_h, frame_h, focus);
+    // 1h-2 (deferred part): the live view keeps to the draft quality on a weak GPU; exports never do.
+    const bool draft_cap = t.live && weak_gpu();
+    if (draft_cap)
+        setup.taps = Showcase::live_dof_taps(setup.taps, true);
     if (!setup.active) {
         m_dof_used = "off (the circle of confusion is under a pixel)";
         return false;
@@ -2684,6 +2690,18 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
     dof->set_uniform("depth_tex", 0);
     dof->set_uniform("color_tex", 1);
     dof->set_uniform("coc_tex", 2);
+    // 1h-2 (deferred part): the foreground's spill and the highlights from the HDR layer.
+    const GLuint hdr_tex   = m_scene->dof.highlights > 0.f ? resolved_hdr(fb) : 0;
+    const float  highlight = hdr_tex != 0 ? m_scene->dof.highlights : 0.f;
+    dof->set_uniform("near_bleed", m_scene->dof.near_bleed);
+    dof->set_uniform("highlights", highlight);
+    dof->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+    dof->set_uniform("hdr_tex", 3);
+    if (hdr_tex != 0) {
+        glsafe(::glActiveTexture(GL_TEXTURE3));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, hdr_tex));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
 
     // 1. The circles of confusion.
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_dof_coc_fbo));
@@ -2699,7 +2717,7 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
     glsafe(::glActiveTexture(GL_TEXTURE2));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_dof_coc));
     m_canvas.m_background.render();
-    for (int unit : { 2, 1, 0 }) {
+    for (int unit : { 3, 2, 1, 0 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -2711,8 +2729,209 @@ bool ShowcaseRenderer::apply_dof(const ShowcaseFramebuffers &fb, const DrawTarge
     std::ostringstream used;
     used << "f/" << m_scene->dof.f_number << " at " << int(std::lround(setup.focus)) << " mm, lens " << int(std::lround(setup.focal_mm))
          << " mm, far blur " << int(std::lround(std::min(setup.k_px, setup.max_px))) << " px, " << setup.taps << " taps"
-         << (bg_mode == 3 ? ", photo kept sharp" : bg_mode == 2 ? ", ground dome" : bg_mode == 1 ? ", floor plane" : "");
+         << (bg_mode == 3 ? ", photo kept sharp" : bg_mode == 2 ? ", ground dome" : bg_mode == 1 ? ", floor plane" : "")
+         << (m_scene->dof.near_bleed ? ", foreground spill" : "") << (highlight > 0.f ? ", bokeh highlights" : "")
+         << (draft_cap ? ", draft (weak GPU)" : "");
     m_dof_used = used.str();
+    return true;
+}
+
+bool ShowcaseRenderer::weak_gpu()
+{
+    if (m_weak_gpu < 0) {
+        const char *env = std::getenv("EDGESLICER_SHOWCASE_DRAFT_DOF");
+        const GLubyte *r = ::glGetString(GL_RENDERER);
+        const bool weak = (env != nullptr && *env != '\0' && *env != '0') ||
+                          (r != nullptr && Showcase::weak_gpu_renderer(reinterpret_cast<const char *>(r)));
+        m_weak_gpu = weak ? 1 : 0;
+        if (weak)
+            BOOST_LOG_TRIVIAL(info) << "Showcase: the live view's depth of field keeps to the draft quality on this GPU";
+    }
+    return m_weak_gpu == 1;
+}
+
+unsigned int ShowcaseRenderer::resolved_hdr(const ShowcaseFramebuffers &fb)
+{
+    if (!fb.has_hdr() || !m_hdr_drawn || fb.hdr == 0)
+        return 0;
+    if (fb.msaa_hdr_fbo != 0 && !m_hdr_resolved) {
+        // The multisampled layer averaged into the single-sampled one (colour only).
+        GLint read = 0, draw = 0;
+        glsafe(::glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read));
+        glsafe(::glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw));
+        glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.msaa_hdr_fbo));
+        glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb.hdr_fbo));
+        glsafe(::glBlitFramebuffer(0, 0, fb.width, fb.height, 0, 0, fb.width, fb.height, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+        glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(read)));
+        glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLuint(draw)));
+    }
+    m_hdr_resolved = true;
+    return fb.hdr;
+}
+
+void ShowcaseRenderer::release_lens()
+{
+    for (unsigned int *fbo : { &m_lens_fbo, &m_bloom_fbo })
+        if (*fbo != 0) {
+            glsafe(::glDeleteFramebuffers(1, fbo));
+            *fbo = 0;
+        }
+    for (unsigned int *tex : { &m_lens_copy, &m_bloom_tex[0], &m_bloom_tex[1] })
+        if (*tex != 0) {
+            glsafe(::glDeleteTextures(1, tex));
+            *tex = 0;
+        }
+    m_lens_w = m_lens_h = m_bloom_w = m_bloom_h = 0;
+}
+
+bool ShowcaseRenderer::apply_lens(const ShowcaseFramebuffers &fb, const DrawTarget &t)
+{
+    m_lens_used.clear();
+    if (m_scene == nullptr || !m_scene->lens.any() || fb.fbo == 0)
+        return false;
+    GLShaderProgram *lens = wxGetApp().get_shader("showcase_lens");
+    GLShaderProgram *blur = wxGetApp().get_shader("showcase_blur");
+    if (lens == nullptr) {
+        m_lens_used = "off (the camera effects shader is not loaded)";
+        return false;
+    }
+    const Showcase::LensEffects &le = m_scene->lens;
+    const int w = fb.width, h = fb.height;
+    ShowcaseTargetState keep;
+    auto texture = [](GLint internal, GLenum format, GLenum type, int tw, int th) {
+        GLuint tex = 0;
+        glsafe(::glGenTextures(1, &tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, internal, tw, th, 0, format, type, nullptr));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        return tex;
+    };
+    const GLenum bufs[] = { GL_COLOR_ATTACHMENT0 };
+    if (m_lens_fbo == 0 || m_lens_w != w || m_lens_h != h) {
+        if (m_lens_copy != 0)
+            glsafe(::glDeleteTextures(1, &m_lens_copy));
+        if (m_lens_fbo == 0)
+            glsafe(::glGenFramebuffers(1, &m_lens_fbo));
+        m_lens_copy = texture(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_lens_fbo));
+        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lens_copy, 0));
+        glsafe(::glDrawBuffers(1, bufs));
+        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            release_lens();
+            m_lens_used = "off (no buffers)";
+            return false;
+        }
+        m_lens_w = w;
+        m_lens_h = h;
+    }
+    // The finished frame, copied so the pass can read it while it writes the frame.
+    glsafe(::glBindFramebuffer(GL_READ_FRAMEBUFFER, fb.fbo));
+    glsafe(::glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_lens_fbo));
+    glsafe(::glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST));
+
+    ensure_fullscreen_quad();
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_BLEND));
+    glsafe(::glDisable(GL_CULL_FACE));
+
+    // The bloom: the HDR layer's brightest light at a quarter size, blurred wide (two rounds).
+    bool bloom = false;
+    if (le.bloom > 0.f && blur != nullptr) {
+        const GLuint hdr = resolved_hdr(fb);
+        if (hdr != 0) {
+            const int bw = std::max(1, w / 4), bh = std::max(1, h / 4);
+            if (m_bloom_fbo == 0 || m_bloom_w != bw || m_bloom_h != bh) {
+                for (unsigned int &tex : m_bloom_tex)
+                    if (tex != 0) {
+                        glsafe(::glDeleteTextures(1, &tex));
+                        tex = 0;
+                    }
+                if (m_bloom_fbo == 0)
+                    glsafe(::glGenFramebuffers(1, &m_bloom_fbo));
+                for (unsigned int &tex : m_bloom_tex)
+                    tex = texture(GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, bw, bh);
+                m_bloom_w = bw;
+                m_bloom_h = bh;
+            }
+            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_bloom_fbo));
+            glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloom_tex[0], 0));
+            glsafe(::glDrawBuffers(1, bufs));
+            if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+                glsafe(::glViewport(0, 0, bw, bh));
+                lens->start_using();
+                lens->set_uniform("mode", 1);
+                lens->set_uniform("hdr_tex", 2);
+                lens->set_uniform("viewport_size", Vec2f(float(bw), float(bh)));
+                lens->set_uniform("exposure", std::exp2(m_scene->lighting.exposure));
+                glsafe(::glActiveTexture(GL_TEXTURE2));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, hdr));
+                m_canvas.m_background.render();
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+                glsafe(::glActiveTexture(GL_TEXTURE0));
+                lens->stop_using();
+                blur->start_using();
+                blur->set_uniform("source", 0);
+                // Wider with the output: the glow covers the same share of the frame at any size.
+                const float base = std::max(1.f, float(bh) / 135.f);
+                for (float spread : { 1.f * base, 3.f * base }) {
+                    for (int pass = 0; pass < 2; ++pass) {
+                        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloom_tex[1 - pass], 0));
+                        glsafe(::glBindTexture(GL_TEXTURE_2D, m_bloom_tex[pass]));
+                        blur->set_uniform("direction", pass == 0 ? Vec2f(spread / float(bw), 0.f) : Vec2f(0.f, spread / float(bh)));
+                        m_canvas.m_background.render();
+                    }
+                }
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+                blur->stop_using();
+                bloom = true;
+            }
+        }
+    }
+
+    // The frame through the lens.
+    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo));
+    glsafe(::glViewport(0, 0, w, h));
+    const float fx = t.frame[0] * float(w), fy = t.frame[1] * float(h);
+    const float fw = std::max(1.f, (t.frame[2] - t.frame[0]) * float(w)), fh = std::max(1.f, (t.frame[3] - t.frame[1]) * float(h));
+    lens->start_using();
+    lens->set_uniform("mode", 0);
+    lens->set_uniform("color_tex", 0);
+    lens->set_uniform("bloom_tex", 1);
+    lens->set_uniform("viewport_size", Vec2f(float(w), float(h)));
+    lens->set_uniform("frame_px", std::array<float, 4>{ fx, fy, fw, fh });
+    lens->set_uniform("out_scale", float(std::max(1, t.out_scale)));
+    lens->set_uniform("grain", le.grain);
+    lens->set_uniform("vignette", le.vignette);
+    lens->set_uniform("bloom", bloom ? le.bloom : 0.f);
+    lens->set_uniform("chromatic", le.chromatic);
+    lens->set_uniform("distortion", le.distortion);
+    lens->set_uniform("seed", m_frame_seed);
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_lens_copy));
+    if (bloom) {
+        glsafe(::glActiveTexture(GL_TEXTURE1));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_bloom_tex[0]));
+    }
+    m_canvas.m_background.render();
+    for (int unit : { 1, 0 }) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    }
+    lens->stop_using();
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+
+    std::ostringstream used;
+    used << "grain " << le.grain << ", vignette " << le.vignette << ", bloom " << (bloom ? le.bloom : 0.f)
+         << (le.bloom > 0.f && !bloom ? " (no HDR layer)" : "") << ", fringes " << le.chromatic << ", distortion " << le.distortion
+         << ", seed " << m_frame_seed;
+    m_lens_used = used.str();
     return true;
 }
 
@@ -2935,6 +3154,8 @@ void ShowcaseRenderer::render_frame()
             }
             // 1h-2: depth of field over the finished frame.
             apply_dof(fb, t);
+            // Realism 1g: the camera effects last.
+            apply_lens(fb, t);
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, GLuint(window_fbo)));
             glsafe(::glViewport(0, 0, GLsizei(vp_w), GLsizei(vp_h)));
             glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
@@ -3143,6 +3364,7 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     dt.run_ssao          = false;
     dt.ssao_radius_scale = plan.ssao_radius_scale;
     dt.shadow_map_size   = plan.shadow_map_size;
+    dt.out_scale         = plan.ssaa;
     dt.scene_fbo         = fb.draw_fbo();
     dt.hdr_fbo           = fb.has_hdr() ? fb.draw_hdr_fbo() : 0;
     log << (fb.has_hdr() ? ", HDR objects layer (RGBA16F) + post pass" : ", no HDR layer");
@@ -3169,6 +3391,8 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     }
     // 1h-2: depth of field over the finished frame, at the internal (supersampled) size.
     apply_dof(fb, dt);
+    // Realism 1g: the camera effects (grain at the output's pixels).
+    apply_lens(fb, dt);
     // Where the plate's objects are (the golden fixtures' cameras are written against it).
     if (const char *dbg = std::getenv("EDGESLICER_SHOWCASE_DEBUG"); dbg != nullptr && *dbg != '\0' && *dbg != '0') {
         const BoundingBoxf3 ob = objects_box();
@@ -3178,6 +3402,8 @@ bool ShowcaseRenderer::render_export(ShowcaseImage &out, std::string &report)
     }
     if (!m_dof_used.empty())
         log << ", depth of field " << m_dof_used;
+    if (!m_lens_used.empty())
+        log << ", camera effects " << m_lens_used;
     if (m_bg_ground)
         log << ", environment projected onto the ground (camera height " << int(std::lround(m_bg_dome.height)) << " mm, dome radius "
             << int(std::lround(m_bg_dome.radius)) << " mm)";

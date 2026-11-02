@@ -1376,7 +1376,10 @@ bool ShowcaseView::video_render_frame_at(double t, int index, Showcase::VideoFra
 
     ShowcaseImage image;
     std::string   report;
+    // Realism 1g: a new film grain each frame, the same one for the same frame on every run.
+    m_renderer->set_frame_seed(index);
     bool          ok = m_renderer->render_export(image, report) && !image.empty();
+    m_renderer->set_frame_seed(0);
     if (ok && m_video.settings.callouts && fs.callouts.enabled && !fs.callouts.items.empty()) {
         // The callouts of this pose: which anchors are hidden now, their fade, the layout with the
         // sides of the last frame so labels do not jump (design 3.3 item 6, R13).

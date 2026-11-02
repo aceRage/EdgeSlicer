@@ -259,7 +259,8 @@ bool Scene::operator==(const Scene &o) const
 {
     return id == o.id && name == o.name && plate_index == o.plate_index && view_frame_height == o.view_frame_height && source == o.source &&
            preset_base == o.preset_base &&
-           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && dof == o.dof && views == o.views &&
+           background == o.background && floor == o.floor && lighting == o.lighting && camera == o.camera && dof == o.dof && lens == o.lens &&
+           views == o.views &&
            export_settings == o.export_settings && materials == o.materials && callouts == o.callouts && video == o.video;
 }
 
@@ -846,9 +847,29 @@ json scene_to_json_object(const Scene &s)
         d["focus_on_model"] = s.dof.focus_on_model;
         d["focus_mm"]       = s.dof.focus_mm;
         d["quality"]        = to_string(s.dof.quality);
-        j["dof"] = merged(raw, "dof", d);
+        d["near_bleed"]     = s.dof.near_bleed;
+        d["highlights"]     = s.dof.highlights;
+        json out = merged(raw, "dof", d);
+        // The deferred 1h-2 settings only when set, so a 1h-2 scene writes back as it was read.
+        if (!s.dof.near_bleed)
+            out.erase("near_bleed");
+        if (s.dof.highlights <= 0.f)
+            out.erase("highlights");
+        j["dof"] = out;
     } else
         j.erase("dof");
+
+    // Realism 1g: the camera effects, only when one is on.
+    if (s.lens.any()) {
+        json l;
+        l["grain"]      = s.lens.grain;
+        l["vignette"]   = s.lens.vignette;
+        l["bloom"]      = s.lens.bloom;
+        l["chromatic"]  = s.lens.chromatic;
+        l["distortion"] = s.lens.distortion;
+        j["lens"] = merged(raw, "lens", l);
+    } else
+        j.erase("lens");
 
     json views = json::array();
     for (const CameraView &v : s.views)
@@ -1004,6 +1025,17 @@ bool scene_from_json_object(const json &j, Scene &s)
         s.dof.focus_on_model = get_or<bool>(d, "focus_on_model", true);
         s.dof.focus_mm       = clamp_or(get_or<float>(d, "focus_mm", 300.f), 1.f, 100000.f, 300.f);
         s.dof.quality        = enum_or(d, "quality", s.dof.quality);
+        s.dof.near_bleed     = get_or<bool>(d, "near_bleed", false);
+        s.dof.highlights     = clamp_or(get_or<float>(d, "highlights", 0.f), 0.f, 1.f, 0.f);
+    }
+    // Realism 1g (absent = all off).
+    if (j.contains("lens") && j["lens"].is_object()) {
+        const json &l       = j["lens"];
+        s.lens.grain        = clamp_or(get_or<float>(l, "grain", 0.f), 0.f, 1.f, 0.f);
+        s.lens.vignette     = clamp_or(get_or<float>(l, "vignette", 0.f), 0.f, 1.f, 0.f);
+        s.lens.bloom        = clamp_or(get_or<float>(l, "bloom", 0.f), 0.f, 1.f, 0.f);
+        s.lens.chromatic    = clamp_or(get_or<float>(l, "chromatic", 0.f), 0.f, 1.f, 0.f);
+        s.lens.distortion   = clamp_or(get_or<float>(l, "distortion", 0.f), 0.f, 1.f, 0.f);
     }
     if (j.contains("views") && j["views"].is_array())
         for (const json &v : j["views"]) {

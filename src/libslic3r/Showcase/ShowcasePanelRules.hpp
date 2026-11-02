@@ -26,6 +26,7 @@ struct PanelVisibility
     bool bg_ground_detail = false;   // camera height, dome radius, world scale
     bool bg_pitch         = false;   // the infinite backdrop's tilt
     bool bg_plate_match   = false;   // a backplate's horizon, focal length and Match camera
+    bool bg_ground_reset  = false;   // 1h-2 (deferred part): "Reset to auto", once a size was typed in
     // Floor
     bool floor_colour      = false;
     bool floor_shadow      = false;
@@ -87,6 +88,7 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.bg_ground_detail = env_bg && env_set && s.background.ground;
     v.bg_pitch         = env_bg && env_set && !s.background.ground;
     v.bg_plate_match   = backplate;
+    v.bg_ground_reset  = v.bg_ground_detail && (s.background.ground_height > 0.f || s.background.ground_radius > 0.f);
 
     // 1h-2: with a ground-projected environment or a photo backplate the floor is drawn as a shadow
     // catcher (the picture is the floor), so its own colour, grid and photo rows do not apply.

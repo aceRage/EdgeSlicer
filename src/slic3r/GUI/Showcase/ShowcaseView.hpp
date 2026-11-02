@@ -134,6 +134,9 @@ private:
     // 1h-2b: the Lens choice shows the camera's lens now: a preset within 3 %, else "~42 mm" (the last
     // entry), or nothing for an orthographic camera.
     void                     refresh_lens();
+    // 1h-2, the deferred part: dragging the photo backplate's horizon line on the live view (within a
+    // few pixels of it). True for the events it used.
+    bool                     horizon_on_mouse(wxMouseEvent &evt);
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -446,6 +449,18 @@ private:
     wxCheckBox              *m_dof_on_model = nullptr;
     wxSpinCtrl              *m_dof_focus = nullptr;
     wxChoice                *m_dof_quality = nullptr;
+    // 1h-2, the deferred part: the foreground's spill and the bokeh highlights.
+    wxCheckBox              *m_dof_bleed = nullptr;
+    wxSlider                *m_dof_highlights = nullptr;
+    // Realism 1g: the camera effects.
+    wxSlider                *m_lens_grain = nullptr;
+    wxSlider                *m_lens_vignette = nullptr;
+    wxSlider                *m_lens_bloom = nullptr;
+    wxSlider                *m_lens_chromatic = nullptr;
+    wxSlider                *m_lens_distortion = nullptr;
+    // 1h-2, the deferred part: the ground projection's automatic size, and dragging the photo horizon.
+    wxButton                *m_bg_ground_auto = nullptr;
+    bool                     m_horizon_drag = false;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
     wxChoice                *m_size = nullptr;

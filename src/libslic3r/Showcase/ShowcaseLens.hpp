@@ -20,6 +20,8 @@
 #include "ShowcaseScene.hpp"
 
 #include <array>
+#include <cstdint>
+#include <string>
 
 namespace Slic3r {
 namespace Showcase {
@@ -133,6 +135,35 @@ struct DofSetup
 DofSetup dof_setup(const DepthOfField &dof, double p11_frame, double frame_aspect, double frame_h_px, double focus_distance);
 // The circle of confusion (diameter, px) of something at view distance `z` (mm), capped.
 double   coc_px(const DofSetup &setup, double z);
+
+// 1h-2 (deferred part): the live view's draft cap on weak GPUs. `renderer` is GL_RENDERER: integrated
+// Intel graphics (not Arc), and software renderers (llvmpipe, SwiftShader, Microsoft Basic Render)
+// count as weak. Exports always use the scene's quality.
+bool     weak_gpu_renderer(const std::string &renderer);
+int      live_dof_taps(int requested_taps, bool weak_gpu);
+
+// ---- Camera effects (realism 1g) ----------------------------------------------------------------
+//
+// All relative to the safe frame: `x`, `y` are 0..1 across it (y up), `aspect` its width / height. The
+// radius r is 0 at the centre and 1 at the corners. Mirrored in resources/shaders/140/showcase_lens.fs.
+
+double frame_radius(double x, double y, double aspect);
+// The vignette's light at r for a strength 0..1: cos^4 of the angle a lens of half-diagonal field
+// tan 0.6 sees there, mixed in by the strength (1 at the centre, ~0.54 at the corners at full strength).
+double vignette_factor(double strength, double r);
+// Barrel distortion: where an output point of the frame takes its picture from (0..1 in, 0..1 out).
+// The corners stay at the corners, the middle is magnified by 1 + k (k = 0.15 x strength).
+std::array<double, 2> distort_frame_point(double x, double y, double aspect, double strength);
+// The colour fringe's offset in output pixels at r: up to 1.5 px in the corners at full strength.
+double chromatic_offset_px(double strength, double r);
+// The film grain's noise for an output pixel and a seed (the video frame), 0..1. The same inputs give
+// the same value on every run; the GLSL uses the same integer hash.
+double grain_noise(uint32_t x, uint32_t y, uint32_t seed);
+// How much grain shows at a luma 0..1: most in the mid-tones, a little in the shadows and highlights.
+double grain_weight(double luma);
+// The bloom's bright pass: what is left of a linear value over the threshold (1 = white after exposure).
+constexpr double BLOOM_THRESHOLD = 1.0;
+double bloom_bright(double linear, double threshold = BLOOM_THRESHOLD);
 
 } // namespace Showcase
 } // namespace Slic3r
