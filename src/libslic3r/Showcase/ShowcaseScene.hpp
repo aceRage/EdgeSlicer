@@ -339,6 +339,24 @@ struct Materials
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };
 
+// What the toolpaths view lays besides the model's walls. During a video's layer build-up the video's own
+// Infill / Supports switches decide (BuildUp::infill / supports); otherwise the scene's Materials switches
+// (stills and the live view). The skirt and brim always follow the Materials switch.
+struct ToolpathParts
+{
+    bool infill   = true;
+    bool supports = true;
+    bool skirt    = true;
+};
+inline ToolpathParts toolpath_parts(const Materials &m, bool building, bool build_infill, bool build_supports)
+{
+    ToolpathParts p;
+    p.infill   = building ? build_infill : m.toolpath_infill;
+    p.supports = building ? build_supports : m.toolpath_supports;
+    p.skirt    = m.toolpath_skirt;
+    return p;
+}
+
 // 1h-2 (design 2.7, pulled forward from 1g): depth of field in the post pass, off by default. The
 // circle of confusion comes from the lens of the frame (its 35 mm equivalent focal length), the
 // f-number and the focus distance (ShowcaseLens.hpp). Written as the scene's "dof" only when changed.

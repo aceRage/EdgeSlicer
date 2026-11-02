@@ -75,8 +75,15 @@ struct ShowcaseFilament
     std::string      type;
     std::string      color;          // "#RRGGBB"
     Showcase::Finish inferred = Showcase::Finish::Standard;
+    // A Color Mixing (virtual) filament: its recipe as the sidebar names it ("F2 25%+F3 75%").
+    bool             mixed = false;
+    std::string      mixed_label;
 };
+// The physical filament slots (preset, colour and the guessed finish).
 std::vector<ShowcaseFilament> showcase_filaments();
+// The enabled Color Mixing filaments after them (slots filaments_cnt() + 1 ...), with their blended
+// display colour, as the Prepare sidebar lists them. Their finish is Standard unless the scene picks one.
+std::vector<ShowcaseFilament> showcase_mixed_filaments();
 
 } // namespace GUI
 } // namespace Slic3r

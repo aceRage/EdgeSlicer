@@ -374,5 +374,29 @@ std::vector<ShowcaseFilament> showcase_filaments()
     return out;
 }
 
+std::vector<ShowcaseFilament> showcase_mixed_filaments()
+{
+    std::vector<ShowcaseFilament> out;
+    const PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return out;
+    // The slicer numbers the virtual filaments after the physical ones, in list order.
+    int slot = std::max(wxGetApp().filaments_cnt(), 0);
+    for (const MixedFilament &mf : bundle->mixed_filaments.mixed_filaments()) {
+        if (!mf.enabled || mf.deleted)
+            continue;
+        ShowcaseFilament f;
+        f.slot        = ++slot;
+        f.mixed       = true;
+        f.color       = mf.display_color.empty() ? std::string("#808080") : mf.display_color;
+        const int b   = std::clamp(mf.mix_b_percent, 0, 100);
+        f.mixed_label = "F" + std::to_string(mf.component_a) + " " + std::to_string(100 - b) + "%+F" + std::to_string(mf.component_b) + " " +
+                        std::to_string(b) + "%";
+        f.inferred    = Showcase::Finish::Standard;
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
 } // namespace GUI
 } // namespace Slic3r

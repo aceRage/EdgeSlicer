@@ -673,6 +673,8 @@ TEST_CASE("Showcase 1h-3: the download catalogue is the owner's six panoramas fr
         CHECK(it->downloadable);
         CHECK(it->licence == "CC0 1.0");
         CHECK_FALSE(it->download_file.empty());
+        // Published on the mirror (release showcase-hdri-1): size and checksum filled in.
+        CHECK(hdri_download_published(*it));
         // Our mirror, never the Poly Haven API (D-R3).
         const std::string url = hdri_download_url(hdri_mirror_base(nullptr), *it);
         CHECK(url.find("polyhaven") == std::string::npos);
@@ -782,4 +784,41 @@ TEST_CASE("Showcase 1h-3: the user's own HDRIs", "[Showcase][Realism][HDR]")
     CHECK(back.hdris[0].file == a.file);
     CHECK(back.hdris[0].backdrop_pitch == 5.f);
     CHECK_FALSE(back.hdris[0].downloadable);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Video build-up (owner feedback 2026-11-02)
+// ------------------------------------------------------------------------------------------------
+
+TEST_CASE("Showcase build-up: the video's Infill / Supports decide while it builds", "[Showcase][Realism]")
+{
+    Materials m;
+    m.toolpath_infill   = false;   // Materials > Infill off (for stills)
+    m.toolpath_supports = false;
+    m.toolpath_skirt    = false;
+    // A build-up with its Infill on lays the infill (it was hidden before: the regression).
+    ToolpathParts p = toolpath_parts(m, true, true, true);
+    CHECK(p.infill);
+    CHECK(p.supports);
+    CHECK_FALSE(p.skirt);
+    p = toolpath_parts(m, true, false, true);
+    CHECK_FALSE(p.infill);
+    // Stills and the live view keep the Materials switches.
+    p = toolpath_parts(m, false, true, true);
+    CHECK_FALSE(p.infill);
+    CHECK_FALSE(p.supports);
+    m.toolpath_infill = true;
+    CHECK(toolpath_parts(m, false, false, false).infill);
+}
+
+TEST_CASE("Showcase build-up: a model build-up has no infill or supports rows", "[Showcase][Realism][panel]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    CHECK_FALSE(panel_visibility(s, false).vid_build_source);
+    s.video.build.enabled = true;
+    CHECK(panel_visibility(s, false).vid_build_source);
+    CHECK(panel_visibility(s, false).vid_build_parts);
+    s.video.build.source = BuildSource::Clip;
+    CHECK(panel_visibility(s, false).vid_build_source);
+    CHECK_FALSE(panel_visibility(s, false).vid_build_parts);
 }

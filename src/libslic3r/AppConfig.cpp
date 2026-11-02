@@ -152,6 +152,11 @@ void AppConfig::set_defaults()
             set_bool("model_browser_beta", true);
 #endif // _WIN32 || __APPLE__
 
+        // The Layerling tab (LayerlingPanel): shown by default. It only offers the optional download
+        // until Layerling is installed; Preferences can hide it.
+        if (get("show_layerling_tab").empty())
+            set_bool("show_layerling_tab", true);
+
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
             erase("app", "use_legacy_opengl");

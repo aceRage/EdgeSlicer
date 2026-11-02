@@ -452,6 +452,7 @@ private:
     wxSlider                *m_imp_colour = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
+    std::vector<int>         m_mat_slots;     // the filament slot of each choice (physical, then Color Mixing)
     std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
     // 1h-2: the lens (an action: dolly-zooms to a focal length) and the depth of field.
@@ -577,6 +578,7 @@ private:
     wxCheckBox              *m_vid_build = nullptr;
     wxChoice                *m_vid_co_motion = nullptr;   // S5c
     wxChoice                *m_vid_co_appear = nullptr;   // S5c
+    wxChoice                *m_vid_build_source = nullptr;     // Build-up shows: Toolpaths (Auto) / Model (Clip)
     wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
     wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;

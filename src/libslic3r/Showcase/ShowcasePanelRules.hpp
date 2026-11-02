@@ -59,7 +59,8 @@ struct PanelVisibility
     // Video
     bool vid_co_position   = false;
     bool vid_co_appearance = false;
-    bool vid_build_parts   = false;
+    bool vid_build_parts   = false;   // infill and supports: toolpath build-ups only
+    bool vid_build_source  = false;   // "Build-up shows" toolpaths or the model
     // Watermark
     bool wm_detail = false;
 };
@@ -127,7 +128,9 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
 
     v.vid_co_position   = s.callouts.enabled && s.video.callouts;
     v.vid_co_appearance = s.callouts.enabled && s.video.callouts && s.video.build.enabled;
-    v.vid_build_parts   = s.video.build.enabled;
+    v.vid_build_source  = s.video.build.enabled;
+    // The model's build-up is cut by a plane: it has no infill or supports to leave out.
+    v.vid_build_parts   = s.video.build.enabled && s.video.build.source != BuildSource::Clip;
 
     v.wm_detail = s.export_settings.watermark.enabled;
     return v;
