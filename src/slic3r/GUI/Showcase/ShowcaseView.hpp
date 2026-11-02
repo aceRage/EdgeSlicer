@@ -137,6 +137,10 @@ private:
     // 1h-2, the deferred part: dragging the photo backplate's horizon line on the live view (within a
     // few pixels of it). True for the events it used.
     bool                     horizon_on_mouse(wxMouseEvent &evt);
+    // 1h-3: the Environments dialog; afterwards the environment lists are made again (and a newly
+    // added HDRI is picked).
+    void                     on_manage_environments();
+    void                     refresh_environment_choices();
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -461,6 +465,9 @@ private:
     // 1h-2, the deferred part: the ground projection's automatic size, and dragging the photo horizon.
     wxButton                *m_bg_ground_auto = nullptr;
     bool                     m_horizon_drag = false;
+    // 1h-3: "Environments..." (downloads and the user's own HDRIs), under each environment picker.
+    wxButton                *m_env_more = nullptr;
+    wxButton                *m_light_env_more = nullptr;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
     wxChoice                *m_size = nullptr;

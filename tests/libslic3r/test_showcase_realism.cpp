@@ -5,6 +5,8 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/Showcase/ShowcaseHdr.hpp"
+#include "libslic3r/Showcase/ShowcaseHdriLibrary.hpp"
 #include "libslic3r/Showcase/ShowcaseLens.hpp"
 #include "libslic3r/Showcase/ShowcaseMaterial.hpp"
 #include "libslic3r/Showcase/ShowcasePanelRules.hpp"
@@ -12,9 +14,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <set>
+#include <sstream>
 
 using namespace Slic3r;
 using namespace Slic3r::Showcase;
@@ -548,4 +553,233 @@ TEST_CASE("Showcase 1h-2: Reset to auto shows once a ground size is typed in", "
     CHECK(panel_visibility(s, false).bg_ground_reset);
     s.background.ground = false;
     CHECK_FALSE(panel_visibility(s, false).bg_ground_reset);
+}
+
+// ------------------------------------------------------------------------------------------------
+// 1h-3: HDRI downloads and the user's own HDRIs
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+
+std::string read_resource(const std::string &rel)
+{
+    std::ifstream     f(std::string(TEST_DATA_DIR) + "/../../resources/" + rel, std::ios::binary);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+HdrImage gradient_panorama(int w, int h)
+{
+    HdrImage img;
+    img.width  = w;
+    img.height = h;
+    img.rgb.resize(size_t(w) * size_t(h) * 3);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float *p = &img.rgb[(size_t(y) * size_t(w) + size_t(x)) * 3];
+            p[0]     = 0.05f + 3.f * float(x) / float(w);
+            p[1]     = 0.5f + 0.25f * float(y) / float(h);
+            p[2]     = (x == w / 2 && y == h / 4) ? 2000.f : 0.125f;   // a sun-bright texel
+        }
+    return img;
+}
+
+const uint8_t *bytes_of(const std::string &s) { return reinterpret_cast<const uint8_t *>(s.data()); }
+
+} // namespace
+
+TEST_CASE("Showcase 1h-3: OpenEXR scanline files read back (NONE and ZIP)", "[Showcase][Realism][HDR]")
+{
+    const HdrImage src = gradient_panorama(64, 32);
+    for (bool zip : { false, true }) {
+        INFO("zip " << zip);
+        const std::string file = encode_exr(src, zip);
+        HdrImage    back;
+        std::string error;
+        REQUIRE(decode_exr(bytes_of(file), file.size(), back, &error));
+        REQUIRE(back.width == 64);
+        REQUIRE(back.height == 32);
+        for (size_t i = 0; i < src.rgb.size(); ++i)
+            CHECK_THAT(back.rgb[i], WithinAbs(src.rgb[i], std::max(1e-3f, std::abs(src.rgb[i]) * 2e-3f)));   // half precision
+        // The same through the dispatcher.
+        HdrImage any;
+        REQUIRE(decode_hdri_any(bytes_of(file), file.size(), any));
+        CHECK(any.rgb == back.rgb);
+    }
+    // ZIP compresses a smooth picture.
+    CHECK(encode_exr(src, true).size() < encode_exr(src, false).size());
+    // A Radiance file still goes through the Radiance reader.
+    const std::string rgbe = encode_rgbe(src);
+    HdrImage          r;
+    REQUIRE(decode_hdri_any(bytes_of(rgbe), rgbe.size(), r));
+    CHECK(r.width == 64);
+}
+
+TEST_CASE("Showcase 1h-3: OpenEXR files this reader does not handle are refused cleanly", "[Showcase][Realism][HDR]")
+{
+    const std::string good = encode_exr(gradient_panorama(16, 8), true);
+    HdrImage          out;
+    std::string       error;
+    CHECK_FALSE(decode_exr(nullptr, 0, out, &error));
+    CHECK_FALSE(decode_exr(bytes_of(good), 20, out, &error));   // cut short
+    CHECK(out.empty());
+    // Tiled: the version's tile bit (0x200).
+    std::string tiled = good;
+    tiled[5]          = char(tiled[5] | 0x02);
+    CHECK_FALSE(decode_exr(bytes_of(tiled), tiled.size(), out, &error));
+    CHECK(error.find("tiled") != std::string::npos);
+    // PIZ: the compression attribute's value ("compression", NUL, "compression", NUL, a 4-byte size).
+    std::string  piz = good;
+    const size_t at  = piz.find("compression");
+    REQUIRE(at != std::string::npos);
+    piz[at + 2 * 12 + 4] = char(4);
+    CHECK_FALSE(decode_exr(bytes_of(piz), piz.size(), out, &error));
+    CHECK(error.find("PIZ") != std::string::npos);
+    // A block cut short: refused, never a crash.
+    std::string bad = good;
+    bad.resize(bad.size() - 10);
+    CHECK_FALSE(decode_exr(bytes_of(bad), bad.size(), out, &error));
+}
+
+TEST_CASE("Showcase 1h-3: a large panorama is halved until it fits", "[Showcase][Realism][HDR]")
+{
+    const HdrImage big   = gradient_panorama(256, 128);
+    const HdrImage small = downscale_hdr(big, 64);
+    CHECK(small.width == 64);
+    CHECK(small.height == 32);
+    // A box filter keeps the average light.
+    double a = 0., b = 0.;
+    for (float v : big.rgb)
+        a += v;
+    for (float v : small.rgb)
+        b += v;
+    CHECK_THAT(b * 16., WithinAbs(a, a * 1e-4));
+    CHECK(downscale_hdr(big, 1000).width == 256);   // already small enough
+}
+
+TEST_CASE("Showcase 1h-3: the download catalogue is the owner's six panoramas from our mirror", "[Showcase][Realism][HDR]")
+{
+    HdriManifest cat;
+    std::string  error;
+    REQUIRE(parse_hdri_catalogue(read_resource(std::string(HDRI_DIR) + "/" + HDRI_CATALOGUE), cat, &error));
+    REQUIRE(cat.hdris.size() == 6);
+    for (const char *src : { "brown_photostudio_02", "blue_photo_studio", "industrial_sunset_puresky", "kiara_1_dawn", "empty_warehouse_01",
+                             "abandoned_workshop_02" }) {
+        INFO(src);
+        const std::string page = std::string("https://polyhaven.com/a/") + src;
+        const auto it = std::find_if(cat.hdris.begin(), cat.hdris.end(), [&page](const HdriInfo &h) { return h.source == page; });
+        REQUIRE(it != cat.hdris.end());
+        CHECK(it->downloadable);
+        CHECK(it->licence == "CC0 1.0");
+        CHECK_FALSE(it->download_file.empty());
+        // Our mirror, never the Poly Haven API (D-R3).
+        const std::string url = hdri_download_url(hdri_mirror_base(nullptr), *it);
+        CHECK(url.find("polyhaven") == std::string::npos);
+        CHECK(url.rfind(HDRI_MIRROR_BASE_URL, 0) == 0);
+    }
+    // No id repeats a bundled HDRI.
+    HdriManifest bundled;
+    REQUIRE(parse_hdri_manifest(read_resource(std::string(HDRI_DIR) + "/" + HDRI_MANIFEST), bundled, &error));
+    for (const HdriInfo &h : cat.hdris)
+        CHECK(bundled.find(h.id) == nullptr);
+}
+
+TEST_CASE("Showcase 1h-3: catalogue entries need a size and a checksum, and safe names", "[Showcase][Realism][HDR]")
+{
+    const json text = json::parse(R"JSON({"hdris":[
+        {"id":"a","name":"A","file":"a.hdr","licence":"CC0","downloadable":true,
+         "download":{"file":"a_2k.hdr","size":123,"sha256":"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"}},
+        {"id":"b","name":"B","file":"b.hdr","licence":"CC0","downloadable":true,"download":{"file":"b.hdr","size":0,"sha256":""}},
+        {"id":"c","name":"C","file":"c.hdr","licence":"CC0","downloadable":true,"download":{"file":"../c.hdr","size":5,"sha256":""}},
+        {"id":"d","name":"D","file":"d.hdr","licence":"CC0","downloadable":true,"download":{"file":"d.hdr?x=1","size":5}},
+        {"id":"e","name":"E","file":"e.hdr","licence":"CC0"}
+    ]})JSON");
+    HdriManifest m;
+    REQUIRE(parse_hdri_catalogue(text.dump(), m));
+    REQUIRE(m.hdris.size() == 2);   // c and d have unsafe names, e is not a download
+    CHECK(m.find("a")->download_file == "a_2k.hdr");
+    CHECK(m.find("a")->download_size == 123);
+    CHECK(m.find("a")->sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");   // lower case
+    CHECK(hdri_download_published(*m.find("a")));
+    CHECK_FALSE(hdri_download_published(*m.find("b")));
+    // The mirror can be replaced (a local mock server); a slash is added.
+    CHECK(hdri_mirror_base("http://127.0.0.1:8123/hdri") == "http://127.0.0.1:8123/hdri/");
+    CHECK(hdri_mirror_base("") == HDRI_MIRROR_BASE_URL);
+    CHECK(hdri_download_url("http://x/", *m.find("a")) == "http://x/a_2k.hdr");
+}
+
+TEST_CASE("Showcase 1h-3: a download is kept only when its size and SHA-256 match", "[Showcase][Realism][HDR]")
+{
+    CHECK(sha256_hex(bytes_of("abc"), 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    const std::string file = encode_rgbe(gradient_panorama(32, 16));
+    HdriInfo          h;
+    h.id            = "x";
+    h.downloadable  = true;
+    h.download_size = file.size();
+    h.sha256        = sha256_hex(bytes_of(file), file.size());
+    CHECK(verify_hdri_download(bytes_of(file), file.size(), h) == DownloadCheck::Ok);
+    std::string altered = file;
+    altered[altered.size() / 2] ^= 0x01;
+    CHECK(verify_hdri_download(bytes_of(altered), altered.size(), h) == DownloadCheck::HashMismatch);
+    CHECK(verify_hdri_download(bytes_of(file), file.size() - 1, h) == DownloadCheck::SizeMismatch);
+    CHECK(verify_hdri_download(nullptr, 0, h) == DownloadCheck::Empty);
+    // Not published yet: nothing is ever kept.
+    HdriInfo unpublished = h;
+    unpublished.sha256.clear();
+    CHECK(verify_hdri_download(bytes_of(file), file.size(), unpublished) == DownloadCheck::NotPublished);
+    // The right checksum of something that is not a panorama.
+    const std::string junk(200, 'j');
+    HdriInfo          j = h;
+    j.download_size     = junk.size();
+    j.sha256            = sha256_hex(bytes_of(junk), junk.size());
+    CHECK(verify_hdri_download(bytes_of(junk), junk.size(), j) == DownloadCheck::NotAnHdri);
+    CHECK(std::string(to_string(DownloadCheck::HashMismatch)).find("checksum") != std::string::npos);
+}
+
+TEST_CASE("Showcase 1h-3: the user's own HDRIs", "[Showcase][Realism][HDR]")
+{
+    CHECK(user_hdri_slug("C:/photos/My Garage (2).EXR") == "my_garage_2");
+    CHECK(user_hdri_slug("") == "hdri");
+    CHECK(user_hdri_slug("___.hdr") == "hdri");
+    CHECK(user_hdri_display_name("C:/photos/My Garage (2).EXR") == "My Garage (2)");
+    std::vector<HdriInfo> existing(2);
+    existing[0].id = "user_garage";
+    existing[1].id = "user_garage_2";
+    CHECK(unique_user_hdri_id("garage", existing) == "user_garage_3");
+    CHECK(unique_user_hdri_id("shed", existing) == "user_shed");
+
+    // Read, checked and kept as Radiance.
+    const HdrImage    pano = gradient_panorama(64, 32);
+    const std::string exr  = encode_exr(pano, true);
+    HdrImage          ready;
+    std::string       error;
+    REQUIRE(prepare_user_hdri(bytes_of(exr), exr.size(), ready, &error));
+    CHECK(ready.width == 64);
+    // Black or portrait pictures are refused, and so is anything that is not a panorama.
+    HdrImage black = pano;
+    std::fill(black.rgb.begin(), black.rgb.end(), 0.f);
+    const std::string black_file = encode_rgbe(black);
+    CHECK_FALSE(prepare_user_hdri(bytes_of(black_file), black_file.size(), ready, &error));
+    CHECK_FALSE(error.empty());
+    const std::string tall = encode_rgbe(gradient_panorama(16, 32));
+    CHECK_FALSE(prepare_user_hdri(bytes_of(tall), tall.size(), ready, &error));
+    const std::string junk = "not a picture";
+    CHECK_FALSE(prepare_user_hdri(bytes_of(junk), junk.size(), ready, &error));
+
+    // Their list round-trips through the manifest format.
+    HdriInfo a;
+    a.id             = "user_shed";
+    a.name           = "Shed at dusk";
+    a.file           = "user_shed.hdr";
+    a.licence        = "your own";
+    a.backdrop_pitch = 5.f;
+    HdriManifest back;
+    REQUIRE(parse_hdri_manifest(hdri_manifest_to_json({ a }), back));
+    REQUIRE(back.hdris.size() == 1);
+    CHECK(back.hdris[0].id == a.id);
+    CHECK(back.hdris[0].name == a.name);
+    CHECK(back.hdris[0].file == a.file);
+    CHECK(back.hdris[0].backdrop_pitch == 5.f);
+    CHECK_FALSE(back.hdris[0].downloadable);
 }

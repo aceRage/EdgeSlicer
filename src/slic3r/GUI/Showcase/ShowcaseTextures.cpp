@@ -69,23 +69,117 @@ const Showcase::FloorManifest &showcase_floors()
     return manifest;
 }
 
-const Showcase::HdriManifest &showcase_hdris()
+namespace {
+Showcase::HdriManifest g_hdris;
+bool                   g_hdris_loaded     = false;
+unsigned int           g_hdris_generation = 1;
+} // namespace
+
+std::string showcase_hdri_data_dir() { return (boost::filesystem::path(data_dir()) / Showcase::HDRI_DATA_DIR).string(); }
+
+const Showcase::HdriManifest &showcase_hdri_catalogue()
 {
-    static Showcase::HdriManifest manifest;
+    static Showcase::HdriManifest catalogue;
     static bool                   loaded = false;
     if (!loaded) {
         loaded = true;
+        std::string       error;
+        const std::string path = showcase_asset_path(Showcase::HDRI_DIR, Showcase::HDRI_CATALOGUE);
+        if (!Showcase::parse_hdri_catalogue(showcase_read_text(path), catalogue, &error))
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDRI download catalogue (" << path << ": " << error << ")";
+    }
+    return catalogue;
+}
+
+bool showcase_hdri_installed(const Showcase::HdriInfo &hdri)
+{
+    if (!hdri.downloadable || hdri.file.empty())
+        return false;
+    boost::system::error_code ec;
+    return boost::filesystem::is_regular_file(boost::filesystem::path(showcase_hdri_data_dir()) / hdri.file, ec);
+}
+
+std::vector<Showcase::HdriInfo> showcase_user_hdris()
+{
+    std::vector<Showcase::HdriInfo> out;
+    const boost::filesystem::path dir = showcase_hdri_data_dir();
+    const std::string             text = showcase_read_text((dir / Showcase::USER_HDRI_MANIFEST).string());
+    if (text.empty())
+        return out;
+    Showcase::HdriManifest m;
+    std::string            error;
+    if (!Showcase::parse_hdri_manifest(text, m, &error)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the list of your own HDRIs could not be read (" << error << ")";
+        return out;
+    }
+    for (Showcase::HdriInfo &h : m.hdris) {
+        if (h.procedural || h.downloadable)
+            continue;
+        h.user     = true;
+        h.base_dir = dir.string();
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+bool showcase_save_user_hdris(const std::vector<Showcase::HdriInfo> &hdris)
+{
+    const boost::filesystem::path dir = showcase_hdri_data_dir();
+    boost::system::error_code     ec;
+    boost::filesystem::create_directories(dir, ec);
+    const boost::filesystem::path path = dir / Showcase::USER_HDRI_MANIFEST;
+    const boost::filesystem::path tmp  = dir / (std::string(Showcase::USER_HDRI_MANIFEST) + ".tmp");
+    {
+        boost::nowide::ofstream f(tmp.string(), std::ios::binary | std::ios::trunc);
+        if (!f)
+            return false;
+        f << Showcase::hdri_manifest_to_json(hdris);
+        if (!f)
+            return false;
+    }
+    boost::filesystem::rename(tmp, path, ec);
+    return !ec;
+}
+
+void showcase_hdris_reload()
+{
+    g_hdris_loaded = false;
+    ++g_hdris_generation;
+}
+
+unsigned int showcase_hdris_generation() { return g_hdris_generation; }
+
+const Showcase::HdriManifest &showcase_hdris()
+{
+    if (!g_hdris_loaded) {
+        g_hdris_loaded = true;
+        g_hdris        = Showcase::HdriManifest();
         std::string error;
         const std::string path = showcase_asset_path(Showcase::HDRI_DIR, Showcase::HDRI_MANIFEST);
-        if (!Showcase::parse_hdri_manifest(showcase_read_text(path), manifest, &error))
+        if (!Showcase::parse_hdri_manifest(showcase_read_text(path), g_hdris, &error))
             BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDRI environments (" << path << ": " << error << ")";
+        // 1h-3: the downloaded catalogue entries, then the user's own (ids never repeat a bundled one).
+        const std::string data = showcase_hdri_data_dir();
+        for (const Showcase::HdriInfo &h : showcase_hdri_catalogue().hdris)
+            if (g_hdris.find(h.id) == nullptr && showcase_hdri_installed(h)) {
+                Showcase::HdriInfo installed = h;
+                installed.base_dir           = data;
+                g_hdris.hdris.push_back(std::move(installed));
+            }
+        for (Showcase::HdriInfo &h : showcase_user_hdris())
+            if (g_hdris.find(h.id) == nullptr)
+                g_hdris.hdris.push_back(std::move(h));
     }
-    return manifest;
+    return g_hdris;
 }
 
 std::string showcase_hdri_path(const Showcase::HdriInfo &hdri)
 {
-    return hdri.procedural ? std::string() : showcase_asset_path(Showcase::HDRI_DIR, hdri.file);
+    if (hdri.procedural)
+        return std::string();
+    if (!hdri.base_dir.empty())
+        return (boost::filesystem::path(hdri.base_dir) / hdri.file).string();
+    return showcase_asset_path(Showcase::HDRI_DIR, hdri.file);
 }
 
 wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
@@ -95,6 +189,15 @@ wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
     if (hdri.id == "hdri_workshop") return _L("Workshop window (HDRI)");
     if (hdri.id == "hdri_loft") return _L("Loft studio (HDRI)");
     if (hdri.id == "hdri_sunset") return _L("Golden hour (HDRI)");
+    // 1h-3: the download catalogue.
+    if (hdri.id == "hdri_brown_studio") return _L("Brown photo studio (HDRI)");
+    if (hdri.id == "hdri_blue_studio") return _L("Blue photo studio (HDRI)");
+    if (hdri.id == "hdri_industrial_sunset") return _L("Industrial sunset sky (HDRI)");
+    if (hdri.id == "hdri_kiara_dawn") return _L("Dawn in the park (HDRI)");
+    if (hdri.id == "hdri_warehouse") return _L("Empty warehouse (HDRI)");
+    if (hdri.id == "hdri_abandoned_workshop") return _L("Abandoned workshop (HDRI)");
+    if (hdri.user)
+        return wxString::Format(_L("Mine: %s"), wxString::FromUTF8(hdri.name));
     return wxString::FromUTF8(hdri.name);
 }
 

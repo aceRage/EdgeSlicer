@@ -28,17 +28,30 @@ environment's floor" (the automatic camera height comes from the model's size). 
 (degrees, + = more sky) is what the panel sets the backdrop tilt to when the HDRI is chosen. The
 values are estimates from looking at the panoramas, not measurements.
 
-## Catalogue for phase 1h-3 (in-app downloads; not in this folder, no download code yet)
+## Download catalogue (phase 1h-3)
 
-The owner wants these Poly Haven CC0 2k panoramas as download options (2026-11-01), served from our
-own mirror (the edgeslicer-deps release assets; D-R3), never from the Poly Haven API. When 1h-3 lands
-they get manifest entries with `"downloadable": true`, a `download_url` and a `sha256`:
+`hdri_catalogue.json` lists the Poly Haven CC0 2k panoramas the owner chose as download options
+(2026-11-01). They are not in this folder. The app downloads one only when the user asks
+(Background or Light > Environments...), and only from our own mirror (D-R3), never from the Poly
+Haven API. The mirror's base URL is `HDRI_MIRROR_BASE_URL` in
+`src/libslic3r/Showcase/ShowcaseHdriLibrary.hpp`; the environment variable `EDGESLICER_HDRI_MIRROR`
+replaces it, for example to test against a local server. Each download must match the entry's
+`download.size` and `download.sha256` before it is kept in `<data folder>/showcase/hdri/`. An entry
+whose size or checksum is still empty shows as "Not available yet", and nothing is downloaded for it.
 
-| Poly Haven id | Source page |
-|---|---|
-| `brown_photostudio_02` | https://polyhaven.com/a/brown_photostudio_02 |
-| `blue_photo_studio` | https://polyhaven.com/a/blue_photo_studio |
-| `industrial_sunset_puresky` | https://polyhaven.com/a/industrial_sunset_puresky |
-| `kiara_1_dawn` | https://polyhaven.com/a/kiara_1_dawn |
-| `empty_warehouse_01` | https://polyhaven.com/a/empty_warehouse_01 |
-| `abandoned_workshop_02` | https://polyhaven.com/a/abandoned_workshop_02 |
+| Id | Poly Haven source | File on the mirror |
+|---|---|---|
+| `hdri_brown_studio` | https://polyhaven.com/a/brown_photostudio_02 | `brown_photostudio_02_2k.hdr` |
+| `hdri_blue_studio` | https://polyhaven.com/a/blue_photo_studio | `blue_photo_studio_2k.hdr` |
+| `hdri_industrial_sunset` | https://polyhaven.com/a/industrial_sunset_puresky | `industrial_sunset_puresky_2k.hdr` |
+| `hdri_kiara_dawn` | https://polyhaven.com/a/kiara_1_dawn | `kiara_1_dawn_2k.hdr` |
+| `hdri_warehouse` | https://polyhaven.com/a/empty_warehouse_01 | `empty_warehouse_01_2k.hdr` |
+| `hdri_abandoned_workshop` | https://polyhaven.com/a/abandoned_workshop_02 | `abandoned_workshop_02_2k.hdr` |
+
+To publish one: put the 2k Radiance `.hdr` on the mirror under the file name above, then fill its
+`download.size` (bytes) and `download.sha256` (lower-case hex) in `hdri_catalogue.json`. The
+`ground` and `backdrop_pitch` values are estimates, like the bundled ones; adjust them after a look.
+
+The user's own HDRIs (Load my own HDRI: `.hdr`, or a scanline `.exr` with no, RLE, ZIP or ZIPS
+compression) are checked, stored at most 4096 px wide as `.hdr` in the same data folder, and listed
+in `user_hdri.json` there.

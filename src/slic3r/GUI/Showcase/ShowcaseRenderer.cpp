@@ -748,7 +748,9 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_hdri(const Showcase::H
 {
     // The sun is taken out of the image-based light only when the key light stands in for it.
     const bool        remove_sun = m_scene->lighting.sun_from_env;
-    const std::string key        = "hdri:" + hdri.id + (remove_sun ? "+sun" : "");
+    // 1h-3: the list's generation too, so a re-added or deleted download / own HDRI of the same id is read again.
+    const std::string generation = std::to_string(showcase_hdris_generation());
+    const std::string key        = "hdri:" + generation + ":" + hdri.id + (remove_sun ? "+sun" : "");
     if (m_env_key == key) {
         m_env_is_hdri = m_env_texture != 0;
         return m_env_texture != 0 ? &m_hdri_info : nullptr;
@@ -770,7 +772,7 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_hdri(const Showcase::H
         image  = Showcase::make_procedural_hdr(hdri.kind, 2048);
         loaded = !image.empty();
     } else {
-        loaded = Showcase::load_hdr_file(showcase_hdri_path(hdri), image, &error);
+        loaded = Showcase::load_hdri_any(showcase_hdri_path(hdri), image, &error);   // 1h-3: .hdr or .exr
     }
     if (!loaded) {
         BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be read (" << error
@@ -798,13 +800,13 @@ const Showcase::EnvironmentInfo *ShowcaseRenderer::ensure_hdri(const Showcase::H
         return nullptr;
     }
     // The sharp panorama for the backdrop, once per HDRI (the sun toggle does not change it).
-    if (m_hdri_backdrop_id != hdri.id || m_hdri_backdrop == 0) {
+    if (m_hdri_backdrop_id != generation + ":" + hdri.id || m_hdri_backdrop == 0) {
         if (m_hdri_backdrop != 0) {
             glsafe(::glDeleteTextures(1, &m_hdri_backdrop));
             m_hdri_backdrop = 0;
         }
         m_hdri_backdrop    = showcase_upload_equirect(image, baked.scale);
-        m_hdri_backdrop_id = hdri.id;
+        m_hdri_backdrop_id = generation + ":" + hdri.id;
         if (m_hdri_backdrop == 0)
             BOOST_LOG_TRIVIAL(warning) << "Showcase: the HDRI " << hdri.id << " could not be uploaded as a backdrop; its light is used, the backdrop stays blurred";
     }

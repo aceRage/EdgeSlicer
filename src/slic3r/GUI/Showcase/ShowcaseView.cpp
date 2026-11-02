@@ -1,5 +1,6 @@
 #include "ShowcaseView.hpp"
 
+#include "ShowcaseHdriDialog.hpp"
 #include "ShowcaseRenderer.hpp"
 #include "ShowcaseTextures.hpp"
 
@@ -617,6 +618,11 @@ void ShowcaseView::build_panel()
     m_environment = env_choice();
     m_environment->SetToolTip(_L("The surrounding shown behind the model. It also lights the model and shows in its reflections."));
     row(_L("Environment"), m_environment);
+    // 1h-3: more environments to download, and your own HDRI.
+    m_env_more = new wxButton(m_side, wxID_ANY, _L("Environments..."));
+    m_env_more->SetToolTip(_L("Download more environments, or load your own HDRI panorama."));
+    grid->AddSpacer(0);
+    grid->Add(m_env_more);
     // 1h-2: where the environment sits (the box first: it decides which rows below apply).
     m_bg_ground = new wxCheckBox(m_side, wxID_ANY, _L("Stand on the environment's floor"));
     m_bg_ground->SetToolTip(_L("Projects the environment onto a dome with a flat floor, so the model stands on its floor "
@@ -785,6 +791,10 @@ void ShowcaseView::build_panel()
     m_light_env = env_choice();
     m_light_env->SetToolTip(_L("Light and reflections from a photographed surrounding, behind the colour, gradient or picture."));
     row(_L("Lighting environment"), m_light_env);
+    m_light_env_more = new wxButton(m_side, wxID_ANY, _L("Environments..."));
+    m_light_env_more->SetToolTip(_L("Download more environments, or load your own HDRI panorama."));
+    grid->AddSpacer(0);
+    grid->Add(m_light_env_more);
     m_env_intensity = slider(70, 0, 300);
     row(_L("Environment brightness"), m_env_intensity);
     m_env_rotation = slider(0, 0, 359);
@@ -1286,6 +1296,8 @@ void ShowcaseView::build_panel()
         const float mm = float(m_bg_ground_radius->GetValue());
         edit([mm](Showcase::Scene &s) { s.background.ground_radius = mm; });
     });
+    for (wxButton *b : { m_env_more, m_light_env_more })
+        b->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { on_manage_environments(); });
     m_bg_ground_auto->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         edit([](Showcase::Scene &s) {
             s.background.ground_height = 0.f;
@@ -2317,7 +2329,7 @@ void ShowcaseView::update_enabled()
                                                           m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
                                                           m_plate_offset_y, m_plate_fit, m_translucency, m_imp_wobble, m_imp_seam, m_imp_strings,
                                                           m_imp_colour, m_dof_bleed, m_dof_highlights, m_lens_grain, m_lens_vignette, m_lens_bloom,
-                                                          m_lens_chromatic, m_lens_distortion, m_bg_ground_auto })
+                                                          m_lens_chromatic, m_lens_distortion, m_bg_ground_auto, m_env_more, m_light_env_more })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2492,6 +2504,8 @@ void ShowcaseView::apply_row_visibility()
 
     // Background
     set(m_environment, v.bg_environment);
+    set(m_env_more, v.bg_environment);
+    set(m_light_env_more, v.light_environment);
     set(m_bg_color1, v.bg_colour1);
     set(m_bg_color2, v.bg_colour2);
     set(m_bg_image, v.bg_image);
@@ -3563,6 +3577,47 @@ void ShowcaseView::callouts_apply_to_export(ShowcaseImage &image, bool has_alpha
     opt.model_center_x = callouts_model_center_x();
     opt.model_box      = callouts_model_box();
     showcase_draw_callouts(image, has_alpha, s, callouts_draw_list(labels), opt);
+}
+
+void ShowcaseView::refresh_environment_choices()
+{
+    for (wxChoice *c : { m_environment, m_light_env }) {
+        if (c == nullptr)
+            continue;
+        wxArrayString envs;
+        envs.Add(_L("None"));
+        for (const Showcase::EnvironmentInfo &e : showcase_environments().environments)
+            envs.Add(showcase_environment_name(e));
+        for (const Showcase::HdriInfo &h : showcase_hdris().hdris)
+            envs.Add(showcase_hdri_name(h));
+        c->Set(envs);
+    }
+}
+
+void ShowcaseView::on_manage_environments()
+{
+    if (read_only())
+        return;
+    ShowcaseHdriDialog dlg(wxGetTopLevelParent(this));
+    dlg.ShowModal();
+    if (!dlg.changed())
+        return;
+    showcase_hdris_reload();
+    refresh_environment_choices();
+    // A download or an own HDRI just added becomes the scene's environment, as if picked from the list.
+    if (const Showcase::HdriInfo *info = dlg.added_id().empty() ? nullptr : showcase_hdris().find(dlg.added_id())) {
+        const std::string id    = info->id;
+        const float       pitch = info->backdrop_pitch;
+        edit([&id, pitch](Showcase::Scene &s) {
+            s.lighting.environment      = id;
+            s.lighting.sun_from_env     = true;
+            s.background.backdrop_pitch = pitch;
+        }, true);
+    } else
+        sync_controls();
+    fit_side_width();
+    m_side->Layout();
+    set_as_dirty();
 }
 
 bool ShowcaseView::horizon_on_mouse(wxMouseEvent &evt)

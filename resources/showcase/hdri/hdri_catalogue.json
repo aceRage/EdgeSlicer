@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "mirror_note": "Downloaded on request from our own mirror (ShowcaseHdriLibrary.hpp HDRI_MIRROR_BASE_URL), never the Poly Haven API (D-R3). size and sha256 are filled when the files are published; until then the app does not download the entry.",
+  "hdris": [
+    {
+      "id": "hdri_brown_studio",
+      "name": "Brown photo studio",
+      "file": "brown_photostudio_02_2k.hdr",
+      "source": "https://polyhaven.com/a/brown_photostudio_02",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1600,
+        "radius_mm": 6000
+      },
+      "backdrop_pitch": 8,
+      "downloadable": true,
+      "download": {
+        "file": "brown_photostudio_02_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hdri_blue_studio",
+      "name": "Blue photo studio",
+      "file": "blue_photo_studio_2k.hdr",
+      "source": "https://polyhaven.com/a/blue_photo_studio",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1600,
+        "radius_mm": 6000
+      },
+      "backdrop_pitch": 8,
+      "downloadable": true,
+      "download": {
+        "file": "blue_photo_studio_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hdri_industrial_sunset",
+      "name": "Industrial sunset sky",
+      "file": "industrial_sunset_puresky_2k.hdr",
+      "source": "https://polyhaven.com/a/industrial_sunset_puresky",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1700,
+        "radius_mm": 60000
+      },
+      "backdrop_pitch": 30,
+      "downloadable": true,
+      "download": {
+        "file": "industrial_sunset_puresky_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hdri_kiara_dawn",
+      "name": "Dawn in the park",
+      "file": "kiara_1_dawn_2k.hdr",
+      "source": "https://polyhaven.com/a/kiara_1_dawn",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1700,
+        "radius_mm": 40000
+      },
+      "backdrop_pitch": 15,
+      "downloadable": true,
+      "download": {
+        "file": "kiara_1_dawn_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hdri_warehouse",
+      "name": "Empty warehouse",
+      "file": "empty_warehouse_01_2k.hdr",
+      "source": "https://polyhaven.com/a/empty_warehouse_01",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1600,
+        "radius_mm": 15000
+      },
+      "backdrop_pitch": 12,
+      "downloadable": true,
+      "download": {
+        "file": "empty_warehouse_01_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    },
+    {
+      "id": "hdri_abandoned_workshop",
+      "name": "Abandoned workshop",
+      "file": "abandoned_workshop_02_2k.hdr",
+      "source": "https://polyhaven.com/a/abandoned_workshop_02",
+      "authors": "Poly Haven",
+      "licence": "CC0 1.0",
+      "ground": {
+        "height_mm": 1500,
+        "radius_mm": 8000
+      },
+      "backdrop_pitch": 12,
+      "downloadable": true,
+      "download": {
+        "file": "abandoned_workshop_02_2k.hdr",
+        "size": 0,
+        "sha256": ""
+      }
+    }
+  ]
+}
