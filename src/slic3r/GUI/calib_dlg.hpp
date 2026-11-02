@@ -149,8 +149,10 @@ protected:
     TextInput *m_tiRetractStart;
     TextInput *m_tiRetractEnd;
     TextInput *m_tiRetractStep;
+    TextInput *m_tiFilletRadius;
     CheckBox  *m_cbLabels;
     CheckBox  *m_cbWaitTemp;
+    CheckBox  *m_cbFillet;
     wxStaticText *m_stSummary;
     wxStaticText *m_stRangeNote;
     Plater    *m_plater;

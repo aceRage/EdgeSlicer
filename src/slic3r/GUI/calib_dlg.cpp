@@ -1005,8 +1005,10 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     wxString retract_start_str = _L("Retraction min: ");
     wxString retract_end_str   = _L("Retraction max: ");
     wxString retract_step_str  = _L("Retraction step: ");
+    wxString fillet_radius_str = _L("Fillet radius: ");
     int      text_max          = GetTextMax(this, std::vector<wxString>{start_temp_str, end_temp_str, temp_step_str, band_height_str,
-                                                                       retract_start_str, retract_end_str, retract_step_str});
+                                                                       retract_start_str, retract_end_str, retract_step_str,
+                                                                       fillet_radius_str});
 
     auto st_size = FromDIP(wxSize(text_max, -1));
     auto ti_size = FromDIP(wxSize(120, -1));
@@ -1053,6 +1055,20 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     wait_sizer->Add(wait_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
     settings_sizer->Add(wait_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
 
+    // Owner (real print): the towers snapped at the plate. Concave fillet foot under every pillar.
+    auto fillet_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbFillet        = new CheckBox(this);
+    m_cbFillet->SetValue(true);
+    auto fillet_text = new wxStaticText(this, wxID_ANY, _L("Fillet tower base"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbFillet->SetToolTip(_L("Add a concave fillet where each tower meets its base plate, so tall towers do not snap off at the joint."));
+    fillet_text->SetToolTip(m_cbFillet->GetToolTipText());
+    fillet_sizer->Add(m_cbFillet, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    fillet_sizer->Add(fillet_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(fillet_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+    add_row(fillet_radius_str, m_tiFilletRadius, wxString::FromDouble(stringing_grid_max_fillet_radius()), "mm");
+    m_tiFilletRadius->SetToolTip(wxString::Format(_L("0.5 to %.1f mm: the largest radius keeps the fillet on the base plate."),
+                                                  stringing_grid_max_fillet_radius()));
+
     settings_sizer->AddSpacer(FromDIP(5));
     m_stSummary = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
     m_stSummary->SetForegroundColour(wxColour(128, 128, 128));
@@ -1085,8 +1101,14 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
         this->update_summary();
         e.Skip();
     };
-    for (TextInput *ti : {m_tiStartTemp, m_tiEndTemp, m_tiTempStep, m_tiBandHeight, m_tiRetractStart, m_tiRetractEnd, m_tiRetractStep})
+    for (TextInput *ti : {m_tiStartTemp, m_tiEndTemp, m_tiTempStep, m_tiBandHeight, m_tiRetractStart, m_tiRetractEnd, m_tiRetractStep,
+                          m_tiFilletRadius})
         ti->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, on_edit);
+    m_cbFillet->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) {
+        m_tiFilletRadius->Enable(m_cbFillet->GetValue());
+        update_summary();
+        e.Skip();
+    });
     // Skip(): handlers bound later run first, and CheckBox's own wxEVT_TOGGLEBUTTON handler (bound in its
     // constructor) is what swaps the checked/unchecked bitmap. Without Skip() it never ran, so both boxes
     // looked locked (owner hand test).
@@ -1146,6 +1168,9 @@ void TempRetract_Calibration_Dlg::reset_to_defaults()
     m_tiRetractStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_step));
     m_cbLabels->SetValue(p.print_labels);
     m_cbWaitTemp->SetValue(p.wait_for_temperature);
+    m_cbFillet->SetValue(p.fillet_base);
+    m_tiFilletRadius->GetTextCtrl()->SetValue(wxString::FromDouble(p.fillet_radius));
+    m_tiFilletRadius->Enable(p.fillet_base);
     Layout();
 }
 
@@ -1176,6 +1201,9 @@ bool TempRetract_Calibration_Dlg::read_params(Calib_Params &params, wxString *er
     ok      = ok && m_tiRetractStart->GetTextCtrl()->GetValue().ToDouble(&params.retract_start);
     ok      = ok && m_tiRetractEnd->GetTextCtrl()->GetValue().ToDouble(&params.retract_end);
     ok      = ok && m_tiRetractStep->GetTextCtrl()->GetValue().ToDouble(&params.retract_step);
+    params.fillet_base = m_cbFillet->GetValue();
+    if (params.fillet_base) // the radius only matters (and is only checked) with the fillet on
+        ok = ok && m_tiFilletRadius->GetTextCtrl()->GetValue().ToDouble(&params.fillet_radius);
     if (!ok) {
         if (error)
             *error = _L("Please input valid numbers.");

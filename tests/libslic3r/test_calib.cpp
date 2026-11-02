@@ -346,6 +346,32 @@ TEST_CASE("Stringing grid dialog defaults validate and 18 columns do not fit", "
     CHECK(err.find("max") != std::string::npos);
 }
 
+TEST_CASE("Stringing grid dialog fillet option: default on at the largest radius, radius checked only when on", "[Calib][TempRetract]")
+{
+    Calib_Params defaults;
+    stringing_grid_default_params(defaults, 220., 190., 240., 5.);
+    CHECK(defaults.fillet_base);
+    CHECK(defaults.fillet_radius == Approx(stringing_grid_max_fillet_radius()));
+    CHECK(stringing_grid_params_valid(defaults, 270.));
+
+    Calib_Params p = grid_params();
+    for (double r : {0.5, 1.5, 3.0}) {
+        CAPTURE(r);
+        p.fillet_radius = r;
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    for (double r : {0., 0.4, 3.5, 5.}) {
+        CAPTURE(r);
+        p.fillet_radius = r;
+        std::string err;
+        CHECK_FALSE(stringing_grid_params_valid(p, 270., &err));
+        CHECK(err.find("Fillet") != std::string::npos);
+    }
+    p.fillet_base   = false; // the radius field is ignored when the fillet is off
+    p.fillet_radius = 99.;
+    CHECK(stringing_grid_params_valid(p, 270.));
+}
+
 TEST_CASE("Stringing grid slicer config disables raft and the prime tower", "[Calib][TempRetract]")
 {
     DynamicPrintConfig print    = DynamicPrintConfig::full_print_config();

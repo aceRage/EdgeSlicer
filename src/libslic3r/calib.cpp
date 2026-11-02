@@ -1126,6 +1126,11 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
         if (params.retract_step <= 0.)
             return fail(_u8L("Retraction step must be > 0"));
     }
+    if (params.fillet_base) {
+        const double max_r = stringing_grid_max_fillet_radius();
+        if (params.fillet_radius < 0.5 - 1e-9 || params.fillet_radius > max_r + 1e-9)
+            return fail(Slic3r::format(_u8L("Fillet radius must be between 0.5 and %1% mm"), max_r));
+    }
     const int cols     = stringing_grid_column_count(params);
     const int max_cols = std::min(17, stringing_grid_max_columns(bed_width));
     if (cols < 2)
@@ -1149,6 +1154,8 @@ bool stringing_grid_default_params(
     params.retract_step         = 0.2;
     params.print_labels         = false;
     params.wait_for_temperature = true;
+    params.fillet_base          = true; // owner: towers snapped at the plate
+    params.fillet_radius        = stringing_grid_max_fillet_radius();
 
     // Lance (2026-11-01): build outward from the filament's other-layers temperature,
     // center +step, -step, +2 step, -2 step, ... When one side reaches its limit, keep adding on the
