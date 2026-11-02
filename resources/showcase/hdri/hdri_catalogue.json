@@ -17,8 +17,8 @@
       "downloadable": true,
       "download": {
         "file": "brown_photostudio_02_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 6492863,
+        "sha256": "153ca0cb899575c00f5b23065958d250a0f73e8789c8cf5957ccea313baf2bb6"
       }
     },
     {
@@ -36,8 +36,8 @@
       "downloadable": true,
       "download": {
         "file": "blue_photo_studio_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 6472197,
+        "sha256": "2c236548680005d1215fef31fdc8c2968cf46250f70c4b56f3e9e4493eb613eb"
       }
     },
     {
@@ -55,8 +55,8 @@
       "downloadable": true,
       "download": {
         "file": "industrial_sunset_puresky_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 4344656,
+        "sha256": "799e6fa9a58dfbec1426d62486aa87fa097a85cf16bb121c79f9ee1125a54288"
       }
     },
     {
@@ -74,8 +74,8 @@
       "downloadable": true,
       "download": {
         "file": "kiara_1_dawn_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 6149550,
+        "sha256": "7261c613b35a9b760ed5c7846ec8182532b90d89f6a8385c42bb743883159a66"
       }
     },
     {
@@ -93,8 +93,8 @@
       "downloadable": true,
       "download": {
         "file": "empty_warehouse_01_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 6581920,
+        "sha256": "9734d30c83fe480a2a7c7521b7bdb816d869c2468d45d3794bde729d6181f830"
       }
     },
     {
@@ -112,8 +112,8 @@
       "downloadable": true,
       "download": {
         "file": "abandoned_workshop_02_2k.hdr",
-        "size": 0,
-        "sha256": ""
+        "size": 6914252,
+        "sha256": "8d52ed6ebe66c7c98f275658664ac378daa83ceb54fd7f3756f07a2a053a95f3"
       }
     }
   ]

@@ -23,9 +23,9 @@
 namespace Slic3r {
 namespace Showcase {
 
-// TODO(owner, 1h-3): publish the six catalogue files (hdri_catalogue.json, "download.file") as release
-// assets under this URL in the edgeslicer-deps mirror, then fill each entry's "size" and "sha256".
-// Until an entry has both, the app shows it as "not available yet" and downloads nothing.
+// The six catalogue files (hdri_catalogue.json, "download.file") are release assets under this URL in
+// the edgeslicer-deps mirror (release showcase-hdri-1, published 2026-11-02). An entry without both
+// "size" and "sha256" shows as "not available yet" and downloads nothing.
 inline const char *HDRI_MIRROR_BASE_URL = "https://github.com/aceRage/edgeslicer-deps/releases/download/showcase-hdri-1/";
 // An environment variable that replaces the base URL (a local mock server for tests, or a staging mirror).
 inline const char *HDRI_MIRROR_ENV      = "EDGESLICER_HDRI_MIRROR";
