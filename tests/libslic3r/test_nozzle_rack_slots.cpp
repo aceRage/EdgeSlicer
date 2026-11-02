@@ -39,6 +39,8 @@ DynamicPrintConfig h2c(const std::string &right_rack)
     cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4, 0.4 };
     cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = false;
     cfg.option<ConfigOptionInts>("filament_map", true)->values                  = { 1, 2, 2 };
+    // The H2C's rack: one nozzle on the left, up to six on the right.
+    cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1, 6 }));
     if (!right_rack.empty())
         cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "", right_rack };
     return cfg;
@@ -64,43 +66,45 @@ MultiNozzleUtils::NozzleInfo nozzle(int id, int extruder, const char *diameter)
 
 // ---- 1. Ids and storage -------------------------------------------------------------------------------------------
 
-TEST_CASE("Rack slot ids are T<extruder>.<slot> and older readers ignore them", "[NozzleRackSlots][Ids]")
+TEST_CASE("Rack size tool ids are T<extruder>:<size> and older readers ignore them", "[NozzleRackSlots][Ids]")
 {
-    CHECK(nozzle_slot_id(1, 3) == "T2.3");
+    CHECK(nozzle_size_group_id(1, 0.6) == "T2:0.6");
+    CHECK(nozzle_size_group_id(0, 0.25) == "T1:0.25");
     size_t e = 9;
-    int    k = 9;
-    REQUIRE(parse_nozzle_slot_id("T2.3", e, k));
+    double d = 9.;
+    REQUIRE(parse_nozzle_size_group_id("T2:0.6", e, d));
     CHECK(e == 1);
-    CHECK(k == 3);
-    CHECK_FALSE(parse_nozzle_slot_id("T2", e, k));
-    CHECK_FALSE(parse_nozzle_slot_id("T2.0", e, k));
-    CHECK_FALSE(parse_nozzle_slot_id("T2.x", e, k));
-    CHECK_FALSE(parse_nozzle_slot_id("Left.1", e, k));
-    // P8's reader of extruder ids rejects slot ids: a build without P9 ignores them.
-    CHECK(nozzle_tool_id_extruder("T2.3") == -1);
+    CHECK(d == Approx(0.6));
+    CHECK_FALSE(parse_nozzle_size_group_id("T2", e, d));
+    CHECK_FALSE(parse_nozzle_size_group_id("T2:", e, d));
+    CHECK_FALSE(parse_nozzle_size_group_id("T2:x", e, d));
+    CHECK_FALSE(parse_nozzle_size_group_id("T2:0", e, d));
+    CHECK_FALSE(parse_nozzle_size_group_id("Left:0.4", e, d));
+    // P8's reader of extruder ids rejects them: a build without P9 ignores them.
+    CHECK(nozzle_tool_id_extruder("T2:0.6") == -1);
     CHECK(nozzle_tool_id_extruder("T2") == 1);
 }
 
-TEST_CASE("A rack slot's changes round-trip in nozzle_process_edits next to the extruders'", "[NozzleRackSlots][Ids][Edits]")
+TEST_CASE("A rack size's changes round-trip in nozzle_process_edits next to the extruders'", "[NozzleRackSlots][Ids][Edits]")
 {
     NozzleProcessEdits edits;
-    edits["T2.3"].set_key_value("wall_loops", new ConfigOptionInt(5));
+    edits["T2:0.6"].set_key_value("wall_loops", new ConfigOptionInt(5));
     edits["T1"].set_key_value("outer_wall_speed", new ConfigOptionFloats({ 77. }));
     const std::vector<std::string> stored = serialize_nozzle_process_edits(edits);
     REQUIRE(stored.size() == 2);
     const NozzleProcessEdits back = parse_nozzle_process_edits(stored);
-    REQUIRE(back.count("T2.3") == 1);
+    REQUIRE(back.count("T2:0.6") == 1);
     REQUIRE(back.count("T1") == 1);
-    CHECK(back.at("T2.3").opt_int("wall_loops") == 5);
+    CHECK(back.at("T2:0.6").opt_int("wall_loops") == 5);
 }
 
-TEST_CASE("Slot process choices are stored by slot id; bad entries are dropped", "[NozzleRackSlots][Ids]")
+TEST_CASE("Rack size process choices are stored by tool id; bad entries are dropped", "[NozzleRackSlots][Ids]")
 {
-    std::map<std::string, std::string> names{ { "T2.3", "0.30mm Standard @BBL H2C 0.6 nozzle" }, { "T2.1", "0.20mm Standard @BBL H2C" } };
+    std::map<std::string, std::string> names{ { "T2:0.6", "0.30mm Standard @BBL H2C 0.6 nozzle" }, { "T2:0.2", "0.10mm Standard @BBL H2C 0.2 nozzle" } };
     DynamicPrintConfig cfg;
     std::vector<std::string> stored = serialize_nozzle_slot_process_names(names);
-    stored.push_back("T2\nnot a slot id");
-    stored.push_back("T2.4\n");
+    stored.push_back("T2\nnot a size tool id");
+    stored.push_back("T2:0.8\n");
     stored.push_back("garbage");
     cfg.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(stored));
     const std::map<std::string, std::string> back = nozzle_slot_process_names(cfg);
@@ -109,7 +113,7 @@ TEST_CASE("Slot process choices are stored by slot id; bad entries are dropped",
 
 // ---- 2. The selector's entries ----------------------------------------------------------------------------------
 
-TEST_CASE("An extruder whose rack lists two or more nozzles shows its slots as tools", "[NozzleRackSlots][Entries]")
+TEST_CASE("The selector groups an extruder's rack by nozzle size", "[NozzleRackSlots][Entries]")
 {
     SECTION("no rack: one entry per extruder, as in P8")
     {
@@ -119,35 +123,60 @@ TEST_CASE("An extruder whose rack lists two or more nozzles shows its slots as t
         CHECK(nozzle_slot_tools(h2c("")).empty());
         CHECK(rack_slot_count(h2c(""), 1) == 0);
     }
-    SECTION("a rack of one nozzle is no choice")
+    SECTION("a rack of one size is the extruder itself: Right 0.4, nothing more")
     {
         CHECK(nozzle_slot_tools(h2c("0.4")).empty());
+        CHECK(nozzle_slot_tools(h2c("0.4, 0.4, 0.4, 0.4, 0.4, 0.4")).empty());
+        CHECK(nozzle_tool_entries(h2c("0.4, 0.4, 0.4")).size() == 2);
     }
-    SECTION("Left, then Right slot 1..N with their sizes")
+    SECTION("Left, Right (its mounted size), then each other size of the rack once, in rack order")
     {
-        const DynamicPrintConfig           cfg     = h2c("0.4, 0.4, 0.2, 0.6:high_flow");
+        const DynamicPrintConfig           cfg     = h2c("0.4, 0.4, 0.2, 0.6:high_flow, 0.2");
         const std::vector<NozzleToolEntry> entries = nozzle_tool_entries(cfg);
-        REQUIRE(entries.size() == 5);
+        REQUIRE(entries.size() == 4);
         CHECK(entries[0].extruder == 0);
         CHECK(entries[0].slot == 0);
-        CHECK(entries[3].extruder == 1);
-        CHECK(entries[3].slot == 3);
-        CHECK(entries[3].diameter == Approx(0.2));
-        CHECK(nozzle_tool_entry_id(entries[4]) == "T2.4");
-        CHECK(has(nozzle_tool_entry_name(cfg, entries[4]), "slot 4"));
-        CHECK(nozzle_slot_tools(cfg).size() == 4);
+        CHECK(entries[1].extruder == 1);
+        CHECK(entries[1].slot == 0);
+        CHECK(entries[1].diameter == Approx(0.4));
+        CHECK(entries[2].slot == 1);
+        CHECK(entries[2].diameter == Approx(0.2));
+        CHECK(nozzle_tool_entry_id(entries[3]) == "T2:0.6");
+        CHECK(has(nozzle_tool_entry_name(cfg, entries[3]), "0.6"));
+        CHECK(nozzle_slot_tools(cfg).size() == 2);
+        CHECK(rack_summary(extruder_rack_nozzles(cfg)[1]) == "2 x 0.4, 2 x 0.2, 1 x 0.6");
     }
     SECTION("the project's rack sizes win over the printer preset's")
     {
         DynamicPrintConfig cfg = h2c("0.4, 0.4");
         cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "", "0.4, 0.6, 0.8" };
         const std::vector<NozzleToolEntry> slots = nozzle_slot_tools(cfg);
-        REQUIRE(slots.size() == 3);
-        CHECK(slots[2].diameter == Approx(0.8));
+        REQUIRE(slots.size() == 2);
+        CHECK(slots[1].diameter == Approx(0.8));
         // An empty project text keeps the preset's rack.
         cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override")->values = { "", "" };
-        CHECK(nozzle_slot_tools(cfg).size() == 2);
+        CHECK(nozzle_slot_tools(cfg).empty());
     }
+}
+
+TEST_CASE("A U1 has no rack: Plate + T1..T4, even with a rack text left over from an H2C project", "[NozzleRackSlots][Entries][U1]")
+{
+    // Owner hand test 2026-11-02: the U1 selector read "T1 0.2 | T2 slot 1 0.4 | ...".
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_filaments(4);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.2, 0.4, 0.6, 0.8 };
+    cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = false;
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "", "0.4,0.4,0.4,0.4,0.4" };
+    const std::vector<NozzleToolEntry> entries = nozzle_tool_entries(cfg);
+    REQUIRE(entries.size() == 4);
+    for (size_t e = 0; e < 4; ++e) {
+        CHECK(entries[e].extruder == e);
+        CHECK(entries[e].slot == 0);
+        CHECK(nozzle_tool_entry_id(entries[e]) == "T" + std::to_string(e + 1));
+    }
+    CHECK(nozzle_slot_tools(cfg).empty());
+    CHECK(rack_slot_count(cfg, 1) == 0);
+    CHECK(nozzle_filament_group_id(cfg, 2).empty());
 }
 
 // ---- 3. Filament -> slot -----------------------------------------------------------------------------------------
@@ -205,7 +234,7 @@ TEST_CASE("A rack slot's own process reaches only the filaments on that slot", "
     slot_process.set_key_value("wall_loops", new ConfigOptionInt(5));
     slot_process.set_key_value("outer_wall_line_width", new ConfigOptionFloatOrPercent(0.66, false));
 
-    // Filament 3 on slot 3 (the 0.6), filament 2 on slot 1 (the plate's).
+    // Filament 3 on the 0.6 (slot 3), filament 2 on the mounted 0.4 (the plate's).
     const std::vector<const DynamicPrintConfig *> sources{ nullptr, nullptr };
     const std::vector<const DynamicPrintConfig *> filament_sources{ nullptr, nullptr, &slot_process };
     REQUIRE(fill_nozzle_process_slots(cfg, sources, &filament_sources));
@@ -374,14 +403,16 @@ TEST_CASE("Validation messages name the rack slot", "[NozzleRackSlots][Validate]
 {
     DynamicPrintConfig cfg = h2c("0.4, 0.4, 0.2");
     cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 0, 0, 3 };
-    CHECK(nozzle_filament_tool_id(cfg, 3) == "T2.3");
+    CHECK(nozzle_filament_tool_id(cfg, 3) == "T2:0.2");
+    CHECK(nozzle_filament_group_id(cfg, 3) == "T2:0.2");
+    CHECK(nozzle_filament_tool_id(cfg, 2) == "T2"); // on the mounted size: the extruder's own process
     CHECK(nozzle_filament_tool_id(cfg, 1) == "T1");
-    CHECK(has(nozzle_filament_tool_name(cfg, 3), "slot 3"));
+    CHECK(has(nozzle_filament_tool_name(cfg, 3), "0.2"));
     const std::string layer = nozzle_layer_height_error(cfg, 3, false, 0.28, 0.2);
-    CHECK(has(layer, "slot 3"));
+    CHECK(has(layer, "T2 0.2"));
     CHECK(has(layer, "0.2 mm"));
-    const std::string missing = nozzle_slot_process_missing_error(cfg, 1, 3);
-    CHECK(has(missing, "slot 3"));
+    const std::string missing = nozzle_size_group_missing_error(cfg, 1, 0.2);
+    CHECK(has(missing, "T2 0.2"));
     CHECK(has(missing, "0.2 mm"));
 }
 
@@ -431,7 +462,7 @@ PresetBundle &h2c_bundle(const std::vector<std::string> &rack_override)
 
 } // namespace
 
-TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked process", "[NozzleRackSlots][PresetBundle]")
+TEST_CASE("H2C: rack sizes are tools of the preset bundle with their own picked process", "[NozzleRackSlots][PresetBundle]")
 {
     SECTION("without a rack the tools are the two extruders, and nothing P9 reaches the slicing config")
     {
@@ -442,21 +473,21 @@ TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked 
         CHECK(full.option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
         CHECK(full.option<ConfigOptionStrings>("nozzle_slot_process_missing")->values.empty());
     }
-    SECTION("Left, Right slot 1..3: the 0.6 slot gets the H2C 0.6 process, and the filament pinned to it prints with it")
+    SECTION("Left, Right 0.4, Right 0.6: the 0.6 gets the H2C 0.6 process, and the filament pinned to its slot prints with it")
     {
         PresetBundle &b = h2c_bundle({ "", "0.4,0.4,0.6" });
-        CHECK(b.nozzle_tool_count() == 5);
-        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 2, 3, 4 });
-        const PresetBundle::NozzleToolRef slot3 = b.nozzle_tool_ref(4);
+        CHECK(b.nozzle_tool_count() == 3);
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1, 2 });
+        const PresetBundle::NozzleToolRef slot3 = b.nozzle_tool_ref(2);
         REQUIRE(slot3.valid);
-        CHECK(slot3.id == "T2.3");
+        CHECK(slot3.id == "T2:0.6");
         CHECK(slot3.diameter == Approx(0.6));
-        CHECK(b.nozzle_tool_index("T2.3") == 4);
-        CHECK(b.nozzle_tool_index("T2.9") == -1);
-        CHECK(has(b.nozzle_tool_name(4), "slot 3"));
-        // Slots 1 and 2 follow the plate; slot 3 gets the 0.6 system process of the plate's kind.
-        CHECK(b.nozzle_tool_process_info(2).kind == PresetBundle::NozzleToolProcessKind::FollowsPlate);
-        const PresetBundle::NozzleToolProcess info = b.nozzle_tool_process_info(4);
+        CHECK(b.nozzle_tool_index("T2:0.6") == 2);
+        CHECK(b.nozzle_tool_index("T2:0.8") == -1);
+        CHECK(has(b.nozzle_tool_name(2), "0.6"));
+        // Right (0.4) follows the plate; Right 0.6 gets the 0.6 system process of the plate's kind.
+        CHECK(b.nozzle_tool_process_info(1).kind == PresetBundle::NozzleToolProcessKind::FollowsPlate);
+        const PresetBundle::NozzleToolProcess info = b.nozzle_tool_process_info(2);
         CHECK(info.kind == PresetBundle::NozzleToolProcessKind::AutoPicked);
         CHECK(has(info.name, "0.6 nozzle"));
 
@@ -477,23 +508,23 @@ TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked 
         CHECK(std::any_of(own_speeds.begin(), own_speeds.end(), [got](double v) { return std::abs(v - got) < 1e-6; }));
         b.set_filament_rack_slot(2, 0);
     }
-    SECTION("a slot's choice and changes are kept by its id, and go when the slot goes")
+    SECTION("a rack size's choice and changes are kept by its id, and go when the size goes")
     {
         PresetBundle &b = h2c_bundle({ "", "0.4,0.4,0.6" });
-        REQUIRE(b.set_nozzle_process(4, "0.24mm Balanced Strength @BBL H2C 0.6 nozzle"));
-        CHECK(b.nozzle_tool_selection(4) == "0.24mm Balanced Strength @BBL H2C 0.6 nozzle");
-        CHECK(nozzle_slot_process_names(b.project_config).count("T2.3") == 1);
+        REQUIRE(b.set_nozzle_process(2, "0.24mm Balanced Strength @BBL H2C 0.6 nozzle"));
+        CHECK(b.nozzle_tool_selection(2) == "0.24mm Balanced Strength @BBL H2C 0.6 nozzle");
+        CHECK(nozzle_slot_process_names(b.project_config).count("T2:0.6") == 1);
         // A 0.4 process does not fit the 0.6 slot.
         const Preset *p04 = b.prints.find_preset("0.20mm Standard @BBL H2C", false);
         REQUIRE(p04 != nullptr);
-        CHECK_FALSE(b.nozzle_process_fits(*p04, 4));
-        // The tool view: the slot's profile is shown, an edit is stored under T2.3.
-        REQUIRE(b.begin_nozzle_tool_view(4));
+        CHECK_FALSE(b.nozzle_process_fits(*p04, 2));
+        // The tool view: the size tool's profile is shown, an edit is stored under T2:0.6.
+        REQUIRE(b.begin_nozzle_tool_view(2));
         CHECK(b.prints.get_selected_preset_name() == "0.24mm Balanced Strength @BBL H2C 0.6 nozzle");
         b.prints.get_edited_preset().config.set_key_value("wall_loops", new ConfigOptionInt(7));
         b.nozzle_tool_view_sync();
         b.end_nozzle_tool_view();
-        CHECK(b.nozzle_process_edits_map().count("T2.3") == 1);
+        CHECK(b.nozzle_process_edits_map().count("T2:0.6") == 1);
         CHECK(b.prints.get_selected_preset_name() == "0.20mm Standard @BBL H2C");
         // "Use one process": every choice and change goes.
         {
@@ -506,10 +537,10 @@ TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked 
             b.project_config.option<ConfigOptionStrings>("nozzle_slot_process_presets")->values = keep;
             b.project_config.option<ConfigOptionStrings>("nozzle_process_edits")->values        = edits;
         }
-        // The rack shrinks to two slots: slot 3's choice and changes are dropped.
+        // The rack loses its 0.6: that size's choice and changes are dropped.
         b.set_rack_nozzle_override({ "", "0.4,0.4" });
         CHECK(nozzle_slot_process_names(b.project_config).empty());
-        CHECK(b.nozzle_process_edits_map().count("T2.3") == 0);
+        CHECK(b.nozzle_process_edits_map().count("T2:0.6") == 0);
         b.set_rack_nozzle_override({});
     }
     SECTION("what the Extruder pages and the sidebar read for the stock H2C (owner crash report on Extruder 2)")
@@ -531,8 +562,8 @@ TEST_CASE("H2C: rack slots are tools of the preset bundle with their own picked 
         // Out of range and odd texts are taken without harm.
         CHECK_FALSE(b.set_rack_nozzle_override(5, "0.4,0.6"));
         CHECK(b.set_rack_nozzle_override(1, " 0.4, x, 0.6 "));
-        CHECK(b.nozzle_tool_count() == 4);
-        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 2, 3 });
+        CHECK(b.nozzle_tool_count() == 3);
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1, 2 });
         CHECK(b.set_rack_nozzle_override(1, ""));
         CHECK(b.nozzle_tool_count() == 2);
     }

@@ -3401,6 +3401,11 @@ Sidebar::Sidebar(Plater *parent)
     });
     combobox->edit_btn = edit_btn;
 
+    // Per-nozzle process P9 (owner hand test 2026-11-02): filament 1 is built here, not in init_filament_combo; it gets the
+    // toolhead button too.
+    combobox->tool_btn = make_filament_tool_button(0);
+    combo_and_btn_sizer->Add(combobox->tool_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2));
+
     combo_and_btn_sizer->Add(edit_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2)); // ElementSpacing - 2 (from combo box))
     combo_and_btn_sizer->AddSpacer(FromDIP(SidebarProps::ContentMargin()));
 
@@ -4035,34 +4040,9 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, const int filame
 
     combobox->edit_btn = edit_btn;
 
-    // Per-nozzle process P9 (owner idea 2026-11-02): on a toolchanger without an AMS (U1 class), the toolhead this filament prints
-    // on, always visible: click = the next toolhead, right-click = pick one. The filament menu's "Print on nozzle" is the same
-    // setting (filament_nozzle_assignment).
-    Button* tool_btn = new Button(p->m_panel_scrolled_filament_content, "T1");
-    tool_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
-    tool_btn->Bind(wxEVT_BUTTON, [this, filament_idx](wxCommandEvent&) {
-        wxGetApp().CallAfter([this, filament_idx]() { cycle_filament_tool(size_t(filament_idx)); });
-    });
-    tool_btn->Bind(wxEVT_RIGHT_DOWN, [this, tool_btn, filament_idx](wxMouseEvent&) {
-        PresetBundle *bundle = wxGetApp().preset_bundle;
-        if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
-            return;
-        const std::vector<size_t> tools = bundle->filament_nozzles();
-        const std::vector<double> sizes = bundle->effective_nozzle_diameters();
-        wxMenu                    menu;
-        for (size_t t = 0; t < sizes.size(); ++t) {
-            const int id = wxWindow::NewControlId();
-            menu.AppendCheckItem(id, wxString::Format("T%d  %s mm", int(t + 1), from_u8(format_diameter_to_str(sizes[t]))));
-            menu.Check(id, size_t(filament_idx) < tools.size() && tools[size_t(filament_idx)] == t);
-            menu.Bind(wxEVT_MENU, [this, filament_idx, t](wxCommandEvent&) {
-                wxGetApp().CallAfter([this, filament_idx, t]() { set_filament_nozzle(size_t(filament_idx), int(t + 1)); });
-            }, id);
-        }
-        tool_btn->PopupMenu(&menu);
-    });
-    tool_btn->Hide();
-    combobox->tool_btn = tool_btn;
-    combo_and_btn_sizer->Add(tool_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2));
+    // Per-nozzle process P9 (owner idea 2026-11-02): the toolhead button (make_filament_tool_button).
+    combobox->tool_btn = make_filament_tool_button(filament_idx);
+    combo_and_btn_sizer->Add(combobox->tool_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2));
 
     combo_and_btn_sizer->Add(edit_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(SidebarProps::ElementSpacing()) - FromDIP(2)); // ElementSpacing - 2 (from combo box))
 
@@ -4817,6 +4797,36 @@ void Sidebar::update_filament_nozzle_summary()
         Layout();
     }
     update_filament_tool_buttons();
+}
+
+wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
+{
+    // On a toolchanger without an AMS (U1 class), the toolhead this filament prints on, always visible: click = the next
+    // toolhead, right-click = pick one. The filament menu's "Print on nozzle" is the same setting (filament_nozzle_assignment).
+    Button *tool_btn = new Button(p->m_panel_scrolled_filament_content, "T1");
+    tool_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    tool_btn->Bind(wxEVT_BUTTON, [this, filament_idx](wxCommandEvent &) {
+        wxGetApp().CallAfter([this, filament_idx]() { cycle_filament_tool(size_t(filament_idx)); });
+    });
+    tool_btn->Bind(wxEVT_RIGHT_DOWN, [this, tool_btn, filament_idx](wxMouseEvent &) {
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
+            return;
+        const std::vector<size_t> tools = bundle->filament_nozzles();
+        const std::vector<double> sizes = bundle->effective_nozzle_diameters();
+        wxMenu                    menu;
+        for (size_t t = 0; t < sizes.size(); ++t) {
+            const int id = wxWindow::NewControlId();
+            menu.AppendCheckItem(id, wxString::Format("T%d  %s mm", int(t + 1), from_u8(format_diameter_to_str(sizes[t]))));
+            menu.Check(id, size_t(filament_idx) < tools.size() && tools[size_t(filament_idx)] == t);
+            menu.Bind(wxEVT_MENU, [this, filament_idx, t](wxCommandEvent &) {
+                wxGetApp().CallAfter([this, filament_idx, t]() { set_filament_nozzle(size_t(filament_idx), int(t + 1)); });
+            }, id);
+        }
+        tool_btn->PopupMenu(&menu);
+    });
+    tool_btn->Hide();
+    return tool_btn;
 }
 
 void Sidebar::update_filament_tool_buttons()
@@ -11110,25 +11120,21 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             counts != nullptr && i < counts->values.size() && !counts->is_nil(i) && counts->values[i] > 1) {
             const DynamicPrintConfig sized = bundle.printer_config_with_project_sizes();
             const auto               racks = extruder_rack_nozzles(sized);
-            wxString                 rack_text;
-            if (i < racks.size())
-                for (size_t k = 0; k < racks[i].size(); ++k)
-                    rack_text += (k == 0 ? wxString() : wxString(", ")) + wxString::Format("%d: %s", int(k + 1),
-                                                                                         from_u8(format_nozzle_diameter_word(racks[i][k].diameter)));
+            // Owner hand test 2026-11-02: one compact row, grouped like the Process selector ("Rack: 5 x 0.4, 1 x 0.6"), the theme's
+            // text colour, the sidebar's small-button style; the per-slot detail is in Edit.
             wxBoxSizer*   rack_sizer = new wxBoxSizer(wxHORIZONTAL);
-            wxStaticText* rack_label = new wxStaticText(nozzle_panel, wxID_ANY, _L("Rack"));
-            rack_label->SetForegroundColour(is_dark ? wxColor(194, 194, 194) : wxColor(0, 0, 0));
-            rack_label->SetFont(Label::Body_14);
-            const bool    has_slots = i < racks.size() && racks[i].size() >= 2;
-            wxStaticText* rack_value = new wxStaticText(nozzle_panel, wxID_ANY,
-                                                        has_slots ? rack_text + " mm" : _L("not set up: one nozzle, no rack slots"));
-            rack_value->SetFont(Label::Body_12);
-            rack_value->SetToolTip(_L("The nozzles in this extruder's rack in this project, slot 1 first. With two or more, each slot is a "
-                                      "tool of its own: its size, its process (Process tab: Right slot 1..N) and the filaments pinned to "
-                                      "it (filament menu > Rack slot). The stock printer preset declares no rack: add the slots with Edit, "
-                                      "or Sync them from a connected printer."));
-            Button* rack_edit = new Button(nozzle_panel, has_slots ? _L("Edit") : _L("Add rack slots"));
+            const bool    has_slots  = i < racks.size() && racks[i].size() >= 2;
+            const wxString summary   = has_slots ? _L("Rack") + ": " + from_u8(rack_summary(racks[i])) : _L("Rack: not set up");
+            Label*        rack_value = new Label(nozzle_panel, summary);
+            rack_value->SetFont(Label::Body_13);
+            rack_value->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#262E30")));
+            rack_value->SetToolTip(_L("The nozzles in this extruder's rack in this project. With two or more sizes, each size is a tool of its "
+                                      "own on the Process tab (Right 0.4, Right 0.6) with its own process; filaments can be pinned to a slot "
+                                      "(filament menu > Rack slot). The stock printer preset declares no rack: add the nozzles with Edit, or "
+                                      "Sync them from a connected printer."));
+            Button* rack_edit = new Button(nozzle_panel, has_slots ? _L("Edit") : _L("Add"));
             rack_edit->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+            rack_edit->SetToolTip(_L("The nozzle in each rack slot (Printer settings > Extruder: Rack nozzles in this project)."));
             rack_edit->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) {
                 // After the click: the dialog result rebuilds these pages.
                 wxGetApp().CallAfter([this, i]() { edit_rack_nozzles(i); });
@@ -11137,10 +11143,9 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             rack_sync->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
             rack_sync->SetToolTip(_L("Read the rack's nozzles from the connected printer (the Device page's state; nothing is sent)."));
             rack_sync->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { wxGetApp().CallAfter([this]() { sync_nozzle_sizes_from_bambu_printer(); }); });
-            rack_sizer->AddSpacer(15);
-            rack_sizer->Add(rack_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
-            rack_sizer->Add(rack_value, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
-            rack_sizer->Add(rack_edit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
+            rack_sizer->AddSpacer(FromDIP(15));
+            rack_sizer->Add(rack_value, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+            rack_sizer->Add(rack_edit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
             rack_sizer->Add(rack_sync, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(15));
             panel_sizer->Add(rack_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(4));
         }

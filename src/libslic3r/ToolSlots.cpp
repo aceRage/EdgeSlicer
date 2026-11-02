@@ -575,10 +575,52 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
 
 // ---- P9: rack slots as tools ------------------------------------------------------------------------------------
 
+bool extruder_has_nozzle_rack(const ConfigBase &config, size_t extruder)
+{
+    // extruder_max_nozzle_count is a nullable vector (1,6 on the H2C, 1 / 1,1 elsewhere); a printer config without it (tests,
+    // custom printers) declares a rack only through its rack text.
+    const ConfigOption *opt = config.option("extruder_max_nozzle_count");
+    if (opt == nullptr)
+        return true;
+    if (const auto *counts = dynamic_cast<const ConfigOptionIntsNullable *>(opt))
+        return extruder < counts->values.size() && !counts->is_nil(extruder) && counts->values[extruder] > 1;
+    if (const auto *counts = dynamic_cast<const ConfigOptionInts *>(opt))
+        return extruder < counts->values.size() && counts->values[extruder] > 1;
+    return false;
+}
+
 size_t rack_slot_count(const ConfigBase &config, size_t extruder)
 {
+    // Owner hand test 2026-11-02: a U1 showed "T2 slot 1..N" with a rack text left over from an H2C project. Only an extruder with a
+    // nozzle rack (extruder_max_nozzle_count > 1) shows rack tools.
+    if (!extruder_has_nozzle_rack(config, extruder))
+        return 0;
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
     return extruder < racks.size() && racks[extruder].size() >= 2 ? racks[extruder].size() : 0;
+}
+
+std::string rack_size_name(const ConfigBase &config, size_t extruder, double diameter)
+{
+    const size_t extruders = floats_of(config, "nozzle_diameter").size();
+    std::string  side      = extruders == 2 && is_bambu_grouping_machine(config, 2) ? std::string(extruder == 0 ? "Left" : "Right") :
+                                                                                      "T" + std::to_string(extruder + 1);
+    return side + " " + format_nozzle_diameter_word(diameter);
+}
+
+std::string rack_summary(const std::vector<RackNozzle> &rack)
+{
+    std::vector<std::pair<double, int>> counts;
+    for (const RackNozzle &nozzle : rack) {
+        auto it = std::find_if(counts.begin(), counts.end(), [&nozzle](const auto &c) { return same_nozzle_diameter(c.first, nozzle.diameter); });
+        if (it == counts.end())
+            counts.emplace_back(nozzle.diameter, 1);
+        else
+            ++it->second;
+    }
+    std::string out;
+    for (const auto &[d, n] : counts)
+        out += (out.empty() ? "" : ", ") + std::to_string(n) + " x " + format_nozzle_diameter_word(d);
+    return out;
 }
 
 std::string rack_slot_name(const ConfigBase &config, size_t extruder, int slot)
@@ -619,7 +661,7 @@ int filament_rack_slot(const ConfigBase &config, unsigned int filament_id)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
     const size_t                               e     = physical_extruder_of(config, filament_id);
-    if (e >= racks.size() || racks[e].size() < 2)
+    if (e >= racks.size() || rack_slot_count(config, e) == 0)
         return 0;
     if (const int pin = filament_rack_slot_pin(config, filament_id); pin > 0 && size_t(pin) <= racks[e].size())
         return pin;

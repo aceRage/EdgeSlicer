@@ -272,48 +272,49 @@ void stamp_nozzle_region_values(PrintRegionConfig &config);
 std::string nozzle_layer_height_error(const ConfigBase &config, unsigned int filament_id, bool first_layer, double layer_height, double nozzle);
 std::string nozzle_process_missing_error(const ConfigBase &config, size_t extruder);
 
-// ---- Per-nozzle process P9: H2C rack slots as tools (owner 2026-11-01) ----
+// ---- Per-nozzle process P9: H2C rack nozzle sizes as tools (owner 2026-11-01, grouped by size 2026-11-02) ----
 //
-// An extruder whose rack lists two or more nozzles (rack_slot_count, ToolSlots.hpp) shows each rack slot as a tool of its own:
-// the Process tab's selector reads "Plate | Left 0.4 | Right slot 1 0.4 | ... | Right slot N 0.6", each slot with its size and
-// its own process profile. Storage, alongside P8's:
-//   - nozzle_slot_process_presets: the profile chosen for a slot, the slot id "T2.3" then the name on the next line (none = the
-//     plate's when it fits the slot's
-//     size, else the system process of that size picked automatically, as for an extruder);
-//   - nozzle_process_edits: a slot's unsaved changes under its id "T2.3" (builds without P9 ignore such ids);
-//   - filament_rack_nozzle_slot (ToolSlots.hpp): the slot a filament is pinned to.
-// A filament on a rack extruder prints with the process of its slot (filament_rack_slot): fill_nozzle_process_slots() takes
-// per-filament sources for that. Without a rack declared nothing changes.
+// An extruder whose rack lists two or more nozzles (rack_slot_count, ToolSlots.hpp) shows each nozzle SIZE of its rack as a tool:
+// the extruder itself stands for its mounted size (id "T2", as in P8), each other size is a tool of its own (id "T2:0.6"). The
+// Process tab's selector reads "Plate | Left 0.4 | Right 0.4 | Right 0.6"; a rack of one size adds nothing. Storage, beside P8's:
+//   - nozzle_slot_process_presets: the profile chosen for a size tool, the id "T2:0.6" then the name on the next line (none = the
+//     plate's when it fits that size, else the system process of that size picked automatically, as for an extruder);
+//   - nozzle_process_edits: a size tool's unsaved changes under its id "T2:0.6" (builds without P9 ignore such ids);
+//   - filament_rack_nozzle_slot (ToolSlots.hpp): the rack slot a filament is pinned to (its size, and its nozzle).
+// A filament on a rack extruder prints with the process of its size: fill_nozzle_process_slots() takes per-filament sources.
 
-// "T2.3": extruder 2 (1-based), rack slot 3.
-std::string nozzle_slot_id(size_t extruder, int slot);
-// The 0-based extruder and 1-based slot of a "T<n>.<k>" id; false for any other id (a "T<n>" id included).
-bool        parse_nozzle_slot_id(const std::string &id, size_t &extruder, int &slot);
+// "T2:0.6": extruder 2 (1-based), its rack's 0.6 mm nozzles.
+std::string nozzle_size_group_id(size_t extruder, double diameter);
+// The 0-based extruder and the size of a "T<n>:<size>" id; false for any other id (a "T<n>" id included).
+bool        parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double &diameter);
 
-// One entry of the Process tab's selector: an extruder (slot 0) or one of its rack slots.
+// One entry of the Process tab's selector: an extruder (slot 0, its mounted size) or another nozzle size of its rack.
 struct NozzleToolEntry
 {
     size_t extruder{ 0 };
-    int    slot{ 0 };      // 1-based rack slot, 0 = the extruder itself
+    int    slot{ 0 };      // 1-based index of the rack size, 0 = the extruder itself
     double diameter{ 0. }; // the nozzle size (the project's)
 };
-// The selector's entries in order: per extruder its rack slots when it shows them, else the extruder.
+// The selector's entries in order: per extruder the extruder, then its rack's other sizes when it shows its rack.
 std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_config);
-// The rack slot entries only (in nozzle_tool_entries order).
+// The rack size entries only (in nozzle_tool_entries order).
 std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config);
-// "T1" or "T2.3".
+// "T1" or "T2:0.6".
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry);
-// "Left (T1)", "Right slot 3", "T2 slot 3", "T3".
+// "Left (T1)", "Right 0.6", "T2 0.6", "T3".
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry);
-// The tool a filament prints with, as messages name it (its rack slot when it has one) and as jump ids carry it.
+// The size tool 1-based `filament_id` prints with ("T2:0.6"), "" when it prints with its extruder's process (no rack shown, or the
+// extruder's mounted size).
+std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int filament_id);
+// The tool a filament prints with, as messages name it and as jump ids carry it.
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id);
 std::string nozzle_filament_tool_id(const ConfigBase &config, unsigned int filament_id);
 
-// nozzle_slot_process_presets as slot id -> process name, and back (entries with an empty name or a bad id are dropped).
+// nozzle_slot_process_presets as tool id -> process name, and back (entries with an empty name or a bad id are dropped).
 std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &config);
 std::vector<std::string>           serialize_nozzle_slot_process_names(const std::map<std::string, std::string> &names);
-// The slot's version of nozzle_process_missing_error().
-std::string nozzle_slot_process_missing_error(const ConfigBase &config, size_t extruder, int slot);
+// A size tool's version of nozzle_process_missing_error().
+std::string nozzle_size_group_missing_error(const ConfigBase &config, size_t extruder, double diameter);
 
 } // namespace Slic3r
 

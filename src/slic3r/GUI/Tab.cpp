@@ -4084,7 +4084,8 @@ void TabPrint::create_tool_selector()
     m_tool_collapse_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         wxGetApp().CallAfter([this]() { use_one_process(); });
     });
-    m_tool_row->Add(m_tool_collapse_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    // Its own row under the selector, so it never takes width from the selector.
+    vsizer->Add(m_tool_collapse_btn, 0, wxTOP, FromDIP(4));
     m_tool_collapse_btn->Hide();
     m_tool_note = new wxStaticText(m_tool_panel, wxID_ANY, wxEmptyString);
     m_tool_note->SetFont(Label::Body_12);
@@ -4109,14 +4110,14 @@ std::vector<wxString> TabPrint::tool_selector_labels() const
     int        extruder_count = 0;
     const bool sided          = nozzles.size() == 2 && printer.support_different_extruders(extruder_count);
     labels.push_back(_L("Plate"));
-    // Per-nozzle process P9: an extruder whose rack lists two or more nozzles (H2C right) shows each rack slot instead.
+    // Per-nozzle process P9: an extruder with a nozzle rack (H2C right) also shows the rack's other sizes: "Right 0.4 | Right 0.6".
     for (size_t tool : m_preset_bundle->nozzle_selector_tools()) {
         const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
         if (!ref.valid)
             continue;
         const wxString side = sided ? (ref.extruder == 0 ? _L("Left") : _L("Right")) : wxString::Format("T%d", int(ref.extruder + 1));
         if (ref.slot > 0)
-            labels.push_back(wxString::Format(_L("%s slot %d"), side, ref.slot) + " " + from_u8(format_diameter_to_str(ref.diameter)));
+            labels.push_back(side + " " + from_u8(format_diameter_to_str(ref.diameter)));
         else
             labels.push_back(side + " " + from_u8(format_diameter_to_str(nozzles[ref.extruder])));
     }
@@ -4171,28 +4172,52 @@ void TabPrint::refresh_tool_selector()
     if (!available)
         m_tools_expanded = false;
     const bool expanded = available && tool_selector_expanded();
-    if (labels != m_tool_labels || tool_ids != m_tool_ids || m_tool_selector == nullptr) {
+    // P9 (owner hand test 2026-11-02): never clip. Up to five short entries (Plate + four tools) are buttons; more, or longer
+    // labels, a drop-down list.
+    size_t label_chars = 0;
+    for (const wxString& label : labels)
+        label_chars += label.length();
+    const bool as_list = labels.size() > 5 || label_chars > 34;
+    if (labels != m_tool_labels || tool_ids != m_tool_ids || (m_tool_selector == nullptr && m_tool_combo == nullptr) ||
+        as_list != (m_tool_combo != nullptr)) {
         if (m_tool_selector != nullptr) {
             m_tool_row->Detach(m_tool_selector);
             m_tool_selector->Destroy();
             m_tool_selector = nullptr;
         }
+        if (m_tool_combo != nullptr) {
+            m_tool_row->Detach(m_tool_combo);
+            m_tool_combo->Destroy();
+            m_tool_combo = nullptr;
+        }
         m_tool_labels = labels;
         m_tool_ids    = tool_ids;
-        if (available) {
+        // P9: entry -> tool; after the control's own event returns.
+        auto pick = [this](int index) {
+            const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
+            wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
+        };
+        if (available && as_list) {
+            m_tool_combo = new ComboBox(m_tool_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(160), -1), 0, nullptr,
+                                        wxCB_READONLY);
+            for (const wxString& label : labels)
+                m_tool_combo->Append(label);
+            m_tool_combo->Bind(wxEVT_COMBOBOX, [this, pick](wxCommandEvent&) { pick(m_tool_combo->GetSelection()); });
+            m_tool_row->Insert(0, m_tool_combo, 1, wxALIGN_CENTER_VERTICAL | wxEXPAND);
+        } else if (available) {
             m_tool_selector = new SegmentedToggle(m_tool_panel, labels, std::max(0, position_of(m_preset_bundle->nozzle_tool_view())),
                                                   SegmentedToggle::Style::Pill);
-            m_tool_selector->bindSelectionCallback([this](int index) {
-                // The toggle's own click is still running: switch after it returns. P9: entry -> tool.
-                const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
-                wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
-            });
+            m_tool_selector->bindSelectionCallback([pick](int index) { pick(index); });
             m_tool_row->Insert(0, m_tool_selector, 0, wxALIGN_CENTER_VERTICAL);
         }
     }
     if (m_tool_selector != nullptr) {
         m_tool_selector->setSelected(std::max(0, position_of(m_preset_bundle->nozzle_tool_view())));
         m_tool_selector->Show(expanded);
+    }
+    if (m_tool_combo != nullptr) {
+        m_tool_combo->SetSelection(std::max(0, position_of(m_preset_bundle->nozzle_tool_view())));
+        m_tool_combo->Show(expanded);
     }
     m_tool_expand_btn->Show(available && !expanded);
     // P9: the way back, while the selector is open.
@@ -4317,7 +4342,8 @@ void TabPrint::apply_tool_field_states()
     if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr || m_preset_bundle == nullptr || m_tool_panel == nullptr)
         return;
     // On Plate, with the selector open: the per-tool settings are each nozzle's, not the plate's; not editable here.
-    if (m_preset_bundle->nozzle_tool_view() >= 0 || m_tool_selector == nullptr || !m_tool_selector->IsShown() || !m_tool_panel->IsShown())
+    const bool selector_open = (m_tool_selector != nullptr && m_tool_selector->IsShown()) || (m_tool_combo != nullptr && m_tool_combo->IsShown());
+    if (m_preset_bundle->nozzle_tool_view() >= 0 || !selector_open || !m_tool_panel->IsShown())
         return;
     for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
         for (const auto& option : group->opt_map())

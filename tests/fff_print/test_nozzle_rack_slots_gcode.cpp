@@ -96,7 +96,7 @@ std::set<int> feeds_in_tool(const std::string &gcode, int tool, const std::strin
 TEST_CASE("A rack slot's process prints the walls and speeds of the filament pinned to it", "[NozzleRackSlots][GCode]")
 {
     const DynamicPrintConfig plate = rack_config();
-    REQUIRE(filament_rack_slot(plate, 2) == 2);
+    REQUIRE(filament_rack_slot_pin(plate, 2) == 2);
     DynamicPrintConfig slot_process = plate;
     slot_process.set_key_value("wall_loops", new ConfigOptionInt(4));
     slot_process.option<ConfigOptionFloats>("outer_wall_speed")->values = { 23. };

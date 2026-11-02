@@ -168,6 +168,7 @@ public:
     void edit_rack_nozzles(size_t extruder);
     // Per-nozzle process P9: the toolhead button beside each filament (toolchangers): its label and visibility, and a click.
     void update_filament_tool_buttons();
+    wxWindow *make_filament_tool_button(int filament_idx);
     void cycle_filament_tool(size_t filament);
     // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
     // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).

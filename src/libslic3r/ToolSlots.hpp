@@ -137,8 +137,15 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
 // grouping, so a change to a filament on another slot of the same extruder is a rack nozzle change (M632 / M633).
 // The slot numbers are the slicer's: the printer maps them to its rack positions by size when the job is sent.
 
-// The number of rack slots extruder `extruder` shows as tools: its rack's nozzle count when that is two or more, else 0.
+// Whether extruder `extruder` has a nozzle rack (extruder_max_nozzle_count > 1; a config without that key: any).
+bool extruder_has_nozzle_rack(const ConfigBase &config, size_t extruder);
+// The number of rack slots extruder `extruder` shows: its rack's nozzle count when it has a nozzle rack and the rack lists two
+// or more nozzles, else 0.
 size_t rack_slot_count(const ConfigBase &config, size_t extruder);
+// "Right 0.6" on Bambu's two-extruder machines, "T2 0.6" elsewhere: an extruder's rack nozzles of one size.
+std::string rack_size_name(const ConfigBase &config, size_t extruder, double diameter);
+// "5 x 0.4, 1 x 0.6": a rack by size, in rack order.
+std::string rack_summary(const std::vector<RackNozzle> &rack);
 // "Right slot 3" on Bambu's two-extruder machines, "T2 slot 3" elsewhere (1-based slot).
 std::string rack_slot_name(const ConfigBase &config, size_t extruder, int slot);
 // The slot 1-based `filament_id` is pinned to (filament_rack_nozzle_slot), 0 when none.

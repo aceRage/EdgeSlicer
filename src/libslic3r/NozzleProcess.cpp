@@ -1124,26 +1124,31 @@ std::string nozzle_tool_name(const ConfigBase &config, size_t extruder)
     return nozzle_tool_id(extruder);
 }
 
-// ---- P9: rack slots as tools -------------------------------------------------------------------------------------
+// ---- P9: rack nozzle sizes as tools -------------------------------------------------------------------------------
+//
+// Owner hand test round 1 (2026-11-02): the selector groups an extruder's rack by nozzle size. The extruder itself stands for its
+// mounted size (id "T2", P8's own id, so a P8 choice keeps working); each other size in its rack is a tool "T2:0.6".
 
-std::string nozzle_slot_id(size_t extruder, int slot) { return nozzle_tool_id(extruder) + "." + std::to_string(slot); }
-
-bool parse_nozzle_slot_id(const std::string &id, size_t &extruder, int &slot)
+std::string nozzle_size_group_id(size_t extruder, double diameter)
 {
-    const size_t dot = id.find('.');
-    if (dot == std::string::npos || dot + 1 >= id.size())
+    return nozzle_tool_id(extruder) + ":" + format_nozzle_diameter_word(diameter);
+}
+
+bool parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double &diameter)
+{
+    const size_t colon = id.find(':');
+    if (colon == std::string::npos || colon + 1 >= id.size())
         return false;
-    const int e = nozzle_tool_id_extruder(id.substr(0, dot));
+    const int e = nozzle_tool_id_extruder(id.substr(0, colon));
     if (e < 0)
         return false;
-    for (size_t i = dot + 1; i < id.size(); ++i)
-        if (!std::isdigit(static_cast<unsigned char>(id[i])))
-            return false;
-    const int k = std::atoi(id.c_str() + dot + 1);
-    if (k < 1)
+    const std::string word = id.substr(colon + 1);
+    char             *end  = nullptr;
+    const double      d    = std::strtod(word.c_str(), &end);
+    if (end == word.c_str() || *end != '\0' || !(d > 0.) || d > 3.)
         return false;
     extruder = size_t(e);
-    slot     = k;
+    diameter = d;
     return true;
 }
 
@@ -1153,12 +1158,17 @@ std::vector<NozzleToolEntry> nozzle_tool_entries(const ConfigBase &printer_confi
     const std::vector<double>    nozzles = effective_nozzle_diameters(printer_config);
     const auto                   racks   = extruder_rack_nozzles(printer_config);
     for (size_t e = 0; e < nozzles.size(); ++e) {
-        if (rack_slot_count(printer_config, e) > 0) {
-            for (size_t k = 0; k < racks[e].size(); ++k)
-                out.push_back({ e, int(k) + 1, racks[e][k].diameter });
-            continue;
-        }
         out.push_back({ e, 0, nozzles[e] });
+        if (rack_slot_count(printer_config, e) == 0)
+            continue;
+        // The rack's other sizes, in rack order, each once.
+        std::vector<double> sizes;
+        for (const RackNozzle &nozzle : racks[e])
+            if (!same_nozzle_diameter(nozzle.diameter, nozzles[e]) &&
+                std::none_of(sizes.begin(), sizes.end(), [&nozzle](double d) { return same_nozzle_diameter(d, nozzle.diameter); }))
+                sizes.push_back(nozzle.diameter);
+        for (size_t k = 0; k < sizes.size(); ++k)
+            out.push_back({ e, int(k) + 1, sizes[k] });
     }
     return out;
 }
@@ -1174,28 +1184,40 @@ std::vector<NozzleToolEntry> nozzle_slot_tools(const ConfigBase &printer_config)
 
 std::string nozzle_tool_entry_id(const NozzleToolEntry &entry)
 {
-    return entry.slot > 0 ? nozzle_slot_id(entry.extruder, entry.slot) : nozzle_tool_id(entry.extruder);
+    return entry.slot > 0 ? nozzle_size_group_id(entry.extruder, entry.diameter) : nozzle_tool_id(entry.extruder);
 }
 
 std::string nozzle_tool_entry_name(const ConfigBase &config, const NozzleToolEntry &entry)
 {
-    return entry.slot > 0 ? rack_slot_name(config, entry.extruder, entry.slot) : nozzle_tool_name(config, entry.extruder);
+    return entry.slot > 0 ? rack_size_name(config, entry.extruder, entry.diameter) : nozzle_tool_name(config, entry.extruder);
+}
+
+std::string nozzle_filament_group_id(const ConfigBase &config, unsigned int filament_id)
+{
+    const unsigned int f = std::max(filament_id, 1u);
+    const size_t       e = nozzle_for_filament(config, f);
+    if (rack_slot_count(config, e) == 0)
+        return std::string();
+    const std::vector<double> nozzles = effective_nozzle_diameters(config);
+    const double              d       = nozzle_diameter_for_filament(config, f);
+    if (e >= nozzles.size() || same_nozzle_diameter(d, nozzles[e]))
+        return std::string();
+    return nozzle_size_group_id(e, d);
 }
 
 std::string nozzle_filament_tool_name(const ConfigBase &config, unsigned int filament_id)
 {
     const size_t e = nozzle_for_filament(config, std::max(filament_id, 1u));
-    if (const int slot = filament_rack_slot(config, std::max(filament_id, 1u)); slot > 0)
-        return rack_slot_name(config, e, slot);
+    if (!nozzle_filament_group_id(config, filament_id).empty())
+        return rack_size_name(config, e, nozzle_diameter_for_filament(config, std::max(filament_id, 1u)));
     return nozzle_tool_name(config, e);
 }
 
 std::string nozzle_filament_tool_id(const ConfigBase &config, unsigned int filament_id)
 {
-    const size_t e = nozzle_for_filament(config, std::max(filament_id, 1u));
-    if (const int slot = filament_rack_slot(config, std::max(filament_id, 1u)); slot > 0)
-        return nozzle_slot_id(e, slot);
-    return nozzle_tool_id(e);
+    if (std::string id = nozzle_filament_group_id(config, filament_id); !id.empty())
+        return id;
+    return nozzle_tool_id(nozzle_for_filament(config, std::max(filament_id, 1u)));
 }
 
 std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &config)
@@ -1211,8 +1233,8 @@ std::map<std::string, std::string> nozzle_slot_process_names(const ConfigBase &c
             boost::algorithm::trim(id);
             boost::algorithm::trim_right(name);
             size_t e = 0;
-            int    k = 0;
-            if (!name.empty() && parse_nozzle_slot_id(id, e, k))
+            double d = 0.;
+            if (!name.empty() && parse_nozzle_size_group_id(id, e, d))
                 out[id] = name;
         }
     return out;
@@ -1227,19 +1249,13 @@ std::vector<std::string> serialize_nozzle_slot_process_names(const std::map<std:
     return out;
 }
 
-std::string nozzle_slot_process_missing_error(const ConfigBase &config, size_t extruder, int slot)
+std::string nozzle_size_group_missing_error(const ConfigBase &config, size_t extruder, double diameter)
 {
-    double d = 0.;
-    {
-        const auto racks = extruder_rack_nozzles(config);
-        if (extruder < racks.size() && slot >= 1 && size_t(slot) <= racks[extruder].size())
-            d = racks[extruder][size_t(slot - 1)].diameter;
-    }
     char n[32];
-    snprintf(n, sizeof(n), "%g", std::round(d * 1000.) / 1000.);
-    const std::string tool = rack_slot_name(config, extruder, slot);
-    return (boost::format(L("%1% has a %2% mm nozzle, and neither the plate's process nor any process of this printer is made for "
-                            "%2% mm nozzles. Choose a process for %1% on the Process tab, or change the nozzle in %1%.")) %
+    snprintf(n, sizeof(n), "%g", std::round(diameter * 1000.) / 1000.);
+    const std::string tool = rack_size_name(config, extruder, diameter);
+    return (boost::format(L("%1% (the rack's %2% mm nozzles): neither the plate's process nor any process of this printer is made for "
+                            "%2% mm nozzles. Choose a process for %1% on the Process tab, or change the rack's nozzles.")) %
             tool % n)
         .str();
 }

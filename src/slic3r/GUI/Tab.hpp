@@ -607,6 +607,7 @@ private:
 	SegmentedToggle*		m_tool_selector     = nullptr;
 	Button*					m_tool_expand_btn   = nullptr;
 	Button*					m_tool_collapse_btn = nullptr; // P9: "Use one process", the way back
+	ComboBox*				m_tool_combo        = nullptr; // P9: the selector as a list when its buttons would not fit
 	void					use_one_process();
 	wxStaticText*			m_tool_note         = nullptr;
 	std::vector<wxString>	m_tool_labels;

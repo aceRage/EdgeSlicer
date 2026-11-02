@@ -3243,7 +3243,7 @@ DynamicPrintConfig PresetBundle::nozzle_tool_config() const
     DynamicPrintConfig out;
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
     for (const char *key : { "nozzle_diameter", "extruder_rack_nozzle_diameter", "nozzle_volume_type", "extruder_variant_list",
-                             "single_extruder_multi_material" })
+                             "single_extruder_multi_material", "extruder_max_nozzle_count" })
         if (const ConfigOption *opt = printer.option(key))
             out.set_key_value(key, opt->clone());
     for (const char *key : { NOZZLE_DIAMETER_OVERRIDE_KEY, "extruder_rack_nozzle_override" })
@@ -3311,7 +3311,7 @@ std::string PresetBundle::nozzle_tool_name(size_t tool) const
     if (!ref.valid)
         return std::string();
     const DynamicPrintConfig cfg = this->nozzle_tool_config();
-    return ref.slot > 0 ? rack_slot_name(cfg, ref.extruder, ref.slot) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
+    return ref.slot > 0 ? rack_size_name(cfg, ref.extruder, ref.diameter) : Slic3r::nozzle_tool_name(cfg, ref.extruder);
 }
 
 std::string PresetBundle::nozzle_tool_selection(size_t tool) const
@@ -3475,8 +3475,8 @@ bool PresetBundle::prune_nozzle_processes()
         for (auto it = edits.begin(); it != edits.end();) {
             const int e = nozzle_tool_id_extruder(it->first);
             size_t    se = 0;
-            int       sk = 0;
-            const bool slot_id = parse_nozzle_slot_id(it->first, se, sk);
+            double    sd = 0.;
+            const bool slot_id = parse_nozzle_size_group_id(it->first, se, sd);
             if ((e >= 0 && size_t(e) >= selection.size()) || (slot_id && this->nozzle_tool_index(it->first) < 0) ||
                 dropped_slot_ids.count(it->first) > 0) {
                 it      = edits.erase(it);
@@ -3740,6 +3740,9 @@ void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config
             values = parse_nozzle_diameter_override(config.get("nozzle_diameter_override", model));
         this->project_config.set_key_value(NOZZLE_DIAMETER_OVERRIDE_KEY,
                                            new ConfigOptionFloats(nozzle_diameter_override_stored(values, this->preset_nozzle_diameters())));
+        // P9 (owner hand test 2026-11-02): another printer model has its own rack, if any: an H2C project's rack slots must not
+        // turn up on a U1.
+        this->project_config.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings());
         return;
     }
     // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders.
@@ -3794,13 +3797,13 @@ void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
     const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
     std::vector<const DynamicPrintConfig *> filament_sources(filaments, nullptr);
     for (size_t f = 0; f < filaments; ++f) {
-        const size_t e    = nozzle_for_filament(out, unsigned(f + 1));
-        const int    slot = filament_rack_slot(out, unsigned(f + 1));
+        const size_t      e  = nozzle_for_filament(out, unsigned(f + 1));
+        const std::string id = nozzle_filament_group_id(out, unsigned(f + 1)); // its rack size's tool, "" = the extruder's
         filament_sources[f] = e < sources.size() ? sources[e] : nullptr;
-        if (slot <= 0)
+        if (id.empty())
             continue;
         for (size_t i = 0; i < slot_tools.size(); ++i)
-            if (slot_tools[i].extruder == e && slot_tools[i].slot == slot) {
+            if (nozzle_tool_entry_id(slot_tools[i]) == id) {
                 filament_sources[f] = slot_sources[i];
                 break;
             }

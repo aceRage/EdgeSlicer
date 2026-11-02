@@ -3804,11 +3804,11 @@ int CLI::run(int argc, char **argv)
             const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
             filament_sources.assign(filaments, nullptr);
             for (size_t f = 0; f < filaments; ++f) {
-                const size_t e    = nozzle_for_filament(m_print_config, unsigned(f + 1));
-                const int    slot = filament_rack_slot(m_print_config, unsigned(f + 1));
+                const size_t      e  = nozzle_for_filament(m_print_config, unsigned(f + 1));
+                const std::string id = nozzle_filament_group_id(m_print_config, unsigned(f + 1)); // its rack size's tool
                 filament_sources[f] = e < nozzle_process_sources.size() ? nozzle_process_sources[e] : nullptr;
-                for (size_t i = 0; slot > 0 && i < slot_tools.size(); ++i)
-                    if (slot_tools[i].extruder == e && slot_tools[i].slot == slot) {
+                for (size_t i = 0; !id.empty() && i < slot_tools.size(); ++i)
+                    if (nozzle_tool_entry_id(slot_tools[i]) == id) {
                         filament_sources[f] = slot_sources[i];
                         break;
                     }

@@ -2890,19 +2890,19 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (unsigned int filament : extruders) {
             const size_t e = nozzle_for_filament(m_config, filament + 1);
             const auto  &missing = m_config.nozzle_process_missing.values;
-            if (std::find(missing.begin(), missing.end(), int(e) + 1) != missing.end() && filament_rack_slot(m_config, filament + 1) <= 0)
+            if (std::find(missing.begin(), missing.end(), int(e) + 1) != missing.end() && nozzle_filament_group_id(m_config, filament + 1).empty())
                 return { nozzle_process_missing_error(m_config, e) };
         }
-    // Per-nozzle process P9: likewise a rack slot that prints, naming the slot ("Right slot 3").
+    // Per-nozzle process P9: likewise a rack nozzle size that prints, naming it ("Right 0.6").
     if (!m_config.nozzle_slot_process_missing.values.empty())
         for (unsigned int filament : extruders) {
-            const int slot = filament_rack_slot(m_config, filament + 1);
-            if (slot <= 0)
+            const std::string id = nozzle_filament_group_id(m_config, filament + 1);
+            if (id.empty())
                 continue;
-            const size_t e       = nozzle_for_filament(m_config, filament + 1);
-            const auto  &missing = m_config.nozzle_slot_process_missing.values;
-            if (std::find(missing.begin(), missing.end(), nozzle_slot_id(e, slot)) != missing.end())
-                return { nozzle_slot_process_missing_error(m_config, e, slot) };
+            const auto &missing = m_config.nozzle_slot_process_missing.values;
+            if (std::find(missing.begin(), missing.end(), id) != missing.end())
+                return { nozzle_size_group_missing_error(m_config, nozzle_for_filament(m_config, filament + 1),
+                                                         nozzle_diameter_for_filament(m_config, filament + 1)) };
         }
 
 	{
