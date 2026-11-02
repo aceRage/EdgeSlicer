@@ -888,10 +888,23 @@ json scene_to_json_object(const Scene &s)
     ma["toolpath_infill"]   = s.materials.toolpath_infill;
     ma["translucency"]      = s.materials.translucency;
     {
+        const Imperfections &im = s.materials.imperfections;
+        json imp;
+        imp["wobble"]  = im.wobble;
+        imp["seam"]    = im.seam;
+        imp["strings"] = im.strings;
+        imp["colour"]  = im.colour;
+        json raw_ma    = raw.is_object() && raw.contains("materials") ? raw["materials"] : json();
+        ma["imperfections"] = merged(raw_ma, "imperfections", imp);
+    }
+    {
         json out = merged(raw, "materials", ma);
         // Realism 1d: only when set.
         if (s.materials.translucency <= 0.f)
             out.erase("translucency");
+        // Realism 1f: only when one is on.
+        if (!s.materials.imperfections.any())
+            out.erase("imperfections");
         // 1h-2b: only when off (and dropped again when back on).
         if (s.materials.toolpath_supports)
             out.erase("toolpath_supports");
@@ -1022,6 +1035,13 @@ bool scene_from_json_object(const json &j, Scene &s)
     s.materials.toolpath_skirt     = get_or<bool>(ma, "toolpath_skirt", true);
     s.materials.toolpath_infill    = get_or<bool>(ma, "toolpath_infill", true);
     s.materials.translucency       = clamp_or(get_or<float>(ma, "translucency", 0.f), 0.f, 1.f, 0.f);
+    if (ma.is_object() && ma.contains("imperfections") && ma["imperfections"].is_object()) {
+        const json &im = ma["imperfections"];
+        s.materials.imperfections.wobble  = clamp_or(get_or<float>(im, "wobble", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.seam    = clamp_or(get_or<float>(im, "seam", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.strings = clamp_or(get_or<float>(im, "strings", 0.f), 0.f, 1.f, 0.f);
+        s.materials.imperfections.colour  = clamp_or(get_or<float>(im, "colour", 0.f), 0.f, 1.f, 0.f);
+    }
     if (ma.is_object() && ma.contains("filaments") && ma["filaments"].is_array())
         for (const json &f : ma["filaments"]) {
             const int slot = get_or<int>(f, "slot", 0);

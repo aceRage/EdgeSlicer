@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
 
@@ -342,6 +343,113 @@ std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_lin
 }
 
 float sparkle_lod(float cell_px) { return std::isfinite(cell_px) ? smoothstep01(0.75f, 2.f, cell_px) : 1.f; }
+
+// --- realism 1f: imperfections -------------------------------------------------------------------
+
+std::vector<SeamPoint> seam_points(const std::vector<PathPoint> &moves, size_t max_points)
+{
+    std::vector<SeamPoint> out;
+    for (const PathPoint &p : moves)
+        if (p.kind == PathKind::Seam && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
+            out.push_back({ p.x, p.y, p.z });
+    std::sort(out.begin(), out.end(), [](const SeamPoint &a, const SeamPoint &b) {
+        return a.z != b.z ? a.z < b.z : (a.x != b.x ? a.x < b.x : a.y < b.y);
+    });
+    out.erase(std::unique(out.begin(), out.end(),
+                          [](const SeamPoint &a, const SeamPoint &b) {
+                              return std::abs(a.x - b.x) < 1e-3f && std::abs(a.y - b.y) < 1e-3f && std::abs(a.z - b.z) < 1e-3f;
+                          }),
+              out.end());
+    if (max_points > 0 && out.size() > max_points) {
+        std::vector<SeamPoint> thin;
+        thin.reserve(max_points);
+        const double step = double(out.size()) / double(max_points);
+        for (size_t i = 0; i < max_points; ++i)
+            thin.push_back(out[std::min(out.size() - 1, size_t(double(i) * step))]);
+        out = std::move(thin);
+    }
+    return out;
+}
+
+namespace {
+// A fixed hash of a move index to 0..1 (the same wisps every frame).
+float wisp_hash(size_t i)
+{
+    uint32_t h = uint32_t(i) * 2654435761u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    return float(h & 0xFFFFFFu) / float(0x1000000);
+}
+} // namespace
+
+std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count)
+{
+    std::vector<StringWisp> out;
+    const float s = std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f;
+    if (s <= 0.f || max_count == 0)
+        return out;
+    const float keep = 0.25f * s;
+    size_t i = 0;
+    while (i < moves.size() && out.size() < max_count) {
+        // A run of travels (with retractions and wipes) right after an extrusion.
+        if (moves[i].kind != PathKind::Extrude && moves[i].kind != PathKind::Seam) {
+            ++i;
+            continue;
+        }
+        const PathPoint &start = moves[i];
+        size_t j = i + 1;
+        bool   travelled = false;
+        while (j < moves.size() && (moves[j].kind == PathKind::Travel || moves[j].kind == PathKind::Other)) {
+            travelled |= moves[j].kind == PathKind::Travel;
+            ++j;
+        }
+        if (!travelled || j >= moves.size() || moves[j].kind != PathKind::Extrude) {
+            i = j > i ? j : i + 1;
+            continue;
+        }
+        // The travel ends where the next extrusion starts: the last travel's end.
+        const PathPoint *end = nullptr;
+        for (size_t k = j; k-- > i + 1;)
+            if (moves[k].kind == PathKind::Travel) {
+                end = &moves[k];
+                break;
+            }
+        if (end != nullptr && std::abs(end->z - start.z) < 0.05f) {
+            const float dx = end->x - start.x, dy = end->y - start.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len >= 2.f && len <= 30.f && wisp_hash(i) < keep) {
+                StringWisp w;
+                w.a        = { start.x, start.y, start.z };
+                w.b        = { end->x, end->y, end->z };
+                w.sag      = (0.03f + 0.05f * wisp_hash(i + 7)) * len;
+                w.extruder = start.extruder;
+                out.push_back(w);
+            }
+        }
+        i = j;
+    }
+    return out;
+}
+
+std::array<float, 3> wisp_point(const StringWisp &w, float t)
+{
+    t = std::clamp(t, 0.f, 1.f);
+    const float drop = 4.f * w.sag * t * (1.f - t);
+    return { w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t, w.a[2] + (w.b[2] - w.a[2]) * t - drop };
+}
+
+float seam_bump(float distance_mm, float width_mm)
+{
+    if (!(width_mm > 0.f) || !std::isfinite(distance_mm))
+        return 0.f;
+    const float x = std::clamp(1.f - std::abs(distance_mm) / width_mm, 0.f, 1.f);
+    return x * x * (3.f - 2.f * x);
+}
+
+float seam_height_mm(float strength) { return 0.1f * (std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f); }
+
+float wobble_amplitude_mm(float strength) { return 0.05f * (std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f); }
 
 std::array<float, 3> color_temperature_rgb(float kelvin)
 {

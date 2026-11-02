@@ -317,6 +317,13 @@ private:
     // white RGBA8 map by the light it lets through (m_transmit_valid; only when a caster lets light
     // through, else the floor's shadow stays grey as before).
     void            render_transmit_map();
+    // Realism 1f: the seam points (a texture for the shader) and the string wisps of the plate's slice,
+    // worked out again when the slice or the strings' strength changes. False without a slice.
+    bool            ensure_slice_imperfections();
+    // Realism 1f: the wisps as thin ribbons facing the camera, through the bound material program
+    // (frame uniforms already set), translucent.
+    void            draw_strings(GLShaderProgram &shader, const Transform3d &view, const Transform3d &projection, const Vec3d &eye,
+                                 const std::vector<ColorRGBA> &colors);
 
     GLCanvas3D                &m_canvas;
     const Showcase::Scene     *m_scene   = nullptr;
@@ -380,6 +387,14 @@ private:
     unsigned int               m_transmit_fbo = 0;
     unsigned int               m_transmit_tex = 0;
     bool                       m_transmit_valid = false;
+    // Realism 1f: the slice's seam table (RGBA32F) and string wisps, and what they were made from.
+    unsigned int               m_seam_tex = 0;
+    int                        m_seam_count = 0;
+    int                        m_seam_width = 0;
+    std::vector<Showcase::StringWisp> m_wisps;
+    std::string                m_slice_imp_key;
+    // One model of ribbons per extruder (they face the camera, so they are made again each frame).
+    std::vector<std::pair<int, std::shared_ptr<GLModel>>> m_strings_models;
     // 1h-2: depth of field: a copy of the colour and depth, and the circles of confusion (RG16F).
     unsigned int               m_dof_copy_fbo = 0;
     unsigned int               m_dof_color = 0;

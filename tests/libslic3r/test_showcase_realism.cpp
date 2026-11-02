@@ -256,3 +256,143 @@ TEST_CASE("Showcase 1e: a new finish override round-trips; an unknown one falls 
     REQUIRE(scene_from_json(j.dump(), newer));
     CHECK(newer.materials.override_for(1) == nullptr);
 }
+
+// ------------------------------------------------------------------------------------------------
+// 1f: imperfections
+// ------------------------------------------------------------------------------------------------
+
+namespace {
+PathPoint pt(PathKind k, float x, float y, float z, int e = 0)
+{
+    PathPoint p;
+    p.kind     = k;
+    p.x        = x;
+    p.y        = y;
+    p.z        = z;
+    p.extruder = e;
+    return p;
+}
+} // namespace
+
+TEST_CASE("Showcase 1f: the seam table is sorted by height, without duplicates", "[Showcase][Realism]")
+{
+    const std::vector<PathPoint> moves = {
+        pt(PathKind::Extrude, 1, 1, 0.2f), pt(PathKind::Seam, 5, 5, 0.4f), pt(PathKind::Seam, 3, 3, 0.2f),
+        pt(PathKind::Seam, 3, 3, 0.2f),    // the same point twice
+        pt(PathKind::Travel, 9, 9, 0.4f),  pt(PathKind::Seam, 1, 2, 0.4f),
+    };
+    const std::vector<SeamPoint> s = seam_points(moves);
+    REQUIRE(s.size() == 3);
+    CHECK(s[0].z == 0.2f);
+    CHECK(s[1].z == 0.4f);
+    CHECK(s[1].x == 1.f);   // by x within a layer
+    CHECK(s[2].x == 5.f);
+    CHECK(seam_points({}).empty());
+    // Thinned evenly past the cap, still sorted.
+    std::vector<PathPoint> many;
+    for (int i = 0; i < 1000; ++i)
+        many.push_back(pt(PathKind::Seam, float(i % 7), 0.f, 0.2f * float(i)));
+    const std::vector<SeamPoint> thin = seam_points(many, 100);
+    CHECK(thin.size() == 100);
+    for (size_t i = 1; i < thin.size(); ++i)
+        CHECK(thin[i].z >= thin[i - 1].z);
+}
+
+TEST_CASE("Showcase 1f: strings hang on travels across gaps", "[Showcase][Realism]")
+{
+    // Island A ends at (0, 0), a retraction, a travel to (10, 0), island B starts: one candidate.
+    std::vector<PathPoint> moves;
+    for (int n = 0; n < 400; ++n) {
+        const float z = 0.2f * float(n + 1);
+        moves.push_back(pt(PathKind::Extrude, -5.f, 0.f, z, 1));
+        moves.push_back(pt(PathKind::Extrude, 0.f, 0.f, z, 1));
+        moves.push_back(pt(PathKind::Other, 0.f, 0.f, z));          // retract
+        moves.push_back(pt(PathKind::Travel, 10.f, 0.f, z));
+        moves.push_back(pt(PathKind::Other, 10.f, 0.f, z));         // unretract
+        moves.push_back(pt(PathKind::Extrude, 15.f, 0.f, z, 1));
+        // A short hop (under 2 mm) and a long one (over 30 mm) never get a string.
+        moves.push_back(pt(PathKind::Travel, 16.f, 0.f, z));
+        moves.push_back(pt(PathKind::Extrude, 18.f, 0.f, z, 1));
+        moves.push_back(pt(PathKind::Travel, 80.f, 0.f, z));
+        moves.push_back(pt(PathKind::Extrude, 85.f, 0.f, z, 1));
+    }
+    CHECK(string_wisps(moves, 0.f).empty());   // off
+    const std::vector<StringWisp> some = string_wisps(moves, 1.f, 10000);
+    REQUIRE_FALSE(some.empty());
+    // About a quarter of the candidates, and only the 0 -> 10 mm hops.
+    CHECK(some.size() <= 150);   // a quarter of 400 on average
+    for (const StringWisp &w : some) {
+        CHECK(w.a[0] == 0.f);
+        CHECK(w.b[0] == 10.f);
+        CHECK(w.a[2] == w.b[2]);
+        CHECK(w.sag > 0.f);
+        CHECK(w.extruder == 1);
+    }
+    // The same ones every time (no flicker in a video); fewer at a lower strength; capped.
+    CHECK(string_wisps(moves, 1.f, 10000).size() == some.size());
+    CHECK(string_wisps(moves, 0.3f, 10000).size() < some.size());
+    CHECK(string_wisps(moves, 1.f, 5).size() == 5);
+    // A travel that changes layer is no string.
+    std::vector<PathPoint> up = { pt(PathKind::Extrude, 0, 0, 0.2f), pt(PathKind::Travel, 10, 0, 0.4f), pt(PathKind::Extrude, 12, 0, 0.4f) };
+    CHECK(string_wisps(up, 1.f).empty());
+}
+
+TEST_CASE("Showcase 1f: a string sags between its ends; the seam bump is smooth", "[Showcase][Realism]")
+{
+    StringWisp w;
+    w.a   = { 0.f, 0.f, 5.f };
+    w.b   = { 10.f, 0.f, 5.f };
+    w.sag = 0.5f;
+    CHECK(wisp_point(w, 0.f) == w.a);
+    CHECK(wisp_point(w, 1.f) == w.b);
+    const std::array<float, 3> mid = wisp_point(w, 0.5f);
+    CHECK_THAT(mid[0], WithinAbs(5.f, 1e-6));
+    CHECK_THAT(mid[2], WithinAbs(4.5f, 1e-6));   // the full sag at the middle
+    CHECK(wisp_point(w, 0.25f)[2] > mid[2]);
+
+    CHECK(seam_bump(0.f, SEAM_WIDTH_MM) == 1.f);
+    CHECK(seam_bump(SEAM_WIDTH_MM, SEAM_WIDTH_MM) == 0.f);
+    CHECK(seam_bump(5.f, SEAM_WIDTH_MM) == 0.f);
+    CHECK(seam_bump(-0.1f, SEAM_WIDTH_MM) == seam_bump(0.1f, SEAM_WIDTH_MM));
+    CHECK(seam_bump(0.1f, SEAM_WIDTH_MM) > seam_bump(0.3f, SEAM_WIDTH_MM));
+    CHECK(seam_bump(0.1f, 0.f) == 0.f);
+    CHECK(seam_height_mm(0.f) == 0.f);
+    CHECK(seam_height_mm(1.f) > 0.f);
+    CHECK(seam_height_mm(5.f) == seam_height_mm(1.f));
+    CHECK(wobble_amplitude_mm(0.f) == 0.f);
+    CHECK(wobble_amplitude_mm(1.f) <= 0.05f);   // the design's 0.02-0.05 mm
+}
+
+TEST_CASE("Showcase 1f: the imperfections round-trip and are written only when on", "[Showcase][Realism]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    CHECK_FALSE(s.materials.imperfections.any());
+    CHECK_FALSE(scene_json(s)["materials"].contains("imperfections"));
+    s.materials.imperfections.wobble  = 0.3f;
+    s.materials.imperfections.strings = 1.f;
+    const json j = scene_json(s);
+    REQUIRE(j["materials"].contains("imperfections"));
+    CHECK(j["materials"]["imperfections"]["wobble"].get<float>() == 0.3f);
+    Scene back = round_trip(s);
+    CHECK(back.materials.imperfections == s.materials.imperfections);
+    CHECK(back == s);
+    // Unknown keys inside are kept; out of range is clamped.
+    json k = j;
+    k["materials"]["imperfections"]["elephant_foot"] = 0.5;
+    k["materials"]["imperfections"]["seam"]          = -2.0;
+    Scene read;
+    REQUIRE(scene_from_json(k.dump(), read));
+    CHECK(read.materials.imperfections.seam == 0.f);
+    CHECK(json::parse(scene_to_json(read))["materials"]["imperfections"]["elephant_foot"].get<double>() == 0.5);
+    // All back to 0: dropped.
+    back.materials.imperfections = Imperfections();
+    CHECK_FALSE(scene_json(round_trip(back))["materials"].contains("imperfections"));
+}
+
+TEST_CASE("Showcase 1f: the imperfection rows are for the model", "[Showcase][Realism][panel]")
+{
+    Scene s = make_scene(PresetId::StudioWhite, 0);
+    CHECK(panel_visibility(s, false).mat_imperfections);
+    s.source = "toolpaths";
+    CHECK_FALSE(panel_visibility(s, false).mat_imperfections);
+}

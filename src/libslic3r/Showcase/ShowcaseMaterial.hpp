@@ -104,6 +104,55 @@ constexpr float SPARKLE_CELL_MM = 0.15f;
 // Mirrored in showcase_material.fs as sparkle_lod().
 float sparkle_lod(float cell_px);
 
+// --- realism 1f: imperfections (design 2.6) -----------------------------------------------------
+//
+// What makes a print read as printed: the layers wobble a little (Z-banding), the seam shows as a
+// line of small bumps where the slicer put it, a few faint strings hang where the nozzle travelled
+// across a gap, and the colour and gloss vary a little. Each has a strength 0..1 in the scene
+// (Imperfections in ShowcaseScene.hpp), 0 = off. Model mode; the seam and the strings need the plate
+// sliced (no guessing).
+
+// One point of the sliced plate's moves, as far as the imperfections care.
+enum class PathKind : int { Travel = 0, Extrude, Seam, Other };
+struct PathPoint
+{
+    PathKind kind     = PathKind::Other;
+    float    x = 0.f, y = 0.f, z = 0.f;   // the end of the move, world mm
+    int      extruder = 0;                 // 0-based
+};
+
+struct SeamPoint
+{
+    float x = 0.f, y = 0.f, z = 0.f;
+};
+// The seam points of the moves, sorted by z then x, y (the shader searches them by z), duplicates
+// within 1 um dropped. At most `max_points`, evenly thinned beyond it.
+std::vector<SeamPoint> seam_points(const std::vector<PathPoint> &moves, size_t max_points = 65536);
+
+// A string of plastic left on a travel across a gap: from `a` to `b`, sagging by `sag` mm at the middle.
+struct StringWisp
+{
+    std::array<float, 3> a{ { 0.f, 0.f, 0.f } };
+    std::array<float, 3> b{ { 0.f, 0.f, 0.f } };
+    float                sag      = 0.f;
+    int                  extruder = 0;
+};
+// The travels a string could hang on: from the end of one extrusion to the start of the next on the
+// same layer, 2 to 30 mm apart (retractions and wipes between them do not count). `strength` 0..1
+// keeps that share of them, at most a quarter, picked by a fixed hash of the move so the same ones
+// stay from frame to frame; at most `max_count`.
+std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count = 400);
+// A point along a wisp, t in 0..1 (a parabola below the straight line).
+std::array<float, 3>    wisp_point(const StringWisp &w, float t);
+
+// The seam's bump across its width: 1 on the seam, 0 at `width_mm` from it and beyond, smooth.
+float seam_bump(float distance_mm, float width_mm);
+// The seam's width (mm) and how far it stands out (mm) at a strength.
+constexpr float SEAM_WIDTH_MM = 0.45f;
+float           seam_height_mm(float strength);
+// How far (mm) a layer may be shifted sideways at a strength (the wobble's amplitude).
+float           wobble_amplitude_mm(float strength);
+
 // --- toolpath realism (S5, D13; design 2.6.3) --------------------------------------------------
 
 // The finish's default Smoothness (design 2.6.3's table): matte 0.5, standard 0.6, silk 0.8, gloss

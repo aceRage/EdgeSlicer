@@ -268,6 +268,20 @@ struct ExportSettings
     bool operator!=(const ExportSettings &o) const { return !(*this == o); }
 };
 
+// Realism 1f (design 2.6): what makes the model read as printed, each 0 (off) .. 1, model mode. Written
+// as the materials' "imperfections" only when one is on.
+struct Imperfections
+{
+    float wobble = 0.f;   // layers shifted a little sideways (Z-banding)
+    float seam   = 0.f;   // the seam as a line of small bumps (needs the plate sliced)
+    float strings = 0.f;  // faint strings on travels across gaps (needs the plate sliced)
+    float colour = 0.f;   // slight colour and gloss variation
+
+    bool any() const { return wobble > 0.f || seam > 0.f || strings > 0.f || colour > 0.f; }
+    bool operator==(const Imperfections &o) const { return wobble == o.wobble && seam == o.seam && strings == o.strings && colour == o.colour; }
+    bool operator!=(const Imperfections &o) const { return !(*this == o); }
+};
+
 // Per filament slot (1-based, as the filament list shows it): the finish the user picked over the
 // inferred one (D4).
 struct MaterialOverride
@@ -303,6 +317,8 @@ struct Materials
     // Translucent filaments glow through thin walls at any value (effective_translucency()). Written
     // only when set.
     float                         translucency       = 0.f;
+    // Realism 1f.
+    Imperfections                 imperfections;
     // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
     float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
@@ -318,7 +334,7 @@ struct Materials
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
                coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient &&
                toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill &&
-               translucency == o.translucency;
+               translucency == o.translucency && imperfections == o.imperfections;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };

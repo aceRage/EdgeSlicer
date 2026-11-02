@@ -159,7 +159,7 @@ std::pair<bool, std::string> GLShadersManager::init()
         if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)
             s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "transmit_map", 3 }, { "shadow_map", 5 } });
         if (GLShaderProgram* s = get_shader("showcase_material"); s != nullptr)
-            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 } });
+            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
         // Realism 1d: the thickness pass and the coloured shadows' map (both use showcase_material.vs).
         // Without them translucent plastics take a typical wall thickness and shadows stay grey.
         appendOptionalShader("showcase_thickness", { prefix + "showcase_material.vs", prefix + "showcase_thickness.fs" });
@@ -182,7 +182,7 @@ std::pair<bool, std::string> GLShadersManager::init()
             auto program = std::make_unique<GLShaderProgram>();
             if (!sources[0].empty() && !sources[1].empty() && program->init_from_texts("showcase_material_mc", sources)) {
                 m_shaders.push_back(std::move(program));
-                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 } });
+                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
             } else
                 BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: showcase_material_mc";
         }

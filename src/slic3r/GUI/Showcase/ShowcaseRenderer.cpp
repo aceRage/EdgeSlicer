@@ -286,7 +286,8 @@ ShowcaseRenderer::~ShowcaseRenderer()
     // them here only while the canvas can still be made current.
     const bool has_gl = m_bg_texture != 0 || m_wm_texture != 0 || (m_floor_model != nullptr && m_floor_model->is_initialized()) ||
                         m_env_texture != 0 || m_floor_texture != 0 || m_contact_fbo != 0 || m_refl_fbo != 0 || !m_layers.empty() ||
-                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0 || m_thick_fbo != 0 || m_transmit_fbo != 0;
+                        m_callout_texture != 0 || m_live_fb != nullptr || m_dof_copy_fbo != 0 || m_thick_fbo != 0 || m_transmit_fbo != 0 ||
+                        m_seam_tex != 0 || !m_strings_models.empty();
     if (has_gl && m_canvas.get_wxglcanvas() != nullptr && m_canvas._set_current())
         release_gl();
     for (std::unique_ptr<ShowcaseFramebuffers> *fb : { &m_batch_fb, &m_live_fb })
@@ -340,6 +341,14 @@ void ShowcaseRenderer::release_gl()
         m_floor_texture = 0;
     }
     m_floor_key.clear();
+    // Realism 1f.
+    if (m_seam_tex != 0) {
+        glsafe(::glDeleteTextures(1, &m_seam_tex));
+        m_seam_tex = 0;
+    }
+    m_seam_count = m_seam_width = 0;
+    m_slice_imp_key.clear();
+    m_strings_models.clear();
     m_batch_fb.reset();
     m_live_fb.reset();
     m_live_fb_failed_w = m_live_fb_failed_h = 0;
@@ -1492,8 +1501,24 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
             m_thick_valid = render_thickness(thick_items, view, projection, eye);
     }
 
+    // Realism 1f: the imperfections; the seam and the strings come from the plate's slice.
+    const Showcase::Imperfections imp = m_scene->materials.imperfections;
+    const bool imp_on    = imp.wobble > 0.f || imp.seam > 0.f || imp.colour > 0.f;
+    const bool slice_imp = (imp.seam > 0.f || imp.strings > 0.f) && ensure_slice_imperfections();
+
     // Frame uniforms.
     shader->start_using();
+    shader->set_uniform("imp_wobble", imp.wobble);
+    shader->set_uniform("imp_seam", slice_imp ? imp.seam : 0.f);
+    shader->set_uniform("imp_colour", imp.colour);
+    shader->set_uniform("seam_table", 9);
+    shader->set_uniform("seam_count", slice_imp && imp.seam > 0.f ? m_seam_count : 0);
+    shader->set_uniform("seam_table_width", std::max(1, m_seam_width));
+    if (slice_imp && imp.seam > 0.f && m_seam_tex != 0) {
+        glsafe(::glActiveTexture(GL_TEXTURE0 + 9));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_seam_tex));
+        glsafe(::glActiveTexture(GL_TEXTURE0));
+    }
     shader->set_uniform("use_thickness", m_thick_valid);
     shader->set_uniform("thickness_map", 8);
     shader->set_uniform("thickness_viewport", std::array<float, 4>{ m_thick_viewport[0], m_thick_viewport[1], m_thick_viewport[2], m_thick_viewport[3] });
@@ -1596,7 +1621,7 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
                                            it.filament <= MultiColour::GLSL_SLOTS &&
                                            MultiColour::slot_is_multi(multicolour, it.filament - 1) ?
                                        it.filament - 1 : -1;
-        const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
+        const LayerInfo *layers = (line_depth > 0.f || aniso || mc_slot >= 0 || imp_on) && !v->is_wipe_tower ? layers_for(v->object_idx()) : nullptr;
         const int        mode   = layers != nullptr ? layers->mode : 0;
         shader->set_uniform("layer_mode", mode);
         if (layers != nullptr) {
@@ -1718,10 +1743,13 @@ bool ShowcaseRenderer::draw_objects_material(bool mirrored, bool hdr)
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
         glsafe(::glDisable(GL_BLEND));
     }
+    // Realism 1f: the faint strings, last (translucent, over everything they hang in front of).
+    if (!mirrored && slice_imp && imp.strings > 0.f && !m_wisps.empty())
+        draw_strings(*shader, view, projection, eye, colors);
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glCullFace(GL_BACK));
 
-    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT, 8 }) {
+    for (int unit : { SHOWCASE_SHADOW_MAP_UNIT, SHOWCASE_LAYER_UNIT, 8, 9 }) {
         glsafe(::glActiveTexture(GL_TEXTURE0 + unit));
         glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
     }
@@ -2089,6 +2117,165 @@ void ShowcaseRenderer::render_transmit_map()
     glsafe(::glEnable(GL_DEPTH_TEST));
     glsafe(::glEnable(GL_CULL_FACE));
     m_transmit_valid = true;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Realism 1f: the slice's seam and strings
+// ------------------------------------------------------------------------------------------------
+
+bool ShowcaseRenderer::ensure_slice_imperfections()
+{
+    if (m_scene == nullptr || !toolpaths_available())
+        return false;
+    PartPlate *plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+    const GCodeProcessorResult *result = plate != nullptr ? plate->get_slice_result() : nullptr;
+    if (result == nullptr || result->moves.empty())
+        return false;
+    const Vec3d origin  = plate->get_origin();
+    const float strings = m_scene->materials.imperfections.strings;
+    std::ostringstream key;
+    key << static_cast<const void *>(result) << ':' << result->id << ':' << result->moves.size() << ':' << origin.x() << ',' << origin.y() << ':' << strings;
+    if (key.str() == m_slice_imp_key)
+        return m_seam_count > 0 || !m_wisps.empty();
+    m_slice_imp_key = key.str();
+
+    // The moves as the imperfections see them, in world coordinates (the plate's origin added).
+    std::vector<Showcase::PathPoint> points;
+    points.reserve(result->moves.size());
+    for (const GCodeProcessorResult::MoveVertex &m : result->moves) {
+        Showcase::PathPoint p;
+        switch (m.type) {
+        case EMoveType::Travel: p.kind = Showcase::PathKind::Travel; break;
+        case EMoveType::Extrude: p.kind = Showcase::PathKind::Extrude; break;
+        case EMoveType::Seam: p.kind = Showcase::PathKind::Seam; break;
+        default: p.kind = Showcase::PathKind::Other; break;
+        }
+        p.x        = m.position.x() + float(origin.x());
+        p.y        = m.position.y() + float(origin.y());
+        p.z        = m.position.z() + float(origin.z());
+        p.extruder = int(m.extruder_id);
+        points.push_back(p);
+    }
+    const std::vector<Showcase::SeamPoint> seams = Showcase::seam_points(points);
+    m_wisps = Showcase::string_wisps(points, strings);
+
+    if (m_seam_tex != 0) {
+        glsafe(::glDeleteTextures(1, &m_seam_tex));
+        m_seam_tex = 0;
+    }
+    m_seam_count = 0;
+    m_seam_width = 0;
+    if (!seams.empty()) {
+        const int width  = int(std::min<size_t>(seams.size(), 1024));
+        const int height = int((seams.size() + size_t(width) - 1) / size_t(width));
+        std::vector<float> texels(size_t(width) * size_t(height) * 4, 0.f);
+        for (size_t i = 0; i < seams.size(); ++i) {
+            texels[i * 4 + 0] = seams[i].x;
+            texels[i * 4 + 1] = seams[i].y;
+            texels[i * 4 + 2] = seams[i].z;
+        }
+        glsafe(::glGenTextures(1, &m_seam_tex));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, m_seam_tex));
+        glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 4));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, texels.data()));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        m_seam_count = int(seams.size());
+        m_seam_width = width;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Showcase: imperfections from the slice: " << m_seam_count << " seam points, " << m_wisps.size() << " strings";
+    return m_seam_count > 0 || !m_wisps.empty();
+}
+
+void ShowcaseRenderer::draw_strings(GLShaderProgram &shader, const Transform3d &view, const Transform3d &projection, const Vec3d &eye,
+                                    const std::vector<ColorRGBA> &colors)
+{
+    // Ribbons facing the camera, about a pixel wide (thinner in mm when close), drawn faint so a sub-
+    // pixel string still reads as a hairline.
+    const Matrix4d &P   = projection.matrix();
+    GLint           vp[4] = { 0, 0, 1, 1 };
+    glsafe(::glGetIntegerv(GL_VIEWPORT, vp));
+    const double px_scale = 2. / std::max(1e-6, P(1, 1) * double(std::max(1, vp[3])));   // mm per pixel per mm of distance
+    const bool   ortho    = std::abs(P(3, 3) - 1.) < 1e-9;
+    const double ortho_mm = ortho ? 2. / std::max(1e-9, P(1, 1) * double(std::max(1, vp[3]))) : 0.;
+    std::map<int, GLModel::Geometry> by_extruder;
+    const int segments = 12;
+    for (const Showcase::StringWisp &w : m_wisps) {
+        GLModel::Geometry &g = by_extruder[w.extruder];
+        if (g.vertices.empty())
+            g.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+        const unsigned int base = unsigned(g.vertices_count());
+        for (int s = 0; s <= segments; ++s) {
+            const float                t  = float(s) / float(segments);
+            const std::array<float, 3> p  = Showcase::wisp_point(w, t);
+            const std::array<float, 3> p2 = Showcase::wisp_point(w, std::min(1.f, t + 0.02f));
+            const std::array<float, 3> p1 = Showcase::wisp_point(w, std::max(0.f, t - 0.02f));
+            const Vec3d pos(p[0], p[1], p[2]);
+            const Vec3d dir = Vec3d(p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]).normalized();
+            const Vec3d to_eye = (eye - pos).normalized();
+            Vec3d side = dir.cross(to_eye);
+            if (side.squaredNorm() < 1e-12)
+                side = Vec3d::UnitZ();
+            side.normalize();
+            // Thinner at the ends, where the string leaves the part.
+            const double taper = 0.35 + 0.65 * std::sin(PI * double(t));
+            const double mm_px = ortho ? ortho_mm : (eye - pos).norm() * px_scale;
+            const double half  = 0.5 * std::max(0.04, 0.9 * mm_px) * taper;
+            const Vec3f  n     = to_eye.cast<float>();
+            g.add_vertex(Vec3f((pos + side * half).cast<float>()), n);
+            g.add_vertex(Vec3f((pos - side * half).cast<float>()), n);
+        }
+        for (int s = 0; s < segments; ++s) {
+            const unsigned int i = base + unsigned(2 * s);
+            g.add_triangle(i, i + 1, i + 2);
+            g.add_triangle(i + 1, i + 3, i + 2);
+        }
+    }
+    m_strings_models.clear();
+    // A plain plastic: the standard finish, no translucency or effects, faint.
+    const Showcase::MaterialParams mp = Showcase::material_params(Showcase::Finish::Standard);
+    shader.set_uniform("mat_roughness", mp.roughness);
+    shader.set_uniform("mat_f0", mp.f0);
+    shader.set_uniform("mat_metal_tint", 0.f);
+    shader.set_uniform("mat_anisotropy", 0.f);
+    shader.set_uniform("mat_clearcoat", 0.f);
+    shader.set_uniform("mat_alpha", 0.45f);
+    shader.set_uniform("mat_line_shade", 0.f);
+    shader.set_uniform("mat_fiber_noise", 0.f);
+    for (const char *name : { "mat_transmission", "mat_density", "mat_sss", "mat_sheen", "mat_sparkle", "mat_speckle", "imp_wobble", "imp_seam", "imp_colour" })
+        shader.set_uniform(name, 0.f);
+    shader.set_uniform("mat_speckle_kind", 0);
+    shader.set_uniform("layer_mode", 0);
+    shader.set_uniform("skin_mode_top", 0);
+    shader.set_uniform("skin_mode_bottom", 0);
+    shader.set_uniform("glow_slot", std::array<float, 4>{ 0.f, 0.f, 0.f, 0.f });
+    shader.set_uniform("force_opaque", false);
+    if (shader.get_uniform_location("mc_slot") >= 0)
+        shader.set_uniform("mc_slot", -1);
+    shader.set_uniform("view_model_matrix", view);
+    shader.set_uniform("projection_matrix", projection);
+    shader.set_uniform("volume_world_matrix", Transform3d::Identity());
+    shader.set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDepthMask(GL_FALSE));
+    glsafe(::glDisable(GL_CULL_FACE));
+    for (auto &[extruder, geometry] : by_extruder) {
+        if (geometry.is_empty())
+            continue;
+        auto model = std::make_shared<GLModel>();
+        model->init_from(std::move(geometry));
+        const ColorRGBA c = extruder >= 0 && size_t(extruder) < colors.size() ? colors[size_t(extruder)] : ColorRGBA(0.8f, 0.8f, 0.8f, 1.f);
+        model->set_color(ColorRGBA(c.r(), c.g(), c.b(), 1.f));
+        model->render();
+        m_strings_models.emplace_back(extruder, std::move(model));
+    }
+    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDisable(GL_BLEND));
 }
 
 void ShowcaseRenderer::draw_scene(const DrawTarget &t)

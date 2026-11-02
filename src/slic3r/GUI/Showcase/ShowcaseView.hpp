@@ -430,6 +430,11 @@ private:
     wxSlider                *m_lights_ambient = nullptr;
     wxSlider                *m_glow_intensity = nullptr;
     wxSlider                *m_translucency = nullptr;   // realism 1d
+    // Realism 1f: the imperfections.
+    wxSlider                *m_imp_wobble = nullptr;
+    wxSlider                *m_imp_seam = nullptr;
+    wxSlider                *m_imp_strings = nullptr;
+    wxSlider                *m_imp_colour = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
     std::string              m_mat_signature;

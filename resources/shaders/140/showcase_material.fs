@@ -95,6 +95,15 @@ uniform float mat_sparkle;
 uniform float mat_speckle;
 uniform int   mat_speckle_kind;      // 1 stone (marble), 2 wood
 
+// Realism 1f (Showcase::Imperfections): 0 = off. The seam table (unit 9, RGBA32F, one texel a seam
+// point x, y, z, sorted by z; Showcase::seam_points) comes from the plate's slice.
+uniform float     imp_wobble;
+uniform float     imp_seam;
+uniform float     imp_colour;
+uniform sampler2D seam_table;
+uniform int       seam_count;
+uniform int       seam_table_width;
+
 // Nothing under the floor (and the mirrored pass keeps to its side of it).
 uniform bool  clip_floor;
 // S5, the layer build-up's fallback without a slice: nothing above build_clip_z (very large = off),
@@ -668,6 +677,64 @@ vec3 speckle_albedo(vec3 albedo, float fleck_px)
     return mix(c, c * (1.0 - 0.08 * mat_speckle), 1.0 - fine);
 }
 
+// --- realism 1f: imperfections ------------------------------------------------------------------------
+
+float hash_layer(float i, float salt) { return fract(sin(i * 12.9898 + salt * 78.233) * 43758.5453); }
+
+// The sideways shift of the layers (in units of the amplitude) at the layer coordinate li (the layer's
+// index plus the height within it): a slow drift over about five layers, and a little of each layer's
+// own that changes near the layer's top, where the next bead starts.
+vec2 wobble_offset(float li)
+{
+    float k  = floor(li / 5.0);
+    float f  = fract(li / 5.0);
+    f = f * f * (3.0 - 2.0 * f);
+    vec2  a  = vec2(hash_layer(k, 1.0), hash_layer(k, 2.0)) - 0.5;
+    vec2  b  = vec2(hash_layer(k + 1.0, 1.0), hash_layer(k + 1.0, 2.0)) - 0.5;
+    float il = floor(li);
+    vec2  j0 = vec2(hash_layer(il, 3.0), hash_layer(il, 4.0));
+    vec2  j1 = vec2(hash_layer(il + 1.0, 3.0), hash_layer(il + 1.0, 4.0));
+    vec2  j  = mix(j0, j1, smoothstep(0.7, 1.0, fract(li))) - 0.5;
+    return 2.0 * (mix(a, b, f) + 0.5 * j);
+}
+
+vec4 seam_point(int i) { return texelFetch(seam_table, ivec2(i - (i / seam_table_width) * seam_table_width, i / seam_table_width), 0); }
+
+// How far (mm, across the wall) this point is from the seam of its layer, and the direction away from
+// it. The seam points sit at the top of their layer (the nozzle's height), so the search runs from
+// this height up one layer.
+float seam_distance(vec3 p, float h, out vec2 away)
+{
+    away = vec2(0.0);
+    if (seam_count <= 0 || seam_table_width <= 0)
+        return 1e9;
+    float lo_z = p.z - 0.01;
+    int lo = 0, hi = seam_count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (seam_point(mid).z < lo_z)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    float best = 1e9;
+    for (int k = 0; k < 48; ++k) {
+        int i = lo + k;
+        if (i >= seam_count)
+            break;
+        vec4 s = seam_point(i);
+        if (s.z > p.z + h + 0.01)
+            break;
+        vec2  d = p.xy - s.xy;
+        float l = length(d);
+        if (l < best) {
+            best = l;
+            away = l > 1e-5 ? d / l : vec2(0.0);
+        }
+    }
+    return best;
+}
+
 #ifdef SHOWCASE_MULTICOLOUR
 // Multi-colour (coextruded) filaments, P4 (tests/design_multicolour_filament_view.md 7.3): the mesh's
 // stand-in for the toolpaths' colours, without a slice. Only in the "showcase_material_mc" program,
@@ -788,6 +855,7 @@ void main()
 
     // 1e: how many millimetres one pixel spans here (flakes and flecks fade below a pixel).
     float px_mm = max(length(fwidth(world_pos.xyz)), 1e-6);
+    float dz_px = max(fwidth(world_pos.z), 1e-6);
     // 1e: marble and wood fills.
     if (mat_speckle > 0.0)
         albedo = speckle_albedo(albedo, 0.35 / px_mm);
@@ -803,6 +871,57 @@ void main()
             speck = hash12(floor(world_pos.xy * 12.0) + floor(world_pos.z * 12.0) * 17.0);
         albedo *= 1.0 - mat_fiber_noise * 0.18 * speck;
         roughness = clamp(roughness - mat_fiber_noise * 0.25 * step(0.93, speck), 0.03, 1.0);
+    }
+
+    // Realism 1f: imperfections, each only when on. World and layer coordinates only (never the
+    // screen), so they stay put in a video, and they fade with the layer lines' "pixels a layer".
+    if (imp_wobble > 0.0 || imp_seam > 0.0 || imp_colour > 0.0) {
+        float z  = world_pos.z;
+        float h  = 0.2;
+        float li = z / 0.2;
+        if (layer_mode != 0) {
+            vec2 layer = layer_at(z);
+            h  = max(layer.y - layer.x, 1e-4);
+            li = float(layer_index_at(z)) + clamp((z - layer.x) / h, 0.0, 1.0);
+        }
+        float lfade = layer_fade(h / dz_px);
+        float wall_i = 1.0 - abs(n.z);
+        // Z-banding: each layer shifted a little sideways tilts the wall at its edges.
+        if (imp_wobble > 0.0 && wall_i > 0.02) {
+            float amp   = 0.05 * imp_wobble;   // Showcase::wobble_amplitude_mm
+            float d0    = dot(wobble_offset(li - 0.25), n.xy);
+            float d1    = dot(wobble_offset(li + 0.25), n.xy);
+            float slope = (d1 - d0) / (0.5 * h) * amp;
+            n = normalize(n - vec3(0.0, 0.0, 1.0) * slope * 3.0 * lfade * wall_i);
+            albedo *= 1.0 + 0.05 * imp_wobble * dot(wobble_offset(li), vec2(0.7071)) * lfade;
+        }
+        // The seam: a line of small bumps, a touch glossier, where the slicer put it.
+        if (imp_seam > 0.0 && seam_count > 0 && wall_i > 0.02) {
+            const float w = 0.45;   // Showcase::SEAM_WIDTH_MM
+            vec2  away;
+            float d = seam_distance(world_pos.xyz, h, away);
+            if (d < w) {
+                float sfade = smoothstep(0.75, 1.5, w / px_mm);
+                float x     = clamp(1.0 - d / w, 0.0, 1.0);
+                float b     = x * x * (3.0 - 2.0 * x);
+                float slope = 0.1 * imp_seam * 6.0 * x * (1.0 - x) / w;   // Showcase::seam_height_mm over the width
+                // Each layer's blob is round: strongest in the middle of the layer.
+                float mid   = sin(PI * clamp(fract(li), 0.0, 1.0));
+                n = normalize(n + vec3(away, 0.0) * slope * 2.0 * mid * sfade * wall_i);
+                roughness = clamp(roughness - 0.15 * b * imp_seam * sfade, 0.03, 1.0);
+                groove_shade *= 1.0 - 0.1 * imp_seam * sfade * smoothstep(0.4, 0.0, d / w);
+            }
+        }
+        // Slight colour and gloss drift: low-frequency noise and a little per layer.
+        if (imp_colour > 0.0) {
+            vec3  p  = world_pos.xyz;
+            float lo = value_noise(p * 0.04) - 0.5;
+            float pl = hash_layer(floor(li), 5.0) - 0.5;
+            albedo *= 1.0 + imp_colour * (0.07 * lo + 0.025 * pl * lfade);
+            vec3 hue = vec3(value_noise(p * 0.03 + 11.0), value_noise(p * 0.03 + 23.0), value_noise(p * 0.03 + 37.0)) - 0.5;
+            albedo *= 1.0 + imp_colour * 0.03 * hue;
+            roughness = clamp(roughness + imp_colour * 0.12 * (value_noise(p * 0.08 + 5.0) - 0.5), 0.03, 1.0);
+        }
     }
 
     // The anisotropic lobe's tangent follows the layers (horizontal) on walls; 1c: on flat top and

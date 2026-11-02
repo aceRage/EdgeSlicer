@@ -866,6 +866,19 @@ void ShowcaseView::build_panel()
     m_translucency = slider(0, 0, 100);
     m_translucency->SetToolTip(_L("Light shines through thin walls and softens the edges of the plastic. Translucent filaments glow on their own."));
     row(_L("Translucency"), m_translucency);
+    // Realism 1f: imperfections (model mode), all off by default.
+    m_imp_wobble = slider(0, 0, 100);
+    m_imp_wobble->SetToolTip(_L("Layers shifted a little sideways, as on a real printer (Z-banding)."));
+    row(_L("Layer wobble"), m_imp_wobble);
+    m_imp_seam = slider(0, 0, 100);
+    m_imp_seam->SetToolTip(_L("The seam as a line of small bumps where the slicer put it. Slice the plate first."));
+    row(_L("Seam"), m_imp_seam);
+    m_imp_strings = slider(0, 0, 100);
+    m_imp_strings->SetToolTip(_L("Faint strings where the nozzle travelled across a gap. Slice the plate first."));
+    row(_L("Stringing"), m_imp_strings);
+    m_imp_colour = slider(0, 0, 100);
+    m_imp_colour->SetToolTip(_L("Slight colour and gloss variation, so large faces are not one flat colour."));
+    row(_L("Colour variation"), m_imp_colour);
     {
         auto *hint = new wxStaticText(m_side, wxID_ANY, _L("The finish of each filament is guessed from its preset name and type. "
                                                            "Pick another one where the guess is wrong."));
@@ -1511,6 +1524,15 @@ void ShowcaseView::build_panel()
         const float v = float(m_translucency->GetValue()) / 100.f;
         edit([v](Showcase::Scene &s) { s.materials.translucency = v; });
     });
+    // Realism 1f.
+    for (wxSlider *sl : { m_imp_wobble, m_imp_seam, m_imp_strings, m_imp_colour })
+        sl->Bind(wxEVT_SLIDER, [this, sl](wxCommandEvent &) {
+            const float v = float(sl->GetValue()) / 100.f;
+            edit([this, sl, v](Showcase::Scene &s) {
+                Showcase::Imperfections &im = s.materials.imperfections;
+                (sl == m_imp_wobble ? im.wobble : sl == m_imp_seam ? im.seam : sl == m_imp_strings ? im.strings : im.colour) = v;
+            });
+        });
 
     m_lens->Bind(wxEVT_CHOICE, [this](wxCommandEvent &) {
         const int sel = m_lens->GetSelection();
@@ -2004,6 +2026,10 @@ void ShowcaseView::sync_controls()
     if (s.materials.toolpath_smoothness >= 0.f)
         m_smooth->SetValue(int(std::lround(s.materials.toolpath_smoothness * 100.f)));
     m_translucency->SetValue(std::clamp(int(std::lround(s.materials.translucency * 100.f)), 0, 100));
+    m_imp_wobble->SetValue(std::clamp(int(std::lround(s.materials.imperfections.wobble * 100.f)), 0, 100));
+    m_imp_seam->SetValue(std::clamp(int(std::lround(s.materials.imperfections.seam * 100.f)), 0, 100));
+    m_imp_strings->SetValue(std::clamp(int(std::lround(s.materials.imperfections.strings * 100.f)), 0, 100));
+    m_imp_colour->SetValue(std::clamp(int(std::lround(s.materials.imperfections.colour * 100.f)), 0, 100));
     refresh_materials(true);
 
     m_projection->SetSelection(wxGetApp().plater()->get_camera().get_type() == Camera::EType::Ortho ? 1 : 0);
@@ -2224,7 +2250,8 @@ void ShowcaseView::update_enabled()
                                                           m_plate_horizon, m_plate_focal, m_plate_match, m_lens, m_dof, m_dof_fnumber,
                                                           m_dof_on_model, m_dof_focus, m_dof_quality, m_plate_rotation, m_plate_flip,
                                                           m_tp_supports, m_tp_skirt, m_tp_infill, m_plate_zoom, m_plate_offset_x,
-                                                          m_plate_offset_y, m_plate_fit, m_translucency })
+                                                          m_plate_offset_y, m_plate_fit, m_translucency, m_imp_wobble, m_imp_seam, m_imp_strings,
+                                                          m_imp_colour })
         w->Enable(editable);
     m_lights_ambient->Enable(editable && s.materials.lights_off);
     m_glow_intensity->Enable(editable);
@@ -2450,6 +2477,8 @@ void ShowcaseView::apply_row_visibility()
     set(m_smooth_auto, v.mat_toolpath);
     set(m_lights_ambient, v.mat_light_left);
     set(m_translucency, v.mat_translucency);
+    for (wxWindow *w : std::initializer_list<wxWindow *>{ m_imp_wobble, m_imp_seam, m_imp_strings, m_imp_colour })
+        set(w, v.mat_imperfections);
     // Callouts
     for (wxWindow *w : std::initializer_list<wxWindow *>{ m_co_layout, m_co_once, m_co_style, m_co_font, m_co_size, m_co_leader,
                                                           m_co_auto_colors, m_co_list, m_co_hint })
