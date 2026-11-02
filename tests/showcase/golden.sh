@@ -61,7 +61,7 @@ while [ $# -gt 0 ]; do
     --expect-change) EXPECT=$2; shift 2 ;;
     --golden-env) GENV=$2; shift 2 ;;
     --candidate-env) CENV=$2; shift 2 ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) CAND=$1; shift ;;
     esac
 done
@@ -101,12 +101,9 @@ echo "candidate: $CEXE" | tee -a "$REPORT"
 echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$REPORT"
 [ -n "$GENV" ] && echo "golden env:    $GENV" | tee -a "$REPORT"
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
-# 1h-2: fixtures the shared baseline cannot render yet differ on purpose. (The 1h-1 HDRI fixtures are
-# compared strictly: the baseline has them since c5b7546a45.)
-NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden,backplate_portrait"
-# Realism 1d-1g, 1h-2 rest: new looks the shared baseline cannot render (compare them with a golden install of
-# the 1h-2 branch to see that everything else is unchanged).
-NEW_FIXTURES="$NEW_FIXTURES,translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights"
+# Fixtures a baseline from before them cannot render differ on purpose: realism 1d-1g and the rest of
+# 1h-2. (The 1h-1 and 1h-2 fixtures are compared strictly: main has them since c5b7546a45 and #828.)
+NEW_FIXTURES="translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
