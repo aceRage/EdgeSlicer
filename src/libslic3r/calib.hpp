@@ -97,7 +97,11 @@ int                  temp_retract_band_index(const Calib_Params &params, double 
 // other-layers temperature within its range, at most 10 bands; 230/205 when the inputs are invalid.
 // Also sets 8 mm bands, retraction 0.2-1.6 mm by 0.2, labels off, wait on.
 // F14 (Lance): no band above min(range_high, printer_max_nozzle_temp, 350); printer max <= 0 means unknown.
-void                 stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high,
+// F17 (Lance): no band below range_low. When fewer than 2 bands fit, start = end = the clipped center
+// (or the cap when the cap is below range_low) and the function returns true: the dialog shows a note asking
+// for a temperature range, and stringing_grid_params_valid blocks OK until the range is valid.
+// Returns false otherwise, including the 230/205 fallback for missing or invalid values.
+bool                 stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high,
                                                    double step = 5., double printer_max_nozzle_temp = 0.);
 double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
 double               temp_for_z(const Calib_Params &params, double z);

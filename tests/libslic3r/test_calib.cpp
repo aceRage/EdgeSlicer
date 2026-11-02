@@ -269,59 +269,52 @@ TEST_CASE("Stringing grid defaults build outward from the other-layers temperatu
     }
 }
 
-TEST_CASE("Stringing grid defaults widen single-temperature, narrow and out-of-limit ranges", "[Calib][TempRetract]")
+TEST_CASE("Stringing grid defaults never go below the filament minimum", "[Calib][TempRetract]")
 {
-    // B2
-    auto check_valid = [](const Calib_Params &p) {
+    // F17 (Lance): bands stay in [range_low, min(range_high, printer max, 350)]. Fewer than 2 bands gives
+    // one band (start = end) and the range-note flag; the validator blocks OK until a range is set.
+    auto check_single = [](double center, double low, double high, double printer_max, double temp) {
+        CAPTURE(center, low, high, printer_max);
+        Calib_Params p;
+        CHECK(stringing_grid_default_params(p, center, low, high, 5., printer_max));
+        CHECK(p.start == Approx(temp));
+        CHECK(p.end == Approx(temp));
+        CHECK(stringing_grid_band_count(p) == 1);
         std::string err;
-        CHECK(stringing_grid_params_valid(p, 270., &err));
-        CHECK(err.empty());
-        CHECK(p.start <= 350.);
-        CHECK(p.end >= 150.);
-        CHECK(stringing_grid_band_count(p) >= 2);
-        CHECK(stringing_grid_band_count(p) <= 10);
-        CHECK(std::fmod(p.start - p.end, p.step) == Approx(0.).margin(1e-9));
+        CHECK_FALSE(stringing_grid_params_valid(p, 270., &err));
+        CHECK_FALSE(err.empty());
     };
-    SECTION("single-temperature PPS profile 300/300/300 builds down from 300")
+    SECTION("single-temperature PPS profile 300/300/300 opens on 300 with the note")
     {
-        Calib_Params p;
-        stringing_grid_default_params(p, 300., 300., 300., 5.);
-        check_valid(p);
-        CHECK(p.start == Approx(300.));
-        CHECK(p.end == Approx(255.));
+        check_single(300., 300., 300., 0., 300.);
     }
-    SECTION("range narrower than one step, 222 in 220-224, stays at or below 224")
+    SECTION("range narrower than one step, 222 in 220-224, opens on 222 with the note")
     {
-        Calib_Params p;
-        stringing_grid_default_params(p, 222., 220., 224., 5.);
-        check_valid(p);
-        CHECK(p.start <= 224.);
-        CHECK(p.start == Approx(222.));
-        CHECK(p.end == Approx(177.));
+        check_single(222., 220., 224., 0., 222.);
     }
-    SECTION("PEEK 420 in 380-460 is capped at 350 without a printer max")
+    SECTION("PEEK 420 in 380-460: the 350 cap is below the minimum, one band at the cap")
     {
-        Calib_Params p;
-        stringing_grid_default_params(p, 420., 380., 460., 5.);
-        check_valid(p);
-        CHECK(p.start == Approx(350.));
-        CHECK(p.end == Approx(305.));
+        check_single(420., 380., 460., 0., 350.);
     }
-    SECTION("PEEK 420 in 380-460 is capped at a 300 C printer max")
+    SECTION("PEEK 420 in 380-460 with a 300 C printer max: one band at 300")
     {
-        Calib_Params p;
-        stringing_grid_default_params(p, 420., 380., 460., 5., 300.);
-        check_valid(p);
-        CHECK(p.start == Approx(300.));
-        CHECK(p.end == Approx(255.));
+        check_single(420., 380., 460., 300., 300.);
     }
     SECTION("range partly above the limit stays inside it, 340 in 300-380")
     {
         Calib_Params p;
-        stringing_grid_default_params(p, 340., 300., 380., 5.);
-        check_valid(p);
+        CHECK_FALSE(stringing_grid_default_params(p, 340., 300., 380., 5.));
         CHECK(p.start == Approx(350.));
         CHECK(p.end == Approx(305.));
+        CHECK(stringing_grid_params_valid(p, 270.));
+    }
+    SECTION("center at the minimum only builds upward, 190 in 190-240")
+    {
+        Calib_Params p;
+        CHECK_FALSE(stringing_grid_default_params(p, 190., 190., 240., 5.));
+        CHECK(p.start == Approx(235.));
+        CHECK(p.end == Approx(190.));
+        CHECK(stringing_grid_params_valid(p, 270.));
     }
 }
 
@@ -371,7 +364,7 @@ TEST_CASE("Stringing grid defaults fall back to 230/205 on invalid filament temp
     for (const Case &c : cases) {
         CAPTURE(c.center, c.low, c.high);
         Calib_Params p;
-        stringing_grid_default_params(p, c.center, c.low, c.high, 5.);
+        CHECK_FALSE(stringing_grid_default_params(p, c.center, c.low, c.high, 5.));
         CHECK(p.start == Approx(230.));
         CHECK(p.end == Approx(205.));
         CHECK(stringing_grid_params_valid(p, 270.));

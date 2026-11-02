@@ -991,7 +991,7 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     SetFont(Label::Body_14);
 
     Calib_Params defaults;
-    filament_default_params(defaults);
+    const bool   needs_range = filament_default_params(defaults);
     const unsigned long start_temp = (unsigned long) defaults.start;
     const unsigned long end_temp   = (unsigned long) defaults.end;
 
@@ -1057,6 +1057,14 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
     m_stSummary = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
     m_stSummary->SetForegroundColour(wxColour(128, 128, 128));
     settings_sizer->Add(m_stSummary, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+    // F17: shown when the filament range holds fewer than 2 bands, so the dialog opens on one temperature.
+    m_stRangeNote = new wxStaticText(this, wxID_ANY,
+                                     _L("The filament's temperature range fits only one band. Set a start and end temperature range to test."),
+                                     wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_stRangeNote->SetForegroundColour(wxColour(230, 92, 92));
+    m_stRangeNote->Wrap(FromDIP(360));
+    m_stRangeNote->Show(needs_range);
+    settings_sizer->Add(m_stRangeNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
 
     v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
     v_sizer->AddSpacer(FromDIP(5));
@@ -1090,7 +1098,7 @@ TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWin
 
 TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
 
-void TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
+bool TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
 {
     double center = 0., low = 0., high = 0.;
     if (const auto *bundle = wxGetApp().preset_bundle) {
@@ -1106,13 +1114,14 @@ void TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
     // F14: the printer preset has no max nozzle temperature option (PrintConfig defines none), so the
     // cap is the filament's nozzle_temperature_range_high and 350 C. Pass the printer max here if one is added.
     const double printer_max_nozzle_temp = 0.;
-    stringing_grid_default_params(params, center, low, high, 5., printer_max_nozzle_temp);
+    return stringing_grid_default_params(params, center, low, high, 5., printer_max_nozzle_temp);
 }
 
 void TempRetract_Calibration_Dlg::reset_to_defaults()
 {
     Calib_Params p;
-    filament_default_params(p);
+    const bool   needs_range = filament_default_params(p);
+    m_stRangeNote->Show(needs_range);
     m_tiStartTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.start)));
     m_tiEndTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.end)));
     m_tiTempStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.step));
@@ -1122,6 +1131,7 @@ void TempRetract_Calibration_Dlg::reset_to_defaults()
     m_tiRetractStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_step));
     m_cbLabels->SetValue(p.print_labels);
     m_cbWaitTemp->SetValue(p.wait_for_temperature);
+    Layout();
 }
 
 int TempRetract_Calibration_Dlg::ShowModal()

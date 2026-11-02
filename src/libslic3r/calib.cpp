@@ -1137,7 +1137,7 @@ bool stringing_grid_params_valid(const Calib_Params &params, double bed_width, s
     return true;
 }
 
-void stringing_grid_default_params(
+bool stringing_grid_default_params(
     Calib_Params &params, double center, double range_low, double range_high, double step, double printer_max_nozzle_temp)
 {
     params                      = Calib_Params();
@@ -1154,14 +1154,13 @@ void stringing_grid_default_params(
     // center +step, -step, +2 step, -2 step, ... When one side reaches its limit, keep adding on the
     // other side. Stop at the 10-band cap or when both sides are at their limits. Bands are
     // center + k * step, so (start - end) is always a step multiple.
-    // B2: 1) build inside the filament range (intersected with the validator's 150-350 C limits);
-    //     2) if that gives fewer than 2 bands (single-temperature or narrower-than-a-step range, or a
-    //        range entirely outside the limits), build again from the center inside the limits only;
-    //     3) the center itself is clipped to the limits (e.g. a 420 C PEEK profile starts at 350 C);
-    // F14 (Lance 2026-11-01): no band goes above upper = min(filament range high, printer max nozzle
-    //     temperature, 350), in either stage. Stage 2 may still go below the filament's low end, to 150.
-    //     The printer max is unknown (<= 0) when the printer preset has no such option.
-    //     4) anything that still fails stringing_grid_params_valid falls back to 230/205.
+    // Bands stay inside [max(range_low, 150), upper], upper = min(filament range high, printer max nozzle
+    // temperature, 350) (F14, Lance 2026-11-01; printer max <= 0 means unknown). The center is clipped to
+    // that window. F17 (Lance 2026-11-01): never below range_low, so there is no widening past the filament
+    // range. If fewer than 2 bands fit (single-temperature or narrower-than-a-step range, or a cap below
+    // range_low), start = end = the clipped center (the cap when the window is empty) and the function
+    // returns true so the dialog asks for a temperature range; the validator blocks OK until then.
+    // Missing or invalid values fall back to 230/205.
     const double eps       = 1e-6;
     const double abs_low   = 150.;
     const double abs_high  = 350.;
@@ -1174,7 +1173,7 @@ void stringing_grid_default_params(
     if (center <= 0. || range_low <= 0. || range_high <= 0. || range_low > range_high || center < range_low - eps ||
         center > range_high + eps) {
         set_fallback();
-        return;
+        return false;
     }
     auto build = [&](double c, double lim_low, double lim_high, double &hi, double &lo) {
         hi = lo = c;
@@ -1201,21 +1200,24 @@ void stringing_grid_default_params(
         upper = std::min(upper, printer_max_nozzle_temp);
     if (upper < abs_low) {
         set_fallback();
-        return;
+        return false;
     }
-    const double c_clipped = std::clamp(center, abs_low, upper);
-    const double in_low    = std::max(range_low, abs_low);
-    const double in_high   = upper;
+    const double in_low = std::max(range_low, abs_low);
+    if (in_low > upper + eps) {
+        // Cap below the filament minimum (e.g. PEEK 380-460 with the 350 C cap): one band at the cap.
+        params.start = params.end = upper;
+        return true;
+    }
+    const double c_clipped = std::clamp(center, in_low, upper);
     double       hi = c_clipped, lo = c_clipped;
-    int          bands = 0;
-    if (in_low <= in_high + eps && c_clipped >= in_low - eps && c_clipped <= in_high + eps)
-        bands = build(c_clipped, in_low, in_high, hi, lo);
-    if (bands < min_bands)
-        bands = build(c_clipped, abs_low, upper, hi, lo);
+    const int    bands = build(c_clipped, in_low, upper, hi, lo);
     params.start = hi;
     params.end   = lo;
-    if (bands < min_bands || !stringing_grid_params_valid(params, 1000.))
+    if (bands < min_bands)
+        return true;
+    if (!stringing_grid_params_valid(params, 1000.))
         set_fallback();
+    return false;
 }
 
 double temp_retract_relative_z(double print_z, double first_printed_layer_bottom)
