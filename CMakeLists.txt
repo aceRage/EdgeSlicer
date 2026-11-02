@@ -962,12 +962,24 @@ set(OCCT_PREFIX "${CMAKE_PREFIX_PATH}" CACHE PATH "Prefix holding OCCT (bin/occt
 
 # OCCT toolkits the app loads at run time on Windows (OCCT is shared there). TKBool, TKFillet,
 # TKOffset and TKFeat come from OCCT's ModelingAlgorithms module (B-rep booleans, fillets,
-# offsets, features). OCCT 7.8 merged the five STEP toolkits into TKDESTEP, which also needs TKDE.
-# The Windows self-hosted CI parses this list against bin/occt; keep it in step with OCCT_LIBS.
+# offsets, features).
 set(OCCT_RUNTIME_TOOLKITS
+    TKBO TKBool TKBRep TKCAF TKCDF TKernel TKFeat TKFillet TKG2d TKG3d TKGeomAlgo TKGeomBase
+    TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKSTEP TKSTEP209
+    TKSTEPAttr TKSTEPBase TKTopAlgo TKV3d TKVCAF TKXCAF TKXDESTEP TKXSBase)
+
+# SLIC3R_CAD=ON builds against OCCT 8.0.1 (deps built with -DSLIC3R_CAD=ON, e.g. edgebuild's "cad"
+# deps profile): OCCT 7.8 merged the five STEP toolkits into TKDESTEP, which also needs TKDE.
+# The list above stays first and unchanged: the Windows self-hosted CI parses the first
+# set(OCCT_RUNTIME_TOOLKITS ...) against the default (OCCT 7.6) deps. Keep this one in step with
+# OCCT_LIBS in src/libslic3r/CMakeLists.txt.
+set(OCCT_RUNTIME_TOOLKITS_CAD
     TKBO TKBool TKBRep TKCAF TKCDF TKernel TKFeat TKFillet TKG2d TKG3d TKGeomAlgo TKGeomBase
     TKHLR TKLCAF TKMath TKMesh TKOffset TKPrim TKService TKShHealing TKDESTEP TKDE
     TKTopAlgo TKV3d TKVCAF TKXCAF TKXSBase)
+if (SLIC3R_CAD)
+    set(OCCT_RUNTIME_TOOLKITS ${OCCT_RUNTIME_TOOLKITS_CAD})
+endif ()
 
 function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
     if ("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "AMD64")
@@ -1005,8 +1017,16 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
         )
     endif()
 
-    # Stage the OCCT toolkits libslic3r links. RelWithDebInfo / Debug installs live in
-    # bin/occti and bin/occtd; the directory is published per build type from TKernel.
+    if (NOT SLIC3R_CAD)
+    set(_occt_dlls_src "")
+    set(_occt_dlls_out "")
+    foreach (_tk IN LISTS OCCT_RUNTIME_TOOLKITS)
+        list(APPEND _occt_dlls_src ${OCCT_PREFIX}/bin/occt/${_tk}.dll)
+        list(APPEND _occt_dlls_out ${_out_dir}/${_tk}.dll)
+    endforeach ()
+    else ()
+    # SLIC3R_CAD=ON (OCCT 8.0.1): stage the OCCT toolkits libslic3r links. RelWithDebInfo / Debug
+    # installs live in bin/occti and bin/occtd; the directory is published per build type from TKernel.
     string(TOUPPER "${config}" _config_upper)
     set(_occt_bin "${OCCT_BIN_DIR_${_config_upper}}")
     if (NOT _occt_bin)
@@ -1030,7 +1050,9 @@ function(Snapmaker_Orca_copy_dlls target config postfix output_dlls)
     if (_missing_occt)
         message(FATAL_ERROR
             "OCCT DLLs missing from ${_occt_bin}/: ${_missing_occt}\n"
-            "Rebuild the dependencies (build_release_vs2022.bat deps) so the OCCT 8.0.1 toolkit set is installed.")
+            "SLIC3R_CAD=ON needs the OCCT 8.0.1 toolkit set: build the deps with -DSLIC3R_CAD=ON "
+            "(e.g. edgebuild --deps cad) and point CMAKE_PREFIX_PATH / OCCT_PREFIX at that prefix.")
+    endif ()
     endif ()
     file(COPY ${_occt_dlls_src}
             ${CMAKE_PREFIX_PATH}/bin/freetype.dll
