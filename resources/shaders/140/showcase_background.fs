@@ -5,7 +5,8 @@
 // m_background's full-screen quad with background.vs. Everything is laid out relative to the safe
 // frame, so the live view shows the backdrop the export will have.
 
-uniform int  mode;          // 0 solid, 1 vertical gradient, 2 radial gradient, 3 image, 4 checkerboard, 5 environment
+uniform int  mode;          // 0 solid, 1 vertical gradient, 2 radial gradient, 3 image, 4 checkerboard, 5 environment,
+                            // 6 an HDRI environment's sharp panorama (image_tex: RGBA16F equirect, linear, already scaled)
 uniform vec4 color1;        // solid; gradient top / centre; image letterbox
 uniform vec4 color2;        // gradient bottom / edge
 uniform vec4 frame_rect;    // the safe frame in [0,1] viewport coordinates: x0, y0, x1, y1
@@ -35,6 +36,14 @@ in vec2 tex_coord;
 out vec4 out_color;
 
 vec3 to_cube(vec3 w) { return vec3(w.x, w.z, -w.y); }
+
+// 1h-1: the equirect mapping of ShowcaseHdr.hpp (the Poly Haven / Blender convention): the image
+// centre is world +X, u = 0.25 is +Y, v = 0 the zenith.
+vec2 equirect_uv(vec3 w)
+{
+    const float pi = 3.14159265;
+    return vec2(0.5 - atan(w.y, w.x) / (2.0 * pi), 0.5 - asin(clamp(w.z, -1.0, 1.0)) / pi);
+}
 
 vec3 env_rotate(vec3 w)
 {
@@ -130,6 +139,16 @@ void main()
         vec3 dir = normalize(p.xyz / p.w - camera_position);
         vec4 t = textureLod(env_map, to_cube(env_rotate(dir)), clamp(blur, 0.0, 1.0) * env_max_lod);
         c = vec4(linear_to_srgb(tone_curve_map(t.rgb * t.a * 16.0 * env_exposure)), 1.0);
+    } else if (mode == 6) {
+        vec4 p = inv_view_projection * vec4(tex_coord * 2.0 - 1.0, 1.0, 1.0);
+        vec3 dir = normalize(p.xyz / p.w - camera_position);
+        // The mip level that matches one screen pixel (from the direction's derivatives, so there is no
+        // seam where the longitude wraps), or the blur's level when that is softer.
+        vec2 tsize = vec2(textureSize(image_tex, 0));
+        float texels_per_pixel = length(fwidth(dir)) * tsize.x / 6.2831853;
+        float lod = max(log2(max(texels_per_pixel, 1e-4)), image_lod);
+        vec3 t = textureLod(image_tex, equirect_uv(env_rotate(dir)), lod).rgb;
+        c = vec4(linear_to_srgb(tone_curve_map(t * env_exposure)), 1.0);
     }
     // G1: the backdrop in the dark, in display space.
     out_color = vec4(c.rgb * pow(max(1.0 - scene_dim, 0.0), 1.0 / 2.2), 1.0);

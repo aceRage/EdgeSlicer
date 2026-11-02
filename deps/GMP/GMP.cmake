@@ -72,6 +72,7 @@ else ()
         DOWNLOAD_DIR ${DEP_DOWNLOAD_DIR}/GMP
         PATCH_COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE}
                       -DP1=${CMAKE_CURRENT_LIST_DIR}/0001-GMP_GCC15.patch
+                      -DP2=${CMAKE_CURRENT_LIST_DIR}/0002-GMP_arm64_no_x18.patch
                       -P ${CMAKE_CURRENT_LIST_DIR}/../apply_patch.cmake
         BUILD_IN_SOURCE ON
         CONFIGURE_COMMAND  env "CFLAGS=${_gmp_ccflags}" "CXXFLAGS=${_gmp_ccflags}" ./configure ${_cross_compile_arg} --enable-shared=no --enable-cxx=yes --enable-static=yes "--prefix=${DESTDIR}" ${_gmp_build_tgt}
