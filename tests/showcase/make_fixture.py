@@ -68,6 +68,11 @@ def main(argv):
                 return 2
             cfg = json.loads(settings.decode("utf-8"))
             cfg.update({k: str(v) for k, v in overrides.items()})
+            # The project keeps only the process keys listed as changed from its system preset.
+            diff = cfg.get("different_settings_to_system")
+            if isinstance(diff, list) and diff:
+                listed = [k for k in diff[0].split(";") if k]
+                diff[0] = ";".join(listed + [k for k in overrides if k not in listed])
             settings = json.dumps(cfg, indent=4).encode("utf-8")
     skip = {SCENES_ENTRY.lower()}
     if settings is not None:
