@@ -2354,3 +2354,49 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
     REQUIRE(it != warnings.end());
     CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
 }
+
+// Bambu #12861: identical objects share sliced layers only when their layers sit in the same place.
+// Layers are stored relative to PrintObject::center_offset(), which follows the first instance of each
+// ModelObject. Two copies of one mesh can then get PrintObjects with the same trafo but a different
+// center_offset; sharing the layers between them printed one copy in the wrong place.
+TEST_CASE("Print: shared layers need the same center offset, not only the same trafo", "[Print][SharedObject][Regression]")
+{
+    Model model;
+    // make_cube() spans 0..20, so its centre is off the origin and moves when rotated about Z.
+    ModelObject *a = model.add_object();
+    a->name        = "A";
+    a->add_volume(make_cube(20.0, 20.0, 20.0));
+    a->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    a->ensure_on_bed();
+
+    // B is a copy of A (same mesh, volumes and settings) whose first instance is turned by 90 degrees.
+    // Its second, unrotated instance gets a PrintObject with A's trafo but a rotated center_offset.
+    ModelObject *b = model.add_object(*a);
+    b->name        = "B";
+    b->instances.front()->set_offset(Vec3d(100., 40., 0.));
+    b->instances.front()->set_rotation(Vec3d(0., 0., 0.5 * PI));
+    b->add_instance()->set_offset(Vec3d(40., 100., 0.));
+    b->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Print print;
+    for (ModelObject *obj : model.objects)
+        print.auto_assign_extruders(obj);
+    print.apply(model, config);
+    print.process();
+
+    bool same_trafo_other_offset = false;
+    for (const PrintObject *o1 : print.objects())
+        for (const PrintObject *o2 : print.objects())
+            if (o1 != o2 && o1->trafo().matrix() == o2->trafo().matrix() && o1->center_offset() != o2->center_offset())
+                same_trafo_other_offset = true;
+    // Without such a pair this test would not exercise the fix.
+    REQUIRE(same_trafo_other_offset);
+
+    for (const PrintObject *obj : print.objects()) {
+        if (const PrintObject *shared = obj->get_shared_object()) {
+            CAPTURE(obj->model_object()->name, shared->model_object()->name);
+            CHECK(obj->center_offset() == shared->center_offset());
+        }
+    }
+}
