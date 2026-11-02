@@ -158,6 +158,55 @@ def make_linear(id_data):
             kp.interpolation = "LINEAR"
 
 
+class MissingAddon(RuntimeError):
+    pass
+
+
+def ensure_addon(module_name, label):
+    """Enables a bundled Blender add-on (Cycles, the glTF importer) when the user's profile has it off.
+    Their register() reads their own preferences entry, so it must be added (default_set=True); the
+    preferences are then marked unchanged again when they were before, so Blender's auto-save does
+    not write the change into the user's profile (it lasts this session)."""
+    import addon_utils
+
+    loaded_default, loaded_state = addon_utils.check(module_name)
+    if loaded_state and module_name in bpy.context.preferences.addons:
+        return
+    prefs = bpy.context.preferences
+    was_dirty = getattr(prefs, "is_dirty", True)
+    try:
+        mod = addon_utils.enable(module_name, default_set=True, persistent=False)
+    except Exception as exc:  # noqa: BLE001 - reported to the user
+        raise MissingAddon("%s (%s) could not be enabled: %s" % (label, module_name, exc))
+    finally:
+        if not was_dirty:
+            try:
+                prefs.is_dirty = False
+            except (AttributeError, TypeError):
+                pass
+    if mod is None or module_name not in prefs.addons:
+        raise MissingAddon("%s (%s) is not available in this Blender." % (label, module_name))
+    print("EdgeSlicer: enabled %s for this session" % module_name)
+
+
+def cycles(scene):
+    """The scene's Cycles settings, with Cycles enabled for this session and chosen as the engine.
+    Every scene.cycles access goes through here: a real profile can have Cycles switched off."""
+    if not hasattr(scene, "cycles"):
+        ensure_addon("cycles", "Cycles")
+    if scene.render.engine != "CYCLES":
+        scene.render.engine = "CYCLES"
+    if not hasattr(scene, "cycles"):
+        raise MissingAddon("Cycles is not available in this Blender.")
+    return scene.cycles
+
+
+def ensure_gltf_importer():
+    """Blender's glTF importer (io_scene_gltf2), enabled for this session when the profile has it off."""
+    if "gltf" not in dir(bpy.ops.import_scene):
+        ensure_addon("io_scene_gltf2", "The glTF importer")
+
+
 def gpu_device_available():
     """True when the user's Cycles preferences already name a GPU backend with a device switched on.
     The preferences are only read: changing them would be saved into the user's Blender config."""

@@ -76,7 +76,7 @@ class EDGESLICER_OT_import(Operator):
     def execute(self, context):
         try:
             _do_import(context, self.filepath)
-        except (package.PackageError, OSError, ValueError) as exc:
+        except (package.PackageError, compat.MissingAddon, OSError, ValueError, RuntimeError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -96,7 +96,7 @@ class EDGESLICER_OT_reimport(Operator):
         path = bpy.path.abspath(_settings(context).package_path)
         try:
             _do_import(context, path)
-        except (package.PackageError, OSError, ValueError) as exc:
+        except (package.PackageError, compat.MissingAddon, OSError, ValueError, RuntimeError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -112,15 +112,31 @@ class EDGESLICER_OT_render(Operator):
     def execute(self, context):
         sc = context.scene
         st = _settings(context)
-        sc.cycles.samples = scene.QUALITY_SAMPLES.get(st.quality, 512)
-        sc.cycles.device = "GPU" if st.device == "GPU" or (st.device == "AUTO" and compat.gpu_device_available()) else "CPU"
+        if bpy.data.collections.get(scene.COLLECTION) is None or sc.camera is None:
+            self.report({"ERROR"}, "No EdgeSlicer scene imported - use Re-import / Update or Open in Blender")
+            return {"CANCELLED"}
+        try:
+            cy = compat.cycles(sc)
+        except compat.MissingAddon as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if self.animation and bpy.data.objects.get(scene.VIDEO_CAMERA) is None:
+            self.report({"ERROR"}, "This package has no video: use Render image")
+            return {"CANCELLED"}
+        scene.use_mode(sc, video=self.animation)
+        cy.samples = scene.QUALITY_SAMPLES.get(st.quality, 512)
+        cy.device = "GPU" if st.device == "GPU" or (st.device == "AUTO" and compat.gpu_device_available()) else "CPU"
         out_dir = _output_dir(context)
-        if self.animation:
-            sc.render.filepath = os.path.join(out_dir, "frame_")
-            bpy.ops.render.render("INVOKE_DEFAULT", animation=True)
-        else:
-            sc.render.filepath = os.path.join(out_dir, "still.png")
-            bpy.ops.render.render("INVOKE_DEFAULT", write_still=True)
+        try:
+            if self.animation:
+                sc.render.filepath = os.path.join(out_dir, "frame_")
+                bpy.ops.render.render("INVOKE_DEFAULT", animation=True)
+            else:
+                sc.render.filepath = os.path.join(out_dir, "still.png")
+                bpy.ops.render.render("INVOKE_DEFAULT", write_still=True)
+        except RuntimeError as exc:
+            self.report({"ERROR"}, str(exc).splitlines()[-1] if str(exc) else "The render could not start")
+            return {"CANCELLED"}
         return {"FINISHED"}
 
 
@@ -213,7 +229,7 @@ class EDGESLICER_PT_panel(Panel):
         layout.separator()
         layout.operator(EDGESLICER_OT_render.bl_idname, text="Render image", icon="RENDER_STILL").animation = False
         row = layout.row()
-        row.enabled = context.scene.frame_end > context.scene.frame_start
+        row.enabled = bpy.data.objects.get(scene.VIDEO_CAMERA) is not None
         row.operator(EDGESLICER_OT_render.bl_idname, text="Render animation", icon="RENDER_ANIMATION").animation = True
         layout.operator(EDGESLICER_OT_open_output.bl_idname, icon="FILE_FOLDER")
         if st.status:

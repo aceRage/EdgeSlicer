@@ -16,6 +16,9 @@ from . import compat, materials
 COLLECTION = "EdgeSlicer Showcase"
 QUALITY_SAMPLES = {"PREVIEW": 64, "FINAL": 512, "BEST": 2048}
 BUILD_PROP = "edgeslicer_build_height"
+BUILD_ON = "edgeslicer_build_on"
+STILL_CAMERA = "EdgeSlicer Camera"
+VIDEO_CAMERA = "EdgeSlicer Video Camera"
 QUALITY_FROM_PACKAGE = {"draft": "PREVIEW", "high": "FINAL", "best": "BEST"}
 
 
@@ -398,14 +401,13 @@ def build_floor(pkg, collection, look_override=None):
 # --- render settings -----------------------------------------------------------------------------
 
 def apply_render_settings(pkg, scene, quality=None, device="AUTO", samples=None):
-    scene.render.engine = "CYCLES"
+    cy = compat.cycles(scene)
     out = pkg.get("output", default={})
     scene.render.resolution_x = int(out.get("width", 1920))
     scene.render.resolution_y = int(out.get("height", 1080))
     scene.render.resolution_percentage = 100
     scene.render.fps = int(out.get("fps", 30) or 30)
     quality = quality or QUALITY_FROM_PACKAGE.get(pkg.get("look", "quality", default="high"), "FINAL")
-    cy = scene.cycles
     cy.samples = int(samples or QUALITY_SAMPLES.get(quality, 512))
     cy.use_adaptive_sampling = quality != "BEST"
     cy.use_denoising = True
@@ -431,11 +433,33 @@ def apply_render_settings(pkg, scene, quality=None, device="AUTO", samples=None)
 
 # --- video ---------------------------------------------------------------------------------------
 
-def build_animation(pkg, scene, cam_obj, model_objects, collection):
+def use_mode(scene, video):
+    """A still renders through the still's camera with the whole print; the video through the video
+    camera with its build-up. The viewport shows the still unless asked."""
+    cam = bpy.data.objects.get(VIDEO_CAMERA if video else STILL_CAMERA)
+    if cam is None:
+        cam = bpy.data.objects.get(STILL_CAMERA)
+    if cam is not None:
+        scene.camera = cam
+    scene[BUILD_ON] = 1.0 if video else 0.0
+    if not video:
+        scene.frame_set(scene.frame_start)
+    return cam
+
+
+def build_animation(pkg, scene, still_cam, model_objects, collection):
+    """The video's camera path on its own camera (the still keeps the scene's camera), the turntable
+    and the build-up. Returns the video camera, or None for a still."""
     frames = pkg.frames
+    scene[BUILD_ON] = 0.0
     if not frames:
         scene.frame_start = scene.frame_end = 1
         return None
+    cam_obj = still_cam.copy()
+    cam_obj.data = still_cam.data.copy()
+    cam_obj.name = VIDEO_CAMERA
+    cam_obj.data.name = VIDEO_CAMERA
+    collection.objects.link(cam_obj)
     scene.frame_start = 1
     scene.frame_end = len(frames)
     scene.render.fps = int(pkg.camera_path.get("fps", 30) or 30)
@@ -479,7 +503,7 @@ def build_animation(pkg, scene, cam_obj, model_objects, collection):
         if idb is not None:
             compat.make_linear(idb)
     scene.frame_set(1)
-    return turntable
+    return cam_obj
 
 
 # --- overlay (stills) ----------------------------------------------------------------------------

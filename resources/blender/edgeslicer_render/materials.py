@@ -23,6 +23,7 @@ from . import compat
 
 LINEAR_ATTR = "_SILK_DIR"
 BUILD_PROP = "edgeslicer_build_height"
+BUILD_ON = "edgeslicer_build_on"
 
 
 class _Builder:
@@ -251,13 +252,15 @@ def build_material(name, spec, layers=None, has_silk_attr=False, imperfection_co
         vol.inputs["Density"].default_value = s("absorption_density")
         b.link(vol.outputs[0], out.inputs["Volume"])
 
-    # A video's build-up: transparent above the scene's keyed height (Showcase's clip fallback).
+    # A video's build-up: transparent above the scene's keyed height (Showcase's clip fallback), only
+    # while the scene renders the video (BUILD_ON 1; a still, BUILD_ON 0 or missing, shows the whole print).
     if build_clip:
         attr = b.node("ShaderNodeAttribute", attribute_type="VIEW_LAYER", attribute_name=BUILD_PROP)
+        on = b.node("ShaderNodeAttribute", attribute_type="VIEW_LAYER", attribute_name=BUILD_ON)
         geo = b.node("ShaderNodeNewGeometry")
         sep = b.node("ShaderNodeSeparateXYZ")
         b.link(geo.outputs["Position"], sep.inputs[0])
-        above = b.math("GREATER_THAN", sep.outputs["Z"], attr.outputs["Fac"])
+        above = b.math("MULTIPLY", b.math("GREATER_THAN", sep.outputs["Z"], attr.outputs["Fac"]), on.outputs["Fac"])
         clear = b.node("ShaderNodeBsdfTransparent")
         mix = b.node("ShaderNodeMixShader")
         b.link(above, mix.inputs["Fac"])

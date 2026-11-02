@@ -17,6 +17,7 @@ import sys
 import traceback
 
 import bpy
+from mathutils import Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RESOURCES = os.path.normpath(os.path.join(HERE, "..", "..", "resources", "blender"))
@@ -80,19 +81,40 @@ def main():
         checks["silk_dir_z_up"] = sum(zs) / max(1, len(zs)) < 0.2
     frames = pkg.frames
     if frames:
-        cam_curves = edgeslicer_render.compat.action_fcurves(sc.camera)
+        video = bpy.data.objects.get("EdgeSlicer Video Camera")
+        checks["video_camera"] = video is not None
+        cam_curves = edgeslicer_render.compat.action_fcurves(video) if video else []
         keys = max((len(fc.keyframe_points) for fc in cam_curves), default=0)
         report["camera_keys"] = keys
         checks["camera_keyframes"] = keys == len(frames)
         checks["frame_range"] = sc.frame_end - sc.frame_start + 1 == len(frames)
+        checks["still_camera_not_animated"] = not edgeslicer_render.compat.action_fcurves(sc.camera)
         if any(f.get("build_height") is not None for f in frames):
             checks["build_up_keyed"] = "edgeslicer_build_height" in sc.keys() and any(
                 fc.data_path == '["edgeslicer_build_height"]' for fc in edgeslicer_render.compat.action_fcurves(sc))
-        sc.frame_set(a.frame if a.frame > 0 else max(1, len(frames) // 2))
+            # A still (what Open in Blender shows and Render image renders) has the build-up off.
+            checks["still_shows_whole_print"] = float(sc.get("edgeslicer_build_on", 0.0)) == 0.0
+
+    # The parts are there for the still: visible to the camera and inside its frame (the owner's hand
+    # test of #841 had a render with the backplate and no model).
+    from bpy_extras.object_utils import world_to_camera_view
+    sc.frame_set(sc.frame_start)
+    checks["parts_render_visible"] = len(meshes) > 0 and all(
+        not o.hide_render and getattr(o, "visible_camera", True) for o in meshes)
+    inside = 0
+    corners = 0
+    for o in meshes:
+        for c in o.bound_box:
+            p = world_to_camera_view(sc, sc.camera, o.matrix_world @ Vector(c))
+            corners += 1
+            inside += 0.0 <= p.x <= 1.0 and 0.0 <= p.y <= 1.0 and p.z > 0.0
+    report["bbox_corners_in_frame"] = [inside, corners]
+    checks["parts_in_camera_frame"] = corners > 0 and inside >= corners // 2
 
     # One still at a low sample count.
-    sc.cycles.samples = a.samples
-    sc.cycles.use_denoising = False
+    cy = edgeslicer_render.compat.cycles(sc)
+    cy.samples = a.samples
+    cy.use_denoising = False
     out_png = os.path.join(a.out, "still.png")
     sc.render.resolution_percentage = max(1, int(round(100.0 * a.width / max(1, sc.render.resolution_x))))
     sc.render.filepath = out_png

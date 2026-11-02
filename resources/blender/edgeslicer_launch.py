@@ -37,13 +37,36 @@ def _args():
     return p.parse_args(argv)
 
 
+def _installed_module():
+    """The permanently installed copy of the add-on (an extension or a legacy add-on), if enabled."""
+    for name in bpy.context.preferences.addons.keys():
+        if name == "edgeslicer_render" or name.endswith(".edgeslicer_render"):
+            mod = sys.modules.get(name)
+            if mod is not None:
+                return name, mod
+    return None, None
+
+
 def _register_for_session():
+    """One copy of the add-on, never two: the installed one when it is the same version as the one
+    shipped with this EdgeSlicer, else the shipped one (the installed one is switched off for this
+    session only; the user's preferences are not changed)."""
     # The add-on is read from EdgeSlicer's installation: nothing is written there.
     sys.dont_write_bytecode = True
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import edgeslicer_render
 
+    name, installed = _installed_module()
+    if installed is not None:
+        if getattr(installed, "ADDON_VERSION", None) == edgeslicer_render.ADDON_VERSION and hasattr(installed, "importer"):
+            print("EdgeSlicer: using the installed add-on %s %s" % (name, installed.ADDON_VERSION))
+            return installed
+        import addon_utils
+
+        print("EdgeSlicer: the installed add-on %s is version %s, EdgeSlicer ships %s: using EdgeSlicer's for this session"
+              % (name, getattr(installed, "ADDON_VERSION", "?"), edgeslicer_render.ADDON_VERSION))
+        addon_utils.disable(name, default_set=False)
     if not hasattr(bpy.types.Scene, "edgeslicer"):
         edgeslicer_render.register()
     return edgeslicer_render
@@ -57,27 +80,47 @@ def _clear_default_scene():
             bpy.data.objects.remove(obj, do_unlink=True)
 
 
-def _show_panel():
+def _views():
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
-            if area.type != "VIEW_3D":
-                continue
-            space = area.spaces.active
-            space.show_region_ui = True
-            try:
-                for region in area.regions:
-                    if region.type == "UI":
-                        region.active_panel_category = "EdgeSlicer"
-            except (AttributeError, TypeError):
-                pass
-            space.shading.type = "MATERIAL"
-            # Look through the scene's camera.
+            if area.type == "VIEW_3D":
+                yield window, area
+
+
+def _show_panel():
+    for _window, area in _views():
+        space = area.spaces.active
+        space.show_region_ui = True
+        try:
+            for region in area.regions:
+                if region.type == "UI":
+                    region.active_panel_category = "EdgeSlicer"
+        except (AttributeError, TypeError):
+            pass
+        space.shading.type = "MATERIAL"
+        # Look through the scene's camera.
+        if bpy.context.scene.camera is not None:
             space.region_3d.view_perspective = "CAMERA"
+        area.tag_redraw()
     return None
 
 
-def main():
-    args = _args()
+def _popup(message):
+    """An error the user sees (not only in the console)."""
+    def draw(menu, _context):
+        for line in message.splitlines() or [message]:
+            menu.layout.label(text=line)
+    for window, _area in _views():
+        try:
+            with bpy.context.temp_override(window=window):
+                bpy.context.window_manager.popup_menu(draw, title="EdgeSlicer: the package was not imported", icon="ERROR")
+            return
+        except Exception:  # noqa: BLE001 - fall back below
+            pass
+    bpy.context.window_manager.popup_menu(draw, title="EdgeSlicer: the package was not imported", icon="ERROR")
+
+
+def _import(args):
     addon = _register_for_session()
     _clear_default_scene()
     summary = addon.importer.import_package(args.package, args.quality, args.device, args.samples)
@@ -94,16 +137,37 @@ def main():
         with open(args.report, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
     print("EdgeSlicer: imported %s" % json.dumps(summary, sort_keys=True))
-    if not bpy.app.background:
-        bpy.app.timers.register(_show_panel, first_interval=0.2)
+    return summary
 
 
-try:
-    main()
-except Exception as exc:  # shown in Blender's console and, for the tests, as the exit code
-    import traceback
+def _import_in_ui(args):
+    """Open in Blender: once the window is up, import, look through the camera, show the panel; any
+    failure is shown in a popup."""
+    try:
+        _import(args)
+    except Exception as exc:  # noqa: BLE001 - shown to the user
+        import traceback
 
-    traceback.print_exc()
-    print("EdgeSlicer: the package could not be imported: %s" % exc)
+        traceback.print_exc()
+        _popup("%s\n\nPackage: %s" % (exc, args.package))
+    _show_panel()
+    return None
+
+
+def main():
+    args = _args()
+    print("EdgeSlicer: package %s" % args.package)
     if bpy.app.background:
-        sys.exit(1)
+        try:
+            _import(args)
+        except Exception as exc:  # the tests read the exit code
+            import traceback
+
+            traceback.print_exc()
+            print("EdgeSlicer: the package could not be imported: %s" % exc)
+            sys.exit(1)
+    else:
+        bpy.app.timers.register(lambda: _import_in_ui(args), first_interval=0.5)
+
+
+main()

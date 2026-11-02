@@ -49,9 +49,12 @@ def clear_previous():
         if all(fc.data_path == '["%s"]' % scene.BUILD_PROP for fc in compat.action_fcurves(sc)):
             sc.animation_data_clear()
         del sc[scene.BUILD_PROP]
+    if scene.BUILD_ON in sc.keys():
+        del sc[scene.BUILD_ON]
 
 
 def _import_glb(path, collection):
+    compat.ensure_gltf_importer()
     before = set(bpy.data.objects)
     # New objects go to the active collection: make ours active for the import.
     view_layer = bpy.context.view_layer
@@ -140,8 +143,12 @@ def apply_materials(pkg, model_objects, imperfections=True, layer_bump=True):
 def import_package(path, quality=None, device="AUTO", samples=None, imperfections=True, look_override=None):
     """Builds the scene from the package at `path` (folder, zip, or a file in the folder). Returns a
     summary dict for the panel and the tests."""
-    pkg = package.load(path)
     sc = bpy.context.scene
+    settings = getattr(sc, "edgeslicer", None)
+    if settings is not None:
+        # The panel shows the package even when a later step fails, so Re-import can try again.
+        settings.package_path = path
+    pkg = package.load(path)
     clear_previous()
     collection = bpy.data.collections.new(scene.COLLECTION)
     sc.collection.children.link(collection)
@@ -157,11 +164,11 @@ def import_package(path, quality=None, device="AUTO", samples=None, imperfection
     lights = scene.build_lights(pkg, collection)
     cam = scene.build_camera(pkg, sc, collection)
     floor = scene.build_floor(pkg, collection, look_override)
-    scene.build_animation(pkg, sc, cam, model_objects, collection)
+    video_cam = scene.build_animation(pkg, sc, cam, model_objects, collection)
+    scene.use_mode(sc, video=False)
     overlay = scene.build_overlay(pkg, sc)
     sc.render.filepath = os.path.join(scene.output_dir(pkg), "frame_")
     sc[PROP_PACKAGE] = pkg.source
-    settings = getattr(sc, "edgeslicer", None)
     if settings is not None:
         settings.package_path = pkg.source
         settings.quality = quality
@@ -174,6 +181,7 @@ def import_package(path, quality=None, device="AUTO", samples=None, imperfection
         "frames": len(pkg.frames),
         "overlay": overlay,
         "camera": cam.name,
+        "video_camera": video_cam.name if video_cam is not None else None,
         "view_transform": sc.view_settings.view_transform,
         "has_silk_attr": any(o.data.attributes.get(materials.LINEAR_ATTR) is not None for o in model_objects),
     }
