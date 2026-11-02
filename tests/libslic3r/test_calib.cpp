@@ -29,10 +29,11 @@ Calib_Params grid_params()
 
 bool has_label_vertices(const TriangleMesh &mesh)
 {
-    // Raised base labels sit on z = 1..1.6 between the two pillars (the pillars cover y = 3..7 and 23..27).
+    // Raised base labels sit on z = 1..1.6 between the two pillars, y = 12.5..17.5 (the pillars cover
+    // y = 3..7 and 23..27, and their fillet feet reach y = 10 and 20 at the plate).
     for (const auto &v : mesh.its.vertices)
         if (v.z() > stringing_grid_base_height + 0.05f && v.z() < stringing_grid_base_height + stringing_grid_label_height + 0.05f &&
-            v.y() > 8.f && v.y() < 22.f)
+            v.y() > 11.f && v.y() < 19.f)
             return true;
     return false;
 }
@@ -232,8 +233,65 @@ TEST_CASE("Stringing grid base labels sit between the pillars, clear of both foo
             const BoundingBoxf fp = pillar_footprint(p);
             const bool clear = bb.max.y() + margin <= fp.min.y() || bb.min.y() - margin >= fp.max.y();
             CHECK(clear);
+            // ...and of the fillet foot around it (default radius, the largest that fits).
+            const double r          = stringing_grid_fillet_radius(params);
+            const bool   clear_foot = bb.max.y() + margin <= fp.min.y() - r || bb.min.y() - margin >= fp.max.y() + r;
+            CHECK(r > 0.);
+            CHECK(clear_foot);
         }
     }
+}
+
+TEST_CASE("Stringing grid pillars get a watertight fillet foot on the base plate", "[Calib][TempRetract]")
+{
+    // Owner (real print): the towers snapped where they meet the plate.
+    const double eps = 1e-4;
+    Calib_Params params = grid_params();
+    CHECK(params.fillet_base);                                          // default on
+    CHECK(stringing_grid_max_fillet_radius() == Approx(3.).margin(eps)); // 3 mm to the plate's edges
+    CHECK(stringing_grid_fillet_radius(params) == Approx(3.).margin(eps));
+    params.fillet_radius = 5.;
+    CHECK(stringing_grid_fillet_radius(params) == Approx(3.).margin(eps)); // clamped: the foot stays on the plate
+    params.fillet_radius = 1.5;
+    CHECK(stringing_grid_fillet_radius(params) == Approx(1.5).margin(eps));
+    params.fillet_base = false;
+    CHECK(stringing_grid_fillet_radius(params) == 0.);
+
+    const double       r      = 3.;
+    const double       cx     = 0.5 * stringing_grid_base_x;
+    const double       cy     = 0.5 * (stringing_grid_base_y - stringing_grid_pillar_gap);
+    TriangleMesh       fillet = make_stringing_grid_pillar_fillet_mesh(cx, cy, r); // volume() is not const
+    REQUIRE_FALSE(fillet.empty());
+    // Watertight, outward facing.
+    CHECK(its_num_open_edges(fillet.its) == 0);
+    CHECK(fillet.volume() > 0.);
+    // From inside the plate up to radius above it; pillar plus radius wide at the plate, pillar wide at the top.
+    const BoundingBoxf3 bb = fillet.bounding_box();
+    CHECK(bb.min.z() == Approx(stringing_grid_base_height - stringing_grid_label_embed).margin(eps));
+    CHECK(bb.max.z() == Approx(stringing_grid_base_height + r).margin(eps));
+    CHECK(bb.size().x() > stringing_grid_pillar_xy + 2. * r - 0.2);
+    CHECK(bb.min.x() >= -eps);
+    CHECK(bb.max.x() <= stringing_grid_base_x + eps);
+    CHECK(bb.min.y() >= -eps);
+    // Concave: half way up, the foot is much narrower than at the plate but still wider than the pillar.
+    double half_way_max_x = 0.;
+    for (const auto &v : fillet.its.vertices)
+        if (std::abs(v.z() - (stringing_grid_base_height + 0.5 * r)) < 1e-3)
+            half_way_max_x = std::max(half_way_max_x, double(v.x()) - cx);
+    CHECK(half_way_max_x > 0.5 * stringing_grid_pillar_xy);
+    CHECK(half_way_max_x < 0.5 * stringing_grid_pillar_xy + 0.5 * r);
+    CHECK(make_stringing_grid_pillar_fillet_mesh(cx, cy, 0.).empty());
+
+    // The column mesh carries both feet only when the option is on, and stays on its plate.
+    Calib_Params on = grid_params(), off = grid_params();
+    off.fillet_base = false;
+    const TriangleMesh col_on  = make_stringing_grid_column_mesh(on, 0);
+    const TriangleMesh col_off = make_stringing_grid_column_mesh(off, 0);
+    CHECK(col_on.its.indices.size() == col_off.its.indices.size() + 2 * fillet.its.indices.size());
+    CHECK(col_on.bounding_box().min.x() == Approx(col_off.bounding_box().min.x()).margin(eps));
+    CHECK(col_on.bounding_box().max.x() == Approx(col_off.bounding_box().max.x()).margin(eps));
+    CHECK(col_on.bounding_box().min.y() == Approx(col_off.bounding_box().min.y()).margin(eps));
+    CHECK(col_on.bounding_box().max.y() == Approx(col_off.bounding_box().max.y()).margin(eps));
 }
 
 TEST_CASE("Stringing grid column names parse strictly", "[Calib][TempRetract]")
