@@ -13088,8 +13088,18 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__
                                                 << boost::format(" 3MF project config missing or empty, importing geometry only: %1%") % path.string();
                         load_config = false;
-                        if (!load_model)
+                        if (!load_model) {
+                            // Config-only import with nothing to import: stop here so no plate, preset or thumbnail state
+                            // from this file is applied (review F5). This is the only popup for this file: the Prusa
+                            // "not supported" notice further down is never reached (review F4).
                             show_info(q, _L("The 3MF file has no project settings that EdgeSlicer can import."), _L("Load 3mf"));
+                            release_PlateData_list(plate_data);
+                            for (Preset *preset : project_presets)
+                                delete preset;
+                            project_presets.clear();
+                            q->skip_thumbnail_invalid = false;
+                            return empty_result;
+                        }
                     }
                     // 1. add extruder for prusa model if the number of existing extruders is not enough
                     // 2. add extruder for BBS or Other model if only import geometry
