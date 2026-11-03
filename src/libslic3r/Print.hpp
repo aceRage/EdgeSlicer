@@ -218,6 +218,10 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
                                                   const DynamicPrintConfig *layer_range_config,
                                                   const ModelVolume        &volume,
                                                   size_t                    num_extruders);
+// The volume's own config sets a filament (extruder, wall, sparse or solid infill filament > 0).
+bool model_volume_sets_filament(const ModelVolume &volume);
+// A modifier with "Override paint" on that sets a filament: inside it its filament wins over colour painting.
+bool model_volume_overrides_paint(const ModelVolume &volume);
 
 template<typename T>
 class ConstVectorOfPtrsAdaptor {
@@ -384,8 +388,10 @@ private:
 //  sets_filament: the modifier carries an explicit filament/extruder.
 //  filament_differs: its region's filament differs from the parent region's.
 //  overlaps_painted: the part it overlaps carries colour painting.
+//  overrides_paint: "Override paint" is on (and the modifier sets a filament), so paint does not shadow it.
 enum class ModifierPaintNote { None, SameFilamentPainted, FilamentOverriddenByPaint };
-ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted);
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint = false);
 
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {

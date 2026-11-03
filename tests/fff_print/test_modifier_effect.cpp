@@ -23,15 +23,20 @@
 #include <string>
 #include <vector>
 
+#include <boost/filesystem.hpp>
+
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include "test_data.hpp"
 
@@ -389,4 +394,249 @@ TEST_CASE("a modifier with its own bridge speed keeps its own bridge infill", "[
     // Path lengths are in scaled units. Each half of the 20 x 10 mm span takes well over 50 mm of bridge lines.
     CHECK(bridge_length_by_speed[50.] > scale_(50.));
     CHECK(bridge_length_by_speed[20.] > scale_(50.));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Override paint (feat/modifier-override-paint): a modifier that sets a filament can win over colour
+// painting inside its volume. The owner's case: an emboss text modifier set to orange on a body painted
+// grey all over prints orange text. Modelled with the harness above: a two-filament 20 mm cube with
+// extruder 1 painted entirely with filament 2, and a 6 mm modifier box that pokes through the cube's
+// top face (so its footprint holds visible top skin and walls on the top layers).
+
+namespace {
+
+// add_volume() centres each mesh on its own origin before the harness's set_offset(), so the part spans
+// [-20, 0] on every axis and the modifier spans offset + [-6, 0]: this puts it at x, y = [-13, -7], fully
+// inside the part, and z = [-4, 2], through the part's top face at 0.
+const Vec3d k_modifier_through_top { -7., -7., 2. };
+
+void set_override_paint(ModelVolume &v) { v.config.set_key_value("override_paint", new ConfigOptionBool(true)); }
+
+// Area in mm^2 the given layer prints with walls in filament `wall_filament`, and whether that area also
+// has perimeters and fill extrusions, every one of them with solid infill in the same filament.
+struct FilamentArea
+{
+    double area { 0. };
+    bool   has_perimeters { false };
+    bool   has_fills { false };
+    bool   solid_matches { true };
+};
+
+FilamentArea filament_area(const Layer &layer, int wall_filament)
+{
+    FilamentArea out;
+    for (const LayerRegion *lregion : layer.regions()) {
+        const PrintRegionConfig &cfg = lregion->region().config();
+        if (cfg.wall_filament.value != wall_filament || lregion->slices.empty())
+            continue;
+        for (const Surface &s : lregion->slices.surfaces)
+            out.area += s.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        out.has_perimeters = out.has_perimeters || ! lregion->perimeters.entities.empty();
+        out.has_fills      = out.has_fills || ! lregion->fills.entities.empty();
+        out.solid_matches  = out.solid_matches && cfg.solid_infill_filament.value == wall_filament;
+    }
+    return out;
+}
+
+const Layer &top_layer(const PrintObject &object)
+{
+    REQUIRE(! object.layers().empty());
+    return *object.layers().back();
+}
+
+// Region graph, warnings and the top layer's regions, for INFO when a check fails.
+std::string describe(const PrintObject &object)
+{
+    std::string out;
+    if (const PrintObjectRegions *shared = object.shared_regions())
+        for (const PrintObjectRegions::LayerRangeRegions &lr : shared->layer_ranges) {
+            out += "range [" + std::to_string(lr.layer_height_range.first) + "," + std::to_string(lr.layer_height_range.second) + "]\n";
+            for (const PrintObjectRegions::VolumeRegion &r : lr.volume_regions)
+                out += "  volume " + r.model_volume->name + " parent " + std::to_string(r.parent) + " region " +
+                       (r.region ? std::to_string(r.region->print_object_region_id()) + " wall " +
+                                       std::to_string(r.region->config().wall_filament.value) + " override " +
+                                       std::to_string(int(r.region->config().override_paint.value))
+                                 : std::string("none")) + "\n";
+            for (const PrintObjectRegions::PaintedRegion &p : lr.painted_regions)
+                out += "  painted ext " + std::to_string(p.extruder_id) + " parent " + std::to_string(p.parent) + " region " +
+                       std::to_string(p.region->print_object_region_id()) + "\n";
+        }
+    for (const PrintStateBase::Warning &w : object.step_state_with_warnings(posSlice).warnings)
+        out += "warning " + std::to_string(w.message_id) + ": " + w.message + "\n";
+    if (! object.layers().empty()) {
+        const Layer &top = *object.layers().back();
+        out += "top layer z " + std::to_string(top.print_z) + " of " + std::to_string(object.layers().size()) + "\n";
+        for (const LayerRegion *lregion : top.regions()) {
+            double a = 0.;
+            for (const Surface &s : lregion->slices.surfaces)
+                a += s.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+            out += "  region " + std::to_string(lregion->region().print_object_region_id()) + " wall " +
+                   std::to_string(lregion->region().config().wall_filament.value) + " area " + std::to_string(a) + "\n";
+        }
+    }
+    for (const ModelVolume *v : object.model_object()->volumes) {
+        out += "model volume " + v->name + " modifier " + std::to_string(int(v->is_modifier())) + " config:";
+        for (const std::string &k : v->config.keys())
+            out += " " + k + "=" + v->config.opt_serialize(k);
+        out += "\n";
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("override paint: a filament-1 modifier on a part painted with filament 2 prints filament 1", "[ModifierEffect][OverridePaint]")
+{
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.paint_part = true;
+    spec.offset     = k_modifier_through_top;
+
+    SECTION("flag on: the modifier's footprint keeps filament 1 for walls and top skin") {
+        spec.overrides = [](ModelVolume &v) { v.config.set("extruder", 1); set_override_paint(v); };
+        const PrintObject *object = slice_with_modifier(print, model, spec);
+        const Layer       &top    = top_layer(*object);
+        const FilamentArea f1     = filament_area(top, 1);
+        INFO(describe(*object));
+        // The 6 x 6 mm footprint, give or take the segmentation's trimming.
+        CHECK(f1.area > 30.);
+        CHECK(f1.area < 40.);
+        CHECK(f1.has_perimeters);
+        CHECK(f1.has_fills);
+        CHECK(f1.solid_matches);
+        // The rest of the top face is still painted.
+        CHECK(filament_area(top, 2).area > 300.);
+        // And it is the modifier's own region doing it, flagged as such.
+        bool flagged = false;
+        for (const LayerRegion *lregion : top.regions())
+            if (! lregion->slices.empty() && lregion->region().config().override_paint.value &&
+                lregion->region().config().wall_filament.value == 1)
+                flagged = true;
+        CHECK(flagged);
+    }
+    SECTION("flag off: paint wins, the top layer is filament 2 throughout") {
+        spec.overrides = [](ModelVolume &v) { v.config.set("extruder", 1); };
+        const PrintObject *object = slice_with_modifier(print, model, spec);
+        const Layer       &top    = top_layer(*object);
+        CHECK(filament_area(top, 1).area < 1.);
+        CHECK(filament_area(top, 2).area > 380.);
+    }
+    SECTION("flag on with filament 2 on a part of filament 1 painted 2: still filament 2, no paint warning") {
+        spec.overrides = [](ModelVolume &v) { v.config.set("extruder", 2); set_override_paint(v); };
+        const PrintObject *object = slice_with_modifier(print, model, spec);
+        CHECK(filament_area(top_layer(*object), 2).area > 380.);
+        CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierOverriddenByPaint));
+    }
+}
+
+TEST_CASE("override paint: the flag is dropped where it can change nothing", "[ModifierEffect][OverridePaint]")
+{
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.offset = k_modifier_through_top;
+
+    SECTION("modifier without a filament of its own: flag ignored, still the plain no-effect notice") {
+        spec.paint_part = true;
+        spec.overrides  = set_override_paint; // extruder stays 0 ("default")
+        const PrintObject *object = slice_with_modifier(print, model, spec);
+        INFO(describe(*object));
+        CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *lregion : layer->regions())
+                CHECK_FALSE(lregion->region().config().override_paint.value);
+    }
+    SECTION("unpainted part, same filament: no region of its own and the plain no-effect notice") {
+        spec.overrides = [](ModelVolume &v) { v.config.set("extruder", 1); set_override_paint(v); };
+        const PrintObject *object = slice_with_modifier(print, model, spec);
+        INFO(describe(*object));
+        CHECK(distinct_layer_regions(*object) == 1);
+        CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
+    }
+}
+
+TEST_CASE("override paint: warnings from paint shadowing do not fire for the modifier", "[ModifierEffect][OverridePaint]")
+{
+    // Selection: Override paint suppresses both paint notes.
+    CHECK(classify_modifier_paint_note(true,  true, false, true, true) == ModifierPaintNote::None);
+    CHECK(classify_modifier_paint_note(false, true, true,  true, true) == ModifierPaintNote::None);
+    CHECK(classify_modifier_paint_note(false, true, true,  true, false) == ModifierPaintNote::FilamentOverriddenByPaint);
+
+    // End to end, the same-filament case of the #843 test above with the flag on.
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.paint_part = true;
+    spec.overrides  = [](ModelVolume &v) { v.config.set("extruder", 1); set_override_paint(v); };
+    const PrintObject *object = slice_with_modifier(print, model, spec);
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierSameFilamentPainted));
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierOverriddenByPaint));
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
+}
+
+TEST_CASE("override paint: the flag survives a 3MF round trip on the modifier", "[ModifierEffect][OverridePaint][3MF]")
+{
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "override_paint_3mf";
+    ModelVolume *part = object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
+    part->name = "part";
+    ModelVolume *modifier = object->add_volume(TriangleMesh(its_make_cube(6., 6., 6.)));
+    modifier->name = "text_modifier";
+    modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->config.set("extruder", 2);
+    set_override_paint(*modifier);
+    object->add_instance();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string  file   = (tmp_root / "override_paint_roundtrip.3mf").string();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // Two filaments, or loading clamps the modifier's extruder 2 back to 0 (default).
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+
+    StoreParams store_params;
+    store_params.path     = file.c_str();
+    store_params.model    = &model;
+    store_params.config   = &config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     loaded;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded_ok = load_bbs_3mf(file.c_str(), &dst_config, &ctxt, &loaded, &plate_data, &project_presets, &is_bbl_3mf,
+                                        &file_version, nullptr,
+                                        LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                            LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(file);
+    REQUIRE(loaded_ok);
+
+    REQUIRE(loaded.objects.size() == 1);
+    const ModelVolume *loaded_modifier = nullptr;
+    const ModelVolume *loaded_part     = nullptr;
+    for (const ModelVolume *v : loaded.objects.front()->volumes)
+        (v->is_modifier() ? loaded_modifier : loaded_part) = v;
+    REQUIRE(loaded_modifier != nullptr);
+    REQUIRE(loaded_part != nullptr);
+    INFO("loaded modifier config: " + [&]() { std::string s; for (const std::string &k : loaded_modifier->config.keys()) s += k + "=" + loaded_modifier->config.opt_serialize(k) + " "; return s; }());
+    const ConfigOption *opt = loaded_modifier->config.option("override_paint");
+    REQUIRE(opt != nullptr);
+    CHECK(opt->getBool());
+    CHECK(model_volume_overrides_paint(*loaded_modifier));
+    // Only the modifier carries it, and the project config never does.
+    CHECK(loaded_part->config.option("override_paint") == nullptr);
+    const bool project_has_it = dst_config.has("override_paint") && dst_config.opt_bool("override_paint");
+    CHECK_FALSE(project_has_it);
 }

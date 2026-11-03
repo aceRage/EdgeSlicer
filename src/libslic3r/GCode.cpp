@@ -9958,7 +9958,8 @@ void GCode::append_full_config(const Print& print, std::string& str)
             continue;
         // Per-nozzle process P8: the per-filament region values are internal (the values they stand for are in the moves);
         // the tools' own changes only when a tool has some; the missing list never (such a job is refused).
-        if (key == "nozzle_region_values" || key == "nozzle_process_missing" ||
+        // override_paint is a per-modifier key, never a print setting.
+        if (key == "nozzle_region_values" || key == "nozzle_process_missing" || key == "override_paint" ||
             (key == "nozzle_process_edits" && cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0))
             continue;
         // Per-nozzle process P6: the per-nozzle width table and the widths' nozzle only when set.

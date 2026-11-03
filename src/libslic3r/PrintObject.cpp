@@ -4565,9 +4565,12 @@ std::vector<std::string> PrintObject::modifiers_without_overrides() const
     return out;
 }
 
-ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted)
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint)
 {
-    if (! overlaps_painted || ! sets_filament)
+    // With Override paint on the paint does not shadow the modifier, so neither note applies. (On an
+    // unpainted part the flag is dropped and an otherwise inert modifier still gets the plain notice.)
+    if (! overlaps_painted || ! sets_filament || overrides_paint)
         return ModifierPaintNote::None;
     if (region_is_alias)
         return ModifierPaintNote::SameFilamentPainted;
@@ -4583,13 +4586,7 @@ PrintObject::ModifierPaintNotes PrintObject::modifier_paint_notes() const
     for (const ModelVolume *volume : this->model_object()->volumes) {
         if (volume == nullptr || ! volume->is_modifier())
             continue;
-        const auto set_filament = [volume](const char *key) {
-            const ConfigOption *opt = volume->config.option(key);
-            return opt != nullptr && opt->getInt() > 0;
-        };
-        const bool sets_filament = set_filament("extruder") || set_filament("wall_filament") ||
-                                   set_filament("sparse_infill_filament") || set_filament("solid_infill_filament");
-        if (! sets_filament)
+        if (! model_volume_sets_filament(*volume))
             continue;
         bool seen = false, effective = false, differs = false, overlaps_painted = false;
         for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
@@ -4611,7 +4608,7 @@ PrintObject::ModifierPaintNotes PrintObject::modifier_paint_notes() const
                 }
         if (! seen)
             continue;
-        switch (classify_modifier_paint_note(! effective, true, differs, overlaps_painted)) {
+        switch (classify_modifier_paint_note(! effective, true, differs, overlaps_painted, model_volume_overrides_paint(*volume))) {
         case ModifierPaintNote::SameFilamentPainted:       out.same_filament_painted.emplace_back(volume->name); break;
         case ModifierPaintNote::FilamentOverriddenByPaint: out.filament_overridden.emplace_back(volume->name);   break;
         default: break;
@@ -4721,7 +4718,27 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         if (layer_range_config != nullptr)
             reapply_widths(*layer_range_config);
     }
+    // Override paint belongs to a modifier that sets a filament: a part (or its object, or a height range
+    // modifier) never carries it, and a modifier without a filament of its own keeps what it inherited.
+    if (volume.is_model_part())
+        config.override_paint.value = false;
+    else if (config.override_paint.value != default_or_parent_region_config.override_paint.value && ! model_volume_sets_filament(volume))
+        config.override_paint.value = default_or_parent_region_config.override_paint.value;
     return config;
+}
+
+bool model_volume_sets_filament(const ModelVolume &volume)
+{
+    for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+        if (const ConfigOption *opt = volume.config.option(key); opt != nullptr && opt->getInt() > 0)
+            return true;
+    return false;
+}
+
+bool model_volume_overrides_paint(const ModelVolume &volume)
+{
+    const ConfigOption *opt = volume.config.option("override_paint");
+    return volume.is_modifier() && opt != nullptr && opt->getBool() && model_volume_sets_filament(volume);
 }
 
 struct POProfiler
