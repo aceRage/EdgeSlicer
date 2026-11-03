@@ -2,11 +2,13 @@
 #include "CoolingBuffer.hpp"
 #include "../ContourZ.hpp"
 #include "../LocalesUtils.hpp"
+#include "MinLayerTimePause.hpp"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
 #include <algorithm>
 #include <iostream>
+#include <cstring>
 #include <float.h>
 #include <string_view>
 #include <system_error>
@@ -81,6 +83,8 @@ struct CoolingLine
         // its feed rate encodes the local bead height (F_seg proportional to h_seg). Such a
         // block may only ever be slowed PROPORTIONALLY - see slow_down_to_feedrate().
         TYPE_ZAA_SCALED                = 1 << 21,
+        // Edge (min_layer_time_pause): a whole park-and-return block, from its START to its END tag.
+        TYPE_MIN_LAYER_PAUSE           = 1 << 22,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -112,6 +116,8 @@ struct CoolingLine
     float   time_max;
     // If marked with the "slowdown" flag, the line has been slowed down.
     bool    slowdown;
+    // TYPE_MIN_LAYER_PAUSE: the minimum layer time in seconds.
+    float   pause_target { 0.f };
 };
 
 // Calculate the required per extruder time stretches.
@@ -398,7 +404,10 @@ std::string CoolingBuffer::process_layer(std::string &&gcode, size_t layer_id, b
                                                    return std::any_of(adj.lines.begin(), adj.lines.end(),
                                                                       [](const CoolingLine &line) { return line.slowdown; });
                                                });
+        m_last_layer_paused = false;
         out = this->apply_layer_cooldown(m_gcode, layer_id, layer_time_stretched, per_extruder_adjustments);
+        // Edge (min_layer_time_pause): a paused layer is as long as it should be; speed smoothing leaves it alone.
+        m_last_layer_slowed_down = m_last_layer_slowed_down || m_last_layer_paused;
         m_gcode.clear();
     }
     return out;
@@ -444,6 +453,23 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         if (*line_end == '\n')
             ++ line_end;
         CoolingLine line(0, line_start - gcode.c_str(), line_end - gcode.c_str());
+        // Edge (min_layer_time_pause): the park-and-return block is one opaque line. It takes no time here (the
+        // dwell is decided from the layer time) and returns to where it started, so the position is unchanged.
+        if (boost::starts_with(sline, MinLayerTimePause::START_TAG)) {
+            const size_t end_tag = gcode.find(MinLayerTimePause::END_TAG, line_end - gcode.c_str());
+            if (end_tag != std::string::npos) {
+                line_end = gcode.c_str() + end_tag;
+                while (*line_end != '\n' && *line_end != 0)
+                    ++ line_end;
+                if (*line_end == '\n')
+                    ++ line_end;
+                line.type         = CoolingLine::TYPE_MIN_LAYER_PAUSE;
+                line.line_end     = line_end - gcode.c_str();
+                line.pause_target = float(atof_decimal_point(std::string_view(sline).substr(strlen(MinLayerTimePause::START_TAG))));
+                adjustment->lines.emplace_back(std::move(line));
+                continue;
+            }
+        }
         if (boost::starts_with(sline, "G0 "))
             line.type = CoolingLine::TYPE_G0;
         else if (boost::starts_with(sline, "G1 "))
@@ -1039,6 +1065,29 @@ std::string CoolingBuffer::apply_layer_cooldown(
         }
         else if (line->type & CoolingLine::TYPE_EXTRUDE_END) {
             // Just remove this comment.
+        } else if (line->type & CoolingLine::TYPE_MIN_LAYER_PAUSE) {
+            // Edge (min_layer_time_pause): keep the block, with the dwell for the time the layer still lacks,
+            // or drop it when the layer is long enough.
+            const std::string dwell = MinLayerTimePause::dwell_gcode(line->pause_target, layer_time);
+            if (! dwell.empty()) {
+                std::string_view block(line_start, line_end - line_start);
+                // Without the START and END tag lines.
+                block.remove_prefix(std::min(block.size(), block.find('\n') + 1));
+                const size_t end_tag = block.rfind(MinLayerTimePause::END_TAG);
+                if (end_tag != std::string_view::npos)
+                    block = block.substr(0, end_tag);
+                const std::string dwell_line = std::string(MinLayerTimePause::DWELL_TAG) + "\n";
+                const size_t      dwell_pos  = block.find(dwell_line);
+                if (dwell_pos != std::string_view::npos) {
+                    new_gcode.append(block.data(), dwell_pos);
+                    new_gcode += dwell;
+                    new_gcode.append(block.data() + dwell_pos + dwell_line.size(), block.size() - dwell_pos - dwell_line.size());
+                    // The block's own moves set their feedrates; give the following moves theirs back.
+                    if (current_feedrate > 0)
+                        new_gcode += "G1 F" + std::to_string(current_feedrate) + "\n";
+                    m_last_layer_paused = true;
+                }
+            }
         } else if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE | CoolingLine::TYPE_HAS_F)) {
             // Find the start of a comment, or roll to the end of line.
             const char *end = line_start;

@@ -10,6 +10,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode.cpp
 	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
+	test_min_layer_time_pause.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp

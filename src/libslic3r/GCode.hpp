@@ -12,6 +12,7 @@
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/FanMover.hpp"
 #include "GCode/LayerTimeSpeedSmoothingFilter.hpp"
+#include "GCode/MinLayerTimePause.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -448,6 +449,9 @@ private:
         const size_t                     single_object_idx = size_t(-1),
         // BBS
         const bool                       prime_extruder = false);
+    // Edge (min_layer_time_pause): the park-and-return block that ends a layer whose pause target is `target`
+    // seconds (see GCode/MinLayerTimePause.hpp), or empty when there is nowhere to park.
+    std::string min_layer_time_pause_block(const Print &print, const std::vector<LayerToPrint> &layers, size_t single_object_idx, double target);
     // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
     // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
     // and export G-code into file.
@@ -709,6 +713,8 @@ private:
     bool                                m_last_pos_defined;
 
     std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
+    // Edge (min_layer_time_pause): park candidates' obstacles, built on the first pause of an export.
+    std::unique_ptr<MinLayerTimePause::Sites>      m_min_layer_pause_sites;
     // After CoolingBuffer / before FanMover. Null when mode is Off (streaming, no extra buffer).
     std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
     std::unique_ptr<SpiralVase>                    m_spiral_vase;

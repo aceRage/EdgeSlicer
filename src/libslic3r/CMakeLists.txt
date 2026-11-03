@@ -368,6 +368,8 @@ set(lisbslic3r_sources
     GCode/FanMover.hpp
     GCode/LayerTimeSpeedSmoothingFilter.cpp
     GCode/LayerTimeSpeedSmoothingFilter.hpp
+    GCode/MinLayerTimePause.cpp
+    GCode/MinLayerTimePause.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode/ElegooGCodeProcessorHelper.cpp

@@ -1779,7 +1779,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "bottom_solid_infill_flow_ratio"
             || opt_key == "brim_flow_ratio"
             || opt_key == "spiral_starting_flow_ratio"
-            || opt_key == "spiral_finishing_flow_ratio") {
+            || opt_key == "spiral_finishing_flow_ratio"
+            // Edge: read by GCode::process_layer only.
+            || opt_key == "min_layer_time_pause") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"

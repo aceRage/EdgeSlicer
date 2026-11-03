@@ -75,6 +75,8 @@ private:
     bool                        m_fan_speed_unknown { false };
     // See last_layer_slowed_down().
     bool                        m_last_layer_slowed_down { false };
+    // Edge (min_layer_time_pause): the layer flushed last kept its pause.
+    bool                        m_last_layer_paused { false };
 };
 
 }
