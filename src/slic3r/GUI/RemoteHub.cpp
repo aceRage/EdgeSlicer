@@ -6,6 +6,7 @@
 #include "BambuCamRelay.hpp"
 #include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
+#include "RemotePaintV1.hpp"
 #include "RemoteSliceV1.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
@@ -2598,6 +2599,8 @@ std::vector<std::string> Testing::pair_features()
 {
     std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" };
     for (const std::string& s : SliceV1::pair_features())
+        f.push_back(s);
+    for (const std::string& s : PaintV1::pair_features())
         f.push_back(s);
     return f;
 }
@@ -6786,6 +6789,20 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/thumbnail.png") return get;
         if (what == "/send" || what == "/delete" || what == "/preview") return post;
         return false;
+    }
+
+    // paint_v1 (H1, the read side of tablet paint sessions): the object list, opening a session and
+    // a session's state, one volume's mesh and its painting (volume= / rev= are query values). The
+    // session id is 16 lowercase hex characters the instance made; nothing else reaches it.
+    if (sub == "/api/paint/objects")  return get;
+    if (sub == "/api/paint/sessions") return post;
+    if (sub.compare(0, 20, "/api/paint/sessions/") == 0) {
+        const std::string rest  = sub.substr(20);
+        const size_t      slash = rest.find('/');
+        const std::string id    = slash == std::string::npos ? rest : rest.substr(0, slash);
+        if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
+        const std::string what = slash == std::string::npos ? std::string() : rest.substr(slash);
+        return get && (what.empty() || what == "/mesh" || what == "/paint");
     }
 
     if (sub == "/api" || sub == "/api/")             return get;

@@ -31,8 +31,10 @@ const std::vector<std::string>& pair_features();
 // 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove);
 // 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers);
 // 7: PR G, plates, objects and save (plates/add, plates/{i}/delete|rename|bed_type, objects/delete,
-// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type).
-constexpr int INSTANCE_API_VERSION = 7;
+// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type);
+// 8: paint_v1 (H1), tablet paint sessions read side (paint/objects, paint/sessions, a session's
+// state, mesh and painting; RemotePaintV1.hpp).
+constexpr int INSTANCE_API_VERSION = 8;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo

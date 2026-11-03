@@ -1347,7 +1347,7 @@ TEST_CASE("plates edit: /pair lists the PR G features, the manifest is v7, the r
     for (const char* name : { "slice_plates_edit", "slice_objects_edit", "slice_project_save" })
         CHECK(std::find(f.begin(), f.end(), name) != f.end());
     CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
-    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 7);
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 7);
 
     using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
     CHECK(instance_api_allowed("POST", "/api/plates/add"));
@@ -1436,4 +1436,35 @@ TEST_CASE("plates edit: bed type ids", "[RemoteHub][plates_edit]")
     CHECK(bed_type_from_id("") == -1);
     for (int bt = Slic3r::btDefault; bt < Slic3r::btCount; ++bt)
         CHECK(bed_type_from_id(bed_type_id(bt)) == bt);
+}
+
+TEST_CASE("paint_v1: /pair lists paint_v1, the manifest is v8, the read routes are allowed", "[RemoteHub][paint_v1]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "paint_v1") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 8);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/paint/objects"));
+    CHECK(instance_api_allowed("POST", "/api/paint/sessions"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/mesh"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/paint"));
+    // read side only: no writes, no other verbs
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/objects"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/paint/sessions/0123456789abcdef"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef/paint"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/apply"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/mesh/x"));
+    // the id is exactly 16 lowercase hex characters, one segment
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcde"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef0"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789ABCDEF"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/../../../info/mesh"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcd%2f/mesh"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint"));
 }
