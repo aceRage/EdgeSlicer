@@ -56,6 +56,12 @@ ExPolygons adaptive_printable_pieces(ExPolygons pieces, double nozzle_diameter);
 // hairline tails would otherwise become a patch of their own and be walled as fragmented thin lines.
 ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter);
 
+// Id convention (kept deliberately, documented rather than unified): the vector-taking gates below
+// (has_multiple_used_nozzle_diameters, adaptive_band_reference_nozzle) take 0-based filament indices, as Bambu's
+// API and Print::extruders() do. adaptive_layer_height_range_for_filament takes a 1-based filament id, because it
+// forwards straight into Edge's nozzle_diameter_for_filament / physical_extruder_for_filament, which are 1-based
+// across Edge. Unifying would mean changing either Bambu's ported API or Edge-wide helpers, so it is left as is.
+//
 // True when the filaments handed in do not all share one nozzle diameter. filament_ids are 0 based; pass the
 // filaments the print actually uses. Diameters are resolved through Edge's nozzle_diameter_for_filament(), which
 // honors filament_nozzle_assignment (per-nozzle P2), nozzle_diameter_override (P7) and rack slots (P4/P9), so the
@@ -80,8 +86,9 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
 // nozzle cannot extrude, in which case printability wins. Pass an empty vector for the normal fixed grid.
 //
 // Unlike a fixed stride, no layer is left out: a tail too short for a full band is folded back into the
-// segment before it and the segment is re-cut, so eight layers with band_size five come out as 4 + 4 rather
-// than 5 + an orphaned 3. Returns an empty plan when band_size is 1, i.e. when this nozzle merges nothing.
+// segment before it and the segment is re-cut from the base anchor, so eight layers with band_size five come out
+// as 5 + 3 (a full band from the base, then the short tail as its own band; Bambu's upstream comment says 4 + 4,
+// which the code does not do). Returns an empty plan when band_size is 1, i.e. when this nozzle merges nothing.
 std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
     const std::vector<double>      &layer_heights,
     size_t                          band_size,

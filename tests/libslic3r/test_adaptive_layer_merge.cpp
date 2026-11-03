@@ -24,6 +24,8 @@ bool nests(const std::vector<AdaptiveLayerBand> &fine, const std::vector<Adaptiv
 PrintConfig two_nozzle_config(double d0, double d1)
 {
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_extruders(2);
+    cfg.set_num_filaments(2);
     cfg.set_deserialize_strict({ { "nozzle_diameter", std::to_string(d0) + "," + std::to_string(d1) },
                                  { "min_layer_height", "0.07,0.07" },
                                  { "max_layer_height", "0.3,0.3" } });
