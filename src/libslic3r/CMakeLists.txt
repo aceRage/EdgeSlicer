@@ -658,6 +658,8 @@ set(lisbslic3r_sources
     SlicesToTriangleMesh.hpp
     SlicingAdaptive.cpp
     SlicingAdaptive.hpp
+    AdaptiveLayerMerge.cpp
+    AdaptiveLayerMerge.hpp
     Slicing.cpp
     Slicing.hpp
     Support/SupportCommon.cpp
