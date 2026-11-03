@@ -1417,6 +1417,7 @@ void GCodeProcessor::reset()
 
     m_seams_count = 0;
     m_g29_time_added = false;
+    m_count_next_dwell = false;
     m_preheat_time = 0.f;
     m_delta_temperature = 0;
     m_preheat_steps = 1;
@@ -1828,7 +1829,9 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 case '2': { process_G2_G3(line, true); break; }  // Move, clockwise arc
                 case '3': { process_G2_G3(line, false); break; } // Move, counter-clockwise arc
                 //BBS
-                case 4:  { process_G4(line); break; }  // Delay
+                // EDGE: '4', not 4 (which never matched, so no G4 was ever seen); process_G4 still counts only the
+                // dwell of a minimum layer time pause, see there.
+                case '4':  { process_G4(line); break; }  // Delay
                 default: break;
                 }
                 break;
@@ -2162,6 +2165,12 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // producers tags
     if (producers_enabled && process_producers_tags(comment))
         return;
+
+    // Edge: a minimum layer time pause; its G4 follows (GCode/MinLayerTimePause.hpp).
+    if (boost::starts_with(comment, "MIN_LAYER_TIME_PAUSE")) {
+        m_count_next_dwell = true;
+        return;
+    }
 
     // extrusion role tag
     if (boost::starts_with(comment, reserved_tag(ETags::Role))) {
@@ -3577,11 +3586,24 @@ void GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line, bool cloc
 //BBS
 void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
 {
+    // EDGE: the dispatch read `case 4:` (BambuStudio fixed it to '4' in ced9e43be6, the BS 1.7.4 merge 2a478ab4f9 put
+    // the old line back), so G4 has never counted in the estimate. Counting every G4 would move the estimate of most
+    // prints (start G-code and tool change dwells), which is a separate decision; only the dwell of a minimum layer
+    // time pause counts, the G4 right after its ";MIN_LAYER_TIME_PAUSE" comment.
+    if (!m_count_next_dwell)
+        return;
+    m_count_next_dwell = false;
     float value_s = 0.0;
     float value_p = 0.0;
+    // S (seconds) wins over P (milliseconds), as in Marlin and RepRapFirmware.
     if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
         value_s += value_p * 0.001;
-        simulate_st_synchronize(value_s);
+        if (value_s > 0.f) {
+            // The dwell starts once the queued moves are done; booked after flushing them, it lands on the first
+            // move after it (the way back from the park), so it stays on its own layer.
+            simulate_st_synchronize(0.f);
+            simulate_st_synchronize(value_s);
+        }
     }
 }
 

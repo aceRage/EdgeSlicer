@@ -248,8 +248,12 @@ TEST_CASE("The park position stays clear of the print", "[MinLayerTimePause]")
     }
 }
 
+// GCodeProcessor's dispatch read `case 4:` and never saw a G4. It now reads them, but only the dwell of a minimum
+// layer time pause (the G4 after the ";MIN_LAYER_TIME_PAUSE" comment) counts; other dwells stay out of the estimate
+// as before, so no other print's estimate moves.
 TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCodeProcessor]")
 {
+    const std::string tag = std::string(MinLayerTimePause::COMMENT_TAG) + " 2.00s\n";
     auto total = [](const std::string &dwell) {
         std::string gcode = "G90\nM83\nM204 S1500\nG1 Z0.2 F600\n;LAYER_CHANGE\nG1 X10 Y10 F6000\nG1 X20 Y10 E0.5 F1800\n" + dwell +
                             "G1 X20 Y20 E0.5 F1800\n";
@@ -267,12 +271,18 @@ TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCo
         return double(result.print_statistics.modes[NORMAL].time);
     };
     const double none = total("");
-    CHECK(total("G4 S2\n") - none == Approx(2.).margin(0.01));
-    CHECK(total("G4 P2000\n") - none == Approx(2.).margin(0.01));
-    CHECK(total("G4 P1500 ; Settle Pressure\n") - none == Approx(1.5).margin(0.01));
+    // (The margin covers the stop the dwell forces between the two moves.)
+    CHECK(total(tag + "G4 S2\n") - none == Approx(2.).margin(0.05));
+    CHECK(total(tag + "G4 P2000\n") - none == Approx(2.).margin(0.05));
+    CHECK(total(tag + "G4 P1500 ; Settle Pressure\n") - none == Approx(1.5).margin(0.05));
     // S wins over P, as in Marlin and RepRapFirmware.
-    CHECK(total("G4 S1 P5000\n") - none == Approx(1.).margin(0.01));
-    CHECK(total("G4\n") - none == Approx(0.).margin(0.01));
+    CHECK(total(tag + "G4 S1 P5000\n") - none == Approx(1.).margin(0.05));
+    CHECK(total(tag + "G4\n") - none == Approx(0.).margin(0.05));
+    // Only the G4 right after the tag.
+    CHECK(total(tag + "G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") - total("G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") == Approx(2.).margin(0.05));
+    // Any other dwell stays out of the estimate, as before.
+    CHECK(total("G4 S2\n") - none == Approx(0.).margin(0.01));
+    CHECK(total("G4 P2000\n") - none == Approx(0.).margin(0.01));
 }
 
 TEST_CASE("A thin spike pauses on its short layers", "[MinLayerTimePause][PrintGCode]")
