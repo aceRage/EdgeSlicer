@@ -1333,6 +1333,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/FirewallCheckDialog.cpp                   # Windows shell headers; ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/BambuSetupNoticeDialog.cpp                # ::CheckBox vs GUI::CheckBox (Field.hpp)
     Utils/WinFirewall.cpp                         # windows.h + netfw.h (COM) ahead of neighbours' headers
+    GUI/ZipCleanup.cpp                            # <windows.h> for the background thread priority
     GUI/wxMediaCtrl2.cpp                          # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
