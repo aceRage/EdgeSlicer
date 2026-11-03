@@ -67,6 +67,9 @@ struct Calib_Params
     // Radius is clamped to stringing_grid_max_fillet_radius() so the foot stays on the plate.
     bool   fillet_base         = true;
     double fillet_radius       = 3.0;
+    // Owner: keep the user's z-hop by default (no z-hop can itself reduce stringing, and a hop-free
+    // nozzle knocks tall towers over more easily). True sets z_hop and filament_z_hop to 0 for the test.
+    bool   disable_z_hop       = false;
 
     CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
@@ -94,11 +97,31 @@ static constexpr const char *stringing_grid_label_name       = "SG_label";
 
 int                  stringing_grid_band_count(const Calib_Params &params);
 std::vector<double>  stringing_grid_retract_schedule(const Calib_Params &params);
+int                  stringing_grid_column_count(const Calib_Params &params);
 int                  stringing_grid_max_columns(double bed_width);
 bool                 stringing_grid_columns_fit(int columns, double bed_width);
+double               stringing_grid_bed_width(const ConfigBase &printer_config);
+bool                 stringing_grid_params_valid(const Calib_Params &params, double bed_width, std::string *error = nullptr);
 std::string          stringing_grid_column_name(int column);
 int                  stringing_grid_column_from_name(const std::string &name);
 int                  temp_retract_band_index(const Calib_Params &params, double z);
+// F11: band Z is measured from the object's first printed layer bottom (after raft).
+// first_printed_layer_bottom is object.layers().front()->bottom_z() after slicing.
+// Stringing-grid dialog defaults (Lance 2026-11-01): bands built outward from the filament's
+// other-layers temperature within its range, at most 10 bands; 230/205 when the inputs are invalid.
+// Also sets 8 mm bands, retraction 0.2-1.6 mm by 0.2, labels off, wait on.
+// F14 (Lance): no band above min(range_high, printer_max_nozzle_temp, 350); printer max <= 0 means unknown.
+// F17 (Lance): no band below range_low. When fewer than 2 bands fit, start = end = the clipped center
+// (or the cap when the cap is below range_low) and the function returns true: the dialog shows a note asking
+// for a temperature range, and stringing_grid_params_valid blocks OK until the range is valid.
+// Returns false otherwise, including the 230/205 fallback for missing or invalid values.
+bool                 stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high,
+                                                   double step = 5., double printer_max_nozzle_temp = 0.);
+// Same, reading nozzle_temperature / nozzle_temperature_range_low / _high (first value) from a filament
+// preset's config. The dialog passes the preset of filament slot 1, which the grid prints with.
+bool                 stringing_grid_default_params_from_filament(Calib_Params &params, const ConfigBase &filament_config,
+                                                                 double step = 5., double printer_max_nozzle_temp = 0.);
+double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
 double               temp_for_z(const Calib_Params &params, double z);
 double               retract_for_column(const Calib_Params &params, int column);
 TriangleMesh         make_stringing_grid_column_mesh(const Calib_Params &params, int column);
@@ -120,6 +143,27 @@ double               stringing_grid_fillet_radius(const Calib_Params &params);
 // so the three slice as one solid. Empty for radius <= 0.
 TriangleMesh         make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius);
 void                 make_stringing_grid(Model &model, const Calib_Params &params);
+
+// Persisted name for Calib_Temp_Retract_Grid. Never serialize CalibMode as an int (F12).
+static constexpr const char *calib_temp_retract_grid_mode_name = "temp_retract_grid_calib_mode";
+
+// The slicer settings the stringing grid needs, and nothing else (owner: keep the user's retraction setup):
+//   print_sequence = by layer        columns in a fixed order every layer
+//   enable_prime_tower = false       single toolhead v1, and the bed fit leaves no room for it
+//   wipe_inward = false              no inward wipe hiding the strings (the G-code also forces it)
+//   raft_layers = 0                  band Z is relative to the object's first printed layer (F11)
+//   enable_support = false           nothing to support; support would add travels between pillars
+//   reduce_crossing_wall = false     the travel must cross the gap between the pillars, not detour
+//   use_firmware_retraction = false  each column's length is written as G1 E (G10 has no length)
+// With disable_z_hop also z_hop and filament_z_hop = 0. z_hop_types, retract_lift_above/below, wipe,
+// retract_when_changing_layer, retraction_minimum_travel, restart extra and resonance avoidance are left
+// as the user has them. Wipe still retracts each column's length: the wipe reads the extruder's
+// retraction_length, which the per-column hook sets.
+void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
+                                        DynamicPrintConfig &filament_config,
+                                        DynamicPrintConfig &printer_config,
+                                        int                 filament_idx,
+                                        bool                disable_z_hop = false);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.
