@@ -10,6 +10,7 @@
 #include "MutablePolygon.hpp"
 #include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
+#include "NozzleProcess.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
@@ -282,7 +283,7 @@ void PrintObject::_transform_hole_to_polyholes()
     }
     //create a polyhole per id and replace holes points by it.
     for (auto entry : id2layerz2hole) {
-        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(std::get<2>(entry.first) - 1)), std::get<4>(entry.first), std::get<5>(entry.first));
+        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(nozzle_diameter_for_filament(print()->config(), unsigned(std::get<2>(entry.first)))), std::get<4>(entry.first), std::get<5>(entry.first));
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
@@ -4283,6 +4284,12 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.6.
     if (PrintObject::support_groups_want_soluble(object))
         config.support_top_z_distance.value = 0.;
+    // Per-nozzle process P2: the support width of the support filament's nozzle process (no-op without one).
+    // A support width set on the object still wins.
+    // P6: nor does a line_width set on the object when the plate's support width is 0 (= line_width).
+    if (!config.nozzle_support_line_width.values.empty() && object.config.get().option("support_line_width") == nullptr &&
+        !(object.config.get().option("line_width") != nullptr && config.support_line_width.value == 0.))
+        stamp_nozzle_line_widths(config);
     return config;
 }
 
@@ -4602,6 +4609,25 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     if (config.outer_wall_filament.value > (int) num_extruders)
         config.outer_wall_filament.value = 0;
     clamp_exturder_to_default(config.solid_infill_filament, num_extruders);
+    // Per-nozzle process P8: every other region setting from the process of the tool that prints the role (no-op without
+    // per-tool processes). A setting made on the object, part, modifier or layer range still wins over the tool's process.
+    if (!config.nozzle_region_values.values.empty()) {
+        stamp_nozzle_region_values(config);
+        auto reapply_region = [&config](const DynamicPrintConfig &src) {
+            for (const std::string &key : src.keys())
+                if (is_nozzle_region_option(key))
+                    if (ConfigOption *dst = config.option(key); dst != nullptr)
+                        if (const ConfigOption *opt = src.option(key); opt != nullptr && opt->type() == dst->type())
+                            dst->set(opt);
+        };
+        if (volume.is_model_part())
+            reapply_region(volume.get_object()->config.get());
+        reapply_region(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_region(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_region(*layer_range_config);
+    }
     if (config.sparse_infill_density.value < 0.00011f)
         // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
         // See GH issue #5910.
@@ -4614,6 +4640,32 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     // which would bring the zero distance back.
     if (config.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
         config.fuzzy_skin.value = FuzzySkinType::Disabled_fuzzy;
+    // Per-nozzle process P2: each role's width from the process of the nozzle that prints it (no-op without one).
+    // A width set on the object, part, modifier or layer range still wins over the nozzle's process.
+    if (!config.nozzle_outer_wall_line_width.values.empty()) {
+        const PrintRegionConfig plate = config; // the widths before the stamp
+        stamp_nozzle_line_widths(config);
+        auto reapply_widths = [&config, &plate](const DynamicPrintConfig &src) {
+            // P6: a line_width set on the object or a layer range is what a role left at 0 on the plate means.
+            const bool own_line_width = src.option("line_width") != nullptr;
+            for (const auto &key : nozzle_line_width_keys()) {
+                ConfigOption *dst = config.option(key.second);
+                if (dst == nullptr)
+                    continue;
+                if (const ConfigOption *opt = src.option(key.second); opt != nullptr)
+                    dst->set(opt);
+                else if (own_line_width && key.second != "bridge_line_width")
+                    if (const auto *before = plate.option<ConfigOptionFloatOrPercent>(key.second); before != nullptr && before->value == 0.)
+                        dst->set(before);
+            }
+        };
+        reapply_widths(volume.get_object()->config.get());
+        reapply_widths(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_widths(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_widths(*layer_range_config);
+    }
     return config;
 }
 
@@ -5791,9 +5843,9 @@ void PrintObject::combine_infill()
 
         // Limit the number of combined layers to the maximum height allowed by this regions' nozzle.
         //FIXME limit the layer height to max_layer_height
-        double nozzle_diameter = this->print()->config().nozzle_diameter.get_at(region.config().wall_filament.value - 1);
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().sparse_infill_filament.value - 1));
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().solid_infill_filament.value - 1));
+        double nozzle_diameter = nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().wall_filament.value));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().sparse_infill_filament.value)));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().solid_infill_filament.value)));
         
         //Orca: Limit combination of infill to up to infill_combination_max_layer_height
         const double infill_combination_max_layer_height = region.config().infill_combination_max_layer_height.get_abs_value(nozzle_diameter);

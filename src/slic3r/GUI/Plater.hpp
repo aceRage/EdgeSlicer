@@ -156,6 +156,48 @@ public:
     void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
     // BBS. Add on_filaments_change() method.
     void on_filaments_change(size_t num_filaments);
+    // Per-nozzle process P2: put 0-based filament `filament` on 1-based tool `tool` (0 = its own nozzle), and the
+    // summary under the filament list.
+    void set_filament_nozzle(size_t filament, int tool);
+    void update_filament_nozzle_summary();
+    // Per-nozzle process P5: pin 0-based filament `filament` to rack nozzle size `diameter` (0 = its extruder's nozzle).
+    void set_filament_rack_pin(size_t filament, double diameter);
+    // Per-nozzle process P9: pin 0-based filament `filament` to rack slot `slot` (1-based, 0 = any slot of its size).
+    void set_filament_rack_slot(size_t filament, int slot);
+    // Per-nozzle process P9: the sidebar's "Edit / Add rack slots" for 0-based extruder `extruder` (the project's rack sizes).
+    void edit_rack_nozzles(size_t extruder);
+    // Per-nozzle process P9: the toolhead button beside each filament (toolchangers): its label and visibility, and a click.
+    void update_filament_tool_buttons();
+    wxWindow *make_filament_tool_button(int filament_idx);
+    // Per-nozzle process P9: Left / Right per filament on Bambu's two-extruder machines (the plate's manual filament map), the
+    // "Print on" menu (Auto / Left / Right and the rack's nozzles by size) and pinning a rack size.
+    bool filament_sides_supported() const;
+    int  filament_side(size_t filament) const; // 0 = auto, 1 = left, 2 = right
+    void set_filament_side(size_t filament, int side);
+    void set_filament_rack_size(size_t filament, size_t extruder, double diameter);
+    void append_filament_side_menu(wxMenu *menu, size_t filament);
+    // One choice of the side badge / "Print on" list: a side (0 auto, 1 left, 2 right) and, on a side whose rack holds several
+    // sizes, a size (0 = any), with the list label, the badge text and the size's rack slots.
+    struct SideChoice
+    {
+        int              side{ 0 };
+        double           size{ 0. };
+        wxString         label;
+        wxString         badge;
+        std::vector<int> slots;
+    };
+    std::vector<SideChoice> filament_side_choices() const;
+    int                     filament_side_choice(size_t filament) const; // index into filament_side_choices()
+    void                    apply_filament_side_choice(size_t filament, const SideChoice &choice);
+    void cycle_filament_tool(size_t filament);
+    // Per-nozzle process P7: give 0-based tool `tool` (-1 = every tool) a `diameter` nozzle in this project (0 = the
+    // printer preset's size). The printer preset is not changed (project key nozzle_diameter_override).
+    void set_tool_nozzle_size(int tool, double diameter);
+    // After the project's nozzle sizes changed: remembered for the printer model, the sidebar, the filament lists, the
+    // Tabs and the slice follow.
+    void on_nozzle_sizes_changed();
+    // "Sync nozzle sizes from printer" for a Bambu printer: the sizes the selected printer reports become the project's.
+    void sync_nozzle_sizes_from_bambu_printer();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);
@@ -387,6 +429,7 @@ public:
     void calib_temp(const Calib_Params& params);
     void calib_max_vol_speed(const Calib_Params& params);
     void calib_retraction(const Calib_Params& params);
+    void calib_temp_retraction(const Calib_Params& params);
     void calib_VFA(const Calib_Params& params);
     void calib_input_shaping_freq(const Calib_Params& params);
     void calib_input_shaping_damp(const Calib_Params& params);

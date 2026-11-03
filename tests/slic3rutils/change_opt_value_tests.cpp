@@ -12,6 +12,7 @@
 
 #include "slic3r/GUI/GUI.hpp"
 
+#include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 using namespace Slic3r;
@@ -97,4 +98,42 @@ TEST_CASE("Every coFloatsOrPercents option can be edited", "[GUI][ChangeOptValue
     }
     // overhang_1_4..4_4_speed, internal_bridge_speed, small_perimeter_speed, ... (11 on 2026-10-30).
     CHECK(checked >= 10);
+}
+
+// Per-nozzle process P1/P2: on a process split per nozzle ("Edit nozzles separately"), the Speed page writes
+// the shown nozzle's slot through change_opt_value(). Before #795 an overhang speed edited for Right was
+// dropped like every other mm/s-or-% edit; now it lands in Right's slot only and the slicer reads it there.
+TEST_CASE("A per-nozzle edit of an overhang speed sticks to that nozzle", "[GUI][ChangeOptValue][NozzleProcess]")
+{
+    // An H2D-like two-extruder process: Bambu's 7-slot layout, filament 1 on Left, filament 2 on Right.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4, 0.4 };
+    config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = false;
+    config.option<ConfigOptionStrings>("extruder_variant_list", true)->values      = { "Direct Drive Standard,Direct Drive High Flow",
+                                                                                     "Direct Drive Standard,Direct Drive High Flow" };
+    config.option<ConfigOptionInts>("print_extruder_id", true)->values             = { 1, 1, 1, 2, 2, 2, 2 };
+    config.option<ConfigOptionStrings>("print_extruder_variant", true)->values     = { "Direct Drive Standard", "Direct Drive High Flow",
+                                                                                     "Direct Drive E3D High Flow", "Direct Drive Standard",
+                                                                                     "Direct Drive High Flow", "Direct Drive TPU High Flow",
+                                                                                     "Direct Drive E3D High Flow" };
+    config.option<ConfigOptionStrings>("process_flow_support", true)->values       = { "standard", "high_flow" };
+    config.option<ConfigOptionInts>("filament_map", true)->values                  = { 1, 2 };
+    config.set_key_value("overhang_1_4_speed", new ConfigOptionFloatsOrPercents{ FloatOrPercent{ 60, false }, FloatOrPercent{ 70, false } });
+
+    REQUIRE(split_process_per_nozzle(config, 2));
+    const int right = process_nozzle_slot(config, "overhang_1_4_speed", 1, fvtStandard);
+    const int left  = process_nozzle_slot(config, "overhang_1_4_speed", 0, fvtStandard);
+    REQUIRE(right >= 0);
+    REQUIRE(left >= 0);
+    REQUIRE(right != left);
+
+    // What the Speed page does for a field bound to Right's Standard slot.
+    GUI::change_opt_value(config, "overhang_1_4_speed", boost::any(std::string("25")), right);
+    CHECK(slot(config, "overhang_1_4_speed", size_t(right)) == FloatOrPercent{ 25, false });
+    CHECK(slot(config, "overhang_1_4_speed", size_t(left)) == FloatOrPercent{ 60, false });
+    // The slicer reads it for a filament on Right only.
+    const auto &opt = *config.option<ConfigOptionFloatsOrPercents>("overhang_1_4_speed");
+    CHECK(opt.get_at(process_config_idx(config, opt.size(), 1)) == FloatOrPercent{ 25, false });
+    CHECK(opt.get_at(process_config_idx(config, opt.size(), 0)) == FloatOrPercent{ 60, false });
 }

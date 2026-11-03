@@ -581,6 +581,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
@@ -645,6 +647,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
     GUI/CostsDialog.hpp
+    GUI/FilamentNozzleValuesDialog.cpp
+    GUI/FilamentNozzleValuesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp

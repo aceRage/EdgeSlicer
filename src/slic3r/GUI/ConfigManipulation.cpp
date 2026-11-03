@@ -8,6 +8,9 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/NozzleProcess.hpp"
+#include "Plater.hpp"
+#include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "FlowVariantEdit.hpp"
@@ -248,14 +251,21 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
 }
 
 // Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
-// smallest minimum and its largest maximum.
+// smallest minimum and its largest maximum. Per-nozzle process P2 (D9): with mixed nozzle sizes, by the limits of
+// the smallest nozzle the current plate prints with (layer_height_limits_for_nozzles).
 void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
 {
-    const DynamicPrintConfig& printer_config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    const std::vector<double>& min_limits = printer_config.option<ConfigOptionFloats>("min_layer_height")->values;
-    const std::vector<double>& max_limits = printer_config.option<ConfigOptionFloats>("max_layer_height")->values;
-    min_layer_height = *std::min_element(min_limits.begin(), min_limits.end());
-    max_layer_height = *std::max_element(max_limits.begin(), max_limits.end());
+    PresetBundle*             bundle         = GUI::wxGetApp().preset_bundle;
+    const DynamicPrintConfig& printer_config = bundle->printers.get_edited_preset().config;
+    std::vector<size_t>       used_nozzles;
+    if (Plater* plater = GUI::wxGetApp().plater(); plater != nullptr && has_mixed_nozzle_diameters(printer_config)) {
+        const std::vector<size_t> filament_nozzles = bundle->filament_nozzles();
+        if (PartPlate* plate = plater->get_partplate_list().get_curr_plate())
+            for (int filament : plate->get_extruders())
+                if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
+                    used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
+    }
+    layer_height_limits_for_nozzles(printer_config, used_nozzles, min_layer_height, max_layer_height);
 }
 
 ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
