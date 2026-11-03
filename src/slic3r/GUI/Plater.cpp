@@ -22182,6 +22182,138 @@ void Plater::calib_retraction(const Calib_Params& params)
     p->background_process.fff_print()->set_calib_params(params);
 }
 
+void Plater::calib_temp_retraction(const Calib_Params& params)
+{
+    if (params.mode != CalibMode::Calib_Temp_Retract_Grid)
+        return;
+
+    // F19/F21/F22 (Russ): the grid prints with filament slot 1 and its defaults came from slot 1's preset.
+    // The Filament tab may be editing another slot k. Bind it to slot 1 the way Sidebar::edit_filament() /
+    // PlaterPresetComboBox::switch_to_tab() do, without opening the tab:
+    // - unsaved edits of slot k are resolved for slot k first with Save / Discard / Cancel, never Transfer
+    //   (no_transfer), so they are not carried onto slot 1;
+    // - editing_filament is 0 during select_preset(), whose update_presets() writes set_filament_preset(
+    //   editing_filament, ...): slot k is never reassigned to slot 1's preset;
+    // - every slot is put back to what it held (slot k gets the saved name if the user saved), the tab
+    //   combo is bound to slot 0 (set_filament_idx) and the sidebar combos are refreshed.
+    // Cancel at the prompt, or a refused switch, aborts before new_project(): nothing is created.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    Tab          *filament_tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+    if (bundle != nullptr && filament_tab != nullptr && !bundle->filament_presets.empty()) {
+        TabPresetComboBox *tab_combo = filament_tab->get_combo_box();
+        // The slot the tab is editing now. Until a slot is bound, the tab holds filament_presets[0].
+        const int bound_idx = (tab_combo && tab_combo->get_filament_idx() >= 0) ? tab_combo->get_filament_idx() : 0;
+        const int previous_editing = sidebar().editing_filament_index();
+        std::vector<std::string> slots_target = bundle->filament_presets;
+        bool slots_touched = false;
+        if (bound_idx != 0 && filament_tab->current_preset_is_dirty()) {
+            if (!filament_tab->may_discard_current_dirty_preset(nullptr, "", true))
+                return; // Cancel: the tab keeps editing slot k with its edits; calibration aborted
+            if (filament_tab->current_preset_is_dirty()) {
+                // Discarded (may_discard_current_dirty_preset() leaves that to the caller).
+                bundle->filaments.discard_current_changes();
+                filament_tab->load_current_preset();
+                filament_tab->update_dirty();
+            } else if (size_t(bound_idx) < slots_target.size()) {
+                // Saved: only slot k moves to the saved preset (a save under a new name renames every
+                // slot that used the old one, see switch_to_tab()).
+                slots_target[bound_idx] = bundle->filaments.get_selected_preset_name();
+                slots_touched = true;
+            }
+        }
+        const std::string slot1_name = slots_target.front();
+        bool switched = true;
+        if (bundle->filaments.get_edited_preset().name != slot1_name) {
+            sidebar().set_editing_filament(0);
+            switched = filament_tab->select_preset(slot1_name) && bundle->filaments.get_edited_preset().name == slot1_name;
+            slots_touched = true;
+        }
+        for (size_t i = 0; i < slots_target.size() && i < bundle->filament_presets.size(); ++i)
+            if (bundle->filament_presets[i] != slots_target[i])
+                bundle->set_filament_preset(i, slots_target[i]);
+        if (switched) {
+            sidebar().set_editing_filament(0);
+            if (tab_combo)
+                tab_combo->set_filament_idx(0);
+        } else
+            sidebar().set_editing_filament(previous_editing);
+        if (slots_touched) {
+            sidebar().update_presets(Preset::TYPE_FILAMENT);
+            bundle->export_selections(*wxGetApp().app_config);
+        }
+        if (!switched)
+            return; // the switch to slot 1 was refused: calibration aborted, no project, no overrides
+    }
+
+    const auto calib_name = wxString::Format(L"Stringing temp × retraction");
+    // F23: "Creating a new project" can be cancelled; then there is no project to set up.
+    if (new_project(false, false, calib_name) == wxID_CANCEL)
+        return;
+    wxGetApp().mainframe->select_tab(size_t(MainFrame::tp3DEditor));
+
+    auto print_config    = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const int filament_idx = std::max(params.extruder_id, 0);
+
+    make_stringing_grid(model(), params);
+
+    // Centre the grid on the current plate. Columns are named SG_col_NN so arrange cannot scramble them.
+    if (const auto *bed_pts = printer_config->option<ConfigOptionPoints>("printable_area");
+        bed_pts && bed_pts->values.size() >= 2 && !model().objects.empty()) {
+        BoundingBoxf  bed_ext = get_extents(bed_pts->values);
+        BoundingBoxf3 bbox    = model().bounding_box_exact();
+        auto         *plate   = get_partplate_list().get_curr_plate();
+        const Vec3d   origin  = plate ? plate->get_origin() : Vec3d::Zero();
+        const Vec3d   shift(origin.x() + bed_ext.center().x() - bbox.center().x(),
+                            origin.y() + bed_ext.center().y() - bbox.center().y(), 0.);
+        for (ModelObject *obj : model().objects) {
+            if (obj->instances.empty())
+                continue;
+            obj->instances[0]->set_offset(obj->instances[0]->get_offset() + shift);
+            obj->ensure_on_bed();
+        }
+    }
+
+    apply_stringing_grid_slicer_config(*print_config, *filament_config, *printer_config, filament_idx, params.disable_z_hop);
+
+    auto *max_lh = printer_config->option<ConfigOptionFloats>("max_layer_height");
+    if (max_lh && !max_lh->values.empty() && max_lh->values[0] < 0.2)
+        max_lh->values[0] = 0.2;
+
+    print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.2));
+
+    std::vector<size_t> object_idxs;
+    object_idxs.reserve(model().objects.size());
+    for (size_t i = 0; i < model().objects.size(); ++i) {
+        ModelObject *obj = model().objects[i];
+        obj->config.set_key_value("extruder", new ConfigOptionInt(filament_idx + 1));
+        obj->config.set_key_value("wall_loops", new ConfigOptionInt(2));
+        obj->config.set_key_value("top_shell_layers", new ConfigOptionInt(0));
+        obj->config.set_key_value("bottom_shell_layers", new ConfigOptionInt(3));
+        obj->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
+        obj->config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+        obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
+        obj->config.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spAligned));
+        obj->config.set_key_value("wall_sequence", new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
+        obj->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
+        obj->config.set_key_value("enable_support", new ConfigOptionBool(false));
+        obj->config.set_key_value("raft_layers", new ConfigOptionInt(0));
+        sidebar().obj_list()->add_object_to_list(i, i + 1 == model().objects.size());
+        object_idxs.push_back(i);
+    }
+
+    changed_objects(object_idxs);
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINTER)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_PRINTER)->reload_config();
+
+    p->background_process.fff_print()->set_calib_params(params);
+}
+
 void Plater::calib_VFA(const Calib_Params& params)
 {
     const auto calib_vfa_name = wxString::Format(L"VFA test");

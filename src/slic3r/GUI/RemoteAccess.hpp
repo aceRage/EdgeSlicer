@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <deque>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -11,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "slic3r/GUI/RemotePaintV1.hpp"
 #include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
@@ -207,6 +210,15 @@ private:
     ApiResponse api_filament_revert(int slot);
     ApiResponse api_filament_save(int slot, const std::string& name);
     ApiResponse api_filament_remove(int slot, int replace, bool confirm);
+    // paint_v1 (H1, pen colouring; RemotePaintV1.hpp): the objects a tablet can paint, opening a
+    // session on one, and that session's state, one volume's mesh and its painting. Read-only.
+    ApiResponse api_paint_objects();
+    ApiResponse api_paint_session_open(const std::string& form_body);
+    ApiResponse api_paint_session(const std::string& id, const std::string& what, const std::string& query);
+    // H2: the tablet's paint, spooled by the hub to `path` (in its uploads folder); applied in one undo step.
+    ApiResponse api_paint_apply(const std::string& id, const std::string& path);
+    // The paint a session read at `revision` (what a later apply painted on), kept for the last few reads.
+    void        paint_remember(const std::string& id, const std::string& revision, const PaintV1::ObjectSnapshot& object);
 
     struct Job
     {
@@ -247,6 +259,16 @@ private:
     long long        m_gui_tick_ms { 0 };
     int              m_modal_depth { 0 };
     int              m_requests_done { 0 };
+    // paint_v1: open sessions by id, each bound to an object key (PaintV1::MAX_SESSIONS at most)
+    struct PaintSession
+    {
+        std::string                           object_key;
+        std::chrono::steady_clock::time_point opened;
+        // revision -> each model part's paint as served then (the newest few; see paint_remember)
+        std::vector<std::pair<std::string, PaintV1::PaintByVolume>> seen;
+    };
+    std::mutex                          m_paint_mutex;
+    std::map<std::string, PaintSession> m_paint_sessions;
 };
 
 } // namespace GUI
