@@ -585,5 +585,6 @@ TEST_CASE("override paint: the flag survives a 3MF round trip on the modifier", 
     CHECK(model_volume_overrides_paint(*loaded_modifier));
     // Only the modifier carries it, and the project config never does.
     CHECK(loaded_part->config.option("override_paint") == nullptr);
-    CHECK_FALSE(dst_config.has("override_paint") && dst_config.opt_bool("override_paint"));
+    const bool project_has_it = dst_config.has("override_paint") && dst_config.opt_bool("override_paint");
+    CHECK_FALSE(project_has_it);
 }
