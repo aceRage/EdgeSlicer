@@ -201,6 +201,8 @@ public:
     ~PlaterPresetComboBox();
 
     ScalableButton* edit_btn { nullptr };
+    // Per-nozzle process P9 (owner idea 2026-11-02): the toolhead this filament prints on ("T3"), on toolchangers; click cycles.
+    wxWindow* tool_btn { nullptr };
 
     // BBS
     wxButton* clr_picker { nullptr };

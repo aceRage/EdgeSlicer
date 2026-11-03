@@ -26,6 +26,7 @@ struct PanelVisibility
     bool bg_ground_detail = false;   // camera height, dome radius, world scale
     bool bg_pitch         = false;   // the infinite backdrop's tilt
     bool bg_plate_match   = false;   // a backplate's horizon, focal length and Match camera
+    bool bg_ground_reset  = false;   // 1h-2 (deferred part): "Reset to auto", once a size was typed in
     // Floor
     bool floor_colour      = false;
     bool floor_shadow      = false;
@@ -45,6 +46,8 @@ struct PanelVisibility
     bool mat_layer_lines  = false;
     bool mat_toolpath     = false;    // smoothing
     bool mat_light_left   = false;
+    bool mat_translucency = false;    // realism 1d: model mode (the toolpaths have no thickness pass)
+    bool mat_imperfections = false;   // realism 1f: wobble, seam, strings, colour variation (model mode)
     // Camera (1h-2)
     bool cam_dof_detail   = false;   // aperture, focus on model, bokeh quality
     bool cam_dof_focus    = false;   // the focus distance when not on the model
@@ -56,7 +59,8 @@ struct PanelVisibility
     // Video
     bool vid_co_position   = false;
     bool vid_co_appearance = false;
-    bool vid_build_parts   = false;
+    bool vid_build_parts   = false;   // infill and supports: toolpath build-ups only
+    bool vid_build_source  = false;   // "Build-up shows" toolpaths or the model
     // Watermark
     bool wm_detail = false;
 };
@@ -85,6 +89,7 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.bg_ground_detail = env_bg && env_set && s.background.ground;
     v.bg_pitch         = env_bg && env_set && !s.background.ground;
     v.bg_plate_match   = backplate;
+    v.bg_ground_reset  = v.bg_ground_detail && (s.background.ground_height > 0.f || s.background.ground_radius > 0.f);
 
     // 1h-2: with a ground-projected environment or a photo backplate the floor is drawn as a shadow
     // catcher (the picture is the floor), so its own colour, grid and photo rows do not apply.
@@ -108,6 +113,9 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
     v.mat_layer_lines = s.source != "toolpaths";   // the toolpaths view already shows the real layers
     v.mat_toolpath    = s.source == "toolpaths";
     v.mat_light_left  = s.materials.lights_off;
+    v.mat_translucency = s.source != "toolpaths";
+    // The toolpaths already are the real print (with its own seams and travels).
+    v.mat_imperfections = s.source != "toolpaths";
 
     v.cam_dof_detail = s.dof.enabled;
     v.cam_dof_focus  = s.dof.enabled && !s.dof.focus_on_model;
@@ -120,7 +128,9 @@ inline PanelVisibility panel_visibility(const Scene &s, bool env_is_hdri)
 
     v.vid_co_position   = s.callouts.enabled && s.video.callouts;
     v.vid_co_appearance = s.callouts.enabled && s.video.callouts && s.video.build.enabled;
-    v.vid_build_parts   = s.video.build.enabled;
+    v.vid_build_source  = s.video.build.enabled;
+    // The model's build-up is cut by a plane: it has no infill or supports to leave out.
+    v.vid_build_parts   = s.video.build.enabled && s.video.build.source != BuildSource::Clip;
 
     v.wm_detail = s.export_settings.watermark.enabled;
     return v;

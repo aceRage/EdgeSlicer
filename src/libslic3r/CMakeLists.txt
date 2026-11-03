@@ -113,6 +113,8 @@ set(lisbslic3r_sources
     Showcase/ShowcaseAssets.hpp
     Showcase/ShowcaseHdr.cpp
     Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcaseHdriLibrary.cpp
+    Showcase/ShowcaseHdriLibrary.hpp
     Showcase/ShowcaseLens.cpp
     Showcase/ShowcaseLens.hpp
     Showcase/ShowcasePanelRules.hpp
@@ -582,6 +584,12 @@ set(lisbslic3r_sources
     SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    NozzleOverride.cpp
+    NozzleOverride.hpp
+    NozzleProcess.cpp
+    NozzleProcess.hpp
+    ToolSlots.cpp
+    ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp
@@ -808,6 +816,7 @@ slic3r_unity_build(libslic3r SKIP
     Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
     Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
     Showcase/ShowcaseHdr.cpp        # file-local hdr_* helpers and a TBB include; kept out of the unity batches
+    Showcase/ShowcaseHdriLibrary.cpp # file-local hdri_stem; OpenSSL through ImageFill
     Layerling.cpp                   # file-local helpers (lower, trim, starts_with) with common names
 )
 

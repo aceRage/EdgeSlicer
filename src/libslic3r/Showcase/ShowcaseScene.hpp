@@ -268,6 +268,20 @@ struct ExportSettings
     bool operator!=(const ExportSettings &o) const { return !(*this == o); }
 };
 
+// Realism 1f (design 2.6): what makes the model read as printed, each 0 (off) .. 1, model mode. Written
+// as the materials' "imperfections" only when one is on.
+struct Imperfections
+{
+    float wobble = 0.f;   // layers shifted a little sideways (Z-banding)
+    float seam   = 0.f;   // the seam as a line of small bumps (needs the plate sliced)
+    float strings = 0.f;  // faint strings on travels across gaps (needs the plate sliced)
+    float colour = 0.f;   // slight colour and gloss variation
+
+    bool any() const { return wobble > 0.f || seam > 0.f || strings > 0.f || colour > 0.f; }
+    bool operator==(const Imperfections &o) const { return wobble == o.wobble && seam == o.seam && strings == o.strings && colour == o.colour; }
+    bool operator!=(const Imperfections &o) const { return !(*this == o); }
+};
+
 // Per filament slot (1-based, as the filament list shows it): the finish the user picked over the
 // inferred one (D4).
 struct MaterialOverride
@@ -299,6 +313,12 @@ struct Materials
     bool                          toolpath_supports  = true;   // supports, their interfaces and transitions
     bool                          toolpath_skirt     = true;   // skirt and brim
     bool                          toolpath_infill    = true;   // sparse and internal solid infill (seen through gaps)
+    // Realism 1d: light through thin walls and soft edges of the plastic (0 = off .. 1), model mode.
+    // Translucent filaments glow through thin walls at any value (effective_translucency()). Written
+    // only when set.
+    float                         translucency       = 0.f;
+    // Realism 1f.
+    Imperfections                 imperfections;
     // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
     float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
@@ -313,10 +333,29 @@ struct Materials
     {
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
                coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient &&
-               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill;
+               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill &&
+               translucency == o.translucency && imperfections == o.imperfections;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
 };
+
+// What the toolpaths view lays besides the model's walls. During a video's layer build-up the video's own
+// Infill / Supports switches decide (BuildUp::infill / supports); otherwise the scene's Materials switches
+// (stills and the live view). The skirt and brim always follow the Materials switch.
+struct ToolpathParts
+{
+    bool infill   = true;
+    bool supports = true;
+    bool skirt    = true;
+};
+inline ToolpathParts toolpath_parts(const Materials &m, bool building, bool build_infill, bool build_supports)
+{
+    ToolpathParts p;
+    p.infill   = building ? build_infill : m.toolpath_infill;
+    p.supports = building ? build_supports : m.toolpath_supports;
+    p.skirt    = m.toolpath_skirt;
+    return p;
+}
 
 // 1h-2 (design 2.7, pulled forward from 1g): depth of field in the post pass, off by default. The
 // circle of confusion comes from the lens of the frame (its 35 mm equivalent focal length), the
@@ -328,13 +367,38 @@ struct DepthOfField
     bool         focus_on_model = true;   // focus on the middle of the plate's objects
     float        focus_mm       = 300.f;  // otherwise this far along the view (mm)
     BokehQuality quality        = BokehQuality::Good;
+    // Realism 1h-2, the deferred part (written only when set): a blurred foreground spills over the
+    // sharper background behind it, and bright highlights (from the HDR layer) bloom into bokeh discs
+    // (0 = off .. 1).
+    bool         near_bleed     = false;
+    float        highlights     = 0.f;
 
     bool operator==(const DepthOfField &o) const
     {
         return enabled == o.enabled && f_number == o.f_number && focus_on_model == o.focus_on_model && focus_mm == o.focus_mm &&
-               quality == o.quality;
+               quality == o.quality && near_bleed == o.near_bleed && highlights == o.highlights;
     }
     bool operator!=(const DepthOfField &o) const { return !(*this == o); }
+};
+
+// Realism 1g (design 2.7): camera effects over the finished frame, each 0 (off) .. 1. Written as the
+// scene's "lens" only when one is on. Relative to the safe frame, so the live view and the export
+// agree; the grain is drawn at the output's pixels (not the supersampled ones) and changes with each
+// video frame.
+struct LensEffects
+{
+    float grain      = 0.f;   // luma-weighted film grain
+    float vignette   = 0.f;   // cos^4-style darkening towards the corners
+    float bloom      = 0.f;   // a glow around the brightest highlights (from the HDR layer)
+    float chromatic  = 0.f;   // colour fringes towards the corners (up to ~1.5 px)
+    float distortion = 0.f;   // barrel distortion
+
+    bool any() const { return grain > 0.f || vignette > 0.f || bloom > 0.f || chromatic > 0.f || distortion > 0.f; }
+    bool operator==(const LensEffects &o) const
+    {
+        return grain == o.grain && vignette == o.vignette && bloom == o.bloom && chromatic == o.chromatic && distortion == o.distortion;
+    }
+    bool operator!=(const LensEffects &o) const { return !(*this == o); }
 };
 
 struct Scene
@@ -355,6 +419,7 @@ struct Scene
     Lighting                lighting;
     CameraView              camera;
     DepthOfField            dof;                    // 1h-2
+    LensEffects             lens;                   // realism 1g
     std::vector<CameraView> views;                  // saved, named views
     ExportSettings          export_settings;
     Materials               materials;

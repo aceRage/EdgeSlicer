@@ -452,6 +452,8 @@ public:
     // The Layerling tab (LayerlingPanel): added or removed to follow Preferences > "Show the Layerling
     // tab". It is always the last page and has no TabPosition: it is found by pointer, never by index.
     void update_layerling_tab();
+    // The Layerling tab's panel, null before the tab was first shown.
+    LayerlingPanel *layerling_panel() const { return m_layerling; }
     // Where Calibration goes back in (show_device): the end, or just before the Layerling page.
     int  calibration_page_position() const;
     // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).

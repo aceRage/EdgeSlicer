@@ -721,6 +721,53 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// ---- Per-nozzle process values (per-nozzle process P1, tests/design_per_nozzle_process.md D1) -------
+// The process keys of per_nozzle_process_options() may hold one value per (extruder, variant) slot in
+// Bambu's layout: print_extruder_id / print_extruder_variant name the slots, extruder-major (an H2D
+// process: E1 Standard, E1 High Flow, E1 E3D High Flow, E2 Standard, ...). A vector of any other length
+// is a flow-mode vector read through get_config_idx(Process), as before.
+//
+// The slicer reads a filament's extruder slot only when process_extruder_values is set: by the user on
+// a process split per nozzle (left / right edits), or by fill_nozzle_process_slots() for a per-nozzle
+// process with values of its own. Without it every reader takes get_config_idx(Process) exactly as
+// before - whatever the other slots hold (the X2D's system Bowden slots differ) - so stock jobs, older
+// presets and per-object overrides slice unchanged.
+
+// The keys a per-nozzle process supplies: process_flow_variant_options() without the four the slicer
+// reads once for the whole print (slow_down_layers and the extrusion-rate smoothing keys, read at
+// values.front()); those always come from the plate's process.
+const std::vector<std::string>& per_nozzle_process_options();
+bool is_per_nozzle_process_option(const std::string &key);
+
+// fvtStandard / fvtHighFlow for "<Direct Drive|Bowden> Standard|High Flow", -1 for any other variant
+// (E3D High Flow, TPU High Flow, TPU285...).
+int process_variant_flow_mode(const std::string &variant);
+// The flow mode a slot is filled from (D6): the variant's own mode, TPU High Flow -> Standard, any other
+// "... High Flow" -> High Flow, anything else -> Standard.
+FilamentVolumeType process_variant_fill_mode(const std::string &variant);
+
+// The slots of each extruder (extruder e's at [e]) of the print_extruder_id / print_extruder_variant
+// layout, or empty unless both have the same length, the ids run 1, 1, .., 2, .., n and n >= 2.
+std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase &config);
+
+// The physical extruder (0-based) printing filament `filament_idx` (0-based) on a machine with
+// `extruder_count` extruders: filament_map on a Bambu grouping machine (two extruders that offer
+// several nozzle variants, DynamicPrintConfig::support_different_extruders) or when filaments outnumber
+// extruders, else the filament's own tool (a toolchanger such as the U1).
+size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count);
+// Whether a machine of `extruder_count` extruders is one of Bambu's grouping machines (H2D / H2C / X2D): at most
+// two extruders whose extruder_variant_list entries name more than one variant between them.
+bool is_bambu_grouping_machine(const ConfigBase &config, size_t extruder_count);
+
+// The index of a process option holding `opt_size` values that filament `filament_idx` (0-based) reads:
+// its extruder's slot for the flow mode get_config_idx(Process) picks when process_extruder_values is
+// set and opt_size is the layout's length, else get_config_idx(Process).
+size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx);
+
+// Whether some extruder's Standard / High Flow slot of a per_nozzle_process_options() key differs from
+// extruder 1's.
+bool process_extruder_slots_differ(const ConfigBase &config);
+
 // Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
 // name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
 // value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
@@ -773,6 +820,8 @@ template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
 {
+    if (domain == ConfigFlowDomain::Process)
+        return opt.get_at(process_config_idx(config, opt.values.size(), filament_id));
     return opt.get_at(get_config_idx(config, domain, filament_id));
 }
 
@@ -837,6 +886,10 @@ struct ResolvedFilamentFlow
 {
     bool                       variants_active{false};
     std::vector<size_t>        process_config_idx;
+    // Per-nozzle process P1: the extruder slot process_config_idx(config, process_layout_size, id) picks,
+    // read for an option of process_layout_size values (0 when process_extruder_values is off).
+    std::vector<size_t>        process_extruder_idx;
+    size_t                     process_layout_size{0};
     std::vector<double>        flow_ratio;
     std::vector<double>        max_volumetric_speed;
     std::vector<unsigned char> enable_pressure_advance;
@@ -853,6 +906,14 @@ struct ResolvedFilamentFlow
     {
         return filament_id < process_config_idx.size() ? process_config_idx[filament_id] :
                                                          get_config_idx(config, ConfigFlowDomain::Process, filament_id);
+    }
+    // The slot of an option holding opt_size values: what process_config_idx(config, opt_size, id) gives.
+    size_t process_config_idx_for(const ConfigBase &config, size_t opt_size, unsigned int filament_id) const
+    {
+        if (process_layout_size == 0 || opt_size != process_layout_size)
+            return process_config_idx_for(config, filament_id);
+        return filament_id < process_extruder_idx.size() ? process_extruder_idx[filament_id] :
+                                                           Slic3r::process_config_idx(config, opt_size, filament_id);
     }
     double flow_ratio_for(const ConfigBase &config, unsigned int filament_id) const
     {
@@ -1510,9 +1571,6 @@ protected: \
 PRINT_CONFIG_CLASS_DEFINE(
     PrintObjectConfig,
 
-    // Ultra (dual-nozzle): process-scope extruder-variant expansion keys.
-    ((ConfigOptionInts,                print_extruder_id))
-    ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               brim_object_gap))
     ((ConfigOptionFloat,               brim_flow_ratio))
     ((ConfigOptionBool,                brim_use_efc_outline))
@@ -1600,6 +1658,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 enforce_support_layers))
     ((ConfigOptionInt,                 support_filament))
     ((ConfigOptionFloatOrPercent,      support_line_width))
+    // Per-nozzle process P2: per filament, the support line width of the filament's nozzle process.
+    ((ConfigOptionFloatsOrPercents,    nozzle_support_line_width))
     ((ConfigOptionBool,                support_interface_not_for_body))
     // EdgeSlicer: support interface interlock (woven band under the top contact layer).
     ((ConfigOptionBool,                support_interface_interlock))
@@ -1783,6 +1843,23 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<SurfaceFillOrder>, bottom_surface_fill_order))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
+    // Per-nozzle process P2: per FILAMENT (index filament - 1), the line width the per-nozzle process of the
+    // filament's nozzle gives each role; a missing or 0 entry leaves the region's own width
+    // (stamp_nozzle_line_widths in region_config_from_model_volume).
+    ((ConfigOptionFloatsOrPercents,     nozzle_outer_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_inner_wall_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_sparse_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_internal_solid_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_top_surface_line_width))
+    // Per-nozzle process P5: the locked-zag skin / skeleton widths, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_skin_infill_line_width))
+    ((ConfigOptionFloatsOrPercents,     nozzle_skeleton_infill_line_width))
+    // Per-nozzle process P6: the bridge width, the same way.
+    ((ConfigOptionFloatsOrPercents,     nozzle_bridge_line_width))
+    // Per-nozzle process P8: per FILAMENT (index filament - 1), the region keys the process of the filament's tool
+    // gives ("key = value" lines, nozzle_region_option_keys()); empty without per-tool processes
+    // (stamp_nozzle_region_values in region_config_from_model_volume).
+    ((ConfigOptionStrings,              nozzle_region_values))
     ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
@@ -2224,6 +2301,46 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                extruder_max_nozzle_count))
     ((ConfigOptionInts,                printer_extruder_id))
     ((ConfigOptionStrings,             printer_extruder_variant))
+    // Ultra (dual-nozzle): the process-scope extruder-variant layout (Bambu's print_extruder_id /
+    // print_extruder_variant). Per-nozzle process P1: a print-level key (it was in PrintObjectConfig, where
+    // nothing read it), so the G-code writer, Fill and the wipe towers resolve per-extruder process slots.
+    ((ConfigOptionInts,                print_extruder_id))
+    ((ConfigOptionStrings,             print_extruder_variant))
+    // Per-nozzle process P1: the process preset chosen for each physical extruder ("" = the plate's
+    // process) and whether the slicer reads the process keys' extruder slots (process_config_idx).
+    ((ConfigOptionStrings,             nozzle_process_presets))
+    // Per-nozzle process P8: each tool's unsaved changes to its process ("T2" then "key = value" lines, one entry per
+    // tool) and the 1-based tools that need a process of their own and have none (Print::validate refuses them).
+    ((ConfigOptionStrings,             nozzle_process_edits))
+    ((ConfigOptionInts,                nozzle_process_missing))
+    ((ConfigOptionBool,                process_extruder_values))
+    // Per-nozzle process P6: explicit line widths per nozzle size / tool, and the nozzle the process's mm widths are for.
+    ((ConfigOptionString,              process_nozzle_line_widths))
+    ((ConfigOptionFloat,               line_width_nozzle_diameter))
+    // Per-nozzle process P2: the 1-based physical extruder (tool) each filament prints on, 0 = its own
+    // tool (the filament's index on a toolchanger). Only toolchangers use it (physical_extruder_for_filament).
+    ((ConfigOptionInts,                filament_nozzle_assignment))
+    // Per-nozzle process P4 (ToolSlots.hpp): the diameter dimension of the process slot layout, the printer's
+    // opt-in to the per-tool slot model, the physical nozzle declaration, rack nozzle diameters (H2C), the
+    // rack nozzle size per filament, and per-nozzle filament values.
+    ((ConfigOptionFloats,              print_extruder_nozzle_diameter))
+    ((ConfigOptionBool,                tool_slot_model))
+    ((ConfigOptionBool,                support_filament_nozzle_mapping))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_diameter))
+    ((ConfigOptionFloats,              filament_rack_nozzle_diameter))
+    // Per-nozzle process P9 (H2C rack slots as tools, NozzleProcess.hpp "P9"): the rack slot each filament is pinned to
+    // (1-based, 0 = none), the process each rack slot uses ("T2.3" then the name), the rack nozzle sizes of this project
+    // (one text per extruder, "" = the printer preset's), and two internal keys filled while slicing: the slot ids that
+    // need a process and have none, and per filament the process slot it reads (-1 = the extruder's).
+    ((ConfigOptionInts,                filament_rack_nozzle_slot))
+    ((ConfigOptionInts,                filament_side_pin))
+    ((ConfigOptionStrings,             nozzle_slot_process_presets))
+    ((ConfigOptionStrings,             extruder_rack_nozzle_override))
+    ((ConfigOptionStrings,             nozzle_slot_process_missing))
+    ((ConfigOptionInts,                nozzle_filament_process_slot))
+    // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
+    ((ConfigOptionFloats,              nozzle_diameter_override))
+    ((ConfigOptionStrings,             filament_nozzle_variants))
     ((ConfigOptionInt,                 master_extruder_id))
     ((ConfigOptionInts,                physical_extruder_map))
     ((ConfigOptionPointsGroups,        extruder_printable_area))
@@ -2309,6 +2426,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               during_print_exhaust_fan_speed))
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
+    // Per-nozzle process P5: per FILAMENT (index filament - 1), the first-layer width of the per-nozzle process of
+    // the filament's nozzle (0 = that process uses the role widths); empty without per-nozzle processes.
+    ((ConfigOptionFloatsOrPercents,   nozzle_initial_layer_line_width))
+    // Per-nozzle process P6: per FILAMENT, line_width for the filament's nozzle (the skirt's fallback width).
+    ((ConfigOptionFloatsOrPercents,   nozzle_line_width))
     ((ConfigOptionFloat,              initial_layer_print_height))
     ((ConfigOptionFloats,              initial_layer_speed))
 
@@ -2720,7 +2842,20 @@ bool has_nozzle_rack(const PrintConfig &config);
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
 // The same mapping from the raw values, for callers that only hold a DynamicPrintConfig or the
 // preset bundle (the support overhang highlight in the 3D view).
-size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id);
+// `assignment` is filament_nozzle_assignment (per-nozzle process P2): a filament with an entry 1..nozzle_count
+// prints on that tool before any other rule.
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &filament_map, unsigned int filament_id,
+                                      const std::vector<int> &assignment = {});
+// The 0-based tool filament_nozzle_assignment puts 1-based `filament_id` on, or -1 when it names none.
+int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id);
+// Per-nozzle process P4: the nozzle diameter 1-based `filament_id` prints with: nozzle_diameter of its physical
+// extruder (physical_extruder_for_filament), or the rack nozzle size it is pinned to (filament_rack_nozzle_diameter)
+// when that extruder declares rack nozzle diameters (extruder_rack_nozzle_diameter, H2C). Without rack diameters
+// it is exactly nozzle_diameter.get_at(physical_extruder_for_filament(config, filament_id)). ToolSlots.cpp.
+double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// Per-nozzle process P4: the smallest physical nozzle, rack nozzles (extruder_rack_nozzle_diameter) included; the
+// smallest nozzle_diameter when no rack diameters are declared. ToolSlots.cpp.
+double min_physical_nozzle_diameter(const PrintConfig &config);
 
 // Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
 // diameters at the same time - more than one physical extruder and NOT a single-extruder
@@ -2743,10 +2878,9 @@ bool has_mixed_nozzle_diameters(const ConfigBase &config);
 std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters);
 std::string nozzle_diameter_summary(const ConfigBase &config);
 
-// The nozzle diameter that filament slot `filament_id` (1-based) prints through, resolved via
-// physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
-// per-slot filament preset compatibility rule measures against.
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int), the nozzle diameter filament slot `filament_id`
+// (1-based) prints through, is declared above (per-nozzle process P4: rack-aware). It is what the per-slot filament
+// preset compatibility rule measures against.
 
 // CLI --uptodate_settings / --downward_check: load_config_file() uses
 // ConfigBase::load_from_json()'s 4-arg form, which does not flatten inherits.
