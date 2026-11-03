@@ -142,12 +142,16 @@ std::string zip_entry_extra_bytes(mz_zip_archive* zip, mz_uint file_index)
 {
     if (zip == nullptr)
         return {};
-    // The extra-field length is a 16-bit value, so 65535 bytes plus miniz's terminating NUL
-    // always holds the whole field: a 0x9901 header past the first 4 KiB is still found.
-    // (WinZip AES also always sets compression method 99, which is checked first.)
-    std::string  extra(65536, 0);
-    const size_t extra_size = mz_zip_reader_get_extra(zip, file_index, extra.data(), extra.size());
-    if (extra_size == 0)
+    // A zero-size buffer makes miniz return the central-directory extra-field length (+1 for its
+    // NUL) without copying, so the buffer is sized from the header instead of a 64 KiB block per
+    // entry (inspect_zip_entries calls this for up to 10,000 entries). The length is a 16-bit
+    // value, so a 0x9901 header anywhere in the field is still found.
+    const mz_uint needed = mz_zip_reader_get_extra(zip, file_index, nullptr, 0);
+    if (needed <= 1)
+        return {};
+    std::string  extra(needed, 0);
+    const size_t extra_size = mz_zip_reader_get_extra(zip, file_index, extra.data(), static_cast<mz_uint>(extra.size()));
+    if (extra_size <= 1)
         return {};
     extra.resize(extra_size - 1);
     return extra;
@@ -281,6 +285,14 @@ std::string sanitize_zip_extract_segment(const std::string& seg)
             out = "_" + out;
             break;
         }
+    // An archive may carry its own work-folder marker; it must never land as a real marker
+    // inside a session (review A-3), so it is renamed like a reserved name.
+    std::string lower;
+    lower.reserve(out.size());
+    for (char c : out)
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (lower == ZipWorkDir::marker_name())
+        out = "_" + out;
     return out;
 }
 
@@ -554,9 +566,9 @@ bool commit_part(const boost::filesystem::path &part, const boost::filesystem::p
     namespace fs = boost::filesystem;
     boost::system::error_code ec;
     // boost::filesystem::rename replaces an existing file (Windows: MoveFileEx REPLACE).
-    // A dest-file symlink is replaced rather than followed.
-    fs::rename(part, dest, ec);
-    if (ec) {
+    // A dest-file symlink is replaced rather than followed. A scanner or sync client may hold
+    // the fresh .part file for a moment, so a sharing / access error is retried briefly.
+    if (!zip_fs_retry([&](boost::system::error_code& e) { fs::rename(part, dest, e); }, ec)) {
         err = "rename failed: " + path_utf8(part) + " -> " + path_utf8(dest) + " (" + ec.message() + ")";
         return false;
     }
@@ -594,11 +606,11 @@ void rollback_extract(std::vector<StagedFile>                 &staged,
     boost::system::error_code ec;
     for (const StagedFile &s : staged) {
         if (!s.part.empty())
-            fs::remove(s.part, ec);
+            zip_fs_retry([&](boost::system::error_code& e) { fs::remove(s.part, e); }, ec);
         // A dest that did not exist before this call and was already committed (rename
         // succeeded) is ours to remove. A pre-existing dest is never deleted.
         if (!s.dest_existed)
-            fs::remove(s.dest, ec);
+            zip_fs_retry([&](boost::system::error_code& e) { fs::remove(s.dest, e); }, ec);
     }
     std::sort(created_dirs.begin(), created_dirs.end(), [](const fs::path &a, const fs::path &b) {
         return a.generic_string().size() > b.generic_string().size();

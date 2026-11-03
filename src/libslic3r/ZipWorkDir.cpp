@@ -3,9 +3,11 @@
 #include "UntrustedInput.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <ctime>
 #include <exception>
 #include <string>
+#include <thread>
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -111,6 +113,45 @@ void split_stem_ext(const std::string& leaf, std::string& stem, std::string& ext
 }
 
 } // namespace
+
+bool zip_fs_error_is_transient(const boost::system::error_code& ec)
+{
+    if (!ec)
+        return false;
+#ifdef _WIN32
+    if (ec.category() == boost::system::system_category()) {
+        switch (ec.value()) {
+        case 5:  // ERROR_ACCESS_DENIED (a scanner holding the file with delete sharing denied)
+        case 32: // ERROR_SHARING_VIOLATION
+        case 33: // ERROR_LOCK_VIOLATION
+            return true;
+        default: break;
+        }
+    }
+#endif
+    return ec == boost::system::errc::device_or_resource_busy || ec == boost::system::errc::resource_unavailable_try_again
+#ifdef _WIN32
+           || ec == boost::system::errc::permission_denied
+#endif
+        ;
+}
+
+bool zip_fs_retry(const std::function<void(boost::system::error_code&)>& op, boost::system::error_code& ec, unsigned attempts, unsigned delay_ms)
+{
+    if (attempts == 0)
+        attempts = 1;
+    for (unsigned i = 0; i < attempts; ++i) {
+        ec.clear();
+        op(ec);
+        if (!ec)
+            return true;
+        if (!zip_fs_error_is_transient(ec) || i + 1 == attempts)
+            break;
+        if (delay_ms > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+    return false;
+}
 
 bool ZipWorkDir::ensure_root(const boost::filesystem::path& root, std::string& err)
 {
