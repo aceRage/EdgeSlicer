@@ -261,7 +261,9 @@ TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCo
         GCodeProcessor processor;
         processor.process_file(path.string());
         boost::filesystem::remove(path);
-        GCodeProcessorResult result = std::move(processor.extract_result());
+        // The result moves but cannot be copied or move-constructed: assign it, as test_gcodeprocessor_times does.
+        GCodeProcessorResult result;
+        result = std::move(processor.extract_result());
         return double(result.print_statistics.modes[NORMAL].time);
     };
     const double none = total("");
