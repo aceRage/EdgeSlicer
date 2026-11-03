@@ -441,6 +441,45 @@ const Layer &top_layer(const PrintObject &object)
     return *object.layers().back();
 }
 
+// Region graph, warnings and the top layer's regions, for INFO when a check fails.
+std::string describe(const PrintObject &object)
+{
+    std::string out;
+    if (const PrintObjectRegions *shared = object.shared_regions())
+        for (const PrintObjectRegions::LayerRangeRegions &lr : shared->layer_ranges) {
+            out += "range [" + std::to_string(lr.layer_height_range.first) + "," + std::to_string(lr.layer_height_range.second) + "]\n";
+            for (const PrintObjectRegions::VolumeRegion &r : lr.volume_regions)
+                out += "  volume " + r.model_volume->name + " parent " + std::to_string(r.parent) + " region " +
+                       (r.region ? std::to_string(r.region->print_object_region_id()) + " wall " +
+                                       std::to_string(r.region->config().wall_filament.value) + " override " +
+                                       std::to_string(int(r.region->config().override_paint.value))
+                                 : std::string("none")) + "\n";
+            for (const PrintObjectRegions::PaintedRegion &p : lr.painted_regions)
+                out += "  painted ext " + std::to_string(p.extruder_id) + " parent " + std::to_string(p.parent) + " region " +
+                       std::to_string(p.region->print_object_region_id()) + "\n";
+        }
+    for (const PrintStateBase::Warning &w : object.step_state_with_warnings(posSlice).warnings)
+        out += "warning " + std::to_string(w.message_id) + ": " + w.message + "\n";
+    if (! object.layers().empty()) {
+        const Layer &top = *object.layers().back();
+        out += "top layer z " + std::to_string(top.print_z) + " of " + std::to_string(object.layers().size()) + "\n";
+        for (const LayerRegion *lregion : top.regions()) {
+            double a = 0.;
+            for (const Surface &s : lregion->slices.surfaces)
+                a += s.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+            out += "  region " + std::to_string(lregion->region().print_object_region_id()) + " wall " +
+                   std::to_string(lregion->region().config().wall_filament.value) + " area " + std::to_string(a) + "\n";
+        }
+    }
+    for (const ModelVolume *v : object.model_object()->volumes) {
+        out += "model volume " + v->name + " modifier " + std::to_string(int(v->is_modifier())) + " config:";
+        for (const std::string &k : v->config.keys())
+            out += " " + k + "=" + v->config.opt_serialize(k);
+        out += "\n";
+    }
+    return out;
+}
+
 } // namespace
 
 TEST_CASE("override paint: a filament-1 modifier on a part painted with filament 2 prints filament 1", "[ModifierEffect][OverridePaint]")
@@ -456,6 +495,7 @@ TEST_CASE("override paint: a filament-1 modifier on a part painted with filament
         const PrintObject *object = slice_with_modifier(print, model, spec);
         const Layer       &top    = top_layer(*object);
         const FilamentArea f1     = filament_area(top, 1);
+        INFO(describe(*object));
         // The 6 x 6 mm footprint, give or take the segmentation's trimming.
         CHECK(f1.area > 30.);
         CHECK(f1.area < 40.);
@@ -498,6 +538,7 @@ TEST_CASE("override paint: the flag is dropped where it can change nothing", "[M
         spec.paint_part = true;
         spec.overrides  = set_override_paint; // extruder stays 0 ("default")
         const PrintObject *object = slice_with_modifier(print, model, spec);
+        INFO(describe(*object));
         CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
         for (const Layer *layer : object->layers())
             for (const LayerRegion *lregion : layer->regions())
@@ -506,6 +547,7 @@ TEST_CASE("override paint: the flag is dropped where it can change nothing", "[M
     SECTION("unpainted part, same filament: no region of its own and the plain no-effect notice") {
         spec.overrides = [](ModelVolume &v) { v.config.set("extruder", 1); set_override_paint(v); };
         const PrintObject *object = slice_with_modifier(print, model, spec);
+        INFO(describe(*object));
         CHECK(distinct_layer_regions(*object) == 1);
         CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
     }
@@ -579,6 +621,7 @@ TEST_CASE("override paint: the flag survives a 3MF round trip on the modifier", 
         (v->is_modifier() ? loaded_modifier : loaded_part) = v;
     REQUIRE(loaded_modifier != nullptr);
     REQUIRE(loaded_part != nullptr);
+    INFO("loaded modifier config: " + [&]() { std::string s; for (const std::string &k : loaded_modifier->config.keys()) s += k + "=" + loaded_modifier->config.opt_serialize(k) + " "; return s; }());
     const ConfigOption *opt = loaded_modifier->config.option("override_paint");
     REQUIRE(opt != nullptr);
     CHECK(opt->getBool());
