@@ -164,6 +164,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HighFlowCompat.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/ZipCleanup.cpp
+    GUI/ZipCleanup.hpp
     GUI/filamentsync/FilamentColorMapBox.cpp
     GUI/filamentsync/FilamentColorMapBox.hpp
     GUI/filamentsync/FilamentColorMapBoxGroup.cpp

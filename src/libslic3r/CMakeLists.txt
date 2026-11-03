@@ -760,6 +760,8 @@ set(lisbslic3r_sources
     ZipWorkDir.hpp
     ZipOpen.cpp
     ZipOpen.hpp
+    ZipWorkCleaner.cpp
+    ZipWorkCleaner.hpp
 )
 
 if (APPLE)

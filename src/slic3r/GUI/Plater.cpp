@@ -232,6 +232,8 @@
 #include <libslic3r/miniz_extension.hpp>
 #include <libslic3r/ZipWorkDir.hpp>
 #include <libslic3r/ZipOpen.hpp>
+#include <libslic3r/ZipWorkCleaner.hpp>
+#include "ZipCleanup.hpp"
 #include "WipeTowerDialog.hpp"
 #include "ObjColorDialog.hpp"
 
@@ -23058,16 +23060,35 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
     };
     // Any exit that does not load something (early returns, any exception type) removes the
     // session; the successful paths set `keep` just before returning.
+    // A kept session gets its clean-up record (only recorded sessions are ever auto-deleted, and
+    // only by this install) and is protected for the rest of this run; then a background clean
+    // pass runs (PR C).
+    auto keep_session = [&session]() {
+        if (session.empty())
+            return;
+        std::string rec_err;
+        const std::string install_id = wxGetApp().app_config->get(ZIP_WORK_INSTALL_ID_KEY);
+        if (!ZipWorkCleaner::write_session_record(session.parent_path(), session, install_id, rec_err))
+            BOOST_LOG_TRIVIAL(warning) << "ZIP session " << session << " has no clean-up record: " << rec_err;
+        ZipCleanup::note_session(session);
+        ZipCleanup::start(ZipCleanup::Mode::Auto);
+    };
     struct SessionGuard
     {
         std::function<void()> remove;
+        std::function<void()> on_keep;
         bool                  keep = false;
         ~SessionGuard()
         {
-            if (!keep)
-                remove();
+            try {
+                if (!keep)
+                    remove();
+                else
+                    on_keep();
+            } catch (...) {
+            }
         }
-    } session_guard{remove_session};
+    } session_guard{remove_session, keep_session};
     try
     {
         MZ_Archive archive;
