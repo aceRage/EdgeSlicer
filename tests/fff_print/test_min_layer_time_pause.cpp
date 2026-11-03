@@ -248,15 +248,23 @@ TEST_CASE("The park position stays clear of the print", "[MinLayerTimePause]")
     }
 }
 
-// GCodeProcessor's dispatch read `case 4:` and never saw a G4. It now reads them, but only the dwell of a minimum
-// layer time pause (the G4 after the ";MIN_LAYER_TIME_PAUSE" comment) counts; other dwells stay out of the estimate
-// as before, so no other print's estimate moves.
-TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCodeProcessor]")
+// GCodeProcessor's dispatch read `case 4:` and never saw a G4. Every G4 wait counts in the estimate now: S seconds,
+// P milliseconds (S wins when both are there, as in Marlin), a bare G4 is 0 s, a comment is not a G4.
+TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCodeProcessor][G4]")
 {
-    const std::string tag = std::string(MinLayerTimePause::COMMENT_TAG) + " 2.00s\n";
-    auto total = [](const std::string &dwell) {
-        std::string gcode = "G90\nM83\nM204 S1500\nG1 Z0.2 F600\n;LAYER_CHANGE\nG1 X10 Y10 F6000\nG1 X20 Y10 E0.5 F1800\n" + dwell +
-                            "G1 X20 Y20 E0.5 F1800\n";
+    const std::string tag = std::string(MinLayerTimePause::COMMENT_TAG) + " 2.00s
+";
+    auto total = [](const std::string &dwell, const std::string &start = std::string()) {
+        std::string gcode = "G90
+M83
+M204 S1500
+" + start + "G1 Z0.2 F600
+;LAYER_CHANGE
+G1 X10 Y10 F6000
+G1 X20 Y10 E0.5 F1800
+" +
+                            dwell + "G1 X20 Y20 E0.5 F1800
+";
         const boost::filesystem::path path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("edge_g4_%%%%%%%%.gcode");
         {
             boost::nowide::ofstream out(path.string(), std::ios::binary);
@@ -272,17 +280,44 @@ TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCo
     };
     const double none = total("");
     // (The margin covers the stop the dwell forces between the two moves.)
-    CHECK(total(tag + "G4 S2\n") - none == Approx(2.).margin(0.05));
-    CHECK(total(tag + "G4 P2000\n") - none == Approx(2.).margin(0.05));
-    CHECK(total(tag + "G4 P1500 ; Settle Pressure\n") - none == Approx(1.5).margin(0.05));
-    // S wins over P, as in Marlin and RepRapFirmware.
-    CHECK(total(tag + "G4 S1 P5000\n") - none == Approx(1.).margin(0.05));
-    CHECK(total(tag + "G4\n") - none == Approx(0.).margin(0.05));
-    // Only the G4 right after the tag.
-    CHECK(total(tag + "G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") - total("G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") == Approx(2.).margin(0.05));
-    // Any other dwell stays out of the estimate, as before.
-    CHECK(total("G4 S2\n") - none == Approx(0.).margin(0.01));
-    CHECK(total("G4 P2000\n") - none == Approx(0.).margin(0.01));
+    CHECK(total("G4 S2
+") - none == Approx(2.).margin(0.05));
+    CHECK(total("G4 P500
+") - none == Approx(0.5).margin(0.05));
+    CHECK(total("G4 P1500 ; Settle Pressure
+") - none == Approx(1.5).margin(0.05));
+    // S wins over P.
+    CHECK(total("G4 S1 P500
+") - none == Approx(1.).margin(0.05));
+    CHECK(total("G4
+") - none == Approx(0.).margin(0.05));
+    CHECK(total("G4 S0
+") - none == Approx(0.).margin(0.05));
+    // A comment is not a G4.
+    CHECK(total("; G4 S5
+;G4 P5000
+") - none == Approx(0.).margin(0.01));
+    // Dwells in the start G-code count.
+    CHECK(total("", "G4 S3
+") - total("") == Approx(3.).margin(0.05));
+    // Many dwells (a tool change block) add up.
+    std::string many;
+    for (int i = 0; i < 10; ++i)
+        many += "G4 P250
+G4 S1
+";
+    CHECK(total(many) - none == Approx(12.5).margin(0.2));
+    // The minimum layer time pause counts once: its tag adds nothing on top of its G4.
+    CHECK(total(tag + "G4 S2
+") - none == Approx(2.).margin(0.05));
+    CHECK(total(tag + "G4 P2000
+") - none == Approx(2.).margin(0.05));
+    // ... and other dwells count too.
+    CHECK(total(tag + "G4 S2
+G1 X30 Y20 F6000
+G4 S3
+") - total("G1 X30 Y20 F6000
+") == Approx(5.).margin(0.1));
 }
 
 TEST_CASE("A thin spike pauses on its short layers", "[MinLayerTimePause][PrintGCode]")

@@ -957,8 +957,6 @@ inline bool is_bbl_special_tool_command(int tool_number)
         bool m_detect_layer_based_on_tag {false};
         int m_seams_count;
         bool m_g29_time_added {false};
-        // Edge: the next G4 is the dwell of a minimum layer time pause (";MIN_LAYER_TIME_PAUSE"), see process_G4().
-        bool m_count_next_dwell {false};
         bool m_single_extruder_multi_material;
         float m_preheat_time;
         int m_delta_temperature;
