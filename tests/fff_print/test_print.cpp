@@ -2389,7 +2389,8 @@ void init_vase_with_height_range(Print &print, Model &model, DynamicPrintConfig 
 TEST_CASE("Spiral vase allows a height range that keeps one filament", "[Print][SpiralVase][Regression]")
 {
     DynamicPrintConfig range;
-    range.set_key_value("outer_wall_speed", new ConfigOptionFloat(25.));
+    // outer_wall_speed is per extruder in Edge (ConfigOptionFloats).
+    range.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 25. }));
     Print print;
     Model model;
     init_vase_with_height_range(print, model, two_filament_config(false, false), range);
@@ -2421,7 +2422,8 @@ TEST_CASE("Spiral vase still refuses a height range that prints a second filamen
 TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVase]")
 {
     DynamicPrintConfig range;
-    range.set_key_value("outer_wall_speed", new ConfigOptionFloat(25.));
+    // outer_wall_speed is per extruder in Edge (ConfigOptionFloats).
+    range.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 25. }));
     Print print;
     Model model;
     // Mixed walls: object_extruders() expands the virtual filament into both physical components.
