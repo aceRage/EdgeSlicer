@@ -6,6 +6,7 @@
 #include "GCodeWriter.hpp"
 #include "PrintConfig.hpp"
 #include "BoundingBox.hpp"
+#include "TriangleMesh.hpp"
 
 namespace Slic3r {
 
@@ -24,7 +25,10 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Cornering
+    Calib_Cornering,
+    // Combined temperature × retraction stringing grid. Appended after Calib_Cornering so
+    // #819's ironing-flow mode (if it lands first) can keep the next slot.
+    Calib_Temp_Retract_Grid
 };
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
@@ -47,8 +51,75 @@ struct Calib_Params
     // 0.4 mm / 0.2 mm reference model is printed as-is. (Edge: our temperature tower has no nozzle scaling.)
     bool nozzle_based_resize = true;
 
-    CalibMode mode;
+    // Calib_Temp_Retract_Grid: one retraction per column (object named SG_col_NN). Empty means
+    // build the schedule from retract_start / retract_end / retract_step.
+    std::vector<double> retract_lengths;
+    double              retract_start = 0.2;
+    double              retract_end   = 1.6;
+    double              retract_step  = 0.2;
+    // Temperature band height in mm. start / end / step are the temperature schedule.
+    double band_height = 8.0;
+    // 0 = derive from (start, end, step).
+    int  band_count            = 0;
+    bool wait_for_temperature  = true;  // M109 at each band change. Lance: default ON.
+    bool print_labels          = false; // Raised value labels. PR A core support; dialog is PR B.
+    // Concave fillet where each pillar meets its base plate (owner: the towers snapped at the joint).
+    // Radius is clamped to stringing_grid_max_fillet_radius() so the foot stays on the plate.
+    bool   fillet_base         = true;
+    double fillet_radius       = 3.0;
+
+    CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
+
+// Geometry constants for the temperature × retraction stringing grid.
+static constexpr double      stringing_grid_pillar_xy        = 4.0;
+static constexpr double      stringing_grid_pillar_gap       = 20.0; // centre-to-centre of a pair, along Y
+static constexpr double      stringing_grid_column_pitch     = 12.0;
+static constexpr double      stringing_grid_base_x           = 10.0;
+static constexpr double      stringing_grid_base_y           = 30.0;
+static constexpr double      stringing_grid_base_height      = 1.0;
+static constexpr double      stringing_grid_notch_depth      = 0.4;
+static constexpr double      stringing_grid_label_height     = 0.6;  // emboss height above the host face (3 layers at 0.2)
+static constexpr double      stringing_grid_label_embed      = 0.2;  // how far a label reaches into its host, so it fuses
+static constexpr double      stringing_grid_label_glyph_height = 5.0; // 7-segment digit height
+static constexpr double      stringing_grid_label_glyph_width  = 3.0; // 7-segment digit width
+static constexpr double      stringing_grid_label_stroke     = 1.0;  // segment width: about two 0.45 mm lines
+// Label tower (temperature per band, digits upright on its front face, y = 0).
+static constexpr double      stringing_grid_label_tower_x    = 10.5;
+static constexpr double      stringing_grid_label_tower_y    = 6.0;
+static constexpr double      stringing_grid_bed_margin       = 15.0;
+static constexpr double      stringing_grid_prime_tower_size = 35.0;
+static constexpr const char *stringing_grid_column_prefix    = "SG_col_";
+static constexpr const char *stringing_grid_label_name       = "SG_label";
+
+int                  stringing_grid_band_count(const Calib_Params &params);
+std::vector<double>  stringing_grid_retract_schedule(const Calib_Params &params);
+int                  stringing_grid_max_columns(double bed_width);
+bool                 stringing_grid_columns_fit(int columns, double bed_width);
+std::string          stringing_grid_column_name(int column);
+int                  stringing_grid_column_from_name(const std::string &name);
+int                  temp_retract_band_index(const Calib_Params &params, double z);
+double               temp_for_z(const Calib_Params &params, double z);
+double               retract_for_column(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_column_mesh(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_label_tower_mesh(const Calib_Params &params);
+// The raised labels on their own, in the coordinates of their host mesh (column base / label tower).
+// Column: retraction value on the base top between the two pillars. Band: that band's temperature,
+// upright on the label tower's front face (y = 0), centred in the band.
+TriangleMesh         make_stringing_grid_column_label_mesh(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_band_label_mesh(const Calib_Params &params, int band);
+// Label text: "0.2" ... "9.8", whole lengths of 10 mm and more without the ".0" so they fit the base.
+std::string          stringing_grid_retract_label(double length);
+// Largest pillar fillet that keeps the foot on the base plate (the pillar is 3 mm from the plate's edges).
+double               stringing_grid_max_fillet_radius();
+// The fillet radius make_stringing_grid_column_mesh uses: 0 when off, else clamped to (0, max].
+double               stringing_grid_fillet_radius(const Calib_Params &params);
+// One watertight concave fillet ("foot") around a pillar centred at (cx, cy): a square loft from the
+// pillar size plus radius at the base top (reaching stringing_grid_label_embed into the plate) up to the
+// pillar size at radius above the plate, following a quarter circle. It overlaps the pillar and the plate,
+// so the three slice as one solid. Empty for radius <= 0.
+TriangleMesh         make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius);
+void                 make_stringing_grid(Model &model, const Calib_Params &params);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.

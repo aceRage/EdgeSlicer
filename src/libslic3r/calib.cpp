@@ -3,8 +3,12 @@
 #include "Config.hpp"
 #include "Model.hpp"
 #include "Flow.hpp"
+#include "TriangleMesh.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <iomanip>
+#include <sstream>
 
 namespace Slic3r {
 
@@ -1033,5 +1037,374 @@ double CalibPressureAdvancePattern::pattern_shift() const
     return (wall_count() - 1) * line_spacing_first_layer() + line_width_first_layer() + m_glyph_padding_horizontal;
 }
 
+int stringing_grid_band_count(const Calib_Params &params)
+{
+    if (params.band_count > 0)
+        return params.band_count;
+    if (params.step <= 0.)
+        return 1;
+    return std::max(1, int(std::lround(std::abs(params.end - params.start) / params.step)) + 1);
+}
+
+std::vector<double> stringing_grid_retract_schedule(const Calib_Params &params)
+{
+    if (!params.retract_lengths.empty())
+        return params.retract_lengths;
+    std::vector<double> out;
+    if (params.retract_step <= 0.) {
+        out.push_back(params.retract_start);
+        return out;
+    }
+    const int n = std::max(1, int(std::lround(std::abs(params.retract_end - params.retract_start) / params.retract_step)) + 1);
+    const double dir = params.retract_end >= params.retract_start ? 1. : -1.;
+    out.reserve(size_t(n));
+    for (int i = 0; i < n; ++i)
+        out.push_back(params.retract_start + dir * i * params.retract_step);
+    return out;
+}
+
+int stringing_grid_max_columns(double bed_width)
+{
+    const double usable = bed_width - 2. * stringing_grid_bed_margin - stringing_grid_prime_tower_size;
+    if (usable < stringing_grid_column_pitch)
+        return 0;
+    return int(std::floor(usable / stringing_grid_column_pitch));
+}
+
+bool stringing_grid_columns_fit(int columns, double bed_width)
+{
+    return columns >= 2 && columns <= stringing_grid_max_columns(bed_width);
+}
+
+std::string stringing_grid_column_name(int column)
+{
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%s%02d", stringing_grid_column_prefix, column);
+    return buf;
+}
+
+int stringing_grid_column_from_name(const std::string &name)
+{
+    const std::string prefix = stringing_grid_column_prefix;
+    if (name.rfind(prefix, 0) != 0)
+        return -1;
+    // Review F5: digits only, to the end of the name ("SG_col_3abc", "SG_col_-1", "SG_col_ 3" are not columns).
+    const std::string digits = name.substr(prefix.size());
+    if (digits.empty() || digits.size() > 4)
+        return -1;
+    int col = 0;
+    for (char ch : digits) {
+        if (ch < '0' || ch > '9')
+            return -1;
+        col = col * 10 + (ch - '0');
+    }
+    return col;
+}
+
+int temp_retract_band_index(const Calib_Params &params, double z)
+{
+    const int    n      = stringing_grid_band_count(params);
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    if (n <= 1)
+        return 0;
+    if (z <= stringing_grid_base_height)
+        return 0;
+    int band = int(std::floor((z - stringing_grid_base_height) / band_h));
+    if (band < 0)
+        band = 0;
+    if (band >= n)
+        band = n - 1;
+    return band;
+}
+
+double temp_for_z(const Calib_Params &params, double z)
+{
+    const int n    = stringing_grid_band_count(params);
+    const int band = temp_retract_band_index(params, z);
+    if (n <= 1)
+        return params.start;
+    return params.start + (params.end - params.start) * (double(band) / double(n - 1));
+}
+
+double retract_for_column(const Calib_Params &params, int column)
+{
+    const std::vector<double> lens = stringing_grid_retract_schedule(params);
+    if (lens.empty())
+        return 0.;
+    if (column < 0)
+        return lens.front();
+    if (column >= int(lens.size()))
+        return lens.back();
+    return lens[size_t(column)];
+}
+
+namespace {
+
+void merge_cube_at(TriangleMesh &dst, double x, double y, double z, double sx, double sy, double sz)
+{
+    if (sx <= 0. || sy <= 0. || sz <= 0.)
+        return;
+    TriangleMesh cube = make_cube(sx, sy, sz);
+    cube.translate(float(x), float(y), float(z));
+    dst.merge(cube);
+}
+
+// 7-segment bit order: A B C D E F G (top, UR, LR, bottom, LL, UL, mid).
+static constexpr unsigned k_digit_seg[10] = {
+    0b1111110, // 0
+    0b0110000, // 1
+    0b1101101, // 2
+    0b1111001, // 3
+    0b0110011, // 4
+    0b1011011, // 5
+    0b1011111, // 6
+    0b1110000, // 7
+    0b1111111, // 8
+    0b1111011, // 9
+};
+
+// Owner hand test: the old strokes were 0.18 of the digit width (about 0.4 mm, one line or less) and met
+// only edge to edge, so the sliced labels came out as a few stray fragments. Strokes are now a fixed
+// stringing_grid_label_stroke (about two lines) and every vertical stroke overlaps the horizontal ones it
+// meets, so each digit slices as one solid shape (overlapping boxes of one volume are unioned when sliced).
+void merge_digit(TriangleMesh &dst, double ox, double oy, double oz, char ch, double w, double h, double t)
+{
+    const double s = stringing_grid_label_stroke;
+    if (ch == '.') {
+        merge_cube_at(dst, ox + 0.5 * (w - s), oy, oz, s, s, t);
+        return;
+    }
+    if (ch < '0' || ch > '9')
+        return;
+    const unsigned bits = k_digit_seg[ch - '0'];
+    const double   mid  = h * 0.5;
+    const double   up   = h - (mid - 0.5 * s); // upper strokes: from the middle bar's bottom to the top
+    const double   low  = mid + 0.5 * s;       // lower strokes: from the bottom to the middle bar's top
+    if (bits & 0b1000000) merge_cube_at(dst, ox, oy + h - s, oz, w, s, t);                 // A
+    if (bits & 0b0100000) merge_cube_at(dst, ox + w - s, oy + mid - 0.5 * s, oz, s, up, t); // B
+    if (bits & 0b0010000) merge_cube_at(dst, ox + w - s, oy, oz, s, low, t);               // C
+    if (bits & 0b0001000) merge_cube_at(dst, ox, oy, oz, w, s, t);                         // D
+    if (bits & 0b0000100) merge_cube_at(dst, ox, oy, oz, s, low, t);                       // E
+    if (bits & 0b0000010) merge_cube_at(dst, ox, oy + mid - 0.5 * s, oz, s, up, t);         // F
+    if (bits & 0b0000001) merge_cube_at(dst, ox, oy + mid - 0.5 * s, oz, w, s, t);         // G
+}
+
+// Glyph metrics for merge_text: digit width, gap between characters, width of the '.' cell.
+static constexpr double k_glyph_w     = stringing_grid_label_glyph_width;
+static constexpr double k_glyph_gap   = 0.4;
+static constexpr double k_glyph_dot_w = stringing_grid_label_stroke;
+
+double text_width(const std::string &text)
+{
+    double w = 0.;
+    for (char ch : text)
+        w += (ch == '.' ? k_glyph_dot_w : k_glyph_w) + k_glyph_gap;
+    return text.empty() ? 0. : w - k_glyph_gap;
+}
+
+// Lays the text flat: glyph x along +X from ox, glyph up along +Y from oy, thickness t along +Z from oz.
+void merge_text(TriangleMesh &dst, double ox, double oy, double oz, const std::string &text, double t)
+{
+    const double w      = k_glyph_w;
+    const double h      = stringing_grid_label_glyph_height;
+    const double gap    = k_glyph_gap;
+    const double dot_w  = k_glyph_dot_w;
+    double       x      = ox;
+    for (char ch : text) {
+        if (ch == '.') {
+            merge_digit(dst, x, oy, oz, ch, dot_w, h, t);
+            x += dot_w + gap;
+        } else {
+            merge_digit(dst, x, oy, oz, ch, w, h, t);
+            x += w + gap;
+        }
+    }
+}
+
+} // namespace
+
+std::string stringing_grid_retract_label(double length)
+{
+    std::ostringstream os;
+    if (length >= 10. - 1e-6)
+        os << int(std::lround(length));
+    else
+        os << std::fixed << std::setprecision(1) << length;
+    return os.str();
+}
+
+namespace {
+
+std::string format_temp_label(double temp)
+{
+    std::ostringstream os;
+    os << int(std::lround(temp));
+    return os.str();
+}
+
+void add_pillar(TriangleMesh &dst, double cx, double cy, const Calib_Params &params)
+{
+    const int    bands  = stringing_grid_band_count(params);
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    const double half   = stringing_grid_pillar_xy * 0.5;
+    const double notch  = stringing_grid_notch_depth;
+    const double inset  = stringing_grid_pillar_xy - 2. * notch;
+    for (int band = 0; band < bands; ++band) {
+        const double z0 = stringing_grid_base_height + band * band_h;
+        if (band + 1 < bands && band_h > notch) {
+            merge_cube_at(dst, cx - half, cy - half, z0, stringing_grid_pillar_xy, stringing_grid_pillar_xy, band_h - notch);
+            merge_cube_at(dst, cx - inset * 0.5, cy - inset * 0.5, z0 + band_h - notch, inset, inset, notch);
+        } else {
+            merge_cube_at(dst, cx - half, cy - half, z0, stringing_grid_pillar_xy, stringing_grid_pillar_xy, band_h);
+        }
+    }
+}
+
+} // namespace
+
+TriangleMesh make_stringing_grid_column_label_mesh(const Calib_Params &params, int column)
+{
+    // Lies on the top of the base between the two pillars (the 3 mm strip in front of the front pillar is
+    // too shallow for a 4 mm digit, which used to run into the pillar), centred, read from the front (-Y)
+    // with the digits' up along +Y. It sinks stringing_grid_label_embed into the base so it fuses with it.
+    TriangleMesh      mesh;
+    const std::string label = stringing_grid_retract_label(retract_for_column(params, column));
+    const double      ox    = 0.5 * (stringing_grid_base_x - text_width(label));
+    const double      oy    = 0.5 * (stringing_grid_base_y - stringing_grid_label_glyph_height);
+    merge_text(mesh, ox, oy, stringing_grid_base_height - stringing_grid_label_embed, label,
+               stringing_grid_label_height + stringing_grid_label_embed);
+    return mesh;
+}
+
+TriangleMesh make_stringing_grid_band_label_mesh(const Calib_Params &params, int band)
+{
+    // Owner hand test: the digits used to be laid flat (thickness along Z) at y = tower depth, so each
+    // band's label was a set of horizontal slabs hanging off the back of the tower. Now they stand on the
+    // tower's FRONT face (y = 0, toward the default camera): built flat in XY, then turned +90 deg about X
+    // so glyph up -> +Z and thickness -> -Y. They stick out stringing_grid_label_height in front of the
+    // face and reach stringing_grid_label_embed into the tower, so they fuse with it.
+    TriangleMesh mesh;
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    // Review F6: same rule as the G-code (temp_retract_band_index on the middle of the band).
+    const double      z_mid = stringing_grid_base_height + (band + 0.5) * band_h;
+    const std::string label = format_temp_label(temp_for_z(params, z_mid));
+    TriangleMesh flat;
+    merge_text(flat, 0., 0., -stringing_grid_label_embed, label, stringing_grid_label_height + stringing_grid_label_embed);
+    // +90 deg about X, written out: (x, y, z) -> (x, -z, y). A proper rotation, so the faces keep their winding.
+    const double         ox  = 0.5 * (stringing_grid_label_tower_x - text_width(label));
+    const double         oz  = z_mid - 0.5 * stringing_grid_label_glyph_height;
+    indexed_triangle_set its = flat.its;
+    for (stl_vertex &v : its.vertices)
+        v = stl_vertex(float(v.x() + ox), -v.z(), float(v.y() + oz));
+    mesh = TriangleMesh(std::move(its));
+    return mesh;
+}
+
+double stringing_grid_max_fillet_radius()
+{
+    const double y0 = (stringing_grid_base_y - stringing_grid_pillar_gap) * 0.5; // front pillar centre
+    return std::min(0.5 * (stringing_grid_base_x - stringing_grid_pillar_xy), y0 - 0.5 * stringing_grid_pillar_xy);
+}
+
+double stringing_grid_fillet_radius(const Calib_Params &params)
+{
+    if (!params.fillet_base || params.fillet_radius <= 0.)
+        return 0.;
+    return std::min(params.fillet_radius, stringing_grid_max_fillet_radius());
+}
+
+TriangleMesh make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius)
+{
+    if (radius <= 0.)
+        return {};
+    // Square rings, corners counter-clockwise seen from above: (-,-) (+,-) (+,+) (-,+). The loft is pulled in
+    // by `inset` so its top ring lies inside the pillar and its foot inside the plate edge (no coplanar faces).
+    const double inset  = 0.05;
+    const double half   = 0.5 * stringing_grid_pillar_xy - inset;
+    const double z_base = stringing_grid_base_height;
+    const int    steps  = 12;
+    std::vector<std::pair<double, double>> rings; // (z, half size)
+    rings.emplace_back(z_base - stringing_grid_label_embed, half + radius);
+    for (int i = 0; i <= steps; ++i) {
+        // Concave quarter circle centred at (half + radius, z_base + radius): extra(t) = r - sqrt(r^2 - (r - t)^2).
+        const double t     = radius * double(i) / double(steps);
+        const double extra = radius - std::sqrt(std::max(0., radius * radius - (radius - t) * (radius - t)));
+        rings.emplace_back(z_base + t, half + extra);
+    }
+    indexed_triangle_set its;
+    for (const auto &[z, h] : rings) {
+        its.vertices.emplace_back(float(cx - h), float(cy - h), float(z));
+        its.vertices.emplace_back(float(cx + h), float(cy - h), float(z));
+        its.vertices.emplace_back(float(cx + h), float(cy + h), float(z));
+        its.vertices.emplace_back(float(cx - h), float(cy + h), float(z));
+    }
+    const int n = int(rings.size());
+    for (int r = 0; r + 1 < n; ++r)
+        for (int j = 0; j < 4; ++j) {
+            const int a0 = 4 * r + j, a1 = 4 * r + (j + 1) % 4, b0 = a0 + 4, b1 = a1 + 4;
+            its.indices.emplace_back(a0, a1, b1);
+            its.indices.emplace_back(a0, b1, b0);
+        }
+    its.indices.emplace_back(0, 2, 1); // bottom cap, facing down
+    its.indices.emplace_back(0, 3, 2);
+    const int top = 4 * (n - 1);
+    its.indices.emplace_back(top + 0, top + 1, top + 2); // top cap, facing up
+    its.indices.emplace_back(top + 0, top + 2, top + 3);
+    return TriangleMesh(std::move(its));
+}
+
+TriangleMesh make_stringing_grid_column_mesh(const Calib_Params &params, int column)
+{
+    TriangleMesh mesh;
+    merge_cube_at(mesh, 0., 0., 0., stringing_grid_base_x, stringing_grid_base_y, stringing_grid_base_height);
+    const double cx = stringing_grid_base_x * 0.5;
+    const double y0 = (stringing_grid_base_y - stringing_grid_pillar_gap) * 0.5;
+    add_pillar(mesh, cx, y0, params);
+    add_pillar(mesh, cx, y0 + stringing_grid_pillar_gap, params);
+    // Owner (real print): the 4 mm pillars snapped at the plate. A concave fillet foot under each one.
+    if (const double r = stringing_grid_fillet_radius(params); r > 0.) {
+        mesh.merge(make_stringing_grid_pillar_fillet_mesh(cx, y0, r));
+        mesh.merge(make_stringing_grid_pillar_fillet_mesh(cx, y0 + stringing_grid_pillar_gap, r));
+    }
+    if (params.print_labels)
+        mesh.merge(make_stringing_grid_column_label_mesh(params, column));
+    return mesh;
+}
+
+TriangleMesh make_stringing_grid_label_tower_mesh(const Calib_Params &params)
+{
+    TriangleMesh mesh;
+    const int    bands  = stringing_grid_band_count(params);
+    const double band_h = params.band_height > 0. ? params.band_height : 8.;
+    const double height = stringing_grid_base_height + bands * band_h;
+    merge_cube_at(mesh, 0., 0., 0., stringing_grid_label_tower_x, stringing_grid_label_tower_y, height);
+    if (params.print_labels)
+        for (int band = 0; band < bands; ++band)
+            mesh.merge(make_stringing_grid_band_label_mesh(params, band));
+    return mesh;
+}
+
+void make_stringing_grid(Model &model, const Calib_Params &params)
+{
+    const std::vector<double> lens = stringing_grid_retract_schedule(params);
+    for (int col = 0; col < int(lens.size()); ++col) {
+        ModelObject *obj = model.add_object();
+        obj->name        = stringing_grid_column_name(col);
+        obj->add_volume(make_stringing_grid_column_mesh(params, col), ModelVolumeType::MODEL_PART, false);
+        obj->invalidate_bounding_box();
+        ModelInstance *inst = obj->add_instance();
+        inst->set_offset(Vec3d(col * stringing_grid_column_pitch, 0., 0.));
+        obj->ensure_on_bed();
+    }
+    if (params.print_labels) {
+        ModelObject *label = model.add_object();
+        label->name        = stringing_grid_label_name;
+        label->add_volume(make_stringing_grid_label_tower_mesh(params), ModelVolumeType::MODEL_PART, false);
+        label->invalidate_bounding_box();
+        ModelInstance *inst = label->add_instance();
+        inst->set_offset(Vec3d(-stringing_grid_column_pitch, 0., 0.));
+        label->ensure_on_bed();
+    }
+}
 
 } // namespace Slic3r

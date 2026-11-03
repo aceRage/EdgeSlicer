@@ -600,6 +600,15 @@ private:
     // filament options of m_config change during an export).
     ResolvedFilamentFlow                m_filament_flow;
     DynamicConfig                       m_calib_config;
+    // Calib_Temp_Retract_Grid only: the writer's retraction_length is mutated per column
+    // and restored at the end of the print so a later toolchange uses the preset.
+    bool                                m_temp_retract_saved_retract { false };
+    ConfigOptionFloats                  m_temp_retract_original;
+    int                                 m_temp_retract_last_band { -1 };
+    std::string                         apply_temp_retract_grid_layer(const Print &print, double print_z);
+    std::string                         apply_temp_retract_grid_object(const Print &print, const PrintObject &object);
+    std::string                         reset_temp_retract_grid_first_layer(const Print &print);
+    std::string                         restore_temp_retract_grid_retraction(const Print &print);
     // scaled G-code resolution
     double                              m_scaled_resolution;
     GCodeWriter                         m_writer;
