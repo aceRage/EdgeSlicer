@@ -498,8 +498,7 @@ void AppConfig::set_defaults()
         set("download_path", "");
     }
 
-    // ZIP working folder and hidden extract caps (PR B). Auto-clean is seeded here
-    // for PR C; the Preferences UI and cleaner arrive there.
+    // ZIP working folder and hidden extract caps (PR B).
     if (get(ZIP_WORK_DIR_KEY).empty())
         set(ZIP_WORK_DIR_KEY, "");
     if (get(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY).empty())
@@ -512,10 +511,6 @@ void AppConfig::set_defaults()
         set(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY, "4294967296");
     if (get(ZIP_MAX_COMPRESSION_RATIO_KEY).empty())
         set(ZIP_MAX_COMPRESSION_RATIO_KEY, "200");
-    if (get(ZIP_WORK_AUTOCLEAN_KEY).empty())
-        set_bool(ZIP_WORK_AUTOCLEAN_KEY, false);
-    if (get(ZIP_WORK_AUTOCLEAN_DAYS_KEY).empty())
-        set(ZIP_WORK_AUTOCLEAN_DAYS_KEY, "30");
 
     if (get("mouse_wheel").empty()) {
         set("mouse_wheel", "0");

@@ -7,6 +7,7 @@
 #include "ExtraRenderers.hpp"
 #include "MsgDialog.hpp"
 #include "format.hpp"
+#include "common_func/common_func.hpp"
 #include "Widgets/CheckBox.hpp"
 #include <algorithm>
 #include <functional>
@@ -218,7 +219,7 @@ FileArchiveDialog::FileArchiveDialog(wxWindow*                        parent_win
     wxBoxSizer* topSizer = new wxBoxSizer(wxVERTICAL);
 
     m_encrypted_msg = new wxStaticText(this, wxID_ANY,
-        _L("This ZIP is password-protected. Edge can't open encrypted archives; extract it with your system tool first."));
+        format_wxstr(_L("This ZIP is password-protected. %1% can't open encrypted archives; extract it with your system tool first."), SLIC3R_APP_NAME));
     m_encrypted_msg->Wrap(40 * em);
     m_listed.reserve(m_entries.size());
     for (const ZipEntryInfo& e : m_entries)

@@ -15,15 +15,15 @@
 
 namespace Slic3r {
 
-// AppConfig keys seeded in PR B. Caps stay hidden from the Preferences UI (PR C).
+// AppConfig keys seeded in PR B. The caps stay hidden from the Preferences UI. The clean-up
+// keys arrive with the cleaner (PR C, zip_work_cleanup*); the old zip_work_autoclean* seeds
+// (off) are gone so a test build that wrote them cannot turn the cleaner off later.
 inline constexpr const char* ZIP_WORK_DIR_KEY                   = "zip_work_dir";
 inline constexpr const char* ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY = "zip_open_single_without_asking";
 inline constexpr const char* ZIP_MAX_ENTRIES_SCANNED_KEY        = "zip_max_entries_scanned";
 inline constexpr const char* ZIP_MAX_ENTRY_UNCOMPRESSED_KEY     = "zip_max_entry_uncompressed";
 inline constexpr const char* ZIP_MAX_TOTAL_UNCOMPRESSED_KEY     = "zip_max_total_uncompressed";
 inline constexpr const char* ZIP_MAX_COMPRESSION_RATIO_KEY      = "zip_max_compression_ratio";
-inline constexpr const char* ZIP_WORK_AUTOCLEAN_KEY             = "zip_work_autoclean";
-inline constexpr const char* ZIP_WORK_AUTOCLEAN_DAYS_KEY        = "zip_work_autoclean_days";
 
 // Model / project extensions that File > Open lists (FT_MODEL) minus `.zip`.
 // The archive picker uses this same list so it cannot drift from a second regex.
@@ -126,14 +126,42 @@ std::vector<std::uint32_t> zip_extract_order(const std::vector<std::uint32_t>& s
 // `.zip` but not `.zip.amf`.
 bool is_zip_archive_path(const std::string& path);
 
+// Default ZIP working folder (owner decision 2026-11-03): the platform's local, unsynced
+// app-data / cache folder, never Documents (often OneDrive- or iCloud-synced).
+//   Windows: %LOCALAPPDATA%/EdgeSlicer/Zip (else %USERPROFILE%/AppData/Local/EdgeSlicer/Zip)
+//   macOS:   ~/Library/Caches/EdgeSlicer/Zip
+//   Linux:   $XDG_CACHE_HOME/EdgeSlicer/Zip, else ~/.cache/EdgeSlicer/Zip (Flatpak sets
+//            XDG_CACHE_HOME to its own ~/.var/app/<id>/cache)
+// Then `app_data_dir/Zip`, then empty (the caller falls back to the temporary directory).
+// Relative environment values are ignored. Pure, so every platform's rule is testable anywhere.
+enum class ZipRootPlatform { Windows, MacOS, Linux };
+struct ZipRootEnv
+{
+    std::string local_app_data; // %LOCALAPPDATA%
+    std::string user_profile;   // %USERPROFILE%
+    std::string home;           // $HOME
+    std::string xdg_cache_home; // $XDG_CACHE_HOME
+};
+// UTF-8, with the platform's separator.
+std::string zip_work_root_for(ZipRootPlatform platform, const ZipRootEnv& env, const std::string& app_data_dir_utf8);
+
 #ifndef ZIP_OPEN_STANDALONE
 bool running_in_flatpak();
 
-// `<documents>/EdgeSlicer/Zip`. When `documents_dir` is empty or missing: XDG
-// Documents, then ~/Documents, then $HOME. Flatpak without a usable Documents
-// folder falls back to `app_data_dir/Zip` when `app_data_dir` is set.
-boost::filesystem::path default_zip_work_root(const boost::filesystem::path& documents_dir,
-                                              const boost::filesystem::path& app_data_dir = {});
+ZipRootPlatform zip_root_current_platform();
+ZipRootEnv      zip_root_env_from_process();
+
+// zip_work_root_for with this process's platform and environment.
+boost::filesystem::path default_zip_work_root(const boost::filesystem::path& app_data_dir = {});
+// The AppConfig `zip_work_dir` value (UTF-8) when set, else default_zip_work_root.
+boost::filesystem::path resolve_zip_work_root(const std::string& configured_utf8, const boost::filesystem::path& app_data_dir);
+
+// File name a phone / hub save uses for a project opened from a ZIP (review B-2): no Save As
+// dialog can be answered remotely, and the extracted copy sits in the auto-cleaned work folder,
+// so the hub writes `<project stem>_<stamp>.3mf` into its own saves folder instead, the way it
+// saves a project that was never saved. `project_filename_utf8` may be a full path; an empty or
+// unusable stem gives `Untitled_<stamp>.3mf`.
+std::string zip_remote_save_name(const std::string& project_filename_utf8, const std::string& stamp);
 
 // Join a sanitized extract-relative path onto a session folder (UTF-8, `/` separators).
 boost::filesystem::path zip_session_entry_dest(const boost::filesystem::path& session_dir, const std::string& extract_name);

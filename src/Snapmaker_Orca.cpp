@@ -1847,7 +1847,7 @@ int CLI::run(int argc, char **argv)
 
     for (const std::string& input_file : m_input_files) {
         if (is_zip_archive_path(input_file)) {
-            boost::nowide::cerr << "ZIP archives cannot be sliced from the command line. Open the ZIP in Edge, or extract it first."
+            boost::nowide::cerr << "ZIP archives cannot be sliced from the command line. Open the ZIP in " SLIC3R_APP_NAME ", or extract it first."
                                 << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);

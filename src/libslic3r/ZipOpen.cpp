@@ -5,9 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 
 #ifndef ZIP_OPEN_STANDALONE
+#include "UntrustedInput.hpp"
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #ifdef _WIN32
@@ -110,59 +112,16 @@ boost::filesystem::path utf8_path(const std::string& name_utf8) { return boost::
 boost::filesystem::path utf8_path(const std::string& name_utf8) { return boost::filesystem::path(name_utf8); }
 #endif
 
-std::string expand_home(const std::string& raw, const char* home)
+// Environment variable as UTF-8 (Windows reads the wide form so a non-ASCII user name survives).
+std::string env_utf8(const char* name)
 {
-    if (raw.size() >= 5 && raw.compare(0, 5, "$HOME") == 0 && home && *home)
-        return std::string(home) + raw.substr(5);
-    if (!raw.empty() && raw[0] == '~' && home && *home)
-        return std::string(home) + raw.substr(1);
-    return raw;
-}
-
-bool dir_exists(const boost::filesystem::path& p)
-{
-    boost::system::error_code ec;
-    return !p.empty() && boost::filesystem::is_directory(p, ec);
-}
-
-boost::filesystem::path read_xdg_documents()
-{
-    const char* home = std::getenv("HOME");
-    if (const char* env = std::getenv("XDG_DOCUMENTS_DIR"); env && *env) {
-        const boost::filesystem::path p(expand_home(env, home));
-        if (!p.empty())
-            return p;
-    }
-
-    boost::filesystem::path config;
-    if (const char* xdg_config = std::getenv("XDG_CONFIG_HOME"); xdg_config && *xdg_config)
-        config = boost::filesystem::path(xdg_config) / "user-dirs.dirs";
-    else if (home && *home)
-        config = boost::filesystem::path(home) / ".config" / "user-dirs.dirs";
-    if (config.empty())
-        return {};
-
-    boost::nowide::ifstream in(config.string());
-    if (!in)
-        return {};
-    std::string line;
-    while (std::getline(in, line)) {
-        const auto hash = line.find('#');
-        if (hash != std::string::npos)
-            line.erase(hash);
-        const auto key = line.find("XDG_DOCUMENTS_DIR");
-        if (key == std::string::npos)
-            continue;
-        const auto eq = line.find('=', key + 17);
-        if (eq == std::string::npos)
-            continue;
-        std::string val = line.substr(eq + 1);
-        trim_inplace(val);
-        if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
-            val = val.substr(1, val.size() - 2);
-        return boost::filesystem::path(expand_home(val, home));
-    }
-    return {};
+#ifdef _WIN32
+    const wchar_t* v = _wgetenv(boost::nowide::widen(name).c_str());
+    return (v && *v) ? boost::nowide::narrow(v) : std::string();
+#else
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::string(v) : std::string();
+#endif
 }
 #endif
 
@@ -182,7 +141,8 @@ const std::vector<std::string_view>& zip_model_extensions()
 
 const std::vector<std::string_view>& zip_gcode_extensions()
 {
-    static const std::vector<std::string_view> exts = {".bgcode", ".gcode"};
+    // No .bgcode: EdgeSlicer has no binary G-code (libbgcode) reader, so load_gcode cannot open it.
+    static const std::vector<std::string_view> exts = {".gcode"};
     return exts;
 }
 
@@ -576,34 +536,126 @@ bool running_in_flatpak()
     return boost::filesystem::exists("/.flatpak-info", ec);
 }
 
-boost::filesystem::path default_zip_work_root(const boost::filesystem::path& documents_dir,
-                                              const boost::filesystem::path& app_data_dir)
-{
-    namespace fs  = boost::filesystem;
-    fs::path docs = documents_dir;
-    if (!dir_exists(docs)) {
-        const fs::path xdg = read_xdg_documents();
-        if (dir_exists(xdg))
-            docs = xdg;
-        else {
-            const char* home = std::getenv("HOME");
-#ifdef _WIN32
-            if (!(home && *home))
-                home = std::getenv("USERPROFILE");
 #endif
-            if (home && *home) {
-                const fs::path home_docs = fs::path(home) / "Documents";
-                docs                     = dir_exists(home_docs) ? home_docs : fs::path(home);
-            }
-        }
+
+namespace {
+
+bool zip_root_is_absolute(ZipRootPlatform platform, const std::string& p)
+{
+    if (platform == ZipRootPlatform::Windows) {
+        // X:\ or X:/ (drive) or \\server\share (UNC).
+        if (p.size() >= 3 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':' && (p[2] == '\\' || p[2] == '/'))
+            return true;
+        return p.size() >= 3 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/');
     }
+    return !p.empty() && p[0] == '/';
+}
 
-    if (running_in_flatpak() && !dir_exists(docs) && !app_data_dir.empty())
-        return app_data_dir / "Zip";
+std::string zip_root_join(ZipRootPlatform platform, std::string base, std::initializer_list<const char*> parts)
+{
+    const char sep = platform == ZipRootPlatform::Windows ? '\\' : '/';
+    // Keep "X:\" and "/" themselves; trim any other trailing separator.
+    while (base.size() > 1 && (base.back() == '/' || (platform == ZipRootPlatform::Windows && base.back() == '\\')) &&
+           !(platform == ZipRootPlatform::Windows && base.size() == 3 && base[1] == ':'))
+        base.pop_back();
+    for (const char* part : parts) {
+        if (!base.empty() && base.back() != sep && base.back() != '/')
+            base.push_back(sep);
+        base += part;
+    }
+    return base;
+}
 
-    if (docs.empty())
-        return fs::path("EdgeSlicer") / "Zip";
-    return docs / "EdgeSlicer" / "Zip";
+} // namespace
+
+std::string zip_work_root_for(ZipRootPlatform platform, const ZipRootEnv& env, const std::string& app_data_dir_utf8)
+{
+    switch (platform) {
+    case ZipRootPlatform::Windows:
+        // %LOCALAPPDATA% is never roamed or synced by OneDrive (Documents often is).
+        if (zip_root_is_absolute(platform, env.local_app_data))
+            return zip_root_join(platform, env.local_app_data, {"EdgeSlicer", "Zip"});
+        if (zip_root_is_absolute(platform, env.user_profile))
+            return zip_root_join(platform, env.user_profile, {"AppData", "Local", "EdgeSlicer", "Zip"});
+        break;
+    case ZipRootPlatform::MacOS:
+        // ~/Library/Caches: not synced by iCloud Drive (only Desktop and Documents are) and left
+        // out of Time Machine backups, which suits copies that can be extracted again.
+        if (zip_root_is_absolute(platform, env.home))
+            return zip_root_join(platform, env.home, {"Library", "Caches", "EdgeSlicer", "Zip"});
+        break;
+    case ZipRootPlatform::Linux:
+        // XDG base-dir spec: a relative XDG_CACHE_HOME is ignored. Flatpak points it at the
+        // app's own ~/.var/app/<id>/cache, so the sandbox gets its own cache folder.
+        if (zip_root_is_absolute(platform, env.xdg_cache_home))
+            return zip_root_join(platform, env.xdg_cache_home, {"EdgeSlicer", "Zip"});
+        if (zip_root_is_absolute(platform, env.home))
+            return zip_root_join(platform, env.home, {".cache", "EdgeSlicer", "Zip"});
+        break;
+    }
+    // Last resort: the app's data folder (never a relative path, review B-6). Empty when that is
+    // unusable too; the caller then falls back to the temporary directory.
+    if (zip_root_is_absolute(platform, app_data_dir_utf8))
+        return zip_root_join(platform, app_data_dir_utf8, {"Zip"});
+    return {};
+}
+
+#ifndef ZIP_OPEN_STANDALONE
+ZipRootPlatform zip_root_current_platform()
+{
+#if defined(_WIN32)
+    return ZipRootPlatform::Windows;
+#elif defined(__APPLE__)
+    return ZipRootPlatform::MacOS;
+#else
+    return ZipRootPlatform::Linux;
+#endif
+}
+
+ZipRootEnv zip_root_env_from_process()
+{
+    ZipRootEnv env;
+    env.local_app_data = env_utf8("LOCALAPPDATA");
+    env.user_profile   = env_utf8("USERPROFILE");
+    env.home           = env_utf8("HOME");
+    env.xdg_cache_home = env_utf8("XDG_CACHE_HOME");
+    return env;
+}
+
+boost::filesystem::path default_zip_work_root(const boost::filesystem::path& app_data_dir)
+{
+    std::string app_data_utf8;
+#ifdef _WIN32
+    app_data_utf8 = boost::nowide::narrow(app_data_dir.wstring());
+#else
+    app_data_utf8 = app_data_dir.string();
+#endif
+    const std::string root = zip_work_root_for(zip_root_current_platform(), zip_root_env_from_process(), app_data_utf8);
+    return root.empty() ? boost::filesystem::path() : utf8_path(root);
+}
+
+boost::filesystem::path resolve_zip_work_root(const std::string& configured_utf8, const boost::filesystem::path& app_data_dir)
+{
+    std::string configured = configured_utf8;
+    trim_inplace(configured);
+    if (!configured.empty())
+        return utf8_path(configured);
+    return default_zip_work_root(app_data_dir);
+}
+
+std::string zip_remote_save_name(const std::string& project_filename_utf8, const std::string& stamp)
+{
+    std::string leaf = slash_normalized(project_filename_utf8);
+    const size_t slash = leaf.find_last_of('/');
+    if (slash != std::string::npos)
+        leaf = leaf.substr(slash + 1);
+    if (iends_with(leaf, ".3mf"))
+        leaf.resize(leaf.size() - 4);
+    std::string stem = untrusted::sanitize_download_filename(leaf);
+    trim_inplace(stem);
+    if (stem.empty() || stem == "." || stem == "..")
+        stem = "Untitled";
+    return stem + "_" + stamp + ".3mf";
 }
 
 boost::filesystem::path zip_session_entry_dest(const boost::filesystem::path& session_dir, const std::string& extract_name)

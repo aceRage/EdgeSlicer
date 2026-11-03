@@ -15168,7 +15168,8 @@ wxString Plater::priv::get_export_file(GUI::FileType file_type)
                     name = "Untitled.3mf";
                 const std::string last = wxGetApp().app_config->get_last_dir();
                 output_file = last.empty() ? name : (fs::path(last) / name);
-                dlg_title = _L("This project was opened from a ZIP; choose where to keep it.");
+                // Short: this is a title bar (review B-4).
+                dlg_title = _L("Save project opened from ZIP as:");
             }
             break;
         }
@@ -23050,8 +23051,8 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         if (session.empty())
             return;
         boost::system::error_code ec;
-        fs::remove_all(session, ec);
-        if (ec)
+        // A scanner may still hold a file it is checking; retry briefly (spec section 10).
+        if (!zip_fs_retry([&](boost::system::error_code& e) { fs::remove_all(session, e); }, ec))
             BOOST_LOG_TRIVIAL(warning) << "Could not remove ZIP session " << session << ": " << ec.message();
         session.clear();
     };
@@ -23073,7 +23074,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         if (!archive.open_reader(archive_path.string())) {
             std::string err_msg;
             if (archive.arch.m_last_error == MZ_ZIP_UNSUPPORTED_MULTIDISK)
-                err_msg = _u8L("This is a split ZIP archive (.z01 / multi-disk). Edge cannot open split archives; combine the parts first.");
+                err_msg = GUI::format(_u8L("This is a split ZIP archive (.z01 / multi-disk). %1% cannot open split archives; combine the parts first."), SLIC3R_APP_NAME);
             else
                 err_msg = GUI::format(_u8L("Loading of a ZIP archive on path %1% has failed."), archive_path.string());
             throw Slic3r::FileIOError(err_msg);
@@ -23091,7 +23092,20 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         caps.max_compression_ratio  = cap_values.max_compression_ratio;
         std::vector<ZipEntryInfo>     entries;
         std::string                   err;
-        if (!inspect_zip_entries(archive.arch, caps, entries, err))
+        // The central directory is read on a worker behind the progress dialog when the archive
+        // is big (review B-5); a small one is read in place so no dialog flashes up.
+        bool inspected = false;
+        if (mz_zip_reader_get_num_files(&archive.arch) > 1000) {
+            std::atomic<bool> inspect_cancel{false};
+            const bool        ran = run_zip_job(_L("Reading the ZIP archive..."), inspect_cancel, nullptr, nullptr, err, [&]() {
+                return inspect_zip_entries(archive.arch, caps, entries, err);
+            });
+            if (inspect_cancel.load())
+                return false;
+            inspected = ran;
+        } else
+            inspected = inspect_zip_entries(archive.arch, caps, entries, err);
+        if (!inspected)
             throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to read the ZIP archive.") : err);
 
         std::vector<mz_uint> selectable;
@@ -23165,6 +23179,11 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
             show_info(this, _L("G-code files cannot be loaded with models together!"), _L("G-code loading"));
             return false;
         }
+        // Refused before anything is extracted (review B-7); the dialog allows ticking several.
+        if (has_gcode && selected.size() > 1) {
+            show_info(this, _L("Only one G-code file can be opened at the same time."), _L("G-code loading"));
+            return false;
+        }
 
         // Sidecars go first so they keep the names the OBJ / MTL text refers to; see
         // zip_extract_order. Selected models are opened through dest_by_index, so a suffixed
@@ -23182,9 +23201,9 @@ bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
         const std::vector<std::uint32_t> order = zip_extract_order(std::vector<std::uint32_t>(selected.begin(), selected.end()), sidecars);
         const std::vector<mz_uint>       extract_indices(order.begin(), order.end());
 
-        const std::string configured = wxGetApp().app_config->get(ZIP_WORK_DIR_KEY);
-        const fs::path documents(std::string(wxStandardPaths::Get().GetDocumentsDir().utf8_str().data()));
-        fs::path       root = configured.empty() ? default_zip_work_root(documents, fs::path(data_dir())) : fs::path(configured);
+        // %LOCALAPPDATA%/EdgeSlicer/Zip on Windows, the platform cache folder elsewhere; never
+        // Documents, which OneDrive / iCloud often sync (owner decision 2026-11-03).
+        fs::path       root = resolve_zip_work_root(wxGetApp().app_config->get(ZIP_WORK_DIR_KEY), fs::path(data_dir()));
         bool           used_temp = false;
         if (!ZipWorkDir::create_session(root, archive_path, session, err)) {
             BOOST_LOG_TRIVIAL(warning) << "ZIP work dir failed (" << err << "), trying fallbacks";

@@ -3,6 +3,7 @@
 #ifndef ZIP_OPEN_STANDALONE
 #include "libslic3r/AppConfig.hpp"
 #include <boost/filesystem.hpp>
+#include <boost/nowide/convert.hpp>
 #endif
 #include "libslic3r/ZipOpen.hpp"
 
@@ -29,7 +30,8 @@ TEST_CASE("classify_zip_entry_name lists gcode and nested zips", "[ZipOpen]")
 {
     CHECK(classify_zip_entry_name("a.gcode", false) == ZipEntryKind::GCode);
     CHECK(classify_zip_entry_name("a.GCODE", false) == ZipEntryKind::GCode);
-    CHECK(classify_zip_entry_name("a.bgcode", false) == ZipEntryKind::GCode);
+    // EdgeSlicer has no binary G-code reader, so .bgcode is not offered (review B-7).
+    CHECK(classify_zip_entry_name("a.bgcode", false) == ZipEntryKind::Unsupported);
     CHECK(classify_zip_entry_name("inner/bundle.zip", false) == ZipEntryKind::NestedZip);
     CHECK(classify_zip_entry_name("inner/bundle.ZIP", false) == ZipEntryKind::NestedZip);
     CHECK(classify_zip_entry_name("notes.txt", false) == ZipEntryKind::Unsupported);
@@ -254,16 +256,82 @@ TEST_CASE("is_zip_archive_path rejects zip.amf", "[ZipOpen]")
     CHECK_FALSE(is_zip_archive_path("model.stl"));
 }
 
+TEST_CASE("default zip work root is the platform's local cache folder", "[ZipOpen][ZipRoot]")
+{
+    SECTION("Windows uses LOCALAPPDATA, never Documents")
+    {
+        ZipRootEnv env;
+        env.local_app_data = "C:\\Users\\Ann\\AppData\\Local";
+        env.user_profile   = "C:\\Users\\Ann";
+        CHECK(zip_work_root_for(ZipRootPlatform::Windows, env, "C:\\Users\\Ann\\AppData\\Roaming\\EdgeSlicer") ==
+              "C:\\Users\\Ann\\AppData\\Local\\EdgeSlicer\\Zip");
+        env.local_app_data = "C:\\Users\\Ann\\AppData\\Local\\";
+        CHECK(zip_work_root_for(ZipRootPlatform::Windows, env, "") == "C:\\Users\\Ann\\AppData\\Local\\EdgeSlicer\\Zip");
+        // Missing or relative LOCALAPPDATA: USERPROFILE\AppData\Local.
+        env.local_app_data = "AppData\\Local";
+        CHECK(zip_work_root_for(ZipRootPlatform::Windows, env, "") == "C:\\Users\\Ann\\AppData\\Local\\EdgeSlicer\\Zip");
+        // Non-ASCII user name stays UTF-8.
+        env.local_app_data = "C:\\Users\\J\xC3\xBCrgen\\AppData\\Local";
+        CHECK(zip_work_root_for(ZipRootPlatform::Windows, env, "") == "C:\\Users\\J\xC3\xBCrgen\\AppData\\Local\\EdgeSlicer\\Zip");
+    }
+    SECTION("macOS uses ~/Library/Caches")
+    {
+        ZipRootEnv env;
+        env.home = "/Users/ann";
+        CHECK(zip_work_root_for(ZipRootPlatform::MacOS, env, "/Users/ann/Library/Application Support/EdgeSlicer") ==
+              "/Users/ann/Library/Caches/EdgeSlicer/Zip");
+    }
+    SECTION("Linux uses XDG_CACHE_HOME, then ~/.cache; Flatpak's cache dir comes through XDG_CACHE_HOME")
+    {
+        ZipRootEnv env;
+        env.home           = "/home/ann";
+        env.xdg_cache_home = "/home/ann/.var/app/com.example.EdgeSlicer/cache";
+        CHECK(zip_work_root_for(ZipRootPlatform::Linux, env, "") == "/home/ann/.var/app/com.example.EdgeSlicer/cache/EdgeSlicer/Zip");
+        env.xdg_cache_home = "relative/cache"; // ignored per the XDG spec
+        CHECK(zip_work_root_for(ZipRootPlatform::Linux, env, "") == "/home/ann/.cache/EdgeSlicer/Zip");
+        env.xdg_cache_home.clear();
+        CHECK(zip_work_root_for(ZipRootPlatform::Linux, env, "") == "/home/ann/.cache/EdgeSlicer/Zip");
+    }
+    SECTION("no usable folder: the app data folder, else empty (never a relative path)")
+    {
+        const ZipRootEnv none;
+        CHECK(zip_work_root_for(ZipRootPlatform::Linux, none, "/home/ann/.config/EdgeSlicer") == "/home/ann/.config/EdgeSlicer/Zip");
+        CHECK(zip_work_root_for(ZipRootPlatform::Windows, none, "D:\\Data\\EdgeSlicer") == "D:\\Data\\EdgeSlicer\\Zip");
+        CHECK(zip_work_root_for(ZipRootPlatform::MacOS, none, "").empty());
+        CHECK(zip_work_root_for(ZipRootPlatform::Linux, none, "EdgeSlicer").empty());
+    }
+}
+
 #ifndef ZIP_OPEN_STANDALONE
-TEST_CASE("default zip work root is Documents/EdgeSlicer/Zip", "[ZipOpen]")
+TEST_CASE("remote saves of a ZIP-opened project get a hub file name, never a dialog", "[ZipOpen][RemoteSave]")
+{
+    // RemoteAccess names the save into <datadir>/hub/saves with this (review B-2).
+    CHECK(zip_remote_save_name("C:/Users/Ann/AppData/Local/EdgeSlicer/Zip/bundle_20261103-101500/Benchy.3mf", "20261103-120000") ==
+          "Benchy_20261103-120000.3mf");
+    CHECK(zip_remote_save_name("/home/ann/.cache/EdgeSlicer/Zip/s/part.3MF", "X") == "part_X.3mf");
+    CHECK(zip_remote_save_name("C:\\Zip\\s\\job.gcode.3mf", "X") == "job.gcode_X.3mf");
+    CHECK(zip_remote_save_name("", "X") == "Untitled_X.3mf");
+    CHECK(zip_remote_save_name("/z/s/...3mf", "X") == "Untitled_X.3mf");
+    CHECK(zip_remote_save_name("/z/s/a:b|c.3mf", "X") == "a_b_c_X.3mf");
+}
+
+TEST_CASE("zip_work_dir overrides the default root", "[ZipOpen][ZipRoot]")
 {
     namespace fs = boost::filesystem;
-    const fs::path docs = fs::temp_directory_path() / "edge-zip-docs-test";
-    boost::system::error_code ec;
-    fs::create_directories(docs, ec);
-    REQUIRE(fs::is_directory(docs));
-    CHECK(default_zip_work_root(docs) == docs / "EdgeSlicer" / "Zip");
-    fs::remove_all(docs, ec);
+    const fs::path app_data = fs::temp_directory_path() / "edge-zip-appdata-test";
+    const fs::path def      = default_zip_work_root(app_data);
+    REQUIRE_FALSE(def.empty());
+    CHECK(def.is_absolute());
+    CHECK(def.filename() == "Zip");
+    CHECK(def.parent_path().filename() == "EdgeSlicer");
+    CHECK(resolve_zip_work_root("", app_data) == def);
+    CHECK(resolve_zip_work_root("   ", app_data) == def);
+    const fs::path custom = fs::temp_directory_path() / "my-zip-folder";
+#ifdef _WIN32
+    CHECK(resolve_zip_work_root(boost::nowide::narrow(custom.wstring()), app_data) == custom);
+#else
+    CHECK(resolve_zip_work_root(custom.string(), app_data) == custom);
+#endif
 }
 
 TEST_CASE("zip_session_entry_dest keeps archive-relative folders", "[ZipOpen]")
@@ -275,7 +343,7 @@ TEST_CASE("zip_session_entry_dest keeps archive-relative folders", "[ZipOpen]")
 #endif
 
 #ifndef ZIP_OPEN_STANDALONE
-TEST_CASE("AppConfig seeds zip work dir, auto-open, hidden caps and autoclean", "[ZipOpen][AppConfig]")
+TEST_CASE("AppConfig seeds zip work dir, auto-open and hidden caps", "[ZipOpen][AppConfig]")
 {
     AppConfig config;
     CHECK(config.get(ZIP_WORK_DIR_KEY).empty());
@@ -284,8 +352,6 @@ TEST_CASE("AppConfig seeds zip work dir, auto-open, hidden caps and autoclean", 
     CHECK(config.get(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY) == "2147483648");
     CHECK(config.get(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY) == "4294967296");
     CHECK(config.get(ZIP_MAX_COMPRESSION_RATIO_KEY) == "200");
-    CHECK_FALSE(config.get_bool(ZIP_WORK_AUTOCLEAN_KEY));
-    CHECK(config.get(ZIP_WORK_AUTOCLEAN_DAYS_KEY) == "30");
 
     const ZipCapValues caps = zip_extract_caps_from_values(config.get(ZIP_MAX_ENTRIES_SCANNED_KEY),
                                                           config.get(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY),
