@@ -1,0 +1,375 @@
+// Edge: minimum layer time pause (min_layer_time_pause). A layer still shorter than the target after the
+// filament's cooling slowdown ends with a park, a G4 dwell for the rest of the time and the way back.
+#include <catch2/catch.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/MinLayerTimePause.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+
+#include "test_data.hpp"
+
+using namespace Slic3r;
+using namespace Slic3r::Test;
+
+namespace {
+
+constexpr size_t NORMAL = static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
+
+struct Pause
+{
+    int    layer;    // 0-based G-code layer (counted from the layer change tags)
+    double seconds;  // from the G4 P
+    Vec2d  park;     // the XY of the last move before the dwell
+};
+
+struct Sliced
+{
+    std::string          gcode;
+    GCodeProcessorResult result;
+    std::vector<BoundingBoxf> footprints; // every object instance, bed coordinates
+    int                  layers { 0 };
+};
+
+double word(const std::string &line, char letter, double fallback)
+{
+    const std::string body = line.substr(0, line.find(';'));
+    const size_t      p    = body.find(std::string(" ") + letter);
+    return p == std::string::npos ? fallback : std::atof(body.c_str() + p + 2);
+}
+
+std::vector<Pause> pauses(const std::string &gcode, int *layers = nullptr)
+{
+    std::vector<Pause> out;
+    std::istringstream in(gcode);
+    std::string        line;
+    int                layer = -1;
+    Vec2d              xy(0., 0.);
+    bool               tagged = false;
+    const std::string  layer_tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line == layer_tag)
+            ++layer;
+        else if (line.rfind(MinLayerTimePause::COMMENT_TAG, 0) == 0)
+            tagged = true;
+        else if (line.rfind("G4 P", 0) == 0 && tagged) {
+            out.push_back({ layer, std::atof(line.c_str() + 4) / 1000., xy });
+            tagged = false;
+        } else if (line.rfind("G1 ", 0) == 0 || line.rfind("G0 ", 0) == 0)
+            xy = Vec2d(word(line, 'X', xy.x()), word(line, 'Y', xy.y()));
+    }
+    if (layers != nullptr)
+        *layers = layer + 1;
+    return out;
+}
+
+DynamicPrintConfig spike_config(double pause)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "skirt_loops", 0 },
+        { "brim_type", "no_brim" },
+        { "slow_down_for_layer_cooling", "1" },
+        { "slow_down_layer_time", "4" },
+        { "slow_down_min_speed", "10" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "exclude_object", "0" },
+        { "gcode_label_objects", "0" },
+        // The test arranges the objects around the origin: put the bed there too.
+        { "printable_area", "-100x-100,100x-100,100x100,-100x100" },
+    });
+    config.set_key_value("min_layer_time_pause", new ConfigOptionFloat(pause));
+    return config;
+}
+
+// A 50 x 50 x 3 mm block (long layers) next to a 3 x 3 x 8 mm spike (its layers above 3 mm are tiny).
+void slice_spike(Sliced &out, const DynamicPrintConfig &config, bool spike_only = false)
+{
+    Print  print;
+    Model  model;
+    std::vector<TriangleMesh> meshes;
+    if (!spike_only)
+        meshes.emplace_back(its_make_cube(50., 50., 3.));
+    meshes.emplace_back(its_make_cube(3., 3., 8.));
+    if (spike_only)
+        meshes.emplace_back(its_make_cube(3., 3., 8.));
+    init_print(std::move(meshes), print, model, config);
+    print.process();
+    out.gcode = Slic3r::Test::gcode(print, out.result);
+    const Vec3d origin = print.get_plate_origin();
+    for (const PrintObject *object : print.objects())
+        for (const PrintInstance &instance : object->instances()) {
+            const BoundingBoxf3 bb = const_cast<PrintInstance &>(instance).get_bounding_box();
+            out.footprints.emplace_back(Vec2d(bb.min.x() - origin.x(), bb.min.y() - origin.y()),
+                                        Vec2d(bb.max.x() - origin.x(), bb.max.y() - origin.y()));
+        }
+    pauses(out.gcode, &out.layers);
+}
+
+// The G-code without the lines expected to differ when only the option's value changes: the echoed config,
+// the generator banner and the time estimates.
+std::vector<std::string> comparable(const std::string &gcode)
+{
+    std::vector<std::string> out;
+    std::istringstream       in(gcode);
+    std::string              line;
+    while (std::getline(in, line)) {
+        if (line.find("min_layer_time_pause") != std::string::npos || line.find("generated by") != std::string::npos ||
+            line.rfind("M73 ", 0) == 0 || line.find("estimated printing time") != std::string::npos ||
+            line.find("total estimated time") != std::string::npos)
+            continue;
+        out.push_back(line);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Minimum layer time pause options round-trip", "[MinLayerTimePause][Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.opt_float("min_layer_time_pause") == 0.);
+    CHECK(config.opt_enum<MinLayerTimePausePark>("min_layer_time_pause_park") == mltpAway);
+    CHECK(config.opt_float("min_layer_time_pause_park_x") == 0.);
+    CHECK(config.opt_float("min_layer_time_pause_park_y") == 0.);
+
+    config.set_deserialize_strict({
+        { "min_layer_time_pause", "12.5" },
+        { "min_layer_time_pause_park", "custom" },
+        { "min_layer_time_pause_park_x", "10" },
+        { "min_layer_time_pause_park_y", "240.5" },
+    });
+    CHECK(config.opt_serialize("min_layer_time_pause") == "12.5");
+    CHECK(config.opt_serialize("min_layer_time_pause_park") == "custom");
+    CHECK(config.opt_serialize("min_layer_time_pause_park_x") == "10");
+    CHECK(config.opt_serialize("min_layer_time_pause_park_y") == "240.5");
+
+    DynamicPrintConfig copy = DynamicPrintConfig::full_print_config();
+    for (const char *key : { "min_layer_time_pause", "min_layer_time_pause_park", "min_layer_time_pause_park_x", "min_layer_time_pause_park_y" })
+        copy.set_deserialize_strict(key, config.opt_serialize(key));
+    CHECK(copy.opt_enum<MinLayerTimePausePark>("min_layer_time_pause_park") == mltpCustom);
+    CHECK(copy.opt_float("min_layer_time_pause") == Approx(12.5));
+    copy.set_deserialize_strict("min_layer_time_pause_park", "prime_tower");
+    CHECK(copy.opt_enum<MinLayerTimePausePark>("min_layer_time_pause_park") == mltpPrimeTower);
+
+    // A process option, settable per object, part and height range (a region option).
+    CHECK(PrintRegionConfig().has("min_layer_time_pause"));
+    CHECK(PrintConfig().has("min_layer_time_pause_park"));
+    const std::vector<std::string> &options = Preset::print_options();
+    for (const char *key : { "min_layer_time_pause", "min_layer_time_pause_park", "min_layer_time_pause_park_x", "min_layer_time_pause_park_y" })
+        CHECK(std::find(options.begin(), options.end(), key) != options.end());
+}
+
+TEST_CASE("The dwell fills the time the layer lacks", "[MinLayerTimePause]")
+{
+    CHECK(MinLayerTimePause::dwell_gcode(10.f, 3.2f) == std::string(MinLayerTimePause::COMMENT_TAG) + " 6.80s\nG4 P6800\n");
+    // Not worth stopping for less than half a second, and nothing when the layer is long enough.
+    CHECK(MinLayerTimePause::dwell_gcode(10.f, 9.8f).empty());
+    CHECK(MinLayerTimePause::dwell_gcode(10.f, 12.f).empty());
+    CHECK(MinLayerTimePause::dwell_gcode(10.f, 0.f).find("G4 P10000\n") != std::string::npos);
+}
+
+TEST_CASE("The park position stays clear of the print", "[MinLayerTimePause]")
+{
+    MinLayerTimePause::Sites sites;
+    sites.bed = BoundingBoxf(Vec2d(0., 0.), Vec2d(250., 250.));
+    sites.objects.emplace_back(Vec2d(100., 100.), Vec2d(150., 150.));
+    sites.objects.emplace_back(Vec2d(160., 20.), Vec2d(200., 60.));
+    const auto everywhere = std::function<bool(const Vec2d &)>();
+    auto clear = [&sites](const Vec2d &p) {
+        for (const BoundingBoxf &b : sites.objects)
+            if (b.inflated(MinLayerTimePause::OBJECT_MARGIN - 1e-3).contains(p))
+                return false;
+        return sites.bed.inflated(-MinLayerTimePause::EDGE_MARGIN + 1e-3).contains(p);
+    };
+
+    SECTION("away from the print: a free spot on the bed edge, the nearest one") {
+        const auto p = MinLayerTimePause::park_point(sites, mltpAway, Vec2d::Zero(), Vec2d(125., 140.), nullptr, everywhere);
+        REQUIRE(p);
+        CHECK(clear(*p));
+        const bool on_edge = std::abs(p->x() - 5.) < 1e-6 || std::abs(p->x() - 245.) < 1e-6 || std::abs(p->y() - 5.) < 1e-6 ||
+                             std::abs(p->y() - 245.) < 1e-6;
+        CHECK(on_edge);
+        // The edge nearest to (125, 140) that is free is the back edge above the print.
+        CHECK(p->y() == Approx(245.));
+    }
+    SECTION("excluded areas and unreachable spots are skipped") {
+        sites.exclusions.emplace_back(Vec2d(0., 0.), Vec2d(18., 28.));
+        const auto p = MinLayerTimePause::park_point(sites, mltpAway, Vec2d::Zero(), Vec2d(1., 1.), nullptr,
+                                                     [](const Vec2d &q) { return q.x() < 200.; });
+        REQUIRE(p);
+        CHECK(clear(*p));
+        CHECK(!BoundingBoxf(Vec2d(0., 0.), Vec2d(18., 28.)).inflated(5.).contains(*p));
+        CHECK(p->x() < 200.);
+    }
+    SECTION("next to the prime tower") {
+        sites.tower = BoundingBoxf(Vec2d(200., 200.), Vec2d(230., 230.));
+        const auto p = MinLayerTimePause::park_point(sites, mltpPrimeTower, Vec2d::Zero(), Vec2d(125., 125.), nullptr, everywhere);
+        REQUIRE(p);
+        CHECK(clear(*p));
+        CHECK(!sites.tower->inflated(MinLayerTimePause::OBJECT_MARGIN - 1e-3).contains(*p));
+        CHECK((*p - sites.tower->center()).norm() < 40.);
+    }
+    SECTION("next to the prime tower without one is away from the print") {
+        const auto a = MinLayerTimePause::park_point(sites, mltpAway, Vec2d::Zero(), Vec2d(125., 140.), nullptr, everywhere);
+        const auto t = MinLayerTimePause::park_point(sites, mltpPrimeTower, Vec2d::Zero(), Vec2d(125., 140.), nullptr, everywhere);
+        REQUIRE(a);
+        REQUIRE(t);
+        CHECK(*a == *t);
+    }
+    SECTION("custom X/Y, kept on the bed") {
+        const auto p = MinLayerTimePause::park_point(sites, mltpCustom, Vec2d(20., 300.), Vec2d(125., 125.), nullptr, everywhere);
+        REQUIRE(p);
+        CHECK(*p == Vec2d(20., 250.));
+    }
+    SECTION("by object: beside the object being printed") {
+        const BoundingBoxf current = sites.objects.front();
+        const auto p = MinLayerTimePause::park_point(sites, mltpAway, Vec2d::Zero(), Vec2d(125., 125.), &current, everywhere);
+        REQUIRE(p);
+        CHECK(clear(*p));
+        CHECK(current.inflated(MinLayerTimePause::OBJECT_MARGIN + 1e-3).contains(*p));
+    }
+}
+
+// GCodeProcessor's dispatch read `case 4:` and never saw a G4. It now reads them, but only the dwell of a minimum
+// layer time pause (the G4 after the ";MIN_LAYER_TIME_PAUSE" comment) counts; other dwells stay out of the estimate
+// as before, so no other print's estimate moves.
+TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCodeProcessor]")
+{
+    const std::string tag = std::string(MinLayerTimePause::COMMENT_TAG) + " 2.00s\n";
+    auto total = [](const std::string &dwell) {
+        std::string gcode = "G90\nM83\nM204 S1500\nG1 Z0.2 F600\n;LAYER_CHANGE\nG1 X10 Y10 F6000\nG1 X20 Y10 E0.5 F1800\n" + dwell +
+                            "G1 X20 Y20 E0.5 F1800\n";
+        const boost::filesystem::path path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("edge_g4_%%%%%%%%.gcode");
+        {
+            boost::nowide::ofstream out(path.string(), std::ios::binary);
+            out << gcode;
+        }
+        GCodeProcessor processor;
+        processor.process_file(path.string());
+        boost::filesystem::remove(path);
+        // The result moves but cannot be copied or move-constructed: assign it, as test_gcodeprocessor_times does.
+        GCodeProcessorResult result;
+        result = std::move(processor.extract_result());
+        return double(result.print_statistics.modes[NORMAL].time);
+    };
+    const double none = total("");
+    // (The margin covers the stop the dwell forces between the two moves.)
+    CHECK(total(tag + "G4 S2\n") - none == Approx(2.).margin(0.05));
+    CHECK(total(tag + "G4 P2000\n") - none == Approx(2.).margin(0.05));
+    CHECK(total(tag + "G4 P1500 ; Settle Pressure\n") - none == Approx(1.5).margin(0.05));
+    // S wins over P, as in Marlin and RepRapFirmware.
+    CHECK(total(tag + "G4 S1 P5000\n") - none == Approx(1.).margin(0.05));
+    CHECK(total(tag + "G4\n") - none == Approx(0.).margin(0.05));
+    // Only the G4 right after the tag.
+    CHECK(total(tag + "G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") - total("G4 S2\nG1 X30 Y20 F6000\nG4 S3\n") == Approx(2.).margin(0.05));
+    // Any other dwell stays out of the estimate, as before.
+    CHECK(total("G4 S2\n") - none == Approx(0.).margin(0.01));
+    CHECK(total("G4 P2000\n") - none == Approx(0.).margin(0.01));
+}
+
+TEST_CASE("A thin spike pauses on its short layers", "[MinLayerTimePause][PrintGCode]")
+{
+    const double target = 10.;
+    Sliced       on;
+    slice_spike(on, spike_config(target));
+    Sliced       off;
+    slice_spike(off, spike_config(0.));
+    const std::vector<Pause> found = pauses(on.gcode);
+    const std::vector<float> &times = on.result.print_statistics.modes[NORMAL].layers_times;
+    INFO("layers " << on.layers << ", pauses " << found.size() << ", layer times " << times.size());
+
+    // Layers 0.2 .. 3.0 mm have the block, the spike alone goes on up to 8 mm (40 layers).
+    REQUIRE(on.layers == 40);
+    REQUIRE(times.size() == size_t(on.layers));
+    CHECK(pauses(off.gcode).empty());
+    CHECK(off.gcode.find("MIN_LAYER_TIME_PAUSE") == std::string::npos);
+    // No internal tag reaches the G-code.
+    CHECK(on.gcode.find(";_MIN_LAYER_TIME_PAUSE") == std::string::npos);
+
+    std::vector<bool> paused(on.layers, false);
+    for (const Pause &p : found) {
+        REQUIRE(p.layer >= 0);
+        REQUIRE(p.layer < on.layers);
+        paused[p.layer] = true;
+        // Fills the gap only: never more than the whole target.
+        CHECK(p.seconds >= MinLayerTimePause::MIN_PAUSE_S - 1e-3);
+        CHECK(p.seconds <= target + 1e-3);
+        // Parked clear of every object.
+        for (const BoundingBoxf &b : on.footprints)
+            CHECK(!b.inflated(MinLayerTimePause::OBJECT_MARGIN - 0.01).contains(p.park));
+        // With the pause the layer takes the target, give or take the park travel and the acceleration the
+        // cooling estimate leaves out.
+        CAPTURE(p.layer, p.seconds, times[p.layer]);
+        CHECK(times[p.layer] >= target - 0.6);
+        CHECK(times[p.layer] <= target + 8.);
+    }
+    // Never after the first or the last layer.
+    CHECK(!paused.front());
+    CHECK(!paused.back());
+    // Every spike-only layer below the last one pauses (the spike's layers take a few seconds at most).
+    for (int layer = 15; layer + 1 < on.layers; ++layer) {
+        CAPTURE(layer);
+        CHECK(paused[layer]);
+    }
+    // Layers clearly longer than the target have no pause.
+    for (int layer = 1; layer < 15; ++layer)
+        if (off.result.print_statistics.modes[NORMAL].layers_times[layer] > target + 2.) {
+            CAPTURE(layer);
+            CHECK(!paused[layer]);
+        }
+
+    // The estimate includes the pauses.
+    double paused_total = 0.;
+    for (const Pause &p : found)
+        paused_total += p.seconds;
+    CHECK(on.result.print_statistics.modes[NORMAL].time - off.result.print_statistics.modes[NORMAL].time >= 0.95 * paused_total);
+}
+
+TEST_CASE("A pause that is not needed leaves the G-code as it was", "[MinLayerTimePause][PrintGCode]")
+{
+    // At 0.3 s no layer lacks the half second a pause needs, so every block is dropped again.
+    Sliced tiny;
+    slice_spike(tiny, spike_config(0.3));
+    Sliced off;
+    slice_spike(off, spike_config(0.));
+    CHECK(pauses(tiny.gcode).empty());
+    CHECK(comparable(tiny.gcode) == comparable(off.gcode));
+}
+
+TEST_CASE("Printing by object pauses each object beside itself", "[MinLayerTimePause][PrintGCode]")
+{
+    DynamicPrintConfig config = spike_config(10.);
+    config.set_deserialize_strict("print_sequence", "by object");
+    Sliced spikes;
+    slice_spike(spikes, config, true);
+    const std::vector<Pause> found = pauses(spikes.gcode);
+    REQUIRE(spikes.footprints.size() == 2);
+    // Both spikes pause on all their layers but the first and the last: 2 x 38.
+    CHECK(found.size() == 76);
+    for (const Pause &p : found) {
+        bool beside_one = false;
+        for (const BoundingBoxf &b : spikes.footprints) {
+            CHECK(!b.inflated(MinLayerTimePause::OBJECT_MARGIN - 0.01).contains(p.park));
+            beside_one = beside_one || b.inflated(MinLayerTimePause::OBJECT_MARGIN + 0.01).contains(p.park);
+        }
+        CHECK(beside_one);
+    }
+}

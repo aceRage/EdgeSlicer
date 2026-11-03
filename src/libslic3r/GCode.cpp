@@ -14,6 +14,7 @@
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
+#include "Geometry.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
@@ -3711,6 +3712,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_cooling_buffer = make_unique<CoolingBuffer>(*this);
     m_cooling_buffer->set_current_extruder(initial_extruder_id);
+    m_min_layer_pause_sites.reset();
 
     // Construct the layer-time speed smoothing stage only when enabled so Off
     // keeps today's streaming path (no extra layer buffer). The TBB filter is still
@@ -9734,6 +9736,21 @@ LayerResult GCode::process_layer(const Print& print,
     file.write(gcode);
 #endif
 
+    // Edge (min_layer_time_pause): end the layer with a park-and-return block; the CoolingBuffer, which flushes
+    // this layer (an object layer) and knows its time after the slowdown, fills in the dwell or drops the block.
+    // It goes after the layer's last extrusion and before any end-of-layer timelapse photo and the next layer's
+    // layer change, so the Bambu layer-change / timelapse / tool-change sequences stay as they are. Not after
+    // the first or the last layer, and never in spiral vase mode.
+    if (object_layer != nullptr && !first_layer && !last_layer && !m_spiral_vase && m_writer.extruder() != nullptr) {
+        double pause_target = 0.;
+        for (const LayerToPrint &l : layers)
+            if (l.object_layer != nullptr)
+                for (const LayerRegion *layerm : l.object_layer->regions())
+                    pause_target = std::max(pause_target, layerm->region().config().min_layer_time_pause.value);
+        if (pause_target > 0.)
+            gcode += this->min_layer_time_pause_block(print, layers, single_object_instance_idx, pause_target);
+    }
+
     BOOST_LOG_TRIVIAL(trace) << "Exported layer " << layer.id() << " print_z " << print_z << log_memory_info();
 
     has_insert_timelapse_gcode |= m_farthest_point_timelapse.inserted_this_layer;
@@ -9788,6 +9805,87 @@ LayerResult GCode::process_layer(const Print& print,
     result.gcode                = std::move(gcode);
     result.cooling_buffer_flush = object_layer || raft_layer || last_layer;
     return result;
+}
+
+// Edge (min_layer_time_pause): see GCode/MinLayerTimePause.hpp.
+std::string GCode::min_layer_time_pause_block(const Print &print, const std::vector<LayerToPrint> &layers, size_t single_object_idx, double target)
+{
+    // World (model) coordinates minus the plate origin are the bed coordinates the G-code is written in.
+    const Vec2f offset_f = m_writer.get_xy_offset();
+    const Vec2d offset(offset_f.x(), offset_f.y());
+    auto footprint = [&offset](const PrintInstance &instance) {
+        const BoundingBoxf3 bb = const_cast<PrintInstance &>(instance).get_bounding_box();
+        return BoundingBoxf(Vec2d(bb.min.x(), bb.min.y()) - offset, Vec2d(bb.max.x(), bb.max.y()) - offset);
+    };
+
+    if (!m_min_layer_pause_sites) {
+        const PrintConfig &config = print.config();
+        auto               sites  = std::make_unique<MinLayerTimePause::Sites>();
+        if (config.printable_area.values.size() >= 3) {
+            sites->bed = BoundingBoxf(config.printable_area.values);
+            for (const Vec2d &p : config.printable_area.values)
+                sites->bed_polygon.points.emplace_back(Point::new_scale(p.x(), p.y()));
+        }
+        if (config.bed_exclude_area.values.size() >= 3)
+            sites->exclusions.emplace_back(config.bed_exclude_area.values);
+        for (const PrintObject *object : print.objects())
+            for (const PrintInstance &instance : object->instances())
+                sites->objects.emplace_back(footprint(instance));
+        if (print.has_wipe_tower()) {
+            const WipeTowerData &wtd   = print.wipe_tower_data();
+            const double         depth = wtd.depth;
+            if (depth > EPSILON) {
+                const double width = wtd.width > EPSILON ? double(wtd.width) : config.prime_tower_width.value;
+                const double brim  = std::max(0., double(wtd.brim_width));
+                const Eigen::Rotation2Dd rot(Geometry::deg2rad(config.wipe_tower_rotation_angle.value));
+                const Vec2d translate(config.wipe_tower_x.get_at(print.get_plate_index()), config.wipe_tower_y.get_at(print.get_plate_index()));
+                BoundingBoxf tower;
+                for (const Vec2d &corner : { Vec2d(-brim, -brim), Vec2d(width + brim, -brim), Vec2d(width + brim, depth + brim), Vec2d(-brim, depth + brim) })
+                    tower.merge(Vec2d(rot * corner + translate));
+                sites->tower = tower;
+            }
+        }
+        m_min_layer_pause_sites = std::move(sites);
+    }
+
+    // Printing by object: the footprint of the copy printed now.
+    std::optional<BoundingBoxf> current_object;
+    if (single_object_idx != size_t(-1) && !layers.empty()) {
+        const PrintObject *object = layers.front().original_object != nullptr ? layers.front().original_object : layers.front().object();
+        if (object != nullptr && single_object_idx < object->instances().size())
+            current_object = footprint(object->instances()[single_object_idx]);
+    }
+
+    const Vec3d &pos  = m_writer.get_position();
+    const Vec2d  from = Vec2d(pos.x(), pos.y()) - offset;
+    const std::optional<Vec2d> park = MinLayerTimePause::park_point(
+        *m_min_layer_pause_sites, m_config.min_layer_time_pause_park.value,
+        Vec2d(m_config.min_layer_time_pause_park_x.value, m_config.min_layer_time_pause_park_y.value), from,
+        current_object ? &*current_object : nullptr, [this](const Vec2d &p) { return m_writer.can_reach(p); });
+    if (!park) {
+        BOOST_LOG_TRIVIAL(warning) << "Minimum layer time pause: no free spot to park at Z " << pos.z();
+        return {};
+    }
+
+    const unsigned int extruder_id = m_writer.extruder()->id();
+    const double       clearance   = std::max(1., m_config.z_hop.get_at(extruder_id));
+    auto [there, back] = m_writer.park_and_return(*park, clearance, print.config().printable_height.value);
+    if (there.empty())
+        return {};
+
+    std::string out;
+    // The object's end label goes before the pause, so excluding the object never skips it.
+    m_writer.add_object_change_labels(out);
+    char buf[96];
+    sprintf(buf, "%s %.3f\n", MinLayerTimePause::START_TAG, target);
+    out += buf;
+    out += there;
+    out += MinLayerTimePause::DWELL_TAG;
+    out += "\n";
+    out += back;
+    out += MinLayerTimePause::END_TAG;
+    out += "\n";
+    return out;
 }
 
 void GCode::apply_print_config(const PrintConfig& print_config)
