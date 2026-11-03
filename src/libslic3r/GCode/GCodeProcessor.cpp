@@ -3589,12 +3589,14 @@ void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
     else
         line.has_value('P', value_p);
     value_s = (value_s > 0.f ? value_s : 0.f) + (value_p > 0.f ? value_p * 0.001f : 0.f);
-    // A G4 always waits for the queued moves (Marlin synchronizes the planner), even with no time. The dwell then
-    // starts once they are done; booked after flushing them, it lands on the first move after it, so it stays on its
-    // own layer (the minimum layer time pause relies on that).
-    simulate_st_synchronize(0.f);
-    if (value_s > 0.f)
+    // A G4 without a time adds nothing and leaves the move queue alone (flushing it would change how the moves
+    // around it are blended, and so their time). Otherwise the dwell starts once the queued moves are done; booked
+    // after flushing them, it lands on the first move after it, so it stays on its own layer (the minimum layer
+    // time pause relies on that).
+    if (value_s > 0.f) {
+        simulate_st_synchronize(0.f);
         simulate_st_synchronize(value_s);
+    }
 }
 
 //BBS
