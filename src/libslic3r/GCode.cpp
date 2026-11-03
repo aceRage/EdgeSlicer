@@ -43,6 +43,7 @@
 #include <optional>
 #include <memory>
 #include <set>
+#include <cstdio>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -3389,6 +3390,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     const bool wipe_tower_type2 = print.wipe_tower_type() == WipeTowerType::Type2;
     const bool skip_config_block = print.config().gcode_skip_config_block;
     m_calib_config.clear();
+    m_temp_retract_saved_retract = false;
+    m_temp_retract_last_band     = -1;
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
     // Keep inward wiping from masking retraction and pressure advance artifacts.
     switch (print.calib_mode()) {
@@ -3396,6 +3399,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     case CalibMode::Calib_PA_Pattern:
     case CalibMode::Calib_PA_Tower:
     case CalibMode::Calib_Retraction_tower:
+    case CalibMode::Calib_Temp_Retract_Grid:
         m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
         break;
     default:
@@ -4809,6 +4813,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     }
     // BBS: the last retraction
     //  Write end commands to file.
+    file.write(this->restore_temp_retract_grid_retraction(print));
     file.write(this->retract(false, true));
 
     // if needed, write the gcode_label_objects_end
@@ -7491,6 +7496,27 @@ LayerResult GCode::process_layer(const Print& print,
         }
         break;
     }
+    case CalibMode::Calib_Temp_Retract_Grid: {
+        // Review F4: pick the band from the middle of the layer, not its top, so a layer whose top
+        // lands on a band boundary (8.9999 vs 9.0) always resolves to the same band.
+        // F10 (Lance): layer 1 prints at nozzle_temperature_initial_layer like a normal print; band 0
+        // starts at layer 2. By object, every object's first layer goes back to the first-layer temperature.
+        // F11: raft layers and z_offset shift absolute print_z. Band Z and first-layer detection
+        // are relative to the object's first printed layer (Layer::id() starts at raft_layers()).
+        // Raft-only layers keep the first-layer temperature. The dialog also forces raft_layers=0.
+        if (object_layer == nullptr)
+            break;
+        const PrintObject *po     = object_layer->object();
+        const size_t       raft_n = po != nullptr ? po->slicing_parameters().raft_layers() : 0;
+        if (object_layer->id() == raft_n)
+            gcode += this->reset_temp_retract_grid_first_layer(print);
+        else {
+            const double first_bottom = (po != nullptr && !po->layers().empty()) ? po->layers().front()->bottom_z() : 0.;
+            const double mid          = 0.5 * (object_layer->print_z + object_layer->bottom_z());
+            gcode += this->apply_temp_retract_grid_layer(print, temp_retract_relative_z(mid, first_bottom));
+        }
+        break;
+    }
     }
 
     // BBS
@@ -7546,6 +7572,12 @@ LayerResult GCode::process_layer(const Print& print,
 
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
+        // Review B1: the temperature x retraction grid owns the nozzle temperature from layer 2 on (band 0
+        // is sent in the calib switch above at the start of layer 2, F10), so the filament temperature
+        // must not overwrite band 0 here.
+        if (print.calib_mode() == CalibMode::Calib_Temp_Retract_Grid) {
+            // nothing: apply_temp_retract_grid_layer() already set the band temperature
+        } else
         if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
             // Bambu two-extruder printer: M104 T is a PHYSICAL hotend, never "T<filament index>". Only
             // the hotend that is printing is set. The idle one gets its temperature from its own tool
@@ -8909,6 +8941,7 @@ LayerResult GCode::process_layer(const Print& print,
 
                 m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
+                gcode += this->apply_temp_retract_grid_object(print, instance_to_print.print_object);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 const bool saved_reduce_crossing_wall = m_config.reduce_crossing_wall.value;
@@ -9504,6 +9537,7 @@ LayerResult GCode::process_layer(const Print& print,
                 // Orca a2a9f95b6b: don't carry the previous object's region options into this one.
                 m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
+                gcode += this->apply_temp_retract_grid_object(print, instance_to_print.print_object);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 if (m_config.reduce_crossing_wall)
@@ -12462,6 +12496,96 @@ int GCode::temperature_tool_for_filament(int filament_id) const
         return filament_id;
     const std::vector<int> &pem = m_config.physical_extruder_map.values;
     return size_t(extruder) < pem.size() ? pem[size_t(extruder)] : extruder;
+}
+
+std::string GCode::apply_temp_retract_grid_layer(const Print &print, double print_z)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    const Calib_Params &params = print.calib_params();
+    const int           band   = temp_retract_band_index(params, print_z);
+    if (band == m_temp_retract_last_band)
+        return {};
+    m_temp_retract_last_band = band;
+    const int temp           = int(std::lround(temp_for_z(params, print_z)));
+    int       tool           = -1;
+    if (m_writer.extruder() != nullptr)
+        tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: band=%d temp=%d\n", band, temp);
+    return std::string(buf) + writer().set_temperature(unsigned(temp), params.wait_for_temperature, tool);
+}
+
+std::string GCode::reset_temp_retract_grid_first_layer(const Print &print)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    // The first object's first layer is already at the first-layer temperature from the start G-code.
+    if (m_temp_retract_last_band < 0)
+        return {};
+    m_temp_retract_last_band = -1;
+    if (m_writer.extruder() == nullptr)
+        return {};
+    const int filament = int(m_writer.extruder()->id());
+    const int temp     = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
+                                      (unsigned int) filament);
+    if (temp <= 0)
+        return {};
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: first layer temp=%d\n", temp);
+    return std::string(buf) + writer().set_temperature(unsigned(temp), print.calib_params().wait_for_temperature,
+                                                       temperature_tool_for_filament(filament));
+}
+
+std::string GCode::apply_temp_retract_grid_object(const Print &print, const PrintObject &object)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    const ModelObject *mo = object.model_object();
+    if (mo == nullptr)
+        return {};
+    const int col = stringing_grid_column_from_name(mo->name);
+    if (col < 0) {
+        // Review F3: a non-column object (the SG_label tower, or anything else on the plate) prints with
+        // the preset retraction length, not the length of the column printed before it.
+        if (!m_temp_retract_saved_retract)
+            return {};
+        writer().config.retraction_length = m_temp_retract_original;
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=none retract=%g\n", m_temp_retract_original.get_at(0));
+        return buf;
+    }
+    const double L = retract_for_column(print.calib_params(), col);
+    if (!m_temp_retract_saved_retract) {
+        m_temp_retract_original      = writer().config.retraction_length;
+        m_temp_retract_saved_retract = true;
+    }
+    ConfigOptionFloats &opt = writer().config.retraction_length;
+    if (opt.values.empty())
+        opt.values.push_back(L);
+    else {
+        for (double &v : opt.values)
+            v = L;
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=%d retract=%g\n", col, L);
+    // The extruder may still hold the previous column's longer retraction (the last column of a layer
+    // before the first column of the next). Keep it for the travel: giving it back here was a stationary
+    // unretract over the previous column followed by a travel across the whole grid with only this
+    // column's (shortest) retraction, which strings over every column. The unretract at the start of
+    // this column gives everything back, and the pillar-to-pillar travels inside the column use L.
+    return buf;
+}
+
+std::string GCode::restore_temp_retract_grid_retraction(const Print &print)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid || !m_temp_retract_saved_retract)
+        return {};
+    writer().config.retraction_length = m_temp_retract_original;
+    m_temp_retract_saved_retract      = false;
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: restore retract=%g\n", m_temp_retract_original.get_at(0));
+    return buf;
 }
 
 void GCode::note_filament_loaded(int filament_id)
