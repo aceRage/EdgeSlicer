@@ -379,6 +379,14 @@ private:
     size_t                                      m_ref_cnt{ 0 };
 };
 
+// How colour painting shadows a modifier's filament. Pure so the selection logic can be tested.
+//  region_is_alias: the modifier overrides nothing (its region is its parent's own).
+//  sets_filament: the modifier carries an explicit filament/extruder.
+//  filament_differs: its region's filament differs from the parent region's.
+//  overlaps_painted: the part it overlaps carries colour painting.
+enum class ModifierPaintNote { None, SameFilamentPainted, FilamentOverriddenByPaint };
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted);
+
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
 private: // Prevents erroneous use by other classes.
@@ -627,6 +635,17 @@ public:
     // folds into wall_filament/sparse_infill_filament/solid_infill_filament, which makes the
     // region config differ and gives the modifier a region of its own.
     std::vector<std::string>    modifiers_without_overrides() const;
+    // Modifiers whose filament is shadowed by colour painting (names, ModelObject::volumes order).
+    //  same_filament_painted: filament-only modifier, same filament as its parent, parent painted -
+    //    a subset of modifiers_without_overrides(); the caller reports it instead of the plain notice.
+    //  filament_overridden: modifier with a different filament overlapping a painted volume.
+    // Painted areas are applied after modifiers (apply_mm_segmentation) and replace the filament.
+    struct ModifierPaintNotes
+    {
+        std::vector<std::string> same_filament_painted;
+        std::vector<std::string> filament_overridden;
+    };
+    ModifierPaintNotes          modifier_paint_notes() const;
     // Modifiers that got no region in ANY layer range - no part's extruded bounding box intersects
     // them - so their geometry never reaches the slice at all.
     std::vector<std::string>    modifiers_without_parent() const;
