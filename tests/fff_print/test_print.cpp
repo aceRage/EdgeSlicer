@@ -2420,7 +2420,10 @@ TEST_CASE("Spiral vase still refuses a height range that prints a second filamen
     Print print;
     Model model;
     init_vase_with_height_range(print, model, two_filament_config(false, false), range);
-    CHECK_FALSE(print.validate().string.empty());
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    CHECK(error.opt_key == "spiral_mode");
+    CHECK(error.string.find("more than one materials") != std::string::npos);
 }
 
 TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVase]")
@@ -2432,5 +2435,8 @@ TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVas
     Model model;
     // Mixed walls: object_extruders() expands the virtual filament into both physical components.
     init_vase_with_height_range(print, model, two_filament_config(false, true), range);
-    CHECK_FALSE(print.validate().string.empty());
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    CHECK(error.opt_key == "spiral_mode");
+    CHECK(error.string.find("more than one materials") != std::string::npos);
 }
