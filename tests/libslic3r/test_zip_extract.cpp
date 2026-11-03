@@ -45,6 +45,16 @@ std::string path_u8(const fs::path& p)
 #endif
 }
 
+// Path from a UTF-8 name (same reason as path_u8).
+fs::path u8_path(const std::string& name_utf8)
+{
+#ifdef _WIN32
+    return fs::path(boost::nowide::widen(name_utf8));
+#else
+    return fs::path(name_utf8);
+#endif
+}
+
 std::string read_binary_file(const fs::path& file)
 {
     boost::nowide::ifstream in(path_u8(file), std::ios::binary);
@@ -527,7 +537,7 @@ TEST_CASE("extract_entries_confined decodes non-UTF-8 names (CP437, Shift-JIS + 
 
         std::string err;
         REQUIRE(extract_entries_confined(zip, {0}, dest, ZipExtractCaps{}, err));
-        CHECK(read_binary_file(dest / utf8) == "kana");
+        CHECK(read_binary_file(dest / u8_path(utf8)) == "kana");
     }
 }
 
