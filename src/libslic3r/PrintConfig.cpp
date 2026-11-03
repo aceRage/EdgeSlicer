@@ -6669,6 +6669,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // Stored per modifier ModelVolume only (right-click > Override paint); NOT in Preset::print_options(),
+    // so it never reaches a process preset, and GCode::append_full_config() leaves it out of the
+    // CONFIG_BLOCK. No category, so is_improper_category() keeps it out of the "Add settings" menus.
+    def = this->add("override_paint", coBool);
+    def->label = L("Override paint");
+    def->tooltip = L("Inside this modifier its filament replaces painted colour.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+    def->cli = ConfigOptionDef::nocli;
+
     def = this->add("inner_wall_line_width", coFloatOrPercent);
     def->label = L("Inner wall");
     def->category = L("Quality");

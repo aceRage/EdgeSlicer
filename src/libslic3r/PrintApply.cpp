@@ -792,6 +792,32 @@ static bool mm_paint_applies_to_parent_region(const PrintObjectRegions::LayerRan
     return root_model_part != nullptr && root_model_part->is_mm_painted();
 }
 
+// Painted regions are built over a volume region unless it comes from an "Override paint" modifier: there
+// the modifier's own filament wins, so apply_mm_segmentation() finds no painted target for its LayerRegion
+// and keeps it whole. One predicate for generate_print_object_regions(), painted_region_targets_match()
+// and verify_update_print_object_regions(), so the three can never disagree.
+static bool paint_targets_parent_region(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id)
+{
+    const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[size_t(parent_region_id)];
+    return parent_region.region != nullptr &&
+           (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
+           mm_paint_applies_to_parent_region(layer_range, parent_region_id) &&
+           ! parent_region.region->config().override_paint.value;
+}
+
+// A modifier's region config over the volume region parent_region_id. "Override paint" only means
+// something over colour painting: on an unpainted part it would make the modifier's region differ from its
+// parent by this flag alone and split the walls at the modifier's boundary, so it is dropped there.
+static PrintRegionConfig modifier_region_config(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id,
+                                                const ModelVolume &volume, size_t num_extruders)
+{
+    PrintRegionConfig config = region_config_from_model_volume(layer_range.volume_regions[size_t(parent_region_id)].region->config(),
+                                                               nullptr, volume, num_extruders);
+    if (config.override_paint.value && (num_extruders < 2 || ! mm_paint_applies_to_parent_region(layer_range, parent_region_id)))
+        config.override_paint.value = false;
+    return config;
+}
+
 void print_region_ref_inc(PrintRegion &r) { ++ r.m_ref_cnt; }
 void print_region_ref_reset(PrintRegion &r) { r.m_ref_cnt = 0; }
 int  print_region_ref_cnt(const PrintRegion &r) { return r.m_ref_cnt; }
@@ -883,7 +909,7 @@ bool verify_update_print_object_regions(
                             } else if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
                                 // Such parent region does not exist. If it is needed, then we need to reslice.
                                 // Only create new region for a modifier, which actually modifies config of it's parent.
-                                if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, **it_model_volume, num_extruders);
+                                if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, **it_model_volume, num_extruders);
                                     config != parent_region.region->config())
                                     // This modifier newly overrides a region, which it did not before. We need to reslice.
                                     return false;
@@ -892,7 +918,11 @@ bool verify_update_print_object_regions(
                 }
                 PrintRegionConfig cfg = region.parent == -1 ?
                     region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders) :
-                    region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders);
+                    modifier_region_config(layer_range, region.parent, **it_model_volume, num_extruders);
+                // Override paint decides whether painted regions exist over this region at all, so a change of it
+                // cannot be patched into the region in place.
+                if (cfg.override_paint.value != region.region->config().override_paint.value)
+                    return false;
                 if (cfg != region.region->config()) {
                     // Region configuration changed.
                     if (print_region_ref_cnt(*region.region) == 0) {
@@ -913,7 +943,7 @@ bool verify_update_print_object_regions(
     // Verify and / or update PrintRegions produced by color painting.
     for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges)
         for (const PrintObjectRegions::PaintedRegion &region : layer_range.painted_regions) {
-            if (!mm_paint_applies_to_parent_region(layer_range, region.parent))
+            if (!paint_targets_parent_region(layer_range, region.parent))
                 return false;
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
@@ -1155,7 +1185,7 @@ static PrintObjectRegions* generate_print_object_regions(
                             if (parent_volume.is_model_part() || parent_volume.is_modifier())
                                 if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
                                     // Only create new region for a modifier, which actually modifies config of it's parent.
-                                    if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders);
+                                    if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, volume, num_extruders);
                                         config != parent_region.region->config()) {
                                         added = true;
                                         layer_range.volume_regions.push_back({ &volume, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1210,7 +1240,7 @@ static PrintObjectRegions* generate_print_object_regions(
                     if (! parent_region.model_volume->is_model_part() || parent_region.region == nullptr)
                         continue;
                     if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
-                        if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, *modifier, num_extruders);
+                        if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, *modifier, num_extruders);
                             config != parent_region.region->config()) {
                             added = true;
                             layer_range.volume_regions.push_back({ modifier, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1229,8 +1259,7 @@ static PrintObjectRegions* generate_print_object_regions(
         for (unsigned int painted_extruder_id : painting_extruders)
             for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++ parent_region_id)
                 if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-                    (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                    mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+                    paint_targets_parent_region(layer_range, parent_region_id)) {
                     PrintRegionConfig cfg = parent_region.region->config();
                     cfg.wall_filament.value    = painted_extruder_id;
                     // Image Row Phase 3: an ImageWeighted row bound to this part's own
@@ -1375,10 +1404,7 @@ static bool painted_region_targets_match(const PrintObjectRegions           &pri
         expected_targets.reserve(layer_range.volume_regions.size() * expected_extruders.size());
 
         for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++parent_region_id) {
-            const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-            if (parent_region.region != nullptr &&
-                (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+            if (paint_targets_parent_region(layer_range, parent_region_id)) {
                 for (unsigned int extruder_id : expected_extruders)
                     expected_targets.emplace_back(parent_region_id, extruder_id);
             }

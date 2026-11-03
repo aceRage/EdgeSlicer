@@ -3,6 +3,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 // cut_target_label() - how "Copy cut to..." names an object in its submenu.
 #include "libslic3r/CutRecipe.hpp"
 #include "libslic3r/QuadRemesh.hpp"
@@ -1795,6 +1796,99 @@ void assign_support_group(const std::vector<ModelVolume*>& volumes,
         obj_list()->changed_object(obj_idx);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Override paint: a per-modifier flag (ModelVolume::config "override_paint"). Inside the modifier its
+// filament wins over colour painting - PrintApply builds no painted regions over the modifier's region.
+// Only modifiers carry it, and it only means something on a modifier that sets a filament.
+// ---------------------------------------------------------------------------------------------
+
+// The PARAMETER_MODIFIER volumes behind the object-list selection, or nothing if anything else is selected.
+static std::vector<ModelVolume*> selected_modifier_volumes()
+{
+    std::vector<ModelVolume*> volumes;
+    wxDataViewItemArray sels;
+    obj_list()->GetSelections(sels);
+    const auto& objects = plater()->model().objects;
+    for (const wxDataViewItem& item : sels) {
+        if (!(list_model()->GetItemType(item) & itVolume))
+            return {};
+        const int obj_idx = list_model()->GetObjectIdByItem(item);
+        const int vol_idx = list_model()->GetVolumeIdByItem(item);
+        if (obj_idx < 0 || obj_idx >= (int) objects.size() || vol_idx < 0 || vol_idx >= (int) objects[obj_idx]->volumes.size())
+            return {};
+        ModelVolume* volume = objects[obj_idx]->volumes[vol_idx];
+        if (!volume->is_modifier())
+            return {};
+        if (std::find(volumes.begin(), volumes.end(), volume) == volumes.end())
+            volumes.push_back(volume);
+    }
+    return volumes;
+}
+
+static bool volume_has_override_paint(const ModelVolume* volume)
+{
+    const ConfigOption* opt = volume->config.option("override_paint");
+    return opt != nullptr && opt->getBool();
+}
+
+static void toggle_override_paint()
+{
+    const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+    if (volumes.empty() || plater() == nullptr)
+        return;
+    const bool on = !std::all_of(volumes.begin(), volumes.end(), volume_has_override_paint);
+    plater()->take_snapshot(on ? "Override paint on" : "Override paint off");
+
+    const auto& objects = plater()->model().objects;
+    std::vector<int> changed_objects;
+    for (ModelVolume* volume : volumes) {
+        // Off is the key's absence, so a project saved with it off reads the same in older builds.
+        if (on)
+            volume->config.set_key_value("override_paint", new ConfigOptionBool(true));
+        else
+            volume->config.erase("override_paint");
+        obj_list()->object_config_options_changed({ volume->get_object(), volume });
+        for (int i = 0; i < (int) objects.size(); ++ i)
+            if (objects[i] == volume->get_object()) {
+                if (std::find(changed_objects.begin(), changed_objects.end(), i) == changed_objects.end())
+                    changed_objects.push_back(i);
+                break;
+            }
+    }
+    // What triggers the re-slice: PrintApply sees the modifier's region config change.
+    for (int obj_idx : changed_objects)
+        obj_list()->changed_object(obj_idx);
+}
+
+void MenuFactory::append_menu_item_override_paint(wxMenu* menu)
+{
+    const wxString label = _L("Override paint");
+    // The part menus are long-lived and the item depends on the selection, so it is rebuilt on every
+    // open - the idiom of append_menu_item_change_filament().
+    if (const int item_id = menu->FindItem(label); item_id != wxNOT_FOUND)
+        menu->Destroy(item_id);
+
+    // Modifiers only, and only with several filaments (painting needs them).
+    if (selected_modifier_volumes().empty() || filaments_count() < 2)
+        return;
+
+    append_menu_check_item(menu, wxID_ANY, label, _L("Inside this modifier its filament replaces painted colour."),
+        [](wxCommandEvent&) { toggle_override_paint(); }, menu,
+        // Greyed until every selected modifier sets a filament of its own: without one there is nothing to override
+        // with. A flag left on (its filament since reset to Default) can still be switched off.
+        []() {
+            const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+            return !volumes.empty() && std::all_of(volumes.begin(), volumes.end(), [](const ModelVolume* v) {
+                return model_volume_sets_filament(*v) || volume_has_override_paint(v);
+            });
+        },
+        []() {
+            const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+            return !volumes.empty() && std::all_of(volumes.begin(), volumes.end(), volume_has_override_paint);
+        },
+        m_parent);
+}
+
 void MenuFactory::append_menu_items_support_group(wxMenu* menu)
 {
     const wxString title = _L("Support group");
@@ -2905,6 +2999,7 @@ wxMenu* MenuFactory::part_menu()
 {
     append_menu_items_convert_unit(&m_part_menu);
     append_menu_item_change_filament(&m_part_menu);
+    append_menu_item_override_paint(&m_part_menu);
     // Ultra (support groups): rebuilt per open, like Change Filament above it.
     append_menu_items_support_group(&m_part_menu);
     append_menu_item_per_object_settings(&m_part_menu);
@@ -2915,6 +3010,7 @@ wxMenu* MenuFactory::part_menu()
 wxMenu* MenuFactory::text_part_menu()
 {
     append_menu_item_change_filament(&m_text_part_menu);
+    append_menu_item_override_paint(&m_text_part_menu);
     append_menu_item_per_object_settings(&m_text_part_menu);
 
     return &m_text_part_menu;
@@ -2923,6 +3019,7 @@ wxMenu* MenuFactory::text_part_menu()
 wxMenu *MenuFactory::svg_part_menu()
 {
     append_menu_item_change_filament(&m_svg_part_menu);
+    append_menu_item_override_paint(&m_svg_part_menu);
     append_menu_item_per_object_settings(&m_svg_part_menu);
 
     return &m_svg_part_menu;
@@ -3021,6 +3118,7 @@ wxMenu* MenuFactory::multi_selection_menu()
         menu->AppendSeparator();
         append_menu_item_change_filament(menu);
         append_menu_item_change_type(menu);
+        append_menu_item_override_paint(menu);
         append_menu_item_precise_seam_submenu(menu);
     }
     return menu;

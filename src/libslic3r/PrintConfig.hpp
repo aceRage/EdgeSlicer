@@ -1956,6 +1956,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, wall_filament))
     // Ultra: 0 = same as wall_filament
     ((ConfigOptionInt, outer_wall_filament))
+    // Per modifier only (never in a preset): inside the modifier its filament wins over colour painting.
+    // region_config_from_model_volume() keeps it only on a modifier that sets a filament; PrintApply keeps it
+    // only on a painted part; painted regions are then never built over such a region.
+    ((ConfigOptionBool, override_paint))
     ((ConfigOptionFloatOrPercent, inner_wall_line_width))
     ((ConfigOptionFloats, inner_wall_speed))
     // Total number of perimeters.
