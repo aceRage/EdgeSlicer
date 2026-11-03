@@ -2419,8 +2419,9 @@ TEST_CASE("Objects on extruders with different layer height limits can share a p
         { "layer_height",       0.2 },
         { "enable_support",     0 },
         { "enable_prime_tower", 1 },
-        { "wipe_tower_x",       "150" },
-        { "wipe_tower_y",       "20" },
+        { "printable_area",     "0x0,250x0,250x250,0x250" },
+        { "wipe_tower_x",       "170" },
+        { "wipe_tower_y",       "170" },
         { "layer_change_gcode", "G92 E0\n" },
     });
     config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00", "#0000FF" };
@@ -2441,6 +2442,8 @@ TEST_CASE("Objects on extruders with different layer height limits can share a p
     REQUIRE(print.objects()[0]->slicing_parameters().max_layer_height != print.objects()[1]->slicing_parameters().max_layer_height);
     const StringObjectException error = print.validate();
     INFO(error.string);
-    // Only the layering rule is under test; tower placement on the default bed is not.
+    // Explicit bed and a tower clear of both cubes, so no earlier validation stage can mask the layering rule:
+    // the whole validation must pass.
+    CHECK(error.string.empty());
     CHECK(error.string.find("same layer heights") == std::string::npos);
 }
