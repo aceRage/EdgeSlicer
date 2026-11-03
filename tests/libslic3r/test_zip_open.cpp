@@ -294,7 +294,7 @@ TEST_CASE("default zip work root is the platform's local cache folder", "[ZipOpe
     }
     SECTION("no usable folder: the app data folder, else empty (never a relative path)")
     {
-        const ZipRootEnv none;
+        const ZipRootEnv none{};
         CHECK(zip_work_root_for(ZipRootPlatform::Linux, none, "/home/ann/.config/EdgeSlicer") == "/home/ann/.config/EdgeSlicer/Zip");
         CHECK(zip_work_root_for(ZipRootPlatform::Windows, none, "D:\\Data\\EdgeSlicer") == "D:\\Data\\EdgeSlicer\\Zip");
         CHECK(zip_work_root_for(ZipRootPlatform::MacOS, none, "").empty());
