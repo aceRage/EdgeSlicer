@@ -113,8 +113,20 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
 {
     const PrintConfig          &print_config = m_layer->object()->print()->config();
     ConfigOptionFloatOrPercent config_width;
-    if (use_initial_layer_width && print_config.initial_layer_line_width.value > 0) {
-        config_width = print_config.initial_layer_line_width;
+    // Per-nozzle process P5: the first-layer width of the process of the nozzle that prints this role, when the job
+    // has per-nozzle processes (nozzle_initial_layer_line_width, empty otherwise: the plate's width as before).
+    const ConfigOptionFloatOrPercent *initial_width = &print_config.initial_layer_line_width;
+    ConfigOptionFloatOrPercent        nozzle_initial_width;
+    if (use_initial_layer_width && !print_config.nozzle_initial_layer_line_width.values.empty()) {
+        const unsigned int filament = this->extruder(role);
+        if (filament >= 1 && filament <= print_config.nozzle_initial_layer_line_width.values.size()) {
+            const FloatOrPercent &w = print_config.nozzle_initial_layer_line_width.values[filament - 1];
+            nozzle_initial_width    = ConfigOptionFloatOrPercent(w.value, w.percent);
+            initial_width           = &nozzle_initial_width;
+        }
+    }
+    if (use_initial_layer_width && initial_width->value > 0) {
+        config_width = *initial_width;
     } else if (role == frExternalPerimeter) {
         config_width = m_region->config().outer_wall_line_width;
     } else if (role == frPerimeter) {
@@ -134,7 +146,7 @@ Flow LayerRegion::flow(FlowRole role, double layer_height, bool use_initial_laye
     if (config_width.value == 0)
         config_width = m_layer->object()->config().line_width;
 
-    const auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(this->extruder(role) - 1));
+    const auto nozzle_diameter = float(nozzle_diameter_for_filament(print_config, this->extruder(role)));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
@@ -145,7 +157,7 @@ Flow LayerRegion::bridging_flow(FlowRole role, bool thick_bridge) const
     const PrintObject       &print_object   = *this->layer()->object();
     Flow bridge_flow;
     // Here this->extruder(role) - 1 may underflow to MAX_INT, but then the get_at() will fall back to zero'th element, so everything is all right.
-    auto nozzle_diameter = float(print_object.print()->config().nozzle_diameter.get_at(this->extruder(role) - 1));
+    auto nozzle_diameter = float(nozzle_diameter_for_filament(print_object.print()->config(), this->extruder(role)));
     // ORCA: Bridge line width. 0 (Edge's default) keeps the widths below exactly as they were.
     const ConfigOptionFloatOrPercent& bridge_width_opt = region_config.bridge_line_width;
     const double                      bridge_width      = bridge_width_opt.get_abs_value(nozzle_diameter);

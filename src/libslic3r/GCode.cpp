@@ -7,6 +7,7 @@
 #include "libslic3r.h"
 #include "I18N.hpp"
 #include "GCode.hpp"
+#include "ToolSlots.hpp"
 #include "GCodeReader.hpp"
 #include "CostEstimate.hpp"
 #include "LocalZOrderOptimizer.hpp"
@@ -41,6 +42,7 @@
 #include <optional>
 #include <memory>
 #include <set>
+#include <cstdio>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -1148,8 +1150,12 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     if (!change_filament_gcode.empty()) {
         DynamicConfig config;
         int           previous_extruder_id = gcodegen.writer().extruder() ? (int) gcodegen.writer().extruder()->id() : -1;
-        config.set_key_value("previous_extruder", new ConfigOptionInt(previous_extruder_id));
-        config.set_key_value("next_extruder", new ConfigOptionInt((int) new_extruder_id));
+        // Per-nozzle process P4: a template names the tools the G-code names (filament_output_tools).
+        config.set_key_value("previous_extruder",
+                             new ConfigOptionInt(previous_extruder_id < 0 ? previous_extruder_id :
+                                                                            int(gcodegen.writer().output_tool(unsigned(previous_extruder_id)))));
+        config.set_key_value("next_extruder", new ConfigOptionInt(new_extruder_id < 0 ? (int) new_extruder_id :
+                                                                                         int(gcodegen.writer().output_tool(unsigned(new_extruder_id)))));
         // Ultra: single-mapped dual-nozzle change_filament vars (filament id == extruder id; hotend -1).
         config.set_key_value("current_filament_id", new ConfigOptionInt(std::max(0, previous_extruder_id)));
         config.set_key_value("next_filament_id", new ConfigOptionInt((int) new_extruder_id));
@@ -1358,7 +1364,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         toolchange_command = gcodegen.writer().toolchange(new_extruder_id);
     if (new_extruder_id >= 0)
         gcodegen.note_filament_loaded(new_extruder_id);
-    if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(), new_extruder_id))
+    if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(),
+                                   new_extruder_id < 0 ? unsigned(new_extruder_id) : gcodegen.writer().output_tool(unsigned(new_extruder_id))))
         toolchange_gcode_str += toolchange_command;
     else {
         // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
@@ -1382,7 +1389,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         }
     }
 
-    gcodegen.placeholder_parser().set("current_extruder", new_extruder_id);
+    gcodegen.placeholder_parser().set("current_extruder",
+                                      new_extruder_id < 0 ? new_extruder_id : int(gcodegen.writer().output_tool(unsigned(new_extruder_id))));
     set_cut_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
     // (the _ec pair was published above, before change_filament_gcode was expanded)
 
@@ -1425,7 +1433,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
     // towards the filament_sequence.json entry order.
-    if (new_extruder_id >= 0 && custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), new_extruder_id)) {
+    if (new_extruder_id >= 0 &&
+        custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), gcodegen.writer().output_tool(unsigned(new_extruder_id)))) {
         gcodegen.m_toolchange_count++;
         gcodegen.record_filament_change(new_extruder_id);
     }
@@ -1926,7 +1935,7 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                                                                         append_tcr2(gcodegen, local_z_tcr, extruder_id, tower_z);
         }
 
-        const float nozzle_diameter = float(gcodegen.config().nozzle_diameter.get_at(size_t(extruder_id)));
+        const float nozzle_diameter = float(nozzle_diameter_for_filament(gcodegen.config(), unsigned(extruder_id) + 1));
         const float line_width = nozzle_diameter * 1.25f;
         const float extra_flow = float(gcodegen.config().wipe_tower_extra_flow.value) / 100.f;
         const float extra_spacing = float(gcodegen.config().wipe_tower_extra_spacing.value) / 100.f;
@@ -3144,7 +3153,8 @@ static std::string update_print_stats_and_format_filament_stats(const bool      
                                                                 const std::vector<Extruder>& extruders,
                                                                 PrintStatistics&             print_statistics,
                                                                 const bool                   with_cost     = true,
-                                                                const ToolOrdering*          tool_ordering = nullptr)
+                                                                const ToolOrdering*          tool_ordering = nullptr,
+                                                                const GCodeWriter*           writer        = nullptr)
 {
     std::string filament_stats_string_out;
 
@@ -3156,15 +3166,21 @@ static std::string update_print_stats_and_format_filament_stats(const bool      
         std::pair<std::string, unsigned int> out_filament_used_cm3("; filament used [cm3] = ", 0);
         std::pair<std::string, unsigned int> out_filament_used_g("; filament used [g] = ", 0);
         std::pair<std::string, unsigned int> out_filament_cost("; filament cost = ", 0);
-        for (const Extruder& extruder : extruders) {
+        // Per-nozzle process P4: when the G-code names assigned tools, the lists are by those tools too.
+        std::vector<std::pair<unsigned int, const Extruder*>> listed;
+        for (const Extruder& extruder : extruders)
+            listed.emplace_back(writer != nullptr ? writer->output_tool(extruder.id()) : extruder.id(), &extruder);
+        std::stable_sort(listed.begin(), listed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& [listed_id, extruder_ptr] : listed) {
+            const Extruder& extruder = *extruder_ptr;
             double used_filament   = extruder.used_filament() + (has_wipe_tower ? wipe_tower_data.used_filament[extruder.id()] : 0.f);
             double extruded_volume = extruder.extruded_volume() + (has_wipe_tower ? wipe_tower_data.used_filament[extruder.id()] * 2.4052f :
                                                                                     0.f); // assumes 1.75mm filament diameter
             double filament_weight = extruded_volume * extruder.filament_density() * 0.001;
             double filament_cost   = filament_weight * extruder.filament_cost() * 0.001;
-            auto   append          = [&extruder](std::pair<std::string, unsigned int>& dst, const char* tmpl, double value) {
+            auto   append          = [listed_id = listed_id](std::pair<std::string, unsigned int>& dst, const char* tmpl, double value) {
                 assert(is_decimal_separator_point());
-                while (dst.second < extruder.id()) {
+                while (dst.second < listed_id) {
                     // Fill in the non-printing extruders with zeros.
                     dst.first += (dst.second > 0) ? ", 0" : "0";
                     ++dst.second;
@@ -3373,6 +3389,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     const bool wipe_tower_type2 = print.wipe_tower_type() == WipeTowerType::Type2;
     const bool skip_config_block = print.config().gcode_skip_config_block;
     m_calib_config.clear();
+    m_temp_retract_saved_retract = false;
+    m_temp_retract_last_band     = -1;
     // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
     // Keep inward wiping from masking retraction and pressure advance artifacts.
     switch (print.calib_mode()) {
@@ -3380,6 +3398,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     case CalibMode::Calib_PA_Pattern:
     case CalibMode::Calib_PA_Tower:
     case CalibMode::Calib_Retraction_tower:
+    case CalibMode::Calib_Temp_Retract_Grid:
         m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
         break;
     default:
@@ -3704,15 +3723,37 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_pa_processor = std::make_unique<AdaptivePAProcessor>(*this, tool_ordering.all_extruders());
     m_pa_reset_in_band = false;
 
+    // Per-nozzle process P4: on a toolchanger whose filaments are put on other tools (filament_nozzle_assignment), the
+    // G-code names the tools they print on: T<n>, M104 T<n>, the tool placeholders and the per-filament values
+    // the custom G-code reads by tool, and the config block. The slicer keeps working with filaments; the
+    // processor reads the G-code's tools back as filaments. Empty (the G-code names each filament's own tool)
+    // without an assignment or when two used filaments share a tool.
+    m_writer.set_output_tools(filament_output_tools(print.config(), print.extruders()));
+    m_processor.set_output_tool_filaments(output_tool_filaments(m_writer.output_tools()));
+    m_cooling_buffer->set_output_tool_filaments(output_tool_filaments(m_writer.output_tools()));
+    if (m_layer_time_speed_smoothing)
+        m_layer_time_speed_smoothing->set_output_tool_filaments(output_tool_filaments(m_writer.output_tools()));
+    if (!m_writer.output_tools().empty())
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P4: the G-code names the assigned tools, filament -> tool "
+                                << ConfigOptionInts(m_writer.output_tools()).serialize();
+    auto output_tool_of = [this](unsigned int filament) -> unsigned int {
+        return filament == (unsigned int) -1 ? filament : m_writer.output_tool(filament);
+    };
     // Update output variables after the extruders were initialized.
     m_placeholder_parser_integration.init(m_writer);
     // Let the start-up script prime the 1st printing tool.
-    this->placeholder_parser().set("initial_tool", initial_extruder_id);
-    this->placeholder_parser().set("initial_extruder", initial_extruder_id);
+    this->placeholder_parser().set("initial_tool", output_tool_of(initial_extruder_id));
+    this->placeholder_parser().set("initial_extruder", output_tool_of(initial_extruder_id));
     // BBS
-    this->placeholder_parser().set("initial_no_support_tool", initial_non_support_extruder_id);
-    this->placeholder_parser().set("initial_no_support_extruder", initial_non_support_extruder_id);
-    this->placeholder_parser().set("current_extruder", initial_extruder_id);
+    this->placeholder_parser().set("initial_no_support_tool", output_tool_of(initial_non_support_extruder_id));
+    this->placeholder_parser().set("initial_no_support_extruder", output_tool_of(initial_non_support_extruder_id));
+    // Per-nozzle process P4 (K3 Tier C, CrealityPrint's placeholder): the physical nozzle the first non-support filament
+    // prints on, and every physical nozzle's diameter and flow type.
+    this->placeholder_parser().set("initial_no_support_physical_nozzle_id",
+                                   int(initial_non_support_extruder_id == (unsigned int) -1 ? 0 :
+                                           physical_extruder_for_filament(m_config, initial_non_support_extruder_id + 1)));
+    this->placeholder_parser().set("physical_nozzle_properties", new ConfigOptionString(physical_nozzle_properties(print.config())));
+    this->placeholder_parser().set("current_extruder", output_tool_of(initial_extruder_id));
     // Orca: set the key for compatibilty
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(initial_extruder_id));
     {
@@ -3758,7 +3799,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // Orca: support max MAXIMUM_EXTRUDER_NUMBER extruders/filaments
     std::vector<unsigned char> is_extruder_used(std::max(size_t(MAXIMUM_EXTRUDER_NUMBER), print.config().filament_diameter.size()), 0);
     for (unsigned int extruder : tool_ordering.all_extruders())
-        is_extruder_used[extruder] = true;
+        is_extruder_used[std::min<size_t>(output_tool_of(extruder), is_extruder_used.size() - 1)] = true;
     this->placeholder_parser().set("is_extruder_used", new ConfigOptionBools(is_extruder_used));
 
     {
@@ -3933,14 +3974,14 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         {
             float filament_max_volumetric_speed = get_value_at(m_config, m_config.filament_max_volumetric_speed,
                                                               ConfigFlowDomain::Filament, initial_non_support_extruder_id);
-            const double nozzle_diameter       = m_config.nozzle_diameter.get_at(initial_non_support_extruder_id);
+            const double nozzle_diameter       = nozzle_diameter_for_filament(m_config, unsigned(initial_non_support_extruder_id) + 1);
             float        outer_wall_line_width = print.default_region_config().get_abs_value("outer_wall_line_width", nozzle_diameter);
             if (outer_wall_line_width == 0.0) {
                 float default_line_width = print.default_object_config().get_abs_value("line_width", nozzle_diameter);
                 outer_wall_line_width    = default_line_width == 0.0 ? nozzle_diameter : default_line_width;
             }
             Flow  outer_wall_flow       = Flow(outer_wall_line_width, m_config.layer_height,
-                                               m_config.nozzle_diameter.get_at(initial_non_support_extruder_id));
+                                               nozzle_diameter_for_filament(m_config, unsigned(initial_non_support_extruder_id) + 1));
             float outer_wall_speed      = print.default_region_config().outer_wall_speed.values.front();
             outer_wall_volumetric_speed = outer_wall_speed * outer_wall_flow.mm3_per_mm();
             if (outer_wall_volumetric_speed > filament_max_volumetric_speed)
@@ -4213,6 +4254,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             joined += to_string(type);
         }
         this->placeholder_parser().set("filament_volume_type_list", new ConfigOptionString(std::move(joined)));
+    }
+    // Per-nozzle process P4: with the G-code naming assigned tools, every per-filament value a custom G-code reads by
+    // tool ({nozzle_temperature[initial_tool]}, the flow type list) is the value of the filament on that tool.
+    if (const std::vector<int> &output_tools = m_writer.output_tools(); !output_tools.empty()) {
+        filament_values_to_tool_space(this->placeholder_parser().config_writable(), print.config(), output_tools);
+        const auto *types = this->placeholder_parser().config().option<ConfigOptionEnumsGeneric>("filament_volume_type");
+        if (types != nullptr) {
+            std::string joined;
+            for (size_t i = 0; i < types->values.size(); ++i)
+                joined += (i ? "," : "") + std::string(to_string(FilamentVolumeType(types->values[i] == int(fvtHighFlow) ? fvtHighFlow : fvtStandard)));
+            this->placeholder_parser().set("filament_volume_type_list", new ConfigOptionString(std::move(joined)));
+        }
     }
 
     this->placeholder_parser().set_deferred("print_time_total_sec", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Print_Time_Total_Sec_Placeholder));
@@ -4758,6 +4811,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     }
     // BBS: the last retraction
     //  Write end commands to file.
+    file.write(this->restore_temp_retract_grid_retraction(print));
     file.write(this->retract(false, true));
 
     // if needed, write the gcode_label_objects_end
@@ -4847,7 +4901,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Modifies
         print.m_print_statistics, print.gcode_filament_prices(),
         // Const input (tool-change fallback for non-wipe-tower prints)
-        &print.tool_ordering()));
+        &print.tool_ordering(),
+        // Per-nozzle process P4: the tools the G-code names
+        &m_writer));
     print.m_print_statistics.initial_tool = initial_extruder_id;
     if (!is_bbl_printers) {
         // CONFIG_BLOCK first, time estimate after: some firmwares only scan the last N lines for
@@ -5537,13 +5593,16 @@ DynamicConfig GCode::build_placeholder_process_config(unsigned int current_extru
                                                        const DynamicConfig *config_override) const
 {
     DynamicConfig process_config_override;
-    const size_t process_config_idx = get_config_idx(m_config, ConfigFlowDomain::Process, current_extruder_id);
     for (const std::string &key : process_flow_variant_options()) {
         const ConfigOption *option = m_config.optptr(key);
         if (option == nullptr) {
             BOOST_LOG_TRIVIAL(error) << "Missing process flow option: " << key;
             continue;
         }
+        // Per-nozzle process P1: the extruder slot for an option of the slot layout's length.
+        const auto  *vec                = dynamic_cast<const ConfigOptionVectorBase *>(option);
+        const size_t process_config_idx = Slic3r::process_config_idx(m_config, vec != nullptr ? vec->size() : 0,
+                                                                     current_extruder_id);
 
         switch (option->type()) {
         case coFloats:
@@ -5664,7 +5723,9 @@ std::string GCode::placeholder_parser_process(const std::string&   name,
 
     try {
         ppi.update_from_gcodewriter(m_writer);
-        std::string output = ppi.parser.process(templ, current_extruder_id, &process_config_override, &ppi.output_config, &ppi.context);
+        // Per-nozzle process P4: the parser's per-filament vectors are in the G-code's tool space then.
+        const unsigned int parser_tool = current_extruder_id == (unsigned int) -1 ? current_extruder_id : m_writer.output_tool(current_extruder_id);
+        std::string output = ppi.parser.process(templ, parser_tool, &process_config_override, &ppi.output_config, &ppi.context);
         ppi.validate_output_vector_variables();
         const CustomGCodeMotionStateChanges motion_state_changes = custom_gcode_motion_state_changes(output);
         if (motion_state_changes.acceleration)
@@ -7433,6 +7494,27 @@ LayerResult GCode::process_layer(const Print& print,
         }
         break;
     }
+    case CalibMode::Calib_Temp_Retract_Grid: {
+        // Review F4: pick the band from the middle of the layer, not its top, so a layer whose top
+        // lands on a band boundary (8.9999 vs 9.0) always resolves to the same band.
+        // F10 (Lance): layer 1 prints at nozzle_temperature_initial_layer like a normal print; band 0
+        // starts at layer 2. By object, every object's first layer goes back to the first-layer temperature.
+        // F11: raft layers and z_offset shift absolute print_z. Band Z and first-layer detection
+        // are relative to the object's first printed layer (Layer::id() starts at raft_layers()).
+        // Raft-only layers keep the first-layer temperature. The dialog also forces raft_layers=0.
+        if (object_layer == nullptr)
+            break;
+        const PrintObject *po     = object_layer->object();
+        const size_t       raft_n = po != nullptr ? po->slicing_parameters().raft_layers() : 0;
+        if (object_layer->id() == raft_n)
+            gcode += this->reset_temp_retract_grid_first_layer(print);
+        else {
+            const double first_bottom = (po != nullptr && !po->layers().empty()) ? po->layers().front()->bottom_z() : 0.;
+            const double mid          = 0.5 * (object_layer->print_z + object_layer->bottom_z());
+            gcode += this->apply_temp_retract_grid_layer(print, temp_retract_relative_z(mid, first_bottom));
+        }
+        break;
+    }
     }
 
     // BBS
@@ -7488,6 +7570,12 @@ LayerResult GCode::process_layer(const Print& print,
 
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
+        // Review B1: the temperature x retraction grid owns the nozzle temperature from layer 2 on (band 0
+        // is sent in the calib switch above at the start of layer 2, F10), so the filament temperature
+        // must not overwrite band 0 here.
+        if (print.calib_mode() == CalibMode::Calib_Temp_Retract_Grid) {
+            // nothing: apply_temp_retract_grid_layer() already set the band temperature
+        } else
         if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
             // Bambu two-extruder printer: M104 T is a PHYSICAL hotend, never "T<filament index>". Only
             // the hotend that is printing is set. The idle one gets its temperature from its own tool
@@ -8851,6 +8939,7 @@ LayerResult GCode::process_layer(const Print& print,
 
                 m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
+                gcode += this->apply_temp_retract_grid_object(print, instance_to_print.print_object);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 const bool saved_reduce_crossing_wall = m_config.reduce_crossing_wall.value;
@@ -9446,6 +9535,7 @@ LayerResult GCode::process_layer(const Print& print,
                 // Orca a2a9f95b6b: don't carry the previous object's region options into this one.
                 m_config.apply(print.default_region_config());
                 m_config.apply(instance_to_print.print_object.config(), true);
+                gcode += this->apply_temp_retract_grid_object(print, instance_to_print.print_object);
                 m_layer                  = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
                 if (m_config.reduce_crossing_wall)
@@ -9783,9 +9873,48 @@ static bool grouping_header_maps(const Print& print, std::vector<int>& nozzle_ma
     return true;
 }
 
+// Per-nozzle process P4: a P4 key at its "unused" value (empty, all zero, false).
+static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::string &key)
+{
+    if (key == "tool_slot_model" || key == "support_filament_nozzle_mapping") {
+        const auto *opt = cfg.option<ConfigOptionBool>(key);
+        return opt == nullptr || !opt->value;
+    }
+    if (key == "print_extruder_nozzle_diameter" || key == "filament_rack_nozzle_diameter" || key == "nozzle_diameter_override") {
+        const auto *opt = cfg.option<ConfigOptionFloats>(key);
+        return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](double v) { return !(v > 0.); });
+    }
+    if (key == "extruder_rack_nozzle_diameter" || key == "filament_nozzle_variants" ||
+        // Per-nozzle process P9: the project's rack sizes and the slots' processes, likewise only when set.
+        key == "extruder_rack_nozzle_override" || key == "nozzle_slot_process_presets") {
+        const auto *opt = cfg.option<ConfigOptionStrings>(key);
+        return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](const std::string &v) {
+                   return v.find_first_not_of(" \t") == std::string::npos;
+               });
+    }
+    // Per-nozzle process P9: the rack slot pins only when a filament is pinned; the internal per-filament process slots and the
+    // missing slots never (the values are in the moves; such a job is refused).
+    if (key == "filament_rack_nozzle_slot" || key == "filament_side_pin") {
+        const auto *opt = cfg.option<ConfigOptionInts>(key);
+        return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](int v) { return v <= 0; });
+    }
+    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing")
+        return true;
+    return false;
+}
+
 void GCode::append_full_config(const Print& print, std::string& str)
 {
-    const DynamicPrintConfig& cfg = print.full_print_config();
+    // Per-nozzle process P4: when the G-code names the assigned tools, so does its config block (the printer reads
+    // its filament types and colours by tool); the assignment itself is then spent.
+    DynamicPrintConfig tool_space_cfg;
+    if (const std::vector<int> output_tools = filament_output_tools(print.config(), print.extruders()); !output_tools.empty()) {
+        tool_space_cfg = print.full_print_config();
+        DynamicConfig per_tool;
+        filament_values_to_tool_space(per_tool, print.full_print_config(), output_tools);
+        tool_space_cfg.apply(per_tool, true);
+    }
+    const DynamicPrintConfig& cfg = tool_space_cfg.empty() ? print.full_print_config() : tool_space_cfg;
     std::vector<int> grouped_nozzle_map, grouped_volume_map;
     const bool       use_grouped_maps = grouping_header_maps(print, grouped_nozzle_map, grouped_volume_map);
     // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
@@ -9811,11 +9940,35 @@ void GCode::append_full_config(const Print& print, std::string& str)
     // nothing reads them back but our own cost views, which fall back to the project's values or say
     // "not in file".
     const bool dump_filament_prices = print.gcode_filament_prices();
+    // Per-nozzle process P1: the per-nozzle keys only when a nozzle has its own process values, so every
+    // other job's config block stays as it was before they existed.
+    const bool dump_per_nozzle_process_keys = print.config().process_extruder_values.value ||
+        std::any_of(print.config().nozzle_process_presets.values.begin(), print.config().nozzle_process_presets.values.end(),
+                    [](const std::string &name) { return !name.empty(); });
     std::ostringstream                      ss;
     for (const std::string& key : cfg.keys()) {
         if (!dump_filament_prices && (key == "filament_cost" || key == "time_cost"))
             continue;
+        if (!dump_per_nozzle_process_keys && (key == "nozzle_process_presets" || key == "process_extruder_values"))
+            continue;
+        // Per-nozzle process P2: the filament -> nozzle assignment and the per-nozzle widths only when a job has
+        // them, so every other job's config block stays as it was.
+        if ((key == "filament_nozzle_assignment" || (boost::starts_with(key, "nozzle_") && boost::ends_with(key, "_line_width"))) &&
+            cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0)
+            continue;
+        // Per-nozzle process P8: the per-filament region values are internal (the values they stand for are in the moves);
+        // the tools' own changes only when a tool has some; the missing list never (such a job is refused).
+        if (key == "nozzle_region_values" || key == "nozzle_process_missing" ||
+            (key == "nozzle_process_edits" && cfg.option(key)->is_vector() && static_cast<const ConfigOptionVectorBase *>(cfg.option(key))->size() == 0))
+            continue;
+        // Per-nozzle process P6: the per-nozzle width table and the widths' nozzle only when set.
+        if ((key == "process_nozzle_line_widths" && print.config().process_nozzle_line_widths.value.empty()) ||
+            (key == "line_width_nozzle_diameter" && print.config().line_width_nozzle_diameter.value == 0.))
+            continue;
         if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
+            continue;
+        // Per-nozzle process P4: its keys only when a job uses them, so every other job's config block stays as it was.
+        if (per_nozzle_p4_key_unused(cfg, key))
             continue;
         if (!dump_mass_model_keys && mass_model_keys.find(key) != mass_model_keys.end())
             continue;
@@ -9834,6 +9987,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
                 ss << "; " << key << " = " << cfg.opt_serialize(key) << "\n";
         }
     }
+    // Per-nozzle process P4 (K3 Tier C): the fitted physical nozzles, for a printer that checks them
+    // (support_filament_nozzle_mapping) or a job on nozzles of different diameters.
+    if (emit_physical_nozzle_properties(cfg))
+        ss << "; physical_nozzle_properties = " << physical_nozzle_properties(cfg) << "\n";
     str += ss.str();
 }
 
@@ -12243,6 +12400,96 @@ int GCode::temperature_tool_for_filament(int filament_id) const
     return size_t(extruder) < pem.size() ? pem[size_t(extruder)] : extruder;
 }
 
+std::string GCode::apply_temp_retract_grid_layer(const Print &print, double print_z)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    const Calib_Params &params = print.calib_params();
+    const int           band   = temp_retract_band_index(params, print_z);
+    if (band == m_temp_retract_last_band)
+        return {};
+    m_temp_retract_last_band = band;
+    const int temp           = int(std::lround(temp_for_z(params, print_z)));
+    int       tool           = -1;
+    if (m_writer.extruder() != nullptr)
+        tool = temperature_tool_for_filament(int(m_writer.extruder()->id()));
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: band=%d temp=%d\n", band, temp);
+    return std::string(buf) + writer().set_temperature(unsigned(temp), params.wait_for_temperature, tool);
+}
+
+std::string GCode::reset_temp_retract_grid_first_layer(const Print &print)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    // The first object's first layer is already at the first-layer temperature from the start G-code.
+    if (m_temp_retract_last_band < 0)
+        return {};
+    m_temp_retract_last_band = -1;
+    if (m_writer.extruder() == nullptr)
+        return {};
+    const int filament = int(m_writer.extruder()->id());
+    const int temp     = get_value_at(print.config(), print.config().nozzle_temperature_initial_layer, ConfigFlowDomain::Filament,
+                                      (unsigned int) filament);
+    if (temp <= 0)
+        return {};
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: first layer temp=%d\n", temp);
+    return std::string(buf) + writer().set_temperature(unsigned(temp), print.calib_params().wait_for_temperature,
+                                                       temperature_tool_for_filament(filament));
+}
+
+std::string GCode::apply_temp_retract_grid_object(const Print &print, const PrintObject &object)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid)
+        return {};
+    const ModelObject *mo = object.model_object();
+    if (mo == nullptr)
+        return {};
+    const int col = stringing_grid_column_from_name(mo->name);
+    if (col < 0) {
+        // Review F3: a non-column object (the SG_label tower, or anything else on the plate) prints with
+        // the preset retraction length, not the length of the column printed before it.
+        if (!m_temp_retract_saved_retract)
+            return {};
+        writer().config.retraction_length = m_temp_retract_original;
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=none retract=%g\n", m_temp_retract_original.get_at(0));
+        return buf;
+    }
+    const double L = retract_for_column(print.calib_params(), col);
+    if (!m_temp_retract_saved_retract) {
+        m_temp_retract_original      = writer().config.retraction_length;
+        m_temp_retract_saved_retract = true;
+    }
+    ConfigOptionFloats &opt = writer().config.retraction_length;
+    if (opt.values.empty())
+        opt.values.push_back(L);
+    else {
+        for (double &v : opt.values)
+            v = L;
+    }
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: col=%d retract=%g\n", col, L);
+    // The extruder may still hold the previous column's longer retraction (the last column of a layer
+    // before the first column of the next). Keep it for the travel: giving it back here was a stationary
+    // unretract over the previous column followed by a travel across the whole grid with only this
+    // column's (shortest) retraction, which strings over every column. The unretract at the start of
+    // this column gives everything back, and the pillar-to-pillar travels inside the column use L.
+    return buf;
+}
+
+std::string GCode::restore_temp_retract_grid_retraction(const Print &print)
+{
+    if (print.calib_mode() != CalibMode::Calib_Temp_Retract_Grid || !m_temp_retract_saved_retract)
+        return {};
+    writer().config.retraction_length = m_temp_retract_original;
+    m_temp_retract_saved_retract      = false;
+    char buf[96];
+    std::snprintf(buf, sizeof(buf), "; Calib_TempRetract: restore retract=%g\n", m_temp_retract_original.get_at(0));
+    return buf;
+}
+
 void GCode::note_filament_loaded(int filament_id)
 {
     const int key = nozzle_key_for_filament(filament_id);
@@ -12296,7 +12543,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
 
     // if we are running a single-extruder setup, just set the extruder and return nothing
     if (!m_writer.multiple_extruders) {
-        this->placeholder_parser().set("current_extruder", extruder_id);
+        this->placeholder_parser().set("current_extruder", m_writer.output_tool(extruder_id));
         // BBS: keep the extruder-change retraction placeholders in step with the active filament.
         set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
@@ -12337,7 +12584,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         // _do_export already recorded it next to ";VT" when the plate has a grouping result.
         if (m_filament_change_sequence.empty())
             this->record_filament_change(extruder_id);
-        this->placeholder_parser().set("current_extruder", extruder_id);
+        this->placeholder_parser().set("current_extruder", m_writer.output_tool(extruder_id));
         set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
         set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
@@ -12477,8 +12724,9 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     new_filament_e_feedrate       = new_filament_e_feedrate == 0 ? 100 : new_filament_e_feedrate;
 
     DynamicConfig dyn_config;
-    dyn_config.set_key_value("previous_extruder", new ConfigOptionInt(previous_extruder_id));
-    dyn_config.set_key_value("next_extruder", new ConfigOptionInt((int) extruder_id));
+    dyn_config.set_key_value("previous_extruder",
+                             new ConfigOptionInt(previous_extruder_id < 0 ? previous_extruder_id : int(m_writer.output_tool(unsigned(previous_extruder_id)))));
+    dyn_config.set_key_value("next_extruder", new ConfigOptionInt(int(m_writer.output_tool(extruder_id))));
     // Ultra: single-mapped dual-nozzle change_filament vars (filament id == extruder id; hotend -1).
     dyn_config.set_key_value("current_filament_id", new ConfigOptionInt(std::max(0, previous_extruder_id)));
     dyn_config.set_key_value("next_filament_id", new ConfigOptionInt((int) extruder_id));
@@ -12601,7 +12849,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
 
     // We inform the writer about what is happening, but we may not use the resulting gcode.
     std::string toolchange_command = m_writer.toolchange(extruder_id);
-    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), extruder_id))
+    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), m_writer.output_tool(extruder_id)))
         gcode += toolchange_command;
     else {
         // user provided his own toolchange gcode, no need to do anything
@@ -12616,7 +12864,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         gcode += m_writer.set_temperature(temp, false);
     }
 
-    this->placeholder_parser().set("current_extruder", extruder_id);
+    this->placeholder_parser().set("current_extruder", m_writer.output_tool(extruder_id));
     set_cut_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
     // BBS: re-publish for everything that runs AFTER the toolchange (filament_start_gcode and the
     // rest of the layer). change_filament_gcode itself already saw these values above.

@@ -600,6 +600,15 @@ private:
     // filament options of m_config change during an export).
     ResolvedFilamentFlow                m_filament_flow;
     DynamicConfig                       m_calib_config;
+    // Calib_Temp_Retract_Grid only: the writer's retraction_length is mutated per column
+    // and restored at the end of the print so a later toolchange uses the preset.
+    bool                                m_temp_retract_saved_retract { false };
+    ConfigOptionFloats                  m_temp_retract_original;
+    int                                 m_temp_retract_last_band { -1 };
+    std::string                         apply_temp_retract_grid_layer(const Print &print, double print_z);
+    std::string                         apply_temp_retract_grid_object(const Print &print, const PrintObject &object);
+    std::string                         reset_temp_retract_grid_first_layer(const Print &print);
+    std::string                         restore_temp_retract_grid_retraction(const Print &print);
     // scaled G-code resolution
     double                              m_scaled_resolution;
     GCodeWriter                         m_writer;
@@ -851,7 +860,10 @@ private:
     {
         // The slot is resolved once per export (m_filament_flow.process_config_idx); the same
         // slot get_value_at(m_config, opt, ConfigFlowDomain::Process, id) picks.
-        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
+        // Per-nozzle process P1: an option of the extruder-slot layout's length reads the filament's
+        // extruder slot when process_extruder_values is set (process_config_idx).
+        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, opt.values.size(),
+                                                                 m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
     }
 
     void print_machine_envelope(GCodeOutputStream &file, Print &print);

@@ -37,6 +37,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
+	test_paint_wire.cpp
 	test_paint_remap.cpp
 	test_spread_paint.cpp
 	test_airbrush.cpp
@@ -120,6 +121,13 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
 	test_mixed_nozzle.cpp
+	test_nozzle_process.cpp
+	test_tool_slots.cpp
+	test_nozzle_editing.cpp
+	test_nozzle_widths.cpp
+	test_nozzle_override.cpp
+	test_nozzle_tool_process.cpp
+	test_nozzle_rack_slots.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
@@ -143,6 +151,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
+	test_calib.cpp
 	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
