@@ -122,7 +122,25 @@ private:
     // set from the scene on a rebuild or when `sync_selection`.
     void                     refresh_materials(bool sync_selection);
 
-    void                     on_choose_background_image();
+    // `type`: Image, or (1h-2) Backplate: the picture becomes the photo backplate.
+    void                     on_choose_background_image(Showcase::BackgroundType type = Showcase::BackgroundType::Image);
+    // 1h-2: moves the camera along its view (keeping the model's size in the frame) so the frame has the
+    // angle of view of a `focal_mm` 35 mm equivalent lens; with `pitch` (radians, + = down) also turns it
+    // to that pitch (Match camera for a photo backplate).
+    void                     apply_camera_lens(double focal_mm, const double *pitch = nullptr);
+    // 1h-2: the ground projection's camera height and dome radius as drawn when the scene leaves them
+    // automatic (0), before the world scale; for the panel.
+    void                     ground_auto_values(double &height, double &radius);
+    // 1h-2b: the Lens choice shows the camera's lens now: a preset within 3 %, else "~42 mm" (the last
+    // entry), or nothing for an orthographic camera.
+    void                     refresh_lens();
+    // 1h-2, the deferred part: dragging the photo backplate's horizon line on the live view (within a
+    // few pixels of it). True for the events it used.
+    bool                     horizon_on_mouse(wxMouseEvent &evt);
+    // 1h-3: the Environments dialog; afterwards the environment lists are made again (and a newly
+    // added HDRI is picked).
+    void                     on_manage_environments();
+    void                     refresh_environment_choices();
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -360,6 +378,25 @@ private:
     wxButton                *m_bg_image = nullptr;
     wxChoice                *m_bg_fit = nullptr;
     wxSlider                *m_bg_blur = nullptr;
+    // 1h-2: where the environment backdrop sits, and the photo backplate's camera match.
+    wxCheckBox              *m_bg_ground = nullptr;
+    wxSpinCtrl              *m_bg_ground_height = nullptr;
+    wxSpinCtrl              *m_bg_ground_radius = nullptr;
+    wxSlider                *m_bg_ground_scale = nullptr;
+    wxSlider                *m_bg_pitch = nullptr;
+    wxSlider                *m_plate_horizon = nullptr;
+    wxSpinCtrl              *m_plate_focal = nullptr;
+    wxButton                *m_plate_match = nullptr;
+    wxChoice                *m_plate_rotation = nullptr;   // 1h-2b: the photo's own turn and mirror
+    wxCheckBox              *m_plate_flip = nullptr;
+    wxSlider                *m_plate_zoom = nullptr;       // 1h-2b: framing the photo
+    wxSlider                *m_plate_offset_x = nullptr;
+    wxSlider                *m_plate_offset_y = nullptr;
+    wxButton                *m_plate_fit = nullptr;
+    // 1h-2b: what the toolpaths view shows besides the model (Materials, under Show).
+    wxCheckBox              *m_tp_supports = nullptr;
+    wxCheckBox              *m_tp_skirt = nullptr;
+    wxCheckBox              *m_tp_infill = nullptr;
     wxChoice                *m_floor_type = nullptr;
     wxColourPickerCtrl      *m_floor_color = nullptr;
     wxSlider                *m_floor_shadow = nullptr;
@@ -399,10 +436,39 @@ private:
     wxCheckBox              *m_lights_off = nullptr;
     wxSlider                *m_lights_ambient = nullptr;
     wxSlider                *m_glow_intensity = nullptr;
+    wxSlider                *m_translucency = nullptr;   // realism 1d
+    // Realism 1f: the imperfections.
+    wxSlider                *m_imp_wobble = nullptr;
+    wxSlider                *m_imp_seam = nullptr;
+    wxSlider                *m_imp_strings = nullptr;
+    wxSlider                *m_imp_colour = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
+    std::vector<int>         m_mat_slots;     // the filament slot of each choice (physical, then Color Mixing)
     std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
+    // 1h-2: the lens (an action: dolly-zooms to a focal length) and the depth of field.
+    wxChoice                *m_lens = nullptr;
+    wxCheckBox              *m_dof = nullptr;
+    wxChoice                *m_dof_fnumber = nullptr;
+    wxCheckBox              *m_dof_on_model = nullptr;
+    wxSpinCtrl              *m_dof_focus = nullptr;
+    wxChoice                *m_dof_quality = nullptr;
+    // 1h-2, the deferred part: the foreground's spill and the bokeh highlights.
+    wxCheckBox              *m_dof_bleed = nullptr;
+    wxSlider                *m_dof_highlights = nullptr;
+    // Realism 1g: the camera effects.
+    wxSlider                *m_lens_grain = nullptr;
+    wxSlider                *m_lens_vignette = nullptr;
+    wxSlider                *m_lens_bloom = nullptr;
+    wxSlider                *m_lens_chromatic = nullptr;
+    wxSlider                *m_lens_distortion = nullptr;
+    // 1h-2, the deferred part: the ground projection's automatic size, and dragging the photo horizon.
+    wxButton                *m_bg_ground_auto = nullptr;
+    bool                     m_horizon_drag = false;
+    // 1h-3: "Environments..." (downloads and the user's own HDRIs), under each environment picker.
+    wxButton                *m_env_more = nullptr;
+    wxButton                *m_light_env_more = nullptr;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
     wxChoice                *m_size = nullptr;
@@ -504,6 +570,7 @@ private:
     wxCheckBox              *m_vid_build = nullptr;
     wxChoice                *m_vid_co_motion = nullptr;   // S5c
     wxChoice                *m_vid_co_appear = nullptr;   // S5c
+    wxChoice                *m_vid_build_source = nullptr;     // Build-up shows: Toolpaths (Auto) / Model (Clip)
     wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
     wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;

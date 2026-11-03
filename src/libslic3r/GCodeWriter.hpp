@@ -110,6 +110,14 @@ public:
     // printed with the same extruder.
     std::string toolchange_prefix() const;
     std::string toolchange(unsigned int extruder_id);
+    // Per-nozzle process P4: the tool number the G-code names for each filament (filament_output_tools), empty
+    // when the G-code names the filament's own tool. T<n> and the T of a tool's temperature go through it.
+    void        set_output_tools(std::vector<int> filament_tools) { m_output_tools = std::move(filament_tools); }
+    const std::vector<int> &output_tools() const { return m_output_tools; }
+    unsigned int output_tool(unsigned int filament_id) const
+    {
+        return filament_id < m_output_tools.size() && m_output_tools[filament_id] >= 0 ? unsigned(m_output_tools[filament_id]) : filament_id;
+    }
     std::string set_speed(double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     void        set_speed(std::string &out, double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     // SoftFever NOTE: the returned speed is mm/minute
@@ -215,6 +223,8 @@ public:
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
   private:
+    // Per-nozzle process P4: see set_output_tools().
+    std::vector<int> m_output_tools;
 	// Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_extruders;
     bool            m_single_extruder_multi_material;

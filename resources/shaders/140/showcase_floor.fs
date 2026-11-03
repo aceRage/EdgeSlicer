@@ -42,6 +42,10 @@ uniform vec2      viewport_size;
 uniform vec3      camera_position;
 // G1: 0 = lights on; otherwise the share of the light taken away (1 - the ambient level).
 uniform float     scene_dim;
+// Realism 1d: the light the shadow casters let through, seen from the key light (showcase_transmit.fs;
+// 1 = clear, 0 = opaque). Off = the shadow is grey as before.
+uniform bool      use_transmit;
+uniform sampler2D transmit_map;
 
 in vec4 world_pos;
 in vec2 local_pos;
@@ -105,6 +109,39 @@ void main()
     float contact = contact_occlusion();
     float dark = 1.0 - (1.0 - occ) * (1.0 - contact);
     vec4 refl = reflection();
+
+    if (use_transmit && occ > 0.0 && mode != 3) {
+        // 1d: under a translucent caster the shadow lets some light through, in the plastic's colour.
+        // (The grid floor keeps grey shadows.)
+        vec4 lp = shadow_light_vp * world_pos;
+        vec2 uv = (lp.xy / lp.w) * 0.5 + 0.5;
+        vec3 through = clamp(texture(transmit_map, uv).rgb, 0.0, 1.0);
+        vec3 dark_rgb = vec3(1.0) - (vec3(1.0) - occ * (vec3(1.0) - through)) * (1.0 - contact);
+        float a_dark = max(dark_rgb.r, max(dark_rgb.g, dark_rgb.b));
+        if (mode == 1) {
+            float a_shadow = a_dark * fade;
+            float a_refl = clamp(refl.a, 0.0, 1.0) * fade;
+            float a = a_refl + a_shadow * (1.0 - a_refl);
+            if (a <= 0.001)
+                discard;
+            // Over white the catcher leaves 1 - dark_rgb: the shadow's own colour where it is lighter.
+            vec3 shade = a_dark > 1e-4 ? (vec3(a_dark) - dark_rgb) / a_dark : vec3(0.0);
+            vec3 c = (refl.rgb * fade + shade * a_shadow * (1.0 - a_refl)) / max(a, 1e-4);
+            out_color = vec4(clamp(c, 0.0, 1.0), a);
+            return;
+        }
+        vec3 base_t = floor_color.rgb;
+        if (mode == 4) {
+            vec2 p = world_pos.xy / max(tile_mm, 1.0);
+            base_t = texture(floor_tex, vec2(dot(floor_uv.xy, p), dot(floor_uv.zw, p))).rgb;
+        }
+        vec3 tint_t = dot(light_tint, vec3(1.0)) > 0.0 ? mix(vec3(1.0), light_tint, 0.35) : vec3(1.0);
+        float lambert_t = 0.80 + 0.20 * clamp(light_dir.z, 0.0, 1.0);
+        vec3 ct = base_t * tint_t * lambert_t * (vec3(1.0) - dark_rgb) * pow(max(1.0 - scene_dim, 0.0), 1.0 / 2.2);
+        ct = ct * (1.0 - clamp(refl.a, 0.0, 1.0)) + refl.rgb;
+        out_color = vec4(clamp(ct, 0.0, 1.0), fade);
+        return;
+    }
 
     if (mode == 1) {
         // Catcher: the reflection over the shadow, both as coverage.

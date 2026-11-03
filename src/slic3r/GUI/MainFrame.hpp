@@ -58,6 +58,7 @@ class MainFrame;
 class ParamsDialog;
 class SliceModePopup;
 class HomePanel;
+class LayerlingPanel;
 
 enum QuickSlice
 {
@@ -448,6 +449,13 @@ public:
     void show_device(bool bBBLPrinter);
     // The notebook index the Device page is inserted at (see the .cpp).
     int  device_page_position() const;
+    // The Layerling tab (LayerlingPanel): added or removed to follow Preferences > "Show the Layerling
+    // tab". It is always the last page and has no TabPosition: it is found by pointer, never by index.
+    void update_layerling_tab();
+    // The Layerling tab's panel, null before the tab was first shown.
+    LayerlingPanel *layerling_panel() const { return m_layerling; }
+    // Where Calibration goes back in (show_device): the end, or just before the Layerling page.
+    int  calibration_page_position() const;
     // Attach / detach the File > Export "Send ... to Bambu Connect" items (Bambu printers only).
     void show_bambu_connect_menu_items(bool show);
 
@@ -456,6 +464,7 @@ public:
     MaxVolumetricSpeed_Test_Dlg* m_vol_test_dlg { nullptr };
     VFA_Test_Dlg* m_vfa_test_dlg { nullptr };
     Retraction_Test_Dlg* m_retraction_calib_dlg{ nullptr };
+    TempRetract_Calibration_Dlg* m_temp_retract_calib_dlg{ nullptr };
     Input_Shaping_Freq_Test_Dlg* m_IS_freq_calib_dlg{ nullptr };
     Input_Shaping_Damp_Test_Dlg* m_IS_damp_calib_dlg{ nullptr };
     Cornering_Test_Dlg* m_cornering_calib_dlg{ nullptr };
@@ -474,6 +483,7 @@ public:
     MonitorPanel*         m_monitor{ nullptr };
     LazyPanelHolder*      m_monitor_holder{ nullptr };
     StreamPanel*          m_stream{ nullptr };
+    LayerlingPanel*       m_layerling{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     // The old Multi-device pages, built on first use inside m_multi_machine_dlg (jump_to_multipage).
