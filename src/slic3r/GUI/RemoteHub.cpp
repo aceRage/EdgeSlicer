@@ -3442,6 +3442,9 @@ static std::string ff_camera_url_from_detail(const std::string& body)
     return "";
 }
 
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error);
+
 // A phone upload: stream the body to <uploads>/<stamp>_<name>. Only model files, only
 // a bare file name (X-File-Name, percent-encoded UTF-8), Content-Length required.
 static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path, std::string& error)
@@ -3461,8 +3464,16 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
         error = "only .3mf, .stl, .obj, .step and .glb files can be opened";
         return false;
     }
+    return spool_body(client, r, clean, MAX_UPLOAD, out_path, error);
+}
+
+// The body of a request to <uploads>/<stamp>_<random>/<name> (one folder each, so a file keeps its own
+// name), Content-Length required and at most `max_bytes`. A stalled or broken body leaves nothing.
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error)
+{
     if (r.content_length == 0) { error = "empty upload (Content-Length required)"; return false; }
-    if (r.content_length > MAX_UPLOAD) { error = "file too large"; return false; }
+    if (r.content_length > max_bytes) { error = "file too large"; return false; }
     ensure_dirs();
     // One folder per upload so the file keeps its own name (it becomes the object / project name).
     // The stamp is only one-second precise, so a random suffix keeps two uploads in the same
@@ -3470,7 +3481,7 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
     const fs::path folder = fs::path(uploads_dir()) / (timestamp_compact() + "_" + random_hex(4));
     boost::system::error_code ec;
     fs::create_directories(folder, ec);
-    out_path = (folder / clean).string();
+    out_path = (folder / name).string();
     boost::nowide::ofstream f(out_path, std::ios::binary | std::ios::trunc);
     if (!f) { error = "cannot write to " + uploads_dir(); return false; }
     set_read_timeout(client, UPLOAD_TIMEOUT_S); // a stalled upload frees its thread and its file
@@ -7118,6 +7129,37 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             if (inst.pid == pid) target = inst;
         if (!target.alive) { respond_json(client, 404, json_error("no such slicer instance")); return; }
         const std::string base = "http://127.0.0.1:" + std::to_string(target.port);
+        // paint_v1 (H2): the tablet's paint for a session. Spooled like an upload - a painted object's
+        // body is MBs and the proxy takes 64 KiB - then handed to the slicer, which reads it once and
+        // deletes it. The session id is 16 lowercase hex characters the slicer made.
+        if (sub.compare(0, 7, "/paint/") == 0 && r.method == "POST") {
+            const std::string tail  = sub.substr(7);
+            const size_t      cut   = tail.find('/');
+            const std::string sid   = cut == std::string::npos ? tail : tail.substr(0, cut);
+            if (cut == std::string::npos || tail.substr(cut) != "/apply" || !PaintV1::is_session_id(sid)) {
+                respond_json(client, 404, json_error("no such route; see /api"));
+                return;
+            }
+            std::string path, error;
+            if (!spool_body(client, r, "apply.psapply", PaintV1::MAX_APPLY_BYTES, path, error)) {
+                respond_json(client, error == "file too large" ? 413 : 400, json_error(error));
+                return;
+            }
+            gc_uploads();
+            int         status = 502;
+            std::string body   = json_error("the slicer did not answer");
+            Http::post(base + "/api/paint/sessions/" + sid + "/apply")
+                .timeout_connect(2).timeout_max(300)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .set_post_body("path=" + percent_encode(path))
+                .on_complete([&](std::string b, unsigned st) { status = (int) st; body = b; })
+                .on_error([&](std::string b, std::string err, unsigned st) { status = st ? (int) st : 502; body = b.empty() ? json_error(err) : b; })
+                .perform_sync();
+            boost::system::error_code ig;
+            fs::remove_all(fs::path(path).parent_path(), ig); // the slicer deleted it already; never leave it
+            respond_json(client, status, body);
+            return;
+        }
         if (sub == "/open" && r.method == "POST") {
             std::string path, error;
             if (!spool_upload(client, r, path, error)) { respond_json(client, 400, json_error(error)); return; }

@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 
 namespace Slic3r {
 namespace GUI {
@@ -22,8 +23,9 @@ namespace PaintV1 {
 
 const std::vector<std::string>& pair_features()
 {
-    // paint_v1: H1, the read side - objects, sessions, a volume's mesh and the PC's painting.
-    static const std::vector<std::string> f = { "paint_v1" };
+    // paint_v1: H1, the read side - objects, sessions, a volume's mesh and the PC's painting;
+    // paint_v1_apply: H2, the tablet's paint applied with the per-triangle merge (one undo step).
+    static const std::vector<std::string> f = { "paint_v1", "paint_v1_apply" };
     return f;
 }
 
@@ -290,6 +292,159 @@ std::string revision(const ObjectSnapshot& object, const std::vector<PaletteSlot
                    paint_hash(v.paint) + "\n");
     sha.update("p " + palette_hash(palette) + "\n");
     return sha.hex().substr(0, 16);
+}
+
+// ---- apply (H2) ----
+
+namespace {
+
+struct Reader
+{
+    const std::string& b;
+    size_t             at { 0 };
+    bool               ok { true };
+
+    uint32_t u32()
+    {
+        if (at + 4 > b.size()) { ok = false; return 0; }
+        uint32_t v = 0;
+        for (int i = 0; i < 4; ++i)
+            v |= uint32_t(uint8_t(b[at + i])) << (8 * i);
+        at += 4;
+        return v;
+    }
+
+    std::string text(size_t n)
+    {
+        if (at + n > b.size()) { ok = false; return {}; }
+        std::string out = b.substr(at, n);
+        at += n;
+        return out;
+    }
+};
+
+bool is_hex(const std::string& s) { return s.find_first_not_of("0123456789abcdef") == std::string::npos; }
+
+} // namespace
+
+bool decode_apply(const std::string& body, ApplyRequest& out, std::string& error)
+{
+    out = ApplyRequest();
+    Reader r { body };
+    if (r.text(4) != "PSA1") { error = "not a paint apply body"; return false; }
+    out.revision = r.text(16);
+    const uint32_t n_volumes = r.u32();
+    if (!r.ok || !is_hex(out.revision)) { error = "the body is truncated or its revision is not hex"; return false; }
+    // Every volume and tree costs at least 8 bytes: a count past that is a lie, refused before allocating.
+    if (n_volumes > body.size() / 8) { error = "the body is truncated"; return false; }
+    std::set<int> seen;
+    for (uint32_t v = 0; v < n_volumes; ++v) {
+        ApplyVolume vol;
+        vol.index     = int(r.u32());
+        vol.triangles = r.u32();
+        vol.mesh_hash = r.text(64);
+        const uint32_t n_trees = r.u32();
+        if (!r.ok || n_trees > body.size() / 8 || !is_hex(vol.mesh_hash)) { error = "the body is truncated"; return false; }
+        if (!seen.insert(vol.index).second) { error = "volume " + std::to_string(vol.index) + " is listed twice"; return false; }
+        vol.trees.reserve(n_trees);
+        for (uint32_t t = 0; t < n_trees; ++t) {
+            const uint32_t tri = r.u32(), n = r.u32();
+            if (!r.ok || n == 0 || r.at + n > body.size()) { error = "the body is truncated"; return false; }
+            vol.trees.emplace_back(int(tri), std::vector<uint8_t>(body.begin() + r.at, body.begin() + r.at + n));
+            r.at += n;
+        }
+        out.volumes.push_back(std::move(vol));
+    }
+    if (r.at != body.size()) { error = "the body has trailing bytes"; return false; }
+    return true;
+}
+
+std::string encode_apply(const ApplyRequest& request)
+{
+    std::string out("PSA1", 4);
+    std::string rev = request.revision;
+    rev.resize(16, '0');
+    out += rev;
+    put_u32(out, uint32_t(request.volumes.size()));
+    for (const ApplyVolume& v : request.volumes) {
+        put_u32(out, uint32_t(v.index));
+        put_u32(out, v.triangles);
+        std::string hash = v.mesh_hash;
+        hash.resize(64, '0');
+        out += hash;
+        put_u32(out, uint32_t(v.trees.size()));
+        for (const PaintWireTree& t : v.trees) {
+            put_u32(out, uint32_t(t.first));
+            put_u32(out, uint32_t(t.second.size()));
+            out.append(reinterpret_cast<const char*>(t.second.data()), t.second.size());
+        }
+    }
+    return out;
+}
+
+PaintByVolume paint_by_volume(const ObjectSnapshot& object)
+{
+    PaintByVolume out;
+    for (const VolumeSnapshot& v : object.volumes)
+        if (v.paintable())
+            out[int(v.index)] = v.paint;
+    return out;
+}
+
+ApplyPlan plan_apply(const ApplyRequest& request, const ObjectSnapshot& current, const std::string& current_revision,
+                     const PaintByVolume* base, size_t filaments)
+{
+    ApplyPlan plan;
+    auto refuse = [&plan](int status, nlohmann::json answer) {
+        plan.status = status;
+        plan.answer = std::move(answer);
+        plan.paint.clear();
+        return plan;
+    };
+    if (request.volumes.empty())
+        return refuse(400, { { "error", "nothing to apply" } });
+    const bool    moved = request.revision != current_revision;
+    nlohmann::json conflicts = nlohmann::json::array();
+    for (const ApplyVolume& want : request.volumes) {
+        const VolumeSnapshot* vol = nullptr;
+        for (const VolumeSnapshot& v : current.volumes)
+            if (int(v.index) == want.index && v.paintable())
+                vol = &v;
+        if (vol == nullptr || !vol->mesh)
+            return refuse(400, { { "error", "no such volume (" + std::to_string(want.index) + " is not a model part)" } });
+        if (want.triangles != vol->triangles() || want.mesh_hash != mesh_hash(vol->mesh))
+            return refuse(409, { { "error", "the mesh changed on the PC" }, { "revision", current_revision }, { "volume", want.index } });
+        std::string error;
+        for (const PaintWireTree& t : want.trees)
+            if (!paint_wire_check_tree(t.second, error))
+                return refuse(400, { { "error", "volume " + std::to_string(want.index) + ", triangle " + std::to_string(t.first) + ": " + error } });
+        const int top = paint_wire_max_state(want.trees, error);
+        if (top < 0)
+            return refuse(400, { { "error", error } });
+        if (size_t(top) > filaments)
+            return refuse(400, { { "error", "filament " + std::to_string(top) + " is not in the project (it has " +
+                                            std::to_string(filaments) + ")" } });
+        if (moved) {
+            if (base == nullptr || base->count(want.index) == 0)
+                return refuse(409, { { "error", "the PC's paint changed; read the object again" }, { "revision", current_revision } });
+            const TriangleSelector::TriangleSplittingData& then = base->at(want.index);
+            nlohmann::json clash = nlohmann::json::array();
+            for (const PaintWireTree& t : want.trees)
+                if (paint_wire_triangle_bits(then, t.first) != paint_wire_triangle_bits(vol->paint, t.first))
+                    clash.push_back(t.first);
+            if (!clash.empty())
+                conflicts.push_back({ { "volume", want.index }, { "triangles", clash } });
+        }
+        TriangleSelector::TriangleSplittingData merged;
+        if (!paint_wire_apply(vol->triangles(), want.trees, vol->paint, merged, error))
+            return refuse(400, { { "error", "volume " + std::to_string(want.index) + ": " + error } });
+        plan.paint.emplace_back(want.index, std::move(merged));
+        plan.triangles += want.trees.size();
+    }
+    if (!conflicts.empty())
+        return refuse(409, { { "error", "the PC painted some of the same triangles" }, { "revision", current_revision },
+                             { "conflicts", conflicts } });
+    return plan;
 }
 
 // ---- JSON ----

@@ -1443,7 +1443,7 @@ TEST_CASE("paint_v1: /pair lists paint_v1, the manifest is v8, the read routes a
     const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
     CHECK(std::find(f.begin(), f.end(), "paint_v1") != f.end());
     CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
-    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 8);
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 8);
 
     using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
     CHECK(instance_api_allowed("GET", "/api/paint/objects"));
@@ -1467,4 +1467,17 @@ TEST_CASE("paint_v1: /pair lists paint_v1, the manifest is v8, the read routes a
     CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/../../../info/mesh"));
     CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcd%2f/mesh"));
     CHECK_FALSE(instance_api_allowed("GET", "/api/paint"));
+}
+
+TEST_CASE("paint_v1 apply: /pair lists paint_v1_apply, the manifest is v9, the proxy never takes the apply", "[RemoteHub][paint_v1]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "paint_v1_apply") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 9);
+    // The hub spools /i/<pid>/paint/<id>/apply itself and calls the slicer; the instance's own apply
+    // route is not proxied (a phone cannot point it at a file).
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef/apply"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/apply"));
 }

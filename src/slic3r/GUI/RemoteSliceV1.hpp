@@ -33,8 +33,9 @@ const std::vector<std::string>& pair_features();
 // 7: PR G, plates, objects and save (plates/add, plates/{i}/delete|rename|bed_type, objects/delete,
 // objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type);
 // 8: paint_v1 (H1), tablet paint sessions read side (paint/objects, paint/sessions, a session's
-// state, mesh and painting; RemotePaintV1.hpp).
-constexpr int INSTANCE_API_VERSION = 8;
+// state, mesh and painting; RemotePaintV1.hpp); 9: paint_v1 apply (H2, paint/sessions/{id}/apply, the
+// hub's spooled /i/<pid>/paint/{id}/apply).
+constexpr int INSTANCE_API_VERSION = 9;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo

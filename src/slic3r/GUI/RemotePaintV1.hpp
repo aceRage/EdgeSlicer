@@ -17,6 +17,13 @@
 //     triangle count x 3 uint32 (vertex indices)
 //   The mesh hash is SHA-256 (lowercase hex) of everything after the 12-byte header.
 //
+//   apply (H2: POST /r/<token>/i/<pid>/paint/<session>/apply, spooled by the hub), little-endian: the
+//   tablet's paint as paint wire trees (EdgeSlicerApp docs/paint_wire_v0.md), only the triangles it
+//   touched, against the revision it painted on:
+//     "PSA1"  16 bytes revision (ASCII hex)  uint32 volume count
+//     per volume: uint32 volume index  uint32 triangle count  64 bytes mesh hash (ASCII hex)
+//                 uint32 tree count, then per tree (ascending triangles): uint32 triangle, uint32 n, n bytes
+//
 //   paint (application/x-edgeslicer-pspaint), little-endian: the PC's painting as the app draws it,
 //   per filament state the painted sub-triangles and the original triangle each came from
 //   (TriangleSelector::get_facets_strict). State 0 (unpainted) is not listed.
@@ -24,12 +31,14 @@
 //     per state: uint32 state  uint32 sub-triangle count n
 //                n x 9 float32 (three corners, mesh space)   n x uint32 (original triangle)
 
+#include "libslic3r/PaintWire.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,7 +53,7 @@ enum class ModelVolumeType : int;
 namespace GUI {
 namespace PaintV1 {
 
-// What /pair `features` gains: "paint_v1" (the read side; the apply side will add its own).
+// What /pair `features` gains: "paint_v1" (the read side) and "paint_v1_apply" (H2, sending paint).
 const std::vector<std::string>& pair_features();
 
 // The caps the owner accepted after spike S1: an object above MAX_TRIANGLES (all its model parts)
@@ -117,6 +126,50 @@ std::string palette_hash(const std::vector<PaletteSlot>& palette);
 // 16 hex characters over each volume's index, type, mesh hash and paint hash, and the palette
 // hash. Changes when anything the app shows changes; transforms are not part of it.
 std::string revision(const ObjectSnapshot& object, const std::vector<PaletteSlot>& palette);
+
+// ---- apply (H2) ----
+// The largest apply body the hub spools (a 2M-triangle object painted all over stays well below).
+constexpr size_t MAX_APPLY_BYTES = 256u * 1024 * 1024;
+constexpr const char* APPLY_UNDO_LABEL = "Paint from tablet";
+
+struct ApplyVolume
+{
+    int                        index { -1 };
+    uint32_t                   triangles { 0 };
+    std::string                mesh_hash;
+    std::vector<PaintWireTree> trees;
+};
+
+struct ApplyRequest
+{
+    std::string              revision;
+    std::vector<ApplyVolume> volumes;
+};
+
+bool        decode_apply(const std::string& body, ApplyRequest& out, std::string& error);
+std::string encode_apply(const ApplyRequest& request);
+
+// The paint each model part had when a session last read it, by volume index: what the tablet painted
+// on. Kept per revision so a send against an older one can still merge (`plan_apply`).
+using PaintByVolume = std::map<int, TriangleSelector::TriangleSplittingData>;
+PaintByVolume paint_by_volume(const ObjectSnapshot& object);
+
+// What an apply does, decided before anything changes: the new paint per volume, or the refusal.
+struct ApplyPlan
+{
+    int            status { 200 };
+    nlohmann::json answer;  // the refusal's {error, ...}
+    std::vector<std::pair<int, TriangleSelector::TriangleSplittingData>> paint; // volume index -> new paint
+    size_t         triangles { 0 }; // triangles the tablet sent
+};
+
+// The per-triangle merge (owner decision Q4, 2026-11-02): the touched triangles take the tablet's trees,
+// every other triangle keeps the PC's current paint. When the PC's paint changed since `request.revision`
+// (`base`: the paint at that revision, nullptr when this hub never served it), the send is refused with
+// 409 only if a touched triangle is one the PC changed too; the answer lists them. A changed mesh is 409,
+// a bad body (tree, triangle, volume, a filament above `filaments`) 400.
+ApplyPlan plan_apply(const ApplyRequest& request, const ObjectSnapshot& current, const std::string& current_revision,
+                     const PaintByVolume* base, size_t filaments);
 
 // ---- JSON ----
 // GET /api/paint/objects: every object with its key, plate, volumes and what opening it costs.
