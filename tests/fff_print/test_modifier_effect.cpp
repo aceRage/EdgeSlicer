@@ -31,6 +31,7 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 
 #include "test_data.hpp"
 
@@ -50,6 +51,8 @@ struct ModifierSpec
     // what the SVG/Emboss gizmo creates (it sets only "extruder", and extruder 0 means "default"
     // and is explicitly ignored by apply_to_print_region_config).
     std::function<void(ModelVolume &)> overrides;
+    // Two filaments, and the part carries colour painting (all facets, filament 2).
+    bool paint_part { false };
 };
 
 // One object: a 20 mm part cube at the origin plus one modifier cube, sliced.
@@ -57,17 +60,33 @@ struct ModifierSpec
 const PrintObject *slice_with_modifier(Print &print, Model &model, const ModifierSpec &spec)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    if (spec.paint_part) {
+        config.set_num_extruders(2);
+        config.set_num_filaments(2);
+        config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+        config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+        config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    }
 
     ModelObject *object = model.add_object();
     object->name = "cube_with_modifier";
 
-    auto add_part = [&object]() {
+    auto add_part = [&object, &spec]() {
         ModelVolume *v = object->add_volume(TriangleMesh(its_make_cube(20., 20., 20.)));
         v->name = "part";
         v->set_type(ModelVolumeType::MODEL_PART);
         // its_make_cube() builds from the origin into +XYZ; centre it so the offsets below are
         // measured centre-to-centre.
         v->set_offset(Vec3d(-10., -10., -10.));
+        if (spec.paint_part) {
+            v->config.set("extruder", 1);
+            TriangleSelector selector(v->mesh());
+            for (int f = 0; f < int(v->mesh().its.indices.size()); ++f)
+                selector.set_facet(f, EnforcerBlockerType(2));
+            REQUIRE(v->mmu_segmentation_facets.set(selector));
+        }
         return v;
     };
     auto add_modifier = [&object, &spec]() {
@@ -219,6 +238,52 @@ TEST_CASE("text-emboss modifier with the creation-path config warns like an SVG 
     CHECK_THAT(slice_warning_text(*object, PrintStateBase::SlicingModifierNoOverrides),
                Catch::Matchers::Contains("text_modifier"));
     CHECK(distinct_layer_regions(*object) == 1);
+}
+
+TEST_CASE("modifier paint note selection", "[ModifierEffect]")
+{
+    // No painting under the modifier, or no explicit filament: nothing to add.
+    CHECK(classify_modifier_paint_note(true,  true,  false, false) == ModifierPaintNote::None);
+    CHECK(classify_modifier_paint_note(true,  false, false, true)  == ModifierPaintNote::None);
+    CHECK(classify_modifier_paint_note(false, false, true,  true)  == ModifierPaintNote::None);
+    // Same filament as the object on a painted part.
+    CHECK(classify_modifier_paint_note(true,  true,  false, true)  == ModifierPaintNote::SameFilamentPainted);
+    // Different filament on a painted part; a real override of something else with the same filament is not one.
+    CHECK(classify_modifier_paint_note(false, true,  true,  true)  == ModifierPaintNote::FilamentOverriddenByPaint);
+    CHECK(classify_modifier_paint_note(false, true,  false, true)  == ModifierPaintNote::None);
+}
+
+TEST_CASE("same-filament modifier on a painted part explains the paint override", "[ModifierEffect]")
+{
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.paint_part = true;
+    spec.overrides  = [](ModelVolume &v) { v.config.set("extruder", 1); };
+    const PrintObject *object = slice_with_modifier(print, model, spec);
+
+    CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierSameFilamentPainted));
+    CHECK_THAT(slice_warning_text(*object, PrintStateBase::SlicingModifierSameFilamentPainted),
+               Catch::Matchers::Contains("painted areas override"));
+    // Replaces the plain notice instead of stacking on it.
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierOverriddenByPaint));
+}
+
+TEST_CASE("different-filament modifier on a painted part warns that paint wins", "[ModifierEffect]")
+{
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.paint_part = true;
+    spec.overrides  = [](ModelVolume &v) { v.config.set("extruder", 2); };
+    const PrintObject *object = slice_with_modifier(print, model, spec);
+
+    CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierOverriddenByPaint));
+    CHECK_THAT(slice_warning_text(*object, PrintStateBase::SlicingModifierOverriddenByPaint),
+               Catch::Matchers::Contains("override the filament of modifier"));
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierSameFilamentPainted));
+    CHECK_FALSE(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
 }
 
 TEST_CASE("modifier outside the part's bounding box warns that it overlaps nothing", "[ModifierEffect]")

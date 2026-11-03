@@ -4565,6 +4565,61 @@ std::vector<std::string> PrintObject::modifiers_without_overrides() const
     return out;
 }
 
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted)
+{
+    if (! overlaps_painted || ! sets_filament)
+        return ModifierPaintNote::None;
+    if (region_is_alias)
+        return ModifierPaintNote::SameFilamentPainted;
+    return filament_differs ? ModifierPaintNote::FilamentOverriddenByPaint : ModifierPaintNote::None;
+}
+
+PrintObject::ModifierPaintNotes PrintObject::modifier_paint_notes() const
+{
+    ModifierPaintNotes out;
+    // Painting only exists as a concept with several filaments.
+    if (m_shared_regions == nullptr || this->model_object() == nullptr || m_print->config().filament_diameter.size() < 2)
+        return out;
+    for (const ModelVolume *volume : this->model_object()->volumes) {
+        if (volume == nullptr || ! volume->is_modifier())
+            continue;
+        const auto set_filament = [volume](const char *key) {
+            const ConfigOption *opt = volume->config.option(key);
+            return opt != nullptr && opt->getInt() > 0;
+        };
+        const bool sets_filament = set_filament("extruder") || set_filament("wall_filament") ||
+                                   set_filament("sparse_infill_filament") || set_filament("solid_infill_filament");
+        if (! sets_filament)
+            continue;
+        bool seen = false, effective = false, differs = false, overlaps_painted = false;
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+                if (region.model_volume == volume && region.parent >= 0) {
+                    seen = true;
+                    const PrintObjectRegions::VolumeRegion &parent = layer_range.volume_regions[region.parent];
+                    if (parent.model_volume != nullptr && parent.model_volume->is_mm_painted())
+                        overlaps_painted = true;
+                    if (region.region != parent.region) {
+                        effective = true;
+                        if (region.region != nullptr && parent.region != nullptr) {
+                            const PrintRegionConfig &a = region.region->config(), &b = parent.region->config();
+                            if (a.wall_filament != b.wall_filament || a.sparse_infill_filament != b.sparse_infill_filament ||
+                                a.solid_infill_filament != b.solid_infill_filament)
+                                differs = true;
+                        }
+                    }
+                }
+        if (! seen)
+            continue;
+        switch (classify_modifier_paint_note(! effective, true, differs, overlaps_painted)) {
+        case ModifierPaintNote::SameFilamentPainted:       out.same_filament_painted.emplace_back(volume->name); break;
+        case ModifierPaintNote::FilamentOverriddenByPaint: out.filament_overridden.emplace_back(volume->name);   break;
+        default: break;
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> PrintObject::modifiers_without_parent() const
 {
     std::vector<std::string> out;
