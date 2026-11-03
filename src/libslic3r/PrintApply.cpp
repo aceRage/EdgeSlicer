@@ -1,6 +1,9 @@
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
+#include "ToolSlots.hpp"
+#include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
 #include "GCode/WipeTowerEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -1501,6 +1504,15 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
+    // Per-nozzle process P7: the nozzle size each tool carries in this project (nozzle_diameter_override) becomes its
+    // nozzle_diameter before anything reads it. No-op without an override.
+    apply_nozzle_diameter_override(new_full_config);
+    // Per-nozzle process P4: a filament's values for the nozzle it prints on (filament_nozzle_variants) become its
+    // own values, so every reader and the G-code's config block see what is printed.
+    resolve_filament_nozzle_variants(new_full_config);
+    // Per-nozzle process P6: every line width for the nozzle that prints it (explicit per-nozzle widths, mm widths
+    // scaled to the nozzle's size on a printer with mixed sizes). No-op with one nozzle size.
+    resolve_nozzle_line_widths(new_full_config);
     // Only WipeTower2 rotates; the Bambu Lab (Type1) tower is always printed unrotated, as the
     // greyed-out Process field and the inert Rotate tool show. The CLI sets is_BBL_printer() after
     // apply(), so printer_model decides too (resolve_wipe_tower_type).

@@ -1,6 +1,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Model.hpp"
 // cut_target_label() - how "Copy cut to..." names an object in its submenu.
 #include "libslic3r/CutRecipe.hpp"
@@ -2523,6 +2524,119 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     const int item_id = menu->FindItem(_L("Merge with"));
     if (item_id != wxNOT_FOUND)
         menu->Destroy(item_id);
+
+    // Per-nozzle process P2: "Print on nozzle" puts this filament on a tool of a toolchanger (filament_nozzle_assignment),
+    // so it slices with that nozzle's diameter, widths and process. Rebuilt for the filament the menu opens on.
+    const int nozzle_item_id = menu->FindItem(_L("Print on nozzle"));
+    if (nozzle_item_id != wxNOT_FOUND)
+        menu->Destroy(nozzle_item_id);
+    {
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size() && bundle->filament_nozzle_assignment_supported()) {
+            const auto *nozzles = bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            const int   own     = filament + 1;
+            wxMenu     *nozzle_menu = new wxMenu();
+            for (size_t t = 0; nozzles != nullptr && t < nozzles->values.size(); ++t) {
+                const int tool = int(t) + 1;
+                wxString  label = wxString::Format("T%d  %s mm", tool, from_u8(format_diameter_to_str(nozzles->values[t])));
+                if (tool == own)
+                    label += "  " + _L("(its own)");
+                // Checked: the filament's nozzle now, its assignment or else its own tool.
+                append_menu_check_item(nozzle_menu, wxID_ANY, label, "",
+                    [filament, tool](wxCommandEvent &) { plater()->sidebar().set_filament_nozzle(size_t(filament), tool); }, nozzle_menu,
+                    []() { return true; },
+                    [filament, tool, own]() {
+                        const int assigned = wxGetApp().preset_bundle->filament_assigned_nozzle(size_t(filament));
+                        return assigned > 0 ? assigned == tool : tool == own;
+                    }, m_parent);
+            }
+            append_submenu(menu, nozzle_menu, wxID_ANY, _L("Print on nozzle"),
+                           _L("The nozzle (tool) this filament prints on. It slices with that nozzle's diameter, line widths and process."),
+                           "", []() { return true; }, m_parent);
+        }
+    }
+
+    // Per-nozzle process P5: "Rack nozzle size" pins this filament to a nozzle size of its extruder's rack (H2C,
+    // filament_rack_nozzle_diameter). Only offered when that rack holds nozzles of more than one size.
+    const int rack_item_id = menu->FindItem(_L("Rack nozzle size"));
+    if (rack_item_id != wxNOT_FOUND)
+        menu->Destroy(rack_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig  full    = bundle->full_config();
+            const std::vector<double> choices = filament_rack_pin_choices(full, unsigned(filament + 1));
+            if (!choices.empty()) {
+                wxMenu *rack_menu = new wxMenu();
+                auto    pinned    = [filament]() {
+                    return filament_rack_pin(wxGetApp().preset_bundle->project_config, unsigned(filament + 1));
+                };
+                append_menu_check_item(rack_menu, wxID_ANY, _L("The extruder's nozzle size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), 0.); }, rack_menu,
+                    []() { return true; }, [pinned]() { return !(pinned() > 0.); }, m_parent);
+                for (double d : choices)
+                    append_menu_check_item(rack_menu, wxID_ANY, from_u8(format_nozzle_diameter_word(d)) + " mm", "",
+                        [filament, d](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), d); }, rack_menu,
+                        []() { return true; }, [pinned, d]() { return same_nozzle_diameter(pinned(), d); }, m_parent);
+                append_submenu(menu, rack_menu, wxID_ANY, _L("Rack nozzle size"),
+                               _L("Experimental. The size of the rack nozzle this filament prints with. It slices with that size, "
+                                  "and the slicer puts it on a rack nozzle of that size on every layer."),
+                               "", []() { return true; }, m_parent);
+            }
+        }
+    }
+
+    // Per-nozzle process P9 (owner hand test 2026-11-02): on H2D / H2C / X2D, "Print on": Auto / Left / Right, and the nozzles of a
+    // side's rack by size ("Right 0.6 (slot 6)"), whether or not a rack is set up (Left / Right always).
+    const int side_item_id = menu->FindItem(_L("Print on"));
+    if (side_item_id != wxNOT_FOUND)
+        menu->Destroy(side_item_id);
+    if (const int filament = active_filament_menu_id; filament >= 0 && plater()->sidebar().filament_sides_supported()) {
+        wxMenu *side_menu = new wxMenu();
+        plater()->sidebar().append_filament_side_menu(side_menu, size_t(filament));
+        append_submenu(menu, side_menu, wxID_ANY, _L("Print on"),
+                       _L("The side (nozzle) this filament prints on. Auto lets the grouping decide; Left / Right pin it on this plate. "
+                          "A side with a nozzle rack also lists its nozzles by size."),
+                       "", []() { return true; }, m_parent);
+    }
+
+    // Per-nozzle process P9: "Rack slot" pins this filament to one slot of its extruder's rack (filament_rack_nozzle_slot): it
+    // prints with that slot's size, process and nozzle, so filaments on different slots change nozzles (M632) instead of
+    // purging. Offered when the filament's extruder shows rack slots (two or more rack nozzles declared).
+    const int slot_item_id = menu->FindItem(_L("Rack slot"));
+    if (slot_item_id != wxNOT_FOUND)
+        menu->Destroy(slot_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig full     = bundle->full_config();
+            const size_t             extruder = nozzle_for_filament(full, unsigned(filament + 1));
+            const size_t             slots    = rack_slot_count(full, extruder);
+            if (slots > 0) {
+                const auto racks     = extruder_rack_nozzles(full);
+                wxMenu    *slot_menu = new wxMenu();
+                auto       pinned    = [filament]() { return wxGetApp().preset_bundle->filament_rack_slot_choice(size_t(filament)); };
+                append_menu_check_item(slot_menu, wxID_ANY, _L("Any slot of its size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), 0); }, slot_menu,
+                    []() { return true; }, [pinned]() { return pinned() <= 0; }, m_parent);
+                for (size_t k = 1; k <= slots && extruder < racks.size() && k <= racks[extruder].size(); ++k) {
+                    const wxString label = from_u8(rack_slot_name(full, extruder, int(k))) + " (" +
+                                           from_u8(format_nozzle_diameter_word(racks[extruder][k - 1].diameter)) + " mm)";
+                    append_menu_check_item(slot_menu, wxID_ANY, label, "",
+                        [filament, k](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), int(k)); }, slot_menu,
+                        []() { return true; }, [pinned, k]() { return pinned() == int(k); }, m_parent);
+                }
+                append_submenu(menu, slot_menu, wxID_ANY, _L("Rack slot"),
+                               _L("Experimental. The rack slot this filament prints with: that slot's nozzle size and process (Process tab), "
+                                  "on that slot's nozzle. Filaments on different slots of one extruder change nozzles instead of purging. "
+                                  "The printer matches the slots to its rack nozzles by size when the job is sent."),
+                               "", []() { return true; }, m_parent);
+            }
+        }
+    }
 
     wxMenu *                      sub_menu         = new wxMenu();
     std::vector<wxBitmap *>       icons            = get_extruder_color_icons(true);

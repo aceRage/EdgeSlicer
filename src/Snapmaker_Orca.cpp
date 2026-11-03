@@ -6,6 +6,10 @@
     #define NOMINMAX
     #include <Windows.h>
     #include <wchar.h>
+    // P9: local minidumps for test copies (MiniDumpWriteDump is loaded at run time, no link change).
+    #include <DbgHelp.h>
+    #include <cwctype>
+    #include <stdlib.h>
     #ifdef SLIC3R_GUI
     extern "C"
     {
@@ -99,6 +103,9 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/ProjectConfigFill.hpp"
 #include <algorithm>
 #include <array>
@@ -626,6 +633,19 @@ struct NamedPresets
     static const PresetCollection& collection(const PresetBundle& b, Preset::Type t)
     {
         return t == Preset::TYPE_PRINTER ? b.printers : t == Preset::TYPE_PRINT ? b.prints : b.filaments;
+    }
+
+    // Per-nozzle process P8: the vendor bundle that lists a system preset (its prints and printers decide which process
+    // fits which nozzle size), or nullptr.
+    PresetBundle* bundle_with(const std::string& name, Preset::Type t)
+    {
+        build_index();
+        for (const auto& kv : vendor_index)
+            if (kv.second[type_slot(t)].count(name))
+                if (PresetBundle* b = vendor_bundle(kv.first))
+                    if (collection(*b, t).find_preset(name) != nullptr)
+                        return b;
+        return nullptr;
     }
 
     // System preset: full (inherits-flattened) config from the vendor bundle that lists the name.
@@ -3673,6 +3693,135 @@ int CLI::run(int argc, char **argv)
     // Normalizing after importing the 3MFs / AMFs
     m_print_config.normalize_fdm();
 
+    // Per-nozzle process P1: --nozzle-process-presets "A;B" (or a project's nozzle_process_presets) names the
+    // process each physical extruder takes its speeds, accelerations and jerk from. Copy them into the
+    // extruders' slots of the process keys, as the GUI's full_config() does. A name that cannot be found
+    // leaves that extruder as the project / plate has it (a project already carries the copied values).
+    //
+    // Per-nozzle process P8: every tool takes its whole profile (speeds, widths, region settings) from its own process: the
+    // one named for it, else the plate's when that is made for the tool's nozzle size (or for no size), else the system
+    // process of that size picked automatically (as the GUI does). The project's per-tool changes (nozzle_process_edits) go
+    // on top. A tool with no fitting process is listed in nozzle_process_missing, which Print::validate refuses.
+    if (supports_nozzle_processes(m_print_config)) {
+        const std::vector<double> nozzles = effective_nozzle_diameters(m_print_config);
+        std::vector<std::string>  names;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("nozzle_process_presets"))
+            names = opt->values;
+        names.resize(nozzles.size());
+        const NozzleProcessEdits edits = nozzle_process_edits(m_print_config);
+
+        // The plate's process: the size it is made for, and the vendor bundle to pick other sizes' processes from.
+        std::string plate_name = m_config.opt_string("process_preset", true);
+        auto config_string = [this](const char *key) {
+            const auto *opt = m_print_config.option<ConfigOptionString>(key);
+            return opt != nullptr ? opt->value : std::string();
+        };
+        if (plate_name.empty())
+            plate_name = config_string("print_settings_id");
+        PresetBundle *plate_bundle = nullptr;
+        double        plate_claim  = 0.;
+        std::string   system_name  = plate_name;
+        {
+            if (named_presets().find_system(system_name, Preset::TYPE_PRINT) == nullptr) {
+                // A user process: the system process it inherits.
+                DynamicPrintConfig user;
+                std::string        filament_id_unused;
+                system_name.clear();
+                if (!plate_name.empty() && named_presets().find_user(plate_name, Preset::TYPE_PRINT, user, filament_id_unused))
+                    if (const auto *inherits = user.option<ConfigOptionString>("inherits"))
+                        system_name = inherits->value;
+            }
+            if (!system_name.empty())
+                if (const Preset *sys = named_presets().find_system(system_name, Preset::TYPE_PRINT))
+                    if ((plate_bundle = named_presets().bundle_with(system_name, Preset::TYPE_PRINT)) != nullptr)
+                        plate_claim = PresetBundle::process_nozzle_claim(*sys, plate_bundle->prints, plate_bundle->printers);
+        }
+        const double plate_lh = m_print_config.option<ConfigOptionFloat>("layer_height") != nullptr ? m_print_config.opt_float("layer_height") : 0.;
+
+        // One tool's effective process into `store` (P9: an extruder "T2" or a rack slot "T2.3"); false when no process fits it.
+        auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
+            DynamicPrintConfig base;
+            bool               has_base = false;
+            std::string        filament_id_unused;
+            if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
+                name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
+                                                           diameter, plate_lh, system_name.empty() ? plate_name : system_name);
+                if (name.empty()) {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P8: no process fits " << id << " (" << diameter << " mm)";
+                    boost::nowide::cerr << "per-nozzle process: no process fits " << id << " (" << diameter << " mm)" << std::endl;
+                    return false;
+                }
+                BOOST_LOG_TRIVIAL(info) << "per-nozzle process P8: " << id << " (" << diameter << " mm) uses '" << name << "' (picked)";
+                boost::nowide::cout << "per-nozzle process: " << id << " (" << diameter << " mm) uses '" << name << "', picked for its size" << std::endl;
+            }
+            if (!name.empty()) {
+                if (const Preset *preset = named_presets().find_system(name, Preset::TYPE_PRINT)) {
+                    base     = preset->config;
+                    has_base = true;
+                } else if (named_presets().find_user(name, Preset::TYPE_PRINT, base, filament_id_unused)) {
+                    has_base = true;
+                } else {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: preset '" << name << "' for " << id << " not found";
+                    boost::nowide::cerr << "per-nozzle process: preset not found: " << name << std::endl;
+                }
+            }
+            const auto it = edits.find(id);
+            store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            return true;
+        };
+
+        std::vector<DynamicPrintConfig>         nozzle_process_store(nozzles.size());
+        std::vector<const DynamicPrintConfig *> nozzle_process_sources(nozzles.size(), nullptr);
+        std::vector<int>                        missing;
+        for (size_t e = 0; e < nozzles.size(); ++e) {
+            if (!resolve_tool(nozzle_tool_id(e), nozzles[e], names[e], nozzle_process_store[e])) {
+                missing.push_back(int(e) + 1);
+                continue;
+            }
+            if (!nozzle_process_diff(nozzle_process_store[e], m_print_config).empty())
+                nozzle_process_sources[e] = &nozzle_process_store[e];
+        }
+        m_print_config.set_key_value("nozzle_process_missing", new ConfigOptionInts(missing));
+
+        // Per-nozzle process P9: the rack slots of an extruder whose rack lists two or more nozzles each have a process of their
+        // own (chosen in nozzle_slot_process_presets, else the plate's or the one picked for the slot's size), and each filament
+        // on such an extruder prints with its slot's.
+        const std::vector<NozzleToolEntry> slot_tools = nozzle_slot_tools(m_print_config);
+        std::vector<const DynamicPrintConfig *> filament_sources;
+        std::vector<DynamicPrintConfig>         slot_store(slot_tools.size());
+        if (!slot_tools.empty()) {
+            const std::map<std::string, std::string> slot_names = nozzle_slot_process_names(m_print_config);
+            std::vector<const DynamicPrintConfig *>  slot_sources(slot_tools.size(), nullptr);
+            std::vector<std::string>                 slot_missing;
+            for (size_t i = 0; i < slot_tools.size(); ++i) {
+                const std::string id   = nozzle_tool_entry_id(slot_tools[i]);
+                const auto        name = slot_names.find(id);
+                if (!resolve_tool(id, slot_tools[i].diameter, name != slot_names.end() ? name->second : std::string(), slot_store[i])) {
+                    slot_missing.push_back(id);
+                    continue;
+                }
+                if (!nozzle_process_diff(slot_store[i], m_print_config).empty())
+                    slot_sources[i] = &slot_store[i];
+            }
+            m_print_config.set_key_value("nozzle_slot_process_missing", new ConfigOptionStrings(slot_missing));
+            const auto  *filament_opt = dynamic_cast<const ConfigOptionVectorBase *>(m_print_config.option("filament_diameter"));
+            const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
+            filament_sources.assign(filaments, nullptr);
+            for (size_t f = 0; f < filaments; ++f) {
+                const size_t      e  = nozzle_for_filament(m_print_config, unsigned(f + 1));
+                const std::string id = nozzle_filament_group_id(m_print_config, unsigned(f + 1)); // its rack size's tool
+                filament_sources[f] = e < nozzle_process_sources.size() ? nozzle_process_sources[e] : nullptr;
+                for (size_t i = 0; !id.empty() && i < slot_tools.size(); ++i)
+                    if (nozzle_tool_entry_id(slot_tools[i]) == id) {
+                        filament_sources[f] = slot_sources[i];
+                        break;
+                    }
+            }
+        }
+        if (fill_nozzle_process_slots(m_print_config, nozzle_process_sources, slot_tools.empty() ? nullptr : &filament_sources))
+            BOOST_LOG_TRIVIAL(info) << "per-nozzle process: filled the extruder slots of the process keys";
+    }
+
     m_print_config.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology", true)->value = printer_technology;
 
     // Initialize full print configs for both the FFF and SLA technologies.
@@ -6493,7 +6642,7 @@ int CLI::run(int argc, char **argv)
         const ConfigOptionFloats* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
         if (nozzle_diameter_option)
-            nozzle_diameter_str = nozzle_diameter_option->serialize();
+            nozzle_diameter_str = ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).serialize(); // P7: overridden sizes
 
         for (int i = 0; i < plate_data_list.size(); i++) {
             PlateData *plate_data = plate_data_list[i];
@@ -7076,7 +7225,7 @@ int CLI::run(int argc, char **argv)
             // get nozzle diameter
             auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloats>("nozzle_diameter");
             if (opt_nozzle_diameters != nullptr)
-                plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
+                plate_bbox->nozzle_diameter = float(ConfigOptionFloats(effective_nozzle_diameters(m_print_config)).get_at(plate_bbox->first_extruder)); // P7
 
             auto objects = print->objects();
             auto orig = part_plate->get_origin();
@@ -7678,9 +7827,102 @@ std::string CLI::output_filepath(const ModelObject &object, unsigned int index, 
 // Guards against a failed allocation inside the dump re-entering the new-handler.
 static std::atomic<bool> g_dump_in_progress{false};
 
+// ---- Local minidumps for test copies (per-nozzle process P9, owner crash report 2026-11-02) ------------------------------
+// Opt-in, Windows, no network: when EDGESLICER_LOCAL_MINIDUMP=1, or when the exe runs from a C:/Dev/EdgeSlicerTest test copy, an
+// unhandled crash (access violation, abort, std::terminate, pure call, invalid CRT parameter) writes
+// <exe folder>/crash/EdgeSlicer_<pid>_<time>.dmp, to open with cdb / Visual Studio and the build tree's PDBs. Release builds
+// that do not opt in are unchanged; Sentry, when it is set up, still installs its own handler after this one.
+namespace {
+std::wstring g_local_dump_dir;
+std::atomic<bool> g_local_dump_written{false};
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+                                          PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+
+void write_local_minidump(EXCEPTION_POINTERS *pointers)
+{
+    if (g_local_dump_dir.empty() || g_local_dump_written.exchange(true))
+        return;
+    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr)
+        return;
+    auto write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (write == nullptr)
+        return;
+    ::CreateDirectoryW(g_local_dump_dir.c_str(), nullptr);
+    SYSTEMTIME t;
+    ::GetLocalTime(&t);
+    wchar_t name[96];
+    swprintf(name, 96, L"\\EdgeSlicer_%lu_%04d%02d%02d_%02d%02d%02d.dmp", ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour,
+             t.wMinute, t.wSecond);
+    const std::wstring path = g_local_dump_dir + name;
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    MINIDUMP_EXCEPTION_INFORMATION info;
+    info.ThreadId          = ::GetCurrentThreadId();
+    info.ExceptionPointers = pointers;
+    info.ClientPointers    = FALSE;
+    const MINIDUMP_TYPE type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
+                                             MiniDumpWithUnloadedModules | MiniDumpWithHandleData);
+    write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, pointers != nullptr ? &info : nullptr, nullptr, nullptr);
+    ::CloseHandle(file);
+}
+
+LONG WINAPI local_minidump_filter(EXCEPTION_POINTERS *pointers)
+{
+    write_local_minidump(pointers);
+    return g_previous_filter != nullptr ? g_previous_filter(pointers) : EXCEPTION_CONTINUE_SEARCH;
+}
+
+// abort / terminate / pure call / invalid parameter have no exception record: raise one so the dump carries a usable context.
+void dump_without_exception()
+{
+    __try {
+        ::RaiseException(0xE0D0D0D0, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    } __except (write_local_minidump(GetExceptionInformation()), EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void install_local_minidumps()
+{
+    wchar_t exe[MAX_PATH] = {};
+    ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring folder(exe);
+    if (const size_t slash = folder.find_last_of(L"\\/"); slash != std::wstring::npos)
+        folder.resize(slash);
+    std::wstring lower = folder;
+    for (wchar_t &c : lower)
+        c = (c == L'\\') ? L'/' : wchar_t(::towlower(c));
+    const char *env       = std::getenv("EDGESLICER_LOCAL_MINIDUMP");
+    const bool  opted_in  = env != nullptr && std::strcmp(env, "1") == 0;
+    const bool  test_copy = lower.find(L"/dev/edgeslicertest/") != std::wstring::npos;
+    if ((!opted_in && !test_copy) || (env != nullptr && std::strcmp(env, "0") == 0))
+        return;
+    g_local_dump_dir  = folder + L"\\crash";
+    g_previous_filter = ::SetUnhandledExceptionFilter(local_minidump_filter);
+    std::set_terminate([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    std::signal(SIGABRT, [](int) { dump_without_exception(); });
+    _set_purecall_handler([]() {
+        dump_without_exception();
+        std::abort();
+    });
+    _set_invalid_parameter_handler([](const wchar_t *, const wchar_t *, const wchar_t *, unsigned int, uintptr_t) {
+        dump_without_exception();
+        std::abort();
+    });
+}
+} // namespace
+
 extern "C" {
     __declspec(dllexport) int __stdcall Snapmaker_Orca_main(int argc, wchar_t **argv)
     {
+        // Per-nozzle process P9: local crash dumps for test copies (opt-in, see install_local_minidumps).
+        install_local_minidumps();
         // Convert wchar_t arguments to UTF8.
         std::vector<std::string> 	argv_narrow;
         std::vector<char*>			argv_ptrs(argc + 1, nullptr);
