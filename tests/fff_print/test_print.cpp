@@ -2445,5 +2445,4 @@ TEST_CASE("Objects on extruders with different layer height limits can share a p
     // Explicit bed and a tower clear of both cubes, so no earlier validation stage can mask the layering rule:
     // the whole validation must pass.
     CHECK(error.string.empty());
-    CHECK(error.string.find("same layer heights") == std::string::npos);
 }
