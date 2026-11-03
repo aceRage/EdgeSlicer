@@ -10,8 +10,9 @@
 
 namespace Slic3r {
 
-// Per-extraction working folder under a caller-supplied root. PR B wires the default
-// Documents/EdgeSlicer/Zip; this helper only takes the root as a parameter.
+// Per-extraction working folder under a caller-supplied root. PR B wires the default (the
+// platform's local cache folder, e.g. %LOCALAPPDATA%/EdgeSlicer/Zip); this helper only takes the
+// root as a parameter.
 //
 // Layout: <root>/<zip-stem>_<yyyymmdd-hhmmss>[_n]/<entry relative path>
 // A marker file `.edge-zip-work` is written in `root` so later cleanup (PR C) can refuse
