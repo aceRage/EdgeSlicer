@@ -100,9 +100,8 @@ DynamicPrintConfig spike_config(double pause)
 }
 
 // A 50 x 50 x 3 mm block (long layers) next to a 3 x 3 x 8 mm spike (its layers above 3 mm are tiny).
-Sliced slice_spike(const DynamicPrintConfig &config, bool spike_only = false)
+void slice_spike(Sliced &out, const DynamicPrintConfig &config, bool spike_only = false)
 {
-    Sliced out;
     Print  print;
     Model  model;
     std::vector<TriangleMesh> meshes;
@@ -122,7 +121,6 @@ Sliced slice_spike(const DynamicPrintConfig &config, bool spike_only = false)
                                         Vec2d(bb.max.x() - origin.x(), bb.max.y() - origin.y()));
         }
     pauses(out.gcode, &out.layers);
-    return out;
 }
 
 // The G-code without the lines expected to differ when only the option's value changes: the echoed config,
@@ -278,8 +276,10 @@ TEST_CASE("G4 dwells count in the print time estimate", "[MinLayerTimePause][GCo
 TEST_CASE("A thin spike pauses on its short layers", "[MinLayerTimePause][PrintGCode]")
 {
     const double target = 10.;
-    Sliced       on     = slice_spike(spike_config(target));
-    Sliced       off    = slice_spike(spike_config(0.));
+    Sliced       on;
+    slice_spike(on, spike_config(target));
+    Sliced       off;
+    slice_spike(off, spike_config(0.));
     const std::vector<Pause> found = pauses(on.gcode);
     const std::vector<float> &times = on.result.print_statistics.modes[NORMAL].layers_times;
     INFO("layers " << on.layers << ", pauses " << found.size() << ", layer times " << times.size());
@@ -334,8 +334,10 @@ TEST_CASE("A thin spike pauses on its short layers", "[MinLayerTimePause][PrintG
 TEST_CASE("A pause that is not needed leaves the G-code as it was", "[MinLayerTimePause][PrintGCode]")
 {
     // At 0.3 s no layer lacks the half second a pause needs, so every block is dropped again.
-    const Sliced tiny = slice_spike(spike_config(0.3));
-    const Sliced off  = slice_spike(spike_config(0.));
+    Sliced tiny;
+    slice_spike(tiny, spike_config(0.3));
+    Sliced off;
+    slice_spike(off, spike_config(0.));
     CHECK(pauses(tiny.gcode).empty());
     CHECK(comparable(tiny.gcode) == comparable(off.gcode));
 }
@@ -344,7 +346,8 @@ TEST_CASE("Printing by object pauses each object beside itself", "[MinLayerTimeP
 {
     DynamicPrintConfig config = spike_config(10.);
     config.set_deserialize_strict("print_sequence", "by object");
-    const Sliced spikes = slice_spike(config, true);
+    Sliced spikes;
+    slice_spike(spikes, config, true);
     const std::vector<Pause> found = pauses(spikes.gcode);
     REQUIRE(spikes.footprints.size() == 2);
     // Both spikes pause on all their layers but the first and the last: 2 x 38.
