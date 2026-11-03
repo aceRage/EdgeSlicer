@@ -28,6 +28,10 @@ struct CornerSmoothing
     // The G-code resolution: a rounded corner keeps within it of its curve, and its vertices stand out of the
     // path by at least it, so that simplifying the path to it keeps them.
     double            tolerance { 0. };
+    // EdgeSlicer: corners whose curve would turn tighter than this radius are left sharp. Multiline infill
+    // offsets every vertex of a path sideways, and a curve tighter than that offset folds the inner line into
+    // a cusp. Zero rounds every corner.
+    double            min_radius { 0. };
 };
 
 // Decides whether a corner may be replaced by the curve that leaves the path at `from` and rejoins it
