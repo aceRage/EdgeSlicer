@@ -26,6 +26,9 @@ public:
     CoolingBuffer(GCode &gcodegen);
     void        reset(const Vec3d &position);
     void        set_current_extruder(unsigned int extruder_id) { m_current_extruder = extruder_id; }
+    // Per-nozzle process P4: the filament each G-code tool prints when the G-code names assigned tools
+    // (output_tool_filaments); a T<n> is read back as that filament.
+    void        set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
     std::string process_layer(std::string &&gcode, size_t layer_id, bool flush);
     // True when the layer flushed by the last process_layer() call had at least one extrusion
     // slowed down to reach slow_down_layer_time, i.e. the F words in the returned G-code carry
@@ -56,6 +59,11 @@ private:
     // Highest of m_extruder_ids plus 1.
     unsigned int                m_num_extruders { 0 };
     const std::string           m_toolchange_prefix;
+    std::vector<int>            m_output_tool_filaments;
+    unsigned int filament_of_output_tool(unsigned int tool) const
+    {
+        return tool < m_output_tool_filaments.size() && m_output_tool_filaments[tool] >= 0 ? unsigned(m_output_tool_filaments[tool]) : tool;
+    }
     // Referencs GCode::m_config, which is FullPrintConfig. While the PrintObjectConfig slice of FullPrintConfig is being modified,
     // the PrintConfig slice of FullPrintConfig is constant, thus no thread synchronization is required.
     const PrintConfig          &m_config;

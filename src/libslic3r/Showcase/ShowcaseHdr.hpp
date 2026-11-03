@@ -59,6 +59,22 @@ bool load_hdr_file(const std::string &path, HdrImage &out, std::string *error = 
 // Encodes to a Radiance file (new-style RLE scanlines when the width allows it, else flat).
 std::string encode_rgbe(const HdrImage &image, bool rle = true);
 
+// ---- OpenEXR (realism 1h-3: the user's own HDRI) --------------------------------------------
+//
+// A small reader for what HDRI panoramas usually are: a single-part scanline image with R, G and B
+// channels (A and others ignored; Y alone is read as grey) of HALF or FLOAT pixels, compressed with
+// NONE, RLE, ZIPS or ZIP. Tiled, deep and multi-part files, and PIZ, PXR24, B44 and DWA compression,
+// are refused with an error naming what is missing (convert the file to .hdr or a ZIP-compressed
+// .exr). Never throws.
+bool decode_exr(const uint8_t *data, size_t size, HdrImage &out, std::string *error = nullptr);
+// Encodes a scanline EXR with HALF R, G, B channels (NONE or ZIP compression): the tests' fixtures.
+std::string encode_exr(const HdrImage &image, bool zip);
+// A Radiance or OpenEXR file, by its first bytes.
+bool decode_hdri_any(const uint8_t *data, size_t size, HdrImage &out, std::string *error = nullptr);
+bool load_hdri_any(const std::string &path, HdrImage &out, std::string *error = nullptr);
+// Halves the panorama (2 x 2 box filter) until it is at most `max_width` wide.
+HdrImage downscale_hdr(const HdrImage &image, int max_width);
+
 // ---- Equirect mapping ----------------------------------------------------------------------
 
 // The world direction (unit) of a point of the panorama, u/v in [0, 1] (v = 0 the top).
@@ -139,6 +155,17 @@ struct HdriInfo
     float         ground_height_mm  = 1600.f;
     float         ground_radius_mm  = 16000.f;
     float         backdrop_pitch    = 0.f;
+    // 1h-3: a catalogue entry downloaded on request from our own mirror (D-R3), never bundled:
+    // "downloadable": true, "download": { "file", "size", "sha256" }. `file` is then the name the
+    // download is kept under in the data folder; `download_file` the name on the mirror.
+    bool          downloadable  = false;
+    std::string   download_file;
+    uint64_t      download_size = 0;
+    std::string   sha256;               // 64 lower-case hex digits; empty = not published yet
+    // 1h-3: where `file` is when it is not in the bundled HDRI_DIR (a download or the user's own HDRI):
+    // an absolute folder. Empty for the bundled ones.
+    std::string   base_dir;
+    bool          user = false;         // the user's own HDRI (from "Load my own HDRI")
 };
 
 struct HdriManifest
@@ -151,6 +178,9 @@ struct HdriManifest
 // a usable file/procedural kind, or with a file name that leaves the folder, are skipped. A
 // listed file is not checked for existence here (the renderer falls back with a warning).
 bool parse_hdri_manifest(const std::string &text, HdriManifest &out, std::string *error = nullptr);
+// 1h-3: the manifest text of a list of HDRIs (the user's own, kept next to them in the data folder);
+// parse_hdri_manifest() reads it back (base_dir and user are the caller's to set).
+std::string hdri_manifest_to_json(const std::vector<HdriInfo> &hdris);
 
 } // namespace Showcase
 } // namespace Slic3r

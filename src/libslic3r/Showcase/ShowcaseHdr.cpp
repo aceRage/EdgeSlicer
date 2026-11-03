@@ -1,7 +1,9 @@
 #include "ShowcaseHdr.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +13,7 @@
 #include <limits>
 
 #include <boost/nowide/fstream.hpp>
+#include <miniz.h>
 #include <nlohmann/json.hpp>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -519,6 +522,445 @@ bool load_hdr_file(const std::string &path, HdrImage &out, std::string *error)
     }
     std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return decode_rgbe(bytes.data(), bytes.size(), out, error);
+}
+
+// ---------------------------------------------------------------------------------------------
+// OpenEXR, realism 1h-3 (a scanline subset; see the header)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+float exr_half_to_float(uint16_t h)
+{
+    const uint32_t sign = uint32_t(h & 0x8000u) << 16;
+    uint32_t       exp  = (h >> 10) & 0x1Fu;
+    uint32_t       mant = h & 0x3FFu;
+    uint32_t       bits;
+    if (exp == 0) {
+        if (mant == 0)
+            bits = sign;
+        else {
+            // Subnormal: normalise it.
+            int e = -1;
+            do {
+                ++e;
+                mant <<= 1;
+            } while ((mant & 0x400u) == 0);
+            mant &= 0x3FFu;
+            bits = sign | (uint32_t(127 - 15 - e) << 23) | (mant << 13);
+        }
+    } else if (exp == 31)
+        bits = sign | 0x7F800000u | (mant << 13);
+    else
+        bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+uint16_t exr_float_to_half(float f)
+{
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    const uint16_t sign = uint16_t((bits >> 16) & 0x8000u);
+    const int      exp  = int((bits >> 23) & 0xFFu) - 127 + 15;
+    uint32_t       mant = bits & 0x7FFFFFu;
+    if (!std::isfinite(f))
+        return uint16_t(sign | 0x7C00u);
+    if (exp >= 31)
+        return uint16_t(sign | 0x7BFFu);   // the largest half
+    if (exp <= 0) {
+        if (exp < -10)
+            return sign;
+        mant |= 0x800000u;
+        return uint16_t(sign | (mant >> (14 - exp)));
+    }
+    const uint16_t h = uint16_t(sign | (uint32_t(exp) << 10) | (mant >> 13));
+    // Round to nearest.
+    return (mant & 0x1000u) != 0 && (h & 0x7FFFu) < 0x7BFFu ? uint16_t(h + 1) : h;
+}
+
+uint32_t exr_u32(const uint8_t *p) { return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24); }
+uint64_t exr_u64(const uint8_t *p) { return uint64_t(exr_u32(p)) | (uint64_t(exr_u32(p + 4)) << 32); }
+
+// OpenEXR's predictor and interleave, undone (ZIP and RLE share them).
+void exr_unpredict(std::vector<uint8_t> &buf)
+{
+    for (size_t i = 1; i < buf.size(); ++i)
+        buf[i] = uint8_t(int(buf[i - 1]) + int(buf[i]) - 128);
+    std::vector<uint8_t> out(buf.size());
+    const size_t half = (buf.size() + 1) / 2;
+    for (size_t i = 0, a = 0, b = half; i < buf.size(); ++i)
+        out[i] = (i % 2 == 0) ? buf[a++] : buf[b++];
+    buf.swap(out);
+}
+
+void exr_predict(std::vector<uint8_t> &buf)
+{
+    std::vector<uint8_t> t(buf.size());
+    const size_t half = (buf.size() + 1) / 2;
+    for (size_t i = 0, a = 0, b = half; i < buf.size(); ++i)
+        ((i % 2 == 0) ? t[a++] : t[b++]) = buf[i];
+    for (size_t i = t.size(); i-- > 1;)
+        t[i] = uint8_t(int(t[i]) - int(t[i - 1]) + 128 + 256);
+    buf.swap(t);
+}
+
+bool exr_rle_decode(const uint8_t *in, size_t n, std::vector<uint8_t> &out, size_t expected)
+{
+    out.clear();
+    size_t i = 0;
+    while (i < n) {
+        const int count = int(int8_t(in[i++]));
+        if (count < 0) {
+            const size_t len = size_t(-count);
+            if (i + len > n || out.size() + len > expected)
+                return false;
+            out.insert(out.end(), in + i, in + i + len);
+            i += len;
+        } else {
+            if (i >= n || out.size() + size_t(count) + 1 > expected)
+                return false;
+            out.insert(out.end(), size_t(count) + 1, in[i++]);
+        }
+    }
+    return out.size() == expected;
+}
+
+} // namespace
+
+bool decode_exr(const uint8_t *data, size_t size, HdrImage &out, std::string *error)
+{
+    out = HdrImage();
+    if (data == nullptr || size < 8 || exr_u32(data) != 20000630u) {
+        hdr_fail(error, "not an OpenEXR file");
+        return false;
+    }
+    const uint32_t version = exr_u32(data + 4);
+    if ((version & 0x200u) != 0) {
+        hdr_fail(error, "tiled OpenEXR files are not supported (save it as a scanline .exr or .hdr)");
+        return false;
+    }
+    if ((version & 0x1800u) != 0) {
+        hdr_fail(error, "deep or multi-part OpenEXR files are not supported");
+        return false;
+    }
+    struct Channel
+    {
+        std::string name;
+        int         type = 1;   // 0 uint, 1 half, 2 float
+        int         xs = 1, ys = 1;
+    };
+    std::vector<Channel> channels;
+    int  compression = -1;
+    int  xmin = 0, ymin = 0, xmax = -1, ymax = -1;
+    bool have_window = false;
+    size_t p = 8;
+    auto read_cstr = [&](std::string &s) {
+        const size_t start = p;
+        while (p < size && data[p] != 0)
+            ++p;
+        if (p >= size || p - start > 255)
+            return false;
+        s.assign(reinterpret_cast<const char *>(data + start), p - start);
+        ++p;
+        return true;
+    };
+    for (;;) {
+        if (p >= size) {
+            hdr_fail(error, "the OpenEXR header is cut short");
+            return false;
+        }
+        if (data[p] == 0) {
+            ++p;
+            break;
+        }
+        std::string name, type;
+        if (!read_cstr(name) || !read_cstr(type) || p + 4 > size) {
+            hdr_fail(error, "the OpenEXR header is damaged");
+            return false;
+        }
+        const uint32_t len = exr_u32(data + p);
+        p += 4;
+        if (len > size - p) {
+            hdr_fail(error, "the OpenEXR header is damaged");
+            return false;
+        }
+        const uint8_t *v = data + p;
+        if (name == "channels" && type == "chlist") {
+            size_t q = 0;
+            while (q < len && v[q] != 0) {
+                Channel c;
+                const size_t start = q;
+                while (q < len && v[q] != 0)
+                    ++q;
+                if (q + 17 > len)
+                    break;
+                c.name = std::string(reinterpret_cast<const char *>(v + start), q - start);
+                ++q;
+                c.type = int(exr_u32(v + q));
+                c.xs   = int(exr_u32(v + q + 8));
+                c.ys   = int(exr_u32(v + q + 12));
+                q += 16;
+                channels.push_back(c);
+            }
+        } else if (name == "compression" && type == "compression" && len >= 1)
+            compression = int(v[0]);
+        else if (name == "dataWindow" && type == "box2i" && len >= 16) {
+            xmin = int(int32_t(exr_u32(v)));
+            ymin = int(int32_t(exr_u32(v + 4)));
+            xmax = int(int32_t(exr_u32(v + 8)));
+            ymax = int(int32_t(exr_u32(v + 12)));
+            have_window = true;
+        }
+        p += len;
+    }
+    const long long w64 = (long long) xmax - xmin + 1, h64 = (long long) ymax - ymin + 1;
+    if (!have_window || channels.empty() || w64 <= 0 || h64 <= 0 || w64 > HDR_MAX_SIDE || h64 > HDR_MAX_SIDE || w64 * h64 > HDR_MAX_PIXELS) {
+        hdr_fail(error, "the OpenEXR file has no usable image (size or channels)");
+        return false;
+    }
+    const int width = int(w64), height = int(h64);
+    int lines_per_block = 0;
+    switch (compression) {
+    case 0: case 1: case 2: lines_per_block = 1; break;   // NONE, RLE, ZIPS
+    case 3: lines_per_block = 16; break;                  // ZIP
+    case 4: hdr_fail(error, "PIZ-compressed OpenEXR files are not supported (save it with ZIP compression or as .hdr)"); return false;
+    default: hdr_fail(error, "this OpenEXR compression is not supported (save it with ZIP compression or as .hdr)"); return false;
+    }
+    // Channels are stored sorted by name, each a full line of its own type.
+    std::sort(channels.begin(), channels.end(), [](const Channel &a, const Channel &b) { return a.name < b.name; });
+    size_t line_bytes = 0;
+    int    ch_r = -1, ch_g = -1, ch_b = -1, ch_y = -1;
+    std::vector<size_t> ch_offset;
+    for (size_t i = 0; i < channels.size(); ++i) {
+        const Channel &c = channels[i];
+        if (c.xs != 1 || c.ys != 1 || c.type < 0 || c.type > 2) {
+            hdr_fail(error, "subsampled or unknown OpenEXR channels are not supported");
+            return false;
+        }
+        ch_offset.push_back(line_bytes);
+        line_bytes += size_t(width) * (c.type == 1 ? 2 : 4);
+        if (c.name == "R") ch_r = int(i);
+        else if (c.name == "G") ch_g = int(i);
+        else if (c.name == "B") ch_b = int(i);
+        else if (c.name == "Y") ch_y = int(i);
+    }
+    if (!((ch_r >= 0 && ch_g >= 0 && ch_b >= 0) || ch_y >= 0)) {
+        hdr_fail(error, "the OpenEXR file has no R, G, B (or Y) channels");
+        return false;
+    }
+    const size_t blocks = size_t((height + lines_per_block - 1) / lines_per_block);
+    if (p + blocks * 8 > size) {
+        hdr_fail(error, "the OpenEXR offset table is cut short");
+        return false;
+    }
+    std::vector<uint64_t> offsets(blocks);
+    for (size_t i = 0; i < blocks; ++i)
+        offsets[i] = exr_u64(data + p + i * 8);
+
+    HdrImage img;
+    img.width  = width;
+    img.height = height;
+    img.rgb.assign(size_t(width) * size_t(height) * 3, 0.f);
+    std::vector<uint8_t> raw;
+    for (size_t b = 0; b < blocks; ++b) {
+        const uint64_t off = offsets[b];
+        if (off + 8 > size) {
+            hdr_fail(error, "an OpenEXR block is outside the file");
+            return false;
+        }
+        const int      y0       = int(int32_t(exr_u32(data + off))) - ymin;
+        const uint32_t data_len = exr_u32(data + off + 4);
+        if (data_len > size - off - 8 || y0 < 0 || y0 >= height) {
+            hdr_fail(error, "an OpenEXR block is damaged");
+            return false;
+        }
+        const int    lines    = std::min(lines_per_block, height - y0);
+        const size_t expected = line_bytes * size_t(lines);
+        const uint8_t *src    = data + off + 8;
+        if (data_len == expected)
+            raw.assign(src, src + expected);   // stored as is (compression did not help)
+        else if (compression == 1) {
+            if (!exr_rle_decode(src, data_len, raw, expected)) {
+                hdr_fail(error, "an OpenEXR RLE block is damaged");
+                return false;
+            }
+            exr_unpredict(raw);
+        } else if (compression == 2 || compression == 3) {
+            raw.assign(expected, 0);
+            mz_ulong out_len = mz_ulong(expected);
+            if (mz_uncompress(raw.data(), &out_len, src, mz_ulong(data_len)) != MZ_OK || out_len != expected) {
+                hdr_fail(error, "an OpenEXR ZIP block is damaged");
+                return false;
+            }
+            exr_unpredict(raw);
+        } else {
+            hdr_fail(error, "an OpenEXR block has the wrong size");
+            return false;
+        }
+        for (int l = 0; l < lines; ++l) {
+            const uint8_t *line = raw.data() + size_t(l) * line_bytes;
+            float         *dst  = img.rgb.data() + size_t(y0 + l) * size_t(width) * 3;
+            auto value = [&](int ch, int x) {
+                const Channel &c = channels[size_t(ch)];
+                const uint8_t *q = line + ch_offset[size_t(ch)] + size_t(x) * (c.type == 1 ? 2 : 4);
+                if (c.type == 1)
+                    return exr_half_to_float(uint16_t(q[0] | (q[1] << 8)));
+                const uint32_t u = exr_u32(q);
+                if (c.type == 0)
+                    return float(u);
+                float f;
+                std::memcpy(&f, &u, sizeof(f));
+                return f;
+            };
+            for (int x = 0; x < width; ++x) {
+                float r, g, bl;
+                if (ch_r >= 0 && ch_g >= 0 && ch_b >= 0) {
+                    r  = value(ch_r, x);
+                    g  = value(ch_g, x);
+                    bl = value(ch_b, x);
+                } else
+                    r = g = bl = value(ch_y, x);
+                auto clean = [](float v) { return std::isfinite(v) ? std::max(v, 0.f) : 0.f; };
+                dst[size_t(x) * 3 + 0] = clean(r);
+                dst[size_t(x) * 3 + 1] = clean(g);
+                dst[size_t(x) * 3 + 2] = clean(bl);
+            }
+        }
+    }
+    out = std::move(img);
+    return true;
+}
+
+std::string encode_exr(const HdrImage &image, bool zip)
+{
+    std::string out;
+    auto put32 = [&out](uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            out.push_back(char((v >> (8 * i)) & 0xFF));
+    };
+    auto put64 = [&put32](uint64_t v) {
+        put32(uint32_t(v & 0xFFFFFFFFu));
+        put32(uint32_t(v >> 32));
+    };
+    auto attr = [&](const char *name, const char *type, const std::string &value) {
+        out += name;
+        out.push_back('\0');
+        out += type;
+        out.push_back('\0');
+        put32(uint32_t(value.size()));
+        out += value;
+    };
+    auto le32 = [](uint32_t v) {
+        std::string s(4, '\0');
+        for (int i = 0; i < 4; ++i)
+            s[size_t(i)] = char((v >> (8 * i)) & 0xFF);
+        return s;
+    };
+    put32(20000630u);
+    put32(2u);
+    std::string chlist;
+    for (const char *c : { "B", "G", "R" }) {
+        chlist += c;
+        chlist.push_back('\0');
+        chlist += le32(1);                 // HALF
+        chlist += std::string(4, '\0');    // pLinear + reserved
+        chlist += le32(1) + le32(1);       // sampling
+    }
+    chlist.push_back('\0');
+    attr("channels", "chlist", chlist);
+    attr("compression", "compression", std::string(1, char(zip ? 3 : 0)));
+    const std::string box = le32(0) + le32(0) + le32(uint32_t(std::max(0, image.width - 1))) + le32(uint32_t(std::max(0, image.height - 1)));
+    attr("dataWindow", "box2i", box);
+    attr("displayWindow", "box2i", box);
+    attr("lineOrder", "lineOrder", std::string(1, '\0'));
+    std::string ar(4, '\0');
+    const float one = 1.f;
+    std::memcpy(&ar[0], &one, 4);
+    attr("pixelAspectRatio", "float", ar);
+    attr("screenWindowCenter", "v2f", std::string(8, '\0'));
+    attr("screenWindowWidth", "float", ar);
+    out.push_back('\0');
+    if (image.empty())
+        return out;
+    const int lines_per_block = zip ? 16 : 1;
+    const int blocks          = (image.height + lines_per_block - 1) / lines_per_block;
+    const size_t table        = out.size();
+    out.append(size_t(blocks) * 8, '\0');
+    const size_t W = size_t(image.width);
+    for (int b = 0; b < blocks; ++b) {
+        const int y0    = b * lines_per_block;
+        const int lines = std::min(lines_per_block, image.height - y0);
+        std::vector<uint8_t> raw;
+        raw.reserve(W * 6 * size_t(lines));
+        for (int l = 0; l < lines; ++l)
+            for (int ch : { 2, 1, 0 })   // B, G, R
+                for (size_t x = 0; x < W; ++x) {
+                    const uint16_t h = exr_float_to_half(image.rgb[(size_t(y0 + l) * W + x) * 3 + size_t(ch)]);
+                    raw.push_back(uint8_t(h & 0xFF));
+                    raw.push_back(uint8_t(h >> 8));
+                }
+        std::string payload;
+        if (zip) {
+            std::vector<uint8_t> pred = raw;
+            exr_predict(pred);
+            mz_ulong             len = mz_compressBound(mz_ulong(pred.size()));
+            std::vector<uint8_t> z(len);
+            if (mz_compress2(z.data(), &len, pred.data(), mz_ulong(pred.size()), 6) == MZ_OK && len < raw.size())
+                payload.assign(reinterpret_cast<const char *>(z.data()), size_t(len));
+            else
+                payload.assign(reinterpret_cast<const char *>(raw.data()), raw.size());
+        } else
+            payload.assign(reinterpret_cast<const char *>(raw.data()), raw.size());
+        const uint64_t offset = out.size();
+        for (int i = 0; i < 8; ++i)
+            out[table + size_t(b) * 8 + size_t(i)] = char((offset >> (8 * i)) & 0xFF);
+        put32(uint32_t(y0));
+        put32(uint32_t(payload.size()));
+        out += payload;
+    }
+    (void) put64;
+    return out;
+}
+
+bool decode_hdri_any(const uint8_t *data, size_t size, HdrImage &out, std::string *error)
+{
+    if (data != nullptr && size >= 4 && exr_u32(data) == 20000630u)
+        return decode_exr(data, size, out, error);
+    return decode_rgbe(data, size, out, error);
+}
+
+bool load_hdri_any(const std::string &path, HdrImage &out, std::string *error)
+{
+    out = HdrImage();
+    boost::nowide::ifstream f(path, std::ios::binary);
+    if (!f) {
+        hdr_fail(error, "cannot open the file");
+        return false;
+    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return decode_hdri_any(bytes.data(), bytes.size(), out, error);
+}
+
+HdrImage downscale_hdr(const HdrImage &image, int max_width)
+{
+    HdrImage cur = image;
+    while (!cur.empty() && max_width > 0 && cur.width > max_width && cur.width >= 2 && cur.height >= 2) {
+        HdrImage half;
+        half.width  = cur.width / 2;
+        half.height = cur.height / 2;
+        half.rgb.assign(size_t(half.width) * size_t(half.height) * 3, 0.f);
+        for (int y = 0; y < half.height; ++y)
+            for (int x = 0; x < half.width; ++x)
+                for (int c = 0; c < 3; ++c) {
+                    auto at = [&](int xx, int yy) { return cur.rgb[(size_t(yy) * size_t(cur.width) + size_t(xx)) * 3 + size_t(c)]; };
+                    half.rgb[(size_t(y) * size_t(half.width) + size_t(x)) * 3 + size_t(c)] =
+                        0.25f * (at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1));
+                }
+        cur = std::move(half);
+    }
+    return cur;
 }
 
 std::string encode_rgbe(const HdrImage &image, bool rle)
@@ -1085,10 +1527,55 @@ bool parse_hdri_manifest(const std::string &text, HdriManifest &out, std::string
             info.ground_radius_mm = num(*g, "radius_mm", info.ground_radius_mm, 100.f, 10000000.f);
         }
         info.backdrop_pitch = num(e, "backdrop_pitch", info.backdrop_pitch, -60.f, 60.f);
+        // 1h-3: a download from our mirror. The mirror's file name follows the same rules as `file`.
+        if (auto dl = e.find("downloadable"); dl != e.end() && dl->is_boolean() && dl->get<bool>()) {
+            if (info.procedural)
+                continue;
+            info.downloadable = true;
+            if (auto d = e.find("download"); d != e.end() && d->is_object()) {
+                info.download_file = str(*d, "file");
+                if (auto sz = d->find("size"); sz != d->end() && sz->is_number_unsigned())
+                    info.download_size = sz->get<uint64_t>();
+                std::string sha = str(*d, "sha256");
+                std::transform(sha.begin(), sha.end(), sha.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                const bool hex = sha.size() == 64 && std::all_of(sha.begin(), sha.end(), [](char c) { return std::isxdigit((unsigned char) c) != 0; });
+                info.sha256 = hex ? sha : std::string();
+            }
+            if (info.download_file.empty())
+                info.download_file = info.file;
+            const std::string &f = info.download_file;
+            if (f.find('/') != std::string::npos || f.find('\\') != std::string::npos || f.find("..") != std::string::npos ||
+                f.find(':') != std::string::npos || f.find('?') != std::string::npos || f.find('#') != std::string::npos)
+                continue;
+        }
         m.hdris.push_back(std::move(info));
     }
     out = std::move(m);
     return true;
+}
+
+std::string hdri_manifest_to_json(const std::vector<HdriInfo> &hdris)
+{
+    hdr_json j;
+    j["version"] = 1;
+    hdr_json list = hdr_json::array();
+    for (const HdriInfo &h : hdris) {
+        hdr_json e;
+        e["id"]   = h.id;
+        e["name"] = h.name;
+        e["file"] = h.file;
+        if (!h.source.empty())
+            e["source"] = h.source;
+        if (!h.authors.empty())
+            e["authors"] = h.authors;
+        if (!h.licence.empty())
+            e["licence"] = h.licence;
+        e["ground"]         = { { "height_mm", h.ground_height_mm }, { "radius_mm", h.ground_radius_mm } };
+        e["backdrop_pitch"] = h.backdrop_pitch;
+        list.push_back(std::move(e));
+    }
+    j["hdris"] = std::move(list);
+    return j.dump(2);
 }
 
 } // namespace Showcase

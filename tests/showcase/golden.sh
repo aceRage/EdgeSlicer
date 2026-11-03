@@ -14,7 +14,10 @@
 #                        toolpaths, toolpaths_finishes, toolpaths_silk, silk_walls, silk_top,
 #                        hdri_outdoor, hdri_studio, hdri_workshop, hdri_loft, hdri_sunset, hdri_outdoor_rotated,
 #                        hdri_outdoor_tilt, ground_workshop_dof, ground_sunset_sill, ground_loft, backplate_desk,
-#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait, video)
+#                        backplate_exif, backplate_catcher, ground_ortho, toolpaths_hidden, backplate_portrait,
+#                        translucent_backlit, translucency_plain, finish_sparkle, finish_marble, finish_wood,
+#                        finish_textured, finish_satin, imperfections_visible, lens_effects, dof_spill_highlights,
+#                        build_infill_mid, build_model_mid, video)
 #                        The 1h-2 fixtures (hdri_outdoor_tilt, ground_*, backplate_desk) need the backdrop
 #                        placement, ground projection, photo backplate and depth of field, which a golden
 #                        install from before 1h-2 does not have: they are expected to change until the
@@ -59,7 +62,7 @@ while [ $# -gt 0 ]; do
     --expect-change) EXPECT=$2; shift 2 ;;
     --golden-env) GENV=$2; shift 2 ;;
     --candidate-env) CENV=$2; shift 2 ;;
-    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
     *) CAND=$1; shift ;;
     esac
 done
@@ -99,9 +102,9 @@ echo "candidate: $CEXE" | tee -a "$REPORT"
 echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$REPORT"
 [ -n "$GENV" ] && echo "golden env:    $GENV" | tee -a "$REPORT"
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
-# 1h-2: fixtures the shared baseline cannot render yet differ on purpose. (The 1h-1 HDRI fixtures are
-# compared strictly: the baseline has them since c5b7546a45.)
-NEW_FIXTURES="hdri_outdoor_tilt,ground_workshop_dof,ground_sunset_sill,ground_loft,backplate_desk,backplate_exif,backplate_catcher,ground_ortho,toolpaths_hidden,backplate_portrait"
+# Fixtures a baseline from before them cannot render differ on purpose: realism 1d-1g and the rest of
+# 1h-2. (The 1h-1 and 1h-2 fixtures are compared strictly: main has them since c5b7546a45 and #828.)
+NEW_FIXTURES="translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights,build_infill_mid,build_model_mid"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
@@ -243,6 +246,23 @@ run_still backplate_catcher --photo
 run_still ground_ortho
 run_still toolpaths_hidden --slice
 run_still backplate_portrait --photo-portrait
+# Realism 1d / 1e
+run_still translucent_backlit --settings
+run_still translucency_plain --settings
+run_still finish_sparkle --settings
+run_still finish_marble --settings
+run_still finish_wood --settings
+run_still finish_textured --settings
+run_still finish_satin --settings
+# Realism 1f (the seam and the strings need the slice)
+run_still imperfections_visible --slice
+# Realism 1g, and the deferred part of 1h-2
+run_still lens_effects --settings
+run_still dof_spill_highlights
+# A video's layer build-up (a 4 s static path: --still 0.6 is 15 %, the hull open with its infill; 2 is half-way): the video's Infill wins over
+# Materials > Infill, and the model build-up
+run_still build_infill_mid --slice --still 0.6
+run_still build_model_mid --slice --still 2
 run_video
 
 # Side by side for a person: golden | candidate | difference x32.

@@ -134,6 +134,13 @@ private:
     // 1h-2b: the Lens choice shows the camera's lens now: a preset within 3 %, else "~42 mm" (the last
     // entry), or nothing for an orthographic camera.
     void                     refresh_lens();
+    // 1h-2, the deferred part: dragging the photo backplate's horizon line on the live view (within a
+    // few pixels of it). True for the events it used.
+    bool                     horizon_on_mouse(wxMouseEvent &evt);
+    // 1h-3: the Environments dialog; afterwards the environment lists are made again (and a newly
+    // added HDRI is picked).
+    void                     on_manage_environments();
+    void                     refresh_environment_choices();
     void                     on_choose_floor_image();
     // D10: the render (centre-cropped, 240 px) as the project's cover picture.
     void                     write_project_cover(const wxImage &image);
@@ -429,8 +436,15 @@ private:
     wxCheckBox              *m_lights_off = nullptr;
     wxSlider                *m_lights_ambient = nullptr;
     wxSlider                *m_glow_intensity = nullptr;
+    wxSlider                *m_translucency = nullptr;   // realism 1d
+    // Realism 1f: the imperfections.
+    wxSlider                *m_imp_wobble = nullptr;
+    wxSlider                *m_imp_seam = nullptr;
+    wxSlider                *m_imp_strings = nullptr;
+    wxSlider                *m_imp_colour = nullptr;
     wxFlexGridSizer         *m_mat_grid = nullptr;
     std::vector<wxChoice *>  m_mat_choices;
+    std::vector<int>         m_mat_slots;     // the filament slot of each choice (physical, then Color Mixing)
     std::string              m_mat_signature;
     wxChoice                *m_projection = nullptr;
     // 1h-2: the lens (an action: dolly-zooms to a focal length) and the depth of field.
@@ -440,6 +454,21 @@ private:
     wxCheckBox              *m_dof_on_model = nullptr;
     wxSpinCtrl              *m_dof_focus = nullptr;
     wxChoice                *m_dof_quality = nullptr;
+    // 1h-2, the deferred part: the foreground's spill and the bokeh highlights.
+    wxCheckBox              *m_dof_bleed = nullptr;
+    wxSlider                *m_dof_highlights = nullptr;
+    // Realism 1g: the camera effects.
+    wxSlider                *m_lens_grain = nullptr;
+    wxSlider                *m_lens_vignette = nullptr;
+    wxSlider                *m_lens_bloom = nullptr;
+    wxSlider                *m_lens_chromatic = nullptr;
+    wxSlider                *m_lens_distortion = nullptr;
+    // 1h-2, the deferred part: the ground projection's automatic size, and dragging the photo horizon.
+    wxButton                *m_bg_ground_auto = nullptr;
+    bool                     m_horizon_drag = false;
+    // 1h-3: "Environments..." (downloads and the user's own HDRIs), under each environment picker.
+    wxButton                *m_env_more = nullptr;
+    wxButton                *m_light_env_more = nullptr;
     wxChoice                *m_views = nullptr;
     wxButton                *m_view_delete = nullptr;
     wxChoice                *m_size = nullptr;
@@ -541,6 +570,7 @@ private:
     wxCheckBox              *m_vid_build = nullptr;
     wxChoice                *m_vid_co_motion = nullptr;   // S5c
     wxChoice                *m_vid_co_appear = nullptr;   // S5c
+    wxChoice                *m_vid_build_source = nullptr;     // Build-up shows: Toolpaths (Auto) / Model (Clip)
     wxCheckBox              *m_vid_build_infill = nullptr;     // S5b
     wxCheckBox              *m_vid_build_supports = nullptr;   // S5b
     wxButton                *m_vid_path_import = nullptr;

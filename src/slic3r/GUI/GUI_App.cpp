@@ -8743,6 +8743,9 @@ std::vector<std::pair<unsigned int, std::string>> GUI_App::get_selected_presets(
 // - Taking snapshot
 bool GUI_App::check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice/* = true*/, bool dont_save_insted_of_discard/* = false*/)
 {
+    // Per-nozzle process P8: the plate's process is the one to ask about; a tool's changes are kept in the project.
+    if (auto* print_tab = dynamic_cast<TabPrint*>(get_tab(Preset::TYPE_PRINT)))
+        print_tab->show_tool(-1);
     if (has_current_preset_changes()) {
         int act_buttons = ActionButtons::SAVE;
         if (dont_save_insted_of_discard)
@@ -8833,6 +8836,9 @@ int GUI_App::cache_current_preset_changes_for_transfer(const char* why)
 // Note: no_nullptr postponed_apply_of_keeped_changes indicates that thie function is called after ConfigWizard is closed
 bool GUI_App::check_and_keep_current_preset_changes(const wxString& caption, const wxString& header, int action_buttons, bool* postponed_apply_of_keeped_changes/* = nullptr*/)
 {
+    // Per-nozzle process P8: as above.
+    if (auto* print_tab = dynamic_cast<TabPrint*>(get_tab(Preset::TYPE_PRINT)))
+        print_tab->show_tool(-1);
     if (has_current_preset_changes()) {
         bool is_called_from_configwizard = postponed_apply_of_keeped_changes != nullptr;
 
