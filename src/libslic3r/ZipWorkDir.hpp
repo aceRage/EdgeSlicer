@@ -1,10 +1,12 @@
 #ifndef slic3r_ZipWorkDir_hpp_
 #define slic3r_ZipWorkDir_hpp_
 
+#include <functional>
 #include <string>
 #include <vector>
 
 #include <boost/filesystem/path.hpp>
+#include <boost/system/error_code.hpp>
 
 namespace Slic3r {
 
@@ -44,6 +46,18 @@ public:
                                                        const std::string&                          relative_utf8,
                                                        const std::vector<boost::filesystem::path>& taken = {});
 };
+
+// True for errors a virus scanner or sync client (Windows Defender, OneDrive) causes while it
+// briefly holds a file that was just written: sharing / lock violation, access denied, busy.
+bool zip_fs_error_is_transient(const boost::system::error_code& ec);
+
+// Runs `op` until it succeeds, fails with an error that is not transient, or `attempts` tries
+// have been made, sleeping `delay_ms` between tries. `ec` holds the last result. Used for the
+// rename / delete of freshly extracted files (spec section 10).
+bool zip_fs_retry(const std::function<void(boost::system::error_code&)>& op,
+                  boost::system::error_code&                             ec,
+                  unsigned                                               attempts = 4,
+                  unsigned                                               delay_ms = 100);
 
 } // namespace Slic3r
 

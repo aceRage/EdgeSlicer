@@ -1003,3 +1003,92 @@ TEST_CASE("extract_entries_confined rejects a zero-size entry with a non-zero CR
     CHECK_FALSE(extract_all(zip, dest, ZipExtractCaps{}, err));
     CHECK(list_regular_files(dest).empty());
 }
+
+TEST_CASE("zip_entry_is_encrypted finds an AES field after a large unrelated extra field", "[ZipExtract]")
+{
+    // The extra-field buffer is sized from the header (review A-1); a 0x9901 field behind
+    // 8 KiB of other data must still be found, and an entry with no extra field is plain.
+    TempDir     tmp;
+    const auto  zip = tmp.dir / "aes_late.zip";
+    std::string pad;
+    pad.push_back(static_cast<char>(0x34));
+    pad.push_back(static_cast<char>(0x12));
+    pad.push_back(static_cast<char>(8192 & 0xFF));
+    pad.push_back(static_cast<char>(8192 >> 8));
+    pad += std::string(8192, 'x');
+    write_zip_with_extra(zip, "late.stl", "payload", pad + aes_extra_field());
+
+    MZ_Archive archive;
+    REQUIRE(archive.open_reader(zip.string()));
+    mz_zip_archive_file_stat stat;
+    REQUIRE(mz_zip_reader_file_stat(&archive.arch, 0, &stat));
+    CHECK(zip_entry_is_encrypted(&archive.arch, stat));
+
+    const auto plain = tmp.dir / "plain.zip";
+    write_zip_entries(plain, {{"plain.stl", "a"}});
+    MZ_Archive plain_archive;
+    REQUIRE(plain_archive.open_reader(plain.string()));
+    REQUIRE(mz_zip_reader_file_stat(&plain_archive.arch, 0, &stat));
+    CHECK_FALSE(zip_entry_is_encrypted(&plain_archive.arch, stat));
+}
+
+TEST_CASE("an archive's own work-folder marker is extracted under another name", "[ZipExtract][ZipWorkDir]")
+{
+    // Review A-3: a `.edge-zip-work` entry must never become a real marker inside a session.
+    CHECK(sanitize_zip_extract_path(".edge-zip-work") == "_.edge-zip-work");
+    CHECK(sanitize_zip_extract_path("sub/.EDGE-ZIP-WORK") == "sub/_.EDGE-ZIP-WORK");
+    CHECK(sanitize_zip_extract_path("sub/.edge-zip-work.txt") == "sub/.edge-zip-work.txt");
+
+    TempDir    tmp;
+    const auto zip  = tmp.dir / "planted.zip";
+    const auto dest = tmp.dir / "out";
+    fs::create_directories(dest);
+    write_zip_entries(zip, {{".edge-zip-work", "planted"}, {"inner/.edge-zip-work", "planted"}, {"cube.stl", "solid"}});
+
+    std::string err;
+    REQUIRE(extract_entries_confined(zip, {0, 1, 2}, dest, ZipExtractCaps{}, err));
+    CHECK_FALSE(fs::exists(dest / ZipWorkDir::marker_name()));
+    CHECK_FALSE(fs::exists(dest / "inner" / ZipWorkDir::marker_name()));
+    CHECK(read_binary_file(dest / "_.edge-zip-work") == "planted");
+    CHECK(read_binary_file(dest / "inner" / "_.edge-zip-work") == "planted");
+}
+
+TEST_CASE("zip_fs_retry retries transient errors only", "[ZipExtract][ZipRetry]")
+{
+    const auto busy    = boost::system::errc::make_error_code(boost::system::errc::device_or_resource_busy);
+    const auto missing = boost::system::errc::make_error_code(boost::system::errc::no_such_file_or_directory);
+    CHECK(zip_fs_error_is_transient(busy));
+    CHECK_FALSE(zip_fs_error_is_transient(missing));
+    CHECK_FALSE(zip_fs_error_is_transient(boost::system::error_code()));
+#ifdef _WIN32
+    CHECK(zip_fs_error_is_transient(boost::system::error_code(32, boost::system::system_category()))); // sharing violation
+    CHECK(zip_fs_error_is_transient(boost::system::error_code(33, boost::system::system_category()))); // lock violation
+#endif
+
+    SECTION("a lock that clears on the third try succeeds")
+    {
+        int                       calls = 0;
+        boost::system::error_code ec;
+        const bool ok = zip_fs_retry([&](boost::system::error_code& e) { if (++calls < 3) e = busy; }, ec, 4, 1);
+        CHECK(ok);
+        CHECK(calls == 3);
+        CHECK_FALSE(ec);
+    }
+    SECTION("a lock that never clears gives up after the attempts")
+    {
+        int                       calls = 0;
+        boost::system::error_code ec;
+        const bool ok = zip_fs_retry([&](boost::system::error_code& e) { ++calls; e = busy; }, ec, 4, 1);
+        CHECK_FALSE(ok);
+        CHECK(calls == 4);
+        CHECK(ec == busy);
+    }
+    SECTION("a permanent error is not retried")
+    {
+        int                       calls = 0;
+        boost::system::error_code ec;
+        const bool ok = zip_fs_retry([&](boost::system::error_code& e) { ++calls; e = missing; }, ec, 4, 1);
+        CHECK_FALSE(ok);
+        CHECK(calls == 1);
+    }
+}
