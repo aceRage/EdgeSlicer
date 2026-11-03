@@ -2376,7 +2376,11 @@ void init_vase_with_height_range(Print &print, Model &model, DynamicPrintConfig 
     mesh.merge(column);
     ModelObject *object = model.add_object();
     object->add_volume(std::move(mesh));
-    object->layer_config_ranges[{ 6., 12. }].assign_config(range);
+    // Like the GUI, every height range carries its own layer_height (layer_height_profile_from_ranges reads it).
+    DynamicPrintConfig range_config = range;
+    if (! range_config.has("layer_height"))
+        range_config.set_key_value("layer_height", new ConfigOptionFloat(config.opt_float("layer_height")));
+    object->layer_config_ranges[{ 6., 12. }].assign_config(range_config);
     object->add_instance()->set_offset(Vec3d(80., 80., 0.));
     object->ensure_on_bed();
     print.auto_assign_extruders(object);
