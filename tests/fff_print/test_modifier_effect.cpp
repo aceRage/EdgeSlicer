@@ -405,7 +405,10 @@ TEST_CASE("a modifier with its own bridge speed keeps its own bridge infill", "[
 
 namespace {
 
-const Vec3d k_modifier_through_top { 0., 0., 8. }; // modifier spans z = [5, 11] around the cube's [-10, 10]
+// add_volume() centres each mesh on its own origin before the harness's set_offset(), so the part spans
+// [-20, 0] on every axis and the modifier spans offset + [-6, 0]: this puts it at x, y = [-13, -7], fully
+// inside the part, and z = [-4, 2], through the part's top face at 0.
+const Vec3d k_modifier_through_top { -7., -7., 2. };
 
 void set_override_paint(ModelVolume &v) { v.config.set_key_value("override_paint", new ConfigOptionBool(true)); }
 
@@ -591,6 +594,12 @@ TEST_CASE("override paint: the flag survives a 3MF round trip on the modifier", 
     Slic3r::set_temporary_dir(tmp_root.string());
     const std::string  file   = (tmp_root / "override_paint_roundtrip.3mf").string();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // Two filaments, or loading clamps the modifier's extruder 2 back to 0 (default).
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
 
     StoreParams store_params;
     store_params.path     = file.c_str();
