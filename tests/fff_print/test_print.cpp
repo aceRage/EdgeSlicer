@@ -2354,3 +2354,77 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
     REQUIRE(it != warnings.end());
     CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
 }
+
+namespace {
+
+// One vase object made of a 20 mm cube and a separate 5 mm column in the same volume, so a spiral
+// (largest contour) slice keeps one island while a regular slice keeps two. Its 6-12 mm range only
+// changes the outer wall speed, which splits the object into regions that are not perimeter compatible
+// while it still prints a single filament.
+void init_vase_with_height_range(Print &print, Model &model, DynamicPrintConfig config, const DynamicPrintConfig &range)
+{
+    config.set_deserialize_strict({
+        { "spiral_mode",           "1" },
+        { "wall_loops",            "1" },
+        { "top_shell_layers",      "0" },
+        { "sparse_infill_density", "0" },
+        { "layer_change_gcode",    "G92 E0\n" },
+    });
+    TriangleMesh mesh   = make_cube(20., 20., 20.);
+    TriangleMesh column = make_cube(5., 5., 20.);
+    column.translate(30.f, 0.f, 0.f);
+    mesh.merge(column);
+    ModelObject *object = model.add_object();
+    object->add_volume(std::move(mesh));
+    object->layer_config_ranges[{ 6., 12. }].assign_config(range);
+    object->add_instance()->set_offset(Vec3d(80., 80., 0.));
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+}
+
+} // namespace
+
+TEST_CASE("Spiral vase allows a height range that keeps one filament", "[Print][SpiralVase][Regression]")
+{
+    DynamicPrintConfig range;
+    range.set_key_value("outer_wall_speed", new ConfigOptionFloat(25.));
+    Print print;
+    Model model;
+    init_vase_with_height_range(print, model, two_filament_config(false, false), range);
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+
+    // Orca #17154: the layers in and around the range are sliced in the spiral (largest contour) mode too.
+    REQUIRE_NOTHROW(print.process());
+    const PrintObject &object = *print.objects().front();
+    for (const double z : { 4., 9., 16. }) {
+        const Layer *layer = object.get_layer_at_printz(z, 0.16);
+        REQUIRE(layer != nullptr);
+        INFO("z " << z);
+        CHECK(layer->lslices.size() == 1);
+    }
+}
+
+TEST_CASE("Spiral vase still refuses a height range that prints a second filament", "[Print][SpiralVase]")
+{
+    DynamicPrintConfig range;
+    range.set_key_value("wall_filament", new ConfigOptionInt(2));
+    Print print;
+    Model model;
+    init_vase_with_height_range(print, model, two_filament_config(false, false), range);
+    CHECK_FALSE(print.validate().string.empty());
+}
+
+TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVase]")
+{
+    DynamicPrintConfig range;
+    range.set_key_value("outer_wall_speed", new ConfigOptionFloat(25.));
+    Print print;
+    Model model;
+    // Mixed walls: object_extruders() expands the virtual filament into both physical components.
+    init_vase_with_height_range(print, model, two_filament_config(false, true), range);
+    CHECK_FALSE(print.validate().string.empty());
+}
