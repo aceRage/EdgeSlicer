@@ -14,6 +14,9 @@ Implementation notes (differences from the sketch below):
 - A deps-stamp mismatch is a warning, not a rebuild: this job only reads the shared deps tree.
 - The workflow also triggers on the engine files that define a valid profile (`PrintConfig.*`,
   `Preset*.*`, the validator source), so an enum change is checked even without a profile edit.
+- First run on the VM (run 41871867543, 2026-11-04): Python job 25 s; validator job 6m39s in
+  total including a **cold** build (~4.5 min) and the validation (~25 s). 59 vendors, 0 errors.
+  Much faster than the local 30 min estimate (the VM has more cores and nothing else was running).
 - Upstream's prebuilt binary and #854's TPU285 sed swap are dropped. #854 has to merge main
   (or this PR) to get the new workflow; its swap step then conflicts and should be deleted.
 
