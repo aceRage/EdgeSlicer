@@ -1144,8 +1144,17 @@ TEST_CASE("Ironing flow calibration with a 0% start keeps the zero-flow pieces a
     // G-code export must go through the zero-flow paths without an assertion or an infinite speed.
     const std::string gcode = Slic3r::Test::gcode(print);
     CHECK(gcode.find("G1 F") != std::string::npos);
-    CHECK(gcode.find("inf") == std::string::npos);
-    CHECK(gcode.find("nan") == std::string::npos);
+    std::istringstream stream(gcode);
+    std::string        line;
+    bool               bad_number = false;
+    while (std::getline(stream, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        const std::string move = line.substr(0, line.find(';'));
+        if (move.find("inf") != std::string::npos || move.find("nan") != std::string::npos)
+            bad_number = true;
+    }
+    CHECK(! bad_number);
 }
 
 TEST_CASE("Infill rotation template is unaffected by a raft", "[Fill][Regression]")
