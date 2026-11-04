@@ -318,6 +318,9 @@ std::string ImageFillParams::to_string() const
     if (detail_mm > 0.f) os << ";det=" << f2s(detail_mm);
     if (background != 0) os << ";bg=" << background;
     if (selection_state != 0) os << ";sel=" << selection_state;
+    if (surfaces != 0) os << ";rs=" << surfaces;
+    if (wall_method != 0) os << ";wm=" << wall_method;
+    if (wall_method != 0 && stripe_depth_pct != 40) os << ";wd=" << stripe_depth_pct;
     if (!allowed.empty()) {
         os << ";f=";
         for (size_t i = 0; i < allowed.size(); ++i) os << (i ? "," : "") << allowed[i];
@@ -356,6 +359,9 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         else if (k == "det")   out.detail_mm = float(std::atof(val.c_str()));
         else if (k == "bg")    out.background = std::atoi(val.c_str());
         else if (k == "sel")   out.selection_state = std::atoi(val.c_str());
+        else if (k == "rs")    out.surfaces = std::max(0, std::min(3, std::atoi(val.c_str())));
+        else if (k == "wm")    out.wall_method = std::max(0, std::min(1, std::atoi(val.c_str())));
+        else if (k == "wd")    out.stripe_depth_pct = std::max(5, std::min(80, std::atoi(val.c_str())));
         else if (k == "g")     out.gradient.enabled = val != "0";
         else if (k == "g3")    out.gradient.three_stop = val != "0";
         else if (k == "gd")    out.gradient.direction = std::atoi(val.c_str());
@@ -1013,7 +1019,9 @@ size_t nearest_candidate_index(const std::vector<std::array<float, 3>> &candidat
 std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
                                                    const std::vector<std::array<float, 3>> &candidate_colors,
                                                    const std::vector<int>                  &candidate_ids,
-                                                   float                                     min_run_len_mm)
+                                                   float                                     min_run_len_mm,
+                                                   int                                       fallback_id,
+                                                   const std::array<float, 3>               &fallback_color)
 {
     std::vector<ImageRowRun> runs;
     if (samples.empty() || candidate_colors.empty() || candidate_colors.size() != candidate_ids.size())
@@ -1024,6 +1032,13 @@ std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSam
     std::array<float, 3> error{0.f, 0.f, 0.f};
     bool have_prev = false;
     for (size_t i = 0; i < samples.size(); ++i) {
+        if (!samples[i].has_color && fallback_id != 0) {
+            // Phase 5a: the image does not reach this point - print the part's own filament and
+            // start the error diffusion afresh after it.
+            assigned[i] = fallback_id;
+            error       = {0.f, 0.f, 0.f};
+            continue;
+        }
         if (!samples[i].has_color) {
             // Nothing to diffuse: carry the same id forward (or the first candidate, if this is
             // the very first sample and there is nothing to carry from), and leave `error` alone.
@@ -1059,6 +1074,8 @@ std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSam
     auto color_of_id = [&](int id) -> std::array<float, 3> {
         for (size_t i = 0; i < candidate_ids.size(); ++i)
             if (candidate_ids[i] == id) return candidate_colors[i];
+        if (fallback_id != 0 && id == fallback_id)
+            return fallback_color;
         return candidate_colors.front();
     };
     while (runs.size() > 1) {
@@ -1111,6 +1128,37 @@ std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSam
             tidy.push_back(r);
     }
     return tidy;
+}
+
+// =============================================================================================
+// 9. Phase 5b: layer stripes on the walls
+// =============================================================================================
+
+std::vector<float> image_fill_mix_weights(const std::array<float, 3>              &target,
+                                          const std::vector<std::array<float, 3>> &candidate_colors)
+{
+    if (candidate_colors.empty())
+        return {};
+    if (candidate_colors.size() == 1)
+        return {1.f};
+    // Every mix of the row's filaments is a candidate (no constraints): the question is "how much
+    // of each would make this colour", not "which one". Cached per palette, like image_fill_solve.
+    static thread_local ColorSolverCandidateCache cache;
+    const ColorSolverCandidateSet &set = color_solver_candidates(cache, candidate_colors, 0, ColorSolverConstraints());
+    std::vector<float> w = solve_color_solver_weights_for_target(set, target, ColorSolverLookupMode::BlendClosestTwo,
+                                                                 ColorSolverMode::OklabSoftCap4Dark4);
+    if (w.size() != candidate_colors.size())
+        return std::vector<float>(candidate_colors.size(), 1.f / float(candidate_colors.size()));
+    return w;
+}
+
+float image_fill_stripe_width_factor(const std::vector<float> &weights, size_t layer_component, float depth)
+{
+    if (weights.empty() || layer_component >= weights.size())
+        return 1.f;
+    const float n = float(weights.size());
+    const float t = std::min(1.f, std::max(0.f, weights[layer_component] * n * 0.5f));
+    return 1.f + depth * (2.f * t - 1.f);
 }
 
 } // namespace Slic3r
