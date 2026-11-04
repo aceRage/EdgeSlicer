@@ -828,6 +828,9 @@ TEST_CASE("height range leaves the rest of the object on the default filament", 
 TEST_CASE("U1 CLI smoke: painted cube on filament 1 with paint 2 has a tower", "[MixedFilamentCli]")
 {
     DynamicPrintConfig cfg = u1_cli_config();
+    // This case needs the painted skin and the base filament to both print, so a tower is required.
+    // With the default (Unlimited) a fully painted cube is entirely filament 2, so pin walls mode.
+    cfg.set_key_value("paint_depth_mode", new ConfigOptionEnum<PaintDepthMode>(pdmWalls));
     Print              print;
     Model              model;
     Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model, cfg);
