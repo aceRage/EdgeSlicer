@@ -333,7 +333,7 @@ TEST_CASE("Adaptive region merge: an object whose own nozzle is the reference ne
     CHECK(adaptive_layer_band_size(0.8, 0.4, 0.07) >= 2);
 
     Model model;
-    ModelObject *fine   = add_cube(model, "fine-only", 20., 20., 20., 1);
+    add_cube(model, "fine-only", 20., 20., 20., 1);
     ModelObject *coarse = add_cube(model, "coarse-mate", 20., 20., 20., 2);
     coarse->instances[0]->set_offset(Vec3d(40., 0., 0.));
     Print print;
@@ -343,7 +343,7 @@ TEST_CASE("Adaptive region merge: an object whose own nozzle is the reference ne
 
     PrintObject *fine_object = nullptr;
     for (PrintObject *obj : print.objects_mutable())
-        if (obj->model_object() == fine)
+        if (obj->model_object()->name == "fine-only")
             fine_object = obj;
     REQUIRE(fine_object != nullptr);
     fine_object->slice();
