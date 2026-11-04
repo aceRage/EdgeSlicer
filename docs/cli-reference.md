@@ -11,6 +11,10 @@ release build 2.4.8.0 (commit `cc089f741d`) with a scratch data directory. This 
 `main` at commit `6558ae3f60`; anything newer than the 2.4.8.0 build is described from source only and
 is marked **source only**.
 
+Options added by the "CLI gaps" change (`--list-presets`, `--list-exit-codes`, `--validate`, `--quiet`,
+`--export-gcode`, the richer `result.json`, and the fixes to `--help`, `--outputdir` and `--export-3mf`)
+are marked **new** and were verified against a test build of that change.
+
 Contents
 
 1. [Overview and invocation](#1-overview-and-invocation)
@@ -36,7 +40,8 @@ Contents
 
 There is one binary on every platform. The Windows executable is a GUI-subsystem program: run it from
 a console and its standard output and standard error can be redirected to files or pipes (verified).
-The one exception is `--help`, see [section 2.1](#21-actions).
+`--help` can be captured too (**new**; before that change its text went to the console instead, see
+[section 2.1](#21-actions)).
 
 ### Syntax
 
@@ -72,10 +77,12 @@ table count as actions.)
 
 ### Output streams
 
-* Status and diagnostic log lines are written to **standard output** as well as the log file, at a level
-  set by `--debug` (default 1, errors). A first `trace` line (`Initializing StaticPrintConfigs`) appears
-  before the level is applied. Scripts that parse standard output (`--export-settings -`, `--info`,
-  `--inspect-mesh`) must skip or filter these lines. This is verified.
+* Status and diagnostic log lines are written to **standard output**, at a level set by `--debug`
+  (default 1, errors). The `found error ... exit` line a failing run prints goes there too. Scripts that
+  parse standard output (`--export-settings -`, `--info`, `--inspect-mesh`, `--list-presets`) should add
+  **`--quiet`** (**new**): it sends the log lines and the `found error` line to standard error, so
+  standard output holds only the command's payload. (Builds before the change also printed a stray
+  `Initializing StaticPrintConfigs` trace line first, which no option could silence; it is gone.)
 * Errors and usage problems go to standard error.
 * `--progress-json` adds machine-readable JSON lines on standard output (section 5.4).
 
@@ -93,13 +100,13 @@ EdgeSlicer.exe --datadir C:/work/scratch/datadir --slice 0 ...
 
 ## 2. Option reference
 
-There are 80 CLI-specific options in three groups, plus every print setting (section 2.4).
+There are 85 CLI-specific options in three groups, plus every print setting (section 2.4).
 
 | Group | Count | Table |
 |---|---|---|
-| Actions | 22 | 2.1 |
+| Actions | 26 | 2.1 |
 | Transform | 13 | 2.2 |
-| Misc | 45 | 2.3 |
+| Misc | 46 | 2.3 |
 | Print-setting overrides | about 715 | 2.4 |
 
 The counts were taken from the option definition tables in the source. Entries that exist only as
@@ -117,9 +124,13 @@ Actions say what the run should do. A run with at least one action is headless.
 
 | Option | Value | Type | Default | Description and notes |
 |---|---|---|---|---|
-| `--help`, `-h` | | bool | off | Prints the usage and option list, then continues with the other actions. On Windows the text goes to a console that the program attaches or creates, not to the redirected standard output, so it cannot be captured by a pipe or file redirect (verified). Use this document or run it in an interactive console. |
-| `--slice` | `N` | int | 0 | Slice plates. `0` slices all plates, `N` slices plate N (1-based). Any other value makes the run fail with `-2` ("invalid plate id"). For input that is not a project 3MF the value is reset to 0 (there is only the generated plate set). With `--outputdir` the G-code goes to `<outputdir>/plate_<N>.gcode`. |
-| `--export-3mf` | `filename.3mf` | string | `output.3mf` | Writes the project as a 3MF at the end of the run, including the G-code of every plate sliced in this run. With `--outputdir` the file name is appended to that directory (see section 5.3). Combine with `--slice` to get sliced plates inside. Without `--slice` the project is exported unsliced. |
+| `--help`, `-h` | | bool | off | Prints the usage and option list, then continues with the other actions. The text goes to standard output, so it can be captured by a pipe or file redirect (**new**: on Windows, builds before the change attached a console and wrote there instead, which left a redirected file empty). When both streams are redirected no console is created. |
+| `--slice` | `N` | int | 0 | Slice plates. `0` slices all plates, `N` slices plate N (1-based). Any other value makes the run fail with `-2` ("invalid plate id"). For input that is not a project 3MF the value is reset to 0 (there is only the generated plate set). With `--outputdir` the G-code goes to `<outputdir>/plate_<N>.gcode`, or to the name chosen with `--export-gcode`. |
+| `--export-gcode` | `filename.gcode` | string | empty | **New.** The G-code file name for each sliced plate; needs `--slice` (`-2` otherwise, also for an empty name). A relative name goes under `--outputdir`, an absolute one is used as given, and missing folders are created. The token `{plate}` stands for the 1-based plate number. Without the token, slicing more than one plate (`--slice 0` on a project with several plates) writes `<name>_<N>.<ext>` (`out.gcode` becomes `out_1.gcode`, `out_2.gcode`); one plate keeps the name exactly. The 3MF export embeds these files. Example: `--export-gcode "p{plate}.gcode"`. |
+| `--validate` | | bool | off | **New.** Load the input, check preset compatibility and run the per-plate checks that precede slicing, then exit without slicing. See section 2.1.2. |
+| `--list-presets` | | bool | off | **New.** Print the system and user presets as JSON on standard output and exit. See section 2.1.3. |
+| `--list-exit-codes` | | bool | off | **New.** Print the exit code table and exit. See section 6. |
+| `--export-3mf` | `filename.3mf` | string | `output.3mf` | Writes the project as a 3MF at the end of the run, including the G-code of every plate sliced in this run. With `--outputdir` a relative name is placed in that directory; an absolute name is used as given (**new**: it used to be appended to the directory). See section 5.3. Combine with `--slice` to get sliced plates inside. Without `--slice` the project is exported unsliced. |
 | `--min-save` | | bool | off | Export the 3MF without the model geometry (`SkipModel`), for a smaller file. Use with `--export-3mf`. Verified: this reduces a one-object 3MF from about 279 KB to about 110 KB. |
 | `--export-bambu-3mf` | | bool | off | Write the file given to `--export-3mf` in Bambu Studio's format (like File > Export > Export Bambu 3MF). Settings Bambu Studio does not have are left out and the rest are converted to its names and types. A one-line summary is printed on standard output. |
 | `--export-stl` | | bool | off | Export every object as its own STL under `<outputdir>/stl/obj_<index>_<name>.stl` (the folder is created). Runs before slicing, in command-line order. |
@@ -147,6 +158,57 @@ With `-` the JSON is written to standard output, so everything that would also w
 companions are `--uptodate`, `--load-defaultfila`, `--min-save`, `--mtcpp`, `--mstpp`, `--no-check`,
 `--strict`, `--normative-check` and `--pipe`. The log lines described in section 1 still appear in front
 of the JSON. Verified: the output is a JSON object keyed by setting name, about 67 KB for an X1C preset set.
+
+#### 2.1.2 `--validate` (new)
+
+`--validate` runs everything a slice runs before it starts slicing, and stops there: it loads the input,
+applies the transforms, switches the presets, checks their compatibility, and then validates every plate
+(objects inside the volume, something printable on the plate, filaments against the bed type, filament
+temperature spread, object and tower collisions, spiral vase settings, and the other `Print::validate`
+rules). It writes no G-code and no 3MF.
+
+* The exit codes are the ones the same run with `--slice` would have returned (`-3`, `-4`, `-5`, `-16`,
+  `-17`, `-50` to `-65` and so on); `0` means every plate passed and would have been sliced.
+* `--slice N` picks the plate to check, `0` (the default) checks all plates. Alone, `--slice` slices;
+  together with `--validate` it only selects.
+* It can be combined with `--uptodate`, `--load-defaultfila`, `--min-save`, `--mtcpp`, `--mstpp`,
+  `--no-check`, `--strict`, `--normative-check`, `--pipe` and with transforms. Any action that writes a file
+  (`--export-3mf`, `--export-gcode`, `--export-settings` and so on) is refused with `-2`.
+* `result.json` gets `"validate_only": true`; each checked plate appears in `sliced_plates` with
+  `"validated": true`, its `triangle_count`, its `bounding_box` and any validation warnings (also listed in
+  the top-level `warnings` array with `class` `validation_warning`). It has no timing or usage numbers and
+  no `totals`.
+* It takes seconds, not the minutes slicing takes, because nothing is sliced. Checks that need the sliced
+  result (G-code path conflicts, the estimates) are not run.
+
+#### 2.1.3 `--list-presets` (new)
+
+Prints a JSON document on standard output and exits with `0`. It lists the **system** presets of the
+installation (`resources/profiles`) and the **user** presets of the data directory (`--datadir`), by type:
+
+```
+{
+  "datadir": "...",
+  "machine":  [ { "name", "vendor", "source", "inherits", "model", "variant" }, ... ],
+  "process":  [ { "name", "vendor", "source", "inherits",
+                  "compatible_printers", "compatible_printers_condition" }, ... ],
+  "filament": [ { ... the same, plus "filament_id" and "filament_type" }, ... ]
+}
+```
+
+* `vendor` is the profile bundle that lists the preset (`BBL`, `Snapmaker`, `OrcaFilamentLibrary`, ...);
+  for a user preset it is the vendor of the system preset it inherits. `source` is `system` or `user`.
+  `inherits` is the parent preset's name (empty for a base preset).
+* `compatible_printers` (a list of printer preset names) and `compatible_printers_condition` (an expression
+  on the printer's settings) are the preset's own declaration. A filament or process preset fits a printer
+  when its list names the printer, or its list is empty and the condition holds (or both are empty).
+* Within a type the entries are sorted by vendor and name.
+* **Filter by printer:** `--list-presets --printer-preset "<printer name>"` (system or user printer) returns
+  only that printer under `machine`, and under `process` and `filament` only the presets that are compatible
+  with it, each marked `"compatible": true`; the document gains `"printer"`. Only the printer's own vendor and
+  `OrcaFilamentLibrary` are searched, which is where its compatible presets live; user presets are included.
+  An unknown printer name prints `preset not found: <name>` on standard error and exits `-5`.
+* It takes no input files, transforms or other actions (`-2`) and writes no `result.json`.
 
 ### 2.2 Transform
 
@@ -177,7 +239,7 @@ Transforms change the loaded objects. They run in command-line order, so a rotat
 |---|---|---|---|---|
 | `--load-settings` | `"a.json;b.json"` | list | empty | Load a machine (printer) and a process settings file, at most one of each type. Each file must carry `name`, `from` (`system`, `User` or `user`) and `type` (`machine` or `process`). A second file of the same type fails with `-5`. |
 | `--load-filaments` | `"f1.json;f2.json;..."` | list | empty | Load filament settings, one file per filament slot, in order. An empty entry (for example `"f1.json;;f3.json"`) leaves that slot to `--load-defaultfila` or the 3MF. Files must be `type: filament`. |
-| `--printer-preset` | `name` | string | empty | Use a named printer preset instead of a `--load-settings` machine file. System presets come from `resources/profiles`, user presets from the data directory. An unknown name prints `preset not found` and exits `-5`. |
+| `--printer-preset` | `name` | string | empty | Use a named printer preset instead of a `--load-settings` machine file. With `--list-presets` it is the printer to filter by instead (section 2.1.3). System presets come from `resources/profiles`, user presets from the data directory. An unknown name prints `preset not found` and exits `-5`. |
 | `--process-preset` | `name` | string | empty | Same, for the process preset. |
 | `--filament-presets` | `"n1;n2;..."` | list | empty | Same, for filaments, in extruder order. |
 | `--uptodate-settings` | `"a.json;b.json"` | list | empty | System machine/process files that `--uptodate` should use. The file's name must match the system preset the 3MF inherits. |
@@ -207,8 +269,9 @@ Transforms change the loaded objects. They run in command-line order, so a rotat
 | Option | Value | Type | Default | Description and notes |
 |---|---|---|---|---|
 | `--datadir` | `dir` | string | empty | Load and store settings in this directory. See section 1. |
-| `--outputdir` | `dir` | string | empty | Where result files go: `plate_<N>.gcode`, `result.json`, the 3MF, STEP and STL exports. Empty means the current directory for `result.json` and temporary files for G-code (section 5). The directory is **not created for you**. |
+| `--outputdir` | `dir` | string | empty | Where result files go: `plate_<N>.gcode`, `result.json`, the 3MF, STEP and STL exports. Empty means the current directory for `result.json` and temporary files for G-code (section 5). The directory is created when it does not exist (**new**; it used to have to exist). |
 | `--debug` | `level` | int | 1 | Log level: 0 fatal, 1 error, 2 warning, 3 info, 4 debug, 5 trace. |
+| `--quiet`, `-q` | | bool | off | **New.** Send log lines and the `found error ... exit` line to standard error instead of standard output, so `--info`, `--inspect-mesh`, `--inspect-paint`, `--export-settings -`, `--list-presets` and `--list-exit-codes` print only their payload on standard output. Does not change the log level, `result.json` or `--progress-json`. |
 | `--progress-json` | | bool | off | JSON lines for progress and the final result on standard output (section 5.4). |
 | `--no-thumbnails` | | bool | off | Do not render plate thumbnails when exporting a 3MF (no OpenGL context needed). Recommended on servers and CI. |
 | `--allow-newer-file` | | bool | off | Allow a 3MF written by a newer version to be sliced. The environment variable `SNAPMAKER_ORCA_ALLOW_NEWER_FILE` set to anything other than `0` does the same. |
@@ -358,7 +421,7 @@ fails with `-5`.
 ### 5.1 G-code
 
 * With `--outputdir D`: `D/plate_<N>.gcode`, where N is the 1-based plate number (verified).
-  The directory must exist.
+  The directory is created if it is missing (**new**). `--export-gcode <name>` chooses the file name instead (section 2.1).
 * Without `--outputdir`: the G-code is written to a temporary location and is only kept inside an exported
   3MF. If you need the `.gcode`, give `--outputdir`.
 * Prices, cost lines and the config block follow `--no-filament-prices`.
@@ -376,9 +439,9 @@ Whether the plate data is "sliced" depends on `--slice` in the same run: `--slic
 
 | Output | Name |
 |---|---|
-| G-code | `<outputdir>/plate_<N>.gcode` |
+| G-code | `<outputdir>/plate_<N>.gcode`, or the `--export-gcode` name (relative names go under `--outputdir`; `{plate}` token or `_<N>` suffix for several plates) |
 | Result file | `<outputdir>/result.json`, or `result.json` in the current directory without `--outputdir` |
-| 3MF | `<outputdir>/<value of --export-3mf>`, or the value as given (relative to the current directory) without `--outputdir`. With `--outputdir` set, give a bare file name: an absolute `--export-3mf` path is appended to the directory, not used as is. |
+| 3MF | `<outputdir>/<value of --export-3mf>`, or the value as given (relative to the current directory) without `--outputdir`. A relative name is placed under `--outputdir`; an absolute path is used as given (**new**; it used to be appended to the directory), and its folder is created. |
 | STEP | the `--export-step` value, placed under `--outputdir` only when it is relative |
 | STL (`--export-stl`) | `<outputdir>/stl/obj_<index>_<name>.stl` |
 | STL (`--export-stls dir`) | `<dir>/obj_<index>_<name>.stl` |
@@ -417,6 +480,18 @@ Whether the plate data is "sliced" depends on `--slice` in the same run: `--slic
 * `return_code` and `error_string` repeat the exit status and its meaning. `plate_index` names the plate
   the run stopped on (0 for a failure before slicing).
 * `time_s` is the estimated print time in seconds; `filament_g` and `filament_mm3` the estimated usage.
+* **New keys (added in the CLI gaps change; every key above is unchanged).** Per sliced plate:
+  `layers`; `filaments` (one entry per filament slot that extruded: `index`, `preset`, `type`, `colour`,
+  `extruder`, `grams`, `mm`, `mm3`, `cost`, `price_per_kg`, `model_g`, `support_g`, `flush_g`, `tower_g`);
+  `extruders` (the same summed per physical extruder: `index`, `filaments`, `grams`, `mm`, `mm3`, `cost`;
+  the extruder of a filament comes from the plate's `filament_map`, 1 when there is none); `cost`
+  (`material`, `machine`, `total`, `display_total` rounded to cents as the cost panel shows it,
+  `prices_known`, `machine_rate_known`, `machine_rate_per_h`); `bounding_box` (`min`, `max`, `size` of the
+  objects in mm, relative to the plate's origin). Top level: `presets` (`printer`, `process`, `filaments`:
+  the preset names used) and `totals` (`plates`, `time_s`, `layers`, `filament_g`, `filament_mm`,
+  `filament_mm3`, `cost`). `time_s` per plate is the estimated print time. Costs use the filament prices of
+  the presets (and the printer's time cost); with `--no-filament-prices` they are 0. `--validate` adds
+  `validate_only` and per-plate `validated` instead (section 2.1.2).
 * `upward_compatible_machine` and `downward_compatible_machine` appear when the 3MF or the downward
   check supplied them.
 * `warnings` is an array of structured warnings (each has a `class`; for example the precise-seam and
@@ -438,7 +513,7 @@ with `{`. `--progress-json` cannot be combined with `--export-settings -`, `--in
 
 ### 5.5 Other output
 
-`--info` prints to standard output; `--inspect-mesh` and `--inspect-paint` print JSON to standard output;
+`--info` prints to standard output (add `--quiet` to keep log lines off it); `--list-presets` prints JSON, `--list-exit-codes` a table or JSON; `--inspect-mesh` and `--inspect-paint` print JSON to standard output;
 `--export-settings -` prints JSON to standard output; `--export-step` and `--export-bambu-3mf` print one
 summary line. Everything else is written to files.
 
@@ -500,6 +575,9 @@ modulo 256 (`-3` becomes 253). `result.json` always holds the exact number in `r
 
 Verified: a missing input file gives `-3`, an unknown option `-2`, a bad plate number `-2`, a plate that
 holds nothing printable `-50`.
+
+`--list-exit-codes` (**new**) prints this table from the program itself: aligned columns, or with `--quiet` JSON
+`{"exit_codes": [{"code", "name", "message"}, ...]}`. The messages are the ones `result.json`'s `error_string` uses.
 
 `--showcase-render` has its own small set of exit codes (section 2.3).
 
@@ -622,6 +700,22 @@ EdgeSlicer.exe --datadir "$RUNNER_TEMP/dd" ... --strict --slice 0 --no-thumbnail
 test "$(python -c "import json;print(json.load(open('out/result.json'))['return_code'])")" = 0
 ```
 
+### 7.11 List presets, validate, name the G-code (new)
+
+```
+EdgeSlicer.exe --datadir scratch/datadir --quiet --list-presets --printer-preset "Bambu Lab X1 Carbon 0.4 nozzle" > presets.json
+EdgeSlicer.exe --datadir scratch/datadir --list-exit-codes --quiet > exit_codes.json
+EdgeSlicer.exe --datadir scratch/datadir --printer-preset "Bambu Lab X1 Carbon 0.4 nozzle" --process-preset "0.20mm Standard @BBL X1C"   --filament-presets "Bambu PLA Basic @BBL X1C" --validate --no-thumbnails --outputdir out/check model.stl
+EdgeSlicer.exe ... --slice 0 --no-thumbnails --outputdir out/s --export-gcode "part_{plate}.gcode" model.stl
+```
+
+Verified on a test build: the filtered listing for the X1 Carbon returned 1 machine, 11 process and 506
+filament presets in about 2 s (the unfiltered listing, with 998 machines, 2880 process and 7276 filament
+presets, about 19 s). `--validate` on the sample model exited 0 and wrote `result.json` with
+`validate_only` and the plate's `bounding_box`; with `--scale 20` it exited `-50`. The slice wrote
+`part_1.gcode`, and `result.json` carried `layers` 32, one `filaments` entry (3.30 g, 1090 mm,
+2623 mm3, cost 0.0826) and `totals`.
+
 ---
 
 ## 8. EdgeSlicer-specific behaviour
@@ -638,6 +732,7 @@ features since; compare with its own documentation where it matters.
   with per-plate time, filament use, G-code path and structured warnings.
 * `--strict` and the `warnings` array with stable classes.
 * `--no-thumbnails`, `--no-filament-prices`.
+* `--list-presets`, `--list-exit-codes`, `--validate`, `--quiet`, `--export-gcode`, and the richer `result.json` (section 5.4).
 * `--inspect-mesh`, `--inspect-paint`, `--export-step`, `--export-bambu-3mf`, `--export-settings -` (stdout).
 * `--ground-largest-face`, `--ground-face-normal`, `--ground-face-point`, `--ensure-on-bed`,
   `--align-to-y-axis`.
@@ -662,9 +757,8 @@ features since; compare with its own documentation where it matters.
 **Not provided**
 
 * There is no `--export-obj`, `--export-amf`, `--cut`, `--split`, `--repair`, `--scale-to-fit` or
-  `--center`: the code for some remains in the source but the options are disabled.
-* `--help` cannot be captured from a redirected Windows console (section 2.1).
+  `--center`: the code for some remains in the source but the options are disabled. Verified: `--cut 3` and `--scale-to-fit 10,10,10` both fail with `Invalid option` (`-2`). Their definitions in `PrintConfig.cpp` sit inside comment blocks, and the handlers in `Snapmaker_Orca.cpp` are unreachable (the `--cut` one only prints "Cut operation is not supported yet").
 
 ---
 
-*Option counts: Actions 22, Transform 13, Misc 45 (80 CLI options); about 715 print-setting overrides.*
+*Option counts: Actions 26, Transform 13, Misc 46 (85 CLI options); about 715 print-setting overrides.*
