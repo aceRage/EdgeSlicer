@@ -180,6 +180,10 @@ TEST_CASE("Snapmaker discovery does not share the download local-suffix list", "
     CHECK(is_local_address("u1.local"));
     CHECK(is_local_address("u1.lan"));
     CHECK_FALSE(is_local_address("u1.ts.net"));
+    // Discovery is the permissive predicate (is_lan_host, which only refuses the cloud), so a
+    // tailnet printer still arrives from mDNS. Only the Device-tab import path above is narrow.
+    // This is the assertion a future "unify the lists" change would break.
+    CHECK(is_lan_host("u1.ts.net"));
 }
 
 static Device dev(const std::string& id, const std::string& name, const std::string& ip, const std::string& by = "discovery")
