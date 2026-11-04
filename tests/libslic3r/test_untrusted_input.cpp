@@ -28,6 +28,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -36,6 +37,13 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Slic3r;
 using namespace Slic3r::untrusted;
@@ -710,8 +718,47 @@ TEST_CASE("archive entry names may not leave the extraction folder", "[Untrusted
                           "Bob's notes.pdf", "Other Files/Bob's notes.pdf"})
         CHECK(is_safe_archive_relative_path(p));
     for (const char *p : {"", "../x", "a/../../x", "..", ".", "./x", "a/./b", "/etc/passwd", "a//b", "a/", "..\\x",
-                          "a\\b", "C:/x", "C:x", "a/.../b", "a/.. /b", "x\x01y"})
+                          "a\\b", "C:/x", "C:x", "x\x01y"})
         CHECK_FALSE(is_safe_archive_relative_path(p));
+#ifdef _WIN32
+    for (const char *p : {"a/.../b", "a/.. /b"})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+#endif
+}
+
+TEST_CASE("archive entry names refuse a trailing dot or space and DOS device names", "[Untrusted][ZipSlip]")
+{
+#ifdef _WIN32
+    // Windows strips a trailing dot or space, so "foo." / "foo " would collide with "foo".
+    for (const char *p : {"foo.", "foo ", "a/foo.", "a/foo ", "foo.bar.", "dir /x", "x/dir."})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+    // Device names, including with an extension: "nul.txt" opens the null device.
+    // Superscript ¹ ² ³ are COM1–3 / LPT1–3.
+    for (const char *p : {"CON", "con", "PRN", "AUX", "NUL", "nul.txt", "NUL.3mf", "COM1", "com1.stl", "LPT9",
+                          "lpt1.gcode", "a/NUL", "a/nul.txt", "COM9.x", "aux.foo.bar", "COM\xC2\xB9", "COM\xC2\xB2.txt",
+                          "LPT\xC2\xB3", "lpt\xC2\xB9.gcode"})
+        CHECK_FALSE(is_safe_archive_relative_path(p));
+    // Ordinary names that only look similar stay allowed.
+    for (const char *p : {"console.stl", "Auxiliaries/cover.png", "connection.json", "prntr.3mf", "COM10", "LPT0",
+                          "COM0.txt", "nulish.txt", "a..b", "..a"})
+        CHECK(is_safe_archive_relative_path(p));
+
+    std::string out;
+    for (const char *p : {"foo.", "foo ", "nul.txt", "CON", "a\\nul.txt", "./COM1.stl", "..a/b..", "COM\xC2\xB9.txt"}) {
+        INFO(p);
+        CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
+    }
+#else
+    // On POSIX these are ordinary names; 3MF entries like Auxiliaries/aux.png must still load.
+    for (const char *p : {"Auxiliaries/aux.png", "con.jpg", "foo.", "foo ", "nul.txt", "CON", "COM1.stl", "a/.../b",
+                          "..a/b..", "COM\xC2\xB9.txt"})
+        CHECK(is_safe_archive_relative_path(p));
+    std::string out;
+    CHECK(normalize_archive_entry_path("Auxiliaries/aux.png", out) == ArchiveEntryName::Ok);
+    CHECK(out == "Auxiliaries/aux.png");
+    CHECK(normalize_archive_entry_path("con.jpg", out) == ArchiveEntryName::Ok);
+    CHECK(out == "con.jpg");
+#endif
 }
 
 // The Windows ANSI code page maps these look-alikes to '.', '/', '\\' and ':' when a UTF-8 name is
@@ -753,7 +800,10 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     CHECK(normalized("dir/") == "dir");
     CHECK(normalized("dir\\") == "dir");
     CHECK(normalized(".//a/") == "a");
+    CHECK(normalized("..a/b") == "..a/b");
+#ifndef _WIN32
     CHECK(normalized("..a/b..") == "..a/b..");
+#endif
     CHECK(normalized("caf\xC3\xA9\\\xE6\xB5\x8B.json") == "caf\xC3\xA9/\xE6\xB5\x8B.json");
 
     // Nothing to extract.
@@ -765,11 +815,18 @@ TEST_CASE("archive entry names are normalised before they are judged", "[Untrust
     for (const char *p : {"", "..", "../x", "a/../x", "a/..", ".\\..\\x", "a\\..\\..\\x", "./../x", "a//../../x",
                           "/x", "//x", "\\x", "\\\\x", "\\\\server\\share\\x", "//server/share/x", "\\\\?\\C:\\x", "/C:/x",
                           "C:", "C:x", "C:/x", "C:\\x", ".\\C:\\x", "a/b:stream", "a\\b:stream",
-                          "a/.../b", "a/.. /b", "a/. /b", "x\x01y", "x\ty",
+                          "x\x01y", "x\ty",
                           "\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\x8F" "x", "a\\\xEF\xBC\x8E\xEF\xBC\x8E\xEF\xBC\xBC" "x"}) {
         INFO(p);
         CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
     }
+#ifdef _WIN32
+    for (const char *p : {"a/.../b", "a/.. /b", "a/. /b", "foo.", "foo ", "..a/b..", "nul.txt", "CON", "a\\NUL.3mf",
+                          "COM\xC2\xB9.txt"}) {
+        INFO(p);
+        CHECK(normalize_archive_entry_path(p, out) == ArchiveEntryName::Reject);
+    }
+#endif
     // Over-long names, before and after normalisation.
     CHECK(normalize_archive_entry_path(std::string(1025, 'a'), out) == ArchiveEntryName::Reject);
     CHECK(normalize_archive_entry_path("./" + std::string(1025, 'a'), out) == ArchiveEntryName::Reject);
@@ -1934,7 +1991,11 @@ void write_zip_entries(const fs::path &zip_file, const std::vector<std::pair<std
 {
     mz_zip_archive zip;
     mz_zip_zero_struct(&zip);
+#ifdef _WIN32
+    REQUIRE(open_zip_writer(&zip, boost::nowide::narrow(zip_file.wstring())));
+#else
     REQUIRE(open_zip_writer(&zip, zip_file.string()));
+#endif
     for (const auto &entry : entries)
         REQUIRE(mz_zip_writer_add_mem(&zip, entry.first.c_str(), entry.second.data(), entry.second.size(), MZ_DEFAULT_COMPRESSION));
     REQUIRE(mz_zip_writer_finalize_archive(&zip));
@@ -2029,6 +2090,61 @@ TEST_CASE("is_path_within_root confines a candidate to the extraction root", "[U
     fs::remove_all(dir, ec);
 }
 
+TEST_CASE("is_path_within_root canonicalizes a dest path longer than MAX_PATH", "[Untrusted][ZipSlip]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_within_root_long_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path root = dir / std::string(240, 'r');
+    REQUIRE(root.string().size() > 260);
+    fs::create_directories(extended_path(root));
+
+    CHECK(is_path_within_root(root, root / "a"));
+    CHECK(is_path_within_root(root, root / "a" / "b.json"));
+    CHECK(is_path_within_root(root, root));
+    CHECK_FALSE(is_path_within_root(root, root / ".." / "x"));
+    CHECK_FALSE(is_path_within_root(root, dir / "x"));
+
+    // A junction (or directory symlink) under that long root must be followed the same way
+    // prefixed I/O follows it, so a hop that lands outside is rejected.
+    const fs::path outside  = dir / "outside";
+    const fs::path junction = root / "escape";
+    fs::create_directories(outside);
+    bool linked = false;
+#ifdef _WIN32
+    {
+        const std::string cmd = "cmd /c mklink /J \"" + junction.string() + "\" \"" + outside.string() + "\" >nul 2>&1";
+        linked                = (std::system(cmd.c_str()) == 0);
+        if (!linked) {
+            const std::wstring link_w   = extended_path(junction).wstring();
+            const std::wstring target_w = extended_path(outside).wstring();
+            DWORD              flags    = SYMBOLIC_LINK_FLAG_DIRECTORY;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+            flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+            linked = CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), flags) != 0;
+        }
+    }
+#else
+    {
+        boost::system::error_code lec;
+        fs::create_directory_symlink(outside, junction, lec);
+        linked = !lec;
+    }
+#endif
+    if (linked) {
+        CHECK_FALSE(is_path_within_root(root, junction / "secret.txt"));
+        CHECK(is_path_within_root(root, root / "safe.txt"));
+        boost::system::error_code rec;
+        fs::remove(extended_path(junction), rec);
+    } else {
+        WARN("junction/symlink unavailable; escape-via-junction case skipped");
+    }
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(root), ec);
+    fs::remove_all(dir, ec);
+}
+
 TEST_CASE("extract_archive_confined writes a well-formed nested archive under the target", "[Untrusted][ZipSlip]")
 {
     const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_confined_ok_%%%%%%%%");
@@ -2049,6 +2165,75 @@ TEST_CASE("extract_archive_confined writes a well-formed nested archive under th
     CHECK(read_text_file(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
 
     boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+namespace {
+
+std::string read_text_file_io(const fs::path &file)
+{
+    const fs::path io = extended_path(file);
+#ifdef _WIN32
+    boost::nowide::ifstream in(boost::nowide::narrow(io.wstring()), std::ios::binary);
+#else
+    boost::nowide::ifstream in(io.string(), std::ios::binary);
+#endif
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("extract_archive_confined writes files under a target path longer than MAX_PATH", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_dest_%%%%%%%%");
+    fs::create_directories(dir);
+    const fs::path zip_file = dir / "bundle.zip";
+    // Directory entries are explicit: extract_archive_confined recreates directories only for them.
+    write_zip_entries(zip_file, {{"vendor/", ""}, {"vendor/machine/", ""}, {"vendor.json", "{\"a\":1}"},
+                                 {"vendor/machine/printer.json", "{\"b\":2}"}});
+
+    // One 240-char component keeps every name below the NTFS 255 limit while pushing the full
+    // target path past the 260-char MAX_PATH the Win32 APIs enforce when LongPathsEnabled is off.
+    const fs::path target = dir / std::string(240, 'd');
+    REQUIRE(target.string().size() > 260);
+    fs::create_directories(extended_path(target));
+
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    // Verify through extended-length paths, otherwise the checks themselves are bounded by MAX_PATH.
+    CHECK(fs::is_directory(extended_path(target / "vendor")));
+    CHECK(read_text_file_io(target / "vendor.json") == "{\"a\":1}");
+    CHECK(read_text_file_io(target / "vendor" / "machine" / "printer.json") == "{\"b\":2}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(target), ec);
+    CHECK_FALSE(ec);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("A zip archive under a path longer than MAX_PATH can be written and read", "[Untrusted][ZipSlip][MinizExtension]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("edgeslicer_long_zip_%%%%%%%%");
+    fs::create_directories(dir);
+
+    const fs::path long_dir = dir / std::string(240, 'z');
+    fs::create_directories(extended_path(long_dir));
+    const fs::path zip_file = long_dir / "bundle.zip";
+    REQUIRE(zip_file.string().size() > 260);
+
+    write_zip_entries(zip_file, {{"vendor.json", "{\"a\":1}"}});
+
+    const fs::path target = dir / "out";
+    fs::create_directories(target);
+    std::string err;
+    REQUIRE(extract_archive_confined(zip_file, target, err));
+    CHECK(err.empty());
+    CHECK(read_text_file(target / "vendor.json") == "{\"a\":1}");
+
+    boost::system::error_code ec;
+    fs::remove_all(extended_path(long_dir), ec);
+    CHECK_FALSE(ec);
     fs::remove_all(dir, ec);
 }
 

@@ -125,6 +125,35 @@ bool looks_like_ipv4(const std::string &host)
 
 const char *const MODEL_EXTENSIONS[] = {".3mf", ".stl", ".step", ".stp", ".obj", ".zip"};
 
+// Windows reserved device names, including with an extension: "nul.txt" opens the null device.
+// Superscript digits ¹ ² ³ (U+00B9/B2/B3) are the same as 1/2/3: COM¹ is COM1.
+bool is_windows_reserved_device_name(const std::string &seg)
+{
+    const std::string stem = seg.substr(0, seg.find('.'));
+    std::string       upper;
+    upper.reserve(stem.size());
+    for (size_t i = 0; i < stem.size();) {
+        const unsigned char c = static_cast<unsigned char>(stem[i]);
+        if (c == 0xC2 && i + 1 < stem.size()) {
+            const unsigned char n = static_cast<unsigned char>(stem[i + 1]);
+            if (n == 0xB9) { upper.push_back('1'); i += 2; continue; } // ¹
+            if (n == 0xB2) { upper.push_back('2'); i += 2; continue; } // ²
+            if (n == 0xB3) { upper.push_back('3'); i += 2; continue; } // ³
+        }
+        upper.push_back(char(std::toupper(c)));
+        ++i;
+    }
+    while (!upper.empty() && upper.back() == ' ')
+        upper.pop_back();
+    static const char *const reserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "CONIN$", "CONOUT$", "COM1", "COM2", "COM3",
+                                           "COM4", "COM5", "COM6", "COM7", "COM8",   "COM9",    "LPT1", "LPT2", "LPT3",
+                                           "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",   "LPT9"};
+    for (const char *r : reserved)
+        if (upper == r)
+            return true;
+    return false;
+}
+
 } // namespace
 
 // ---- URLs ------------------------------------------------------------------------------------
@@ -505,20 +534,8 @@ std::string sanitize_download_filename(const std::string &name_in)
         return std::string();
 
     // Device names are reserved with any extension: "NUL.3mf" opens the null device.
-    std::string stem = out.substr(0, out.find('.'));
-    std::string upper;
-    for (char c : stem)
-        upper.push_back(char(std::toupper((unsigned char)c)));
-    while (!upper.empty() && upper.back() == ' ')
-        upper.pop_back();
-    static const char *const reserved[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
-                                           "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-                                           "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
-    for (const char *r : reserved)
-        if (upper == r) {
-            out = "_" + out;
-            break;
-        }
+    if (is_windows_reserved_device_name(out))
+        out = "_" + out;
 
     // Cap the length, keeping the extension.
     const size_t max_len = 150;
@@ -874,9 +891,19 @@ bool is_safe_archive_relative_path(const std::string &path)
         const std::string seg = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
         if (seg.empty() || seg == "." || seg == "..")
             return false;
-        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb.
+#ifdef _WIN32
+        // Windows strips trailing dots/spaces, so "..." or ".. " would still climb, and
+        // "foo." / "foo " would collide with "foo". Refuse both the all-dot/space case and
+        // an otherwise-valid name that only ends in a dot or space. DOS device names
+        // (CON, AUX, nul.txt, COM¹, …) open the device; on POSIX they are ordinary names
+        // (Auxiliaries/aux.png, con.jpg in a 3MF).
         if (seg.find_first_not_of(". ") == std::string::npos)
             return false;
+        if (seg.back() == '.' || seg.back() == ' ')
+            return false;
+        if (is_windows_reserved_device_name(seg))
+            return false;
+#endif
         if (slash == std::string::npos)
             break;
         start = slash + 1;
@@ -950,15 +977,20 @@ boost::filesystem::path strip_trailing_separators_path(boost::filesystem::path p
 // valid dest and must be followed (plain weakly_canonical).
 boost::filesystem::path weakly_canonical_for_confine(const boost::filesystem::path &p)
 {
-    const boost::filesystem::path stripped = strip_trailing_separators_path(p);
+    // Drop a trailing separator without round-tripping through generic_string, which would
+    // rewrite an already-prefixed "\\?\" path into a look-alike that is not extended.
+    boost::filesystem::path stripped = p;
+    while (stripped.has_relative_path() && stripped.filename() == ".")
+        stripped = stripped.parent_path();
+    const boost::filesystem::path io = extended_path(stripped);
     boost::system::error_code     ec;
-    if (boost::filesystem::is_symlink(boost::filesystem::symlink_status(stripped, ec))) {
+    if (boost::filesystem::is_symlink(boost::filesystem::symlink_status(io, ec))) {
         const boost::filesystem::path parent = stripped.parent_path();
         if (parent.empty())
-            return stripped;
-        return boost::filesystem::weakly_canonical(parent) / stripped.filename();
+            return io;
+        return boost::filesystem::weakly_canonical(extended_path(parent)) / stripped.filename();
     }
-    return boost::filesystem::weakly_canonical(stripped);
+    return boost::filesystem::weakly_canonical(io);
 }
 
 bool skip_dot_or_empty(const boost::filesystem::path &comp) { return comp.empty() || comp == "."; }
@@ -970,8 +1002,10 @@ bool is_path_within_root(const boost::filesystem::path &root, const boost::files
     try {
         if (has_embedded_nul(root) || has_embedded_nul(candidate))
             return false;
-        const boost::filesystem::path root_c = boost::filesystem::weakly_canonical(strip_trailing_separators_path(root));
-        const boost::filesystem::path cand_c = weakly_canonical_for_confine(candidate);
+        // Prefixed I/O follows a junction past MAX_PATH; canonicalise the same way so the
+        // confine check sees the real target instead of the unresolved long path.
+        const boost::filesystem::path root_c = boost::filesystem::weakly_canonical(extended_path(strip_trailing_separators_path(root)));
+        const boost::filesystem::path cand_c = weakly_canonical_for_confine(extended_path(candidate));
         if (has_embedded_nul(root_c) || has_embedded_nul(cand_c))
             return false;
         auto r = root_c.begin();
