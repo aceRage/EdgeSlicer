@@ -2354,3 +2354,95 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
     REQUIRE(it != warnings.end());
     CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
 }
+
+namespace {
+
+// Orca #17000. The slicing parameters of an object printed with one filament, on a printer whose first
+// extruder allows layers up to 0.32 mm and the second one up to 0.28 mm. The layers are 0.2 mm, within both.
+SlicingParameters slicing_parameters_on_filament(unsigned int filament, const char *nozzle_assignment = nullptr)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",   "0.4,0.4" },
+        { "filament_diameter", "1.75,1.75" },
+        { "min_layer_height",  "0.08,0.08" },
+        { "max_layer_height",  "0.32,0.28" },
+        { "layer_height",      0.2 },
+        { "enable_support",    0 },
+        { "raft_layers",       0 },
+    });
+    if (nozzle_assignment)
+        config.set_deserialize_strict({ { "filament_nozzle_assignment", nozzle_assignment } });
+    PrintConfig       print_config;
+    PrintObjectConfig object_config;
+    print_config.apply(config, true);
+    object_config.apply(config, true);
+    // The extruders of an object are 0-based.
+    return SlicingParameters::create_from_config(print_config, object_config, 20., { filament - 1 }, Vec3d(1., 1., 1.));
+}
+
+} // namespace
+
+TEST_CASE("An object takes the layer height limits of the extruder of its own filament", "[Print][PerNozzle]")
+{
+    CHECK_THAT(slicing_parameters_on_filament(1).max_layer_height, Catch::Matchers::WithinAbs(0.32, EPSILON));
+    CHECK_THAT(slicing_parameters_on_filament(2).max_layer_height, Catch::Matchers::WithinAbs(0.28, EPSILON));
+    // Edge: the limits follow the filament -> nozzle mapping, not the filament index.
+    CHECK_THAT(slicing_parameters_on_filament(1, "2,1").max_layer_height, Catch::Matchers::WithinAbs(0.28, EPSILON));
+    CHECK_THAT(slicing_parameters_on_filament(2, "2,1").max_layer_height, Catch::Matchers::WithinAbs(0.32, EPSILON));
+}
+
+TEST_CASE("equal_layering ignores the variable layer height limits", "[Print][PerNozzle]")
+{
+    const SlicingParameters a = slicing_parameters_on_filament(1);
+    const SlicingParameters b = slicing_parameters_on_filament(2);
+    REQUIRE(a.max_layer_height != b.max_layer_height);
+    CHECK(equal_layering(a, b));
+    SlicingParameters c = b;
+    c.layer_height = 0.16;
+    CHECK_FALSE(equal_layering(a, c));
+}
+
+// The limits only bound a variable layer height, so with fixed 0.2 mm layers both objects share every layer.
+TEST_CASE("Objects on extruders with different layer height limits can share a prime tower", "[Print][PerNozzle]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",    "0.4,0.4,0.4" },
+        { "filament_diameter",  "1.75,1.75,1.75" },
+        { "min_layer_height",   "0.08,0.08,0.08" },
+        { "max_layer_height",   "0.32,0.28,0.28" },
+        { "layer_height",       0.2 },
+        { "enable_support",     0 },
+        { "enable_prime_tower", 1 },
+        { "printable_area",     "0x0,250x0,250x250,0x250" },
+        { "wipe_tower_x",       "170" },
+        { "wipe_tower_y",       "170" },
+        { "layer_change_gcode", "G92 E0\n" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00", "#0000FF" };
+
+    Model model;
+    const int filaments[] = { 1, 3 };
+    for (size_t i = 0; i < 2; ++ i) {
+        ModelObject *object = model.add_object();
+        object->add_volume(make_cube(20., 20., 20.));
+        object->config.set_key_value("extruder", new ConfigOptionInt(filaments[i]));
+        object->add_instance()->set_offset(Vec3d(60. + 40. * double(i), 80., 0.));
+        object->ensure_on_bed();
+    }
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.objects()[0]->slicing_parameters().max_layer_height != print.objects()[1]->slicing_parameters().max_layer_height);
+    const StringObjectException error = print.validate();
+    INFO(error.string);
+    // Explicit bed and a tower clear of both cubes, so no earlier validation stage can mask the layering rule:
+    // the whole validation must pass.
+    CHECK(error.string.empty());
+}
