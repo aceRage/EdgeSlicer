@@ -5,7 +5,7 @@
 // (tests/design_bambu29_mixed_nozzle_compare.md section 4). Both are painted whole, size from the DIP constants below through
 // FromDIP and the Label fonts, wrap onto another row instead of clipping or scrolling, and take their colours from
 // StateColor::darkModeColorFor, so the light and dark themes and every DPI work alike. The tile layout and the hotend icon
-// follow Bambu Studio's NozzleSlotTile (AGPL-3.0, commit 464f4b8db), drawn smaller: 26 DIP tiles, a 10 x 24 DIP icon.
+// follow Bambu Studio's NozzleSlotTile (AGPL-3.0, commit 464f4b8db), at 52 DIP tiles with a 17 x 40 DIP icon (owner hand test 2026-11-04).
 
 #include <functional>
 #include <vector>
@@ -35,11 +35,12 @@ wxColour pill_background();
 wxColour hover_background();
 // `c` mixed into `bg` at `alpha` (0..1): the 30 % look of a tile that cannot print.
 wxColour faded(const wxColour &c, const wxColour &bg, double alpha);
-wxFont   label_font();     // tile labels, badges: Body 9 bold
-wxFont   size_font();      // tile size line: Body 9
-wxFont   flow_font();      // tile flow line: Body 8
-wxFont   chip_font();      // chip label: Body 11 bold
-wxFont   chip_pill_font(); // chip tools: Body 9
+wxFont   label_font();      // filament badges: Body 9 bold
+wxFont   tile_label_font(); // tile labels: Body 12 bold
+wxFont   size_font();      // tile size line: Body 14
+wxFont   flow_font();      // tile flow line: Body 12
+wxFont   chip_font();      // chip label: Body 13 bold
+wxFont   chip_pill_font(); // chip tools: Body 11
 } // namespace NozzleStyle
 
 // What one tile shows.

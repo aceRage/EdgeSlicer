@@ -20,23 +20,28 @@ namespace Slic3r { namespace GUI {
 
 // ---- Sizes (DIP; tests/design_bambu29_mixed_nozzle_compare.md 4.2 / 4.4) ----------------------------------------------
 namespace {
-constexpr int NS_TILE_MIN_W     = 26;
+// Owner hand test 2026-11-04: twice the design's 26 DIP, with the icon, badge, text and dots scaled to match.
+constexpr int NS_TILE_MIN_W     = 52;
 constexpr int NS_TILE_GAP       = 3;
-constexpr int NS_TILE_PAD       = 3;
-constexpr int NS_TILE_RADIUS    = 4;
-constexpr int NS_ICON_H         = 24;
+constexpr int NS_TILE_PAD       = 5;
+constexpr int NS_TILE_RADIUS    = 6;
+constexpr int NS_ICON_H         = 40;
 constexpr int NS_DIVIDER_SPACE  = 7; // gap + 1 DIP line + gap
-constexpr int NS_DOT_D          = 4;
-constexpr int NS_DOT_GAP        = 2;
+constexpr int NS_LINE_GAP       = 3; // between the icon, the text lines and the dots
+constexpr int NS_BADGE_PAD      = 3;
+constexpr int NS_BADGE_RADIUS   = 4;
+constexpr int NS_DOT_D          = 7;
+constexpr int NS_DOT_GAP        = 3;
 constexpr int NS_MAX_DOTS       = 4;
 constexpr double NS_DIM_ALPHA   = 0.3;
 
-constexpr int NS_CHIP_H         = 24;
-constexpr int NS_CHIP_RADIUS    = 6;
-constexpr int NS_CHIP_PAD       = 8;
+// Owner hand test 2026-11-04: about 20 % taller than the design's 24 DIP, text one step larger.
+constexpr int NS_CHIP_H         = 29;
+constexpr int NS_CHIP_RADIUS    = 7;
+constexpr int NS_CHIP_PAD       = 10;
 constexpr int NS_CHIP_GAP       = 6;
-constexpr int NS_PILL_PAD       = 3;
-constexpr int NS_PILL_RADIUS    = 2;
+constexpr int NS_PILL_PAD       = 4;
+constexpr int NS_PILL_RADIUS    = 3;
 
 // 1.5 DIP accent border, at least one pixel.
 int strip_border_width(const wxWindow *w) { return std::max(1, int(std::lround(1.5 * w->FromDIP(100) / 100.))); }
@@ -63,10 +68,11 @@ wxColour faded(const wxColour &c, const wxColour &bg, double alpha)
     return wxColour(mix(c.Red(), bg.Red()), mix(c.Green(), bg.Green()), mix(c.Blue(), bg.Blue()));
 }
 wxFont label_font() { return strip_bold_font(Label::Body_9); }
-wxFont size_font() { return Label::Body_9; }
-wxFont flow_font() { return Label::Body_8; }
-wxFont chip_font() { return strip_bold_font(Label::Body_11); }
-wxFont chip_pill_font() { return Label::Body_9; }
+wxFont tile_label_font() { return strip_bold_font(Label::Body_12); }
+wxFont size_font() { return Label::Body_14; }
+wxFont flow_font() { return Label::Body_12; }
+wxFont chip_font() { return strip_bold_font(Label::Body_13); }
+wxFont chip_pill_font() { return Label::Body_11; }
 } // namespace NozzleStyle
 
 // ---- NozzleTileRow --------------------------------------------------------------------------------------------------
@@ -102,10 +108,10 @@ void NozzleTileRow::update_metrics()
 {
     wxClientDC dc(this);
     int        widest = 0;
-    dc.SetFont(NozzleStyle::label_font());
-    widest = std::max(widest, dc.GetTextExtent("R10").x);
+    dc.SetFont(NozzleStyle::tile_label_font());
+    widest = std::max(widest, dc.GetTextExtent("R10").x + FromDIP(2 * NS_BADGE_PAD));
     for (const NozzleTileView &t : m_tiles)
-        widest = std::max(widest, dc.GetTextExtent(t.label).x);
+        widest = std::max(widest, dc.GetTextExtent(t.label).x + FromDIP(2 * NS_BADGE_PAD));
     dc.SetFont(NozzleStyle::size_font());
     const int size_h = dc.GetTextExtent("0.4").y;
     for (const NozzleTileView &t : m_tiles)
@@ -117,7 +123,7 @@ void NozzleTileRow::update_metrics()
     const int icon_h = ScalableBitmap::GetBmpSize(m_icon).y > 0 ? ScalableBitmap::GetBmpSize(m_icon).y : FromDIP(NS_ICON_H);
     // Never narrower than 26 DIP; wider when a label needs it (never clipped).
     m_tile_w = std::max(FromDIP(NS_TILE_MIN_W), widest + FromDIP(2 * NS_TILE_PAD));
-    m_tile_h = FromDIP(NS_TILE_PAD) + icon_h + FromDIP(2) + size_h + flow_h + FromDIP(2) + FromDIP(NS_DOT_D) + FromDIP(NS_TILE_PAD);
+    m_tile_h = FromDIP(NS_TILE_PAD) + icon_h + FromDIP(NS_LINE_GAP) + size_h + flow_h + FromDIP(NS_LINE_GAP) + FromDIP(NS_DOT_D) + FromDIP(NS_TILE_PAD);
 }
 
 void NozzleTileRow::set_tiles(const std::vector<NozzleTileView> &tiles)
@@ -268,15 +274,16 @@ void NozzleTileRow::paint_tile(wxDC &dc, int index, const wxRect &rect)
     const wxSize icon_sz = ScalableBitmap::GetBmpSize(icon);
     if (icon.IsOk())
         dc.DrawBitmap(icon, rect.x + (rect.width - icon_sz.x) / 2, y, true);
-    dc.SetFont(NozzleStyle::label_font());
-    const wxSize lsz   = dc.GetTextExtent(t.label);
-    const wxRect badge(rect.x + (rect.width - (lsz.x + FromDIP(4))) / 2, y + FromDIP(1), lsz.x + FromDIP(4), lsz.y);
+    dc.SetFont(NozzleStyle::tile_label_font());
+    const wxSize lsz = dc.GetTextExtent(t.label);
+    const int    bw2 = lsz.x + FromDIP(2 * NS_BADGE_PAD);
+    const wxRect badge(rect.x + (rect.width - bw2) / 2, y + FromDIP(2), bw2, lsz.y);
     dc.SetPen(*wxTRANSPARENT_PEN);
     dc.SetBrush(wxBrush(col(NozzleStyle::tile_background())));
-    dc.DrawRoundedRectangle(badge, FromDIP(3));
+    dc.DrawRoundedRectangle(badge, FromDIP(NS_BADGE_RADIUS));
     dc.SetTextForeground(col(NozzleStyle::text()));
-    dc.DrawText(t.label, badge.x + FromDIP(2), badge.y);
-    y += (icon_sz.y > 0 ? icon_sz.y : FromDIP(NS_ICON_H)) + FromDIP(2);
+    dc.DrawText(t.label, badge.x + FromDIP(NS_BADGE_PAD), badge.y);
+    y += (icon_sz.y > 0 ? icon_sz.y : FromDIP(NS_ICON_H)) + FromDIP(NS_LINE_GAP);
 
     // Size, then flow type.
     dc.SetFont(NozzleStyle::size_font());
@@ -288,7 +295,7 @@ void NozzleTileRow::paint_tile(wxDC &dc, int index, const wxRect &rect)
     const wxSize fsz = dc.GetTextExtent(t.flow);
     dc.SetTextForeground(col(NozzleStyle::secondary_text()));
     dc.DrawText(t.flow, rect.x + (rect.width - fsz.x) / 2, y);
-    y += dc.GetTextExtent("Std").y + FromDIP(2);
+    y += dc.GetTextExtent("Std").y + FromDIP(NS_LINE_GAP);
 
     // Up to four dots in the colours of the filaments printing here; a fourth "+" dot stands for more.
     if (!t.dots.empty()) {
@@ -415,7 +422,7 @@ int NozzleChipRow::chip_width(int index) const
     int w = FromDIP(2 * NS_CHIP_PAD) + dc.GetTextExtent(strip_chip_label_text(c)).x;
     if (!c.tools.empty()) {
         dc.SetFont(NozzleStyle::chip_pill_font());
-        w += FromDIP(4) + dc.GetTextExtent(c.tools).x + FromDIP(2 * NS_PILL_PAD);
+        w += FromDIP(5) + dc.GetTextExtent(c.tools).x + FromDIP(2 * NS_PILL_PAD);
     }
     return w;
 }
@@ -544,7 +551,7 @@ void NozzleChipRow::on_paint(wxPaintEvent &)
         int            x     = m_rects[i].x + FromDIP(NS_CHIP_PAD);
         dc.SetTextForeground(sel ? NozzleStyle::accent() : NozzleStyle::text());
         dc.DrawText(label, x, m_rects[i].y + (m_rects[i].height - lsz.y) / 2);
-        x += lsz.x + FromDIP(4);
+        x += lsz.x + FromDIP(5);
         if (!c.tools.empty()) {
             dc.SetFont(NozzleStyle::chip_pill_font());
             const wxSize psz = dc.GetTextExtent(c.tools);
