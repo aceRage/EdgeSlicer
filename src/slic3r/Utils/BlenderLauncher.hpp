@@ -73,6 +73,28 @@ struct EditSession
 // Full argv for an edit session: `blender_command` followed by the bridge script and its options.
 std::vector<std::string> edit_session_args(const std::vector<std::string> &blender_command, const EditSession &session);
 
+// --- Showcase "Open in Blender" (tests/design_showcase_realism.md 5.4) ----------------------------
+
+// The oldest Blender the Showcase add-on supports: 4.2 LTS, the first with extensions.
+constexpr int SHOWCASE_MIN_MAJOR = 4;
+constexpr int SHOWCASE_MIN_MINOR = 2;
+bool showcase_version_supported(int major, int minor);
+
+// "Blender 4.2.3 LTS" (the first line of `blender --version`) -> 4, 2.
+bool parse_version_output(const std::string &text, int &major, int &minor);
+// The version from the install folder of the executable ("...\Blender 4.2\blender.exe"), when it
+// is a "Blender X.Y" folder; false otherwise (Steam, macOS bundles, Linux, Flatpak).
+bool version_from_install_path(const std::string &exe, int &major, int &minor);
+
+// The add-on is loaded for this session only by the launch script: nothing is installed.
+//   blender --python <resources>/blender/edgeslicer_launch.py -- --package <folder>
+std::vector<std::string> showcase_session_args(const std::vector<std::string> &blender_command, const std::string &launch_script,
+                                               const std::string &package);
+// Blender's own extension install of the add-on zip into the user's default repository, enabled
+// (Blender 4.2+): blender --command extension install-file -r user_default -e <zip>. Run only when
+// the user clicks "Install Blender add-on".
+std::vector<std::string> install_addon_args(const std::vector<std::string> &blender_command, const std::string &addon_zip);
+
 // -------------------------------------------------------------------------------------------
 // Platform adapters (real filesystem / registry / process launch, not unit tested).
 // -------------------------------------------------------------------------------------------
@@ -82,6 +104,14 @@ std::vector<std::string> find_blender(const std::string &custom_path);
 
 // Starts `argv` detached. False when the process could not be started.
 bool launch(const std::vector<std::string> &argv);
+
+// Runs `argv` and waits for it, collecting what it prints. False when it could not be started;
+// `exit_code` is its exit code.
+bool run_and_wait(const std::vector<std::string> &argv, std::string &output, int &exit_code);
+
+// The Blender version of a command from find_blender(): from its install folder, else from
+// `blender --version`. False when neither tells.
+bool blender_version(const std::vector<std::string> &command, int &major, int &minor);
 
 } // namespace BlenderLauncher
 } // namespace Slic3r

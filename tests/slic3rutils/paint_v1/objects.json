@@ -1,5 +1,5 @@
 {
-  "max_triangles": 2000000,
+  "max_triangles": 10000000,
   "objects": [
     {
       "airbrushed": false,

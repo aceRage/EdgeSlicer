@@ -56,9 +56,10 @@ namespace PaintV1 {
 // What /pair `features` gains: "paint_v1" (the read side) and "paint_v1_apply" (H2, sending paint).
 const std::vector<std::string>& pair_features();
 
-// The caps the owner accepted after spike S1: an object above MAX_TRIANGLES (all its model parts)
-// is listed but cannot be opened; MAX_LEAVES is the app's split-tree cap, handed out with the session.
-constexpr size_t MAX_TRIANGLES = 2000000;
+// The caps: an object above MAX_TRIANGLES (all its model parts) is listed but cannot be opened;
+// MAX_LEAVES is the app's split-tree cap, handed out with the session. MAX_TRIANGLES was S1's 2M; the
+// owner raised it to 10M on 2026-11-03, with the app warning before it opens anything over 2M.
+constexpr size_t MAX_TRIANGLES = 10000000;
 constexpr size_t MAX_LEAVES    = 1000000;
 // Open sessions the instance keeps; the oldest is dropped when another one opens.
 constexpr size_t MAX_SESSIONS = 16;

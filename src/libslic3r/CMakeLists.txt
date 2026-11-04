@@ -144,6 +144,12 @@ set(lisbslic3r_sources
     Showcase/ShowcasePath.hpp
     Showcase/ShowcaseRenderCli.cpp
     Showcase/ShowcaseRenderCli.hpp
+    Showcase/ShowcaseBlender.cpp
+    Showcase/ShowcaseBlender.hpp
+    Showcase/ShowcaseGltf.cpp
+    Showcase/ShowcaseGltf.hpp
+    Showcase/ShowcaseTubes.cpp
+    Showcase/ShowcaseTubes.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -486,6 +492,8 @@ set(lisbslic3r_sources
     MixedFilament.hpp
     MixedFilamentCliGates.cpp
     MixedFilamentCliGates.hpp
+    CliPresetSlots.cpp
+    CliPresetSlots.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
     BambuFlowSupport.cpp
@@ -662,6 +670,8 @@ set(lisbslic3r_sources
     SlicesToTriangleMesh.hpp
     SlicingAdaptive.cpp
     SlicingAdaptive.hpp
+    AdaptiveLayerMerge.cpp
+    AdaptiveLayerMerge.hpp
     Slicing.cpp
     Slicing.hpp
     Support/SupportCommon.cpp
@@ -760,6 +770,12 @@ set(lisbslic3r_sources
     VariableWidth.hpp
     Zipper.cpp
     Zipper.hpp
+    ZipWorkDir.cpp
+    ZipWorkDir.hpp
+    ZipOpen.cpp
+    ZipOpen.hpp
+    ZipWorkCleaner.cpp
+    ZipWorkCleaner.hpp
 )
 
 if (APPLE)
@@ -808,6 +824,9 @@ slic3r_unity_build(libslic3r SKIP
     SLA/ConcaveHull.cpp             # its to_vec2() differs only by return type from SupportTreeBuildsteps.hpp's
     MinAreaBoundingBox.cpp          # libnest2d headers (opt namespace, boost.geometry traits for Point) clash with neighbours
     SLAPrint.cpp                    # libnest2d headers clash with neighbours
+    ZipOpen.cpp                     # file-local ascii_lower()/utf8_path() also in ZipWorkDir.cpp
+    ZipWorkDir.cpp                  # file-local ascii_lower()/utf8_path()/leaf_exists() with common names
+    ZipWorkCleaner.cpp              # file-local path_utf8()/utf8_path() and <windows.h>
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours
