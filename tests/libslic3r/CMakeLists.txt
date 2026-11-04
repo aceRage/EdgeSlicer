@@ -188,6 +188,7 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
+    test_bbl_h3c.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
