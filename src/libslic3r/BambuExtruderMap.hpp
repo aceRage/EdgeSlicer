@@ -46,6 +46,18 @@ std::string tray_display_name(int ams_id, int slot_id);
 // the grouping treats differently; an AMS HT is an ordinary AMS slot.
 std::string tray_name(int ams_id, int slot_id);
 
+// One AMS tray of the printer report as PresetBundle::filament_ams_list holds it
+// (Sidebar::build_filament_ams_list): key = ams_id * 4 + slot_id, as BambuStudio keys it and as
+// CalibrationPresetPage::sync_ams_info looks trays up, so an AMS HT (ams id 128+) sorts after the
+// four-slot units and never shares a key with one. ams_id and slot_id are the report's map keys
+// ("0", "1", "128"; "0".."3"). key is -1 when either is not a number.
+struct AmsListEntry
+{
+    int         key{ -1 };
+    std::string tray_name;
+};
+AmsListEntry ams_list_entry(const std::string &ams_id, const std::string &slot_id);
+
 struct MappedTray
 {
     int filament_id{ -1 };            // 0-based filament index

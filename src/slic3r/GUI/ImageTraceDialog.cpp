@@ -5,12 +5,18 @@
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "MsgDialog.hpp"
+#include "PresetComboBoxes.hpp"
 #include "format.hpp"
 
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/CodeEmboss.hpp" // create_code_group_id
+#include "libslic3r/Format/DXF.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/NSVGUtils.hpp"
+#include "libslic3r/FilamentColorLibrary.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/SvgSplit.hpp"
 
 #include "nanosvg/nanosvg.h"
 #include "nanosvg/nanosvgrast.h"
@@ -23,6 +29,7 @@
 #include <wx/filedlg.h>
 #include <wx/filename.h>
 #include <wx/image.h>
+#include <wx/menu.h>
 #include <wx/sizer.h>
 #include <wx/slider.h>
 #include <wx/spinctrl.h>
@@ -382,6 +389,14 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
             grid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString));
         }
     }
+    if (m_options.allow_filaments) {
+        grid->Add(new wxStaticText(this, wxID_ANY, wxEmptyString));
+        m_match_filaments = new wxButton(this, wxID_ANY, _L("Match filaments") + dots);
+        m_match_filaments->SetToolTip(_L("Add filaments of the traced colours, give the project filaments these colours, "
+                                         "or use the nearest filaments."));
+        m_match_filaments->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { show_match_menu(); });
+        grid->Add(m_match_filaments, 0, wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL);
+    }
 
     cols->Add(grid, 1, wxEXPAND | wxALL, FromDIP(10));
 
@@ -391,9 +406,27 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
     right->Add(label(_L("Image") + ":"), 0, wxBOTTOM, FromDIP(4));
     m_source_preview = new wxStaticBitmap(this, wxID_ANY, wxBitmap(blank_preview(px)));
     right->Add(m_source_preview, 0, wxBOTTOM, FromDIP(8));
-    right->Add(label(_L("Shapes") + ":"), 0, wxBOTTOM, FromDIP(4));
+    {
+        // The shapes are painted in the colours of their filaments by default; the traced image
+        // colours show which colours the palette really found (kept for this dialog only)
+        wxBoxSizer *shapes_row = new wxBoxSizer(wxHORIZONTAL);
+        shapes_row->Add(label(_L("Shapes") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        shapes_row->AddStretchSpacer();
+        shapes_row->Add(label(_L("Show") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        wxArrayString shows;
+        shows.Add(_L("Filament colours"));
+        shows.Add(_L("Image colours"));
+        m_preview_colors = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, shows);
+        m_preview_colors->SetSelection(0);
+        m_preview_colors->SetToolTip(_L("Paint the shapes in the colours of their filaments, or in the colours traced from the image."));
+        shapes_row->Add(m_preview_colors, 0, wxALIGN_CENTER_VERTICAL);
+        right->Add(shapes_row, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+    }
     m_preview_bitmap = new wxStaticBitmap(this, wxID_ANY, wxBitmap(blank_preview(px)));
     right->Add(m_preview_bitmap, 0);
+    m_export_dxf = new wxButton(this, wxID_ANY, _L("Export DXF") + dots);
+    m_export_dxf->SetToolTip(_L("Save the outlines of the colours as a DXF file in millimetres, one layer per colour, for CAD and laser software."));
+    right->Add(m_export_dxf, 0, wxTOP, FromDIP(6));
     m_info = new wxStaticText(this, wxID_ANY, wxEmptyString);
     right->Add(m_info, 0, wxTOP, FromDIP(6));
     m_warning = new wxStaticText(this, wxID_ANY, wxEmptyString);
@@ -425,6 +458,11 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
         evt.Skip();
     });
     m_colors->Bind(wxEVT_TEXT, changed);
+    m_preview_colors->Bind(wxEVT_CHOICE, [this](wxCommandEvent &evt) {
+        if (m_preview.is_valid())
+            m_preview_bitmap->SetBitmap(render_preview(m_preview, FromDIP(TRACE_PREVIEW_PX)));
+        evt.Skip();
+    });
     for (wxChoice *c : {m_shape_from, m_resolution})
         c->Bind(wxEVT_CHOICE, changed);
     for (wxCheckBox *c : {m_auto_threshold, m_invert, m_remove_bg, m_stacked, m_keep_source})
@@ -455,6 +493,7 @@ ImageTraceDialog::ImageTraceDialog(wxWindow                      *parent,
         evt.Skip();
     });
     Bind(wxEVT_TIMER, [this](wxTimerEvent &) { refresh_preview(); });
+    m_export_dxf->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { export_dxf_file(); });
     m_ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
         if (finish())
             EndModal(wxID_OK);
@@ -528,6 +567,8 @@ void ImageTraceDialog::update_enabled()
 void ImageTraceDialog::update_filament_rows()
 {
     size_t count = m_preview.layers.size();
+    if (m_match_filaments != nullptr)
+        m_match_filaments->Show(count > 0);
     for (size_t i = 0; i < size_t(IMAGE_TRACE_MAX_COLORS); ++i) {
         bool show = i < count;
         m_level_swatch[i]->Show(show);
@@ -547,25 +588,112 @@ void ImageTraceDialog::update_filament_rows()
 
 int ImageTraceDialog::nearest_filament(const std::array<uint8_t, 3> &color) const
 {
-    int    best   = 0;
-    double best_d = std::numeric_limits<double>::max();
-    for (size_t i = 0; i < m_filament_colors.size(); ++i) {
-        std::array<uint8_t, 3> f;
-        if (!parse_hex_color(m_filament_colors[i], f))
+    // CIEDE2000, the same as "Match filaments" > "Nearest existing filaments"
+    return svg_split_nearest_filament(color, m_filament_colors);
+}
+
+// Filaments of the project, as offered in the rows
+void ImageTraceDialog::refill_filament_choices()
+{
+    int count = std::max<int>(1, int(m_filament_colors.size()));
+    for (wxChoice *c : m_level_filament) {
+        if (c == nullptr)
             continue;
-        double d = 0.;
-        for (int c = 0; c < 3; ++c)
-            d += (double(f[c]) - color[c]) * (double(f[c]) - color[c]);
-        if (d < best_d) {
-            best_d = d;
-            best   = int(i) + 1;
-        }
+        int selection = c->GetSelection();
+        c->Freeze();
+        c->Clear();
+        for (int f = 0; f <= count; ++f)
+            c->Append(trace_filament_label(f));
+        c->SetSelection(std::clamp(selection, 0, count));
+        c->Thaw();
     }
-    return best;
+}
+
+void ImageTraceDialog::show_match_menu()
+{
+    if (!m_preview.is_valid() || m_preview.layers.empty())
+        return;
+    wxMenu menu;
+    const int add_id = wxWindow::NewControlId(), replace_id = wxWindow::NewControlId(), nearest_id = wxWindow::NewControlId();
+    menu.Append(add_id, _L("Add new filaments"),
+                _L("Add a filament of every traced colour; a filament of a very close colour is used instead of a new one."));
+    menu.Append(replace_id, _L("Replace filament colours"),
+                _L("Give filaments 1, 2, ... the traced colours, adding filaments when there are fewer."));
+    menu.Append(nearest_id, _L("Nearest existing filaments"), _L("Use the filament of the nearest colour, nothing changes."));
+    menu.Bind(wxEVT_MENU, [this, add_id, replace_id](wxCommandEvent &evt) {
+        TraceFilamentMatch mode = evt.GetId() == add_id     ? TraceFilamentMatch::AddNew :
+                                  evt.GetId() == replace_id ? TraceFilamentMatch::ReplaceColours :
+                                                              TraceFilamentMatch::Nearest;
+        // after the menu is closed, the filament changes rebuild the sidebar
+        CallAfter([this, mode]() { match_filaments(mode); });
+    });
+    PopupMenu(&menu, m_match_filaments->GetPosition() + wxPoint(0, m_match_filaments->GetSize().GetHeight()));
+}
+
+void ImageTraceDialog::match_filaments(TraceFilamentMatch mode)
+{
+    Plater       *plater = wxGetApp().plater();
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (plater == nullptr || bundle == nullptr || !m_preview.is_valid())
+        return;
+    std::vector<std::array<uint8_t, 3>> colors;
+    for (const ImageTraceLayer &layer : m_preview.layers)
+        colors.push_back(layer.color);
+    m_filament_colors       = plater->get_extruder_colors_from_plater_config(nullptr, false);
+    TraceFilamentPlan plan  = plan_trace_filaments(colors, m_filament_colors, mode);
+
+    if (!plan.recolour.empty()) {
+        wxString text = GUI::format_wxstr(_L("Change the colour of filaments %1% to %2% to the traced colours?"), plan.recolour.front().first,
+                                          plan.recolour.back().first);
+        text += "\n" + _L("Other objects printed with these filaments change their colour too.");
+        if (!plan.add.empty())
+            text += "\n" + GUI::format_wxstr(_L("%1% filaments are added."), int(plan.add.size()));
+        MessageDialog dialog(this, text, _L("Replace filament colours"), wxYES_NO | wxICON_QUESTION);
+        if (dialog.ShowModal() != wxID_YES)
+            return;
+    }
+
+    // the same paths as the sidebar's "+" button and colour picker
+    Sidebar &sidebar = wxGetApp().sidebar();
+    size_t   added   = 0;
+    for (const std::string &hex : plan.add) {
+        const size_t before = bundle->num_physical_filaments();
+        sidebar.add_custom_filament(wxColour(from_u8(hex)));
+        if (bundle->num_physical_filaments() <= before)
+            break; // the slicer's own maximum of filaments
+        ++added;
+    }
+    for (const auto &[filament, hex] : plan.recolour) {
+        std::vector<PlaterPresetComboBox *> &combos = sidebar.combos_filament();
+        if (filament >= 1 && size_t(filament) <= combos.size() && combos[size_t(filament - 1)] != nullptr)
+            combos[size_t(filament - 1)]->ApplyFilamentColor(FilamentColor::FromColors({hex}, FilamentColorMode::Segment));
+    }
+
+    m_filament_colors = plater->get_extruder_colors_from_plater_config(nullptr, false);
+    refill_filament_choices();
+    for (size_t i = 0; i < plan.filaments.size() && i < m_level_filament.size(); ++i) {
+        if (m_level_filament[i] == nullptr)
+            continue;
+        int filament = plan.filaments[i];
+        if (filament > int(m_filament_colors.size()))
+            filament = nearest_filament(colors[i]); // not added (maximum of filaments)
+        m_level_filament[i]->SetSelection(std::clamp(filament, 0, int(m_level_filament[i]->GetCount()) - 1));
+        m_user_filament[i] = true;
+    }
+    if (added < plan.add.size())
+        m_warning->SetLabel(GUI::format_wxstr(_L("Only %1% of %2% filaments could be added, the slicer's maximum is reached. "
+                                                 "The other colours use the nearest filament."),
+                                              int(added), int(plan.add.size())));
+    if (m_preview.is_valid())
+        m_preview_bitmap->SetBitmap(render_preview(m_preview, FromDIP(TRACE_PREVIEW_PX)));
+    Layout();
 }
 
 std::string ImageTraceDialog::level_color(size_t level) const
 {
+    const bool image_colors = m_preview_colors != nullptr && m_preview_colors->GetSelection() == 1;
+    if (image_colors && level < m_preview.layers.size())
+        return image_trace_color_to_hex(m_preview.layers[level].color);
     if (level < m_level_filament.size() && m_level_filament[level] != nullptr) {
         int index = m_level_filament[level]->GetSelection();
         if (index > 0 && size_t(index) <= m_filament_colors.size() && !m_filament_colors[size_t(index - 1)].empty())
@@ -624,12 +752,14 @@ void ImageTraceDialog::refresh_preview()
             warnings += (warnings.empty() ? "" : "\n") + _L("Pixels are large compared to a nozzle, raise the resolution for finer details.");
         m_warning->SetLabel(warnings);
         m_ok->Enable(true);
+        m_export_dxf->Enable(true);
     } else {
         update_filament_rows();
         m_preview_bitmap->SetBitmap(wxBitmap(blank_preview(px)));
         m_info->SetLabel(wxEmptyString);
         m_warning->SetLabel(from_u8(m_preview.error));
         m_ok->Enable(false);
+        m_export_dxf->Enable(false);
     }
     m_info->Wrap(px);
     m_warning->Wrap(px);
@@ -693,6 +823,44 @@ void ImageTraceDialog::change_image()
     refresh_source_preview();
     update_enabled();
     refresh_preview();
+}
+
+void ImageTraceDialog::export_dxf_file()
+{
+    m_timer.Stop();
+    const ImageTraceParams params = collect();
+    ImageTraceResult       result;
+    {
+        wxBusyCursor busy;
+        // the final resolution, no SVG text needed
+        result = trace_image(m_image, params, {}, false);
+    }
+    if (!result.is_valid()) {
+        show_error(this, from_u8(result.error.empty() ? _u8L("There is nothing to export.") : result.error));
+        return;
+    }
+
+    // layer names are plain ASCII, as CAD programs expect them
+    std::vector<std::string> names;
+    for (size_t i = 0; i < result.layers.size(); ++i) {
+        std::string name = "Colour " + std::to_string(i + 1);
+        if (i < m_level_filament.size() && m_level_filament[i] != nullptr && m_level_filament[i]->GetSelection() > 0)
+            name = "Filament " + std::to_string(m_level_filament[i]->GetSelection());
+        names.push_back(name + " " + image_trace_color_to_hex(result.layers[i].color));
+    }
+    if (result.layers.size() == 1)
+        names[0] = m_image_name.empty() ? std::string("Trace") : m_image_name;
+
+    wxFileDialog dlg(this, _L("Export DXF file:"), wxEmptyString, from_u8((m_image_name.empty() ? std::string("trace") : m_image_name) + ".dxf"),
+                     _L("DXF files") + " (*.dxf)|*.dxf", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    wxString path = dlg.GetPath();
+    if (!path.Lower().EndsWith(".dxf"))
+        path += ".dxf";
+    std::string err;
+    if (!Slic3r::export_dxf(into_u8(path), image_trace_dxf_layers(result, names), &err))
+        show_error(this, from_u8(_u8L("Could not export the DXF file.") + " " + err));
 }
 
 bool ImageTraceDialog::finish()

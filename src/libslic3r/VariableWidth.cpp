@@ -325,6 +325,25 @@ static ExtrusionPaths thick_polyline_to_extrusion_paths_2(const ThickPolyline& t
     return paths;
 }
 
+ThickPolylines remove_near_duplicate_gap_fill_loops(const ThickPolylines& polylines)
+{
+    ThickPolylines kept_polylines;
+    kept_polylines.reserve(polylines.size());
+    for (const ThickPolyline& polyline : polylines) {
+        bool is_duplicate = false;
+        for (const ThickPolyline& kept : kept_polylines) {
+            if (are_near_duplicate_closed_gap_fill_loops(polyline, kept)) {
+                is_duplicate = true;
+                break;
+            }
+        }
+
+        if (!is_duplicate)
+            kept_polylines.emplace_back(polyline);
+    }
+    return kept_polylines;
+}
+
 void variable_width(const ThickPolylines& polylines, ExtrusionRole role, const Flow& flow, std::vector<ExtrusionEntity*>& out)
 {
     // This value determines granularity of adaptive width, as G-code does not allow
@@ -335,20 +354,7 @@ void variable_width(const ThickPolylines& polylines, ExtrusionRole role, const F
     ThickPolylines        deduplicated_gap_fill_loops;
 
     if (role == erGapFill && polylines.size() > 1) {
-        deduplicated_gap_fill_loops.reserve(polylines.size());
-        for (const ThickPolyline& polyline : polylines) {
-            bool is_duplicate = false;
-            for (const ThickPolyline& kept : deduplicated_gap_fill_loops) {
-                if (are_near_duplicate_closed_gap_fill_loops(polyline, kept)) {
-                    is_duplicate = true;
-                    break;
-                }
-            }
-
-            if (!is_duplicate)
-                deduplicated_gap_fill_loops.emplace_back(polyline);
-        }
-
+        deduplicated_gap_fill_loops = remove_near_duplicate_gap_fill_loops(polylines);
         source_polylines = &deduplicated_gap_fill_loops;
     }
 

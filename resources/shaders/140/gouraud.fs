@@ -84,6 +84,16 @@ uniform float color_clip_side_alpha_2;
 
 uniform PrintVolumeDetection print_volume;
 
+// Orca #14702: depth-based shadow map (object-on-object and self shadows). shadow_intensity == 0
+// disables it. The C++ side binds the map on texture unit 5 (units 3 and 4 are the cut gizmo's).
+uniform sampler2D shadow_map;
+uniform mat4 shadow_light_vp;
+uniform float shadow_intensity;
+uniform float shadow_map_texel;
+
+// LIGHT_TOP_DIR in eye space (matches the diffuse light used for shading in gouraud.vs).
+const vec3 SHADOW_LIGHT_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
+
 in vec3 clipping_planes_dots;
 in float color_clip_plane_dot;
 
@@ -95,6 +105,35 @@ in float world_normal_z;
 in vec3 eye_normal;
 
 out vec4 out_color;
+
+// Orca #14702: a lighting multiplier in [1 - shadow_intensity, 1]: < 1 where the fragment is
+// occluded from the light in the shadow map.
+float shadow_shade()
+{
+    if (shadow_intensity <= 0.0)
+        return 1.0;
+
+    vec4 lp = shadow_light_vp * world_pos;
+    vec3 proj = lp.xyz / lp.w;
+    proj = proj * 0.5 + 0.5;
+    if (proj.z > 1.0)
+        return 1.0;
+
+    // Slope-scaled depth bias: larger where the surface grazes / faces away from the light. This
+    // suppresses self-shadow acne without discarding real shadows cast by other objects onto
+    // back-facing surfaces.
+    float NdotL = dot(normalize(eye_normal), SHADOW_LIGHT_DIR);
+    float bias = mix(0.0004, 0.004, clamp(1.0 - NdotL, 0.0, 1.0));
+    // 5x5 PCF: softens shadow edges into a smooth penumbra and blurs residual facet acne.
+    float sum = 0.0;
+    for (int x = -2; x <= 2; ++x) {
+        for (int y = -2; y <= 2; ++y) {
+            float closest = texture(shadow_map, proj.xy + vec2(float(x), float(y)) * shadow_map_texel).r;
+            sum += (proj.z - bias > closest) ? 1.0 : 0.0;
+        }
+    }
+    return 1.0 - shadow_intensity * (sum / 25.0);
+}
 
 void main()
 {
@@ -172,10 +211,12 @@ void main()
 	}
 	color.rgb = (any(lessThan(pv_check_min, ZERO)) || any(greaterThan(pv_check_max, ZERO))) ? mix(color.rgb, ZERO, 0.3333) : color.rgb;
 
+    float shade = shadow_shade();
+
 #ifdef ENABLE_ENVIRONMENT_MAP
     if (use_environment_tex)
-        out_color = vec4(0.45 * texture(environment_tex, normalize(eye_normal).xy * 0.5 + 0.5).xyz + 0.8 * color.rgb * intensity.x, color.a);
+        out_color = vec4((0.45 * texture(environment_tex, normalize(eye_normal).xy * 0.5 + 0.5).xyz + 0.8 * color.rgb * intensity.x) * shade, color.a);
     else
 #endif
-        out_color = vec4(vec3(intensity.y) + color.rgb * intensity.x, color.a);
+        out_color = vec4((vec3(intensity.y) + color.rgb * intensity.x) * shade, color.a);
 }

@@ -2,6 +2,7 @@
 #define slic3r_GCode_PostProcessor_hpp_
 
 #include <string>
+#include <vector>
 
 #include "../libslic3r.h"
 #include "../PrintConfig.hpp"
@@ -28,6 +29,26 @@ inline bool run_post_process_scripts(std::string &src_path, const DynamicPrintCo
 
 // BBS
 extern void gcode_add_line_number(const std::string &path, const DynamicPrintConfig &config);
+
+// True when G-code packed into a .gcode.3mf should run post-processing scripts.
+// with_gcode / skip_static are the SaveStrategy bits: backups (SkipStatic) do not pack G-code.
+// BBL printers already post-process the mapped temp file after slicing, so they are skipped.
+bool should_post_process_packed_gcode(bool with_gcode, bool skip_static, PrinterTechnology tech, bool is_bbl_printer);
+
+// One plate's G-code path (rewritten to the post-processed copy when a script ran) and the
+// Print's full_print_config. Untrusted 3MF scripts must already have been stripped from that
+// config (UntrustedSettingsGuard / neutralize_settings, Edge #123); this does not re-read a 3MF.
+struct PackedGcodePlate
+{
+    std::string              *gcode_file { nullptr };
+    const DynamicPrintConfig *config { nullptr };
+};
+
+// Run post-processing on a copy of each plate's G-code (the viewer's mapping stays on the
+// original). Host is always "File"; a script rename of output_name is ignored for 3mf.
+// Appends copy paths to tmp_files as they are created so the caller can delete them on
+// success and on exception. Throws RuntimeError if a script fails.
+void post_process_packed_gcodes(std::vector<PackedGcodePlate> &plates, const std::string &output_name, std::vector<std::string> &tmp_files);
 
 } // namespace Slic3r
 

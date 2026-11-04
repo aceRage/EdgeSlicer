@@ -4,8 +4,10 @@
 #include "libslic3r/EdgeGrid.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/libslic3r.h"
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
 
 // Snapmaker #752 / Orca #12806: visit_cells_intersecting_line used to walk (ix, iy)
 // past the grid on painted-line projection (closed bbox.max, or an exact cell-corner
@@ -80,5 +82,32 @@ TEST_CASE("EdgeGrid painted-line walk stays inside the grid", "[EdgeGrid][PaintO
 
     SECTION("max-edge vertical") {
         walk(Point{bbox.max.x(), bbox.min.y()}, bbox.max);
+    }
+}
+
+// Orca #16626: Danielsson propagation used `addr_delta << 1` on signed neighbour
+// offsets (-1, -ncols). Left-shifting a negative signed integer is UB in C++17.
+// Distances beyond the initialized edge band require that backward step.
+TEST_CASE("EdgeGrid propagates signed distances across the interior and exterior", "[EdgeGrid][Regression]")
+{
+    static constexpr double kAbsTol    = 0.01;        // static: MSVC C++17 lambda use (C3493)
+    static constexpr double kSigns[2]  = {-1., 1.};
+
+    const Polygon rectangle{Point::new_scale(-10., -12.), Point::new_scale(10., -12.),
+                            Point::new_scale(10., 12.), Point::new_scale(-10., 12.)};
+    const Polygons outlines{rectangle};
+    const BoundingBox bounds(Point::new_scale(-30., -32.), Point::new_scale(30., 32.));
+    EdgeGrid::Grid grid(bounds);
+    grid.create(outlines, coord_t(scale_(1.)));
+    grid.calculate_sdf();
+    const auto distance = [&](double x, double y) {
+        return grid.signed_distance_bilinear(Point::new_scale(x, y)) * SCALING_FACTOR;
+    };
+    REQUIRE_THAT(distance(0., 0.), WithinAbs(-10., kAbsTol));
+    for (double sign : kSigns) {
+        REQUIRE_THAT(distance(sign * 5., 0.), WithinAbs(-5., kAbsTol));
+        REQUIRE_THAT(distance(0., sign * 7.), WithinAbs(-5., kAbsTol));
+        REQUIRE_THAT(distance(sign * 20., 0.), WithinAbs(10., kAbsTol));
+        REQUIRE_THAT(distance(0., sign * 22.), WithinAbs(10., kAbsTol));
     }
 }

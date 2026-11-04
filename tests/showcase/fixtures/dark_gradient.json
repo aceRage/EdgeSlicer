@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1", "name": "Golden: dark gradient", "plate_index": 0, "source": "model", "preset_base": "dark_gradient",
+      "background": { "type": "vertical_gradient", "color1": "#3A3D42", "color2": "#0B0C0E" },
+      "floor": { "type": "shadow_catcher", "color": "#1A1B1E", "shadow_strength": 0.6 },
+      "lighting": { "azimuth": 200, "elevation": 40, "shadow_intensity": 0.45, "key_intensity": 1.15, "fill": false,
+                    "rim_intensity": 1.0, "environment": "dark_studio", "env_intensity": 0.5 },
+      "export": { "width": 1920, "height": 1080, "quality": "high", "format": "png" }
+    }
+  ]
+}

@@ -53,11 +53,11 @@ static const std::vector<std::string> FULL_SPECTRUM_FALLBACK_COLORS = {
 static constexpr int LEGEND_GRID_COLS = 4;
 
 // Component-weight bounds for recipe generation (see launch_background_match).
-// Shared with MixedFilament.hpp so Catch2 can pin the structural 15/85/70 caps
-// without opening this dialog. Search uses the two-color cap; three-color
-// recipes then top out at 70% because two other components keep the 15% floor.
-static constexpr int kMinComponentPercent     = kMixedColorMatchMinComponentPercent;
-static constexpr int kMaxPairComponentPercent = kMixedColorMatchMaxPairComponentPercent;
+// Declared on MixedFilament.hpp so Catch2 can pin 15/85/70 and the 0–100 manual
+// search range without opening this dialog. Automatic search uses the two-color
+// cap; three-color recipes then top out at 70% because two other components
+// keep the 15% floor. Manual search is 0%–100%; the same recommended bounds
+// are the post-match advisory.
 
 // UI-list cap: the number of source/palette color rows the legend renders. Past this cap
 // the tail colors are dropped (see load_palette_colors) and a deferred warning is shown once
@@ -2067,12 +2067,22 @@ void MixedFilamentBatchDialog::check_manual_recipe_ratio()
     // NOTE: size by m_physical_colors.size(). In manual mode, launch_background_match's
     // manual-remap branch rewrites recipe component ids to project-wide 1-based indices, so
     // expand_color_match_recipe_weights must be sized against the FULL physical palette.
-    // A too-small count reads out-of-range indices as 0 weight and silently misses the
-    // over-threshold component.
+    // A too-small count reads out-of-range indices as 0 weight and silently misses an
+    // out-of-range component. Manual matching may then remap those IDs past the current
+    // physical-slot count; grow the advisory vector to the largest referenced ID.
     const size_t num_physical = m_physical_colors.size();
     if (num_physical == 0) return;
 
-    // Collect EVERY over-threshold occurrence (target_filament_id — legend badge). No dedup
+    size_t weight_count = num_physical;
+    for (const ColorMappingEntry& e : m_result.mappings) {
+        if (e.is_pure_recipe || !e.recipe.valid) continue;
+        std::vector<unsigned int> gradient_ids;
+        if (!e.recipe.gradient_component_ids.empty())
+            gradient_ids = MixedFilamentManager::decode_gradient_component_ids(e.recipe.gradient_component_ids);
+        weight_count = mixed_color_match_advisory_weight_count(weight_count, e.recipe.component_a, e.recipe.component_b, gradient_ids);
+    }
+
+    // Collect EVERY out-of-range occurrence (target_filament_id — legend badge). No dedup
     // needed: is_pure_recipe mappings are skipped below, and the rest get unique ascending
     // ids from next_virtual_id++ (assign_batch_virtual_filament_ids), preserved through
     // merge_duplicate_recipe_mappings — so each reported id is already unique & in order.
@@ -2083,17 +2093,8 @@ void MixedFilamentBatchDialog::check_manual_recipe_ratio()
         if (e.is_pure_recipe) continue;
         if (!e.recipe.valid) continue;
         if (e.target_filament_id == 0) continue;
-        const auto weights = expand_color_match_recipe_weights(e.recipe, num_physical);
-        size_t active_components = 0;
-        for (size_t i = 0; i < weights.size() && i < num_physical; ++i) {
-            if (weights[i] > 0) ++active_components;
-        }
-        const int max_component_percent = mixed_color_match_max_component_percent(active_components);
-        bool over = false;
-        for (size_t i = 0; i < weights.size() && i < num_physical; ++i) {
-            if (weights[i] > max_component_percent) { over = true; break; }
-        }
-        if (!over) continue;
+        const auto weights = expand_color_match_recipe_weights(e.recipe, weight_count);
+        if (!mixed_color_match_weights_outside_recommended(weights)) continue;
         if (!first) id_list += ", ";
         id_list += wxString::Format("%u", e.target_filament_id);
         first = false;
@@ -2446,8 +2447,8 @@ void MixedFilamentBatchDialog::launch_background_match()
             physical_colors = manual_colors;
         } else {
             // Phase 2: the palette IS the user's four dropdown selections, in slot order.
-            // No combo search anymore. Pass 2 applies the shared 15% floor; the total-weight
-            // constraint then caps two-color recipes at 85% and three-color recipes at 70%.
+            // No combo search anymore. Automatic mode applies the mode-specific bounds in
+            // the Pass-2 batch_match_model_colors call below.
             if (preset_colors.size() >= static_cast<size_t>(kFullSpectrumSlotCount)) {
                 physical_colors = preset_colors;
             } else {
@@ -2515,8 +2516,9 @@ void MixedFilamentBatchDialog::launch_background_match()
         // return-code model (result.success / error_code) and its whole call chain
         // has no throw sites, so no exception handling is needed here.
         //
-        // Per-component weight bounds: min is shared. Passing the two-color cap lets the
-        // structural bounds derive naturally: 15%-85% for two colors and 15%-70% for three.
+        // Automatic mode uses 15%-85% for two colors and 15%-70% for three colors.
+        // Manual mode preserves the legacy 0%-100% search range; out-of-range results
+        // are handled by the recommended-range advisory in check_manual_recipe_ratio().
         //
         // check_compatible is false for BOTH modes. RECOMMENDED needs none: its
         // physical_colors come from a single Full Spectrum preset (one PLA spool,
@@ -2526,8 +2528,9 @@ void MixedFilamentBatchDialog::launch_background_match()
         // preset_bundle->filament_presets unsynchronized from here, racing the UI
         // thread (data-race UB). The slice gate (Plater::has_incompatible_mixed_
         // filament_in_use) still blocks genuinely incompatible mixes at slice time.
-        const int match_min = kMinComponentPercent; // shared floor for both modes
-        constexpr int match_max = kMaxPairComponentPercent;
+        const bool matching_manual = matching_method == MANUAL;
+        const int  match_min       = mixed_color_match_search_min_percent(matching_manual);
+        const int  match_max       = mixed_color_match_search_max_percent(matching_manual);
         if (!unmatched_colors.empty()) {
             auto sub_result = batch_match_model_colors(unmatched_colors, physical_colors, match_min, match_max, cancel_token,
                 [progress_bar, destroyed](int done, int total) {

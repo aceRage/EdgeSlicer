@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <deque>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -10,11 +13,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "slic3r/GUI/RemotePaintV1.hpp"
 #include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
 class LoopbackAcceptLoop;
 namespace GUI {
+namespace SliceV1 { struct PreviewLook; }
 
 // This slicer instance's JSON API, on a loopback-only port picked by the OS.
 //
@@ -118,6 +123,9 @@ public:
     // Send jobs (RemoteSend) report here from their worker thread.
     void update_job(int id, int percent, const std::string& text);
     void finish_job(int id, bool ok, const std::string& error, const nlohmann::json& result);
+    // Arrange / orient jobs (PR D) end here, from the UI job worker's finalize on the GUI thread.
+    // state: done | error | cancelled. Unlike finish_job it never touches the send / control flags.
+    void finish_plate_job(int id, const std::string& state, const std::string& error, const nlohmann::json& result);
 
 private:
     RemoteAccess() = default;
@@ -143,10 +151,34 @@ private:
     ApiResponse api_plate_thumbnail(int plate);
     ApiResponse api_plate_layout(int plate);
     ApiResponse api_plate_preview(int plate);
-    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy);
+    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy,
+                                      const SliceV1::PreviewLook& look);
+    ApiResponse api_plate_preview_legend(int plate, const std::string& color_by, const std::string& hide); // PR E
+    ApiResponse api_plate_preview_layers(int plate);                                                       // PR E
     ApiResponse api_plate_preview_status(int plate);
+    // slice_v1 (the app's native Slice tab): results detail and warnings of a sliced plate, and
+    // cancelling a running slice job the way the desktop's slicing notification does.
+    ApiResponse api_plate_result(int plate);
+    ApiResponse api_job_cancel(int id);
     ApiResponse api_object_transform(const std::string& form_body);
-    ApiResponse api_printers(int plate = -1);
+    // PR D (arrange, EdgeSlicerApp docs/design_native_slice_parity.md section 5): the instances on
+    // no plate, arranging (or orienting) one plate or all as the desktop's own buttons do, the object
+    // list's Printable toggle and one guarded undo step.
+    ApiResponse api_plates_loose();
+    ApiResponse api_plate_arrange(int plate, bool loose, bool orient);
+    ApiResponse api_object_printable(const std::string& form_body);
+    ApiResponse api_undo(const std::string& expect);
+    // PR G (G8-G10, parity section 6.1): plates add / delete / rename / bed type, objects delete /
+    // duplicate and saving the project, each as the PC's own control does it.
+    ApiResponse api_plate_add();
+    ApiResponse api_plate_delete(int plate, const std::string& objects, bool confirm);
+    ApiResponse api_plate_rename(int plate, const std::string& name);
+    ApiResponse api_plate_bed_type(int plate, const std::string& bed_type);
+    ApiResponse api_object_delete(const std::string& form_body);
+    ApiResponse api_object_duplicate(const std::string& form_body);
+    ApiResponse api_project_save();
+    // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).
+    ApiResponse api_printers(int plate = -1, bool watching = true);
     ApiResponse api_snapmaker_devices();
     ApiResponse api_snapmaker_add(const std::string& ip, int port);
     ApiResponse api_snapmaker_remove(const std::string& id);
@@ -154,6 +186,7 @@ private:
     ApiResponse api_snapmaker_disconnect();
     ApiResponse api_slice(int plate, bool all);
     ApiResponse api_send(int plate, const std::string& form_body);
+    ApiResponse api_send_preview(int plate, const std::string& form_body); // slice_v1 PR B
     ApiResponse api_printer_control(const std::string& printer, const std::string& form_body);
     ApiResponse api_jobs(int id);
     // Ultra: the G-code archive (GcodeArchive). Local paths never leave the instance.
@@ -171,18 +204,34 @@ private:
     ApiResponse api_process_set(const std::string& form_body);
     ApiResponse api_process_revert();
     ApiResponse api_process_save();
+    // PR F: filament settings, per slot
+    ApiResponse api_filament_settings(int slot);
+    ApiResponse api_filament_set(int slot, const std::string& form_body);
+    ApiResponse api_filament_revert(int slot);
+    ApiResponse api_filament_save(int slot, const std::string& name);
+    ApiResponse api_filament_remove(int slot, int replace, bool confirm);
+    // paint_v1 (H1, pen colouring; RemotePaintV1.hpp): the objects a tablet can paint, opening a
+    // session on one, and that session's state, one volume's mesh and its painting. Read-only.
+    ApiResponse api_paint_objects();
+    ApiResponse api_paint_session_open(const std::string& form_body);
+    ApiResponse api_paint_session(const std::string& id, const std::string& what, const std::string& query);
+    // H2: the tablet's paint, spooled by the hub to `path` (in its uploads folder); applied in one undo step.
+    ApiResponse api_paint_apply(const std::string& id, const std::string& path);
+    // The paint a session read at `revision` (what a later apply painted on), kept for the last few reads.
+    void        paint_remember(const std::string& id, const std::string& revision, const PaintV1::ObjectSnapshot& object);
 
     struct Job
     {
         int         id { 0 };
         int         plate { -1 };       // -1 = all plates
-        std::string kind { "slice" };   // slice | send | control
+        std::string kind { "slice" };   // slice | send | control | arrange | orient
         std::string state;              // running | done | error | cancelled
         int         percent { 0 };
         std::string text, error;
         std::string printer, mode;      // send jobs: the printer id and upload | print
                                         // control jobs: the printer id and pause | resume | stop
         nlohmann::json result;          // what was (or, dry run, would have been) sent
+                                        // arrange / orient jobs: plates, loose_count and blocked afterwards
     };
 
     std::mutex       m_mutex;
@@ -197,6 +246,11 @@ private:
     std::string      m_title, m_path, m_last_error;
     ColorImport      m_last_color_import;
     bool             m_slicing { false };
+    int              m_slicing_percent { 0 };   // of the plate being sliced, from note_slice_progress
+    int              m_slicing_plate { -1 };    // that plate (-1 when nothing is slicing)
+    // slice_v1: the PC's current plate as last seen on the GUI thread (api_plates, a slice,
+    // and a refresh api_info posts), so /api/info can report it without waiting for the GUI.
+    std::atomic<int> m_current_plate { 0 };
     bool             m_hidden { false };
     std::deque<Attention> m_attention; // ring of auto-answered dialogs, 50 entries
     bool             m_needs_attention { false };
@@ -205,6 +259,16 @@ private:
     long long        m_gui_tick_ms { 0 };
     int              m_modal_depth { 0 };
     int              m_requests_done { 0 };
+    // paint_v1: open sessions by id, each bound to an object key (PaintV1::MAX_SESSIONS at most)
+    struct PaintSession
+    {
+        std::string                           object_key;
+        std::chrono::steady_clock::time_point opened;
+        // revision -> each model part's paint as served then (the newest few; see paint_remember)
+        std::vector<std::pair<std::string, PaintV1::PaintByVolume>> seen;
+    };
+    std::mutex                          m_paint_mutex;
+    std::map<std::string, PaintSession> m_paint_sessions;
 };
 
 } // namespace GUI

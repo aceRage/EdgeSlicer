@@ -1,5 +1,7 @@
 #include "PrinterStorage.hpp"
 
+#include "ElegooCanvas.hpp"    // canvas_capable_model: the Centauri Carbon 1
+#include "ElegooSdcpFiles.hpp" // the CC1 backend
 #include "Http.hpp"
 
 #include <nlohmann/json.hpp>
@@ -333,7 +335,8 @@ std::string base_url_of(const std::string& address)
 }
 
 Target target_for_host(const std::string& host_type, const std::string& address, const std::string& apikey,
-                       const std::string& name, const std::string& key)
+                       const std::string& name, const std::string& key, const std::string& printer_model,
+                       const std::map<std::string, std::string>& start_options)
 {
     Target t;
     t.key  = key;
@@ -349,9 +352,18 @@ Target target_for_host(const std::string& host_type, const std::string& address,
         t.apikey   = apikey;
         return t;
     }
+    if (ht == "elegoolink" && canvas_capable_model(printer_model)) {
+        // The Centauri Carbon 1: its files over SDCP (ElegooSdcpFiles). The Cmds are the CC1's;
+        // another SDCP printer is not sent them (an unexpected Cmd can crash that firmware).
+        t.kind          = Target::Kind::ElegooSdcp;
+        t.base_url      = base;
+        t.printer_model = printer_model;
+        t.start_options = start_options;
+        return t;
+    }
     t.kind = Target::Kind::Unsupported;
     if (ht == "elegoolink")
-        t.reason = "This printer is reached through Elegoo Link (SDCP), which has no file API this tab speaks yet.";
+        t.reason = "The Storage tab speaks Elegoo Link (SDCP) only to the Centauri Carbon; this printer's model is not one.";
     else if (ht == "flashforge")
         t.reason = "Flashforge printers are not supported by the Storage tab.";
     else if (ht == "prusalink" || ht == "prusaconnect")
@@ -573,6 +585,8 @@ std::shared_ptr<IPrinterFiles> make_files(const Target& target)
 {
     if (!target.supported())
         return nullptr;
+    if (target.kind == Target::Kind::ElegooSdcp)
+        return SdcpFiles::make_cc1_files(target);
     return std::make_shared<MoonrakerFiles>(make_http_transport(target));
 }
 

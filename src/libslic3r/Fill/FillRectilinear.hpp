@@ -29,9 +29,6 @@ protected:
         float pattern_shift;
     };
     bool fill_surface_by_multilines(const Surface *surface, FillParams params, const std::initializer_list<SweepParams> &sweep_params, Polylines &polylines_out);
-
-    // The extended bounding box of the whole object that covers any rotation of every layer.
-    BoundingBox extended_object_bounding_box() const;
 };
 
 class FillAlignedRectilinear : public FillRectilinear

@@ -1,0 +1,312 @@
+#ifndef slic3r_Showcase_ShowcaseMaterial_hpp_
+#define slic3r_Showcase_ShowcaseMaterial_hpp_
+
+// Showcase tab, phase S2: how a filament looks in a presentation render. The finish (matte, silk,
+// gloss, transparent, ...) is inferred from the filament preset's name and type (D4: no new profile
+// key) and can be overridden per filament in the scene. Also the light rig maths (colour
+// temperature, the three-point lights around the world-fixed key, D14) and the procedural layer
+// lines (design 2.6.2): where a fragment sits inside its layer, and how far the stripes fade on a
+// far shot. The GLSL in resources/shaders/140/showcase_material.fs mirrors the functions marked so.
+//
+// GL- and wxWidgets-free, so the unit tests can check the inference and the maths.
+
+#include <array>
+#include <string>
+#include <vector>
+
+namespace Slic3r {
+namespace Showcase {
+
+// The look of one filament. The JSON names (to_string) are stable; never translate them. New values go
+// at the end (realism 1d / 1e): "translucent" (milky natural / clear PETG and PLA, light through thin
+// walls), "satin", "sparkle" (glitter, galaxy), "marble" (stone fill), "wood" (wood fill),
+// "matte_textured" (fuzzy matte, the fibre sheen of carbon-fibre blends). An older build reads them as
+// unknown and falls back to the inferred finish.
+enum class Finish : int {
+    Standard = 0, Matte, Silk, Gloss, Transparent, Metallic, CarbonFiber,
+    Translucent, Satin, Sparkle, Marble, Wood, MatteTextured
+};
+
+const char *to_string(Finish v);
+bool        from_string(const std::string &s, Finish &v);
+// Realism 1c: JSON names kept back for finishes still to come, so nothing else takes them and an
+// older build reads them as unknown (the inferred finish): "multicolour_silk", the dual / tri-colour
+// coextruded silk (tests/design_multicolour_filament_view.md).
+const std::vector<std::string> &reserved_finish_names();
+std::vector<Finish> all_finishes();
+
+// D4: the finish a filament preset most likely has, from its name (e.g. "Snapmaker PLA Silk @U1",
+// "Generic PETG-CF") and its filament_type ("PLA", "PETG", "PLA-CF", ...). Whole words only, so a
+// vendor called "MatterHackers" is not matte. Order of precedence: sparkle (glitter, galaxy ...),
+// transparent ("transparent", "crystal"), translucent (D-R4: "translucent", "natural", "clear"),
+// silk, satin, marble / stone fill, wood fill, metallic (and metal fills: "copperfill", "bronze fill"),
+// carbon/glass fibre, matte, gloss (PETG family), standard.
+Finish infer_finish(const std::string &preset_name, const std::string &filament_type);
+
+// Realism 1e: the speckle of a filled filament, mixed into its colour (mesh mode).
+enum class SpeckleKind : int { None = 0, Stone, Wood };
+
+// The parameters the material shader takes for a finish (design 2.5). Everything after fiber_noise is
+// realism 1d / 1e and 0 for the seven finishes from before, so they render exactly as they did.
+struct MaterialParams
+{
+    float roughness   = 0.55f;   // GGX roughness (perceptual), 0..1
+    float f0          = 0.04f;   // specular reflectance at normal incidence
+    float metal_tint  = 0.f;     // 0 = white highlights, 1 = highlights in the filament colour
+    float anisotropy  = 0.f;     // 0 = round highlight, 1 = streaked across the layer lines (silk)
+    float clearcoat   = 0.f;     // a second, sharper lobe (gloss)
+    float alpha       = 1.f;     // < 1: drawn translucent, sorted per object (D15)
+    float line_shade  = 0.5f;    // how much the groove between two layers darkens (matte hides less)
+    float fiber_noise = 0.f;     // micro speckle of carbon / glass fibre
+    // 1d: light through the plastic. `transmission` is how much of the light behind a wall comes
+    // through it (0 = none), `density` how fast it dies away inside (Beer's law: per mm), `sss` a soft
+    // wrap of the light round the edges (plain plastics). The scene's Translucency scales all three
+    // (effective_translucency()); a Translucent filament transmits on its own.
+    float transmission = 0.f;
+    float density      = 0.f;
+    float sss          = 0.f;
+    // 1e: a velvet-like sheen at grazing angles (matte, textured), flakes that wink (sparkle: the share
+    // of cells holding a flake), and the speckle of a filled filament.
+    float       sheen    = 0.f;
+    float       sparkle  = 0.f;
+    float       speckle  = 0.f;
+    SpeckleKind speckle_kind = SpeckleKind::None;
+};
+MaterialParams material_params(Finish finish);
+
+// --- realism 1d: translucency --------------------------------------------------------------------
+
+// What the shader uses for a finish at the scene's Translucency `strength` (0..1, Materials). At 0
+// nothing changes except for a Translucent filament, which always lets light through (its look).
+struct Translucency
+{
+    float transmission = 0.f;   // 0 = off: no thickness pass for it, no transmitted light
+    float density      = 0.f;   // per mm
+    float sss          = 0.f;
+    bool  active() const { return transmission > 0.f || sss > 0.f; }
+};
+Translucency effective_translucency(Finish finish, float strength);
+// Beer-Lambert: the share of the light left after `thickness_mm` of plastic of `density` (per mm).
+float transmittance(float density, float thickness_mm);
+// The thickness the shader assumes where it has no thickness pass (the mirror, or no buffers), mm.
+constexpr float DEFAULT_WALL_THICKNESS = 1.6f;
+// The colour a translucent filament throws as its shadow on the floor (linear, 1 = no shadow): the
+// filament's colour (linear) let through by `transmission`, lighter for clearer plastics. Mirrored in
+// showcase_transmit.fs.
+std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_linear, float transmission);
+
+// --- realism 1e: sparkle -------------------------------------------------------------------------
+
+// The flake cells' size, mm (design 2.5: ~0.15 mm, in world space so they stay on the part in a video).
+constexpr float SPARKLE_CELL_MM = 0.15f;
+// How much of the flakes is drawn as flakes (1) rather than their average haze (0) when one cell
+// covers `cell_px` pixels: 0 at 0.75 px and below, 1 at 2 px and above (no fizzing in a video).
+// Mirrored in showcase_material.fs as sparkle_lod().
+float sparkle_lod(float cell_px);
+
+// --- realism 1f: imperfections (design 2.6) -----------------------------------------------------
+//
+// What makes a print read as printed: the layers wobble a little (Z-banding), the seam shows as a
+// line of small bumps where the slicer put it, a few faint strings hang where the nozzle travelled
+// across a gap, and the colour and gloss vary a little. Each has a strength 0..1 in the scene
+// (Imperfections in ShowcaseScene.hpp), 0 = off. Model mode; the seam and the strings need the plate
+// sliced (no guessing).
+
+// One point of the sliced plate's moves, as far as the imperfections care.
+enum class PathKind : int { Travel = 0, Extrude, Seam, Other };
+struct PathPoint
+{
+    PathKind kind     = PathKind::Other;
+    float    x = 0.f, y = 0.f, z = 0.f;   // the end of the move, world mm
+    int      extruder = 0;                 // 0-based
+};
+
+struct SeamPoint
+{
+    float x = 0.f, y = 0.f, z = 0.f;
+};
+// The seam points of the moves, sorted by z then x, y (the shader searches them by z), duplicates
+// within 1 um dropped. At most `max_points`, evenly thinned beyond it.
+std::vector<SeamPoint> seam_points(const std::vector<PathPoint> &moves, size_t max_points = 65536);
+
+// A string of plastic left on a travel across a gap: from `a` to `b`, sagging by `sag` mm at the middle.
+struct StringWisp
+{
+    std::array<float, 3> a{ { 0.f, 0.f, 0.f } };
+    std::array<float, 3> b{ { 0.f, 0.f, 0.f } };
+    float                sag      = 0.f;
+    int                  extruder = 0;
+};
+// The travels a string could hang on: from the end of one extrusion to the start of the next on the
+// same layer, 2 to 30 mm apart (retractions and wipes between them do not count). `strength` 0..1
+// keeps that share of them, at most 15 %, picked by a fixed hash of the move so the same ones
+// stay from frame to frame; at most `max_count`.
+std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count = 400);
+// A point along a wisp, t in 0..1 (a parabola below the straight line).
+std::array<float, 3>    wisp_point(const StringWisp &w, float t);
+
+// The seam's bump across its width: 1 on the seam, 0 at `width_mm` from it and beyond, smooth.
+float seam_bump(float distance_mm, float width_mm);
+// The seam's width (mm) and how far it stands out (mm) at a strength.
+constexpr float SEAM_WIDTH_MM = 0.45f;
+float           seam_height_mm(float strength);
+// How far (mm) a layer may be shifted sideways at a strength (the wobble's amplitude).
+float           wobble_amplitude_mm(float strength);
+
+// --- toolpath realism (S5, D13; design 2.6.3) --------------------------------------------------
+
+// The finish's default Smoothness (design 2.6.3's table): matte 0.5, standard 0.6, silk 0.8, gloss
+// 0.75, transparent 0.7, metallic 0.7, carbon fibre 0.45.
+float default_toolpath_smoothness(Finish finish);
+
+// What the toolpath shader does at a Smoothness (0 = Preview's crisp extrusions .. 1), the uniforms of
+// libvgcode's smooth path (A + B + F of D13). At 0 everything is off: the shader takes its old path.
+struct ToolpathLook
+{
+    float smoothness   = 0.f;   // 0..1
+    // A: the bead's cross-section, a superellipse |x|^p + |y|^p = 1 (p 2 = round .. 6 = boxy, a bulge
+    // that sits flatter on the bead below).
+    float bulge        = 2.f;
+    // B: top and bottom skin (solid infill, ironing): the line widened by this factor so neighbours
+    // overlap (1 = as sliced), and its normal bent towards straight up/down (0..1).
+    float skin_overlap = 1.f;
+    float skin_flatten = 0.f;
+    // The groove between two wall layers: how dark it stays (0 = none .. 1 = as crisp toolpaths).
+    float groove       = 1.f;
+    // The SSAO weight on skin (the creases there were the main artefact): 1 = full, 0 = none.
+    float ssao_skin    = 1.f;
+    // Silk: the highlight streaks along the extrusion (0..1).
+    float anisotropy   = 0.f;
+};
+
+// `smoothness` < 0 = the finish's default. The finish shapes the defaults (silk overlaps more and
+// streaks its highlight, matte keeps its grooves).
+ToolpathLook toolpath_look(Finish finish, float smoothness);
+
+// --- light rig ---------------------------------------------------------------------------------
+
+// Linear RGB of a black body at `kelvin` (clamped to 1000..40000), largest channel 1. 6500 K is
+// close to white, lower is warmer.
+std::array<float, 3> color_temperature_rgb(float kelvin);
+
+// --- procedural layer lines (design 2.6.2) -----------------------------------------------------
+
+enum class LayerLines : int { Off = 0, Subtle, Real, Exaggerated };
+const char *to_string(LayerLines v);
+bool        from_string(const std::string &s, LayerLines &v);
+// Normal tilt amplitude of the bead profile: 0, 0.15, 0.35, 0.7.
+float layer_line_depth(LayerLines v);
+
+// How visible the stripes are when one layer covers `layer_px` pixels on screen: 0 at 1 px and
+// below, 1 at 2 px and above, smooth in between (0.5 at 1.5 px). Stripes thinner than that would
+// only moire. Mirrored in GLSL as layer_fade(): layer_px = layer_height / fwidth(z).
+float layer_line_fade(float layer_px);
+// layer_px for a layer `layer_height` mm high where z changes by `dz_per_px` mm per pixel.
+float layer_pixels(float layer_height, float dz_per_px);
+
+// The object's layers as in generate_object_layers(): pairs of bottom / top Z, from Z = 0.
+// A fragment's place inside its layer.
+struct LayerSpan
+{
+    float bottom = 0.f;
+    float top    = 0.f;
+    float height() const { return top - bottom; }
+};
+
+class LayerTable
+{
+public:
+    LayerTable() = default;
+    // `boundaries` is generate_object_layers()' output: lo0, hi0, lo1, hi1, ...
+    explicit LayerTable(const std::vector<double> &boundaries);
+
+    bool  empty() const { return m_tops.empty(); }
+    size_t size() const { return m_tops.size(); }
+    const std::vector<float> &tops() const { return m_tops; }
+
+    // Every layer above the first is as high as the first of them (within 1 um): the shader then
+    // needs only first_layer_height() and layer_height(), no table.
+    bool  uniform() const { return m_uniform; }
+    float first_layer_height() const { return m_tops.empty() ? 0.f : m_tops.front(); }
+    float layer_height() const { return m_tops.size() > 1 ? m_tops[1] - m_tops[0] : first_layer_height(); }
+
+    // The layer containing z (binary search over the tops; mirrored in GLSL). Below 0 it is the
+    // first layer, above the last the last one continued.
+    LayerSpan layer_at(float z) const;
+    // 1c: the index of that layer, 0 = the first (mirrored in GLSL as layer_index_at()).
+    int       index_at(float z) const;
+
+private:
+    std::vector<float> m_tops;
+    bool               m_uniform = true;
+};
+
+// Uniform layers without a table: the first layer, then `layer_height` steps (mirrored in GLSL).
+LayerSpan uniform_layer_at(float z, float first_layer_height, float layer_height);
+// 1c: the index of uniform_layer_at()'s layer, 0 = the first.
+int       uniform_layer_index_at(float z, float first_layer_height, float layer_height);
+// 0 at the bottom of the layer, 1 at its top.
+float     layer_phase(const LayerSpan &span, float z);
+
+// --- top and bottom skin direction (realism 1c, design 2.3) -------------------------------------
+//
+// Which way the lines of a top (or bottom) skin run, worked out from the print settings as
+// Fill.cpp lays them, without a slice: the silk sheen's tangent on the mesh's flat faces (1c), and
+// the top stripes of the multi-colour filament view (tests/design_multicolour_filament_view.md,
+// P4). Angles are in degrees from +X towards +Y in the plate's frame; a line and its reverse are
+// the same direction, so they are kept in [0, 180).
+
+enum class SkinPattern : int {
+    Isotropic = 0,   // no single direction the shader can model (Hilbert, Archimedean chords, ...)
+    Lines,           // straight lines: rectilinear, monotonic, monotonic line, aligned rectilinear
+    Concentric,      // rings around the face (concentric, spiral inset)
+};
+
+struct SkinTangent
+{
+    SkinPattern        pattern = SkinPattern::Isotropic;
+    // Lines: layer i of the object (0 = its first layer) runs at angles_deg[i % size()].
+    std::vector<float> angles_deg;
+    // Lines: neighbouring lines run opposite ways (a zig-zag: rectilinear, monotonic); false when
+    // every line runs the same way (monotonic line). The sheen does not care; P4's stripes do.
+    bool               zigzag = true;
+
+    // Lines: the direction of layer `layer` in degrees, [0, 180); 0 for the other patterns.
+    float angle_at(int layer) const;
+    // Lines: the unit direction (x, y) of layer `layer`; (0, 0) for the other patterns.
+    std::array<float, 2> direction_at(int layer) const;
+    // Concentric: the unit direction along the ring through (x, y) around (cx, cy), anticlockwise;
+    // (0, 0) at the centre.
+    static std::array<float, 2> ring_direction(float x, float y, float cx, float cy);
+};
+
+// The settings skin_tangent_mode() reads (the config's values for one surface).
+struct SkinSettings
+{
+    std::string pattern                = "monotonicline";   // top_surface_pattern / bottom_surface_pattern, serialized
+    double      solid_infill_direction = 45.;               // solid_infill_direction
+    double      surface_direction      = -1.;               // top_layer_direction / bottom_layer_direction; < 0 = not set
+    std::string rotate_template;                            // solid_infill_rotate_template
+    bool        align_to_model         = false;             // align_infill_direction_to_model
+    double      model_rotation_deg     = 0.;                // the object's rotation about Z (used when aligned)
+};
+
+// How the skin's lines run (Fill.cpp: a set top/bottom_layer_direction fixes the angle; else a plain
+// rotate template ("0,90") gives each layer its absolute angle; else the solid infill direction,
+// turned 90 degrees on odd layers for every line pattern but aligned rectilinear). A template in the
+// rotate metalanguage ("+30", "45%", ...) is not modelled: Isotropic.
+SkinTangent skin_tangent_mode(const SkinSettings &settings);
+
+} // namespace Showcase
+
+class DynamicPrintConfig;
+
+namespace Showcase {
+
+// The top (`top` true) or bottom skin's settings from an object's full print config.
+SkinSettings skin_settings(const DynamicPrintConfig &config, bool top, double model_rotation_deg);
+
+} // namespace Showcase
+} // namespace Slic3r
+
+#endif // slic3r_Showcase_ShowcaseMaterial_hpp_

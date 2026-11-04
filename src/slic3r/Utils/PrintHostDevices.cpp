@@ -385,6 +385,60 @@ void set_last_used(const std::string& key, const std::string& id)
     save_store(store);
 }
 
+// ------------------------------------------------ what the printer lists show ----
+
+std::string bare_host(const std::string& address)
+{
+    std::string a      = normalize_address(address);
+    const auto  scheme = a.find("://");
+    if (scheme != std::string::npos)
+        a = a.substr(scheme + 3);
+    const auto slash = a.find('/');
+    if (slash != std::string::npos)
+        a = a.substr(0, slash);
+    const auto at = a.rfind('@');
+    if (at != std::string::npos)
+        a = a.substr(at + 1);
+    if (!a.empty() && a.front() == '[') {
+        const auto close = a.find(']');
+        return close == std::string::npos ? a : a.substr(1, close - 1);
+    }
+    const auto colon = a.find(':');
+    if (colon != std::string::npos && a.find(':', colon + 1) == std::string::npos)
+        a = a.substr(0, colon); // host:port; a bare IPv6 address has more than one colon
+    return a;
+}
+
+HostListing host_listing(const std::map<std::string, std::vector<Device>>& all,
+                         const std::string&                                selected_model_key,
+                         const std::string&                                preset_address,
+                         const std::string&                                preset_host_type)
+{
+    HostListing out;
+    auto        add_model = [&out](const std::string& key, const std::vector<Device>& list, bool selected) {
+        for (const Device& d : list)
+            if (!trimmed(d.address).empty())
+                out.devices.push_back({ key, d, selected });
+    };
+    auto selected = selected_model_key.empty() ? all.end() : all.find(selected_model_key);
+    if (selected != all.end())
+        add_model(selected->first, selected->second, true);
+    for (auto it = all.begin(); it != all.end(); ++it)
+        if (it != selected)
+            add_model(it->first, it->second, false);
+
+    out.host_row = !trimmed(preset_address).empty();
+    if (out.host_row && preset_host_type == "elegoolink") {
+        const std::string host = bare_host(preset_address);
+        for (const ListedDevice& l : out.devices)
+            if (l.selected_model && l.device.host_type == "elegoolink" && bare_host(l.device.address) == host) {
+                out.host_row = false;
+                break;
+            }
+    }
+    return out;
+}
+
 // -------------------------------------------- "can this plate go anywhere?" ----
 
 bool has_devices(const std::string& key)

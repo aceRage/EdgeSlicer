@@ -1,6 +1,7 @@
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <set>
@@ -592,6 +593,11 @@ public:
     Preset&         load_preset(const std::string &path, const std::string &name, const DynamicPrintConfig &config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
     Preset&         load_preset(const std::string &path, const std::string &name, DynamicPrintConfig &&config, bool select = true, Semver file_version = Semver(), bool is_custom_defined = false);
 
+    // A new user preset `name` that inherits `parent` (a system preset), with `overrides` applied on top
+    // and saved as a difference against the parent. The selection is left alone. Returns the preset,
+    // or nullptr when `name` is taken or the parent is not a system preset. Used for a third-party
+    // spool a printer reports that no preset matches (FilamentSyncMatch::third_party_preset_name).
+    const Preset*   create_inherited_user_preset(const Preset &parent, const std::string &name, const DynamicPrintConfig &overrides);
     bool clone_presets(std::vector<Preset const *> const &presets, std::vector<std::string> &failures, std::function<void(Preset &, Preset::Type &)> modifier, bool force_rewritten = false);
     bool clone_presets_for_printer(
         std::vector<Preset const *> const &templates, std::vector<std::string> &failures, std::string const &printer, std::function <std::string(std::string)> create_filament_id, bool force_rewritten = false);
@@ -688,7 +694,14 @@ public:
     Preset&         get_edited_preset()         { return m_edited_preset; }
     const Preset&   get_edited_preset() const   { return m_edited_preset; }
 
-    const Preset& get_selected_preset_base() const { return *get_preset_base(m_presets[m_idx_selected]); }
+    // The root of the selected preset's inherits chain, or the selected preset itself when
+    // the chain names a preset that is not loaded (e.g. a vendor that is not installed).
+    const Preset& get_selected_preset_base() const
+    {
+        const Preset &selected = m_presets[m_idx_selected];
+        const Preset *base     = get_preset_base(selected);
+        return base ? *base : selected;
+    }
 
     // Return the last saved preset.
 //  const Preset&   get_saved_preset() const { return m_saved_preset; }
@@ -809,23 +822,29 @@ public:
 
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return true if they differ.
     bool                        current_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &this->get_selected_preset()); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &this->get_selected_preset()) : !this->current_dirty_options().empty(); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_dirty_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare)); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_different_from_parent_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare)); }
     std::vector<std::string>    current_flow_variant_dirty_options(ConfigFlowDomain domain,
                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys)); }
     std::vector<std::string>    current_flow_variant_different_from_parent_options(ConfigFlowDomain domain,
                                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys)); }
+
+    // Per-nozzle process P8: keys the dirty / modified comparisons above leave out. While the Process tab shows a tool's
+    // profile, its plate-wide keys hold the Plate's shared values; they are not changes to the tool's profile.
+    void                        set_dirty_ignore(std::set<std::string> keys) { m_dirty_ignore = std::move(keys); }
+    const std::set<std::string>& dirty_ignore() const { return m_dirty_ignore; }
 
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return true if they differ.
     bool                        saved_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &m_saved_preset); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &m_saved_preset) :
+                                          !without_dirty_ignored(dirty_options(&this->get_edited_preset(), &m_saved_preset)).empty(); }
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return the list of keys where they differ.
 //    std::vector<std::string>    saved_dirty_options() const
 //        { return dirty_options(&this->get_edited_preset(), &this->get_saved_preset(), /* deep_compare */ false); }
@@ -965,6 +984,14 @@ private:
     Preset                  m_edited_preset;
     // Contains a copy of the last saved selected preset.
     Preset                  m_saved_preset;
+    // Per-nozzle process P8: keys the dirty comparisons leave out (set_dirty_ignore).
+    std::set<std::string>   m_dirty_ignore;
+    std::vector<std::string> without_dirty_ignored(std::vector<std::string> keys) const
+    {
+        if (!m_dirty_ignore.empty())
+            keys.erase(std::remove_if(keys.begin(), keys.end(), [this](const std::string &key) { return m_dirty_ignore.count(key) > 0; }), keys.end());
+        return keys;
+    }
 
     // Selected preset.
     size_t                  m_idx_selected;

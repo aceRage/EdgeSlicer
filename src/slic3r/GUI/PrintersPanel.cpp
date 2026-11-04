@@ -1,4 +1,5 @@
 #include "PrintersPanel.hpp"
+#include "PrinterRowsBridge.hpp"
 
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
@@ -56,71 +57,6 @@ public:
         return true;
     }
 };
-
-static long long printers_now_ms()
-{
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-// The vendor profiles' *_cover.png files, indexed once (they only change with an install).
-static const PMon::CoverIndex& printers_cover_index()
-{
-    static std::once_flag    once;
-    static PMon::CoverIndex  index;
-    std::call_once(once, []() {
-        namespace fs = boost::filesystem;
-        std::vector<std::pair<std::string, std::string>> files;
-        boost::system::error_code ec;
-        const fs::path root = fs::path(resources_dir()) / "profiles";
-        for (fs::directory_iterator v(root, ec), end; !ec && v != end; v.increment(ec)) {
-            boost::system::error_code ig;
-            if (!fs::is_directory(v->path(), ig)) continue;
-            for (fs::directory_iterator f(v->path(), ig), fend; !ig && f != fend; f.increment(ig))
-                files.emplace_back(v->path().filename().string(), f->path().filename().string());
-        }
-        index = PMon::index_covers(files);
-    });
-    return index;
-}
-
-// The archive's sidecars, re-read at most every 30 s (each poll would otherwise parse them all).
-static std::vector<PMon::ArchiveEntry> printers_archive_entries()
-{
-    static std::mutex                      mtx;
-    static long long                       read_at = 0;
-    static std::vector<PMon::ArchiveEntry> cached;
-    std::lock_guard<std::mutex> lock(mtx);
-    const long long now = printers_now_ms();
-    if (read_at == 0 || now - read_at > 30000) {
-        read_at = now;
-        cached.clear();
-        try {
-            for (const GcodeArchive::Record& r : GcodeArchive::list()) {
-                if (!r.has_thumbnail || !r.json.is_object() || !r.json.contains("printer") || !r.json["printer"].is_object()) continue;
-                PMon::ArchiveEntry e;
-                e.printer_id = r.json["printer"].value("id", std::string());
-                e.record_id  = r.id;
-                e.sent_name  = r.json.value("sent_name", std::string());
-                e.file       = r.file;
-                e.time       = r.time;
-                cached.push_back(std::move(e));
-            }
-        } catch (...) {}
-    }
-    return cached;
-}
-
-// The rows plus what the card shows besides them: the printer's picture and the job's plate picture.
-static void printers_enrich(json& payload)
-{
-    if (!payload.value("ok", false) || !payload.contains("printers")) return;
-    std::map<std::string, std::string> jobs;
-    for (const json& p : payload["printers"])
-        if (p.is_object() && p.contains("id") && p["id"].is_string()) jobs[p["id"].get<std::string>()] = PMon::row_job(p);
-    std::map<std::string, std::string> thumbs;
-    try { thumbs = PMon::pick_thumbnails(printers_archive_entries(), jobs); } catch (...) {}
-    PMon::enrich_rows(payload["printers"], printers_cover_index(), thumbs);
-}
 
 PrintersPanel::PrintersPanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
@@ -230,57 +166,19 @@ void PrintersPanel::OnScriptMessage(wxWebViewEvent& evt)
     }
 }
 
-void PrintersPanel::get_printers()
+std::function<void(const std::string&, const json&)> PrintersPanel::reply()
 {
-    bool expected = false;
-    if (!m_reading->compare_exchange_strong(expected, true))
-        return; // the read in flight answers this tick too
-    std::weak_ptr<bool>                alive   = m_alive;
-    std::shared_ptr<std::atomic<bool>> reading = m_reading;
-    // api_printers waits for the GUI thread for the Bambu part and probes the network hosts on the
-    // calling thread, so it runs here, never on the GUI thread (RemoteAccess.cpp).
-    std::thread([this, alive, reading]() {
-        std::pair<int, std::string> res { 503, "" };
-        try { res = RemoteAccess::get().monitor_printers(); } catch (...) {}
-        auto payload = std::make_shared<json>(PMon::page_payload(res.first, res.second, printers_now_ms()));
-        try { printers_enrich(*payload); } catch (...) {}
-        *reading = false;
-        RemoteAccess::post_to_app([this, alive, payload]() {
-            auto a = alive.lock();
-            if (!a || !*a) return;
-            if ((*payload)["ok"].get<bool>())
-                m_targets = PMon::targets_of((*payload)["printers"]);
-            RunPageScript("__printers", *payload);
-        });
-    }).detach();
+    return [this](const std::string& fn, const json& arg) { RunPageScript(fn, arg); };
 }
 
-void PrintersPanel::thumbnail(const std::string& archive_id)
+void PrintersPanel::get_printers()
 {
-    std::weak_ptr<bool> alive = m_alive;
-    std::thread([this, alive, archive_id]() {
-        std::string data;
-        try {
-            const GcodeArchive::Record r = GcodeArchive::find(archive_id);
-            boost::system::error_code ec;
-            if (!r.id.empty() && r.has_thumbnail && boost::filesystem::is_regular_file(r.thumbnail_path, ec) &&
-                boost::filesystem::file_size(r.thumbnail_path, ec) <= 2u * 1024 * 1024) {
-                std::ifstream f(boost::filesystem::path(r.thumbnail_path).string(), std::ios::binary);
-                std::stringstream ss;
-                ss << f.rdbuf();
-                const std::string png = ss.str();
-                // A PNG and nothing else (the page puts it in an <img> as a data: URL).
-                if (png.size() > 8 && png.compare(0, 8, "\x89PNG\r\n\x1a\n") == 0)
-                    data = "data:image/png;base64," + std::string(wxBase64Encode(png.data(), png.size()).ToUTF8().data());
-            }
-        } catch (...) {}
-        const json reply = { { "id", archive_id }, { "data", data } };
-        RemoteAccess::post_to_app([this, alive, reply]() {
-            auto a = alive.lock();
-            if (a && *a) RunPageScript("__printerThumb", reply);
-        });
-    }).detach();
+    PrinterRowsBridge::read_rows(m_alive, m_reading, reply(), [this](const json& payload) {
+        if (payload.value("ok", false)) m_targets = PMon::targets_of(payload["printers"]);
+    });
 }
+
+void PrintersPanel::thumbnail(const std::string& archive_id) { PrinterRowsBridge::thumbnail(m_alive, archive_id, reply()); }
 
 void PrintersPanel::get_groups()
 {
@@ -288,51 +186,9 @@ void PrintersPanel::get_groups()
     RunPageScript("__printerGroups", PMon::groups_json(store.load()));
 }
 
-void PrintersPanel::control(const PMon::Message& m)
-{
-    if (m.action == "stop" && !m.confirm) {
-        RunPageScript("__printerControl", json { { "id", m.id }, { "action", m.action }, { "ok", false }, { "error", "Stopping a print needs a confirmation." } });
-        return;
-    }
-    std::weak_ptr<bool> alive = m_alive;
-    const std::string   id = m.id, action = m.action;
-    const bool          confirm = m.confirm;
-    std::thread([this, alive, id, action, confirm]() {
-        std::pair<int, std::string> res { 500, "" };
-        try { res = RemoteAccess::get().monitor_control(id, action, confirm); } catch (...) {}
-        json reply = { { "id", id }, { "action", action }, { "ok", res.first == 200 } };
-        try {
-            const json body = json::parse(res.second);
-            if (res.first == 200) {
-                reply["job"]     = body.value("job", 0);
-                reply["dry_run"] = body.value("dry_run", false);
-            } else {
-                reply["error"] = body.value("error", std::string("the command was refused"));
-            }
-        } catch (...) {
-            if (res.first != 200) reply["error"] = "the command was refused";
-        }
-        RemoteAccess::post_to_app([this, alive, reply]() {
-            auto a = alive.lock();
-            if (a && *a) RunPageScript("__printerControl", reply);
-        });
-    }).detach();
-}
+void PrintersPanel::control(const PMon::Message& m) { PrinterRowsBridge::control(m_alive, m, reply()); }
 
-void PrintersPanel::job(int id)
-{
-    // In memory, no GUI-thread work: cheap enough to answer right here.
-    const std::pair<int, std::string> res = RemoteAccess::get().monitor_job(id);
-    json reply = { { "id", id }, { "state", "error" }, { "error", "no such job" } };
-    if (res.first == 200) {
-        try {
-            const json j = json::parse(res.second);
-            reply        = { { "id", id }, { "state", j.value("state", std::string("error")) }, { "text", j.value("text", std::string()) },
-                             { "error", j.value("error", std::string()) }, { "printer", j.value("printer", std::string()) } };
-        } catch (...) {}
-    }
-    RunPageScript("__printerJob", reply);
-}
+void PrintersPanel::job(int id) { PrinterRowsBridge::job(id, reply()); }
 
 void PrintersPanel::open_device(const std::string& id)
 {

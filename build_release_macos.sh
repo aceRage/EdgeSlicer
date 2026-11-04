@@ -274,6 +274,7 @@ function build_slicer() {
             # (Matched in the shell, not with `| grep -q`: under pipefail an early grep exit can
             # SIGPIPE nm and read as a failure.)
             cam_syms=$(nm -gU "${CAMERA_BIN_DIR}/libBambuSource.dylib" 2>/dev/null || true)
+            # shellcheck disable=SC2016  # the $ is part of the Objective-C symbol name, not an expansion
             case "${cam_syms}" in
                 *'_OBJC_CLASS_$_BambuPlayer'*) ;;
                 *)

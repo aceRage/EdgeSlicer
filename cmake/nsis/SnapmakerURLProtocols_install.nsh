@@ -47,6 +47,16 @@ nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="Ed
 Pop $0
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer FlashForge discovery" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=UDP localport=18007 profile=private,domain enable=yes'
 Pop $0
+; mDNS / Bonjour (UDP 5353): the printer dialog's Browse for OctoPrint / Moonraker hosts
+; (Bonjour.cpp) binds UDP 5353 and joins the mDNS multicast group, so the printers' multicast
+; answers arrive unsolicited on 5353 - Windows Firewall drops them without this rule. The Creality
+; K-series search (deps_src/mdns/cxmdns.cpp) asks for unicast answers on its own ephemeral port and
+; re-sends its query every second, so it rides the firewall's reply window and needs no port of
+; its own; this rule is the backstop for both. Program-bound, Private and Domain only.
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer mDNS discovery"'
+Pop $0
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer mDNS discovery" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=UDP localport=5353 profile=private,domain enable=yes'
+Pop $0
 ; WebRTC camera video: go2rtc (bundled, $INSTDIR\resources\tools\go2rtc\go2rtc.exe) carries the
 ; media straight from this PC to the phone rather than through the hub, so unlike everything else
 ; the hub runs it needs an inbound port. It takes the first free one in 8555-8574 (RemoteHub.cpp,

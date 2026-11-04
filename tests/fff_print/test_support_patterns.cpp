@@ -58,10 +58,16 @@ StringObjectException validate_warning(std::initializer_list<ConfigBase::SetDese
     for (ModelObject *object : model.objects)
         print.auto_assign_extruders(object);
     print.apply(model, config);
-    StringObjectException warning;
-    const StringObjectException error = print.validate(&warning);
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
     INFO("validate error: " << error.string);
     REQUIRE(error.string.empty());
+    // validate() now returns every warning (Orca #14112); these tests look at the base-pattern one,
+    // the latest of which wins as the old single slot did.
+    StringObjectException warning;
+    for (const StringObjectException &w : warnings)
+        if (w.opt_key == "support_base_pattern")
+            warning = w;
     return warning;
 }
 

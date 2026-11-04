@@ -39,6 +39,10 @@ public:
     float   wall_transition_filter_deviation{0.f};
     int     wall_distribution_count{1};
     bool    is_top_or_bottom_layer{false};
+
+    // OrcaSlicer #11925: user-set Arachne simplification; the defaults are the former constants.
+    coord_t wall_maximum_resolution = meshfix_maximum_resolution();
+    coord_t wall_maximum_deviation  = meshfix_maximum_deviation();
 };
 
 WallToolPathsParams make_paths_params(const int layer_id, const PrintObjectConfig &print_object_config, const PrintConfig &print_config);
@@ -102,7 +106,8 @@ public:
      * Get the order constraints of the insets when printing walls per region / hole.
      * Each returned pair consists of adjacent wall lines where the left has an inset_idx one lower than the right.
      *
-     * Odd walls should always go after their enclosing wall polygons.
+     * Odd walls follow the same order as even ones, so that the centre line of a narrow wall is an inner wall
+     * like any other when printing inner to outer.
      *
      * \param outer_to_inner Whether the wall polygons with a lower inset_idx should go before those with a higher one.
      */
@@ -124,10 +129,11 @@ protected:
     /*!
      * Simplifies the variable-width toolpaths by calling the simplify on every line in the toolpath using the provided
      * settings.
-     * \param settings The settings as provided by the user
+     * \param toolpaths The toolpaths vector to simplify
+     * \param params The settings as provided by the user
      * \return
      */
-    static void simplifyToolPaths(std::vector<VariableWidthLines>  &toolpaths);
+    static void simplifyToolPaths(std::vector<VariableWidthLines>& toolpaths, const WallToolPathsParams& params);
 
 private:
     const Polygons& outline; //<! A reference to the outline polygon that is the designated area
