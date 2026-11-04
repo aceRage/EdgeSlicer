@@ -335,13 +335,38 @@ Model Model::read_from_file(const std::string&                                  
                         result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
                     }
                 }
-            } /*else if (obj_info.has_uv_png && obj_info.uvs.size() > 0) {
-                boost::filesystem::path full_path(input_file);
-                std::string             obj_directory = full_path.parent_path().string();
-                obj_info.obj_dircetory = obj_directory;
-                result = false;
-                message = _L("Importing obj with png function is developing.");
-            }*/
+            } else if (obj_info.has_uv_png && objFn && !model.objects.empty() &&
+                       model.objects.back()->volumes.size() == 1 &&
+                       obj_info.uvs.size() == model.objects.back()->volumes[0]->mesh().its.indices.size() &&
+                       obj_info.face_colors.size() == obj_info.uvs.size()) {
+                // ImageMap phase 5d: a textured OBJ (an mtl map_Kd image). Sample the image per
+                // triangle and per sub-facet through the OBJ's own UVs, then take the path a glTF
+                // base colour texture takes: the colour dialog picks the filaments, and the
+                // ImageFill service decides each sub-facet among them.
+                std::vector<std::string> face_texture(obj_info.uvs.size());
+                for (const auto &[face, png] : obj_info.uv_map_pngs)
+                    if (face >= 0 && size_t(face) < face_texture.size())
+                        face_texture[size_t(face)] = png;
+                const int         depth = 2;   // 16 samples a triangle, as for glTF
+                std::vector<RGBA> face_colors, sub_face_colors;
+                std::string       texture_warning;
+                const bool sampled = sample_obj_textures(boost::filesystem::path(input_file).parent_path().string(),
+                                                         face_texture, obj_info.uvs, obj_info.face_colors, depth,
+                                                         face_colors, sub_face_colors, texture_warning);
+                if (!texture_warning.empty() && import_warning != nullptr)
+                    *import_warning = texture_warning;
+                if (!sampled)
+                    face_colors = obj_info.face_colors;   // the materials' own colours, as before
+                std::vector<unsigned char> face_filament_ids;
+                objFn(face_colors, obj_info.is_single_mtl && !sampled, face_filament_ids, first_extruder_id);
+                if (!face_filament_ids.empty()) {
+                    result = sampled && Model::import_multi_volume_face_color_deal(face_filament_ids, face_colors,
+                                                                                   sub_face_colors, depth,
+                                                                                   first_extruder_id, &model);
+                    if (!result)
+                        result = obj_import_face_color_deal(face_filament_ids, first_extruder_id, &model);
+                }
+            }
         }
     }
     else if (boost::algorithm::iends_with(input_file, ".svg"))
@@ -3175,10 +3200,20 @@ size_t ModelVolume::split(unsigned int max_extruders)
     unsigned int extruder_counter = 0;
     const Vec3d offset = this->get_offset();
 
+    // ImageMap phase 5c: each piece is re-centred below, so an image fill on this volume would be
+    // re-stretched over each piece's own box. Carry the picture's box and frame instead.
+    ImageFillParams      image_params;
+    const bool           has_image = image_fill_params_of(*this, image_params);
+    indexed_triangle_set image_old_its;
+    if (has_image)
+        image_old_its = this->mesh().its;
+
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
             continue;
+        // What center_geometry_after_creation() below will move this piece's mesh by.
+        const Vec3d piece_shift = mesh.bounding_box().center();
 
         if (idx == 0) {
             this->set_mesh(std::move(mesh));
@@ -3207,6 +3242,11 @@ size_t ModelVolume::split(unsigned int max_extruders)
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
         //this->object->volumes[ivolume]->config.set("extruder", auto_extruder_id(max_extruders, extruder_counter));
         this->object->volumes[ivolume]->m_is_splittable = 0;
+        if (has_image) {
+            ImageFillParams p = image_params;
+            image_fill_rebase(p, image_old_its, Geometry::translation_transform(-piece_shift));
+            this->object->volumes[ivolume]->config.set_key_value("image_fill_params", new ConfigOptionString(p.to_string()));
+        }
         ++ idx;
     }
 
@@ -3642,8 +3682,10 @@ bool Model::import_volume_color_deal(const std::vector<unsigned char> &volume_fi
     obj->config.set("extruder", first_extruder_id);
     for (size_t i = 0; i < obj->volumes.size(); i++) {
         const unsigned char id = volume_filament_ids[i];
-        if (id <= 1)
-            continue;   // 1 is the default; the OBJ appliers skip it for the same reason
+        // Phase 5e: every part gets the filament the dialog chose for it - filament 1 included, which
+        // the old "id <= 1" skip left on the object's filament whatever that was.
+        if (id == 0)
+            continue;
         obj->volumes[i]->config.set("extruder", (int) id);
     }
     return true;
@@ -3681,7 +3723,7 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
 // Model::obj_import_face_color_deal so the OBJ path and the glTF texture path share one
 // implementation - the same treatment the vertex path got.
 static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned char *face_filament_ids,
-                                          size_t face_count_in)
+                                          size_t face_count_in, unsigned char first_extruder_id)
 {
     const size_t face_count = volume->mesh().its.indices.size();
     if (face_count != face_count_in) { return false; }
@@ -3690,10 +3732,16 @@ static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned ch
     // through set_triangle_from_string. Same result, one writer - and the encoder is the one the
     // Image fill dialog uses, so a painted import and a painted image cannot drift apart.
     //
-    // The `<= 1` skip is kept exactly: id 1 is the part's own filament and was never painted.
+    // Phase 5e: a face is left unpainted when its filament is the PART's own one - the
+    // `first_extruder_id` the caller sets as the volume's extruder - because it prints with that
+    // anyway. Every other filament is painted, filament 1 included. The old rule skipped id 1
+    // whatever the part's filament was, so with the colour dialog's first cluster on, say,
+    // filament 3, every face meant for filament 1 printed in filament 3.
     std::vector<int> states(face_count, 0);
-    for (size_t i = 0; i < face_count; ++i)
-        states[i] = face_filament_ids[i] <= 1 ? 0 : int(face_filament_ids[i]);
+    for (size_t i = 0; i < face_count; ++i) {
+        const int id = int(face_filament_ids[i]);
+        states[i]    = (id <= 0 || id == int(first_extruder_id)) ? 0 : id;
+    }
     TriangleSelector sel(volume->mesh());
     sel.deserialize(image_fill_encode(face_count, 0, states), /*needs_reset=*/true);
     volume->mmu_segmentation_facets.set(sel);
@@ -3705,10 +3753,12 @@ static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned ch
 // colour dialog decided on, with the colour each stands for.
 static bool paint_volume_from_sub_face_colors(ModelVolume *volume, const std::vector<std::array<float, 3>> &sub_colors,
                                               const std::vector<std::array<float, 3>> &palette,
-                                              const std::vector<int> &palette_ids, int depth)
+                                              const std::vector<int> &palette_ids, int depth,
+                                              unsigned char first_extruder_id)
 {
+    // Phase 5e: the part's own filament is the background - a leaf it wins stays unpainted.
     const ImageFillResult res = image_fill_from_face_colors(volume->mesh().its, sub_colors, palette,
-                                                            palette_ids, /*background=*/0, depth);
+                                                            palette_ids, /*background=*/int(first_extruder_id), depth);
     if (!res.ok)
         return false;
     TriangleSelector sel(volume->mesh());
@@ -3727,7 +3777,7 @@ bool Model::obj_import_face_color_deal(const std::vector<unsigned char> &face_fi
         if (obj->volumes.size() == 1) {
             auto volume        = obj->volumes[0];
             volume->config.set("extruder", first_extruder_id);
-            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size());
+            return paint_volume_from_face_colors(volume, face_filament_ids.data(), face_filament_ids.size(), first_extruder_id);
         }
     }
     return false;
@@ -3753,7 +3803,7 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
     for (ModelVolume *volume : obj->volumes) {
         const size_t count = volume->mesh().its.indices.size();
         volume->config.set("extruder", first_extruder_id);
-        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count))
+        if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count, first_extruder_id))
             return false;
         offset += count;
     }
@@ -3792,8 +3842,12 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
     std::vector<size_t>               counts;
     for (size_t i = 0; i < face_filament_ids.size(); ++i) {
         const int id = int(face_filament_ids[i]);
-        if (id <= 1)
-            continue;   // id 1 is the part's own filament: not painted, and not a palette entry
+        // Phase 5e: every filament the dialog chose is a palette entry, the part's own one and
+        // filament 1 included. Leaving id 1 out (the old rule) meant a leaf whose colour was
+        // filament 1's could only be painted with the nearest OTHER filament. Which leaves stay
+        // unpainted is decided by the background, i.e. the part's own filament.
+        if (id <= 0)
+            continue;
         auto it = std::find(ids.begin(), ids.end(), id);
         size_t k;
         if (it == ids.end()) {
@@ -3827,7 +3881,7 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
             const RGBA &c = sub_face_colors[offset * per + i];
             slice.push_back({c[0], c[1], c[2]});
         }
-        if (!paint_volume_from_sub_face_colors(volume, slice, palette, ids, depth))
+        if (!paint_volume_from_sub_face_colors(volume, slice, palette, ids, depth, first_extruder_id))
             return false;
         offset += count;
     }
