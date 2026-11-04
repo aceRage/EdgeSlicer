@@ -174,6 +174,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mesh_round.cpp
 	test_quad_remesh.cpp
 	test_meshboolean.cpp
+	test_adaptive_layer_merge.cpp
 	test_lay_on_face.cpp
 	test_marchingsquares.cpp
 	test_timeutils.cpp
@@ -207,6 +208,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_lens.cpp
     test_showcase_skin.cpp
     test_showcase_realism.cpp
+    test_showcase_blender.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

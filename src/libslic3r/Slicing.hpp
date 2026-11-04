@@ -125,8 +125,9 @@ inline bool equal_layering(const SlicingParameters &sp1, const SlicingParameters
             sp1.interface_raft_layer_height         == sp2.interface_raft_layer_height          &&
             sp1.contact_raft_layer_height           == sp2.contact_raft_layer_height            &&
             sp1.layer_height                        == sp2.layer_height                         &&
-            sp1.min_layer_height                    == sp2.min_layer_height                     &&
-            sp1.max_layer_height                    == sp2.max_layer_height                     &&
+            // Orca #17000: min/max_layer_height only bound a variable layer height, and the nozzles of a
+            // per-nozzle print carry their own limits. The layers themselves are compared by layer_height
+            // above and, for variable profiles, by Print::validate() against the generated Z series.
 //            sp1.max_suport_layer_height             == sp2.max_suport_layer_height              &&
             sp1.first_print_layer_height            == sp2.first_print_layer_height             &&
             sp1.first_object_layer_height           == sp2.first_object_layer_height            &&
