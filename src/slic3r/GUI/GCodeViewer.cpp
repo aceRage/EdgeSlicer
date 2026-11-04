@@ -4153,7 +4153,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 m_fold = false;
                 m_view_type_sel = i;
                 set_view_type(view_type_items[m_view_type_sel]);
-                reset_visible(view_type_items[m_view_type_sel]);
+                // ORCA: the hidden Line Type set is kept across view type switches (the legend eye icons
+                // and the rendering read the same state), so no reset_visible() here
                 // ORCA (#15769): remember the pick so the "Last used" preview default can restore it
                 const std::string view_type_name = view_type_to_config_name(view_type_items[m_view_type_sel]);
                 if (!view_type_name.empty())
