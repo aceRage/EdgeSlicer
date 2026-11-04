@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -56,6 +57,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Surface.hpp"
+#include "libslic3r/Feature/FuzzySkin/FuzzySkin.hpp"
 
 #include "test_data.hpp"
 
@@ -440,11 +442,27 @@ struct Sliced
 };
 
 // Slice a model with the given extra settings on top of base_config().
-void slice(Sliced &out, TriangleMesh mesh, const char *name, std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> extra)
+//
+// The jitter is seeded (Feature::FuzzySkin::set_test_random_seed) so every run of this file slices
+// the same walls: a failure reproduces, and a pass means the same thing every time. kSeed is just a
+// fixed value; the hidden seed sweep at the end of the file runs the wedge checks over many seeds.
+constexpr uint64_t kSeed = 0x5eed2026u;
+
+struct TestSeed
+{
+    explicit TestSeed(uint64_t seed) { Feature::FuzzySkin::set_test_random_seed(seed); }
+    ~TestSeed() { Feature::FuzzySkin::set_test_random_seed(std::nullopt); }
+};
+
+void slice(Sliced &out, TriangleMesh mesh, const char *name, std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> extra,
+           uint64_t seed = kSeed)
 {
     DynamicPrintConfig config = base_config();
     config.set_deserialize_strict(extra);
-    slice_mesh(out.print, out.model, std::move(mesh), name, config);
+    {
+        const TestSeed seeded(seed);
+        slice_mesh(out.print, out.model, std::move(mesh), name, config);
+    }
     REQUIRE(out.object().layers().size() > 4);
 }
 
@@ -571,8 +589,9 @@ double outline_u(const Vec2d &p, const WallRect &r, double exact, double reach)
 // the unsupported set. (The one way to mis-identify the run is a ramped sample whose own draw is
 // under 6 nm in magnitude, about one draw in 50,000 per boundary, which moves the run's end one
 // sample out and tightens the bound on the sample after it by one cadence; that is the residual
-// flake rate of this check, about one run in 100,000, and it is stated here so nobody hunts for a
-// blend bug over it.)
+// flake rate of this check, and it is stated here so nobody hunts for a blend bug over it. The
+// seed sweep measured it at one slice in 40,000. The fixed seed the scenarios run with is not one
+// of those, so they do not flake; the sweep can.)
 void check_blend_ramp(const Layer &layer)
 {
     const double kExact = 2e-6;  // 2 nm: integer-nanometre coordinates, one rounding either way
@@ -600,17 +619,31 @@ void check_blend_ramp(const Layer &layer)
     // edge exactly, and they span the side to within a cadence of either corner. With jitter on the
     // side there would be no such sample at all.
     //
+    // Except at a corner: when the last unsupported sample before a corner lands within the
+    // simplifier's 1 um of the +x line (it sits on the y side, un-jittered too), the end sample of
+    // the +x side is within 1 um of the chord from it and is folded, and that corner sample is what
+    // ends the side instead. About one corner in 800 (1 um of a 0.6-1.0 mm cadence); the seed sweep
+    // found it in both generators (classic: one sample left on the edge; Arachne: the start vertex
+    // and one sample, 0.05-0.27 mm apart). So "on the +x edge" here is within kFold of its x - the
+    // simplifier's tolerance with margin - which a jittered sample can only reach by a draw under
+    // 1.5 um, and the reach check below would still catch that.
+    //
     // Second, every sample within the jitter's reach of the edge - clear of the corners by that
     // same reach, so that no sample of the +y or -y side can be mistaken for one - reads a zero
     // displacement. A jittered sample anywhere on the side would survive the simplifier and land
     // exactly here, non-zero.
     const double kCadence = kPointDistance * 5. / 4.;
-    size_t n_edge = 0, reach_fuzzed = 0, any = 0;
+    // The 1 um simplifier tolerance with margin: the folded end sample is within 1 um of the chord,
+    // and the corner sample's own offset from the +x line is that times |chord| / |end to far end|,
+    // a few percent more (the sweep saw 1.013 um).
+    const double kFold    = 1.5e-3;
+    size_t n_edge = 0, reach_fuzzed = 0, any = size_t(-1);
     double edge_y_lo = 1e30, edge_y_hi = -1e30;
     for (size_t i = 0; i < n; ++i) {
         const Vec2d p = unscale(wall.samples[i]);
-        if (std::abs(p.x() - rect.x_max) <= kExact) {
+        if (std::abs(p.x() - rect.x_max) <= kExact)
             any = i;
+        if (std::abs(p.x() - rect.x_max) <= kFold) {
             ++n_edge;
             edge_y_lo = std::min(edge_y_lo, p.y());
             edge_y_hi = std::max(edge_y_hi, p.y());
@@ -619,11 +652,25 @@ void check_blend_ramp(const Layer &layer)
             p.y() < rect.y_max - kThickness - 0.01 && disp[i] > kExact)
             ++reach_fuzzed;
     }
+    // Diagnostic, shown on failure only: every sample within 1.5 mm of the +x edge, plus the paths.
+    std::string near_edge;
+    for (size_t i = 0; i < n; ++i) {
+        const Vec2d p = unscale(wall.samples[i]);
+        if (p.x() > rect.x_max - 1.5) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "\n  #%zu%s (%.6f, %.6f) dx %.6f", i, i == wall.seam ? " seam" : "", p.x(), p.y(),
+                          rect.x_max - p.x());
+            near_edge += buf;
+        }
+    }
+    INFO("rect x[" << rect.x_min << " " << rect.x_max << "] y[" << rect.y_min << " " << rect.y_max << "]; samples near +x:"
+         << near_edge << "\n" << describe_perimeters(layer));
     INFO("samples on the +x edge: " << n_edge << " spanning " << edge_y_hi - edge_y_lo << " of a "
          << rect.y_max - rect.y_min << " mm side; jittered samples within reach of it: " << reach_fuzzed);
     REQUIRE(n_edge >= 2);
     CHECK(edge_y_hi - edge_y_lo > (rect.y_max - rect.y_min) - 2. * kCadence);
     CHECK(reach_fuzzed == 0);
+    REQUIRE(any != size_t(-1));  // an exact one: both ends folding at once is about 1 in 600,000
 
     // The unsupported run: from any +x-side sample, extend over the zero-displacement samples.
     size_t a = any, b = any, run = 1;
@@ -670,6 +717,25 @@ void check_blend_ramp(const Layer &layer)
             if ((b + k) % n == wall.seam)     read_after  = false;
             if ((a + n - k) % n == wall.seam) read_before = false;
         }
+    // The classic generator has a start vertex too, and it sits at a corner as well: the fuzzer
+    // walks the loop once from it, starting at a random 0-0.3 mm in, so the step that crosses it is
+    // anything from 0 to 1.3 mm - and the classic split recombines it away, so it leaves no seam
+    // mark. What the spacing argument needs is only that every step between the run's end and the
+    // sample being read is at least kFloor, and that is measurable: an end with a shorter step is
+    // the seam (no other step can be shorter; a fold only lengthens one) and is not read. The seed
+    // sweep found it at 0.576 mm, one run in about 800, always at one end only.
+    const auto steps_ok = [&](size_t from, bool forward) {
+        for (size_t k = 0; k < 2; ++k) {
+            const size_t s = forward ? (from + k) % n : (from + n - k) % n;
+            const size_t t = forward ? (s + 1) % n : (s + n - 1) % n;
+            if (du(s, t) < kFloor - kSlack)
+                return false;
+        }
+        return true;
+    };
+    const bool short_after = ! steps_ok(b, true), short_before = ! steps_ok(a, false);
+    read_after  = read_after && ! short_after;
+    read_before = read_before && ! short_before;
     std::string ramp;
     for (size_t k = 1; k <= 2; ++k) {
         char         buf[128];
@@ -680,6 +746,7 @@ void check_blend_ramp(const Layer &layer)
     }
     INFO("run of " << run << " unsupported samples (" << n_edge << " on the +x edge)"
          << (read_after ? "" : "; after end at the seam, not read") << (read_before ? "" : "; before end at the seam, not read")
+         << (short_after ? " (after: a step under the floor)" : "") << (short_before ? " (before: a step under the floor)" : "")
          << ramp);
     REQUIRE((read_after || read_before));
     for (size_t k = 1; k <= 2; ++k) {
@@ -927,6 +994,47 @@ SCENARIO("Fuzzy skin ramps its displacement where a wall goes from supported to 
             THEN("the same holds")
             {
                 check_blend_ramp(layer_under_test(s));
+            }
+        }
+    }
+}
+
+TEST_CASE("The fuzzy skin test seed makes the jitter reproducible", "[FuzzySkinOverhangs]")
+{
+    const auto wall = [](uint64_t seed) {
+        Sliced s;
+        slice(s, overhang_wedge(), "overhang_wedge",
+              {{"wall_generator", "arachne"}, {"fuzzy_skin", "external"}, {"fuzzy_skin_skip_overhangs", "1"}}, seed);
+        REQUIRE(s.object().layers().size() > 8);
+        return outer_wall_samples(*s.object().layers()[5]).samples;
+    };
+    const Points a = wall(kSeed), b = wall(kSeed), c = wall(kSeed + 1);
+    const bool same_seed_same_wall = a == b, other_seed_other_wall = a != c;
+    CHECK(same_seed_same_wall);
+    CHECK(other_seed_other_wall);
+}
+
+// Hidden ([.]): the wedge checks over many seeds, both generators, to measure what the fixed seed
+// above cannot - that the checks hold for any jitter. Run it by name or with "[FuzzySkinSeedSweep]";
+// EDGE_FUZZ_SEED_FIRST / EDGE_FUZZ_SEED_COUNT pick the seeds (default 1, 200). Run large sweeps as
+// several processes of a few hundred seeds each: Catch's section bookkeeping is quadratic in the
+// number of DYNAMIC_SECTIONs.
+TEST_CASE("Fuzzy skin overhang blend holds over a seed sweep", "[FuzzySkinOverhangs][FuzzySkinSeedSweep][.]")
+{
+    const auto env = [](const char *name, uint64_t fallback) {
+        const char *v = std::getenv(name);
+        return v != nullptr && *v != 0 ? uint64_t(std::strtoull(v, nullptr, 10)) : fallback;
+    };
+    const uint64_t first = env("EDGE_FUZZ_SEED_FIRST", 1), count = env("EDGE_FUZZ_SEED_COUNT", 200);
+    for (uint64_t seed = first; seed < first + count; ++seed) {
+        for (const char *generator : {"classic", "arachne"}) {
+            DYNAMIC_SECTION("seed " << seed << " " << generator)
+            {
+                Sliced s;
+                slice(s, overhang_wedge(), "overhang_wedge",
+                      {{"wall_generator", generator}, {"fuzzy_skin", "external"}, {"fuzzy_skin_skip_overhangs", "1"}}, seed);
+                REQUIRE(s.object().layers().size() > 8);
+                check_blend_ramp(*s.object().layers()[5]);
             }
         }
     }

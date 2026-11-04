@@ -48,6 +48,7 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/ZipOpen.hpp"
 #include "slic3r/Utils/ElegooSdcpMonitor.hpp"
 #include "slic3r/Utils/ElegooCc2Monitor.hpp"
 #include "slic3r/Utils/LoopbackAcceptLoop.hpp"
@@ -1654,12 +1655,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_undo(const std::string& expect)
 // own control does, through the same Plater calls, so undo, plate membership, the object list and
 // the dirty flag follow; the checks that need no Plater are SliceV1's.
 
-// Where a project that was never saved is saved for the phone (POST /project/save, /quit,
-// /project/open): <datadir>/hub/saves/Untitled_<stamp>.3mf.
-static wxString untitled_save_path()
+static std::string hub_save_stamp()
 {
-    boost::system::error_code ig;
-    fs::create_directories(RemoteHub::saves_dir(), ig);
     std::time_t t = std::time(nullptr);
     std::tm     tm {};
 #ifdef _WIN32
@@ -1669,7 +1666,55 @@ static wxString untitled_save_path()
 #endif
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
-    return wxString::FromUTF8((fs::path(RemoteHub::saves_dir()) / (std::string("Untitled_") + stamp + ".3mf")).string());
+    return stamp;
+}
+
+// <datadir>/hub/saves/<leaf>, creating the folder.
+static wxString hub_save_path(const std::string& leaf)
+{
+    boost::system::error_code ig;
+    fs::create_directories(RemoteHub::saves_dir(), ig);
+    return wxString::FromUTF8((fs::path(RemoteHub::saves_dir()) / leaf).string());
+}
+
+// Where a project that was never saved is saved for the phone (POST /project/save, /quit,
+// /project/open): <datadir>/hub/saves/Untitled_<stamp>.3mf.
+static wxString untitled_save_path()
+{
+    return hub_save_path(std::string("Untitled_") + hub_save_stamp() + ".3mf");
+}
+
+// A remote save must never open a file dialog on the PC (review B-2). A project opened from a
+// ZIP makes Plater::save_project(false) ask Save As, so it is named into <datadir>/hub/saves
+// (<stem>_<stamp>.3mf), the way a never-saved project is, and the flag is cleared. Returns the
+// previous name and flag so a failed save can put them back.
+struct RemoteSaveTarget
+{
+    bool     new_file      = false;
+    bool     from_zip      = false;
+    wxString old_filename;
+};
+static RemoteSaveTarget prepare_remote_save(Plater* plater)
+{
+    RemoteSaveTarget t;
+    t.old_filename = plater->get_project_filename(".3mf");
+    t.new_file     = t.old_filename.IsEmpty();
+    t.from_zip     = plater->opened_from_zip();
+    if (t.new_file)
+        plater->set_project_filename(untitled_save_path());
+    else if (t.from_zip)
+        plater->set_project_filename(hub_save_path(zip_remote_save_name(t.old_filename.ToUTF8().data(), hub_save_stamp())));
+    if (t.from_zip)
+        plater->set_opened_from_zip(false);
+    return t;
+}
+static void undo_remote_save(Plater* plater, const RemoteSaveTarget& t)
+{
+    if (!t.new_file && !t.from_zip)
+        return;
+    plater->set_project_filename(t.old_filename);
+    if (t.from_zip)
+        plater->set_opened_from_zip(true);
 }
 
 // An edit waits for the PC: not while it slices, nor while an arrange, orient or other UI task runs.
@@ -1959,11 +2004,15 @@ RemoteAccess::ApiResponse RemoteAccess::api_project_save()
         *result = edit_blocked(plater);
         if (result->first != 200) return;
         if (plater->model().objects.empty()) { *result = { 409, "the project is empty" }; return; }
-        const bool new_file = plater->get_project_filename(".3mf").IsEmpty();
-        if (new_file) plater->set_project_filename(untitled_save_path());
-        if (plater->save_project(false) != wxID_YES) { *result = { 500, "the project was not saved" }; return; }
+        const RemoteSaveTarget target = prepare_remote_save(plater);
+        if (plater->save_project(false) != wxID_YES) {
+            undo_remote_save(plater, target);
+            *result = { 500, "the project was not saved" };
+            return;
+        }
         (*out)["project"]  = plater->get_project_filename(".3mf").ToUTF8().data();
-        (*out)["new_file"] = new_file;
+        (*out)["new_file"] = target.new_file;
+        if (target.from_zip) (*out)["from_zip"] = true;
         (*out)["dirty"]    = plater->is_project_dirty();
         *result = { 200, "" };
     }, 15 * 60 * 1000, "saving the project"); // big projects take a while to save
@@ -4017,8 +4066,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_quit(bool discard)
         Plater* plater = wxGetApp().plater();
         if (plater == nullptr || wxGetApp().mainframe == nullptr) { *result = { 500, "no main window" }; return; }
         if (!discard && plater->is_background_process_slicing()) { *result = { 409, "slicing in progress" }; return; }
-        if (!discard && plater->is_project_dirty() && plater->get_project_filename(".3mf").IsEmpty() && !plater->model().objects.empty())
-            plater->set_project_filename(untitled_save_path());
+        // A project opened from a ZIP would ask Save As on the PC; it goes to hub/saves too.
+        if (!discard && plater->is_project_dirty() && !plater->model().objects.empty() &&
+            (plater->get_project_filename(".3mf").IsEmpty() || plater->opened_from_zip()))
+            prepare_remote_save(plater);
         *result = { 200, "" };
     }, 15000);
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
@@ -4058,13 +4109,13 @@ RemoteAccess::ApiResponse RemoteAccess::api_project_open(const std::string& path
         const wxString file = wxString::FromUTF8(path.string());
         if (mode == "load") {
             if (!plater->model().objects.empty() || plater->is_project_dirty()) {
-                wxString current = plater->get_project_filename(".3mf");
-                if (current.IsEmpty()) {
-                    current = untitled_save_path();
-                    plater->set_project_filename(current);
+                const RemoteSaveTarget target = prepare_remote_save(plater);
+                if (plater->save_project(false) != wxID_YES) {
+                    undo_remote_save(plater, target);
+                    *result = { 500, "could not save the current project" };
+                    return;
                 }
-                if (plater->save_project(false) != wxID_YES) { *result = { 500, "could not save the current project" }; return; }
-                (*out)["saved"] = current.ToUTF8().data();
+                (*out)["saved"] = plater->get_project_filename(".3mf").ToUTF8().data();
             }
             // "<loadall>" skips the open-project-or-import-geometry question.
             plater->load_project(file, "<loadall>");
