@@ -3661,6 +3661,64 @@ void paint_state_of(const std::string& key, PaintState& s)
     }
 }
 
+// GUI thread. What the revision is made of, cheaply: per model part its ObjectID, type, mesh (an edit
+// replaces the shared pointer) and paint timestamp (every change to the paint gives a new one, undo
+// included), then the palette. Empty when no object has that key.
+std::string paint_fingerprint_of(const std::string& key)
+{
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    Model&        model  = wxGetApp().plater()->model();
+    for (const ModelObject* o : model.objects) {
+        if (PaintV1::object_key(*o) != key)
+            continue;
+        std::ostringstream fp;
+        fp << key << '\n';
+        for (const ModelVolume* mv : o->volumes)
+            fp << mv->id().id << ' ' << int(mv->type()) << ' ' << (const void*) mv->mesh_ptr().get() << ' '
+               << mv->mmu_segmentation_facets.timestamp() << '\n';
+        fp << PaintV1::palette_hash(paint_palette(*bundle));
+        return fp.str();
+    }
+    return std::string();
+}
+
+// The tablet reads an object one model part at a time (a mesh, then its paint), and each read checks
+// the revision. Snapshotting and hashing every part's paint on each of those reads made an object of
+// 441 parts take about 0.3 s per read, minutes in all (2026-11-04). The last snapshot is kept with
+// the fingerprint it was taken at and reused while that still matches. The snapshot holds the meshes,
+// so a freed mesh's address cannot come back as a new mesh with the same fingerprint.
+struct PaintCache
+{
+    std::string                       fingerprint;
+    std::string                       revision;
+    std::shared_ptr<const PaintState> state;
+};
+std::mutex s_paint_cache_mutex;
+PaintCache s_paint_cache;
+
+// GUI thread. The object with that key: the cached snapshot when `reuse` and the fingerprint still
+// matches, else a fresh one (`fresh` true, `fingerprint` set for storing with its revision). Only a
+// part's mesh and paint reuse it: the session's own answer carries the print preset's paint depth too,
+// which the fingerprint does not cover.
+void paint_state_cached(const std::string& key, bool reuse, std::shared_ptr<const PaintState>& state, std::string& revision,
+                        std::string& fingerprint, bool& fresh)
+{
+    fingerprint = paint_fingerprint_of(key);
+    if (reuse && !fingerprint.empty()) {
+        std::lock_guard<std::mutex> lock(s_paint_cache_mutex);
+        if (s_paint_cache.state && s_paint_cache.fingerprint == fingerprint) {
+            state    = s_paint_cache.state;
+            revision = s_paint_cache.revision;
+            fresh    = false;
+            return;
+        }
+    }
+    auto s = std::make_shared<PaintState>();
+    paint_state_of(key, *s);
+    state = s;
+    fresh = true;
+}
+
 const PaintV1::VolumeSnapshot* paint_volume(const PaintV1::ObjectSnapshot& o, int index)
 {
     for (const PaintV1::VolumeSnapshot& v : o.volumes)
@@ -3738,11 +3796,27 @@ RemoteAccess::ApiResponse RemoteAccess::api_paint_session(const std::string& id,
         if (it != m_paint_sessions.end()) key = it->second.object_key;
     }
     if (key.empty()) { r.status = 404; r.body = json_error("no such paint session"); return r; }
-    auto s  = std::make_shared<PaintState>();
-    bool ok = run_on_main([s, key]() { paint_state_of(key, *s); }, 30000, "reading a paint session");
+    struct Read
+    {
+        std::shared_ptr<const PaintState> state;
+        std::string                       revision, fingerprint;
+        bool                              fresh { true };
+    };
+    auto read = std::make_shared<Read>();
+    const bool reuse = !what.empty();
+    bool       ok    = run_on_main([read, key, reuse]() { paint_state_cached(key, reuse, read->state, read->revision, read->fingerprint, read->fresh); },
+                                   30000, "reading a paint session");
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
-    if (!s->found) { r.status = 404; r.body = json_error("the object is no longer in the project"); return r; }
-    const std::string rev = PaintV1::revision(s->object, s->palette);
+    const std::shared_ptr<const PaintState> s = read->state;
+    if (!s || !s->found) { r.status = 404; r.body = json_error("the object is no longer in the project"); return r; }
+    if (read->fresh) {
+        read->revision = PaintV1::revision(s->object, s->palette);
+        if (!read->fingerprint.empty()) {
+            std::lock_guard<std::mutex> lock(s_paint_cache_mutex);
+            s_paint_cache = PaintCache { read->fingerprint, read->revision, s };
+        }
+    }
+    const std::string& rev = read->revision;
     paint_remember(id, rev, s->object);
     if (what.empty()) {
         r.body = PaintV1::session_json(id, rev, s->object, s->palette, PaintV1::paint_depth_json(s->print, s->object_config)).dump();

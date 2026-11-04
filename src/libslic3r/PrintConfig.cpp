@@ -5463,7 +5463,8 @@ void PrintConfigDef::init_fff_params()
     // parse-only) so old project/preset files still deserialize this key without
     // erroring - see PrintConfigDef::handle_legacy_composite below, which migrates a
     // nonzero stored value into {paint_depth_mode=millimeters, paint_depth_mm=value}
-    // (zero migrates to the new bounded-by-default: paint_depth_mode=walls). The
+    // (zero, or absent, falls through to paint_depth_mode's default, which is unlimited
+    // again since 2026-11-03; it was walls between Paint Depth Stage 1 and then). The
     // segmentation code (MultiMaterialSegmentation.cpp) is wired to the new options
     // directly, not to this one; it is deliberately no longer exposed on the
     // Multimaterial settings page (see Tab.cpp) in favor of paint_depth_mode/
@@ -5493,8 +5494,8 @@ void PrintConfigDef::init_fff_params()
                     "core, showing through light-colored walls/infill above and around it. "
                     "\"Limited by distance\" sets that thickness directly in millimeters and is the "
                     "control to reach for; \"Limited by walls\" converts a wall count into the same "
-                    "millimeter thickness; \"Unlimited\" restores the old unbounded behavior (the "
-                    "painted claim reaches the object's medial axis).");
+                    "millimeter thickness; \"Unlimited\" (the default) does not bound the painted claim, "
+                    "so it reaches the object's medial axis and the inside follows the paint.");
     def->enum_keys_map = &ConfigOptionEnum<PaintDepthMode>::get_enum_values();
     def->enum_values.emplace_back("unlimited");
     def->enum_values.emplace_back("walls");
@@ -5504,7 +5505,11 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.emplace_back(L("Limited by distance"));
     def->category = L("Advanced");
     def->mode     = comAdvanced;
-    def->set_default_value(new ConfigOptionEnum<PaintDepthMode>(pdmWalls));
+    // Default is unlimited (owner decision 2026-11-03; it was walls since Paint Depth Stage 1).
+    // On CAD models where a part's filament and the painting disagree, "limited by walls" left
+    // the inside in the part filament and confused users. Projects and presets that saved
+    // paint_depth_mode explicitly keep their value.
+    def->set_default_value(new ConfigOptionEnum<PaintDepthMode>(pdmUnlimited));
 
     // Image Fill (Phase 2). See PrintConfig.hpp for why these two keys exist and no more.
     def           = this->add("image_fill_params", coString);
@@ -5659,11 +5664,11 @@ void PrintConfigDef::init_fff_params()
     def->min      = 0;
     def->category = L("Advanced");
     def->mode     = comAdvanced;
-    // Paint Depth Stage 1 (spec decision 3): default flips 0 -> nonzero now that depth is
-    // bounded by default (paint_depth_mode default = walls) - the gate that makes this
-    // value only active when the depth clamp is actually applied is unchanged (see the
-    // segmentation call site, Task 2), so this default only takes effect together with
-    // the bounded-by-default flip.
+    // Paint Depth Stage 1 (spec decision 3): default flipped 0 -> nonzero when depth was
+    // bounded by default. Since 2026-11-03 paint_depth_mode defaults to unlimited again, so
+    // this value is inactive until the user picks a bounded mode; the default is kept (not
+    // reset to 0) so that choosing walls/distance gets the tuned 0.1mm tooth with no extra
+    // step. The gate that makes it only active when the depth clamp applies is unchanged.
     //
     // Fix-wave F4 (.superpowers/sdd/2026-08-31-paint-depth/wall-count-investigation.md
     // section 3): that Stage-1 default was 0.3mm - roughly 0.70 * perimeter_spacing, i.e.
@@ -11598,14 +11603,11 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
     // (the value the user actually configured under the old single-float option) -
     // {paint_depth_mode=millimeters, paint_depth_mm=<value>}.
     //
-    // A ZERO (or absent, since paint_depth_mode's own default already covers that
-    // case) stored value does NOT map to paint_depth_mode=unlimited despite 0 being the
-    // legacy "disabled" convention: the approved bounded-by-default flip (spec decision
-    // 1) applies to every project being (re)loaded, old ones included, not only newly
-    // created ones - so a legacy zero is left alone and simply falls through to
-    // paint_depth_mode's own default (walls), matching a config that never had the key
-    // at all. This is the "bounded by default" behavior actually taking effect for
-    // reslices, not just new projects, as the spec requires.
+    // A ZERO (or absent) stored value is left alone and falls through to
+    // paint_depth_mode's own default, which is unlimited (since 2026-11-03), matching the
+    // legacy "0 = disabled" meaning and a config that never had the key at all. (Between
+    // Paint Depth Stage 1 and 2026-11-03 the default was walls, so a legacy zero used to
+    // become walls; that is no longer the case.)
     if (config.has("mmu_segmented_region_max_width") && !config.has("paint_depth_mode")) {
         double legacy_max_width = config.opt_float("mmu_segmented_region_max_width");
         if (legacy_max_width > 0.) {
@@ -11613,10 +11615,10 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
             config.set_key_value("paint_depth_mm", new ConfigOptionFloat(legacy_max_width));
             // Neutralize the old key once migrated: a diff-serialized preset save only
             // writes keys that differ from default, so if the user later switches back
-            // to paint_depth_mode=walls (the default) and saves, paint_depth_mode drops
+            // to paint_depth_mode=unlimited (the default) and saves, paint_depth_mode drops
             // out of the diff but this stale nonzero legacy key would not - re-arming
             // the !config.has("paint_depth_mode") guard on every future load and
-            // silently reverting the user's explicit walls choice back to millimeters
+            // silently reverting the user's explicit unlimited choice back to millimeters
             // forever. Zeroing it here (its own "disabled" convention) means a re-save
             // never re-triggers this migration.
             config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(0.));
