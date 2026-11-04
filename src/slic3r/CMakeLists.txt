@@ -158,6 +158,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
     GUI/FlowTypeHelper.hpp
+    GUI/ExtruderSettingsDialog.cpp
+    GUI/ExtruderSettingsDialog.hpp
     GUI/FlowVariantEdit.cpp
     GUI/FlowVariantEdit.hpp
     GUI/HighFlowCompat.cpp
@@ -900,6 +902,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/ScrolledWindow.hpp
     GUI/Widgets/SegmentedToggle.cpp
     GUI/Widgets/SegmentedToggle.hpp
+    GUI/Widgets/NozzleStrip.cpp
+    GUI/Widgets/NozzleStrip.hpp
     GUI/Widgets/SideButton.cpp
     GUI/Widgets/SideButton.hpp
     GUI/Widgets/SideMenuPopup.cpp

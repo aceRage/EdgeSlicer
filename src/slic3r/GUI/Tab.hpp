@@ -61,6 +61,7 @@ class OG_CustomCtrl;
 
 std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor);
 class SegmentedToggle;
+class NozzleChipRow;
 
 // Single Tab page containing a{ vsizer } of{ optgroups }
 // package Slic3r::GUI::Tab::Page;
@@ -605,10 +606,10 @@ private:
 	// Per-nozzle process P8.
 	wxPanel*				m_tool_panel        = nullptr;
 	wxBoxSizer*				m_tool_row          = nullptr;
-	SegmentedToggle*		m_tool_selector     = nullptr;
+	// Nozzle strip design 4.4: [Plate] [0.4 Std L] [0.4 Std R1-R5] ... chips, wrapping onto a second row.
+	NozzleChipRow*			m_tool_chips        = nullptr;
 	Button*					m_tool_expand_btn   = nullptr;
 	Button*					m_tool_collapse_btn = nullptr; // P9: "Use one process", the way back
-	ComboBox*				m_tool_combo        = nullptr; // P9: the selector as a list when its buttons would not fit
 	void					use_one_process();
 	bool					tool_sizes_mixed() const;
 	wxStaticText*			m_tool_note         = nullptr;

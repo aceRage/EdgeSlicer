@@ -592,6 +592,8 @@ set(lisbslic3r_sources
     NozzleOverride.hpp
     NozzleProcess.cpp
     NozzleProcess.hpp
+    NozzleStripModel.cpp
+    NozzleStripModel.hpp
     ToolSlots.cpp
     ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp

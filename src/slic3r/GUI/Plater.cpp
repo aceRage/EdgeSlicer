@@ -128,6 +128,7 @@
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/ToolSlots.hpp"
+#include "libslic3r/NozzleStripModel.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "libslic3r/ColorSplit.hpp"
@@ -144,6 +145,8 @@
 #include "wxExtensions.hpp"
 #include "MainFrame.hpp"
 #include "FlowTypeHelper.hpp"
+#include "ExtruderSettingsDialog.hpp"
+#include "Widgets/NozzleStrip.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 // Ultra: needed to stop the LAN camera around the modal send flow (see ultra_pause_device_camera).
 #include "Monitor.hpp"
@@ -1427,6 +1430,9 @@ struct Sidebar::priv
 
     // nozzle notebook  and related controls
     CustomNotebook*                  m_nozzle_notebook{nullptr};
+    // The notebook's box, and the nozzle strip that replaces it on printers with two or more nozzles.
+    StaticBox*                       m_nozzle_container{nullptr};
+    NozzleStrip*                     m_nozzle_strip{nullptr};
     std::vector<ComboBox*>       m_nozzle_diameter_lists;
     std::vector<ComboBox*>       m_nozzle_flow_lists;
     std::vector<ScalableButton*> m_nozzle_edit_btns;
@@ -2748,6 +2754,17 @@ Sidebar::Sidebar(Plater *parent)
 
         // 添加到主布局
         vsizer_printer->Add(nozzle_container, 0, wxEXPAND | wxALL, FromDIP(4));
+        p->m_nozzle_container = nozzle_container;
+
+        // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md 4.2): one tile per physical nozzle, replacing the notebook on
+        // printers with two or more nozzles. Its text lines up with the bed type title (box margin 4 + title margin 10 DIP).
+        p->m_nozzle_strip = new NozzleStrip(p->m_panel_printer_content);
+        p->m_nozzle_strip->on_settings = [this]() { show_extruder_settings_dialog(); };
+        p->m_nozzle_strip->on_sync     = [this]() { sync_nozzles_from_strip(); };
+        p->m_nozzle_strip->tiles()->on_click = [this](int index) { on_nozzle_tile_clicked(index); };
+        p->m_nozzle_strip->tiles()->on_height_changed = [this]() { relayout_printer_section(); };
+        p->m_nozzle_strip->Hide();
+        vsizer_printer->Add(p->m_nozzle_strip, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(14));
 
         // Initialize nozzle settings
         update_nozzle_settings();
@@ -4523,10 +4540,12 @@ void Sidebar::update_presets(Preset::Type preset_type)
             {
                 p->m_printerinfo_syncbtn->Show();
             } 
-            else 
+            else
             {
                 p->m_printerinfo_syncbtn->Hide();
             }
+            // The strip's sync button follows this one.
+            request_nozzle_strip_refresh();
         }
 
         update_all_preset_comboboxes();
@@ -4627,6 +4646,8 @@ void Sidebar::msw_rescale()
     if (p->m_bpButton_sync_filament)
         p->m_bpButton_sync_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
+    if (p->m_nozzle_strip != nullptr)
+        p->m_nozzle_strip->msw_rescale();
     //BBS
     m_bed_type_list->Rescale();
     m_bed_type_list->SetMinSize({-1, 3 * wxGetApp().em_unit()});
@@ -4704,6 +4725,8 @@ void Sidebar::sys_color_changed()
     if (p->m_bpButton_sync_filament)
         p->m_bpButton_sync_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
+    if (p->m_nozzle_strip != nullptr)
+        p->m_nozzle_strip->sys_color_changed();
 
     // BBS
 #if 0
@@ -4807,6 +4830,15 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
     // toolhead, right-click = pick one. The filament menu's "Print on nozzle" is the same setting (filament_nozzle_assignment).
     Button *tool_btn = new Button(p->m_panel_scrolled_filament_content, "T1");
     tool_btn->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    // The nozzle strip's look (tile background, accent outline, label font), so a filament's badge and the nozzle it names read
+    // as one vocabulary. StateColor maps the colours for the dark theme.
+    tool_btn->SetFont(NozzleStyle::label_font());
+    tool_btn->SetCornerRadius(tool_btn->FromDIP(4));
+    tool_btn->SetPaddingSize(tool_btn->FromDIP(wxSize(6, 3)));
+    tool_btn->SetBackgroundColor(StateColor(std::pair(wxColour("#E8E8E8"), (int) StateColor::Hovered),
+                                            std::pair(wxColour("#F4F4F4"), (int) StateColor::Normal)));
+    tool_btn->SetBorderColor(StateColor(std::pair(wxColour("#009688"), (int) StateColor::Normal)));
+    tool_btn->SetTextColor(StateColor(std::pair(wxColour("#262E30"), (int) StateColor::Normal)));
     // Owner hand test 2026-11-02: a click opens the list (users do not find right-click); right-click does the same.
     auto popup = [this, tool_btn, filament_idx]() {
         PresetBundle *bundle = wxGetApp().preset_bundle;
@@ -5091,6 +5123,8 @@ void Sidebar::update_filament_tool_buttons()
         p->m_panel_filament_content->Layout();
         Layout();
     }
+    // The strip's used state and dots follow the filament assignment.
+    request_nozzle_strip_refresh();
 }
 
 void Sidebar::cycle_filament_tool(size_t filament)
@@ -5151,39 +5185,9 @@ void Sidebar::set_filament_rack_pin(size_t filament, double diameter)
 
 void Sidebar::edit_rack_nozzles(size_t extruder)
 {
-    PresetBundle *bundle = wxGetApp().preset_bundle;
-    if (bundle == nullptr)
-        return;
-    const std::vector<double> sizes = bundle->effective_nozzle_diameters();
-    if (extruder >= sizes.size())
-        return;
-    // The rack as this project has it (the preset's when the project sets none); none at all: two slots of the extruder's size.
-    std::string text = bundle->rack_nozzle_override(extruder);
-    if (text.empty())
-        if (const auto *racks = bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter");
-            racks != nullptr && extruder < racks->values.size())
-            text = racks->values[extruder];
-    if (text.empty())
-        text = format_nozzle_diameter_word(sizes[extruder]) + ", " + format_nozzle_diameter_word(sizes[extruder]);
-    for (;;) {
-        wxTextEntryDialog dlg(wxGetApp().mainframe,
-                              _L("The nozzle in each rack slot, separated by commas, slot 1 first (e.g. 0.4, 0.4, 0.6). The extruder's own "
-                                 "nozzle size must be one of them. With two or more nozzles each slot is a tool of its own (Process tab, "
-                                 "filament menu > Rack slot). Empty: no rack slots.\nThe printer preset is not changed."),
-                              _L("Rack nozzles in this project"), from_u8(text));
-        if (dlg.ShowModal() != wxID_OK)
-            return;
-        text = into_u8(dlg.GetValue());
-        const std::string error = validate_rack_nozzle_text(text, sizes[extruder]);
-        if (error.empty())
-            break;
-        MessageDialog(wxGetApp().mainframe, _L("Not usable") + ": " + from_u8(error), _L("Rack nozzles in this project"), wxOK | wxICON_WARNING)
-            .ShowModal();
-    }
-    if (bundle->set_rack_nozzle_override(extruder, text)) {
-        BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: rack of extruder " << extruder + 1 << " in this project: '" << text << "' (sidebar)";
-        on_nozzle_sizes_changed();
-    }
+    // The rack is set up in the Extruder Settings dialog now (one row per rack position).
+    BOOST_LOG_TRIVIAL(info) << "nozzle strip: rack of extruder " << extruder + 1 << " edited in the Extruder Settings dialog";
+    show_extruder_settings_dialog();
 }
 
 void Sidebar::set_filament_rack_slot(size_t filament, int slot)
@@ -5319,6 +5323,163 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
                           rack_note,
                       _L("Sync nozzle sizes"), wxOK);
     dlg.ShowModal();
+}
+
+// ---- Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md section 4) -------------------------------------------------
+// The tiles show the project's nozzles; a click opens a menu that edits the same keys as the Extruder Settings dialog
+// (nozzle_diameter_override, nozzle_volume_type, extruder_rack_nozzle_override), then one on_nozzle_sizes_changed().
+
+void Sidebar::relayout_printer_section()
+{
+    if (p->m_panel_printer_content != nullptr) {
+        p->m_panel_printer_content->InvalidateBestSize();
+        p->m_panel_printer_content->Layout();
+    }
+    if (p->scrolled != nullptr) {
+        p->scrolled->Layout();
+        if (auto *sw = dynamic_cast<wxScrolledWindow *>(p->scrolled))
+            sw->FitInside();
+    }
+    Layout();
+}
+
+void Sidebar::request_nozzle_strip_refresh()
+{
+    if (p->m_nozzle_strip == nullptr || !p->m_nozzle_strip->IsShown() || m_nozzle_strip_refresh_pending)
+        return;
+    m_nozzle_strip_refresh_pending = true;
+    wxGetApp().CallAfter([this]() {
+        m_nozzle_strip_refresh_pending = false;
+        refresh_nozzle_strip();
+    });
+}
+
+void Sidebar::refresh_nozzle_strip()
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || p->m_nozzle_strip == nullptr || !p->m_nozzle_strip->IsShown())
+        return;
+    const NozzleStripInput             in     = current_nozzle_strip_input();
+    const std::vector<NozzleStripTile> tiles  = current_nozzle_strip_tiles(in, true);
+    const std::vector<std::string>     colors = p->plater != nullptr ? p->plater->get_extruder_colors_from_plater_config(nullptr, false) :
+                                                                       std::vector<std::string>();
+    std::vector<NozzleTileView>        views;
+    for (const NozzleStripTile &t : tiles) {
+        NozzleTileView v;
+        v.label          = from_u8(t.label);
+        v.size           = t.empty() ? wxString("-") : from_u8(format_diameter_to_str(t.diameter));
+        v.flow           = t.empty() ? wxString() : from_u8(nozzle_flow_short(t.volume_type));
+        v.used           = t.used();
+        v.usable         = t.usable;
+        v.divider_before = t.divider_before;
+        wxString filaments;
+        for (unsigned int f : t.filaments) {
+            if (f < colors.size()) {
+                wxColour c(from_u8(colors[f]));
+                v.dots.push_back(c.IsOk() ? c : NozzleStyle::secondary_text());
+            }
+            filaments += (filaments.empty() ? "" : ", ") + wxString::Format("%d", int(f + 1));
+        }
+        // "Right slot 3: 0.6 mm, High Flow"
+        wxString name = nozzle_strip_extruder_name(in, t.extruder);
+        if (t.slot > 0)
+            name += " " + wxString::Format(_L("slot %d"), t.slot);
+        v.tooltip = t.empty() ? name + ": " + _L("empty") :
+                                name + ": " + from_u8(format_diameter_to_str(t.diameter)) + " mm, " + nozzle_type_name(t.volume_type);
+        if (!filaments.empty())
+            v.tooltip += "\n" + wxString::Format(_L("Filaments on this plate printing here: %s"), filaments);
+        if (!t.usable && !t.empty())
+            v.tooltip += "\n" + _L("No process fits this nozzle size");
+        v.tooltip += "\n" + _L("Click to change the nozzle.");
+        views.push_back(v);
+    }
+    p->m_nozzle_strip->show_sync(p->m_printerinfo_syncbtn != nullptr && p->m_printerinfo_syncbtn->IsShown());
+    p->m_nozzle_strip->tiles()->set_tiles(views);
+}
+
+void Sidebar::on_nozzle_tile_clicked(int index)
+{
+    const NozzleStripInput             in    = current_nozzle_strip_input();
+    const std::vector<NozzleStripTile> tiles = nozzle_strip_tiles(in);
+    if (index < 0 || size_t(index) >= tiles.size() || p->m_nozzle_strip == nullptr)
+        return;
+    const NozzleStripTile               tile  = tiles[size_t(index)];
+    const std::vector<double>           sizes = nozzle_strip_size_choices();
+    const std::vector<NozzleVolumeType> types = nozzle_strip_type_choices();
+    const NozzleVolumeType              type  = tile.empty() && tile.extruder < in.volume_types.size() ? in.volume_types[tile.extruder] : tile.volume_type;
+    wxMenu                              menu;
+    auto edit = [this, index](double d, NozzleVolumeType t) {
+        wxGetApp().CallAfter([this, index, d, t]() { edit_nozzle_tile(index, d, int(t)); });
+    };
+    // Size: the sizes P7 offers. A rack position can also be emptied.
+    for (double d : sizes) {
+        const int id = wxWindow::NewControlId();
+        menu.AppendRadioItem(id, from_u8(format_diameter_to_str(d)) + " mm");
+        menu.Check(id, !tile.empty() && same_nozzle_diameter(d, tile.diameter));
+        menu.Bind(wxEVT_MENU, [edit, d, type](wxCommandEvent &) { edit(d, type); }, id);
+    }
+    if (tile.slot > 0 && !tile.empty() && nozzle_strip_rack(in, tile.extruder).size() > 1) {
+        const int id = wxWindow::NewControlId();
+        menu.Append(id, _L("Empty slot"));
+        menu.Bind(wxEVT_MENU, [edit, type](wxCommandEvent &) { edit(0., type); }, id);
+    }
+    // Flow type, for a nozzle that is there.
+    if (types.size() > 1 && !tile.empty()) {
+        menu.AppendSeparator();
+        for (NozzleVolumeType t : types) {
+            const int id = wxWindow::NewControlId();
+            menu.AppendRadioItem(id, nozzle_type_name(t));
+            menu.Check(id, t == tile.volume_type);
+            menu.Bind(wxEVT_MENU, [edit, d = tile.diameter, t](wxCommandEvent &) { edit(d, t); }, id);
+        }
+    }
+    menu.AppendSeparator();
+    {
+        const int id = wxWindow::NewControlId();
+        menu.Append(id, _L("Extruder settings") + dots);
+        menu.Bind(wxEVT_MENU, [this](wxCommandEvent &) { wxGetApp().CallAfter([this]() { show_extruder_settings_dialog(); }); }, id);
+    }
+    if (p->m_printerinfo_syncbtn != nullptr && p->m_printerinfo_syncbtn->IsShown()) {
+        const int id = wxWindow::NewControlId();
+        menu.Append(id, _L("Sync from printer"));
+        menu.Bind(wxEVT_MENU, [this](wxCommandEvent &) { wxGetApp().CallAfter([this]() { sync_nozzles_from_strip(); }); }, id);
+    }
+    NozzleTileRow *row = p->m_nozzle_strip->tiles();
+    const wxRect   r   = row->tile_rect(index);
+    row->PopupMenu(&menu, row->ScreenToClient(wxPoint(r.GetLeft(), r.GetBottom())));
+}
+
+void Sidebar::edit_nozzle_tile(int index, double diameter, int volume_type)
+{
+    const NozzleStripInput             in    = current_nozzle_strip_input();
+    const std::vector<NozzleStripTile> tiles = nozzle_strip_tiles(in);
+    if (index < 0 || size_t(index) >= tiles.size())
+        return;
+    NozzleStripEdit   edit  = nozzle_strip_edit_start(in);
+    const std::string error = nozzle_strip_edit_tile(edit, in, tiles[size_t(index)], diameter, NozzleVolumeType(volume_type));
+    if (!error.empty()) {
+        MessageDialog(wxGetApp().mainframe, _L("Not usable") + ": " + from_u8(error), _L("Extruder settings"), wxOK | wxICON_WARNING).ShowModal();
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "nozzle strip: tile " << tiles[size_t(index)].label << " set to " << diameter << " mm, flow type " << volume_type;
+    apply_nozzle_strip_edit(wxGetApp().mainframe, in, edit);
+}
+
+void Sidebar::show_extruder_settings_dialog()
+{
+    ExtruderSettingsDialog dlg(wxGetApp().mainframe);
+    if (dlg.ShowModal() == wxID_REFRESH)
+        sync_nozzles_from_strip();
+}
+
+void Sidebar::sync_nozzles_from_strip()
+{
+    // The printer title's sync button does the work (Bambu: nozzle sizes and racks; U1: its own sync).
+    if (p->m_printerinfo_syncbtn == nullptr)
+        return;
+    wxCommandEvent evt(wxEVT_BUTTON, p->m_printerinfo_syncbtn->GetId());
+    evt.SetEventObject(p->m_printerinfo_syncbtn);
+    p->m_printerinfo_syncbtn->GetEventHandler()->ProcessEvent(evt);
 }
 
 void Sidebar::on_filaments_change(size_t num_filaments)
@@ -11095,6 +11256,8 @@ void Sidebar::update_dynamic_filament_list()
 
 void Sidebar::sync_nozzle_flow_combos()
 {
+    // The strip shows the flow types too.
+    request_nozzle_strip_refresh();
     const std::vector<std::string> flows = GUI::FlowType::nozzle_volume_types();
     for (size_t i = 0; i < p->m_nozzle_flow_lists.size(); ++i) {
         ComboBox *combo = p->m_nozzle_flow_lists[i];
@@ -11119,6 +11282,35 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
     bool focus_was_in_notebook = false;
     if (wxWindow* focus = wxWindow::FindFocus())
         focus_was_in_notebook = p->m_nozzle_notebook->IsDescendant(focus);
+
+    // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md 4.2): a printer with two or more physical nozzles (U1 T1-T4,
+    // H2D / X2D L R, H2C L R1-R6, a single extruder with a nozzle rack) shows one tile per nozzle instead of the notebook's
+    // Diameter / Flow combos and the "Rack" row. Single-nozzle printers keep the notebook.
+    if (p->m_nozzle_strip != nullptr && p->m_nozzle_container != nullptr) {
+        const DynamicPrintConfig &printer_cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        const NozzleStripInput    strip_in    = current_nozzle_strip_input();
+        const bool                use_strip   = nozzle_strip_applies(strip_in) &&
+                                 (new_nozzle_count == 1 || supports_mixed_nozzle_diameters(printer_cfg));
+        if (use_strip) {
+            p->m_nozzle_notebook->DeleteAllPages();
+            p->m_nozzle_diameter_lists.clear();
+            p->m_nozzle_edit_btns.clear();
+            p->m_nozzle_flow_lists.clear();
+            p->m_nozzle_container->Hide();
+            p->m_nozzle_strip->Show();
+            refresh_nozzle_strip();
+            relayout_printer_section();
+            if (switch_machine)
+                p->combo_printer->SetFocus();
+            else if (focus_was_in_notebook)
+                p->combo_printer->GetParent()->SetFocus();
+            return;
+        }
+        if (p->m_nozzle_strip->IsShown()) {
+            p->m_nozzle_strip->Hide();
+            p->m_nozzle_container->Show();
+        }
+    }
 
     wxWindowUpdateLocker noUpdates(p->m_nozzle_notebook);
 
@@ -15276,6 +15468,8 @@ void Plater::priv::object_list_changed()
     notify_filament_compatibility_after_apply();
 
     wxGetApp().params_panel()->notify_object_config_changed();
+    // The nozzle strip marks the nozzles the plate's filaments print on.
+    sidebar->request_nozzle_strip_refresh();
 }
 
 void Plater::priv::select_curr_plate_all()
@@ -18336,6 +18530,8 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
     //BBS: add project slice logic
     bool is_finished = !m_slice_all || (m_cur_slice_plate == (partplate_list.get_plate_count() - 1));
+    // The nozzle strip shows where the grouping put the Auto filaments.
+    sidebar->request_nozzle_strip_refresh();
 
     {
         if (m_slice_timing_active) {
@@ -28801,6 +28997,8 @@ int Plater::select_plate(int plate_index, bool need_slice)
         p->partplate_list.update_slice_context_to_current_plate(p->background_process);
         p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
         p->update_print_volume_state();
+        // The nozzle strip shows the selected plate's filaments.
+        p->sidebar->request_nozzle_strip_refresh();
 
         PartPlate* part_plate = p->partplate_list.get_curr_plate();
         bool result_valid = part_plate->is_slice_result_valid();
