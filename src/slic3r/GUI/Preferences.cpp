@@ -33,6 +33,10 @@
 #include "SSWCP.hpp"
 #include "HomePanel.hpp"
 #include "HomeVaults.hpp"
+#include "ZipCleanup.hpp"
+#include "format.hpp"
+#include "libslic3r/ZipOpen.hpp"
+#include "libslic3r/ZipWorkCleaner.hpp"
 #include "ModelBrowserPanel.hpp"
 #include "LayerlingPanel.hpp"
 
@@ -905,6 +909,90 @@ wxWindow *PreferencesDialog::create_item_vault_downloads_dir(wxWindow *parent, w
     sizer->Add(reset, 0, wxALL, FromDIP(5));
     item_panel->SetSizer(sizer);
     item_panel->Layout();
+    return item_panel;
+}
+
+// ZIP files (PR C): where opened ZIPs are extracted, how much is there, Open folder and Clean now.
+// The size is measured on the clean-up worker, never on the UI thread; the label is updated
+// through the ZipCleanup listener, which is removed when this row is destroyed.
+wxWindow *PreferencesDialog::create_item_zip_work_folder(wxWindow *parent, wxString tooltip)
+{
+    auto item_panel = new wxWindow(parent, wxID_ANY);
+    item_panel->SetBackgroundColour(*wxWHITE);
+    wxBoxSizer *outer = new wxBoxSizer(wxVERTICAL);
+    wxBoxSizer *row   = new wxBoxSizer(wxHORIZONTAL);
+
+    row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    auto label = new wxStaticText(item_panel, wxID_ANY, _L("Extracted files"));
+    label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    label->SetFont(::Label::Body_13);
+    label->SetToolTip(tooltip);
+    label->Wrap(-1);
+
+    const wxString root = from_path(ZipCleanup::work_root());
+    auto path_text = new wxStaticText(item_panel, wxID_ANY, root, wxDefaultPosition, wxDefaultSize, wxST_ELLIPSIZE_MIDDLE);
+    path_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    path_text->SetFont(::Label::Body_13);
+    path_text->SetToolTip(root);
+
+    auto open = new Button(item_panel, _L("Open folder"));
+    open->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    open->Bind(wxEVT_BUTTON, [](wxCommandEvent &e) {
+        const boost::filesystem::path dir = ZipCleanup::work_root();
+        boost::system::error_code     ec;
+        boost::filesystem::create_directories(dir, ec);
+        desktop_open_folder(into_u8(from_path(dir)));
+        e.Skip();
+    });
+
+    auto clean = new Button(item_panel, _L("Clean now"));
+    clean->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    clean->SetToolTip(_L("Delete every extracted ZIP folder except the ones the open project uses."));
+
+    row->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    row->Add(path_text, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(5));
+    row->Add(open, 0, wxALL, FromDIP(5));
+    row->Add(clean, 0, wxALL, FromDIP(5));
+
+    wxBoxSizer *size_row = new wxBoxSizer(wxHORIZONTAL);
+    size_row->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    auto size_text = new wxStaticText(item_panel, wxID_ANY, _L("Size: calculating..."));
+    size_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    size_text->SetFont(::Label::Body_13);
+    size_row->Add(size_text, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+
+    outer->Add(row, 0, wxEXPAND);
+    outer->Add(size_row, 0, wxEXPAND);
+    item_panel->SetSizer(outer);
+    item_panel->Layout();
+
+    ZipCleanup::set_listener([size_text, item_panel](const ZipWorkCleaner::Usage &usage, const ZipWorkCleaner::Result *result) {
+        wxString text = format_wxstr(_L("Size: %1% in %2% folder(s)"), format_zip_size(usage.bytes), usage.sessions);
+        if (result != nullptr && result->root_ok)
+            text += " - " + format_wxstr(_L("%1% removed, %2% kept"), result->removed,
+                                         result->kept_young + result->kept_in_use + result->untrusted + result->failed);
+        size_text->SetLabelText(text);
+        item_panel->Layout();
+    });
+    item_panel->Bind(wxEVT_DESTROY, [item_panel](wxWindowDestroyEvent &e) {
+        if (e.GetEventObject() == item_panel)
+            ZipCleanup::set_listener({});
+        e.Skip();
+    });
+
+    clean->Bind(wxEVT_BUTTON, [this, size_text](wxCommandEvent &e) {
+        MessageDialog dlg(this,
+                          _L("Delete all extracted ZIP files now? Folders used by the open project are kept. "
+                             "The ZIP files themselves are not touched."),
+                          _L("Clean now"), wxYES_NO | wxICON_QUESTION);
+        if (dlg.ShowModal() == wxID_YES) {
+            size_text->SetLabelText(_L("Cleaning..."));
+            ZipCleanup::start(ZipCleanup::Mode::Now);
+        }
+        e.Skip();
+    });
+
+    ZipCleanup::start(ZipCleanup::Mode::UsageOnly);
     return item_panel;
 }
 
@@ -2139,6 +2227,21 @@ wxWindow* PreferencesDialog::create_general_page()
     //downloads
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
+    // ZIP files (PR C): extraction folder clean-up.
+    auto title_zip_files  = create_item_title(_L("ZIP files"), page, _L("ZIP files"));
+    auto item_zip_cleanup = create_item_checkbox(_L("Delete extracted ZIP files automatically"), page,
+        _L("Files you open from a ZIP are extracted to a local folder. When this is on, extraction folders older than the "
+           "number of days below are deleted in the background at startup and after a ZIP is opened. Folders used by the "
+           "open project are never deleted."),
+        50, ZIP_WORK_CLEANUP_KEY);
+    auto item_zip_cleanup_days = create_item_input(_L("Delete after"), _L("days"), page,
+        _L("How old an extraction folder must be before it is deleted automatically (1 to 3650 days)."), ZIP_WORK_CLEANUP_DAYS_KEY,
+        [this](wxString value) {
+            app_config->set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(zip_cleanup_days_from_value(into_u8(value))));
+        });
+    auto item_zip_folder = create_item_zip_work_folder(page,
+        _L("Where files opened from a ZIP are extracted. Set zip_work_dir in the configuration file to use another folder."));
+
     auto item_vault_downloads = create_item_vault_downloads_dir(page,
         _L("Where files you download from a vault on the Home tab go. A vault can have its own folder in its settings. "
            "The folder is added to your Library the first time a file lands in it."));
@@ -2319,6 +2422,11 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
     sizer_page->Add(item_vault_downloads, 0, wxEXPAND, FromDIP(3));
+
+    sizer_page->Add(title_zip_files, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_zip_cleanup, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_zip_cleanup_days, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_zip_folder, 0, wxEXPAND | wxTOP, FromDIP(3));
 
     sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));
