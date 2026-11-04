@@ -49,7 +49,7 @@
         ],
         "key": "paint_depth_mode",
         "label": "Paint depth mode",
-        "tooltip": "Controls how thick a painted (multi-material/multi-color) claim is before the object reverts to its base filament for walls, solid infill and sparse infill. The depth is measured perpendicular to the painted surface, so it is the same on a vertical wall, on a curve and on a flat top. Without a bound, a small dark painted spot can extrude dark filament all the way to the object's core, showing through light-colored walls/infill above and around it. \"Limited by distance\" sets that thickness directly in millimeters and is the control to reach for; \"Limited by walls\" converts a wall count into the same millimeter thickness; \"Unlimited\" restores the old unbounded behavior (the painted claim reaches the object's medial axis).",
+        "tooltip": "Controls how thick a painted (multi-material/multi-color) claim is before the object reverts to its base filament for walls, solid infill and sparse infill. The depth is measured perpendicular to the painted surface, so it is the same on a vertical wall, on a curve and on a flat top. Without a bound, a small dark painted spot can extrude dark filament all the way to the object's core, showing through light-colored walls/infill above and around it. \"Limited by distance\" sets that thickness directly in millimeters and is the control to reach for; \"Limited by walls\" converts a wall count into the same millimeter thickness; \"Unlimited\" (the default) does not bound the painted claim, so it reaches the object's medial axis and the inside follows the paint.",
         "type": "enum"
       },
       {
@@ -92,7 +92,7 @@
     "values": {
       "mmu_segmented_region_interlocking_depth": 0.1,
       "paint_depth_mm": 1.2,
-      "paint_depth_mode": "walls",
+      "paint_depth_mode": "unlimited",
       "paint_depth_solid_interfaces": true,
       "paint_depth_walls": 3,
       "paint_infill_override": true

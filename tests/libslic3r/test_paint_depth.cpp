@@ -223,7 +223,7 @@ TEST_CASE("paint depth band: the even-layer interlocking notch never eats into t
 // mmu_segmented_region_max_width migration that leaves the old key nonzero re-arms
 // handle_legacy_composite's `!config.has("paint_depth_mode")` guard the next time a
 // diff-serialized preset is loaded, because a diff save only writes keys that differ
-// from defaults - if the user reverts paint_depth_mode back to its default (walls) and
+// from defaults - if the user reverts paint_depth_mode back to its default (unlimited) and
 // saves, paint_depth_mode drops out of the diff (it now equals the default) but a
 // still-nonzero legacy key would not, silently re-triggering the migration back to
 // millimeters/<value> on every future load.
@@ -236,7 +236,7 @@ TEST_CASE("paint depth band: the even-layer interlocking notch never eats into t
 // sets. A `full_print_config()`-based config already carries every key with its default
 // value from construction, so `!config.has("paint_depth_mode")` would never fire on it
 // regardless of this fix - that would test nothing.
-TEST_CASE("PrintConfigDef::handle_legacy_composite: reverting to paint_depth_mode=walls and re-saving does not re-migrate on the next load", "[paintdepth]")
+TEST_CASE("PrintConfigDef::handle_legacy_composite: reverting to paint_depth_mode=unlimited and re-saving does not re-migrate on the next load", "[paintdepth]")
 {
     // Step 1: legacy preset load - a lone nonzero mmu_segmented_region_max_width, the
     // exact shape a pre-paint-depth-feature preset file has. load_from_ini_string() goes
@@ -255,8 +255,8 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: reverting to paint_depth_mod
     REQUIRE(loaded.has("mmu_segmented_region_max_width"));
     CHECK(std::abs(loaded.option<ConfigOptionFloat>("mmu_segmented_region_max_width")->value) < 1e-6);
 
-    // Step 2: user explicitly switches back to walls (paint_depth_mode's own default).
-    loaded.option<ConfigOptionEnum<PaintDepthMode>>("paint_depth_mode")->value = pdmWalls;
+    // Step 2: user explicitly switches back to unlimited (paint_depth_mode's own default).
+    loaded.option<ConfigOptionEnum<PaintDepthMode>>("paint_depth_mode")->value = pdmUnlimited;
 
     // Step 3: diff-serialized save - a real preset only ever writes keys that differ from
     // its parent/defaults (Preset.cpp), so reproduce exactly that: the set of keys where
@@ -266,7 +266,7 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: reverting to paint_depth_mod
     // candidates for the diff" without needing `loaded` to carry every schema key.
     DynamicPrintConfig   defaults  = DynamicPrintConfig::full_print_config();
     t_config_option_keys diff_keys = loaded.diff(defaults);
-    // paint_depth_mode is walls again (the default), so it must NOT appear in the diff -
+    // paint_depth_mode is unlimited again (the default), so it must NOT appear in the diff -
     // if it did, the scenario this test targets couldn't happen in the first place.
     CHECK(std::find(diff_keys.begin(), diff_keys.end(), "paint_depth_mode") == diff_keys.end());
     // mmu_segmented_region_max_width must also be out of the diff (it's 0, the default) -
@@ -289,7 +289,44 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: reverting to paint_depth_mod
     DynamicPrintConfig reloaded = DynamicPrintConfig::full_print_config();
     reloaded.apply(diff_config);
 
-    // Must land back on walls - NOT be silently reverted to millimeters/0.8 by a
+    // Must land back on unlimited - NOT be silently reverted to millimeters/0.8 by a
     // re-triggered migration.
-    CHECK(reloaded.option<ConfigOptionEnum<PaintDepthMode>>("paint_depth_mode")->value == pdmWalls);
+    CHECK(reloaded.option<ConfigOptionEnum<PaintDepthMode>>("paint_depth_mode")->value == pdmUnlimited);
+}
+
+// Owner decision 2026-11-03: paint_depth_mode defaults to unlimited again (it was walls from
+// Paint Depth Stage 1). "Limited by walls" left the inside in the part filament on CAD models
+// where the part's filament and the painting disagree.
+TEST_CASE("paint_depth_mode defaults to unlimited", "[paintdepth]")
+{
+    const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    CHECK(defaults.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmUnlimited);
+    const ConfigOptionDef *def = print_config_def.get("paint_depth_mode");
+    REQUIRE(def != nullptr);
+    CHECK(def->get_default_value<ConfigOptionEnum<PaintDepthMode>>()->value == pdmUnlimited);
+    // Reaching for a bounded mode is still explicit; the walls count itself is untouched.
+    CHECK(defaults.opt_int("paint_depth_walls") == 3);
+}
+
+// handle_legacy_composite: a legacy mmu_segmented_region_max_width of zero used to land on walls
+// (the old default); it now lands on unlimited, matching its own "0 = disabled" meaning. A
+// nonzero value still becomes an explicit millimeters depth, and a saved explicit mode is kept.
+TEST_CASE("PrintConfigDef::handle_legacy_composite: legacy zero max width maps to unlimited", "[paintdepth]")
+{
+    DynamicPrintConfig legacy_zero;
+    legacy_zero.load_from_ini_string("mmu_segmented_region_max_width = 0\n", ForwardCompatibilitySubstitutionRule::Disable);
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(legacy_zero);
+    CHECK(full.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmUnlimited);
+
+    DynamicPrintConfig legacy_nonzero;
+    legacy_nonzero.load_from_ini_string("mmu_segmented_region_max_width = 2.5\n", ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE(legacy_nonzero.has("paint_depth_mode"));
+    CHECK(legacy_nonzero.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmMillimeters);
+    CHECK(std::abs(legacy_nonzero.opt_float("paint_depth_mm") - 2.5) < 1e-6);
+
+    // A project/preset that saved walls explicitly keeps it (and a stale legacy zero does not override it).
+    DynamicPrintConfig saved_walls;
+    saved_walls.load_from_ini_string("paint_depth_mode = walls\nmmu_segmented_region_max_width = 0\n", ForwardCompatibilitySubstitutionRule::Disable);
+    CHECK(saved_walls.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmWalls);
 }

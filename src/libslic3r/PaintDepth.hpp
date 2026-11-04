@@ -9,16 +9,16 @@ namespace Slic3r {
 // the object's base filament. Feeds the existing cut_segmented_layers band clamp
 // (MultiMaterialSegmentation.cpp) via paint_depth_band_mm below - that clamp used to be
 // driven directly by mmu_segmented_region_max_width, which defaulted to 0 (disabled);
-// this mode switch is what makes the feature bounded BY DEFAULT (spec decision 1/2).
+// this mode switch replaced it. Stage 1 made the default bounded (pdmWalls); the owner
+// reverted that on 2026-11-03 (on CAD models where a part's filament and the painting
+// disagree, "limited by walls" left the inside in the part filament), so the default
+// is pdmUnlimited again and the bounded modes are opt-in.
 //
 // pdmUnlimited (0) is deliberately the enum's zero value so it lines up with the old
 // "0 = disabled" convention mmu_segmented_region_max_width used - a default-constructed
-// or legacy-zero-derived mode reads as "no clamp", matching prior behavior for anyone
-// who explicitly asks for it (handle_legacy_composite in PrintConfig.cpp maps a legacy
-// mmu_segmented_region_max_width of exactly 0 to defaults, i.e. pdmWalls - see that
-// function's own comment for why 0 does NOT map to pdmUnlimited despite the enum-value
-// coincidence: the approved bounded-by-default flip applies to every project, not just
-// new ones, so a legacy zero must land on the new default, not carry "disabled" forward).
+// or legacy-zero-derived mode reads as "no clamp" (handle_legacy_composite in
+// PrintConfig.cpp leaves a legacy mmu_segmented_region_max_width of exactly 0 to the
+// default, which is pdmUnlimited, and maps a nonzero value to pdmMillimeters).
 enum PaintDepthMode {
     pdmUnlimited = 0,
     pdmWalls,
