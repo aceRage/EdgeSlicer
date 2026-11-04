@@ -302,6 +302,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
     GUI/Showcase/ShowcaseHdriDialog.cpp
@@ -1324,6 +1325,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
     GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
     GUI/Showcase/ShowcaseHdriDialog.cpp           # file-local hdri_* helpers; Http (curl) next to wx headers
+    GUI/Showcase/ShowcaseBlenderExport.cpp        # file-local sbx_* helpers; wx image streams next to GL headers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad

@@ -29,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_lightning.cpp
 	test_arachne_walls.cpp
 	test_skirt_distance.cpp
 	test_ams_lookup.cpp
@@ -122,6 +123,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_cli_preset_slots.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp
@@ -177,6 +179,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mesh_round.cpp
 	test_quad_remesh.cpp
 	test_meshboolean.cpp
+	test_adaptive_layer_merge.cpp
 	test_lay_on_face.cpp
 	test_marchingsquares.cpp
 	test_timeutils.cpp
@@ -210,6 +213,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_lens.cpp
     test_showcase_skin.cpp
     test_showcase_realism.cpp
+    test_showcase_blender.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
