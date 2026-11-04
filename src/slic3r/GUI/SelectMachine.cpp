@@ -1257,6 +1257,7 @@ std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type)
     case NozzleVolumeType::nvtStandard:    return "standard_flow";
     case NozzleVolumeType::nvtHighFlow:    return "high_flow";
     case NozzleVolumeType::nvtTPUHighFlow: return "tpu_high_flow";
+    case NozzleVolumeType::nvtTPU285:      return "tpu285_flow";
     case NozzleVolumeType::nvtE3DHighFlow: return "e3d_high_flow";
     case NozzleVolumeType::nvtHybrid:      return "hybrid_flow";
     default:                               return "standard_flow";

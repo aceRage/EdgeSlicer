@@ -102,6 +102,8 @@ NozzleVolumeType parse_nozzle_volume(std::string word, bool &ok)
         return nvtHighFlow;
     if (word == "tpu_high_flow")
         return nvtTPUHighFlow;
+    if (word == "tpu285")
+        return nvtTPU285;
     if (word == "e3d_high_flow")
         return nvtE3DHighFlow;
     ok = false;
@@ -114,6 +116,7 @@ const char *nozzle_volume_word(NozzleVolumeType type)
     case nvtHighFlow: return "high_flow";
     case nvtHybrid: return "hybrid";
     case nvtTPUHighFlow: return "tpu_high_flow";
+    case nvtTPU285: return "tpu285";
     case nvtE3DHighFlow: return "e3d_high_flow";
     default: return "standard";
     }
@@ -328,7 +331,7 @@ std::string validate_rack_nozzle_text(const std::string &text, double extruder_d
             bool ok = false;
             parse_nozzle_volume(trimmed(entry.substr(colon + 1)), ok);
             if (!ok)
-                return "\"" + entry + "\": the flow type after \":\" must be standard, high_flow, tpu_high_flow or e3d_high_flow";
+                return "\"" + entry + "\": the flow type after \":\" must be standard, high_flow, tpu_high_flow, tpu285 or e3d_high_flow";
         }
         any = true;
         has_own |= extruder_diameter > 0. && same_nozzle_diameter(d, extruder_diameter);
@@ -1083,7 +1086,7 @@ bool is_filament_nozzle_size_key(const std::string &key)
     // The spool's and the bed's values, not the nozzle's.
     static const std::set<std::string> not_per_nozzle { "filament_cost", "filament_density", "filament_soluble", "filament_is_support",
                                                         "filament_shrink", "filament_shrinkage_compensation_z", "required_nozzle_HRC",
-                                                        "temperature_vitrification", "chamber_temperature", "filament_flow_step_size",
+                                                        "temperature_vitrification", "fins_extrude_safe_temp", "chamber_temperature", "filament_flow_step_size",
                                                         "pellet_flow_coefficient", "filament_change_length", "idle_temperature" };
     if (not_per_nozzle.count(key) > 0)
         return false;

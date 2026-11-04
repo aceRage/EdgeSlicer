@@ -5934,6 +5934,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_z_offset");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
+        optgroup->append_single_option_line("fins_extrude_safe_temp");
         // filament_is_high_temperature is controlled by preset data, not user-facing
         optgroup->append_single_option_line("idle_temperature");
         // BBS: Bambu Studio shows its wipe-tower cooling (a Develop-mode option) in this group, next to

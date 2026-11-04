@@ -677,6 +677,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Only the cost statistics read it (machine time cost); not a slicing input.
         "time_cost",
         "filament_notes",
+        // BBS 2.9.1: read only by custom G-code (H3C start / change templates).
+        "fins_extrude_safe_temp",
         "outer_wall_acceleration",
         "inner_wall_acceleration",
         "initial_layer_acceleration",

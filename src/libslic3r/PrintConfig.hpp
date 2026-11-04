@@ -590,6 +590,7 @@ enum NozzleVolumeType {
     nvtHighFlow,
     nvtHybrid,
     nvtTPUHighFlow,
+    nvtTPU285 = 4,     // BBS 2.9.1: 2.85 mm TPU path (H3C rack slot); value matches Bambu's
     nvtE3DHighFlow = 5,
     nvtMaxNozzleVolumeType = nvtE3DHighFlow
 };
@@ -2144,6 +2145,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_z_offset))
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
+    ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,

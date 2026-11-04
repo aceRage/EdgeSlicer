@@ -4118,6 +4118,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             // result, so single-nozzle machines are unaffected.
             int shim_nozzle_id = 0;
             int shim_physical_extruder = 0;
+            int shim_no_support_nozzle_id = 0;
             auto group_result_g = print.get_layered_nozzle_group_result();
             if (group_result_g && has_nozzle_rack(m_config)) {
                 auto diams = get_nozzle_diameters_by_nozzle_id(group_result_g.get());
@@ -4129,14 +4130,29 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (first->extruder_id >= 0 && first->extruder_id < int(m_config.physical_extruder_map.size()))
                         shim_physical_extruder = m_config.physical_extruder_map.get_at(first->extruder_id);
                 }
+                // BBS 2.9.1 (H3C start G-code): initial_no_support_nozzle_id = logical nozzle (group id) of the
+                // first non-support filament, the index into nozzle_diameter_at_nozzle_id.
+                if (initial_non_support_extruder_id != (unsigned int) -1)
+                    if (auto first_ns = group_result_g->get_first_nozzle_for_filament(int(initial_non_support_extruder_id)))
+                        shim_no_support_nozzle_id = std::max(0, first_ns->group_id);
             } else {
                 this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionInts(nozzle_vts));
             }
             this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diams));
+            // BBS 2.9.1 key initial_layer_travel_acceleration (H3C change_filament_gcode: M204 S[...] on the first
+            // layer). Ours is first_layer_travel_acceleration; publish the value travel_to() uses on the first
+            // layer (0 = the initial layer acceleration), so the template restores the same acceleration.
+            {
+                const double travel_acc  = this->process_flow_value(m_config.travel_acceleration);
+                const double fl_travel   = m_config.first_layer_travel_acceleration.get_abs_value(travel_acc);
+                const double fl_accel    = fl_travel > 0 ? fl_travel : double(this->process_flow_value(m_config.initial_layer_acceleration));
+                this->placeholder_parser().set("initial_layer_travel_acceleration", new ConfigOptionFloat(std::floor(fl_accel + 0.5)));
+            }
 
             this->placeholder_parser().set("current_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("next_nozzle_id",                 new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("initial_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("initial_no_support_nozzle_id",   new ConfigOptionInt(shim_no_support_nozzle_id));
             this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));

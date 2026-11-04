@@ -546,7 +546,8 @@ static t_config_enum_values s_keys_map_NozzleVolumeType {
     { "Standard",      int(NozzleVolumeType::nvtStandard) },
     { "High Flow",     int(NozzleVolumeType::nvtHighFlow) },
     { "TPU High Flow", int(NozzleVolumeType::nvtTPUHighFlow) },
-    { "Hybrid",        int(NozzleVolumeType::nvtHybrid) },
+    { "TPU285",        int(NozzleVolumeType::nvtTPU285) },
+    { "Hybrid",       int(NozzleVolumeType::nvtHybrid) },
     { "E3D High Flow", int(NozzleVolumeType::nvtE3DHighFlow) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NozzleVolumeType)
@@ -3378,6 +3379,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInts{ 100 });
 
+    // BBS 2.9.1: per-filament safe hotend temperature for fin extrusion; only custom G-code reads it
+    // ({fins_extrude_safe_temp[...]} in the H3C start / filament change templates). 0 = disabled.
+    def = this->add("fins_extrude_safe_temp", coInts);
+    def->label = L("Fin extrude safe temperature");
+    def->tooltip = L("Safe hotend temperature for fin extrusion. 0 means disabled. Accessible in custom G-code via fins_extrude_safe_temp.");
+    def->sidetext = u8"℃" /* °C */;
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->max = 350;
+    def->set_default_value(new ConfigOptionInts{ 0 });
+
     // Ultra: per-filament additive Z offset (OrcaSlicer #4660)
     def = this->add("filament_z_offset", coFloats);
     def->label = L("Filament Z offset");
@@ -4395,11 +4407,13 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("High Flow");
     def->enum_values.push_back("Hybrid");
     def->enum_values.push_back("TPU High Flow");
+    def->enum_values.push_back("TPU285");
     def->enum_values.push_back("E3D High Flow");
     def->enum_labels.push_back(L("Standard"));
     def->enum_labels.push_back(L("High Flow"));
     def->enum_labels.push_back(L("Hybrid"));
     def->enum_labels.push_back(L("TPU High Flow"));
+    def->enum_labels.push_back(L("TPU285"));
     def->enum_labels.push_back(L("E3D High Flow"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnumsGeneric{ NozzleVolumeType::nvtStandard });
@@ -4426,11 +4440,13 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("High Flow");
     def->enum_values.push_back("Hybrid");
     def->enum_values.push_back("TPU High Flow");
+    def->enum_values.push_back("TPU285");
     def->enum_values.push_back("E3D High Flow");
     def->enum_labels.push_back(L("Standard"));
     def->enum_labels.push_back(L("High Flow"));
     def->enum_labels.push_back(L("Hybrid"));
     def->enum_labels.push_back(L("TPU High Flow"));
+    def->enum_labels.push_back(L("TPU285"));
     def->enum_labels.push_back(L("E3D High Flow"));
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionEnumsGeneric{ NozzleVolumeType::nvtStandard });
@@ -4443,11 +4459,13 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("High Flow");
     def->enum_values.push_back("Hybrid");
     def->enum_values.push_back("TPU High Flow");
+    def->enum_values.push_back("TPU285");
     def->enum_values.push_back("E3D High Flow");
     def->enum_labels.push_back(L("Standard"));
     def->enum_labels.push_back(L("High Flow"));
     def->enum_labels.push_back(L("Hybrid"));
     def->enum_labels.push_back(L("TPU High Flow"));
+    def->enum_labels.push_back(L("TPU285"));
     def->enum_labels.push_back(L("E3D High Flow"));
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionEnumsGeneric{ NozzleVolumeType::nvtStandard });
