@@ -487,8 +487,14 @@ std::string redirect_target_refusal(const std::string &url)
         return "the download was redirected to " + u.scheme + ":, which is not secure";
     if (u.has_userinfo)
         return "the download was redirected to an address that hides its real host behind a user name";
-    if (is_local_or_ip_host(u.host))
+    if (is_local_or_ip_host(u.host)) {
+        // This also covers a public IP literal, which is refused for a different reason: a Location
+        // header has no business naming an address instead of a host name, and that is exactly how a
+        // redirect gets bounced past a check that only reads names. Say which of the two it was.
+        if (u.host.front() == '[' || looks_like_ipv4(u.host))
+            return "the download was redirected to the IP address " + u.host + ", not a host name";
         return "the download was redirected to " + u.host + ", which is on this computer or the local network";
+    }
     return std::string();
 }
 

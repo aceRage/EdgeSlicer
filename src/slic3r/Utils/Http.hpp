@@ -133,7 +133,10 @@ public:
 	// range  of donloaded bytes. example: curl_easy_setopt(curl, CURLOPT_RANGE, "0-199");
 	Http& set_range(const std::string& range);
 	// Follows at most `max_redirects` redirects, only to https, and refuses the transfer when the
-	// redirects end anywhere other than a public https host (see untrusted::redirect_target_refusal()).
+	// redirects end anywhere other than a public https host name: not behind a user name, and not
+	// an IP literal of any kind - a public one too, so a hop to an IP-literal CDN or OSS endpoint
+	// is refused along with loopback and the LAN (see untrusted::redirect_target_refusal()).
+	// A request whose own address is https is held to https for its first hop as well.
 	// For downloading a file that a web page, another program or a third-party service named: the
 	// link was checked before the request, and the address it redirects to never is.
 	// Do not use it for a printer or another LAN device that serves its own files over plain http.
@@ -234,6 +237,17 @@ public:
     static std::string tls_global_init();
     static std::string tls_system_cert_store();
 
+	// The check restrict_redirects() makes once the transfer is over, as a pure function so a unit
+	// test can run the very logic http_perform() runs (tests/slic3rutils/http_body_redirect_tests.cpp).
+	// `redirect_count` is CURLINFO_REDIRECT_COUNT and `effective_url` is CURLINFO_EFFECTIVE_URL, or
+	// empty when curl reported none. Returns empty when the transfer may stand, else the reason
+	// to refuse it.
+	static std::string redirect_end_refusal(long redirect_count, const std::string &effective_url);
+	// Whether a URL starts with `scheme`://, compared without case.
+	static bool url_scheme_is(const std::string &url, const char *scheme);
+	// Whether an error string is that refusal. A refusal is a decision about where the transfer
+	// went, not a transport failure, so a caller's retry loop must not re-send the request.
+	static bool error_is_redirect_refusal(const std::string &error);
 	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
 	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
 	static std::string url_host(const std::string &url);

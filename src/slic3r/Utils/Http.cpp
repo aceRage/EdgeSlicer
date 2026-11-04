@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <thread>
 #include <deque>
@@ -105,6 +106,11 @@ struct form_file
         : ifs(p, std::ios::in | std::ios::binary), init_offset(offset), content_length(content_length)
     {}
 };
+
+// The refusal text http_perform() hands to errorfn(). Prefixing it is what lets a caller tell a
+// refusal (a decision about where the transfer went) from a transport failure, so a retry loop can
+// stop instead of re-sending a request that will be refused in exactly the same way.
+static const char REDIRECT_REFUSAL_PREFIX[] = "the download was refused: ";
 
 struct Http::priv
 {
@@ -539,6 +545,17 @@ void Http::priv::restrict_redirects(long max_redirects)
 	// the _STR form above arrived in 7.85 and makes the deprecated option go away.
 	::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
 #endif
+	// REDIR_PROTOCOLS only governs where a redirect may go; the first request itself is checked
+	// against CURLOPT_PROTOCOLS. An address that is already https has no business being served
+	// to us over plain http either, so pin that one too. A plain-http start is left alone: that is
+	// a printer or another LAN device, which the caller would not have restricted anyway.
+	if (Http::url_scheme_is(url, "https")) {
+#if LIBCURL_VERSION_NUM >= 0x075500
+		::curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+#else
+		::curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+	}
 	check_final_url = true;
 }
 
@@ -612,23 +629,20 @@ void Http::priv::http_perform()
 	// restrict_redirects(): curl keeps the hops on https by itself, but an https -> https redirect
 	// onto this computer or the LAN is still one it will follow, and the checks the caller made on
 	// the original link never see the address the transfer ended on. So look at where it went, and
-	// refuse it if that is somewhere the original link would have been refused.
+	// refuse it if that is somewhere the original link would have been refused. The decision itself
+	// lives in redirect_end_refusal(), which the tests run directly.
 	if (res == CURLE_OK && check_final_url) {
 		long  redirects = 0;
 		char *final_url = nullptr;
 		::curl_easy_getinfo(curl, CURLINFO_REDIRECT_COUNT, &redirects);
-		if (redirects > 0) {
-			std::string why;
-			if (::curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url) != CURLE_OK || final_url == nullptr)
-				why = "where the download was redirected to is unknown";
-			else
-				why = untrusted::redirect_target_refusal(final_url);
-			if (!why.empty()) {
-				BOOST_LOG_TRIVIAL(error) << "Http: refused " << Http::url_host(url) << " after " << redirects
-				                         << " redirect(s) to " << (final_url != nullptr ? final_url : "(unknown)") << ": " << why;
-				if (errorfn) { errorfn(std::string(), "the download was refused: " + why, 0); }
-				return;
-			}
+		if (::curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url) != CURLE_OK)
+			final_url = nullptr;
+		const std::string why = Http::redirect_end_refusal(redirects, final_url != nullptr ? std::string(final_url) : std::string());
+		if (!why.empty()) {
+			BOOST_LOG_TRIVIAL(error) << "Http: refused " << Http::url_host(url) << " after " << redirects
+			                         << " redirect(s) to " << (final_url != nullptr ? final_url : "(unknown)") << ": " << why;
+			if (errorfn) { errorfn(std::string(), std::string(REDIRECT_REFUSAL_PREFIX) + why, 0); }
+			return;
 		}
 	}
 
@@ -807,6 +821,30 @@ Http& Http::tls_policy(TlsPolicy policy)
 {
 	if (p) { p->tls_policy = policy; }
 	return *this;
+}
+
+std::string Http::redirect_end_refusal(long redirect_count, const std::string &effective_url)
+{
+	// A transfer that never left the address it was given has nothing to re-check: the caller
+	// checked that one itself.
+	if (redirect_count <= 0)
+		return std::string();
+	if (effective_url.empty())
+		return "where the download was redirected to is unknown";
+	return untrusted::redirect_target_refusal(effective_url);
+}
+
+bool Http::error_is_redirect_refusal(const std::string &error)
+{
+	return error.compare(0, std::strlen(REDIRECT_REFUSAL_PREFIX), REDIRECT_REFUSAL_PREFIX) == 0;
+}
+
+bool Http::url_scheme_is(const std::string &url, const char *scheme)
+{
+	const size_t sep = url.find("://");
+	if (sep == std::string::npos)
+		return false;
+	return boost::iequals(url.substr(0, sep), scheme);
 }
 
 std::string Http::url_host(const std::string &url)

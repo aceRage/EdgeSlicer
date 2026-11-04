@@ -21234,7 +21234,11 @@ void Plater::import_model_id(wxString download_info)
                         http_status,
                         error);
 
-                    if (retry_count == max_retries) {
+                    // A refusal is a decision about where the redirects went, not a flaky transfer:
+                    // re-sending the same request would be refused in exactly the same way, and each
+                    // try is another blind request to a host that already sent us somewhere we would
+                    // not go. So it ends the loop here rather than after max_retries.
+                    if (Http::error_is_redirect_refusal(error) || retry_count == max_retries) {
                         boost::system::error_code ec;
                         fs::remove(tmp_path, ec);
                         msg = _L("Importing to EdgeSlicer failed. Please download the file and manually import it.");

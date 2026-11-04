@@ -362,6 +362,50 @@ TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Downl
     }
 }
 
+TEST_CASE("a redirect is refused however the loopback address is spelled", "[Untrusted][Download][Redirect]")
+{
+    // The address in a redirect's Location is chosen by whoever answered the request, so every
+    // spelling a resolver or a browser would accept for this machine or the LAN has to be refused
+    // too - not just the canonical "127.0.0.1". Each of these is a way to reach loopback, a
+    // link-local address, a unique-local address, or a name that only resolves on the LAN.
+    for (const char *u : {
+             "https://[::ffff:127.0.0.1]/x",   // IPv4-mapped IPv6 loopback
+             "https://[fe80::1]/x",            // IPv6 link-local
+             "https://[fc00::1]/x",            // IPv6 unique-local (fc00::/7)
+             "https://2130706433/x",           // 127.0.0.1 as one decimal integer
+             "https://0x7f000001/x",           // 127.0.0.1 in hex
+             "https://127.1/x",                // 127.0.0.1 abbreviated to two parts
+             "https://localhost./x",           // the trailing root dot
+             "https://LOCALHOST/x",            // host names are case-insensitive
+             "https://a@b@127.0.0.1/x",        // userinfo that hides the real host
+             "https://%31%32%37.0.0.1/x",      // percent-encoded digits are not a host name
+             "https:///x",                     // no host at all
+         }) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+
+    // A public IP literal is refused too, and for its own reason: the address is not this machine,
+    // but a Location that names an address instead of a host name is how a redirect gets past a
+    // check that reads names only. It must not be reported as being on the local network.
+    for (const char *u : {"https://8.8.8.8/x", "https://[2606:4700:4700::1111]/x", "https://1.1.1.1/x"}) {
+        INFO(u);
+        const std::string why = redirect_target_refusal(u);
+        CHECK(why.find("IP address") != std::string::npos);
+        CHECK(why.find("local network") == std::string::npos);
+    }
+    // A name on the LAN is still described as one.
+    CHECK(redirect_target_refusal("https://printer.local/x").find("local network") != std::string::npos);
+
+    // The same spellings that must still be allowed: this check is about where a transfer went,
+    // not about which sites may be downloaded from.
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://cdn.example.co.uk/a.3mf",
+                          "https://storage.example.org:8443/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
+    }
+}
+
 TEST_CASE("model extensions", "[Untrusted][Download]")
 {
     for (const char *n : {"a.3mf", "A.STL", "a.step", "a.stp", "a.obj", "a.zip"})
