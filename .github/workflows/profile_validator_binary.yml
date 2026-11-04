@@ -15,6 +15,7 @@ on:
   push:
     branches:
     - main
+    - feat/validator-fork-binary  # TEMPORARY: test run before the workflow exists on main
     paths:
     - 'src/libslic3r/PrintConfig.cpp'
     - 'src/libslic3r/PrintConfig.hpp'
