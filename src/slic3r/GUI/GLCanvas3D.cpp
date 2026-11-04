@@ -4599,9 +4599,14 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 volume->is_modifier = !mvs->model_volume->is_model_part();
                 volume->set_color(color_from_model_volume(*mvs->model_volume));
 
+                const ModelInstance& instance = *mvs->model_volume->get_object()->instances[mvs->composite_id.instance_id];
+                // Follow the instance's printable flag on every reload; the assemble view never shows it.
+                if (m_canvas_type != ECanvasType::CanvasAssembleView)
+                    volume->printable = instance.printable;
+
                 // updates volumes transformations
                 if (m_canvas_type != ECanvasType::CanvasAssembleView) {
-                    volume->set_instance_transformation(mvs->model_volume->get_object()->instances[mvs->composite_id.instance_id]->get_transformation());
+                    volume->set_instance_transformation(instance.get_transformation());
                     volume->set_volume_transformation(mvs->model_volume->get_transformation());
                     // updates volumes convex hull
                     if (mvs->model_volume->is_model_part() && ! volume->convex_hull())
@@ -4611,14 +4616,14 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                     volume->set_offset_to_assembly(Vec3d(0, 0, 0));
                 }
                 else {
-                    volume->set_instance_transformation(mvs->model_volume->get_object()->instances[mvs->composite_id.instance_id]->get_assemble_transformation());
+                    volume->set_instance_transformation(instance.get_assemble_transformation());
                     volume->set_volume_transformation(mvs->model_volume->get_transformation());
                     // updates volumes convex hull
                     if (mvs->model_volume->is_model_part() && ! volume->convex_hull())
                         // Model volume was likely changed from modifier or support blocker / enforcer to a model part.
                         // Only model parts require convex hulls.
                         volume->set_convex_hull(mvs->model_volume->get_convex_hull_shared_ptr());
-                    volume->set_offset_to_assembly(mvs->model_volume->get_object()->instances[mvs->composite_id.instance_id]->get_offset_to_assembly());
+                    volume->set_offset_to_assembly(instance.get_offset_to_assembly());
                 }
             }
         }
@@ -4691,6 +4696,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                     it->volume_idx = m_volumes.volumes.size();
                     m_volumes.load_object_volume(&model_object, obj_idx, volume_idx, instance_idx, m_color_by, m_initialized, m_canvas_type == ECanvasType::CanvasAssembleView);
                     m_volumes.volumes.back()->geometry_id = key.geometry_id;
+                    if (m_canvas_type != ECanvasType::CanvasAssembleView)
+                        m_volumes.volumes.back()->printable = model_instance.printable;
                     update_object_list = true;
                 } else {
 					// Recycling an old GLVolume.
@@ -6628,7 +6635,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if ((any_gizmo_active || swap_mouse_buttons || m_hover_volume_idxs.empty()) && m_mouse.is_start_position_3D_defined()) {
                 Camera& camera = wxGetApp().plater()->get_camera();
                 auto mult_pref = wxGetApp().app_config->get("camera_orbit_mult");
-                const double mult = mult_pref.empty() ? 1.0 : std::stod(mult_pref);
+                // Preferences stores this with FromCDouble (always '.'). std::stod follows
+                // LC_NUMERIC, so under de_DE/fr_FR "1.5" becomes 1. Parse with the same
+                // locale-independent helper used for arrange distances above.
+                const double mult = mult_pref.empty() ? 1.0 : string_to_double_decimal_point(mult_pref);
                 const Vec3d rot = (Vec3d(pos.x(), pos.y(), 0.) - m_mouse.drag.start_position_3D) * (PI * TRACKBALLSIZE / 180.) * mult;
                 if (this->m_canvas_type == ECanvasType::CanvasAssembleView || m_gizmos.get_current_type() == GLGizmosManager::FdmSupports ||
                     m_gizmos.get_current_type() == GLGizmosManager::Seam || m_gizmos.get_current_type() == GLGizmosManager::MmSegmentation ||

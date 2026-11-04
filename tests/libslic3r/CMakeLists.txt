@@ -15,6 +15,9 @@ add_executable(${_TEST_NAME}_tests
 	test_untrusted_input.cpp
 	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
+	test_zip_cleaner.cpp
+	test_zip_extract.cpp
+	test_zip_open.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
 	test_layerling.cpp
@@ -26,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_lightning.cpp
 	test_arachne_walls.cpp
 	test_skirt_distance.cpp
 	test_ams_lookup.cpp
@@ -56,6 +60,8 @@ add_executable(${_TEST_NAME}_tests
 	test_image_fill.cpp
 	test_image_row_transform.cpp
 	test_image_row_dialog.cpp
+	test_obj_texture_p5d.cpp
+	test_image_fill_p5c.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
@@ -119,6 +125,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_cli_preset_slots.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp
