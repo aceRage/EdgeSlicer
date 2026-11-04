@@ -19,6 +19,9 @@
 #include "libvgcode/include/PathVertex.hpp"
 #include "libvgcode/include/Viewer.hpp"
 #include "libvgcode/src/Layers.hpp"
+#include "libvgcode/src/Settings.hpp"
+#include "libvgcode/src/Utils.hpp"
+#include "libvgcode/include/ColorRange.hpp"
 
 using namespace Slic3r;
 
@@ -276,4 +279,46 @@ TEST_CASE("libvgcode layer lookup counts the layers at or below z", "[libvgcode]
     CHECK(layers.get_layer_id_at(5.0f) == 5);
     // The layer whose z is z: one less, as the preview's support overlay reads it.
     CHECK(layers.get_layer_z(layers.get_layer_id_at(0.6f) - 1) == 0.6f);
+}
+
+// The preview legend's numeric views (flow, speed, ...) take their min/max from the extrusions of the
+// line types that are shown, so showing only Ironing gives a gradient over ironing alone.
+TEST_CASE("libvgcode color ranges only count extrusions of visible line types", "[libvgcode][Regression]")
+{
+    libvgcode::Settings settings;
+    libvgcode::PathVertex ironing;
+    ironing.type = libvgcode::EMoveType::Extrude;
+    ironing.role = libvgcode::EGCodeExtrusionRole::Ironing;
+    libvgcode::PathVertex solid = ironing;
+    solid.role = libvgcode::EGCodeExtrusionRole::SolidInfill;
+    libvgcode::PathVertex travel = ironing;
+    travel.type = libvgcode::EMoveType::Travel;
+
+    // everything shown: both extrusion roles count, travels never do
+    CHECK(libvgcode::counts_for_color_ranges(ironing, settings));
+    CHECK(libvgcode::counts_for_color_ranges(solid, settings));
+    CHECK_FALSE(libvgcode::counts_for_color_ranges(travel, settings));
+
+    // hide everything but Ironing
+    settings.extrusion_roles_visibility.fill(false);
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::Ironing)] = true;
+    CHECK(libvgcode::counts_for_color_ranges(ironing, settings));
+    CHECK_FALSE(libvgcode::counts_for_color_ranges(solid, settings));
+
+    // showing a role again brings it back
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::SolidInfill)] = true;
+    CHECK(libvgcode::counts_for_color_ranges(solid, settings));
+}
+
+TEST_CASE("libvgcode color range with no values is safe to query", "[libvgcode][Regression]")
+{
+    libvgcode::ColorRange range;
+    range.set_palette({ { 0, 0, 255 }, { 255, 0, 0 } });
+    CHECK(range.get_values().empty());
+    CHECK(range.get_color_at(1.0f) == libvgcode::Color{ 0, 0, 255 });
+    range.update(0.1f);
+    range.update(0.5f);
+    CHECK(range.get_range()[0] == Approx(0.1f));
+    CHECK(range.get_range()[1] == Approx(0.5f));
+    CHECK(range.get_values().size() == 2);
 }

@@ -6,6 +6,8 @@
 #define VGCODE_UTILS_HPP
 
 #include "../include/Types.hpp"
+#include "../include/PathVertex.hpp"
+#include "Settings.hpp"
 #include <vector>
 #include <cstdint>
 
@@ -27,6 +29,11 @@ extern bool operator != (const Vec3& v1, const Vec3& v2);
 extern Vec3 operator + (const Vec3& v1, const Vec3& v2);
 extern Vec3 operator - (const Vec3& v1, const Vec3& v2);
 extern Vec3 operator * (float f, const Vec3& v);
+
+// Whether an extrusion vertex counts towards the color ranges (legend min/max) of the numeric view
+// types: only extrusions whose role is currently shown in the Line Type legend do, so hiding all but
+// one feature makes the ranges, and so the gradient, cover that feature alone.
+extern bool counts_for_color_ranges(const PathVertex& v, const Settings& settings);
 
 } // namespace libvgcode
 
