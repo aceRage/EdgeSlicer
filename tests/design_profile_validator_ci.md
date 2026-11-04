@@ -1,7 +1,21 @@
 # Profile validator CI: run EdgeSlicer's own validator (design, 2026-11-04)
 
-Branch `feat/own-profile-validator`. Status: **plan only, waiting for the owner's decision.**
-No hosted CI has been dispatched for this.
+Branch `feat/own-profile-validator`. Status: **owner chose option C (self-hosted VM), 2026-11-04;
+implemented in `.github/workflows/check_profiles.yml`.**
+
+Implementation notes (differences from the sketch below):
+- Source and build dirs are persistent under `C:\Dev\ci\profile_validator\{src,build}`, outside
+  the runner workspace. `build_windows_selfhosted.yml` checks out other commits into the shared
+  workspace and cleans it, which would turn every incremental build into a near-full rebuild.
+- No sccache: Ninja's incremental build in one persistent tree is enough, and sccache with Ninja
+  on the VM needs the edgebuild `/showIncludes` wrapper.
+- No `concurrency` group shared with the release build: the VM has a single runner, so jobs
+  never overlap. The group is per PR, so a newer push cancels the older check.
+- A deps-stamp mismatch is a warning, not a rebuild: this job only reads the shared deps tree.
+- The workflow also triggers on the engine files that define a valid profile (`PrintConfig.*`,
+  `Preset*.*`, the validator source), so an enum change is checked even without a profile edit.
+- Upstream's prebuilt binary and #854's TPU285 sed swap are dropped. #854 has to merge main
+  (or this PR) to get the new workflow; its swap step then conflicts and should be deleted.
 
 ## Why
 
