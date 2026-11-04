@@ -134,6 +134,8 @@ public:
     wxWindow   *create_item_gcode_archive_dir(wxWindow *parent, wxString tooltip);
     // Home > Vaults: where vault downloads go (a folder row with Browse and Default).
     wxWindow   *create_item_vault_downloads_dir(wxWindow *parent, wxString tooltip);
+    // ZIP files (PR C): extraction folder, its size, Open folder and Clean now.
+    wxWindow   *create_item_zip_work_folder(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gcode_archive_max(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip);
     // Selected-object highlight: style combo (Glow / Thin outline) plus the Glow strength slider.

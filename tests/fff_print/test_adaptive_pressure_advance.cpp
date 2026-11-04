@@ -77,3 +77,64 @@ TEST_CASE("Adaptive pressure advance reads the speed of an extrusion that inheri
             CHECK_THAT(speed, Catch::Matchers::WithinAbs(150.0, 0.01));
     }
 }
+
+// Orca #17033: Print::validate names the filament and the invalid line, one warning per filament.
+// Edge has no per-feature *_filament_id keys (Orca process options). The cube is printed with
+// `filament` through the object extruder (1-based), which is what Print::extruders() already uses.
+static std::vector<std::string> adaptive_pa_model_warnings(const std::vector<std::string> &models, int filament = 1)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const unsigned int n      = static_cast<unsigned int>(models.size());
+    config.set_num_extruders(n);
+    config.set_num_filaments(n);
+    config.set_deserialize_strict({
+        // the default config fails validation on relative extrusion without a G92 E0 at each layer
+        { "use_relative_e_distances", "0" },
+    });
+    config.option<ConfigOptionBools>("enable_pressure_advance")->values.assign(n, true);
+    config.option<ConfigOptionBools>("adaptive_pressure_advance")->values.assign(n, true);
+    config.option<ConfigOptionFloats>("filament_diameter")->values.assign(n, 1.75);
+    config.option<ConfigOptionStrings>("adaptive_pressure_advance_model")->values = models;
+    // A second filament would otherwise raise an unrelated prime-tower / wipe-tower check.
+    config.option<ConfigOptionBool>("enable_prime_tower")->value = false;
+
+    Print  print;
+    Model  model;
+    ModelObject *object = model.add_object();
+    object->add_volume(mesh(TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    object->ensure_on_bed();
+    object->config.set("extruder", filament);
+    print.apply(model, config);
+
+    std::vector<StringObjectException> warnings;
+    REQUIRE(print.validate(&warnings).string.empty());
+    std::vector<std::string> texts;
+    for (const StringObjectException &warning : warnings)
+        if (warning.opt_key == "adaptive_pressure_advance_model")
+            texts.push_back(warning.string);
+    return texts;
+}
+
+static std::vector<std::string> adaptive_pa_model_warnings(const std::string &model)
+{
+    return adaptive_pa_model_warnings(std::vector<std::string>{ model });
+}
+
+TEST_CASE("Slicing names the filament and the line of an invalid adaptive pressure advance model", "[AdaptivePressureAdvance]")
+{
+    // a period where the comma belongs leaves the second line with two values
+    const std::vector<std::string> warnings = adaptive_pa_model_warnings("0.07,4.71,500\n0.04.7.53,1000\n0.035,9.41,1000");
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings.front().find("filament 1") != std::string::npos);
+    CHECK(warnings.front().find("Line 2") != std::string::npos);
+}
+
+TEST_CASE("Slicing names the second filament when its adaptive pressure advance model is invalid", "[AdaptivePressureAdvance]")
+{
+    const std::vector<std::string> warnings = adaptive_pa_model_warnings(
+        { "0.07,4.71,500\n0.035,9.41,1000", "0.07,4.71,500\n0.04.7.53,1000" }, 2);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings.front().find("filament 2") != std::string::npos);
+    CHECK(warnings.front().find("Line 2") != std::string::npos);
+}
