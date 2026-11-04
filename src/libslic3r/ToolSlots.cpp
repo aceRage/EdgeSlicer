@@ -146,9 +146,10 @@ std::string rack_text_of(const ConfigBase &config, size_t e)
         if (e < own->values.size() && !trimmed(own->values[e]).empty())
             return own->values[e];
     if (const auto *opt = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_diameter"))
-        if (e < opt->values.size())
+        if (e < opt->values.size() && !trimmed(opt->values[e]).empty())
             return opt->values[e];
-    return std::string();
+    // Owner hand test 2026-11-03: neither sets a rack, so the machine's own (Bambu Studio shows its full rack).
+    return default_rack_nozzle_text(config, e);
 }
 
 bool any_rack_text(const ConfigBase &config)
@@ -158,10 +159,56 @@ bool any_rack_text(const ConfigBase &config)
             for (const std::string &text : opt->values)
                 if (!trimmed(text).empty())
                     return true;
+    for (size_t e = 0; e < floats_of(config, "nozzle_diameter").size(); ++e)
+        if (!default_rack_nozzle_text(config, e).empty())
+            return true;
     return false;
 }
 
 } // namespace
+
+std::string default_rack_nozzle_text(const ConfigBase &config, size_t e)
+{
+    // Only a machine that declares a rack (extruder_max_nozzle_count > 1: H2C right 6, H3C 9).
+    std::vector<int> counts;
+    if (const auto *opt = opt_of<ConfigOptionIntsNullable>(config, "extruder_max_nozzle_count")) {
+        for (size_t i = 0; i < opt->values.size(); ++i)
+            counts.push_back(opt->is_nil(i) ? 1 : std::max(1, opt->values[i]));
+    } else if (const auto *opt = opt_of<ConfigOptionInts>(config, "extruder_max_nozzle_count")) {
+        for (int c : opt->values)
+            counts.push_back(std::max(1, c));
+    }
+    if (e >= counts.size() || counts[e] < 2)
+        return std::string();
+    // A Hybrid extruder keeps its mixed rack from extruder_nozzle_stats, as before.
+    if (extruder_volume_type(config, e) == nvtHybrid)
+        return std::string();
+    const std::vector<double> sizes = effective_nozzle_diameters(config);
+    if (e >= sizes.size() || !(sizes[e] > 0.))
+        return std::string();
+    // Bambu Studio 2.9.1 default_nozzle_volume_slots: a default_nozzle_volume_type list as long as all slots of all extruders
+    // holds one type per slot (H3C: slot 8 TPU285); a shorter one holds one per extruder, which the extruder's
+    // nozzle_volume_type already gives (unannotated slots follow it).
+    std::vector<int> slot_types;
+    if (const auto *types = opt_of<ConfigOptionEnumsGeneric>(config, "default_nozzle_volume_type")) {
+        size_t total = 0, first = 0;
+        for (size_t i = 0; i < counts.size(); ++i) {
+            if (i == e)
+                first = total;
+            total += size_t(counts[i]);
+        }
+        if (types->values.size() == total && total > counts.size())
+            slot_types.assign(types->values.begin() + first, types->values.begin() + first + counts[e]);
+    }
+    const std::string size = format_nozzle_diameter_word(sizes[e]);
+    std::string       text;
+    for (int slot = 0; slot < counts[e]; ++slot) {
+        text += (text.empty() ? "" : ",") + size;
+        if (size_t(slot) < slot_types.size() && slot_types[slot] != int(nvtStandard) && slot_types[slot] != int(nvtHybrid))
+            text += std::string(":") + nozzle_volume_word(NozzleVolumeType(slot_types[slot]));
+    }
+    return text;
+}
 
 bool same_nozzle_diameter(double a, double b) { return std::abs(a - b) < 0.001; }
 

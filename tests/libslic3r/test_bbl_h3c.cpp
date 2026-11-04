@@ -4,6 +4,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "../fff_print/test_data.hpp"
@@ -149,5 +150,93 @@ TEST_CASE("H3C cube slices with the full Bambu start G-code", "[BblH3C][PrintGCo
                 CHECK(line.find(buf) != std::string::npos);
             }
         }
+    }
+}
+
+// Owner hand test 2026-11-03: a new H3C project showed two rack nozzles ("0.4, 0.4"). With no rack text in the project
+// or the printer preset, a rack machine has its full rack: the H3C nine slots (slot 8 TPU285 on the 0.4, as Bambu Studio
+// 2.9.1 shows it), the H2C right extruder six. A saved project rack, a preset rack and Sync still win.
+TEST_CASE("Rack machines default to their full rack", "[BblH3C][NozzleRackSlots]")
+{
+    PresetBundle &b = h3c_bundle();
+    auto select = [&b](const char *printer) {
+        REQUIRE(b.printers.select_preset_by_name(printer, true));
+        b.update_compatible(PresetSelectCompatibleType::Never);
+        b.set_rack_nozzle_override({});
+        return b.printer_config_with_project_sizes();
+    };
+
+    SECTION("H3C 0.4: nine 0.4 slots, slot 8 TPU285")
+    {
+        const DynamicPrintConfig cfg = select("Bambu Lab H3C 0.4 nozzle");
+        CHECK(default_rack_nozzle_text(cfg, 0) == "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4");
+        const auto racks = extruder_rack_nozzles(cfg);
+        REQUIRE(racks.size() == 1);
+        REQUIRE(racks[0].size() == 9);
+        for (size_t i = 0; i < 9; ++i) {
+            INFO("slot " << i + 1);
+            CHECK(racks[0][i].diameter == Approx(0.4));
+            CHECK(racks[0][i].volume_type == (i == 7 ? nvtTPU285 : nvtStandard));
+        }
+        CHECK(rack_slot_count(cfg, 0) == 9);
+        CHECK(rack_summary(racks[0]) == "9 x 0.4");
+    }
+    SECTION("H3C 0.2 / 0.6: nine slots of the machine's size; the 0.2 lists one Standard type for the extruder")
+    {
+        const DynamicPrintConfig c02 = select("Bambu Lab H3C 0.2 nozzle");
+        CHECK(default_rack_nozzle_text(c02, 0) == "0.2,0.2,0.2,0.2,0.2,0.2,0.2,0.2,0.2");
+        const DynamicPrintConfig c06 = select("Bambu Lab H3C 0.6 nozzle");
+        CHECK(default_rack_nozzle_text(c06, 0) == "0.6,0.6,0.6,0.6,0.6,0.6,0.6,0.6:tpu285,0.6");
+        CHECK(rack_slot_count(c06, 0) == 9);
+    }
+    SECTION("H2C: no rack on the left, six of its size on the right")
+    {
+        const DynamicPrintConfig cfg = select("Bambu Lab H2C 0.4 nozzle");
+        CHECK(default_rack_nozzle_text(cfg, 0).empty());
+        CHECK(default_rack_nozzle_text(cfg, 1) == "0.4,0.4,0.4,0.4,0.4,0.4");
+        const auto racks = extruder_rack_nozzles(cfg);
+        REQUIRE(racks.size() == 2);
+        CHECK(racks[0].empty());
+        CHECK(racks[1].size() == 6);
+        CHECK(rack_slot_count(cfg, 1) == 6);
+    }
+    SECTION("X1C / H2D: no rack")
+    {
+        for (const char *printer : { "Bambu Lab X1 Carbon 0.4 nozzle", "Bambu Lab H2D 0.4 nozzle" }) {
+            INFO(printer);
+            const DynamicPrintConfig cfg = select(printer);
+            for (const auto &rack : extruder_rack_nozzles(cfg))
+                CHECK(rack.empty());
+        }
+    }
+    SECTION("a saved project rack keeps its value")
+    {
+        select("Bambu Lab H3C 0.4 nozzle");
+        REQUIRE(b.set_rack_nozzle_override(0, "0.4, 0.6, 0.2"));
+        const auto racks = extruder_rack_nozzles(b.printer_config_with_project_sizes());
+        REQUIRE(racks[0].size() == 3);
+        CHECK(racks[0][1].diameter == Approx(0.6));
+        CHECK(b.rack_nozzle_override(0) == "0.4, 0.6, 0.2");
+        // The H2C keeps a saved right rack too.
+        select("Bambu Lab H2C 0.4 nozzle");
+        REQUIRE(b.set_rack_nozzle_override(1, "0.4,0.8"));
+        CHECK(extruder_rack_nozzles(b.printer_config_with_project_sizes())[1].size() == 2);
+        b.set_rack_nozzle_override({});
+    }
+    SECTION("a printer preset's rack text wins over the default")
+    {
+        DynamicPrintConfig cfg = select("Bambu Lab H3C 0.4 nozzle");
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.2" };
+        CHECK(extruder_rack_nozzles(cfg)[0].size() == 2);
+    }
+    SECTION("Sync replaces the default with the reported nozzles")
+    {
+        const std::vector<std::string> synced = rack_override_from_reported({ { 0.4, 0.4, 0.6, 0.2 } }, {});
+        REQUIRE(synced.size() == 1);
+        DynamicPrintConfig cfg = select("Bambu Lab H3C 0.4 nozzle");
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = synced;
+        const auto racks = extruder_rack_nozzles(cfg);
+        REQUIRE(racks[0].size() == 4);
+        CHECK(racks[0][2].diameter == Approx(0.6));
     }
 }
