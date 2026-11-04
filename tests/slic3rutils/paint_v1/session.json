@@ -1,7 +1,7 @@
 {
   "caps": {
     "leaves": 1000000,
-    "triangles": 2000000
+    "triangles": 10000000
   },
   "formats": {
     "mesh": "psmesh1",
