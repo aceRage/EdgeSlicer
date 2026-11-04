@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
 
@@ -13,7 +14,8 @@ namespace Showcase {
 
 namespace {
 
-const char *const FINISH_NAMES[]      = { "standard", "matte", "silk", "gloss", "transparent", "metallic", "carbon_fiber" };
+const char *const FINISH_NAMES[]      = { "standard", "matte", "silk", "gloss", "transparent", "metallic", "carbon_fiber",
+                                          "translucent", "satin", "sparkle", "marble", "wood", "matte_textured" };
 const char *const LAYER_LINES_NAMES[] = { "off", "subtle", "real", "exaggerated" };
 
 template<class E, size_t N> const char *material_enum_name(E v, const char *const (&names)[N])
@@ -88,7 +90,10 @@ bool        from_string(const std::string &s, LayerLines &v) { return material_e
 
 std::vector<Finish> all_finishes()
 {
-    return { Finish::Standard, Finish::Matte, Finish::Silk, Finish::Gloss, Finish::Transparent, Finish::Metallic, Finish::CarbonFiber };
+    // The panel's order: the plain ones, then the effects.
+    return { Finish::Standard,    Finish::Matte,  Finish::Satin,  Finish::Gloss,         Finish::Silk,
+             Finish::Metallic,    Finish::Transparent, Finish::Translucent, Finish::CarbonFiber, Finish::MatteTextured,
+             Finish::Marble,      Finish::Wood,   Finish::Sparkle };
 }
 
 Finish infer_finish(const std::string &preset_name, const std::string &filament_type)
@@ -97,11 +102,25 @@ Finish infer_finish(const std::string &preset_name, const std::string &filament_
     const std::vector<std::string> type = words(filament_type);
     ws.insert(ws.end(), type.begin(), type.end());
 
-    if (has_word(ws, { "translucent", "transparent", "clear", "crystal" }))
+    // 1e: glitter first (a "galaxy black" PETG is still glitter, not gloss).
+    if (has_word(ws, { "sparkle", "sparkly", "glitter", "galaxy", "starlight", "stardust", "twinkle" }))
+        return Finish::Sparkle;
+    if (has_word(ws, { "transparent", "crystal" }))
         return Finish::Transparent;
-    if (has_word(ws, { "silk", "silky", "shiny", "satin" }))
+    // Fills before "natural" ("Natural Wood PLA" is wood).
+    if (has_word(ws, { "marble", "granite", "stone", "terrazzo", "rock" }))
+        return Finish::Marble;
+    if (has_word(ws, { "wood", "woodfill", "timber", "bamboo" }))
+        return Finish::Wood;
+    // D-R4: natural and clear plastics are milky, not glass.
+    if (has_word(ws, { "translucent", "natural", "clear" }))
+        return Finish::Translucent;
+    if (has_word(ws, { "silk", "silky", "shiny" }))
         return Finish::Silk;
-    if (has_word(ws, { "metal", "metallic", "bronze", "copper", "steel", "brass", "aluminium", "aluminum", "iron" }))
+    if (has_word(ws, { "satin" }))
+        return Finish::Satin;
+    if (has_word(ws, { "metal", "metallic", "bronze", "copper", "steel", "brass", "aluminium", "aluminum", "iron", "metalfill", "copperfill",
+                       "bronzefill", "brassfill", "steelfill", "ironfill" }))
         return Finish::Metallic;
     if (has_word(ws, { "carbon", "fiber", "fibre" }) || std::any_of(ws.begin(), ws.end(), fibre_word))
         return Finish::CarbonFiber;
@@ -121,6 +140,12 @@ float default_toolpath_smoothness(Finish finish)
     case Finish::Transparent: return 0.7f;
     case Finish::Metallic: return 0.7f;
     case Finish::CarbonFiber: return 0.45f;
+    case Finish::Translucent: return 0.7f;
+    case Finish::Satin: return 0.7f;
+    case Finish::Sparkle: return 0.7f;
+    case Finish::MatteTextured: return 0.45f;
+    case Finish::Marble:
+    case Finish::Wood: return 0.5f;
     default: return 0.6f;
     }
 }
@@ -202,9 +227,229 @@ MaterialParams material_params(Finish finish)
         p.fiber_noise = 0.6f;
         p.line_shade  = 0.6f;
         break;
+    // Realism 1d / 1e.
+    case Finish::Translucent:
+        // Milky natural PETG / PLA: mostly solid to the eye, glowing where it is thin.
+        p.roughness    = 0.32f;
+        p.f0           = 0.045f;
+        p.clearcoat    = 0.25f;
+        p.alpha        = 0.92f;
+        p.line_shade   = 0.25f;
+        p.transmission = 0.85f;
+        p.density      = 0.55f;
+        p.sss          = 0.6f;
+        break;
+    case Finish::Satin:
+        p.roughness  = 0.45f;
+        p.f0         = 0.05f;
+        p.metal_tint = 0.2f;
+        p.anisotropy = 0.3f;
+        p.line_shade = 0.38f;
+        p.sheen      = 0.25f;
+        break;
+    case Finish::Sparkle:
+        // A glossy base with flakes in it.
+        p.roughness  = 0.38f;
+        p.f0         = 0.05f;
+        p.clearcoat  = 0.35f;
+        p.line_shade = 0.4f;
+        p.sparkle    = 0.35f;
+        break;
+    case Finish::Marble:
+        p.roughness    = 0.7f;
+        p.f0           = 0.035f;
+        p.line_shade   = 0.55f;
+        p.speckle      = 0.8f;
+        p.speckle_kind = SpeckleKind::Stone;
+        break;
+    case Finish::Wood:
+        p.roughness    = 0.85f;
+        p.f0           = 0.025f;
+        p.line_shade   = 0.7f;
+        p.sheen        = 0.2f;
+        p.speckle      = 0.7f;
+        p.speckle_kind = SpeckleKind::Wood;
+        break;
+    case Finish::MatteTextured:
+        // Velvet-like: the fibres catch the light at grazing angles, in short streaks along the lines.
+        p.roughness   = 0.92f;
+        p.f0          = 0.025f;
+        p.fiber_noise = 0.45f;
+        p.line_shade  = 0.65f;
+        p.sheen       = 0.6f;
+        p.anisotropy  = 0.f;
+        break;
     }
     return p;
 }
+
+Translucency effective_translucency(Finish finish, float strength)
+{
+    Translucency t;
+    const float s = std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f;
+    const MaterialParams p = material_params(finish);
+    switch (finish) {
+    case Finish::Translucent:
+        // Its own look: on at 0, a little more at 1.
+        t.transmission = std::min(1.f, p.transmission * (1.f + 0.2f * s));
+        t.density      = p.density;
+        t.sss          = std::min(1.f, p.sss * (1.f + 0.3f * s));
+        break;
+    case Finish::Transparent:
+        // Clear plastic: very little scattering, light goes straight through.
+        t.transmission = 0.9f * s;
+        t.density      = 0.12f;
+        t.sss          = 0.1f * s;
+        break;
+    case Finish::Metallic:
+        // Metal pigment stops the light.
+        break;
+    case Finish::CarbonFiber:
+    case Finish::MatteTextured:
+    case Finish::Marble:
+    case Finish::Wood:
+        // Filled plastics: a little softness at the edges, nothing comes through.
+        t.sss = 0.25f * s;
+        break;
+    default:
+        // Plain PLA and PETG: soft edges, thin walls glow a little.
+        t.transmission = 0.3f * s;
+        t.density      = 2.2f;
+        t.sss          = 0.5f * s;
+        break;
+    }
+    if (t.transmission <= 0.f)
+        t.density = 0.f;
+    return t;
+}
+
+float transmittance(float density, float thickness_mm)
+{
+    if (!(density > 0.f) || !std::isfinite(thickness_mm))
+        return 1.f;
+    return std::exp(-density * std::max(thickness_mm, 0.f));
+}
+
+std::array<float, 3> shadow_transmittance(const std::array<float, 3> &albedo_linear, float transmission)
+{
+    const float t = std::isfinite(transmission) ? std::clamp(transmission, 0.f, 1.f) : 0.f;
+    std::array<float, 3> out;
+    for (size_t i = 0; i < 3; ++i) {
+        // The light let through takes the filament's colour; a clearer plastic lets more through.
+        const float a = std::clamp(albedo_linear[i], 0.f, 1.f);
+        out[i]        = t * (0.15f + 0.85f * std::pow(a, 1.2f));
+    }
+    return out;
+}
+
+float sparkle_lod(float cell_px) { return std::isfinite(cell_px) ? smoothstep01(0.75f, 2.f, cell_px) : 1.f; }
+
+// --- realism 1f: imperfections -------------------------------------------------------------------
+
+std::vector<SeamPoint> seam_points(const std::vector<PathPoint> &moves, size_t max_points)
+{
+    std::vector<SeamPoint> out;
+    for (const PathPoint &p : moves)
+        if (p.kind == PathKind::Seam && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
+            out.push_back({ p.x, p.y, p.z });
+    std::sort(out.begin(), out.end(), [](const SeamPoint &a, const SeamPoint &b) {
+        return a.z != b.z ? a.z < b.z : (a.x != b.x ? a.x < b.x : a.y < b.y);
+    });
+    out.erase(std::unique(out.begin(), out.end(),
+                          [](const SeamPoint &a, const SeamPoint &b) {
+                              return std::abs(a.x - b.x) < 1e-3f && std::abs(a.y - b.y) < 1e-3f && std::abs(a.z - b.z) < 1e-3f;
+                          }),
+              out.end());
+    if (max_points > 0 && out.size() > max_points) {
+        std::vector<SeamPoint> thin;
+        thin.reserve(max_points);
+        const double step = double(out.size()) / double(max_points);
+        for (size_t i = 0; i < max_points; ++i)
+            thin.push_back(out[std::min(out.size() - 1, size_t(double(i) * step))]);
+        out = std::move(thin);
+    }
+    return out;
+}
+
+namespace {
+// A fixed hash of a move index to 0..1 (the same wisps every frame).
+float wisp_hash(size_t i)
+{
+    uint32_t h = uint32_t(i) * 2654435761u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    return float(h & 0xFFFFFFu) / float(0x1000000);
+}
+} // namespace
+
+std::vector<StringWisp> string_wisps(const std::vector<PathPoint> &moves, float strength, size_t max_count)
+{
+    std::vector<StringWisp> out;
+    const float s = std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f;
+    if (s <= 0.f || max_count == 0)
+        return out;
+    const float keep = 0.15f * s;
+    size_t i = 0;
+    while (i < moves.size() && out.size() < max_count) {
+        // A run of travels (with retractions and wipes) right after an extrusion.
+        if (moves[i].kind != PathKind::Extrude && moves[i].kind != PathKind::Seam) {
+            ++i;
+            continue;
+        }
+        const PathPoint &start = moves[i];
+        size_t j = i + 1;
+        bool   travelled = false;
+        while (j < moves.size() && (moves[j].kind == PathKind::Travel || moves[j].kind == PathKind::Other)) {
+            travelled |= moves[j].kind == PathKind::Travel;
+            ++j;
+        }
+        if (!travelled || j >= moves.size() || moves[j].kind != PathKind::Extrude) {
+            i = j > i ? j : i + 1;
+            continue;
+        }
+        // The travel ends where the next extrusion starts: the last travel's end.
+        const PathPoint *end = nullptr;
+        for (size_t k = j; k-- > i + 1;)
+            if (moves[k].kind == PathKind::Travel) {
+                end = &moves[k];
+                break;
+            }
+        if (end != nullptr && std::abs(end->z - start.z) < 0.05f) {
+            const float dx = end->x - start.x, dy = end->y - start.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len >= 2.f && len <= 30.f && wisp_hash(i) < keep) {
+                StringWisp w;
+                w.a        = { start.x, start.y, start.z };
+                w.b        = { end->x, end->y, end->z };
+                w.sag      = (0.03f + 0.05f * wisp_hash(i + 7)) * len;
+                w.extruder = start.extruder;
+                out.push_back(w);
+            }
+        }
+        i = j;
+    }
+    return out;
+}
+
+std::array<float, 3> wisp_point(const StringWisp &w, float t)
+{
+    t = std::clamp(t, 0.f, 1.f);
+    const float drop = 4.f * w.sag * t * (1.f - t);
+    return { w.a[0] + (w.b[0] - w.a[0]) * t, w.a[1] + (w.b[1] - w.a[1]) * t, w.a[2] + (w.b[2] - w.a[2]) * t - drop };
+}
+
+float seam_bump(float distance_mm, float width_mm)
+{
+    if (!(width_mm > 0.f) || !std::isfinite(distance_mm))
+        return 0.f;
+    const float x = std::clamp(1.f - std::abs(distance_mm) / width_mm, 0.f, 1.f);
+    return x * x * (3.f - 2.f * x);
+}
+
+float seam_height_mm(float strength) { return 0.1f * (std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f); }
+
+float wobble_amplitude_mm(float strength) { return 0.05f * (std::isfinite(strength) ? std::clamp(strength, 0.f, 1.f) : 0.f); }
 
 std::array<float, 3> color_temperature_rgb(float kelvin)
 {

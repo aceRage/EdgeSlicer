@@ -5,10 +5,13 @@
 
 
 #include <cfloat>
+#include <memory>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
 namespace Slic3r {
+
+namespace Airbrush { class AirbrushField; }
 
 enum class EnforcerBlockerType : int16_t {
     // Maximum is 3. The value is serialized in TriangleSelector into 2 bits.
@@ -430,6 +433,12 @@ public:
         TriangleSplittingData seam;
         TriangleSplittingData mmu;
         TriangleSplittingData fuzzy;
+        // Airbrush P3 (A4): the volume's colour field, and the map from the field's space (the
+        // volume's own mesh) into the frame `mesh` was saved in (identity unless the caller moved
+        // `mesh`, as Cut::save_paintings() does). ModelVolume::restore_painting() remaps the paint
+        // UNDER the airbrush and Cut::finalize() / restore_painting() re-bake the field on top.
+        std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
+        Transform3d                                    field_to_saved = Transform3d::Identity();
     };
 
     // Remap painting data from source mesh to target mesh using spatial mapping.

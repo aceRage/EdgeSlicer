@@ -150,12 +150,25 @@ std::pair<bool, std::string> GLShadersManager::init()
         appendOptionalShader("showcase_post_ms", { prefix + "showcase_post_ms.vs", prefix + "showcase_post_ms.fs" });
         if (GLShaderProgram* s = get_shader("showcase_post_ms"); s != nullptr)
             s->set_sampler_units({ { "scene_ms", 1 }, { "hdr_ms", 2 } });
+        // Realism 1h-2: depth of field over the finished frame. Without it the frame stays sharp.
+        appendOptionalShader("showcase_dof", { prefix + "background.vs", prefix + "showcase_dof.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_dof"); s != nullptr)
+            s->set_sampler_units({ { "depth_tex", 0 }, { "color_tex", 1 }, { "coc_tex", 2 } });
         if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
             s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
         if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)
-            s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "shadow_map", 5 } });
+            s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "transmit_map", 3 }, { "shadow_map", 5 } });
         if (GLShaderProgram* s = get_shader("showcase_material"); s != nullptr)
-            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 } });
+            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
+        // Realism 1d: the thickness pass and the coloured shadows' map (both use showcase_material.vs).
+        // Without them translucent plastics take a typical wall thickness and shadows stay grey.
+        appendOptionalShader("showcase_thickness", { prefix + "showcase_material.vs", prefix + "showcase_thickness.fs" });
+        appendOptionalShader("showcase_transmit", { prefix + "showcase_material.vs", prefix + "showcase_transmit.fs" });
+        // Realism 1g: the camera effects over the finished frame (grain, vignette, bloom, colour
+        // fringes, distortion) and the bloom's bright pass. Without it the frame is left as it is.
+        appendOptionalShader("showcase_lens", { prefix + "background.vs", prefix + "showcase_lens.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_lens"); s != nullptr)
+            s->set_sampler_units({ { "color_tex", 0 }, { "bloom_tex", 1 }, { "hdr_tex", 2 } });
         // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): the same material with
         // the coextruded-colour functions put in after its #version line (they live in C++, shared
         // with the toolpaths and the unit tests). Optional: without it coextruded slots show their
@@ -174,7 +187,7 @@ std::pair<bool, std::string> GLShadersManager::init()
             auto program = std::make_unique<GLShaderProgram>();
             if (!sources[0].empty() && !sources[1].empty() && program->init_from_texts("showcase_material_mc", sources)) {
                 m_shaders.push_back(std::move(program));
-                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 } });
+                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
             } else
                 BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: showcase_material_mc";
         }

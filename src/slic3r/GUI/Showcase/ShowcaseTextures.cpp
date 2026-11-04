@@ -69,6 +69,138 @@ const Showcase::FloorManifest &showcase_floors()
     return manifest;
 }
 
+namespace {
+Showcase::HdriManifest g_hdris;
+bool                   g_hdris_loaded     = false;
+unsigned int           g_hdris_generation = 1;
+} // namespace
+
+std::string showcase_hdri_data_dir() { return (boost::filesystem::path(data_dir()) / Showcase::HDRI_DATA_DIR).string(); }
+
+const Showcase::HdriManifest &showcase_hdri_catalogue()
+{
+    static Showcase::HdriManifest catalogue;
+    static bool                   loaded = false;
+    if (!loaded) {
+        loaded = true;
+        std::string       error;
+        const std::string path = showcase_asset_path(Showcase::HDRI_DIR, Showcase::HDRI_CATALOGUE);
+        if (!Showcase::parse_hdri_catalogue(showcase_read_text(path), catalogue, &error))
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDRI download catalogue (" << path << ": " << error << ")";
+    }
+    return catalogue;
+}
+
+bool showcase_hdri_installed(const Showcase::HdriInfo &hdri)
+{
+    if (!hdri.downloadable || hdri.file.empty())
+        return false;
+    boost::system::error_code ec;
+    return boost::filesystem::is_regular_file(boost::filesystem::path(showcase_hdri_data_dir()) / hdri.file, ec);
+}
+
+std::vector<Showcase::HdriInfo> showcase_user_hdris()
+{
+    std::vector<Showcase::HdriInfo> out;
+    const boost::filesystem::path dir = showcase_hdri_data_dir();
+    const std::string             text = showcase_read_text((dir / Showcase::USER_HDRI_MANIFEST).string());
+    if (text.empty())
+        return out;
+    Showcase::HdriManifest m;
+    std::string            error;
+    if (!Showcase::parse_hdri_manifest(text, m, &error)) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: the list of your own HDRIs could not be read (" << error << ")";
+        return out;
+    }
+    for (Showcase::HdriInfo &h : m.hdris) {
+        if (h.procedural || h.downloadable)
+            continue;
+        h.user     = true;
+        h.base_dir = dir.string();
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+bool showcase_save_user_hdris(const std::vector<Showcase::HdriInfo> &hdris)
+{
+    const boost::filesystem::path dir = showcase_hdri_data_dir();
+    boost::system::error_code     ec;
+    boost::filesystem::create_directories(dir, ec);
+    const boost::filesystem::path path = dir / Showcase::USER_HDRI_MANIFEST;
+    const boost::filesystem::path tmp  = dir / (std::string(Showcase::USER_HDRI_MANIFEST) + ".tmp");
+    {
+        boost::nowide::ofstream f(tmp.string(), std::ios::binary | std::ios::trunc);
+        if (!f)
+            return false;
+        f << Showcase::hdri_manifest_to_json(hdris);
+        if (!f)
+            return false;
+    }
+    boost::filesystem::rename(tmp, path, ec);
+    return !ec;
+}
+
+void showcase_hdris_reload()
+{
+    g_hdris_loaded = false;
+    ++g_hdris_generation;
+}
+
+unsigned int showcase_hdris_generation() { return g_hdris_generation; }
+
+const Showcase::HdriManifest &showcase_hdris()
+{
+    if (!g_hdris_loaded) {
+        g_hdris_loaded = true;
+        g_hdris        = Showcase::HdriManifest();
+        std::string error;
+        const std::string path = showcase_asset_path(Showcase::HDRI_DIR, Showcase::HDRI_MANIFEST);
+        if (!Showcase::parse_hdri_manifest(showcase_read_text(path), g_hdris, &error))
+            BOOST_LOG_TRIVIAL(warning) << "Showcase: no HDRI environments (" << path << ": " << error << ")";
+        // 1h-3: the downloaded catalogue entries, then the user's own (ids never repeat a bundled one).
+        const std::string data = showcase_hdri_data_dir();
+        for (const Showcase::HdriInfo &h : showcase_hdri_catalogue().hdris)
+            if (g_hdris.find(h.id) == nullptr && showcase_hdri_installed(h)) {
+                Showcase::HdriInfo installed = h;
+                installed.base_dir           = data;
+                g_hdris.hdris.push_back(std::move(installed));
+            }
+        for (Showcase::HdriInfo &h : showcase_user_hdris())
+            if (g_hdris.find(h.id) == nullptr)
+                g_hdris.hdris.push_back(std::move(h));
+    }
+    return g_hdris;
+}
+
+std::string showcase_hdri_path(const Showcase::HdriInfo &hdri)
+{
+    if (hdri.procedural)
+        return std::string();
+    if (!hdri.base_dir.empty())
+        return (boost::filesystem::path(hdri.base_dir) / hdri.file).string();
+    return showcase_asset_path(Showcase::HDRI_DIR, hdri.file);
+}
+
+wxString showcase_hdri_name(const Showcase::HdriInfo &hdri)
+{
+    if (hdri.id == "hdri_studio") return _L("Studio softbox (HDRI)");
+    if (hdri.id == "hdri_outdoor") return _L("Outdoor sky with sun (HDRI)");
+    if (hdri.id == "hdri_workshop") return _L("Workshop window (HDRI)");
+    if (hdri.id == "hdri_loft") return _L("Loft studio (HDRI)");
+    if (hdri.id == "hdri_sunset") return _L("Golden hour (HDRI)");
+    // 1h-3: the download catalogue.
+    if (hdri.id == "hdri_brown_studio") return _L("Brown photo studio (HDRI)");
+    if (hdri.id == "hdri_blue_studio") return _L("Blue photo studio (HDRI)");
+    if (hdri.id == "hdri_industrial_sunset") return _L("Industrial sunset sky (HDRI)");
+    if (hdri.id == "hdri_kiara_dawn") return _L("Dawn in the park (HDRI)");
+    if (hdri.id == "hdri_warehouse") return _L("Empty warehouse (HDRI)");
+    if (hdri.id == "hdri_abandoned_workshop") return _L("Abandoned workshop (HDRI)");
+    if (hdri.user)
+        return wxString::Format(_L("Mine: %s"), wxString::FromUTF8(hdri.name));
+    return wxString::FromUTF8(hdri.name);
+}
+
 std::string showcase_environment_path(const Showcase::EnvironmentInfo &env) { return showcase_asset_path(Showcase::ENVIRONMENTS_DIR, env.file); }
 std::string showcase_floor_path(const Showcase::FloorTextureInfo &floor) { return showcase_asset_path(Showcase::FLOORS_DIR, floor.file); }
 
@@ -103,6 +235,12 @@ wxString showcase_finish_name(Showcase::Finish finish)
     case Showcase::Finish::Transparent: return _L("Transparent");
     case Showcase::Finish::Metallic: return _L("Metallic");
     case Showcase::Finish::CarbonFiber: return _L("Carbon / glass fibre");
+    case Showcase::Finish::Translucent: return _L("Translucent");
+    case Showcase::Finish::Satin: return _L("Satin");
+    case Showcase::Finish::Sparkle: return _L("Sparkle / galaxy");
+    case Showcase::Finish::Marble: return _L("Marble / stone fill");
+    case Showcase::Finish::Wood: return _L("Wood fill");
+    case Showcase::Finish::MatteTextured: return _L("Textured matte");
     default: return _L("Standard");
     }
 }
@@ -181,6 +319,37 @@ unsigned int showcase_upload_environment(const ShowcaseImage &atlas, int face_si
     return tex;
 }
 
+unsigned int showcase_upload_equirect(const Showcase::HdrImage &image, float scale)
+{
+    if (image.empty() || image.width > 16384)
+        return 0;
+    GLint max_size = 0;
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_size));
+    if (image.width > max_size || image.height > max_size) {
+        BOOST_LOG_TRIVIAL(warning) << "Showcase: an HDRI of " << image.width << "x" << image.height << " is over this GPU's texture limit (" << max_size << ")";
+        return 0;
+    }
+    // RGBA floats; a half float tops out at 65504 (a sun disc in a photograph is well over that).
+    std::vector<float> rgba(size_t(image.width) * size_t(image.height) * 4);
+    for (size_t i = 0; i < size_t(image.width) * size_t(image.height); ++i) {
+        for (size_t c = 0; c < 3; ++c)
+            rgba[i * 4 + c] = std::min(image.rgb[i * 3 + c] * scale, 60000.f);
+        rgba[i * 4 + 3] = 1.f;
+    }
+    GLuint tex = 0;
+    glsafe(::glGenTextures(1, &tex));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, tex));
+    glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 4));
+    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, image.width, image.height, 0, GL_RGBA, GL_FLOAT, rgba.data()));
+    glsafe(::glGenerateMipmap(GL_TEXTURE_2D));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    return tex;
+}
+
 std::vector<ShowcaseFilament> showcase_filaments()
 {
     std::vector<ShowcaseFilament> out;
@@ -200,6 +369,30 @@ std::vector<ShowcaseFilament> showcase_filaments()
                 f.type = p->config.opt_string("filament_type", 0u);
         }
         f.inferred = Showcase::infer_finish(f.preset_name, f.type);
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
+std::vector<ShowcaseFilament> showcase_mixed_filaments()
+{
+    std::vector<ShowcaseFilament> out;
+    const PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return out;
+    // The slicer numbers the virtual filaments after the physical ones, in list order.
+    int slot = std::max(wxGetApp().filaments_cnt(), 0);
+    for (const MixedFilament &mf : bundle->mixed_filaments.mixed_filaments()) {
+        if (!mf.enabled || mf.deleted)
+            continue;
+        ShowcaseFilament f;
+        f.slot        = ++slot;
+        f.mixed       = true;
+        f.color       = mf.display_color.empty() ? std::string("#808080") : mf.display_color;
+        const int b   = std::clamp(mf.mix_b_percent, 0, 100);
+        f.mixed_label = "F" + std::to_string(mf.component_a) + " " + std::to_string(100 - b) + "%+F" + std::to_string(mf.component_b) + " " +
+                        std::to_string(b) + "%";
+        f.inferred    = Showcase::Finish::Standard;
         out.push_back(std::move(f));
     }
     return out;

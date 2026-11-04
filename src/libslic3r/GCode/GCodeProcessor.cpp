@@ -779,6 +779,7 @@ void GCodeProcessorResult::reset() {
     z_offset = 0.0f;
     bed_match_result = BedMatchResult(true);
     warnings.clear();
+    output_tool_filaments.clear();
 
     //BBS: add mutex for protection of gcode result
     unlock();
@@ -1346,6 +1347,7 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
 void GCodeProcessor::reset()
 {
     m_mass_locator = nullptr;
+    m_output_tool_filaments.clear();
     m_booked_times.clear();
     m_booking_tool_change = false;
     m_skip_end_gcode_delays = false;
@@ -1535,6 +1537,8 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;
+    // Per-nozzle process P5: the G-code's tool -> filament map, for the send dialog.
+    m_result.output_tool_filaments = m_output_tool_filaments;
     finalize_object_masses();
 
     // update width/height of wipe moves
@@ -1824,7 +1828,8 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 case '2': { process_G2_G3(line, true); break; }  // Move, clockwise arc
                 case '3': { process_G2_G3(line, false); break; } // Move, counter-clockwise arc
                 //BBS
-                case 4:  { process_G4(line); break; }  // Delay
+                // EDGE: '4', not 4 (which never matched, so no G4 was ever seen, see process_G4).
+                case '4':  { process_G4(line); break; }  // Delay
                 default: break;
                 }
                 break;
@@ -3573,10 +3578,23 @@ void GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line, bool cloc
 //BBS
 void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
 {
+    // EDGE: the dispatch read `case 4:` (BambuStudio fixed it to '4' in ced9e43be6, the BS 1.7.4 merge 2a478ab4f9 put
+    // the old line back), so no G4 ever counted in the estimate. Every G4 wait counts now (start G-code, tool changes,
+    // custom and filament change G-code, the minimum layer time pause), booked on the move that follows it.
     float value_s = 0.0;
     float value_p = 0.0;
-    if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
-        value_s += value_p * 0.001;
+    // S (seconds) wins over P (milliseconds), as in Marlin and RepRapFirmware; a bare G4 waits 0 s.
+    if (line.has_value('S', value_s))
+        value_p = 0.f;
+    else
+        line.has_value('P', value_p);
+    value_s = (value_s > 0.f ? value_s : 0.f) + (value_p > 0.f ? value_p * 0.001f : 0.f);
+    // A G4 without a time adds nothing and leaves the move queue alone (flushing it would change how the moves
+    // around it are blended, and so their time). Otherwise the dwell starts once the queued moves are done; booked
+    // after flushing them, it lands on the first move after it, so it stays on its own layer (the minimum layer
+    // time pause relies on that).
+    if (value_s > 0.f) {
+        simulate_st_synchronize(0.f);
         simulate_st_synchronize(value_s);
     }
 }
@@ -4180,7 +4198,8 @@ void GCodeProcessor::process_T(const std::string_view command)
             if ((m_flavor != gcfRepRapFirmware && m_flavor != gcfRepRapSprinter) || new_extruder != -1)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         } else {
-            unsigned char id = static_cast<unsigned char>(new_extruder);
+            // Per-nozzle process P4: a G-code that names assigned tools is read back in filaments.
+            unsigned char id = static_cast<unsigned char>(filament_of_output_tool(new_extruder));
             bool tool_change_stored = false;
             if (m_extruder_id != id) {
                 if (id >= m_result.extruders_count)
@@ -4898,7 +4917,8 @@ void GCodeProcessor::run_post_process()
         if (cmd.size() >= 2) {
             // Reserved BBL special T markers (T1000/T65535/...) are not toolchanges; don't clamp or warn.
             if (tool_number != -1 && !is_bbl_special_tool_command(tool_number)) {
-                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= tool_number) {
+                // Per-nozzle process P4: the temperatures are the filament's; the line keeps the G-code's tool.
+                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= int(filament_of_output_tool(unsigned(tool_number)))) {
                     // found an invalid value, clamp it to a valid one
                     tool_number = std::clamp<int>(0, m_extruder_temps_config.size() - 1, tool_number);
                     // emit warning
@@ -4915,8 +4935,9 @@ void GCodeProcessor::run_post_process()
                     backtrace, cmd,
                     // line inserter
                     [tool_number, this, &current_layer_id](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[tool_number] :
-                                                                    m_extruder_temps_first_layer_config[tool_number]);
+                        const size_t filament_number = filament_of_output_tool(unsigned(tool_number));
+                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[filament_number] :
+                                                                    m_extruder_temps_first_layer_config[filament_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
                         /**

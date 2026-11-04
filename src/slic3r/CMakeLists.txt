@@ -218,6 +218,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoMeshBoolean.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
+    GUI/Gizmos/GLGizmoMmuSegmentationAirbrush.cpp
     GUI/Gizmos/GLGizmoAlignment.cpp
     GUI/Gizmos/GLGizmoAlignment.hpp
     GUI/Gizmos/GLGizmoMove.cpp
@@ -301,6 +302,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MainTabs.hpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
+    GUI/Showcase/ShowcaseHdriDialog.cpp
+    GUI/Showcase/ShowcaseHdriDialog.hpp
     GUI/Showcase/ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseRenderer.hpp
     GUI/Showcase/ShowcaseTextures.cpp
@@ -578,6 +581,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
@@ -642,6 +647,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
     GUI/CostsDialog.hpp
+    GUI/FilamentNozzleValuesDialog.cpp
+    GUI/FilamentNozzleValuesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -1150,6 +1157,13 @@ set(SLIC3R_GUI_SOURCES
     GUI/ThirdPartyFilamentMap.hpp
     GUI/ThirdPartyFilamentMapPanel.cpp
     GUI/ThirdPartyFilamentMapPanel.hpp
+    GUI/LayerlingPanel.cpp
+    GUI/LayerlingPanel.hpp
+    GUI/LayerlingBrowser.hpp
+    GUI/LayerlingBrowserWin.cpp
+    GUI/LayerlingBrowserGtk.cpp
+    GUI/LayerlingServer.cpp
+    GUI/LayerlingServer.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
@@ -1176,6 +1190,7 @@ if (APPLE)
             GUI/InstanceCheckMac.h
             GUI/GUI_UtilsMac.mm
             GUI/ModelBrowserPanelMac.mm
+            GUI/LayerlingBrowserMac.mm
             GUI/wxMediaCtrl2.mm
             GUI/wxMediaCtrl2.h
             GUI/Showcase/ShowcaseVideoMac.mm
@@ -1270,6 +1285,10 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/UntrustedSettingsGuard.cpp                # namespace-scope using namespace Slic3r::untrusted
     GUI/CustomModelsMenu.cpp                      # file-local helpers with generic names (menu_label, add_item, ...)
     GUI/ModelBrowserPanel.cpp                     # WRL/WebView2 COM headers; namespace-scope using-directive
+    GUI/LayerlingBrowserWin.cpp                   # WRL/WebView2 COM headers; namespace-scope using-declarations
+    GUI/LayerlingBrowserGtk.cpp                   # declares WebKitGTK functions itself, as Widgets/WebView.cpp does
+    GUI/LayerlingPanel.cpp                        # file-local helpers with generic names (cfg, downloads_folder, ...)
+    GUI/LayerlingServer.cpp                       # file-local helpers with generic names (utf8_of, path_of, handle)
     GUI/Jobs/CreateFontStyleImagesJob.cpp         # namespace-scope using namespace Emboss
     GUI/Jobs/EmbossJob.cpp                        # namespace-scope using namespace Emboss
     GUI/TextLines.cpp                             # namespace-scope using namespace Emboss
@@ -1302,6 +1321,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Showcase/ShowcaseTextures.cpp             # glad before wx image headers, like ShowcaseRenderer.cpp
     GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
     GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
+    GUI/Showcase/ShowcaseHdriDialog.cpp           # file-local hdri_* helpers; Http (curl) next to wx headers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad

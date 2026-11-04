@@ -80,6 +80,30 @@ uniform int   skin_count_bottom;
 uniform float skin_angles[16];
 uniform vec2  skin_center;           // concentric: the rings' centre (world XY)
 
+// Realism 1d (Showcase::effective_translucency): light through the plastic. All 0 = the plain material.
+uniform float mat_transmission;      // share of the light behind a wall that comes through it
+uniform float mat_density;           // Beer's law, per mm
+uniform float mat_sss;               // soft wrap of the light round the edges
+// The distance from the camera to the nearest back face of a translucent object (R32F, mm; 0 = none),
+// drawn before the objects at half size (ShowcaseRenderer::render_thickness). Unit 8.
+uniform bool      use_thickness;
+uniform sampler2D thickness_map;
+uniform vec4      thickness_viewport;   // origin x, y and size w, h of the frame it was drawn for
+// Realism 1e (MaterialParams): sheen, flakes and the speckle of a filled filament. All 0 = off.
+uniform float mat_sheen;
+uniform float mat_sparkle;
+uniform float mat_speckle;
+uniform int   mat_speckle_kind;      // 1 stone (marble), 2 wood
+
+// Realism 1f (Showcase::Imperfections): 0 = off. The seam table (unit 9, RGBA32F, one texel a seam
+// point x, y, z, sorted by z; Showcase::seam_points) comes from the plate's slice.
+uniform float     imp_wobble;
+uniform float     imp_seam;
+uniform float     imp_colour;
+uniform sampler2D seam_table;
+uniform int       seam_count;
+uniform int       seam_table_width;
+
 // Nothing under the floor (and the mirrored pass keeps to its side of it).
 uniform bool  clip_floor;
 // S5, the layer build-up's fallback without a slice: nothing above build_clip_z (very large = off),
@@ -483,6 +507,234 @@ bool skin_tangent(vec3 n, out vec3 t)
 // 0 at 1 px a layer and below, 1 at 2 px and above (layer_line_fade() in C++).
 float layer_fade(float layer_px) { return smoothstep(1.0, 2.0, layer_px); }
 
+// --- realism 1d: light through the plastic ----------------------------------------------------------
+
+// How thick the plastic is along the view ray here (mm): the nearest back face minus this front face.
+// Without the thickness pass (the mirror) or where it found nothing behind, a typical wall.
+float wall_thickness()
+{
+    const float fallback = 1.6;   // Showcase::DEFAULT_WALL_THICKNESS
+    if (!use_thickness)
+        return fallback;
+    vec2  uv   = (gl_FragCoord.xy - thickness_viewport.xy) / max(thickness_viewport.zw, vec2(1.0));
+    float back = texture(thickness_map, uv).r;
+    float front = length(world_pos.xyz - camera_position);
+    if (back <= 0.0 || back < front - 0.05)
+        return fallback;   // nothing behind, or another object's back face in front of this one
+    return max(back - front, 0.05);
+}
+
+// The light the plastic lets through towards the eye (linear): the key light from behind the wall and
+// the environment on the far side, dimmed by Beer's law over the wall's thickness and coloured by the
+// filament; plus a soft wrap of the key light round the edges (the "fast subsurface" of game engines).
+vec3 translucent_light(vec3 n, vec3 v, vec3 albedo, float thickness, out float t_share)
+{
+    t_share = exp(-mat_density * thickness);
+    vec3 result = vec3(0.0);
+    if (light_count <= 0)
+        return result;
+    vec3  l   = normalize(light_dir[0]);
+    vec3  key = light_color[0];
+    vec3  tint = mix(vec3(1.0), albedo, 0.85);
+    if (mat_transmission > 0.0) {
+        // Seen against the light: brightest where the eye looks into the key through the wall.
+        float behind = pow(clamp(dot(v, -normalize(l + n * 0.35)), 0.0, 1.0), 3.0);
+        vec3  far    = use_env ? env_diffuse(-n) * env_intensity : plain_diffuse(-n);
+        result += (key * behind * 1.4 + far * 0.8) * tint * albedo * t_share * mat_transmission;
+    }
+    if (mat_sss > 0.0) {
+        float nl    = dot(n, l);
+        float wrap  = 0.5;
+        float extra = max((nl + wrap) / (1.0 + wrap), 0.0) - max(nl, 0.0);
+        // Thin parts let more of it round; a thick block only softens its terminator.
+        float thin = mat_transmission > 0.0 ? mix(0.6, 1.0, t_share) : 0.6;
+        result += albedo * key * extra * mat_sss * thin;
+    }
+    return result;
+}
+
+// --- realism 1e: sheen, flakes, speckle -------------------------------------------------------------
+
+vec3 hash33(vec3 p)
+{
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+float value_noise(vec3 p)
+{
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash33(i).x, n100 = hash33(i + vec3(1, 0, 0)).x, n010 = hash33(i + vec3(0, 1, 0)).x, n110 = hash33(i + vec3(1, 1, 0)).x;
+    float n001 = hash33(i + vec3(0, 0, 1)).x, n101 = hash33(i + vec3(1, 0, 1)).x, n011 = hash33(i + vec3(0, 1, 1)).x, n111 = hash33(i + vec3(1, 1, 1)).x;
+    return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y), mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+float fbm3(vec3 p)
+{
+    float s = 0.0, a = 0.5;
+    for (int i = 0; i < 4; ++i) {
+        s += a * value_noise(p);
+        p = p * 2.03 + vec3(1.7, 9.2, 3.1);
+        a *= 0.5;
+    }
+    return s;
+}
+
+// A velvet-like lobe (Charlie distribution, Neubelt visibility, as KHR_materials_sheen): fibres and
+// matte powders catch the light at grazing angles.
+vec3 sheen_light(vec3 n, vec3 v, vec3 albedo, float key_shade)
+{
+    vec3  color = mix(vec3(1.0), albedo, 0.5) * mat_sheen;
+    float r     = 0.45;
+    float inv_r = 1.0 / r;
+    float nv    = max(dot(n, v), 1e-4);
+    vec3  s     = vec3(0.0);
+    for (int i = 0; i < 3; ++i) {
+        if (i >= light_count)
+            break;
+        vec3  l  = normalize(light_dir[i]);
+        float nl = dot(n, l);
+        if (nl <= 0.0)
+            continue;
+        vec3  h  = normalize(l + v);
+        float nh = dot(n, h);
+        float d  = (2.0 + inv_r) * pow(max(1.0 - nh * nh, 1e-4), 0.5 * inv_r) / (2.0 * PI);
+        float vis = 1.0 / (4.0 * (nl + nv - nl * nv));
+        s += d * vis * nl * light_color[i] * (i == 0 ? key_shade : 1.0);
+    }
+    vec3 ambient = use_env ? env_diffuse(n) * env_intensity : plain_diffuse(n);
+    s += ambient * pow(1.0 - nv, 4.0) * 0.6;
+    return s * color;
+}
+
+// Flakes in world-space cells of 0.15 mm (Showcase::SPARKLE_CELL_MM), so they stay on the part as the
+// camera moves. Each cell holds a flake with probability mat_sparkle, tilted at random: a tight
+// highlight that winks. Under about a pixel a cell fades to the flakes' average haze
+// (Showcase::sparkle_lod), so a video does not fizz. `cell_px` comes from the caller (derivatives
+// are taken in uniform control flow).
+vec3 sparkle_light(vec3 n, vec3 v, vec3 albedo, float key_shade, float cell_px)
+{
+    const float cell = 0.15;
+    vec3  id   = floor(world_pos.xyz / cell);
+    vec3  r1   = hash33(id);
+    vec3  r2   = hash33(id + 17.0);
+    float on   = step(1.0 - mat_sparkle, r1.x);
+    vec3  fn   = normalize(n + (r2 - 0.5) * 1.3);
+    float lod  = smoothstep(0.75, 2.0, cell_px);
+    vec3  tint = mix(vec3(1.0), albedo, 0.35 + 0.4 * r1.y);   // some flakes take the colour, some stay silver
+    vec3  glint = vec3(0.0), haze = vec3(0.0);
+    for (int i = 0; i < 3; ++i) {
+        if (i >= light_count)
+            break;
+        vec3  l  = normalize(light_dir[i]);
+        float nl = dot(n, l);
+        if (nl <= 0.0)
+            continue;
+        vec3  h  = normalize(l + v);
+        vec3  rad = light_color[i] * (i == 0 ? key_shade : 1.0);
+        glint += pow(max(dot(fn, h), 0.0), 900.0) * 60.0 * nl * rad;
+        haze  += pow(max(dot(n, h), 0.0), 24.0) * 0.6 * nl * rad;
+    }
+    vec3 rf = reflect(-v, fn);
+    vec3 env_glint = use_env ? env_specular(rf, 0.03) * env_intensity : plain_specular(rf, 0.03);
+    glint += env_glint * 0.8 * smoothstep(0.6, 1.0, r1.z);
+    vec3 flakes = glint * on;
+    return tint * mix(haze * mat_sparkle, flakes, lod);
+}
+
+// The colour of a filled filament: marble's veins and flecks, wood fill's fibres and grain.
+// `fleck_px`: pixels across one 0.35 mm fleck (the flecks fade to their average below 1.5 px).
+vec3 speckle_albedo(vec3 albedo, float fleck_px)
+{
+    vec3  p    = world_pos.xyz;
+    float fine = smoothstep(0.75, 1.5, fleck_px);
+    if (mat_speckle_kind == 1) {
+        // Veins: thin dark bands along a warped plane; flecks of darker and lighter grains.
+        float warp = fbm3(p * 0.08) * 6.0;
+        float band = abs(sin((p.x * 0.6 + p.y * 0.35 + p.z * 0.25) * 0.18 + warp));
+        float vein = pow(1.0 - band, 10.0);
+        vec3  id   = hash33(floor(p / 0.35));
+        float dark = step(0.96, id.x) * fine;
+        float lite = step(0.98, id.y) * fine;
+        vec3  c    = mix(albedo, albedo * 0.3, vein * 0.9 * mat_speckle);
+        c = mix(c, c * 0.25, dark * 0.8 * mat_speckle);
+        c = mix(c, mix(c, vec3(1.0), 0.6), lite * 0.6 * mat_speckle);
+        // Averaged flecks where they are under a pixel.
+        return mix(c, c * (1.0 - 0.06 * mat_speckle), 1.0 - fine);
+    }
+    // Wood: low-frequency shade, short darker fibres along the layers, dark specks.
+    float shade  = fbm3(p * 0.15);
+    vec3  c      = albedo * mix(1.0, 0.78 + 0.45 * shade, mat_speckle);
+    vec3  fid    = hash33(floor(vec3(p.x / 1.2, p.y / 1.2, p.z / 0.3)));
+    float fibre  = step(0.92, fid.x) * fine;
+    vec3  speck  = hash33(floor(p / 0.35) + 5.0);
+    float dot_on = step(0.96, speck.z) * fine;
+    c = mix(c, c * 0.6, fibre * 0.5 * mat_speckle);
+    c = mix(c, c * 0.35, dot_on * 0.7 * mat_speckle);
+    return mix(c, c * (1.0 - 0.08 * mat_speckle), 1.0 - fine);
+}
+
+// --- realism 1f: imperfections ------------------------------------------------------------------------
+
+float hash_layer(float i, float salt) { return fract(sin(i * 12.9898 + salt * 78.233) * 43758.5453); }
+
+// The sideways shift of the layers (in units of the amplitude) at the layer coordinate li (the layer's
+// index plus the height within it): a slow drift over about five layers, and a little of each layer's
+// own that changes near the layer's top, where the next bead starts.
+vec2 wobble_offset(float li)
+{
+    float k  = floor(li / 5.0);
+    float f  = fract(li / 5.0);
+    f = f * f * (3.0 - 2.0 * f);
+    vec2  a  = vec2(hash_layer(k, 1.0), hash_layer(k, 2.0)) - 0.5;
+    vec2  b  = vec2(hash_layer(k + 1.0, 1.0), hash_layer(k + 1.0, 2.0)) - 0.5;
+    float il = floor(li);
+    vec2  j0 = vec2(hash_layer(il, 3.0), hash_layer(il, 4.0));
+    vec2  j1 = vec2(hash_layer(il + 1.0, 3.0), hash_layer(il + 1.0, 4.0));
+    vec2  j  = mix(j0, j1, smoothstep(0.7, 1.0, fract(li))) - 0.5;
+    return 2.0 * (mix(a, b, f) + 0.25 * j);
+}
+
+vec4 seam_point(int i) { return texelFetch(seam_table, ivec2(i - (i / seam_table_width) * seam_table_width, i / seam_table_width), 0); }
+
+// How far (mm, across the wall) this point is from the seam of its layer, and the direction away from
+// it. The seam points sit at the top of their layer (the nozzle's height), so the search runs from
+// this height up one layer.
+float seam_distance(vec3 p, float h, out vec2 away)
+{
+    away = vec2(0.0);
+    if (seam_count <= 0 || seam_table_width <= 0)
+        return 1e9;
+    float lo_z = p.z - 0.01;
+    int lo = 0, hi = seam_count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (seam_point(mid).z < lo_z)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    float best = 1e9;
+    for (int k = 0; k < 48; ++k) {
+        int i = lo + k;
+        if (i >= seam_count)
+            break;
+        vec4 s = seam_point(i);
+        if (s.z > p.z + h + 0.01)
+            break;
+        vec2  d = p.xy - s.xy;
+        float l = length(d);
+        if (l < best) {
+            best = l;
+            away = l > 1e-5 ? d / l : vec2(0.0);
+        }
+    }
+    return best;
+}
+
 #ifdef SHOWCASE_MULTICOLOUR
 // Multi-colour (coextruded) filaments, P4 (tests/design_multicolour_filament_view.md 7.3): the mesh's
 // stand-in for the toolpaths' colours, without a slice. Only in the "showcase_material_mc" program,
@@ -601,12 +853,75 @@ void main()
         groove_shade = 1.0 - mat_line_shade * min(1.0, line_depth * 1.6) * groove * fade * wall;
     }
 
+    // 1e: how many millimetres one pixel spans here (flakes and flecks fade below a pixel).
+    float px_mm = max(length(fwidth(world_pos.xyz)), 1e-6);
+    float dz_px = max(fwidth(world_pos.z), 1e-6);
+    // 1e: marble and wood fills.
+    if (mat_speckle > 0.0)
+        albedo = speckle_albedo(albedo, 0.35 / px_mm);
+
     // Carbon / glass fibre: a fine speckle in the colour and the roughness.
     float roughness = clamp(mat_roughness, 0.03, 1.0);
     if (mat_fiber_noise > 0.0) {
-        float speck = hash12(floor(world_pos.xy * 12.0) + floor(world_pos.z * 12.0) * 17.0);
+        float speck;
+        if (mat_sheen > 0.0)
+            // 1e, textured matte: short streaks along the layers instead of dots.
+            speck = hash12(floor(world_pos.xy * 4.0) + floor(world_pos.z * 12.0) * 17.0);
+        else
+            speck = hash12(floor(world_pos.xy * 12.0) + floor(world_pos.z * 12.0) * 17.0);
         albedo *= 1.0 - mat_fiber_noise * 0.18 * speck;
         roughness = clamp(roughness - mat_fiber_noise * 0.25 * step(0.93, speck), 0.03, 1.0);
+    }
+
+    // Realism 1f: imperfections, each only when on. World and layer coordinates only (never the
+    // screen), so they stay put in a video, and they fade with the layer lines' "pixels a layer".
+    if (imp_wobble > 0.0 || imp_seam > 0.0 || imp_colour > 0.0) {
+        float z  = world_pos.z;
+        float h  = 0.2;
+        float li = z / 0.2;
+        if (layer_mode != 0) {
+            vec2 layer = layer_at(z);
+            h  = max(layer.y - layer.x, 1e-4);
+            li = float(layer_index_at(z)) + clamp((z - layer.x) / h, 0.0, 1.0);
+        }
+        float lfade = layer_fade(h / dz_px);
+        float wall_i = 1.0 - abs(n.z);
+        // Z-banding: each layer shifted a little sideways tilts the wall at its edges.
+        if (imp_wobble > 0.0 && wall_i > 0.02) {
+            float amp   = 0.05 * imp_wobble;   // Showcase::wobble_amplitude_mm
+            float d0    = dot(wobble_offset(li - 0.25), n.xy);
+            float d1    = dot(wobble_offset(li + 0.25), n.xy);
+            float slope = (d1 - d0) / (0.5 * h) * amp;
+            n = normalize(n - vec3(0.0, 0.0, 1.0) * slope * 2.0 * lfade * wall_i);
+            albedo *= 1.0 + 0.05 * imp_wobble * dot(wobble_offset(li), vec2(0.7071)) * lfade;
+        }
+        // The seam: a line of small bumps, a touch glossier, where the slicer put it.
+        if (imp_seam > 0.0 && seam_count > 0 && wall_i > 0.02) {
+            const float w = 0.45;   // Showcase::SEAM_WIDTH_MM
+            vec2  away;
+            float d = seam_distance(world_pos.xyz, h, away);
+            if (d < w) {
+                float sfade = smoothstep(0.75, 1.5, w / px_mm);
+                float x     = clamp(1.0 - d / w, 0.0, 1.0);
+                float b     = x * x * (3.0 - 2.0 * x);
+                float slope = 0.1 * imp_seam * 6.0 * x * (1.0 - x) / w;   // Showcase::seam_height_mm over the width
+                // Each layer's blob is round: strongest in the middle of the layer.
+                float mid   = sin(PI * clamp(fract(li), 0.0, 1.0));
+                n = normalize(n + vec3(away, 0.0) * slope * 2.0 * mid * sfade * wall_i);
+                roughness = clamp(roughness - 0.15 * b * imp_seam * sfade, 0.03, 1.0);
+                groove_shade *= 1.0 - 0.1 * imp_seam * sfade * smoothstep(0.4, 0.0, d / w);
+            }
+        }
+        // Slight colour and gloss drift: low-frequency noise and a little per layer.
+        if (imp_colour > 0.0) {
+            vec3  p  = world_pos.xyz;
+            float lo = value_noise(p * 0.04) - 0.5;
+            float pl = hash_layer(floor(li), 5.0) - 0.5;
+            albedo *= 1.0 + imp_colour * (0.07 * lo + 0.025 * pl * lfade);
+            vec3 hue = vec3(value_noise(p * 0.03 + 11.0), value_noise(p * 0.03 + 23.0), value_noise(p * 0.03 + 37.0)) - 0.5;
+            albedo *= 1.0 + imp_colour * 0.03 * hue;
+            roughness = clamp(roughness + imp_colour * 0.12 * (value_noise(p * 0.08 + 5.0) - 0.5), 0.03, 1.0);
+        }
     }
 
     // The anisotropic lobe's tangent follows the layers (horizontal) on walls; 1c: on flat top and
@@ -623,10 +938,25 @@ void main()
     }
 
     vec3 diffuse, specular;
-    shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_shadow(n),
+    float key_sh = key_shadow(n);
+    shade_material(n, v, t, albedo, roughness, mat_f0, mat_metal_tint, anisotropy, mat_clearcoat, key_sh,
                    diffuse, specular);
 
     vec3 lit = (diffuse * groove_shade + specular * mix(1.0, groove_shade, 0.5)) * (1.0 - scene_dim) + glow_light;
+
+    // Realism 1d / 1e, each only when its finish has it (so the seven older finishes are unchanged).
+    float t_share = 1.0;
+    bool  extra_on = mat_sheen > 0.0 || mat_sparkle > 0.0 || ((mat_transmission > 0.0 || mat_sss > 0.0) && gl_FrontFacing);
+    if (extra_on) {
+        vec3 extra = vec3(0.0);
+        if (mat_sheen > 0.0)
+            extra += sheen_light(n, v, albedo, key_sh);
+        if (mat_sparkle > 0.0)
+            extra += sparkle_light(n, v, albedo, key_sh, 0.15 / px_mm);
+        if ((mat_transmission > 0.0 || mat_sss > 0.0) && gl_FrontFacing)
+            extra += translucent_light(n, v, albedo, wall_thickness(), t_share);
+        lit += extra * groove_shade * (1.0 - scene_dim);
+    }
 
     // Translucent: the body lets light through, the rim reflects (Fresnel edge brightening).
     float n_dot_v = max(dot(n, v), 1e-4);
@@ -634,6 +964,9 @@ void main()
     if (alpha < 1.0) {
         float edge = pow(1.0 - n_dot_v, 4.0);
         alpha = clamp(mix(alpha, 1.0, edge * 0.7) + dot(specular, vec3(0.3)) * 0.5, 0.0, 1.0);
+        // 1d: thick plastic hides more of what is behind it than a thin wall.
+        if (mat_transmission > 0.0)
+            alpha = clamp(mix(alpha, 1.0, (1.0 - t_share) * 0.8), 0.0, 1.0);
     }
 
     out_color = material_output(lit, alpha, exposure, force_opaque);
