@@ -6748,6 +6748,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
         if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
         if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
+        if (what == "/prime_tower") return post; // slice_prime_tower: move that plate's prime tower
         if (what == "/delete" || what == "/rename" || what == "/bed_type") return post; // PR G: plate edits
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
