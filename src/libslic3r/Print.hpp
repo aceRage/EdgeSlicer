@@ -1299,13 +1299,14 @@ public:
     // then on the band merge is automatic: there is deliberately no config flag and no UI toggle (Lance's
     // decision), so this detection is the only gate. BambuStudio's version also checked its
     // multi_nozzle_diameter_mode project key; that check is dropped here, as is the second clause that compared
-    // against the 0.2 mm layer-grid nozzle, because Edge's grid anchor is the smallest USED nozzle and the clause
-    // cannot fire against it. See the definition for details.
+    // used filaments against a separate layer-grid nozzle. Edge has no such nozzle:
+    // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
+    // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
     bool                uses_multiple_nozzle_diameters() const;
     // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
     // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
-    // their physical components. Shared by the mixed-diameter gate above and by the band planner's reference
-    // nozzle, so the two can never disagree about which nozzles the plate uses.
+    // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
+    // reference nozzle is collected from the object being planned, not from here.
     void                used_printing_filaments(std::vector<unsigned int> &filaments) const;
     // On-demand evaluation vs filament_hot_bed_nozzles.json (calls extruders(true) once internally).
     void                filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,

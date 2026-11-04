@@ -19,6 +19,7 @@ namespace Slic3r {
 
 class Layer;
 class PrintConfig;
+class PrintObject;
 
 struct AdaptiveLayerHeightRange
 {
@@ -118,11 +119,12 @@ ExPolygons adaptive_suppressed_orphan_area(const Layer &layer);
 // gate cannot disagree with the flows behind it.
 bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids);
 
-// How many base layers one nozzle merges into a single extrusion. The whole print is sliced at the layer
-// height of its smallest nozzle, so a larger nozzle simply keeps one layer out of every diameter-ratio
-// layers: a 0.8 nozzle next to a 0.2 one keeps one contour out of every four. The ratio is corrected when
-// the resulting thickness falls outside what the nozzle can actually extrude. Returns 1 when the nozzle
-// has to print every layer on its own.
+// How many base layers one nozzle merges into a single extrusion. The stack is sliced at the user's
+// layer_height; min_nozzle_diameter is only the ratio's denominator (how many of those base layers a
+// bigger nozzle covers per extrusion), not a grid. A 0.8 nozzle next to a 0.2 reference keeps one
+// contour out of every four at equal layer_height. The ratio is corrected when the resulting thickness
+// falls outside what the nozzle can actually extrude. Returns 1 when the nozzle has to print every
+// layer on its own.
 size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height);
 
 // Split the complete layer stack into bands of band_size layers. The first band starts at the object base
@@ -170,15 +172,18 @@ bool split_adaptive_layer_span(
 
 // ---- EdgeSlicer additions (not in BambuStudio) ----------------------------------------------------------------
 
-// The band reference nozzle: the smallest diameter among the used filaments (0 based ids), i.e. the nozzle whose
-// layer height the whole stack is sliced at. 0 when none resolves to a positive diameter.
+// The band reference nozzle: the smallest nonzero diameter among the given filaments (0-based ids).
+// It is the ratio denominator for adaptive_layer_band_size(), not the height the stack is sliced at.
+// 0 when none resolves to a positive diameter.
 double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids);
 
 // The printable window of the nozzle 1-based `filament_id` prints with: Bambu's [0.2d, 0.7d] window, narrowed by
 // the min_layer_height / max_layer_height of the PHYSICAL extruder the filament maps to
 // (physical_extruder_for_filament, so filament_nozzle_assignment is honored and slots past the nozzle count do not
-// fall back to extruder 0 - the get_at() pitfall Bambu's comment above warns about). Zero or negative limits are
-// ignored. If the two windows do not overlap the Bambu window is returned unchanged.
+// fall back to extruder 0 via get_at() - the pitfall Bambu's comment above warns about). An unmapped mixed
+// virtual filament id still falls back to nozzle 0, so that failure mode is a silently wrong nozzle rather
+// than a crash. Zero or negative limits are ignored. If the two windows do not overlap the Bambu window is
+// returned unchanged.
 //
 // Consistency with Orca #17000 (equal_layering): after #17000 the prime tower no longer requires objects to share
 // min/max_layer_height; it only requires one base layer grid. The per-nozzle limits that equal_layering stopped
@@ -188,10 +193,11 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintCon
 
 // Test-only accessor for PrintObject::compute_adaptive_merge_groups(). The planner has no production caller yet
 // (it is wired into the perimeter step by the follow-up PR), so a unit test reaching it through this friend is the
-// only way to exercise it. No such test is written yet: the planner needs a sliced print, and the only slicing
-// harness here (tests/fff_print) has to run on a Mac/Windows gate, so the test has to be developed against a build
-// this PR's authoring step did not have. The friend is kept so that test can be added without changing Print.hpp.
-struct AdaptiveMergePlanAccess;
+// only way to exercise it.
+struct AdaptiveMergePlanAccess
+{
+    static void compute(PrintObject &object);
+};
 
 } // namespace Slic3r
 

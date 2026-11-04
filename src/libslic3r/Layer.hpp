@@ -63,7 +63,8 @@ public:
 
     // Mixed-layer-height band merge (runtime only, recomputed by every prepare_infill(), never serialized):
     // what this region gives up on this layer and, on the group top, what it extrudes instead.
-    // Bands are a global grid per nozzle diameter, so a region holds at most one patch on a given layer.
+    // A region may hold several patches on one layer: disjoint group-top slabs after local Z-conflict
+    // clipping, swallowed-span marker copies of those slabs, and orphan-suppression records.
     std::vector<AdaptiveMergePatch> adaptive_merge_patches;
 
     // collection of expolygons representing the bridged areas (thus not

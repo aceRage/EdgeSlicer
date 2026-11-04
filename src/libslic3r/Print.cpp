@@ -1260,14 +1260,15 @@ unsigned int Print::num_object_instances() const
 // set. Edge has no such key and, per Lance's decision, deliberately does not get one: there is no config flag
 // and no UI toggle, so this is purely mixed-diameter detection and it is the ONLY gate on the band merge.
 //
-// Two more Bambu clauses are dropped, both because Edge's grid anchor is a different thing from Bambu's:
-//   * m_single_diameter_layering_nozzle - Bambu slices a single-diameter plate directly at that nozzle's band
+// Two more Bambu clauses are dropped, both because Edge has no counterpart for Bambu's layer-grid nozzle:
+//   * m_single_diameter_layering_nozzle - Bambu short-circuits a single-diameter plate at that nozzle's band
 //     height. Edge has no such member (and no such step), so there is nothing to short-circuit on.
-//   * the "one coarse filament over the finer grid anchor" clause. In Bambu the anchor is the preset's primary
-//     nozzle (0.2 in multi-diameter mode), so a 0.4 preset on a 0.2 grid has to be compared against 0.2 here.
-//     In Edge the whole stack is sliced at the smallest USED nozzle (adaptive_band_reference_nozzle, the grid
-//     PR #850 plans on and equal_layering PR #849 syncs the prime tower to), so the anchor is by construction the
-//     smallest diameter in the list and that comparison can never be true. Keeping it would be dead code.
+//   * the "one coarse filament over the finer grid anchor" clause. In Bambu the anchor is the preset's
+//     layer-grid nozzle (0.2 in multi-diameter mode), so a plate of all 0.4 nozzles still compares 0.4 > 0.2
+//     and merges. Edge has no separate grid nozzle: SlicingParameters::create_from_config sets layer_height
+//     from the user's object_config.layer_height, and adaptive_band_reference_nozzle() returns the smallest
+//     nonzero diameter over the very list handed to it. "Some filament uses a nozzle larger than D" is then
+//     false by construction, whatever layer_height the user set, so keeping the clause would be dead code.
 //
 // Filaments are collected from print regions and object configs only. This is queried from inside the
 // per-object slicing steps, and support generation runs them in parallel, while Print::extruders() reaches

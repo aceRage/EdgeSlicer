@@ -6023,22 +6023,25 @@ void PrintObject::combine_infill()
     }
 }
 
-// Decide which layers each wall region keeps. The object is sliced at the layer height of the smallest
-// nozzle of the print; a larger nozzle then keeps one contour out of every band and drops the ones below
-// it, instead of merging them into it. Bands are a global grid shared by every region using the same
-// diameter, so two such regions never straddle each other's band boundaries.
+// Decide which layers each wall region keeps. A larger nozzle keeps one contour out of every band and
+// drops the ones below it. Bands are a per-diameter ladder shared by every region of this object that
+// uses the same diameter, so two such regions never straddle each other's band boundaries. The stack
+// itself is sliced at the user's layer_height; the reference nozzle is only the ratio denominator for
+// those band sizes.
 //
-// Ported from BambuStudio v02.09.01.70 src/libslic3r/PrintObject.cpp:4312-4998. Edge differences, all
-// deliberate:
+// Algorithm from BambuStudio v02.09.01.70 src/libslic3r/PrintObject.cpp:4312-4998. This is not a
+// behavioural match: Bambu with a 0.2 layer-grid nozzle will merge a plate where every nozzle is 0.4;
+// Edge never merges a single-diameter plate. Different reference nozzle, different band sizes, and
+// Edge expands mixed virtual filaments where Bambu has no equivalent.
+//
+// Edge differences, all deliberate:
 //   * The gate is Print::uses_multiple_nozzle_diameters(), which in Edge is pure mixed-diameter detection
 //     (no multi_nozzle_diameter_mode key, no UI toggle - Lance's decision).
-//   * The band reference nozzle is Edge's adaptive_band_reference_nozzle() over Print::used_printing_filaments(),
-//     i.e. the smallest nozzle the plate actually prints with. Bambu reads layer_grid_nozzle_diameter() (the
-//     preset's 0.2 layer-grid nozzle) and only falls back to the finest wall nozzle when the preset has none.
-//     Edge has no separate layer-grid nozzle - the stack is sliced at the smallest USED nozzle - so the anchor
-//     and the grid are the same thing here. That keeps the planner, PR #850's band sizing and the prime-tower
-//     grid of equal_layering (#849) on one number. The whole plate still slices on that one shared grid, which
-//     is exactly the contract #849 requires.
+//   * The band reference is adaptive_band_reference_nozzle() over THIS object's own used filaments
+//     (object_extruders()), not the plate-wide used_printing_filaments() and not Bambu's
+//     layer_grid_nozzle_diameter(). Edge has no separate grid nozzle, so the "some filament uses a
+//     nozzle larger than D" clause cannot trigger: D is the smallest nonzero diameter over the same
+//     object-local list the bands are sized from, whatever layer_height the user set.
 //   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
 //     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
 //     count (Bambu's get_at() pitfall).
@@ -6052,13 +6055,15 @@ void PrintObject::compute_adaptive_merge_groups()
         for (LayerRegion *layerm : layer->regions())
             layerm->adaptive_merge_patches.clear();
 
-    // Only meaningful when different nozzle diameters are present.
+    // Only meaningful when different nozzle diameters are present. Plate-wide is the right gate:
+    // a single-diameter plate never merges, even if one object could invent a finer reference.
     if (! this->print()->uses_multiple_nozzle_diameters())
         return;
 
-    // m_slicing_params.layer_height is the fine grid this object was sliced on, which is what a band size is
-    // measured in. Populate it if a caller reached the planner before the slicing step filled it in.
-    this->update_slicing_parameters();
+    // m_slicing_params.layer_height is the user's base step this object was sliced on, which is what
+    // a band size is measured in. The perimeter-path caller must already have sliced; do not mutate
+    // slicing parameters here.
+    assert(m_slicing_params.valid);
 
     const PrintConfig &print_config = this->print()->config();
     const size_t       region_count = this->num_printing_regions();
@@ -6074,12 +6079,18 @@ void PrintObject::compute_adaptive_merge_groups()
     std::vector<double> region_nozzles(region_count, 0.);
     for (size_t region_id = 0; region_id < region_count; ++ region_id) {
         const PrintRegionConfig &config = this->printing_region(region_id).config();
+        // wall_filament is already a 1-based config id; nozzle_diameter_for_filament() wants that
+        // convention, so it is passed through unchanged. (used_printing_filaments() / object_extruders()
+        // are 0-based and need +1, which adaptive_band_reference_nozzle() applies internally.)
         const unsigned int filament = (unsigned int) config.wall_filament.value;
         region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
     }
-    std::vector<unsigned int> used_filaments;
-    this->print()->used_printing_filaments(used_filaments);
-    const double min_nozzle = adaptive_band_reference_nozzle(print_config, used_filaments);
+    // Band reference is this object's own used filaments (regions' wall/infill plus volume extruders,
+    // mixed-expanded), not the plate-wide used_printing_filaments(). A 0.2 support on another object
+    // must not size this object's 0.4 walls. object_extruders() is 0-based; adaptive_band_reference_nozzle()
+    // adds 1 to reach the config id. Support on this object is excluded: Bambu's object-local set is
+    // the used wall nozzles, and object_extruders() already matches that plus this object's infill.
+    const double min_nozzle = adaptive_band_reference_nozzle(print_config, this->object_extruders());
     if (min_nozzle <= EPSILON)
         return;
 
@@ -6738,6 +6749,11 @@ void PrintObject::compute_adaptive_merge_groups()
                         kept.emplace_back(surface, std::move(expolygon));
                 region->slices.set(std::move(kept));
             }
+}
+
+void AdaptiveMergePlanAccess::compute(PrintObject &object)
+{
+    object.compute_adaptive_merge_groups();
 }
 
 void PrintObject::_generate_support_material()
