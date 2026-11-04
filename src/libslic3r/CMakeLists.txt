@@ -144,6 +144,12 @@ set(lisbslic3r_sources
     Showcase/ShowcasePath.hpp
     Showcase/ShowcaseRenderCli.cpp
     Showcase/ShowcaseRenderCli.hpp
+    Showcase/ShowcaseBlender.cpp
+    Showcase/ShowcaseBlender.hpp
+    Showcase/ShowcaseGltf.cpp
+    Showcase/ShowcaseGltf.hpp
+    Showcase/ShowcaseTubes.cpp
+    Showcase/ShowcaseTubes.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
