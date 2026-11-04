@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_zip_entry_path.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
+	test_layerling.cpp
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_arrange_seq_print.cpp
@@ -35,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
+	test_paint_wire.cpp
 	test_paint_remap.cpp
 	test_spread_paint.cpp
 	test_airbrush.cpp
@@ -118,6 +120,13 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
 	test_mixed_nozzle.cpp
+	test_nozzle_process.cpp
+	test_tool_slots.cpp
+	test_nozzle_editing.cpp
+	test_nozzle_widths.cpp
+	test_nozzle_override.cpp
+	test_nozzle_tool_process.cpp
+	test_nozzle_rack_slots.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
@@ -193,7 +202,11 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_path.cpp
     test_showcase_tone.cpp
     test_showcase_glsl.cpp
+    test_showcase_hdr.cpp
+    test_showcase_panel_rules.cpp
+    test_showcase_lens.cpp
     test_showcase_skin.cpp
+    test_showcase_realism.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp

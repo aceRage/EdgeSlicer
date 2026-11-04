@@ -10,6 +10,7 @@
 #include "MutablePolygon.hpp"
 #include "PerimeterGenerator.hpp"
 #include "PrintConfig.hpp"
+#include "NozzleProcess.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/SupportSpotsGenerator.hpp"
 #include "Support/TreeSupport.hpp"
@@ -282,7 +283,7 @@ void PrintObject::_transform_hole_to_polyholes()
     }
     //create a polyhole per id and replace holes points by it.
     for (auto entry : id2layerz2hole) {
-        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(print()->config().nozzle_diameter.get_at(std::get<2>(entry.first) - 1)), std::get<4>(entry.first), std::get<5>(entry.first));
+        Polygons polyholes = create_polyholes(std::get<0>(entry.first), std::get<1>(entry.first), scale_(nozzle_diameter_for_filament(print()->config(), unsigned(std::get<2>(entry.first)))), std::get<4>(entry.first), std::get<5>(entry.first));
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
@@ -1778,7 +1779,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "bottom_solid_infill_flow_ratio"
             || opt_key == "brim_flow_ratio"
             || opt_key == "spiral_starting_flow_ratio"
-            || opt_key == "spiral_finishing_flow_ratio") {
+            || opt_key == "spiral_finishing_flow_ratio"
+            // Edge: read by GCode::process_layer only.
+            || opt_key == "min_layer_time_pause") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
@@ -4283,6 +4286,12 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md 3.6.
     if (PrintObject::support_groups_want_soluble(object))
         config.support_top_z_distance.value = 0.;
+    // Per-nozzle process P2: the support width of the support filament's nozzle process (no-op without one).
+    // A support width set on the object still wins.
+    // P6: nor does a line_width set on the object when the plate's support width is 0 (= line_width).
+    if (!config.nozzle_support_line_width.values.empty() && object.config.get().option("support_line_width") == nullptr &&
+        !(object.config.get().option("line_width") != nullptr && config.support_line_width.value == 0.))
+        stamp_nozzle_line_widths(config);
     return config;
 }
 
@@ -4558,6 +4567,58 @@ std::vector<std::string> PrintObject::modifiers_without_overrides() const
     return out;
 }
 
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint)
+{
+    // With Override paint on the paint does not shadow the modifier, so neither note applies. (On an
+    // unpainted part the flag is dropped and an otherwise inert modifier still gets the plain notice.)
+    if (! overlaps_painted || ! sets_filament || overrides_paint)
+        return ModifierPaintNote::None;
+    if (region_is_alias)
+        return ModifierPaintNote::SameFilamentPainted;
+    return filament_differs ? ModifierPaintNote::FilamentOverriddenByPaint : ModifierPaintNote::None;
+}
+
+PrintObject::ModifierPaintNotes PrintObject::modifier_paint_notes() const
+{
+    ModifierPaintNotes out;
+    // Painting only exists as a concept with several filaments.
+    if (m_shared_regions == nullptr || this->model_object() == nullptr || m_print->config().filament_diameter.size() < 2)
+        return out;
+    for (const ModelVolume *volume : this->model_object()->volumes) {
+        if (volume == nullptr || ! volume->is_modifier())
+            continue;
+        if (! model_volume_sets_filament(*volume))
+            continue;
+        bool seen = false, effective = false, differs = false, overlaps_painted = false;
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+                if (region.model_volume == volume && region.parent >= 0) {
+                    seen = true;
+                    const PrintObjectRegions::VolumeRegion &parent = layer_range.volume_regions[region.parent];
+                    if (parent.model_volume != nullptr && parent.model_volume->is_mm_painted())
+                        overlaps_painted = true;
+                    if (region.region != parent.region) {
+                        effective = true;
+                        if (region.region != nullptr && parent.region != nullptr) {
+                            const PrintRegionConfig &a = region.region->config(), &b = parent.region->config();
+                            if (a.wall_filament != b.wall_filament || a.sparse_infill_filament != b.sparse_infill_filament ||
+                                a.solid_infill_filament != b.solid_infill_filament)
+                                differs = true;
+                        }
+                    }
+                }
+        if (! seen)
+            continue;
+        switch (classify_modifier_paint_note(! effective, true, differs, overlaps_painted, model_volume_overrides_paint(*volume))) {
+        case ModifierPaintNote::SameFilamentPainted:       out.same_filament_painted.emplace_back(volume->name); break;
+        case ModifierPaintNote::FilamentOverriddenByPaint: out.filament_overridden.emplace_back(volume->name);   break;
+        default: break;
+        }
+    }
+    return out;
+}
+
 std::vector<std::string> PrintObject::modifiers_without_parent() const
 {
     std::vector<std::string> out;
@@ -4602,6 +4663,25 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     if (config.outer_wall_filament.value > (int) num_extruders)
         config.outer_wall_filament.value = 0;
     clamp_exturder_to_default(config.solid_infill_filament, num_extruders);
+    // Per-nozzle process P8: every other region setting from the process of the tool that prints the role (no-op without
+    // per-tool processes). A setting made on the object, part, modifier or layer range still wins over the tool's process.
+    if (!config.nozzle_region_values.values.empty()) {
+        stamp_nozzle_region_values(config);
+        auto reapply_region = [&config](const DynamicPrintConfig &src) {
+            for (const std::string &key : src.keys())
+                if (is_nozzle_region_option(key))
+                    if (ConfigOption *dst = config.option(key); dst != nullptr)
+                        if (const ConfigOption *opt = src.option(key); opt != nullptr && opt->type() == dst->type())
+                            dst->set(opt);
+        };
+        if (volume.is_model_part())
+            reapply_region(volume.get_object()->config.get());
+        reapply_region(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_region(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_region(*layer_range_config);
+    }
     if (config.sparse_infill_density.value < 0.00011f)
         // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
         // See GH issue #5910.
@@ -4614,7 +4694,53 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     // which would bring the zero distance back.
     if (config.fuzzy_skin.value != FuzzySkinType::Disabled_fuzzy && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
         config.fuzzy_skin.value = FuzzySkinType::Disabled_fuzzy;
+    // Per-nozzle process P2: each role's width from the process of the nozzle that prints it (no-op without one).
+    // A width set on the object, part, modifier or layer range still wins over the nozzle's process.
+    if (!config.nozzle_outer_wall_line_width.values.empty()) {
+        const PrintRegionConfig plate = config; // the widths before the stamp
+        stamp_nozzle_line_widths(config);
+        auto reapply_widths = [&config, &plate](const DynamicPrintConfig &src) {
+            // P6: a line_width set on the object or a layer range is what a role left at 0 on the plate means.
+            const bool own_line_width = src.option("line_width") != nullptr;
+            for (const auto &key : nozzle_line_width_keys()) {
+                ConfigOption *dst = config.option(key.second);
+                if (dst == nullptr)
+                    continue;
+                if (const ConfigOption *opt = src.option(key.second); opt != nullptr)
+                    dst->set(opt);
+                else if (own_line_width && key.second != "bridge_line_width")
+                    if (const auto *before = plate.option<ConfigOptionFloatOrPercent>(key.second); before != nullptr && before->value == 0.)
+                        dst->set(before);
+            }
+        };
+        reapply_widths(volume.get_object()->config.get());
+        reapply_widths(volume.config.get());
+        if (! volume.material_id().empty())
+            reapply_widths(volume.material()->config.get());
+        if (layer_range_config != nullptr)
+            reapply_widths(*layer_range_config);
+    }
+    // Override paint belongs to a modifier that sets a filament: a part (or its object, or a height range
+    // modifier) never carries it, and a modifier without a filament of its own keeps what it inherited.
+    if (volume.is_model_part())
+        config.override_paint.value = false;
+    else if (config.override_paint.value != default_or_parent_region_config.override_paint.value && ! model_volume_sets_filament(volume))
+        config.override_paint.value = default_or_parent_region_config.override_paint.value;
     return config;
+}
+
+bool model_volume_sets_filament(const ModelVolume &volume)
+{
+    for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+        if (const ConfigOption *opt = volume.config.option(key); opt != nullptr && opt->getInt() > 0)
+            return true;
+    return false;
+}
+
+bool model_volume_overrides_paint(const ModelVolume &volume)
+{
+    const ConfigOption *opt = volume.config.option("override_paint");
+    return volume.is_modifier() && opt != nullptr && opt->getBool() && model_volume_sets_filament(volume);
 }
 
 struct POProfiler
@@ -5791,9 +5917,9 @@ void PrintObject::combine_infill()
 
         // Limit the number of combined layers to the maximum height allowed by this regions' nozzle.
         //FIXME limit the layer height to max_layer_height
-        double nozzle_diameter = this->print()->config().nozzle_diameter.get_at(region.config().wall_filament.value - 1);
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().sparse_infill_filament.value - 1));
-        nozzle_diameter = std::min(nozzle_diameter, this->print()->config().nozzle_diameter.get_at(region.config().solid_infill_filament.value - 1));
+        double nozzle_diameter = nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().wall_filament.value));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().sparse_infill_filament.value)));
+        nozzle_diameter = std::min(nozzle_diameter, nozzle_diameter_for_filament(this->print()->config(), unsigned(region.config().solid_infill_filament.value)));
         
         //Orca: Limit combination of infill to up to infill_combination_max_layer_height
         const double infill_combination_max_layer_height = region.config().infill_combination_max_layer_height.get_abs_value(nozzle_diameter);

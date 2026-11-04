@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -32,6 +33,7 @@
 #include <nlohmann/json.hpp>
 
 #include "GUI.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
@@ -1355,9 +1357,47 @@ const SendPlateFilament* PrintHostSendDialog::plate_filament(int index) const
     return nullptr;
 }
 
+int PrintHostSendDialog::preselect_slot(const SendPlateFilament& f) const
+{
+    // Per-nozzle process P2: the tool the filament was sliced for (its nozzle, widths and process), when the printer
+    // names that tool among its slots (a U1's toolheads). Box / MMU slots are not tools.
+    if (f.assigned_tool < 0 || m_device_status.qidi_box || m_device_status.mmu_grouped())
+        return -1;
+    for (size_t p = 0; p < m_device_status.slots.size(); ++p)
+        if (m_device_status.slots[p].unit < 0 && m_device_status.slots[p].index == f.assigned_tool)
+            return int(p);
+    return -1;
+}
+
 wxString PrintHostSendDialog::mapping_warning() const
 {
-    return wxString();
+    // Per-nozzle process P2: a filament sent to a tool whose nozzle is not the one it was sliced for prints at the
+    // wrong widths. Only when the printer reports the tool's nozzle size.
+    wxString text;
+    const std::vector<int> positions = mapping_choice_positions();
+    for (size_t row = 0; row < positions.size() && row < m_mapping_filament.size(); ++row) {
+        const SendPlateFilament* f = plate_filament(m_mapping_filament[row]);
+        if (f == nullptr || f->sliced_nozzle <= 0.)
+            continue;
+        const int pos = positions[row];
+        double    nozzle = 0.;
+        wxString  tool;
+        if (pos >= 0 && pos < (int) m_device_status.slots.size()) {
+            nozzle = m_device_status.slots[size_t(pos)].nozzle;
+            tool   = from_u8(m_device_status.slots[size_t(pos)].label());
+        } else if (f->assigned_tool >= 0 && f->assigned_tool != f->index) {
+            // "As sliced" runs the filament on its own tool, not the one the project put it on.
+            text += format_wxstr(_L("Filament %1% was sliced for T%2%, but \"As sliced\" prints it on T%3%."), f->index + 1,
+                                 f->assigned_tool + 1, f->index + 1) + "\n";
+            continue;
+        }
+        if (nozzle > 0. && std::abs(nozzle - f->sliced_nozzle) > 0.01)
+            text += format_wxstr(_L("Filament %1% was sliced for a %2% mm nozzle, but %3% has a %4% mm nozzle."), f->index + 1,
+                                 from_u8(format_diameter_to_str(f->sliced_nozzle)), tool, from_u8(format_diameter_to_str(nozzle))) + "\n";
+    }
+    if (!text.empty() && text.Last() == '\n')
+        text.RemoveLast();
+    return text;
 }
 
 wxString PrintHostSendDialog::third_party_mismatch_warning() const

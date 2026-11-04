@@ -6,6 +6,7 @@
 #include "BambuCamRelay.hpp"
 #include "ElegooCamRelay.hpp"
 #include "RemoteNotify.hpp"
+#include "RemotePaintV1.hpp"
 #include "RemoteSliceV1.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
@@ -2599,6 +2600,8 @@ std::vector<std::string> Testing::pair_features()
     std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" };
     for (const std::string& s : SliceV1::pair_features())
         f.push_back(s);
+    for (const std::string& s : PaintV1::pair_features())
+        f.push_back(s);
     return f;
 }
 
@@ -3439,6 +3442,9 @@ static std::string ff_camera_url_from_detail(const std::string& body)
     return "";
 }
 
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error);
+
 // A phone upload: stream the body to <uploads>/<stamp>_<name>. Only model files, only
 // a bare file name (X-File-Name, percent-encoded UTF-8), Content-Length required.
 static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path, std::string& error)
@@ -3458,8 +3464,16 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
         error = "only .3mf, .stl, .obj, .step and .glb files can be opened";
         return false;
     }
+    return spool_body(client, r, clean, MAX_UPLOAD, out_path, error);
+}
+
+// The body of a request to <uploads>/<stamp>_<random>/<name> (one folder each, so a file keeps its own
+// name), Content-Length required and at most `max_bytes`. A stalled or broken body leaves nothing.
+static bool spool_body(tcp::socket& client, Request& r, const std::string& name, size_t max_bytes, std::string& out_path,
+                       std::string& error)
+{
     if (r.content_length == 0) { error = "empty upload (Content-Length required)"; return false; }
-    if (r.content_length > MAX_UPLOAD) { error = "file too large"; return false; }
+    if (r.content_length > max_bytes) { error = "file too large"; return false; }
     ensure_dirs();
     // One folder per upload so the file keeps its own name (it becomes the object / project name).
     // The stamp is only one-second precise, so a random suffix keeps two uploads in the same
@@ -3467,7 +3481,7 @@ static bool spool_upload(tcp::socket& client, Request& r, std::string& out_path,
     const fs::path folder = fs::path(uploads_dir()) / (timestamp_compact() + "_" + random_hex(4));
     boost::system::error_code ec;
     fs::create_directories(folder, ec);
-    out_path = (folder / clean).string();
+    out_path = (folder / name).string();
     boost::nowide::ofstream f(out_path, std::ios::binary | std::ios::trunc);
     if (!f) { error = "cannot write to " + uploads_dir(); return false; }
     set_read_timeout(client, UPLOAD_TIMEOUT_S); // a stalled upload frees its thread and its file
@@ -6724,6 +6738,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     // PR D (arrange): the instances on no plate. A name, not an index, so it is matched here,
     // before the index check below turns it away.
     if (sub == "/api/plates/loose") return get;
+    if (sub == "/api/plates/add") return post; // PR G: the toolbar's Add plate
     // /api/plates/<index>/<what> and /api/jobs/<id>
     if (sub.compare(0, 12, "/api/plates/") == 0) {
         const std::string  rest  = sub.substr(12);
@@ -6733,8 +6748,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (what == "/send") return post; // send the sliced plate to a printer (RemoteSend)
         if (what == "/send/preview") return post; // slice_v1: that send's mapping sheet, nothing sent
         if (what == "/arrange" || what == "/orient") return post; // PR D: arrange / orient that plate (or all)
+        if (what == "/delete" || what == "/rename" || what == "/bed_type") return post; // PR G: plate edits
         return get && (what == "/thumbnail.png" || what == "/layout" || what == "/preview" ||
                        what == "/preview.png" || what == "/preview/status" ||
+                       what == "/preview/legend" || what == "/preview/layers" || // PR E: preview v2
                        what == "/result"); // slice_v1: results detail and warnings
     }
     if (sub.compare(0, 10, "/api/jobs/") == 0) {
@@ -6785,6 +6802,20 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         return false;
     }
 
+    // paint_v1 (H1, the read side of tablet paint sessions): the object list, opening a session and
+    // a session's state, one volume's mesh and its painting (volume= / rev= are query values). The
+    // session id is 16 lowercase hex characters the instance made; nothing else reaches it.
+    if (sub == "/api/paint/objects")  return get;
+    if (sub == "/api/paint/sessions") return post;
+    if (sub.compare(0, 20, "/api/paint/sessions/") == 0) {
+        const std::string rest  = sub.substr(20);
+        const size_t      slash = rest.find('/');
+        const std::string id    = slash == std::string::npos ? rest : rest.substr(0, slash);
+        if (id.size() != 16 || id.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
+        const std::string what = slash == std::string::npos ? std::string() : rest.substr(slash);
+        return get && (what.empty() || what == "/mesh" || what == "/paint");
+    }
+
     if (sub == "/api" || sub == "/api/")             return get;
     if (sub == "/api/info")                          return get;
     if (sub == "/api/window")                        return get || post;
@@ -6795,6 +6826,9 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/objects/transform")             return post;
     if (sub == "/api/objects/printable")             return post; // PR D: the object list's Printable toggle
     if (sub == "/api/undo")                          return post; // PR D: one undo step (expect= guards it)
+    if (sub == "/api/objects/delete")                return post; // PR G: delete an object or one instance
+    if (sub == "/api/objects/duplicate")             return post; // PR G: Clone
+    if (sub == "/api/project/save")                  return post; // PR G: Save project
     if (sub == "/api/printers")                      return get;
     if (sub == "/api/snapmaker/devices")             return get;
     if (sub == "/api/snapmaker/add")                 return post;
@@ -6811,6 +6845,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
     if (sub == "/api/settings/process")              return get || post;
     if (sub == "/api/settings/process/revert")       return post;
     if (sub == "/api/settings/process/save")         return post;
+    if (sub == "/api/settings/filament")             return get || post; // PR F: index= in the query
+    if (sub == "/api/settings/filament/revert")      return post;
+    if (sub == "/api/settings/filament/save")        return post;
+    if (sub == "/api/presets/filament_remove")       return post;
     if (sub == "/api/archive")                       return get;
     return false;
 }
@@ -7091,6 +7129,37 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             if (inst.pid == pid) target = inst;
         if (!target.alive) { respond_json(client, 404, json_error("no such slicer instance")); return; }
         const std::string base = "http://127.0.0.1:" + std::to_string(target.port);
+        // paint_v1 (H2): the tablet's paint for a session. Spooled like an upload - a painted object's
+        // body is MBs and the proxy takes 64 KiB - then handed to the slicer, which reads it once and
+        // deletes it. The session id is 16 lowercase hex characters the slicer made.
+        if (sub.compare(0, 7, "/paint/") == 0 && r.method == "POST") {
+            const std::string tail  = sub.substr(7);
+            const size_t      cut   = tail.find('/');
+            const std::string sid   = cut == std::string::npos ? tail : tail.substr(0, cut);
+            if (cut == std::string::npos || tail.substr(cut) != "/apply" || !PaintV1::is_session_id(sid)) {
+                respond_json(client, 404, json_error("no such route; see /api"));
+                return;
+            }
+            std::string path, error;
+            if (!spool_body(client, r, "apply.psapply", PaintV1::MAX_APPLY_BYTES, path, error)) {
+                respond_json(client, error == "file too large" ? 413 : 400, json_error(error));
+                return;
+            }
+            gc_uploads();
+            int         status = 502;
+            std::string body   = json_error("the slicer did not answer");
+            Http::post(base + "/api/paint/sessions/" + sid + "/apply")
+                .timeout_connect(2).timeout_max(300)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .set_post_body("path=" + percent_encode(path))
+                .on_complete([&](std::string b, unsigned st) { status = (int) st; body = b; })
+                .on_error([&](std::string b, std::string err, unsigned st) { status = st ? (int) st : 502; body = b.empty() ? json_error(err) : b; })
+                .perform_sync();
+            boost::system::error_code ig;
+            fs::remove_all(fs::path(path).parent_path(), ig); // the slicer deleted it already; never leave it
+            respond_json(client, status, body);
+            return;
+        }
         if (sub == "/open" && r.method == "POST") {
             std::string path, error;
             if (!spool_upload(client, r, path, error)) { respond_json(client, 400, json_error(error)); return; }

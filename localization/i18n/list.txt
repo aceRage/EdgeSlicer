@@ -171,6 +171,7 @@ src/libslic3r/Support/TreeSupport.cpp
 src/libslic3r/Model.cpp
 src/libslic3r/CutUtils.cpp
 src/libslic3r/TacJoint.cpp
+src/libslic3r/calib.cpp
 src/libslic3r/Format/OBJ.cpp
 src/slic3r/GUI/CalibrationWizardPage.cpp
 src/slic3r/GUI/CalibrationPanel.cpp

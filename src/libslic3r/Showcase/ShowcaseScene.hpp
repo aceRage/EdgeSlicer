@@ -44,13 +44,17 @@ constexpr int MAX_EXPORT_SIDE = 8192;
 constexpr int MIN_EXPORT_SIDE = 16;
 
 // New values go at the end: the panel's choices follow this order.
-enum class BackgroundType : int { Solid = 0, VerticalGradient, RadialGradient, Image, Transparent, Environment };
+// 1h-2: Backplate = the user's photo behind the model, always filling the frame, with the floor as a
+// shadow catcher and a camera matched to the photo's horizon and focal length.
+enum class BackgroundType : int { Solid = 0, VerticalGradient, RadialGradient, Image, Transparent, Environment, Backplate };
 enum class ImageFit       : int { Fill = 0, Fit, Tile };
 enum class FloorType      : int { None = 0, ShadowCatcher, Solid, Grid, Texture, Image };
 enum class Quality        : int { Draft = 0, High, Best };
 enum class ImageFormat    : int { PNG = 0, JPEG, WebP };
 enum class Projection     : int { Perspective = 0, Ortho };
 enum class Anchor         : int { TopLeft = 0, Top, TopRight, Left, Center, Right, BottomLeft, Bottom, BottomRight };
+// 1h-2: the depth of field's sample count (ShowcaseLens.hpp dof_taps()).
+enum class BokehQuality   : int { Draft = 0, Good, Best };
 
 // The built-in presets: S1's three, then S2's (design 1.3). builtin_presets() gives the order the
 // panel lists them in.
@@ -64,7 +68,9 @@ const char *to_string(ImageFormat v);
 const char *to_string(Projection v);
 const char *to_string(Anchor v);
 const char *to_string(PresetId v);
+const char *to_string(BokehQuality v);
 bool from_string(const std::string &s, BackgroundType &v);
+bool from_string(const std::string &s, BokehQuality &v);
 bool from_string(const std::string &s, ImageFit &v);
 bool from_string(const std::string &s, FloorType &v);
 bool from_string(const std::string &s, Quality &v);
@@ -88,6 +94,34 @@ struct Background
     ImageFit       fit    = ImageFit::Fill;
     // Image and Environment: 0 = sharp, 1 = very soft (a shallow depth of field look).
     float          blur   = 0.f;
+
+    // 1h-2: where the environment backdrop sits (type Environment). Written only when changed, so an
+    // older scene reads and writes back as it was and renders as before.
+    // An infinite environment (ground off) tilted up (+) or down about the camera's horizontal axis, in
+    // degrees: more sky or more floor behind the model. The lighting does not move.
+    float          backdrop_pitch = 0.f;
+    // Ground projection: the panorama is projected onto a dome with a flat floor at the model's floor
+    // (Z = 0), centred under the model, so the model stands on the panorama's floor. The floor then
+    // works as a shadow catcher (effective_floor_type() in ShowcaseLens.hpp).
+    bool           ground        = false;
+    float          ground_height = 0.f;   // mm: the panorama camera's height above its floor; 0 = auto (the model's size)
+    float          ground_radius = 0.f;   // mm: the dome's radius; 0 = auto (the HDRI's room size over its camera height)
+    float          ground_scale  = 1.f;   // multiplies both: a larger or smaller world around the model
+    // Backplate: where the photo's horizon is in the frame (0 bottom .. 1 top), and the 35 mm
+    // equivalent focal length it was taken with. "Match camera" turns the camera to them.
+    float          plate_horizon = 0.5f;
+    float          plate_focal   = 50.f;
+    // Backplate: the photo turned counter-clockwise by 0 / 90 / 180 / 270 degrees and mirrored left to
+    // right (before the turn), on top of the EXIF orientation of the file (which is always applied).
+    int            plate_rotation = 0;
+    bool           plate_flip     = false;
+    // Backplate framing: 1 = the photo covers the frame (cropped to it); larger zooms in, smaller shows
+    // more of it (the rest of the frame a blurred stretch of its edges). The offsets pan the view over
+    // the photo: -1..1 moves the frame's centre to the photo's left / right (x) or bottom / top (y) edge.
+    // plate_horizon stays in the photo's own coordinates (0 its bottom, 1 its top).
+    float          plate_zoom     = 1.f;
+    float          plate_offset_x = 0.f;
+    float          plate_offset_y = 0.f;
 
     bool operator==(const Background &o) const;
     bool operator!=(const Background &o) const { return !(*this == o); }
@@ -146,6 +180,11 @@ struct Lighting
     std::string environment     = "studio";
     float       env_intensity   = 0.7f;   // 0..3
     float       env_rotation_deg = 0.f;   // around +Z
+    // 1h-1: for an HDRI environment (ShowcaseHdr.hpp), the key light is the sun (or brightest light)
+    // found in the panorama - its direction (turned with env_rotation_deg), colour and strength - and
+    // it is taken out of the image-based light. The key_intensity still scales it. Off = the key
+    // light's own angles and temperature.
+    bool        sun_from_env    = false;
     float       exposure        = 0.f;    // EV, -3..3
     float       shadow_softness = 1.f;    // 0.5 (hard, sun) .. 4 (very soft)
     // 1a: the post pass's tone curve (D-R1: Khronos PBR Neutral by default, filmic as an option).
@@ -229,6 +268,20 @@ struct ExportSettings
     bool operator!=(const ExportSettings &o) const { return !(*this == o); }
 };
 
+// Realism 1f (design 2.6): what makes the model read as printed, each 0 (off) .. 1, model mode. Written
+// as the materials' "imperfections" only when one is on.
+struct Imperfections
+{
+    float wobble = 0.f;   // layers shifted a little sideways (Z-banding)
+    float seam   = 0.f;   // the seam as a line of small bumps (needs the plate sliced)
+    float strings = 0.f;  // faint strings on travels across gaps (needs the plate sliced)
+    float colour = 0.f;   // slight colour and gloss variation
+
+    bool any() const { return wobble > 0.f || seam > 0.f || strings > 0.f || colour > 0.f; }
+    bool operator==(const Imperfections &o) const { return wobble == o.wobble && seam == o.seam && strings == o.strings && colour == o.colour; }
+    bool operator!=(const Imperfections &o) const { return !(*this == o); }
+};
+
 // Per filament slot (1-based, as the filament list shows it): the finish the user picked over the
 // inferred one (D4).
 struct MaterialOverride
@@ -255,6 +308,17 @@ struct Materials
     // glow (the project's filament_glow keys) shine in their glow colour. Written only when on.
     bool                          lights_off         = false;
     float                         lights_off_ambient = 0.05f;
+    // 1h-2b: what the toolpaths view shows besides the model's own extrusions (the stills and the live
+    // view; a video's build-up has its own Infill / Supports switches on top). Written only when off.
+    bool                          toolpath_supports  = true;   // supports, their interfaces and transitions
+    bool                          toolpath_skirt     = true;   // skirt and brim
+    bool                          toolpath_infill    = true;   // sparse and internal solid infill (seen through gaps)
+    // Realism 1d: light through thin walls and soft edges of the plastic (0 = off .. 1), model mode.
+    // Translucent filaments glow through thin walls at any value (effective_translucency()). Written
+    // only when set.
+    float                         translucency       = 0.f;
+    // Realism 1f.
+    Imperfections                 imperfections;
     // The shaders' scene_dim: 0 with the lights on, else the share of the light taken away.
     float scene_dim() const { return lights_off ? 1.f - std::min(std::max(lights_off_ambient, 0.f), 1.f) : 0.f; }
 
@@ -268,9 +332,73 @@ struct Materials
     bool operator==(const Materials &o) const
     {
         return layer_lines == o.layer_lines && overrides == o.overrides && toolpath_smoothness == o.toolpath_smoothness &&
-               coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient;
+               coextruded_look == o.coextruded_look && lights_off == o.lights_off && lights_off_ambient == o.lights_off_ambient &&
+               toolpath_supports == o.toolpath_supports && toolpath_skirt == o.toolpath_skirt && toolpath_infill == o.toolpath_infill &&
+               translucency == o.translucency && imperfections == o.imperfections;
     }
     bool operator!=(const Materials &o) const { return !(*this == o); }
+};
+
+// What the toolpaths view lays besides the model's walls. During a video's layer build-up the video's own
+// Infill / Supports switches decide (BuildUp::infill / supports); otherwise the scene's Materials switches
+// (stills and the live view). The skirt and brim always follow the Materials switch.
+struct ToolpathParts
+{
+    bool infill   = true;
+    bool supports = true;
+    bool skirt    = true;
+};
+inline ToolpathParts toolpath_parts(const Materials &m, bool building, bool build_infill, bool build_supports)
+{
+    ToolpathParts p;
+    p.infill   = building ? build_infill : m.toolpath_infill;
+    p.supports = building ? build_supports : m.toolpath_supports;
+    p.skirt    = m.toolpath_skirt;
+    return p;
+}
+
+// 1h-2 (design 2.7, pulled forward from 1g): depth of field in the post pass, off by default. The
+// circle of confusion comes from the lens of the frame (its 35 mm equivalent focal length), the
+// f-number and the focus distance (ShowcaseLens.hpp). Written as the scene's "dof" only when changed.
+struct DepthOfField
+{
+    bool         enabled        = false;
+    float        f_number       = 2.8f;   // 1.0 .. 32
+    bool         focus_on_model = true;   // focus on the middle of the plate's objects
+    float        focus_mm       = 300.f;  // otherwise this far along the view (mm)
+    BokehQuality quality        = BokehQuality::Good;
+    // Realism 1h-2, the deferred part (written only when set): a blurred foreground spills over the
+    // sharper background behind it, and bright highlights (from the HDR layer) bloom into bokeh discs
+    // (0 = off .. 1).
+    bool         near_bleed     = false;
+    float        highlights     = 0.f;
+
+    bool operator==(const DepthOfField &o) const
+    {
+        return enabled == o.enabled && f_number == o.f_number && focus_on_model == o.focus_on_model && focus_mm == o.focus_mm &&
+               quality == o.quality && near_bleed == o.near_bleed && highlights == o.highlights;
+    }
+    bool operator!=(const DepthOfField &o) const { return !(*this == o); }
+};
+
+// Realism 1g (design 2.7): camera effects over the finished frame, each 0 (off) .. 1. Written as the
+// scene's "lens" only when one is on. Relative to the safe frame, so the live view and the export
+// agree; the grain is drawn at the output's pixels (not the supersampled ones) and changes with each
+// video frame.
+struct LensEffects
+{
+    float grain      = 0.f;   // luma-weighted film grain
+    float vignette   = 0.f;   // cos^4-style darkening towards the corners
+    float bloom      = 0.f;   // a glow around the brightest highlights (from the HDR layer)
+    float chromatic  = 0.f;   // colour fringes towards the corners (up to ~1.5 px)
+    float distortion = 0.f;   // barrel distortion
+
+    bool any() const { return grain > 0.f || vignette > 0.f || bloom > 0.f || chromatic > 0.f || distortion > 0.f; }
+    bool operator==(const LensEffects &o) const
+    {
+        return grain == o.grain && vignette == o.vignette && bloom == o.bloom && chromatic == o.chromatic && distortion == o.distortion;
+    }
+    bool operator!=(const LensEffects &o) const { return !(*this == o); }
 };
 
 struct Scene
@@ -290,6 +418,8 @@ struct Scene
     Floor                   floor;
     Lighting                lighting;
     CameraView              camera;
+    DepthOfField            dof;                    // 1h-2
+    LensEffects             lens;                   // realism 1g
     std::vector<CameraView> views;                  // saved, named views
     ExportSettings          export_settings;
     Materials               materials;
@@ -457,6 +587,19 @@ void blend_over_rgba(std::vector<uint8_t> &dst, int dst_w, int dst_h, const std:
                      int x, int y, float opacity);
 // Flattens an RGBA image onto an opaque colour (JPEG has no alpha).
 void flatten_rgba(std::vector<uint8_t> &rgba, uint8_t r, uint8_t g, uint8_t b);
+
+// 1h-2b: the EXIF Orientation (tag 0x0112, 1..8) of a JPEG held in memory; 1 (as stored) for anything
+// else, a file without the tag, or one that does not parse. Phones store the sensor's pixels and this
+// tag; wxWidgets 3.1 ignores it, so Showcase applies it itself.
+int  exif_orientation(const uint8_t *data, size_t size);
+// Turns an RGBA image (top row first) by an EXIF orientation code into how it is meant to be seen:
+// 2 mirror, 3 turn 180, 4 flip upside down, 5 transpose, 6 turn 90 clockwise, 7 transverse,
+// 8 turn 90 counter-clockwise. Width and height swap for 5..8. 1 and anything else leave it as is.
+void orient_rgba(std::vector<uint8_t> &rgba, int &w, int &h, int orientation);
+// The orientation code of the user's own turn (counter-clockwise, snapped to 0 / 90 / 180 / 270)
+// after an optional mirror left to right, applied on top of the file's (backplate Rotate / Flip):
+// orient_rgba with exif first, then with the mirror (2), then with the turn.
+int  rotation_orientation(int rotation_ccw);
 
 } // namespace Showcase
 } // namespace Slic3r
