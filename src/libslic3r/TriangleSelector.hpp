@@ -5,10 +5,13 @@
 
 
 #include <cfloat>
+#include <memory>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
 namespace Slic3r {
+
+namespace Airbrush { class AirbrushField; }
 
 enum class EnforcerBlockerType : int16_t {
     // Maximum is 3. The value is serialized in TriangleSelector into 2 bits.
@@ -331,6 +334,20 @@ public:
                       float                     highlight_by_angle_deg = 0.f,  // The maximal angle of overhang. If it is set to a non-zero value, it is possible to paint only the triangles of overhang defined by this angle in degrees.
                       bool                      select_partially = false);     // Select a triangle if it's partially in the cursor but too small to be subdivided
 
+    // Edge (Spread paint, SpreadPaint.hpp): run the cursor selection on each of `facets` (original
+    // facets) with a caller-made cursor and a fixed edge limit (in the units split_triangle() uses:
+    // mesh units for a uniformly scaled cursor, world otherwise). Unlike select_patch() there is no
+    // flood from a start facet, and the brush's cursor, its radius memory and the edge limit are left
+    // as they were. protect_painted keeps leaves painted in a state other than NONE and new_state.
+    // If fully_inside is given it is resized to facets.size() and says, per facet, whether all three
+    // of its vertices were inside the cursor (the facet ended up selected whole).
+    void select_triangles_with_cursor(const std::vector<int>  &facets,
+                                      std::unique_ptr<Cursor> &&cursor,
+                                      EnforcerBlockerType       new_state,
+                                      float                     edge_limit,
+                                      bool                      protect_painted,
+                                      std::vector<uint8_t>     *fully_inside = nullptr);
+
     void seed_fill_select_triangles(const Vec3f        &hit,                          // point where to start
                                     int                 facet_start,                  // facet of the original mesh (unsplit) that the hit point belongs to
                                     const Transform3d  &trafo_no_translate,           // matrix to get from mesh to world without translation
@@ -416,6 +433,12 @@ public:
         TriangleSplittingData seam;
         TriangleSplittingData mmu;
         TriangleSplittingData fuzzy;
+        // Airbrush P3 (A4): the volume's colour field, and the map from the field's space (the
+        // volume's own mesh) into the frame `mesh` was saved in (identity unless the caller moved
+        // `mesh`, as Cut::save_paintings() does). ModelVolume::restore_painting() remaps the paint
+        // UNDER the airbrush and Cut::finalize() / restore_painting() re-bake the field on top.
+        std::shared_ptr<const Airbrush::AirbrushField> airbrush_field;
+        Transform3d                                    field_to_saved = Transform3d::Identity();
     };
 
     // Remap painting data from source mesh to target mesh using spatial mapping.
@@ -533,8 +556,11 @@ protected:
 
     // Private functions:
 private:
-    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting, bool select_partially);
-    bool select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting, bool select_partially);
+    // protect_painted (Spread paint, "Keep existing paint"): leaves in a state other than NONE and
+    // `type` are left as they are, and a fully covered split triangle is recursed into instead of
+    // being merged.
+    bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting, bool select_partially, bool protect_painted = false);
+    bool select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting, bool select_partially, bool protect_painted = false);
     void undivide_triangle(int facet_idx);
     void split_triangle(int facet_idx, const Vec3i32 &neighbors);
     void remove_useless_children(int facet_idx); // No hidden meaning. Triangles are meant.
@@ -579,6 +605,9 @@ private:
     int m_free_vertices_head { -1 };
 
     friend class TriangleCursor;
+    // Edge: Spread paint (SpreadPaint.hpp).
+    friend class GeodesicCursor;
+    friend class SpreadSession;
 };
 
 } // namespace Slic3r

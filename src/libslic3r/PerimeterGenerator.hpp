@@ -162,6 +162,7 @@ public:
         const PrintObjectConfig*    object_config,
         const PrintConfig*          print_config,
         const bool                  spiral_mode,
+        const double                model_rotation_rad,
         // Output:
         // Loops with the external thin walls
         ExtrusionEntityCollection*  loops,
@@ -178,6 +179,7 @@ public:
             config(config), object_config(object_config), print_config(print_config),
             m_spiral_vase(spiral_mode),
             m_scaled_resolution(scaled<double>(print_config->resolution.value > EPSILON ? print_config->resolution.value : EPSILON)),
+            m_model_rotation_rad(model_rotation_rad),
             loops(loops), gap_fill(gap_fill), fill_surfaces(fill_surfaces), fill_no_overlap(fill_no_overlap),
             m_ext_mm3_per_mm(-1), m_mm3_per_mm(-1), m_mm3_per_mm_overhang(-1), m_ext_mm3_per_mm_smaller_width(-1),
             number_of_layers(layer_count)
@@ -196,6 +198,8 @@ public:
     Polygons    lower_slices_polygons() const { return m_lower_slices_polygons; }
     // ORCA: the slices less the slivers the wall generator prints nothing for, so they never count as support.
     ExPolygons  printable_slices(const ExPolygons &slices) const;
+    // ORCA #16421: whether this layer prints its outer walls first for the brim, see brim_puts_outer_walls_first().
+    bool        outer_walls_first_for_brim() const;
 
 private:
     std::vector<Polygons>     generate_lower_polygons_series(float width);
@@ -206,6 +210,7 @@ private:
 private:
     bool        m_spiral_vase;
     double      m_scaled_resolution;
+    double      m_model_rotation_rad;
     double      m_ext_mm3_per_mm;
     double      m_mm3_per_mm;
     double      m_mm3_per_mm_overhang;
@@ -213,6 +218,11 @@ private:
     double      m_ext_mm3_per_mm_smaller_width;
     Polygons    m_lower_slices_polygons;
 };
+
+// ORCA #16421: a brim against the outer walls makes the first layer print them first, whatever the
+// wall sequence, so the brim runs straight on into the outer wall. Edge has no btLeadingEdgeOnly;
+// Auto, ear and painted brims may leave the outer walls bare and keep the wall sequence.
+bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width);
 
 }
 

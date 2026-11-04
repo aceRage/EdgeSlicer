@@ -44,6 +44,8 @@ public:
     bool CanPrint() const override { return m_files != nullptr; }
     void DeletePrinterFile(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) override;
     void QueryPrinter(std::function<void(const PrinterStorage::Result&, const std::string&, const std::string&)> done) override;
+    void CheckStart(const std::string& id,
+                    std::function<void(const PrinterStorage::Result&, const std::string&, const std::string&, const std::string&)> done) override;
     void StartPrint(const std::string& id, std::function<void(const PrinterStorage::Result&)> done) override;
 
     void SetChangeHandler(std::function<void(FileGridChange, const std::string&)> handler) override

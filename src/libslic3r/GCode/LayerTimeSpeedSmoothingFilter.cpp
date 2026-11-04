@@ -251,6 +251,8 @@ struct ParseState
     ExtrusionRole role     = erNone;
     bool          wipe     = false;
     bool          relative_e = false;
+    // Per-nozzle process P4: G-code tool -> filament, when the G-code names assigned tools.
+    const std::vector<int> *output_tool_filaments = nullptr;
 };
 
 static std::vector<ParsedLine> parse_layer_lines(ParseState &state, const std::string &gcode, const PrintConfig &config)
@@ -282,6 +284,8 @@ static std::vector<ParsedLine> parse_layer_lines(ParseState &state, const std::s
 
         unsigned tool = state.extruder;
         if (parse_toolchange(line.raw, tool)) {
+            if (state.output_tool_filaments != nullptr && tool < state.output_tool_filaments->size() && (*state.output_tool_filaments)[tool] >= 0)
+                tool = unsigned((*state.output_tool_filaments)[tool]);
             state.extruder = tool;
             line.extruder  = tool;
         }
@@ -564,6 +568,7 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
     auto init_parse_state = [this](ParseState &state) {
         state.reader.f() = float(m_config.travel_speed.values.front()) * 60.f;
         state.relative_e = m_relative_e;
+        state.output_tool_filaments = &m_output_tool_filaments;
     };
 
     // Pass 1: layer times only.

@@ -348,10 +348,12 @@ TEST_CASE("Bambu Lab rib tower under smooth timelapse", "[BblRibTower]")
     }
 }
 
-TEST_CASE("Bambu Lab rib tower fillets are arcs unless the tower is rotated", "[BblRibTower]")
+TEST_CASE("Bambu Lab rib tower is never rotated and keeps its arc fillets", "[BblRibTower]")
 {
-    // The G-code post-processor rotates X/Y of a wipe tower move but not the I/J of an arc, so a
-    // rotated tower gets its fillets as short lines instead.
+    // The Bambu Lab (Type1) tower is printed unrotated, as in Bambu Studio and as the greyed-out
+    // Process field shows: Print::apply clears wipe_tower_rotation_angle for it. (WipeTower still
+    // writes a rotated tower's fillets as lines - the G-code post-processor rotates X/Y of a tower
+    // move but not the I/J of an arc - but a Bambu Lab print no longer gets there.)
     auto tower_arcs = [](const Print &print) {
         size_t arcs = 0;
         for (const auto &layer : print.wipe_tower_data().tool_changes)
@@ -374,10 +376,8 @@ TEST_CASE("Bambu Lab rib tower fillets are arcs unless the tower is rotated", "[
             Model model;
             slice(print, model, cfg, X1C.bed_center, true);
             CHECK(tower_shape(print).layers_with_ribs == tower_shape(print).layers);
-            if (angle == 0.)
-                CHECK(tower_arcs(print) > 0);
-            else
-                CHECK(tower_arcs(print) == 0);
+            CHECK(print.config().wipe_tower_rotation_angle.value == 0.);
+            CHECK(tower_arcs(print) > 0);
         }
     }
 }

@@ -1,6 +1,8 @@
 #ifndef slic3r_GUI_ReleaseNote_hpp_
 #define slic3r_GUI_ReleaseNote_hpp_
 
+#include <atomic>
+#include <memory>
 #include <wx/wx.h>
 #include <wx/intl.h>
 #include <wx/collpane.h>
@@ -379,7 +381,9 @@ public:
     wxString comfirm_after_enter_text;
     wxString comfirm_last_enter_text;
 
-    boost::thread* m_thread{nullptr};
+    // Cleared on the UI thread when the dialog is cancelled or destroyed: the bind worker only
+    // reaches the dialog through closures that check it (BindDetectGuard.hpp).
+    std::shared_ptr<std::atomic<bool>> m_alive{std::make_shared<std::atomic<bool>>(true)};
 
     std::string m_ip;
     wxWindow* m_step_icon_panel3{ nullptr };
@@ -430,7 +434,7 @@ public:
     void on_ok(wxMouseEvent& evt);
     void update_test_msg_event(wxCommandEvent &evt);
     void post_update_test_msg(wxString text, bool beconnect);
-    void workerThreadFunc(std::string str_ip, std::string str_access_code, std::string sn, std::string model_id, std::string name);
+    void workerThreadFunc(std::shared_ptr<std::atomic<bool>> alive, int input_index, std::string str_ip, std::string str_access_code, std::string sn, std::string model_id, std::string name);
     void OnTimer(wxTimerEvent& event);
     void on_text(wxCommandEvent& evt);
     void on_dpi_changed(const wxRect& suggested_rect) override;

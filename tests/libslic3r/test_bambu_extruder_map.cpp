@@ -1,5 +1,10 @@
 #include <catch2/catch.hpp>
 
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "libslic3r/BambuExtruderMap.hpp"
 
 using namespace Slic3r::BambuExtruderMap;
@@ -88,4 +93,85 @@ TEST_CASE("Each extruder of a two-extruder printer has its own external spool", 
     const std::vector<int> fil_map{ 1, 2 };
     CHECK(filaments_on_wrong_extruder(fil_map, H2_MAP, { { 1, external_spool_physical_extruder(255) } }).empty());
     CHECK(filaments_on_wrong_extruder(fil_map, H2_MAP, { { 1, external_spool_physical_extruder(254) } }) == std::vector<int>{ 1 });
+}
+
+// The printer report's AMS units as the sync reads them (DeviceManager amsList: ams id -> slot ids),
+// keyed into the sidebar's AMS list the way Sidebar::build_filament_ams_list does (emplace: a
+// second tray on a used key is dropped).
+using AmsReport = std::vector<std::pair<std::string, std::vector<std::string>>>;
+
+static std::map<int, std::string> ams_list_of(const AmsReport &report)
+{
+    std::map<int, std::string> list;
+    for (const auto &ams : report)
+        for (const std::string &slot : ams.second) {
+            const AmsListEntry e = ams_list_entry(ams.first, slot);
+            if (e.key >= 0)
+                list.emplace(e.key, e.tray_name);
+        }
+    return list;
+}
+
+TEST_CASE("Sync AMS keeps an H2C's AMS HT next to its two AMS 2 Pro units", "[BambuExtruderMap]")
+{
+    // H2C, 2026-10-16: two AMS 2 Pro units on the right extruder (ams 0 and 1), an AMS HT on the
+    // left one (ams 128). The old key, (first digit of the ams id) * 4 + slot, put the HT on
+    // AMS 1 slot 1's key 4 and the sync lost it.
+    const AmsReport h2c{ { "0", { "0", "1", "2", "3" } }, { "1", { "0", "1", "2", "3" } }, { "128", { "0" } } };
+    const std::map<int, std::string> list = ams_list_of(h2c);
+    REQUIRE(list.size() == 9);
+    CHECK(list.at(4) == "B1");
+    CHECK(list.at(7) == "B4");
+    REQUIRE(list.count(128 * 4) == 1);
+    CHECK(list.at(128 * 4) == "HT-A");
+    // The HT comes after both four-slot units, as in BambuStudio.
+    CHECK(list.rbegin()->second == "HT-A");
+    // It is the key CalibrationPresetPage::sync_ams_info looks a tray up by: ams id * 4 + slot.
+    CHECK(ams_list_entry("128", "0").key == 128 * 4);
+    CHECK(ams_list_entry("1", "3").key == 7);
+
+    // What the old key did with the same report: nine trays, eight entries, no HT.
+    std::map<int, std::string> old;
+    for (const auto &ams : h2c)
+        for (const std::string &slot : ams.second)
+            old.emplace((ams.first.front() - '0') * 4 + (slot.front() - '0'), ams.first + "/" + slot);
+    CHECK(old.size() == 8);
+    CHECK(old.at(4) == "1/0");
+}
+
+TEST_CASE("Sync AMS of an H2D with one AMS and an AMS HT is unchanged", "[BambuExtruderMap]")
+{
+    const AmsReport h2d{ { "0", { "0", "1", "2", "3" } }, { "128", { "0" } } };
+    const std::map<int, std::string> list = ams_list_of(h2d);
+    REQUIRE(list.size() == 5);
+    CHECK(list.at(0) == "A1");
+    CHECK(list.at(3) == "A4");
+    CHECK(list.rbegin()->second == "HT-A");
+    // Same order as before: the four AMS slots first, then the HT.
+    std::vector<std::string> names;
+    for (const auto &kv : list)
+        names.push_back(kv.second);
+    CHECK(names == std::vector<std::string>{ "A1", "A2", "A3", "A4", "HT-A" });
+}
+
+TEST_CASE("Sync AMS keys stay apart for four AMS units and several AMS HTs", "[BambuExtruderMap]")
+{
+    const AmsReport big{ { "0", { "0", "1", "2", "3" } },
+                         { "1", { "0", "1", "2", "3" } },
+                         { "2", { "0", "1", "2", "3" } },
+                         { "3", { "0", "1", "2", "3" } },
+                         { "128", { "0" } },
+                         { "129", { "0" } },
+                         { "135", { "0" } } };
+    const std::map<int, std::string> list = ams_list_of(big);
+    REQUIRE(list.size() == 19);
+    CHECK(list.at(15) == "D4");
+    CHECK(list.at(129 * 4) == "HT-B");
+    CHECK(list.at(135 * 4) == "HT-H");
+    // None of them is the external spool's key (VIRTUAL_TRAY_ID, 254).
+    CHECK(list.count(254) == 0);
+    // A report key that is not a number is skipped, not filed under some other tray.
+    CHECK(ams_list_entry("", "0").key == -1);
+    CHECK(ams_list_entry("x", "0").key == -1);
+    CHECK(ams_list_entry("0", "").key == -1);
 }

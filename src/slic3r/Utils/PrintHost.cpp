@@ -32,6 +32,8 @@
 #include "../GUI/PlatePrintHistoryRecorder.hpp"
 #include "../GUI/SnapmakerLan.hpp" // Ultra: END_UNLOAD_FILAMENT, built in one place for every send path
 #include "Obico.hpp"
+#include "PrintHostDeviceStatus.hpp"
+#include "PrinterStorage.hpp"
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
 #include "ElegooLink.hpp"
@@ -514,6 +516,124 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const std::string history_printer = !the_job.history_printer_name.empty() ? the_job.history_printer_name : host_name;
     const std::string history_model   = the_job.history_printer_model;
 
+    // "http://192.0.2.106:80/" and friends: SnapmakerLan::run_script wants the bare host and a port.
+    auto script_target = [&the_job]() {
+        GUI::SnapmakerLan::Device d;
+        std::string h = the_job.printhost->get_host();
+        const size_t scheme = h.find("://");
+        if (scheme != std::string::npos)
+            h = h.substr(scheme + 3);
+        if (const size_t slash = h.find('/'); slash != std::string::npos)
+            h = h.substr(0, slash);
+        // The port is the colon after the host: "[fe80::1]:7125" has one, "[fe80::1]" has none.
+        const size_t close = h.rfind(']');
+        const size_t colon = h.rfind(':');
+        if (colon != std::string::npos && (close != std::string::npos ? colon > close : h.find(':') == colon)) {
+            try {
+                d.port = std::stoi(h.substr(colon + 1));
+            } catch (...) {}
+            h = h.substr(0, colon);
+        }
+        d.ip = h;
+        return d;
+    };
+
+    // A QIDI printer that is printing or paused is left alone: its start-of-print script re-points
+    // the Box (value_t<n>, enable_box) and would change what a running print is fed. So before any
+    // of it goes out, one read-only print_stats query; busy, or no answer, and the send stops here
+    // with nothing sent. The send dialog already greys out "Upload and Print" for a busy printer;
+    // this is the check at the moment it matters, which the dialog's probe was not.
+    auto qidi_printer_idle = [&]() -> bool {
+        std::string state, err;
+        if (!PrintHostDevices::query_print_state(PrinterStorage::base_url_of(host_url), state, err)) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: could not read the QIDI printer's state (" << err << "), nothing sent";
+            error_fn(_L("Could not read what the printer is doing, so nothing was sent to it and the print was not started:") + " " +
+                     wxString::FromUTF8(err.c_str()));
+            return false;
+        }
+        if (PrintHostDevices::busy_printing(state)) {
+            BOOST_LOG_TRIVIAL(warning) << "PrintHostJobQueue: the QIDI printer is " << state << ", nothing sent";
+            error_fn(_L("The printer is busy with another print, so nothing was sent to it and this plate was not started. "
+                        "Send it again once that print has finished."));
+            return false;
+        }
+        return true;
+    };
+    const bool qidi_send = archive_print && (!the_job.qidi_start_script.empty() || !the_job.qidi_leveling_script.empty() ||
+                                             the_job.qidi_timelapse >= 0);
+    if (qidi_send && !qidi_printer_idle())
+        return;
+
+    // QIDI printers: the send dialog's QIDI options and Box mapping, sent the way QIDIStudio's own
+    // SelectMachine sends them before every LAN start. The Box firmware's T<n> loads from the slot
+    // the saved variable value_t<n> names and nothing in the G-code sets it, so without the mapping
+    // the printer reuses the slots of whatever it printed last - an ASA plate runs on the PLA still
+    // loaded from that print, at ASA temperatures. Unlike the unload preference below this is not a
+    // convenience: if the printer will not take the script, the send stops here rather than print
+    // the wrong material.
+    if (archive_print && !the_job.qidi_start_script.empty()) {
+        std::string err;
+        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_start_script, err)) {
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI print options (" << err << ")";
+            error_fn(_L("The printer did not accept the QIDI print options or Box slot mapping, so the print was not started:") + " " +
+                     wxString::FromUTF8(err.c_str()));
+            return;
+        }
+        // Read it back. Moonraker answering the script is not proof the Box took it, and a print
+        // started on value_t<n> left from the last print is the bug this exists to stop.
+        const int use_box = the_job.qidi_start_script.find("enable_box VALUE=0") != std::string::npos ? 0 :
+                            the_job.qidi_start_script.find("enable_box VALUE=1") != std::string::npos ? 1 : -1;
+        if (use_box >= 0) {
+            std::string vars, verr, mismatch;
+            if (!PrintHostDevices::query_qidi_variables(PrinterStorage::base_url_of(host_url), vars, verr) ||
+                !PrintHostDevices::qidi_mapping_confirmed(vars, archive_mapping, use_box, mismatch)) {
+                const std::string why = verr.empty() ? mismatch : verr;
+                BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the QIDI Box mapping '" << archive_mapping
+                                         << "' could not be confirmed (" << why << "), nothing uploaded";
+                error_fn(_L("The QIDI Box slot mapping could not be confirmed on the printer, so the file was not sent and "
+                            "the print was not started:") + " " + wxString::FromUTF8(why.c_str()));
+                return;
+            }
+        }
+        BOOST_LOG_TRIVIAL(warning) << "PrintHostJobQueue: sent and confirmed the QIDI print options (Box mapping '"
+                                   << archive_mapping << "', enable_box " << use_box << ")";
+    }
+    // The bed leveling (G31 / G32) is a call of its own, after the Box: a firmware that refuses it
+    // is logged and the print goes ahead on the saved mesh. It never blocks the mapping or the print.
+    if (archive_print && !the_job.qidi_leveling_script.empty()) {
+        std::string err;
+        if (!GUI::SnapmakerLan::run_script(script_target(), the_job.qidi_leveling_script, err))
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the QIDI bed leveling choice (" << err
+                                     << "); the print goes ahead without it";
+        else
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent the QIDI bed leveling choice";
+    }
+    // The timelapse is Moonraker's own setting (its timelapse component's /machine/timelapse/settings,
+    // which QIDIStudio posts to as well), so it goes out on its own. A refusal is logged and the print
+    // goes ahead: a missing timelapse does not spoil the part.
+    if (archive_print && the_job.qidi_timelapse >= 0) {
+        const std::string url = PrinterStorage::base_url_of(host_url) + "/machine/timelapse/settings?enabled=" +
+                                (the_job.qidi_timelapse ? "true" : "false");
+        bool        ok = false;
+        std::string err;
+        Http::post(url)
+            .tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
+            .timeout_connect(5)
+            .timeout_max(15)
+            .header("Content-Type", "application/json")
+            .set_post_body(std::string("{}"))
+            .on_complete([&ok](std::string, unsigned) { ok = true; })
+            .on_error([&err](std::string, std::string error, unsigned status) {
+                err = error.empty() ? ("HTTP " + std::to_string(status)) : error;
+            })
+            .perform_sync();
+        if (ok)
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: set the QIDI timelapse " << (the_job.qidi_timelapse ? "on" : "off");
+        else
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the timelapse setting (" << err
+                                     << "); the print goes ahead without it";
+    }
+
     // "Unload filaments after print", for a Snapmaker tool changer only. The flag cannot
     // ride inside the G-code: the firmware refuses SET_PRINT_PREFERENCES while print_stats.state is
     // "printing", so it has to reach the printer before the job starts. This queue uploads with
@@ -522,27 +642,10 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // Nothing here runs unless the send dialog offered the checkbox and it was ticked, and the
     // dialog only offers it for a Snapmaker tool changer starting a print. Every other host - every
     // Moonraker, OctoPrint, Duet, Elegoo ... send - reaches the upload below having executed not one
-    // extra statement, and a failure to set the preference is logged and never fails the send: the
+    // extra statement for it, and a failure to set the preference is logged and never fails the send: the
     // print is what the person asked for, the unload is a convenience on top of it.
     if (archive_unload && archive_print) {
-        GUI::SnapmakerLan::Device d;
-        d.ip = the_job.printhost->get_host();
-        // "http://192.0.2.106:80/" and friends: SnapmakerLan wants the bare host and a port.
-        {
-            std::string h = d.ip;
-            const size_t scheme = h.find("://");
-            if (scheme != std::string::npos)
-                h = h.substr(scheme + 3);
-            if (const size_t slash = h.find('/'); slash != std::string::npos)
-                h = h.substr(0, slash);
-            if (const size_t colon = h.rfind(':'); colon != std::string::npos) {
-                try {
-                    d.port = std::stoi(h.substr(colon + 1));
-                } catch (...) {}
-                h = h.substr(0, colon);
-            }
-            d.ip = h;
-        }
+        const GUI::SnapmakerLan::Device d = script_target();
         // Which toolheads this print uses: the dialog's own mapping ("0:1,1:2" - filament:slot),
         // and, when nothing was mapped, the file goes out as sliced and toolhead 0 is the one it
         // runs on.

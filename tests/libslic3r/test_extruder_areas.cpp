@@ -458,9 +458,12 @@ std::string validate_warning(const DynamicPrintConfig &cfg, Model &model)
     Print print;
     print.is_BBL_printer() = true;
     print.apply(model, cfg);
-    StringObjectException warning;
-    print.validate(&warning);
-    return warning.string;
+    std::vector<StringObjectException> warnings;
+    print.validate(&warnings);
+    std::string text;
+    for (const StringObjectException &w : warnings)
+        text += w.string;
+    return text;
 }
 
 // The blocking error validate() gives for a plate with objects in the shared middle, so that only the tower can be at fault.

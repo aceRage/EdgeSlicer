@@ -1,0 +1,14 @@
+{
+  "id": "cc2plain",
+  "personality": "elegoo_cc2",
+  "name": "EMU Elegoo CC2 (no CANVAS)",
+  "edgeslicer_preset": "Elegoo Centauri Carbon 2 0.4 nozzle",
+  "bind": "127.0.0.23",
+  "port": 80,
+  "lan": false,
+  "state": "standby",
+  "access_code": "123456",
+  "canvas": {"attached": false},
+  "slots": [],
+  "faults": {}
+}

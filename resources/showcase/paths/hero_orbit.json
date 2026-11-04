@@ -1,0 +1,19 @@
+{
+  "format": "edgeslicer-showcase-path",
+  "version": 1,
+  "name": "Hero orbit",
+  "description": "A quarter orbit round the scene camera, a close-up of the first object while filament 1's callout is highlighted, then back out with a warmer light.",
+  "fps": 30,
+  "start": "scene",
+  "moves": [
+    { "op": "orbit", "deg": 90, "elevation": -5, "duration": 4, "ease": "ease_in_out" },
+    { "op": "focus_object", "object": 0, "margin": 1.3, "duration": 2 },
+    { "op": "wait", "duration": 1.5 },
+    { "op": "fly_to", "view": "iso", "duration": 2.5 }
+  ],
+  "events": [
+    { "type": "callouts", "at": 0, "action": "show" },
+    { "type": "callouts", "from": 4, "to": 7.5, "fade": 0.4, "action": "highlight", "filaments": [1] },
+    { "type": "lighting", "at": 7.5, "transition": 2, "temperature": 4200, "key_intensity": 1.2 }
+  ]
+}

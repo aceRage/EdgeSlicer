@@ -32,6 +32,7 @@ public:
                               Polylines&                     polylines_out) override;
 
     bool is_self_crossing() override { return false; }
+    bool aligned_to_origin() const override { return true; }
 
 };
 

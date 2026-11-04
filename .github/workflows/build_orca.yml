@@ -389,6 +389,10 @@ jobs:
           # The keychain is created and thrown away inside this job, so its password only has to
           # exist; generate one when the optional secret is not set.
           KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          # The identity name is the owner's legal name and this log is public: GitHub masks the
+          # secret, not what is derived from it, so mask those too and never print find-identity.
+          echo "::add-mask::${MACOS_CERTIFICATE_ID}"
+          echo "::add-mask::${KEYCHAIN_PASSWORD}"
           # Whitespace-tolerant decode: the owner pastes the base64 from PowerShell, which wraps it.
           printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$CERTIFICATE_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -406,9 +410,20 @@ jobs:
           done
           security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain || security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
-          echo "Code-signing identities in the build keychain:"
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           identities=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          # Mask every identity in the keychain (full name, the person's name, team id, SHA-1) before
+          # anything below - including the error messages and codesign - can print one.
+          while IFS= read -r line; do
+            id_hash=$(printf '%s\n' "$line" | awk '{print $2}')
+            id_name=$(printf '%s\n' "$line" | grep -oE '"[^"]+"' | head -1 | tr -d '"' || true)
+            id_person=${id_name#*: }
+            id_person=${id_person% (*}
+            id_team=$(printf '%s\n' "$id_name" | sed -nE 's/.*\(([A-Z0-9]+)\)$/\1/p')
+            for v in "$id_name" "$id_person" "$id_team" "$id_hash"; do
+              if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+            done
+          done < <(printf '%s\n' "$identities" | grep -E '^ *[0-9]+\)' || true)
+          echo "code-signing identities in the build keychain: $(printf '%s\n' "$identities" | grep -cE '^ *[0-9]+\)' || true)"
           if ! echo "$identities" | grep -qF "$MACOS_CERTIFICATE_ID"; then
             if echo "$identities" | grep -qE "Apple Distribution|Apple Development|iPhone Distribution|iPhone Developer|Mac Developer|3rd Party Mac Developer"; then
               echo "::error::The imported .p12 holds an App Store / development certificate ($(echo "$identities" | grep -oE '"[^"]+"' | head -1)), not a 'Developer ID Application' one. Gatekeeper and the notary service only accept Developer ID: create that certificate in the developer portal (docs/RELEASING_MACOS.md, step 1), export it as .p12 and replace BUILD_CERTIFICATE_BASE64 / P12_PASSWORD."
@@ -429,7 +444,7 @@ jobs:
             echo "::error::No 'Developer ID Application' identity in the imported .p12"
             exit 1
           fi
-          echo "signing identity: $SIGN_IDENTITY"
+          echo "signing identity: resolved (masked)"
           echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Sign app bundles (Developer ID, hardened runtime)

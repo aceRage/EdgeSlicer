@@ -73,6 +73,7 @@ AdaptivePAProcessor::AdaptivePAProcessor(GCode &gcodegen, const std::vector<unsi
       m_max_next_feedrate(0.0),
       m_next_feedrate(0.0),
       m_current_feedrate(0.0),
+      m_modal_feedrate(0.0),
       m_last_extruder_id(-1),
       m_pa_change_pattern(R"(; PA_CHANGE:T(\d+) MM3MM:([0-9]*\.[0-9]+) ACCEL:(\d+) BR:(\d+) RC:(\d+) OV:(\d+))"),
       m_g1_f_pattern(R"(G1 F([0-9]+))")
@@ -100,6 +101,18 @@ AdaptivePAInterpolator* AdaptivePAProcessor::getInterpolator(unsigned int tool_i
         return it->second.get();
     }
     return nullptr;  // Handle the case where the tool_id was not found
+}
+
+// The feedrate, in mm/s, a G0/G1/G2/G3 line sets with its F word, or 0 when it has none.
+static double feedrate_word(const std::string &line)
+{
+    if (line.size() < 3 || line[0] != 'G' || line[2] != ' ' || (line[1] != '0' && line[1] != '1' && line[1] != '2' && line[1] != '3'))
+        return 0.0;
+    const std::size_t pos = line.find(" F");
+    if (pos == std::string::npos || pos + 2 >= line.size() || !std::isdigit(static_cast<unsigned char>(line[pos + 2])) ||
+        line.find(';') < pos)
+        return 0.0;
+    return std::stod(line.substr(pos + 2)) / 60.0;
 }
 
 /**
@@ -150,6 +163,10 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                 m_current_feedrate = std::stod(line.substr(pos + 1)) / 60.0; // Convert from mm/min to mm/s
             }
         }
+
+        // Every move with an F word sets the feedrate the firmware runs the following moves at, including travels and wipes.
+        if (const double feedrate = feedrate_word(line); feedrate > 0)
+            m_modal_feedrate = feedrate;
         
         // Wipe end found, continue searching for current feed rate.
         if (line.find("WIPE_END") != std::string::npos) {
@@ -187,6 +204,7 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                 std::streampos current_pos = stream.tellg();
                 std::string next_line;
                 double temp_feed_rate = 0;
+                double modal_feedrate = m_modal_feedrate;
                 bool extrude_move_found = false;
                 int line_counter = 0;
                 
@@ -199,6 +217,11 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                     if (next_line.compare(0, PA_RESET_TAG.size(), PA_RESET_TAG) == 0)
                         continue;
                     line_counter++;
+                    // Up to the first extrusion, every move with an F word (a travel, a lift, the extrusion itself) sets the
+                    // feedrate the extrusion inherits when no G1 F precedes it
+                    if (!extrude_move_found)
+                        if (const double feedrate = feedrate_word(next_line); feedrate > 0)
+                            modal_feedrate = feedrate;
                     // Found an extrude move, set extrude move found flag and move to the next line
                     if ((!extrude_move_found) && next_line.find("G1 ") == 0 &&
                         next_line.find('X') != std::string::npos &&
@@ -206,6 +229,13 @@ std::string AdaptivePAProcessor::process_layer(std::string &&gcode) {
                         next_line.find('E') != std::string::npos) {
                         // Pattern matched, break the loop
                         extrude_move_found = true;
+                        // No G1 F preceded the extrusion: the cooling buffer drops a feedrate the preceding travel or wipe
+                        // already set, so the extrusion runs at that feedrate rather than at the last G1 F seen.
+                        if (temp_feed_rate == 0 && modal_feedrate > 0) {
+                            temp_feed_rate     = modal_feedrate;
+                            m_next_feedrate    = modal_feedrate;
+                            m_current_feedrate = modal_feedrate;
+                        }
                         continue;
                     }
                     

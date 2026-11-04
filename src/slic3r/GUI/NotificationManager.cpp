@@ -1813,18 +1813,69 @@ void NotificationManager::push_delayed_notification(const NotificationType type,
 		push_delayed_notification_data(std::make_unique<PopNotification>(*it, m_id_provider, m_evt_handler), condition_callback, initial_delay, delay_interval);
 }
 
+bool select_model_instances(const std::vector<std::pair<ObjectID, ObjectID>>& obj_inst_ids)
+{
+    auto* obj_list = wxGetApp().obj_list();
+    if (!obj_list)
+        return false;
+    auto* model = obj_list->GetModel();
+    if (!model)
+        return false;
+
+    auto& objects = wxGetApp().model().objects;
+    wxDataViewItemArray sel_items;
+    for (const auto& pair : obj_inst_ids) {
+        const ObjectID obj_id  = pair.first;
+        const ObjectID inst_id = pair.second;
+        auto iter = std::find_if(objects.begin(), objects.end(), [obj_id](auto o) { return o->id() == obj_id; });
+        if (iter == objects.end())
+            continue;
+        ModelObject* obj = *iter;
+        int inst_idx = -1;
+        for (int i = 0; i < int(obj->instances.size()); ++i)
+            if (obj->instances[i]->id() == inst_id) {
+                inst_idx = i;
+                break;
+            }
+        if (inst_idx < 0)
+            continue;
+        wxDataViewItem objItem = model->GetObjectItem(obj);
+        if (!objItem.IsOk())
+            continue;
+        const int vm_obj_idx = model->GetIdByItem(objItem);
+        if (vm_obj_idx < 0)
+            continue;
+        wxDataViewItem item = model->GetItemByInstanceId(vm_obj_idx, inst_idx);
+        if (item.IsOk())
+            sel_items.Add(item);
+    }
+    if (sel_items.empty())
+        return false;
+    obj_list->select_items(sel_items);
+    return true;
+}
+
 void NotificationManager::push_validate_error_notification(StringObjectException const &error)
 {
     auto po = dynamic_cast<PrintObjectBase const *>(error.object);
     auto mo = po ? po->model_object() : dynamic_cast<ModelObject const *>(error.object);
+    // ORCA #12122: an error may name one ModelInstance; the jump then selects that instance.
+    auto mi = dynamic_cast<ModelInstance const *>(error.object);
 	std::function<bool(wxEvtHandler*)> callback;
-	if (mo || !error.opt_key.empty()) {
+	if (mo || mi || !error.opt_key.empty()) {
 		callback =
-			[id = mo ? mo->id() : 0, opt = error.opt_key](wxEvtHandler*) {
+			[id = mo ? mo->id() : 0,
+             obj_id = mi ? mi->get_object()->id() : ObjectID(0),
+             inst_id = mi ? mi->id() : ObjectID(0),
+             opt = error.opt_key](wxEvtHandler*) {
 			auto& objects = wxGetApp().model().objects;
-			auto iter = id.id ? std::find_if(objects.begin(), objects.end(), [id](auto o) { return o->id() == id; }) : objects.end();
-			if (iter != objects.end())
-				wxGetApp().obj_list()->select_items({ {*iter, nullptr} });
+            const ObjectID target_id = inst_id.id ? obj_id : id;
+			auto iter = target_id.id ? std::find_if(objects.begin(), objects.end(), [target_id](auto o) { return o->id() == target_id; }) : objects.end();
+			if (iter != objects.end()) {
+                if (!inst_id.id || !select_model_instances({{obj_id, inst_id}}))
+				    wxGetApp().obj_list()->select_items({ {*iter, nullptr} });
+                wxGetApp().obj_list()->update_selections_on_canvas();
+            }
 			if (!opt.empty()) {
 				if (iter != objects.end())
 					wxGetApp().params_panel()->switch_to_object();
@@ -1836,8 +1887,9 @@ void NotificationManager::push_validate_error_notification(StringObjectException
 			return false;
 		};
 	}
-    auto link = (mo || !error.opt_key.empty()) ? _u8L("Jump to") : "";
+    auto link = (mo || mi || !error.opt_key.empty()) ? _u8L("Jump to") : "";
     if (mo) link += std::string(" [") + mo->name + "]";
+    if (mi) link += std::string(" [") + mi->get_object()->name + "]";
     if (!error.opt_key.empty()) link += std::string(" (") + error.opt_key + ")";
     push_notification_data({NotificationType::ValidateError, NotificationLevel::ErrorNotificationLevel, 0, _u8L("Error:") + "\n" + error.string, link, callback}, 0);
 	set_slicing_progress_hidden();
@@ -2242,6 +2294,53 @@ void NotificationManager::push_slicing_serious_warning_notification(const std::s
         if (!objs.empty()) {
             link.pop_back();
             link.pop_back();
+        }
+        link += "] ";
+    }
+    set_all_slicing_warnings_gray(false);
+    push_notification_data({NotificationType::SlicingSeriousWarning, NotificationLevel::SeriousWarningNotificationLevel, 0, _u8L("Serious warning:") + "\n" + text, link,
+                            callback},
+                           0);
+    set_slicing_progress_hidden();
+}
+
+void NotificationManager::push_slicing_serious_warning_notification(const std::string &text, std::vector<ModelInstance const *> insts)
+{
+    std::vector<std::pair<ObjectID, ObjectID>> ids;
+    std::vector<std::string> names;
+    for (auto iptr : insts) {
+        if (iptr && iptr->get_object()) {
+            ids.push_back({iptr->get_object()->id(), iptr->id()});
+            names.push_back(iptr->get_object()->name);
+        }
+    }
+    std::function<bool(wxEvtHandler*)> callback;
+    if (!ids.empty()) {
+        callback = [ids](wxEvtHandler*) {
+            auto& objects = wxGetApp().model().objects;
+            wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
+            if (!select_model_instances(ids)) {
+                // No list item for the instance: fall back to selecting its object.
+                std::vector<ObjectVolumeID> fallback_ovs;
+                for (const auto& pair : ids) {
+                    const ObjectID obj_id = pair.first;
+                    auto iter = std::find_if(objects.begin(), objects.end(), [obj_id](auto o) { return o->id() == obj_id; });
+                    if (iter != objects.end())
+                        fallback_ovs.push_back({*iter, nullptr});
+                }
+                if (!fallback_ovs.empty())
+                    wxGetApp().obj_list()->select_items(fallback_ovs);
+            }
+            wxGetApp().obj_list()->update_selections_on_canvas();
+            return false;
+        };
+    }
+    auto link = callback ? _u8L("Jump to") : "";
+    if (!names.empty()) {
+        link += " [";
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i > 0) link += ", ";
+            link += names[i];
         }
         link += "] ";
     }

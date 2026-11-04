@@ -46,6 +46,7 @@ enum Protocol : int {
 extern const char* const RULE_HUB;       // "EdgeSlicer"               TCP 13640-13659, the phone hub
 extern const char* const RULE_DISCOVERY; // "EdgeSlicer LAN discovery" UDP 2021,1990, Bambu SSDP
 extern const char* const RULE_WEBRTC;    // "EdgeSlicer WebRTC video"  go2rtc.exe, UDP and TCP 8555-8574
+extern const char* const RULE_MDNS;       // "EdgeSlicer mDNS discovery" UDP 5353, Bonjour browse answers
 extern const char* const RULE_FLASHFORGE; // "EdgeSlicer FlashForge discovery" UDP 18007, the reply port of FlashForge's LAN search
 
 // One firewall rule, as much of it as matters here.
@@ -149,6 +150,16 @@ struct Diagnosis
     // network to Private" instead of offering the button again.
     bool fix_would_help(bool allow_public) const;
 };
+
+// Whether the check dialog's "Also allow on Public networks" box starts ticked: the PC is on a
+// Public network right now, the firewall is on there and drops EdgeSlicer's traffic, and rules for
+// Public would change that (not when "Block all incoming connections" is set for Public - no allow
+// rule gets past that). The user opened the check because something on *this* network does not
+// work, so the fix they confirm (UAC) should be the one that works on it: on 2026-10-16 the owner's
+// Wi-Fi was Public, the box was off, and both the Device-page camera and the Stream tab stayed
+// broken after the first fix. The installer keeps Private and Domain only: it cannot know which
+// network a PC will be on, and it would open the hub port on every cafe Wi-Fi without asking.
+bool default_allow_public(const Diagnosis& d);
 
 Diagnosis diagnose(const Snapshot& snapshot, const std::string& exe, const std::string& go2rtc, const EnvLookup& env = {});
 // One line per fact, in English, for the log.

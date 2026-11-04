@@ -769,8 +769,6 @@ void PrintJob::process(Ctl &ctl)
     } else {
         // wait for printer mqtt ready the same job id
 
-        wxGetApp().plater()->record_slice_preset("print");
-
         // Ultra: keep a copy of the gcode 3mf that went to the printer (Preferences > Ultra >
         // G-Code Archive). Archiving never fails a send: GcodeArchive swallows its own errors.
         if (GcodeArchive::enabled()) {

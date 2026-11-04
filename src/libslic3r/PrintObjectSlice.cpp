@@ -18,6 +18,7 @@
 #include "FDMHollowing.hpp"
 #include "MixedFilament.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 #include "Print.hpp"
 #include "SVG.hpp"
 //BBS
@@ -538,37 +539,30 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
     return slices_by_region;
 }
 
-//BBS: justify whether a volume is connected to another one
-bool doesVolumeIntersect(VolumeSlices& vs1, VolumeSlices& vs2)
+// BBS: justify whether a volume is connected to another one.
+// bboxes1 and bboxes2 hold the extents of each layer's slices. Slices whose boxes are disjoint cannot overlap, so
+// the Clipper test runs only for slices that are close. The layers are scanned serially because this is called
+// for every pair of volumes: a parallel_for per call costs far more in thread wake-ups than the scan itself.
+static bool doesVolumeIntersect(const VolumeSlices& vs1, const std::vector<BoundingBox>& bboxes1,
+                                const VolumeSlices& vs2, const std::vector<BoundingBox>& bboxes2)
 {
     if (vs1.volume_id == vs2.volume_id) return true;
     // two volumes in the same object should have same number of layers, otherwise the slicing is incorrect.
     if (vs1.slices.size() != vs2.slices.size()) return false;
 
-    auto& vs1s = vs1.slices;
-    auto& vs2s = vs2.slices;
-    bool is_intersect = false;
+    const auto& vs1s = vs1.slices;
+    const auto& vs2s = vs2.slices;
+    auto layers_overlap = [&](size_t i, size_t j) {
+        return bboxes1[i].defined && bboxes2[j].defined && bboxes1[i].overlap(bboxes2[j]) && overlaps(vs1s[i], vs2s[j]);
+    };
 
-    tbb::parallel_for(tbb::blocked_range<int>(0, vs1s.size()),
-        [&vs1s, &vs2s, &is_intersect](const tbb::blocked_range<int>& range) {
-            for (auto i = range.begin(); i != range.end(); ++i) {
-                if (vs1s[i].empty()) continue;
-
-                if (overlaps(vs1s[i], vs2s[i])) {
-                    is_intersect = true;
-                    break;
-                }
-                if (i + 1 != vs2s.size() && overlaps(vs1s[i], vs2s[i + 1])) {
-                    is_intersect = true;
-                    break;
-                }
-                if (i - 1 >= 0 && overlaps(vs1s[i], vs2s[i - 1])) {
-                    is_intersect = true;
-                    break;
-                }
-            }
-        });
-    return is_intersect;
+    for (size_t i = 0; i < vs1s.size(); ++i) {
+        if (layers_overlap(i, i) ||
+            (i + 1 < vs2s.size() && layers_overlap(i, i + 1)) ||
+            (i > 0 && layers_overlap(i, i - 1)))
+            return true;
+    }
+    return false;
 }
 
 //BBS: grouping the volumes of an object according to their connection relationship
@@ -578,7 +572,10 @@ bool groupingVolumes(std::vector<VolumeSlices> objSliceByVolume, std::vector<gro
     double offsetValue = 0.05 / SCALING_FACTOR;
 
     std::vector<std::vector<int>> osvIndex;
+    // Extents of each volume's offset slices per layer, for the prefilter in doesVolumeIntersect().
+    std::vector<std::vector<BoundingBox>> bboxes(objSliceByVolume.size());
     for (int i = 0; i != objSliceByVolume.size(); ++i) {
+        bboxes[i].resize(objSliceByVolume[i].slices.size());
         for (int j = 0; j != objSliceByVolume[i].slices.size(); ++j) {
             osvIndex.push_back({ i,j });
         }
@@ -593,9 +590,10 @@ bool groupingVolumes(std::vector<VolumeSlices> objSliceByVolume, std::vector<gro
         });
 
     tbb::parallel_for(tbb::blocked_range<int>(0, osvIndex.size()),
-        [&osvIndex, &objSliceByVolume,&offsetValue, &resolution](const tbb::blocked_range<int>& range) {
+        [&osvIndex, &objSliceByVolume, &offsetValue, &bboxes](const tbb::blocked_range<int>& range) {
             for (auto k = range.begin(); k != range.end(); ++k) {
                 objSliceByVolume[osvIndex[k][0]].slices[osvIndex[k][1]] = offset_ex(objSliceByVolume[osvIndex[k][0]].slices[osvIndex[k][1]], offsetValue);
+                bboxes[osvIndex[k][0]][osvIndex[k][1]] = get_extents(objSliceByVolume[osvIndex[k][0]].slices[osvIndex[k][1]]);
             }
         });
 
@@ -604,7 +602,7 @@ bool groupingVolumes(std::vector<VolumeSlices> objSliceByVolume, std::vector<gro
             groupIndex[i] = i;
         }
         for (int j = i + 1; j != objSliceByVolume.size(); ++j) {
-            if (doesVolumeIntersect(objSliceByVolume[i], objSliceByVolume[j])) {
+            if (doesVolumeIntersect(objSliceByVolume[i], bboxes[i], objSliceByVolume[j], bboxes[j])) {
                 if (groupIndex[j] < 0) groupIndex[j] = groupIndex[i];
                 if (groupIndex[j] != groupIndex[i]) {
                     int retain = std::min(groupIndex[i], groupIndex[j]);
@@ -908,11 +906,31 @@ void PrintObject::slice()
         // 1. Overrides nothing relative to its parent region, so it is an alias of the parent's own
         //    PrintRegion and literally cannot print differently. An extruder override that really
         //    differs is an effect and does not land here - see modifiers_without_overrides().
-        if (const std::vector<std::string> inert = this->modifiers_without_overrides(); ! inert.empty())
+        //    Painted areas are applied after modifiers (apply_mm_segmentation) and replace their
+        //    filament, so a filament-only modifier on a painted part gets its own explanation.
+        const PrintObject::ModifierPaintNotes paint_notes = this->modifier_paint_notes();
+        std::vector<std::string> inert = this->modifiers_without_overrides();
+        inert.erase(std::remove_if(inert.begin(), inert.end(), [&paint_notes](const std::string &n) {
+                        return std::find(paint_notes.same_filament_painted.begin(), paint_notes.same_filament_painted.end(), n) !=
+                               paint_notes.same_filament_painted.end();
+                    }), inert.end());
+        if (! inert.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                 Slic3r::format(_u8L("Modifier %1% on \"%2%\" changes no settings and has no effect."),
                                join_names(inert), object_name),
                 PrintStateBase::SlicingModifierNoOverrides);
+        if (! paint_notes.same_filament_painted.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% on \"%2%\" uses the same filament as the object, and painted areas override "
+                                    "modifier filaments, so it has no effect. To print it in its own colour, make it a part "
+                                    "(or paint over it)."),
+                               join_names(paint_notes.same_filament_painted), object_name),
+                PrintStateBase::SlicingModifierSameFilamentPainted);
+        if (! paint_notes.filament_overridden.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Painted areas of \"%2%\" override the filament of modifier %1% where they overlap."),
+                               join_names(paint_notes.filament_overridden), object_name),
+                PrintStateBase::SlicingModifierOverriddenByPaint);
         // 2. Never attached to any part, so its geometry is dropped entirely.
         if (const std::vector<std::string> orphan = this->modifiers_without_parent(); ! orphan.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
@@ -5368,6 +5386,30 @@ void PrintObject::slice_volumes()
                 L("An object's XY size compensation will not be used because it is also color-painted.\nXY Size "
                   "compensation cannot be combined with color-painting."));
             BOOST_LOG_TRIVIAL(info) << "xy compensation will not work for object " << this->model_object()->name << " for multi filament.";
+        }
+
+        // Airbrush P3 (item B): the grain was chosen for a nozzle (the "Printer Nozzle Diameter" in
+        // the painting panel, or the printer selected then). Slicing always uses the real nozzle;
+        // when an airbrushed part's grain is finer than it prints cleanly, say so (never blocks).
+        {
+            const double nozzle = mm_segmentation_finest_nozzle(*this);
+            for (const ModelVolume *mv : volumes) {
+                if (!mv->is_model_part() || !mv->airbrush_field || mv->mmu_segmentation_facets.empty())
+                    continue;
+                Airbrush::AirbrushBakeParams bp;
+                if (!Airbrush::AirbrushBakeParams::from_string(mv->airbrush_field->bake_params(), bp))
+                    continue;
+                if (nozzle > 0. && Airbrush::airbrush_grain_below_floor(bp.grain_mm, float(nozzle))) {
+                    const Airbrush::AirbrushFloors f = Airbrush::airbrush_floors_for_nozzle(float(nozzle));
+                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                        Slic3r::format(_u8L("Object %1%: part \"%2%\" is airbrushed with a %3% mm grain, finer than the %4% mm nozzle "
+                                            "prints cleanly on walls (about %5% mm). Some specks will merge or disappear."),
+                                       this->model_object()->name, mv->name, std::round(bp.grain_mm * 100.f) / 100.f,
+                                       std::round(nozzle * 100.) / 100., std::round(f.wall_mm * 100.f) / 100.f),
+                        PrintStateBase::SlicingAirbrushGrainBelowNozzle);
+                    break;
+                }
+            }
         }
 
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";
