@@ -42,7 +42,9 @@
 // A wall whose projection declines a colour everywhere (a cylindrical projection exactly on the
 // axis) is left whole, printing with the region's nominal filament exactly as before.
 
+#include <array>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "ExtrusionEntity.hpp"
@@ -52,6 +54,7 @@
 
 namespace Slic3r {
 
+class Layer;
 class PrintObject;
 class PrintRegion;
 class MixedFilament;
@@ -81,7 +84,34 @@ struct ImageRowWallContext
     // Box projection pick a side face for a surface that faces up. Left unset (all zero) for
     // walls, which is what selects the per-segment computation.
     Vec3f                            fixed_normal_mesh{0.f, 0.f, 0.f};
+
+    // ---- Phase 5a (docs/superpowers/specs/2026-10-16-imagemap-phase5-completion.md) ----------
+    //
+    // The part's OWN filament (1-based, physical, already resolved for this layer): the owning
+    // volume's extruder, or the painted extruder when the region is a painted sub-region. Wherever
+    // the image does not reach - a face the projection does not point at, a wall when only the top
+    // was asked for, an inner perimeter - the wall prints with this filament, NOT with the row's
+    // per-layer cycle colour (a different filament every layer, which is what an unsplit row
+    // falls back to). 0 keeps phase 4's behaviour exactly (no faces rule, no fallback); every
+    // context built by this file's builders sets it.
+    int                              base_filament = 0;
+    std::array<float, 3>             base_color{0.f, 0.f, 0.f};
+    // ImageFillParams::surfaces as it applies to this binding (never 0 once base_filament is set).
+    // Walls: IMAGE_FILL_SURFACE_WALLS colours a wall where the projection points at it;
+    // IMAGE_FILL_SURFACE_TOP colours the stretch of the outer wall that is seen from above (not
+    // covered by the layer above), so a top image runs all the way to the edge instead of being
+    // framed by a ring of the base colour.
+    int                              surfaces = 0;
+    // The mesh-space "up" direction, for the top-visible samples.
+    Vec3f                            up_mesh{0.f, 0.f, 1.f};
 };
+
+// Phase 5a: the part's own filament for `region` on this layer - see ImageRowWallContext::
+// base_filament. The owning volume's "extruder" key, else the object's, else 1; a PAINTED
+// sub-region uses its painted extruder. A mixed (virtual) id is resolved for the layer. Always a
+// physical 1-based id in [1, num_physical].
+unsigned int image_row_base_filament(const PrintObject &object, const PrintRegion &region, int layer_index,
+                                     float print_z, float layer_height);
 
 // Does this region's WALL filament name an enabled ImageWeighted row with a usable image?
 // Returns the configured (pre-resolution) 1-based virtual id, or 0. Reads outer_wall_filament
@@ -109,7 +139,8 @@ std::vector<unsigned int> image_row_wall_candidate_filaments(const PrintObject &
 // `flow_width_mm` is the external perimeter's extrusion width - it sets both the sample spacing
 // and the minimum run length, so the resolution is nozzle-bounded rather than arbitrary.
 bool image_row_wall_context_for_region(const PrintObject &object, const PrintRegion &region,
-                                       float flow_width_mm, ImageRowWallContext &ctx);
+                                       float flow_width_mm, ImageRowWallContext &ctx,
+                                       int layer_index = 0, float print_z = 0.f, float layer_height = 0.f);
 
 // Phase 4, step 3 (IRONING). Builds a context for an IRONING pass over an image row. Ironing
 // follows the region's solid_infill_filament (Layer::make_ironing sets ironing_params.extruder
@@ -122,7 +153,8 @@ bool image_row_wall_context_for_region(const PrintObject &object, const PrintReg
 //
 // false means "this region's ironing is not an image row" and leaves `ctx` untouched.
 bool image_row_wall_iron_context(const PrintObject &object, const PrintRegion &region,
-                                 float flow_width_mm, ImageRowWallContext &ctx);
+                                 float flow_width_mm, ImageRowWallContext &ctx,
+                                 int layer_index = 0, float print_z = 0.f, float layer_height = 0.f);
 
 // Splits ONE already-seam-placed perimeter entity into per-run pieces.
 //
@@ -143,8 +175,30 @@ bool image_row_wall_iron_context(const PrintObject &object, const PrintRegion &r
 // round. This is the same trade the local-Z clipper already makes (GCode.cpp:4375-4385) and it
 // costs the loop's seam-gap clipping and scarf joint, which only apply on the ExtrusionLoop
 // branch of GCode::extrude_loop().
+//
+// Phase 5a, when ctx.base_filament is set: the faces rule applies per sample, top-visible
+// samples are coloured from above (see ImageRowWallContext::surfaces; `layer` is the layer being
+// printed, whose upper_layer decides what is covered - nullptr means "nothing is seen from above"),
+// and the result is NEVER empty for a splittable entity: one colour for the whole loop comes back
+// as ONE tagged collection holding the untouched entity (a loop stays a loop, seam and scarf
+// included) instead of an empty vector that would leave the loop on the row's cycle colour.
 std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_entity(
-    const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity, double print_z);
+    const ImageAssetStore &assets, const ImageRowWallContext &ctx, const ExtrusionEntity &entity, double print_z,
+    const Layer *layer = nullptr);
+
+// Phase 5a: the physical filaments (1-based) the split above would print `entity` with, without
+// building any geometry. ToolOrdering registers exactly these per layer, instead of the row's whole
+// candidate list - every id in a layer's tool list costs a real tool change and purge, used or not.
+// Computed on the entity as ToolOrdering sees it (before the seam is placed), so G-code time can
+// meet a filament this did not list at a run's margin; GCode.cpp maps such a run to the nearest
+// registered colour (image_row_nearest_registered()).
+std::vector<int> image_row_wall_entity_filaments(const ImageAssetStore &assets, const ImageRowWallContext &ctx,
+                                                 const ExtrusionEntity &entity, double print_z, const Layer *layer);
+
+// Phase 5a: of the 0-based extruders in `registered`, the one whose filament colour is nearest
+// `wanted` (0-based). Returns `wanted` when it is registered, and `fallback` when nothing is.
+unsigned int image_row_nearest_registered(unsigned int wanted, const std::vector<unsigned int> &registered,
+                                          const std::vector<std::string> &filament_colours, unsigned int fallback);
 
 // True when this entity is a wall the split should claim: the outer loop always, the first inner
 // perimeter only when `ctx.split_first_inner`. Uses `inset_idx` (PerimeterGenerator sets it on
