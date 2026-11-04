@@ -41,6 +41,7 @@
 #include <regex>
 #include <future>
 #include <functional>
+#include <new>
 #include <sstream>
 #include <utility>
 #include <boost/algorithm/string.hpp>
@@ -62,6 +63,7 @@
 #include <wx/statbox.h>
 #include <wx/statbmp.h>
 #include <wx/filedlg.h>
+#include <wx/stdpaths.h>
 #include <wx/dnd.h>
 #include <wx/progdlg.h>
 #include <wx/string.h>
@@ -228,6 +230,10 @@
 #include <libslic3r/CutUtils.hpp>
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
 #include <libslic3r/miniz_extension.hpp>
+#include <libslic3r/ZipWorkDir.hpp>
+#include <libslic3r/ZipOpen.hpp>
+#include <libslic3r/ZipWorkCleaner.hpp>
+#include "ZipCleanup.hpp"
 #include "WipeTowerDialog.hpp"
 #include "ObjColorDialog.hpp"
 
@@ -554,7 +560,7 @@ static void collect_filament_slots_from_config(
 }
 
 static void collect_filament_slots_from_model_config(
-    const ModelConfigObject& config,
+    const ModelConfig& config,
     int num_filaments, std::set<int>& used_slots_0_based)
 {
     // Primary filament (extruder)
@@ -585,10 +591,23 @@ static void collect_filament_slots_from_model_config(
     }
 }
 
+// Height-range modifiers override extruder / feature filaments for a z band.
+// Those overrides live in ModelObject::layer_config_ranges as ModelConfig
+// (not ModelConfigObject), which is why collect_filament_slots_from_model_config
+// takes ModelConfig — object/volume configs still bind through the base.
+static void collect_filament_slots_from_layer_config_ranges(
+    const t_layer_config_ranges& ranges,
+    int num_filaments, std::set<int>& used_slots_0_based)
+{
+    for (const auto& layer_range : ranges)
+        collect_filament_slots_from_model_config(layer_range.second, num_filaments, used_slots_0_based);
+}
+
 /// \brief Collect the 0-based filament slots actually used by objects on the given plate.
 /// \details Mirrors the slot-collection block of Plater::check_filament_temp_mixing so that
 ///          cold-plate incompatibility checking uses the same definition of "used filament".
-///          Includes: plate config, per-object/volume configs, plus Plater working config
+///          Includes: plate config, per-object/volume configs, height-range modifier configs
+///          (layer_config_ranges), plus Plater working config
 ///          (wipe_tower / support / wall / infill defaults when any object uses extruder=0).
 /// \param[in]  plate                 Non-null target plate.
 /// \param[in]  num_filaments         Total number of filaments in the current configuration.
@@ -615,6 +634,7 @@ static void collect_used_filament_slots_on_plate(
         if (!model_object_is_on_plate(plate, obj_idx, model_object))
             continue;
         collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+        collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
         if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
             uses_default_extruder = true;
@@ -11957,6 +11977,7 @@ struct Plater::priv
     // PIMPL back pointer ("Q-Pointer")
     Plater *q;
     MainFrame *main_frame;
+    bool m_opened_from_zip { false };
     std::atomic<bool> filament_usage_sync_pending{false};
     bool filament_temp_mixing_notification_initialized = false;
     int filament_temp_mixing_notification_plate = -1;
@@ -12153,9 +12174,13 @@ struct Plater::priv
                 }
                 res = MessageDialog(mainframe, reason + "\n" + format_wxstr(_L("Do you want to save changes to \"%1%\"?"), suggested_project_name),
                                     wxString(SLIC3R_APP_FULL_NAME), wxYES_NO | wxCANCEL).ShowModal();
-                if (res == wxID_YES)
-                    if (!mainframe->save_project_as(project_name))
+                if (res == wxID_YES) {
+                    if (m_opened_from_zip || project_name.IsEmpty()) {
+                        if (q->save_project(true) != wxID_YES)
+                            res = wxID_CANCEL;
+                    } else if (!mainframe->save_project_as(project_name))
                         res = wxID_CANCEL;
+                }
             }
         }
         return res;
@@ -15157,6 +15182,15 @@ wxString Plater::priv::get_export_file(GUI::FileType file_type)
         {
             output_file.replace_extension("3mf");
             dlg_title = _L("Save file as:");
+            if (q->opened_from_zip()) {
+                fs::path name = into_path(get_project_filename(".3mf")).filename();
+                if (name.empty())
+                    name = "Untitled.3mf";
+                const std::string last = wxGetApp().app_config->get_last_dir();
+                output_file = last.empty() ? name : (fs::path(last) / name);
+                // Short: this is a title bar (review B-4).
+                dlg_title = _L("Save project opened from ZIP as:");
+            }
             break;
         }
         case FT_OBJ:
@@ -15421,6 +15455,7 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     notification_manager->close_notification_of_type(NotificationType::NozzleHrcWarning);
 
     set_project_filename("");
+    m_opened_from_zip = false;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " call set_project_filename: empty";
 
     if (view3D->is_layers_editing_enabled())
@@ -21015,12 +21050,24 @@ void Plater::load_project(wxString const& filename2,
 }
 
 // BBS: save logic
+void Plater::set_opened_from_zip(bool opened)
+{
+    p->m_opened_from_zip = opened;
+}
+
+bool Plater::opened_from_zip() const
+{
+    return p->m_opened_from_zip;
+}
+
 int Plater::save_project(bool saveAs)
 {
     //if (up_to_date(false, false)) // should we always save
     //    return;
     auto filename = get_project_filename(".3mf");
     if (!saveAs && filename.IsEmpty())
+        saveAs = true;
+    if (!saveAs && p->m_opened_from_zip)
         saveAs = true;
     if (saveAs)
         filename = p->get_export_file(FT_3MF);
@@ -21039,6 +21086,7 @@ int Plater::save_project(bool saveAs)
     Slic3r::remove_backup(model(), false);
 
     p->set_project_filename(filename);
+    p->m_opened_from_zip = false;
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " call set_project_filename: " << filename;
 
     up_to_date(true, false);
@@ -23015,175 +23063,435 @@ std::vector<size_t> Plater::load_files(const std::vector<std::string>& input_fil
     return load_files(paths, strategy, ask_multi);
 }
 
+namespace {
+
+// Runs `job` on a worker thread behind an app-modal progress dialog, so archive reads never
+// block the UI thread. Every exception from the job (std::bad_alloc included) is caught on the
+// worker and reported through `err`; the guard joins the worker on every exit path, so a throw
+// on the UI thread between spawning and join() cannot destroy a joinable std::thread.
+bool run_zip_job(const wxString&                   message,
+                 std::atomic<bool>&                cancel,
+                 const std::atomic<std::uint64_t>* done_bytes,
+                 const std::atomic<std::uint64_t>* total_bytes,
+                 std::string&                      err,
+                 const std::function<bool()>&      job)
+{
+    std::atomic<bool> finished{false};
+    bool              ok = false;
+    std::string       worker_err;
+    std::thread       worker([&]() {
+        try {
+            ok = job();
+        } catch (const std::bad_alloc&) {
+            ok         = false;
+            worker_err = "out of memory while reading the ZIP archive";
+        } catch (const std::exception& e) {
+            ok         = false;
+            worker_err = e.what();
+        } catch (...) {
+            ok         = false;
+            worker_err = "unexpected error while reading the ZIP archive";
+        }
+        finished = true;
+    });
+    struct JoinGuard
+    {
+        std::thread&       t;
+        std::atomic<bool>& cancel;
+        ~JoinGuard()
+        {
+            if (t.joinable()) {
+                cancel = true;
+                t.join();
+            }
+        }
+    } guard{worker, cancel};
+    {
+        wxProgressDialog progress(_L("Opening ZIP"), message, 1000, static_cast<wxWindow*>(wxGetApp().mainframe),
+                                  wxPD_APP_MODAL | wxPD_AUTO_HIDE | wxPD_SMOOTH | wxPD_CAN_ABORT | wxPD_ELAPSED_TIME);
+        while (!finished) {
+            bool keep_going = true;
+            if (done_bytes && total_bytes) {
+                const std::uint64_t total = total_bytes->load();
+                const int           value = total > 0 ? int(std::min<std::uint64_t>(999, done_bytes->load() * 1000 / total)) : 0;
+                keep_going                = progress.Update(value);
+            } else
+                keep_going = progress.Pulse();
+            if (!keep_going && !cancel.load()) {
+                cancel = true;
+                progress.Pulse(_L("Cancelling..."));
+            }
+            wxMilliSleep(50);
+        }
+    }
+    {
+        wxBusyCursor busy;
+        worker.join();
+    }
+    if (!worker_err.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "ZIP worker failed: " << worker_err;
+        err = worker_err;
+    }
+    return ok;
+}
+
+} // namespace
+
 bool Plater::preview_zip_archive(const boost::filesystem::path& archive_path)
 {
-    //std::vector<fs::path> unzipped_paths;
+    // The archive dialog and the progress dialogs run nested event loops; a second zip dropped
+    // or opened meanwhile must not start another preview on the same plater.
+    static bool s_zip_preview_active = false;
+    if (s_zip_preview_active) {
+        BOOST_LOG_TRIVIAL(warning) << "ZIP preview already running, ignoring " << archive_path;
+        return false;
+    }
+    struct ActiveFlag
+    {
+        bool& flag;
+        explicit ActiveFlag(bool& f) : flag(f) { flag = true; }
+        ~ActiveFlag() { flag = false; }
+    } active_flag(s_zip_preview_active);
+
     std::vector<fs::path> non_project_paths;
     std::vector<fs::path> project_paths;
+    std::vector<fs::path> gcode_paths;
+    // Declared out here so every path that ends with nothing loaded can remove it.
+    fs::path              session;
+    auto                  remove_session = [&session]() {
+        if (session.empty())
+            return;
+        boost::system::error_code ec;
+        // A scanner may still hold a file it is checking; retry briefly (spec section 10).
+        if (!zip_fs_retry([&](boost::system::error_code& e) { fs::remove_all(session, e); }, ec))
+            BOOST_LOG_TRIVIAL(warning) << "Could not remove ZIP session " << session << ": " << ec.message();
+        session.clear();
+    };
+    // Any exit that does not load something (early returns, any exception type) removes the
+    // session; the successful paths set `keep` just before returning.
+    // A kept session gets its clean-up record (only recorded sessions are ever auto-deleted, and
+    // only by this install) and is protected for the rest of this run; then a background clean
+    // pass runs (PR C).
+    auto keep_session = [&session]() {
+        if (session.empty())
+            return;
+        std::string rec_err;
+        const std::string install_id = wxGetApp().app_config->get(ZIP_WORK_INSTALL_ID_KEY);
+        if (!ZipWorkCleaner::write_session_record(session.parent_path(), session, install_id, rec_err))
+            BOOST_LOG_TRIVIAL(warning) << "ZIP session " << session << " has no clean-up record: " << rec_err;
+        ZipCleanup::note_session(session);
+        ZipCleanup::start(ZipCleanup::Mode::Auto);
+    };
+    struct SessionGuard
+    {
+        std::function<void()> remove;
+        std::function<void()> on_keep;
+        bool                  keep = false;
+        ~SessionGuard()
+        {
+            try {
+                if (!keep)
+                    remove();
+                else
+                    on_keep();
+            } catch (...) {
+            }
+        }
+    } session_guard{remove_session, keep_session};
     try
     {
-        mz_zip_archive archive;
-        mz_zip_zero_struct(&archive);
-
-        if (!open_zip_reader(&archive, archive_path.string())) {
-            // TRN %1% is archive path
-            std::string err_msg = GUI::format(_u8L("Loading of a ZIP archive on path %1% has failed."), archive_path.string());
+        MZ_Archive archive;
+        if (!archive.open_reader(archive_path.string())) {
+            std::string err_msg;
+            if (archive.arch.m_last_error == MZ_ZIP_UNSUPPORTED_MULTIDISK)
+                err_msg = GUI::format(_u8L("This is a split ZIP archive (.z01 / multi-disk). %1% cannot open split archives; combine the parts first."), SLIC3R_APP_NAME);
+            else
+                err_msg = GUI::format(_u8L("Loading of a ZIP archive on path %1% has failed."), archive_path.string());
             throw Slic3r::FileIOError(err_msg);
         }
-        mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
-        mz_zip_archive_file_stat stat;
-        // selected_paths contains paths and its uncompressed size. The size is used to distinguish between files with same path.
-        std::vector<std::pair<fs::path, size_t>> selected_paths;
-        FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), &archive, selected_paths);
-        if (dlg.ShowModal() == wxID_OK)
-        {
-            std::string archive_path_string = archive_path.string();
-            archive_path_string = archive_path_string.substr(0, archive_path_string.size() - 4);
-            fs::path archive_dir(wxStandardPaths::Get().GetTempDir().utf8_str().data());
 
-            for (auto& path_w_size : selected_paths) {
-                const fs::path& path = path_w_size.first;
-                size_t size = path_w_size.second;
-                // find path in zip archive
-                for (mz_uint i = 0; i < num_entries; ++i) {
-                    if (mz_zip_reader_file_stat(&archive, i, &stat)) {
-                        if (size != stat.m_uncomp_size) // size must fit
-                            continue;
-                        std::string name = Slic3r::decode_archive_entry_path(&archive, stat);
-                        fs::path archive_path(name);
+        const AppConfig&     cfg = *wxGetApp().app_config;
+        const ZipCapValues   cap_values = zip_extract_caps_from_values(cfg.get(ZIP_MAX_ENTRIES_SCANNED_KEY),
+                                                                     cfg.get(ZIP_MAX_ENTRY_UNCOMPRESSED_KEY),
+                                                                     cfg.get(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY),
+                                                                     cfg.get(ZIP_MAX_COMPRESSION_RATIO_KEY));
+        ZipExtractCaps       caps;
+        caps.max_entries_scanned    = cap_values.max_entries_scanned;
+        caps.max_entry_uncompressed = cap_values.max_entry_uncompressed;
+        caps.max_total_uncompressed = cap_values.max_total_uncompressed;
+        caps.max_compression_ratio  = cap_values.max_compression_ratio;
+        std::vector<ZipEntryInfo>     entries;
+        std::string                   err;
+        // The central directory is read on a worker behind the progress dialog when the archive
+        // is big (review B-5); a small one is read in place so no dialog flashes up.
+        bool inspected = false;
+        if (mz_zip_reader_get_num_files(&archive.arch) > 1000) {
+            std::atomic<bool> inspect_cancel{false};
+            const bool        ran = run_zip_job(_L("Reading the ZIP archive..."), inspect_cancel, nullptr, nullptr, err, [&]() {
+                return inspect_zip_entries(archive.arch, caps, entries, err);
+            });
+            if (inspect_cancel.load())
+                return false;
+            inspected = ran;
+        } else
+            inspected = inspect_zip_entries(archive.arch, caps, entries, err);
+        if (!inspected)
+            throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to read the ZIP archive.") : err);
 
-                        if (archive_path.empty())
-                            continue;
-                        if (path != archive_path)
-                            continue;
-                        // decompressing
-                        try
-                        {
-                            std::replace(name.begin(), name.end(), '\\', '/');
-                            // rename if file exists
-                            std::string filename = path.filename().string();
-                            std::string extension = path.extension().string();
-                            std::string just_filename = filename.substr(0, filename.size() - extension.size());
-                            std::string final_filename = just_filename;
+        std::vector<mz_uint> selectable;
+        selectable.reserve(entries.size());
+        for (const ZipEntryInfo& e : entries) {
+            const ZipEntryKind kind = classify_zip_entry_name(e.decoded_name, e.is_directory);
+            if (zip_entry_is_selectable(kind, e.is_encrypted, e.is_symlink, e.is_safe))
+                selectable.push_back(e.index);
+        }
 
-                            size_t version = 0;
-                            while (fs::exists(archive_dir / (final_filename + extension)))
-                            {
-                                ++version;
-                                final_filename = just_filename + "(" + std::to_string(version) + ")";
-                            }
-                            filename = final_filename + extension;
-                            fs::path final_path = archive_dir / filename;
-                            std::string buffer((size_t)stat.m_uncomp_size, 0);
-                            // Decompress action. We already has correct file index in stat structure.
-                            mz_bool res = mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0);
-                            if (res == 0) {
-                                // TRN: First argument = path to file, second argument = error description
-                                wxString error_log = GUI::format_wxstr(_L("Failed to unzip file to %1%: %2%"), final_path.string(), mz_zip_get_error_string(mz_zip_get_last_error(&archive)));
-                                BOOST_LOG_TRIVIAL(error) << error_log;
-                                show_error(nullptr, error_log);
-                                break;
-                            }
-                            // write buffer to file
-                            fs::fstream file(final_path, std::ios::out | std::ios::binary | std::ios::trunc);
-                            file.write(buffer.c_str(), buffer.size());
-                            file.close();
-                            if (!fs::exists(final_path)) {
-                                wxString error_log = GUI::format_wxstr(_L("Failed to find unzipped file at %1%. Unzipping of file has failed."), final_path.string());
-                                BOOST_LOG_TRIVIAL(error) << error_log;
-                                show_error(nullptr, error_log);
-                                break;
-                            }
-                            BOOST_LOG_TRIVIAL(info) << "Unzipped " << final_path;
-                            if (!boost::algorithm::iends_with(filename, ".3mf") && !boost::algorithm::iends_with(filename, ".amf")) {
-                                non_project_paths.emplace_back(final_path);
-                                break;
-                            }
-                            // if 3mf - read archive headers to find project file
-                            if (/*(boost::algorithm::iends_with(filename, ".3mf") && !is_project_3mf(final_path.string())) ||*/
-                                (boost::algorithm::iends_with(filename, ".amf") && !boost::algorithm::iends_with(filename, ".zip.amf"))) {
-                                non_project_paths.emplace_back(final_path);
-                                break;
-                            }
+        std::vector<ZipListedEntry> listed;
+        listed.reserve(entries.size());
+        for (const ZipEntryInfo& e : entries)
+            listed.push_back({e.index, e.decoded_name, e.is_directory, e.is_encrypted, e.is_symlink, e.is_safe});
 
-                            project_paths.emplace_back(final_path);
-                            break;
-                        }
-                        catch (const std::exception& e)
-                        {
-                            // ensure the zip archive is closed and rethrow the exception
-                            close_zip_reader(&archive);
-                            throw Slic3r::FileIOError(e.what());
-                        }
-                    }
+        // OBJ / MTL text is read with a 16 MiB cap to find mtllib and texture names; an OBJ over
+        // the cap falls back to its same-stem MTL. This runs once, on a worker thread, before the
+        // dialog opens, and the result serves both the dialog's size line and extraction.
+        std::vector<std::uint32_t> selectable_objs;
+        for (mz_uint idx : selectable)
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) {
+                    if (boost::algorithm::iends_with(e.decoded_name, ".obj"))
+                        selectable_objs.push_back(idx);
+                    break;
                 }
+        ZipSidecarMap sidecar_map;
+        if (!selectable_objs.empty()) {
+            std::atomic<bool>    scan_cancel{false};
+            const ZipEntryReader read_entry = [&archive](std::uint32_t index, std::string& out) {
+                return read_zip_entry_capped(archive.arch, index, 16ull * 1024ull * 1024ull, out);
+            };
+            const bool scanned = run_zip_job(_L("Reading OBJ materials..."), scan_cancel, nullptr, nullptr, err, [&]() {
+                sidecar_map = zip_sidecar_map(selectable_objs, listed, read_entry, [&scan_cancel] { return scan_cancel.load(); });
+                return !scan_cancel.load();
+            });
+            if (!scanned) {
+                if (scan_cancel.load())
+                    return false;
+                throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to read the ZIP archive.") : err);
             }
-            close_zip_reader(&archive);
-            if (non_project_paths.size() + project_paths.size() != selected_paths.size())
-                BOOST_LOG_TRIVIAL(error) << "Decompresing of archive did not retrieve all files. Expected files: "
-                                         << selected_paths.size()
-                                         << " Decopressed files: "
-                                         << non_project_paths.size() + project_paths.size();
+        }
+
+        std::vector<mz_uint> selected;
+        const bool auto_open = wxGetApp().app_config->get_bool(ZIP_OPEN_SINGLE_WITHOUT_ASKING_KEY);
+        if (should_auto_open_zip(selectable.size(), auto_open)) {
+            selected = selectable;
         } else {
-            close_zip_reader(&archive);
+            FileArchiveDialog dlg(static_cast<wxWindow*>(wxGetApp().mainframe), entries, selected, sidecar_map);
+            if (dlg.ShowModal() != wxID_OK)
+                return false;
+        }
+        if (selected.empty())
+            return false;
+
+        bool has_model = false;
+        bool has_gcode = false;
+        for (mz_uint idx : selected) {
+            const ZipEntryInfo* info = nullptr;
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) { info = &e; break; }
+            if (!info)
+                continue;
+            const ZipEntryKind kind = classify_zip_entry_name(info->decoded_name, info->is_directory);
+            if (kind == ZipEntryKind::Model)
+                has_model = true;
+            if (kind == ZipEntryKind::GCode)
+                has_gcode = true;
+        }
+        if (has_model && has_gcode) {
+            show_info(this, _L("G-code files cannot be loaded with models together!"), _L("G-code loading"));
+            return false;
+        }
+        // Refused before anything is extracted (review B-7); the dialog allows ticking several.
+        if (has_gcode && selected.size() > 1) {
+            show_info(this, _L("Only one G-code file can be opened at the same time."), _L("G-code loading"));
             return false;
         }
 
+        // Sidecars go first so they keep the names the OBJ / MTL text refers to; see
+        // zip_extract_order. Selected models are opened through dest_by_index, so a suffixed
+        // model name is harmless.
+        std::vector<std::uint32_t> sidecars;
+        for (mz_uint idx : selected) {
+            auto it = sidecar_map.find(idx);
+            if (it == sidecar_map.end())
+                continue;
+            for (std::uint32_t extra : it->second)
+                if (std::find(selected.begin(), selected.end(), extra) == selected.end() &&
+                    std::find(sidecars.begin(), sidecars.end(), extra) == sidecars.end())
+                    sidecars.push_back(extra);
+        }
+        const std::vector<std::uint32_t> order = zip_extract_order(std::vector<std::uint32_t>(selected.begin(), selected.end()), sidecars);
+        const std::vector<mz_uint>       extract_indices(order.begin(), order.end());
+
+        // %LOCALAPPDATA%/EdgeSlicer/Zip on Windows, the platform cache folder elsewhere; never
+        // Documents, which OneDrive / iCloud often sync (owner decision 2026-11-03).
+        fs::path       root = resolve_zip_work_root(wxGetApp().app_config->get(ZIP_WORK_DIR_KEY), fs::path(data_dir()));
+        bool           used_temp = false;
+        if (!ZipWorkDir::create_session(root, archive_path, session, err)) {
+            BOOST_LOG_TRIVIAL(warning) << "ZIP work dir failed (" << err << "), trying fallbacks";
+            bool ok = false;
+            if (running_in_flatpak()) {
+                std::string err2;
+                if (ZipWorkDir::create_session(fs::path(data_dir()) / "Zip", archive_path, session, err2))
+                    ok = true;
+                else
+                    err = err2;
+            }
+            if (!ok) {
+                const fs::path tmp = fs::path(std::string(wxStandardPaths::Get().GetTempDir().utf8_str().data())) / "EdgeSlicer-Zip";
+                std::string    err3;
+                if (!ZipWorkDir::create_session(tmp, archive_path, session, err3))
+                    throw Slic3r::FileIOError(err3);
+                used_temp = true;
+            }
+        }
+        if (used_temp && get_notification_manager())
+            get_notification_manager()->push_plater_warning_notification(
+                _u8L("Could not write the ZIP working folder; extracted files were written to the temporary directory instead."));
+
+        // Extract on a worker thread behind a cancellable progress dialog (4 GiB at most, but
+        // that can take a while). Cancel rolls back every staged file; the session folder this
+        // call created is removed on any failure so no empty marked session is left behind.
+        ZipExtractDests            dest_by_index;
+        std::atomic<std::uint64_t> done_bytes{0};
+        std::atomic<std::uint64_t> total_bytes{0};
+        std::atomic<bool>          cancel{false};
+        const bool                 extracted = run_zip_job(_L("Extracting the selected files..."), cancel, &done_bytes, &total_bytes, err, [&]() {
+            return extract_entries_confined(archive.arch, extract_indices, session, caps, dest_by_index, err,
+                                            [&](std::uint64_t done, std::uint64_t total) {
+                                                done_bytes  = done;
+                                                total_bytes = total;
+                                                return !cancel.load();
+                                            });
+        });
+        if (!extracted) {
+            remove_session();
+            if (cancel.load())
+                return false;
+            throw Slic3r::FileIOError(err.empty() ? _u8L("Failed to extract the selected ZIP entries.") : err);
+        }
+
+        // Sidecars are never renamed on purpose; if one still did not land under its archive
+        // name (two names differing only in case on a case-insensitive volume, or characters the
+        // filesystem cannot store) the OBJ will miss it, so say so instead of failing silently.
+        std::vector<std::string> renamed_sidecars;
+        for (std::uint32_t idx : sidecars) {
+            auto dest_it = dest_by_index.find(idx);
+            if (dest_it == dest_by_index.end())
+                continue;
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) {
+                    const std::string natural = resolve_zip_relative({}, e.decoded_name);
+                    const std::string leaf    = natural.substr(natural.find_last_of('/') == std::string::npos ? 0 : natural.find_last_of('/') + 1);
+                    if (into_u8(from_path(dest_it->second.filename())) != leaf)
+                        renamed_sidecars.push_back(e.decoded_name);
+                    break;
+                }
+        }
+        if (!renamed_sidecars.empty()) {
+            for (const std::string& n : renamed_sidecars)
+                BOOST_LOG_TRIVIAL(warning) << "ZIP sidecar extracted under another name: " << n;
+            if (get_notification_manager())
+                get_notification_manager()->push_plater_warning_notification(
+                    _u8L("Some OBJ material or texture files could not keep their names when extracted; materials may be missing."));
+        }
+
+        for (mz_uint idx : selected) {
+            auto dest_it = dest_by_index.find(idx);
+            if (dest_it == dest_by_index.end())
+                continue;
+            const ZipEntryInfo* info = nullptr;
+            for (const ZipEntryInfo& e : entries)
+                if (e.index == idx) { info = &e; break; }
+            if (!info)
+                continue;
+            const fs::path     dest     = dest_it->second;
+            const std::string  filename = dest.filename().string();
+            const ZipEntryKind kind     = classify_zip_entry_name(info->decoded_name, info->is_directory);
+            BOOST_LOG_TRIVIAL(info) << "Unzipped " << dest;
+            if (kind == ZipEntryKind::GCode) {
+                gcode_paths.emplace_back(dest);
+                continue;
+            }
+            if (!boost::algorithm::iends_with(filename, ".3mf") && !boost::algorithm::iends_with(filename, ".amf")) {
+                non_project_paths.emplace_back(dest);
+                continue;
+            }
+            if (boost::algorithm::iends_with(filename, ".amf") && !boost::algorithm::iends_with(filename, ".zip.amf")) {
+                non_project_paths.emplace_back(dest);
+                continue;
+            }
+            project_paths.emplace_back(dest);
+        }
     }
     catch (const Slic3r::FileIOError& e) {
-        // zip reader should be already closed or not even opened
+        // Every throw above happens before anything is loaded from the session.
+        remove_session();
         GUI::show_error(this, e.what());
         return false;
     }
-    // none selected
-    if (project_paths.empty() && non_project_paths.empty())
-    {
+
+    if (!gcode_paths.empty()) {
+        if (gcode_paths.size() > 1) {
+            show_info(this, _L("Only one G-code file can be opened at the same time."), _L("G-code loading"));
+            return false;
+        }
+        load_gcode(from_path(gcode_paths.front()));
+        session_guard.keep = true;
+        return true;
+    }
+
+    if (project_paths.empty() && non_project_paths.empty()) {
+        remove_session();
         return false;
     }
+
+    // F5: only a plater that was empty, or a zip 3MF that became the project, turns the next
+    // Save into Save As. Dropping a zip into an already saved project keeps plain Save.
+    const bool plater_was_empty = is_empty_project() && get_project_filename().IsEmpty();
 
     // 1 project file and some models - behave like drag n drop of 3mf and then load models
     if (project_paths.size() == 1)
     {
         wxArrayString aux;
         aux.Add(from_u8(project_paths.front().string()));
-        bool loaded3mf = load_files(aux);
-        load_files(non_project_paths, LoadStrategy::LoadModel);
-        boost::system::error_code ec;
-        if (loaded3mf) {
-            fs::remove(project_paths.front(), ec);
-            if (ec)
-                BOOST_LOG_TRIVIAL(error) << ec.message();
-        }
-        for (const fs::path& path : non_project_paths) {
-            // Delete file from temp file (path variable), it will stay only in app memory.
+        const bool                loaded_project = load_files(aux);
+        const std::vector<size_t> loaded_models  = load_files(non_project_paths, LoadStrategy::LoadModel);
+        // The project folder is the extracted 3MF's folder only when it was opened as the project
+        // (not imported as geometry into the current one).
+        bool became_project = false;
+        if (!get_project_filename().IsEmpty()) {
             boost::system::error_code ec;
-            fs::remove(path, ec);
-            if (ec)
-                BOOST_LOG_TRIVIAL(error) << ec.message();
+            became_project = fs::equivalent(into_path(get_project_filename()).parent_path(), project_paths.front().parent_path(), ec) && !ec;
         }
+        if (!loaded_project && loaded_models.empty() && !became_project) {
+            // Extraction worked but nothing was loaded (unreadable file, dialog cancelled).
+            remove_session();
+            return false;
+        }
+        if (plater_was_empty || became_project)
+            set_opened_from_zip(true);
+        session_guard.keep = true;
         return true;
     }
 
-    // load all projects and all models as geometry
-    load_files(project_paths, LoadStrategy::LoadModel);
-    load_files(non_project_paths, LoadStrategy::LoadModel);
-
-
-    for (const fs::path& path : project_paths) {
-        // Delete file from temp file (path variable), it will stay only in app memory.
-        boost::system::error_code ec;
-        fs::remove(path, ec);
-        if (ec)
-            BOOST_LOG_TRIVIAL(error) << ec.message();
+    const std::vector<size_t> loaded_projects = load_files(project_paths, LoadStrategy::LoadModel);
+    const std::vector<size_t> loaded_models   = load_files(non_project_paths, LoadStrategy::LoadModel);
+    if (loaded_projects.empty() && loaded_models.empty()) {
+        remove_session();
+        return false;
     }
-    for (const fs::path& path : non_project_paths) {
-        // Delete file from temp file (path variable), it will stay only in app memory.
-        boost::system::error_code ec;
-        fs::remove(path, ec);
-        if (ec)
-            BOOST_LOG_TRIVIAL(error) << ec.message();
-    }
-
+    if (plater_was_empty)
+        set_opened_from_zip(true);
+    session_guard.keep = true;
     return true;
 }
 
@@ -27178,6 +27486,7 @@ bool Plater::check_filament_temp_mixing(int plate_index, FilamentTempMixingDetai
             if (!model_object_is_on_plate(plate, obj_idx, model_object))
                 continue;
             collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+            collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
             if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
                 uses_default_extruder = true;
@@ -27454,6 +27763,14 @@ bool Plater::sync_filament_temp_mixing_notification()
     p->filament_temp_mixing_notification_plate = curr_plate_index;
     p->filament_temp_mixing_notification_state = mixing_state;
 
+    // Flipping the mixing preference changes the verdict without touching
+    // the print config, so the invalidation-driven reset of
+    // process_completed_with_error (priv::update_background_process) never
+    // runs and reslice() keeps early-returning as if the plate were still
+    // failing. Clear the stranded marker once this plate is allowed again.
+    if (slicing_allowed && p->process_completed_with_error == curr_plate_index)
+        p->process_completed_with_error = -1;
+
     const bool can_slice = curr_plate->can_slice() && slicing_allowed;
     if (p->main_frame != nullptr)
         p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, can_slice);
@@ -27504,6 +27821,7 @@ bool Plater::check_flow_ratio_zero(int plate_index, FlowRatioZeroDetail& detail)
             if (!model_object_is_on_plate(plate, obj_idx, model_object))
                 continue;
             collect_filament_slots_from_model_config(model_object->config, num_filaments, used_slots_0_based);
+            collect_filament_slots_from_layer_config_ranges(model_object->layer_config_ranges, num_filaments, used_slots_0_based);
 
             if (!model_object->config.has("extruder") || model_object->config.extruder() == 0)
                 uses_default_extruder = true;
@@ -29964,27 +30282,52 @@ void Plater::apply_image_fill(const wxString &image_path)
         initial.gradient.enabled = false;
     }
 
-    // Phase 3 (image row): whether this part is ALREADY bound to an enabled ImageWeighted row,
-    // so re-opening the dialog starts with the checkbox ticked - the same promise `initial` makes
-    // for the projection settings above. `filaments.size()` is the physical filament count (see
-    // the loop that built `filaments`, off filament_colour, above).
+    // Phases 3-5a (image row): which surfaces this part is ALREADY re-sampling through an enabled
+    // ImageWeighted row, so re-opening the dialog starts with the same boxes ticked - the same
+    // promise `initial` makes for the projection settings above. `filaments.size()` is the
+    // physical filament count (see the loop that built `filaments`, off filament_colour, above).
+    //
+    // The top binding is solid_infill_filament; the walls binding is wall_filament. Phase 5a binds
+    // wall_filament for "Top surfaces" too (the top edge of the outer wall is part of the top
+    // picture), so which boxes were ticked is read from the row's own params (`rs`), and only a
+    // row from before phase 5a (rs absent) falls back to "the key it is bound to".
     const size_t num_physical = filaments.size();
     PresetBundle *preset_bundle = wxGetApp().preset_bundle;
-    bool initial_image_row = false;
-    if (preset_bundle != nullptr) {
-        if (const ConfigOptionInt *sif = volume->config.get().option<ConfigOptionInt>("solid_infill_filament")) {
-            const unsigned int vid = unsigned(std::max(0, sif->value));
-            const MixedFilament *mf = preset_bundle->mixed_filaments.mixed_filament_from_id(vid, num_physical);
-            initial_image_row = mf != nullptr && mf->enabled && mf->distribution_mode == int(MixedFilament::ImageWeighted);
-        }
+    auto bound_image_row_idx = [&](const char *key) -> int {
+        if (preset_bundle == nullptr)
+            return -1;
+        const ConfigOptionInt *opt = volume->config.get().option<ConfigOptionInt>(key);
+        if (opt == nullptr || opt->value <= 0)
+            return -1;
+        MixedFilamentManager &mgr = preset_bundle->mixed_filaments;
+        const int idx = mgr.mixed_index_from_filament_id(unsigned(opt->value), num_physical);
+        if (idx < 0 || mgr.mixed_filaments()[size_t(idx)].distribution_mode != int(MixedFilament::ImageWeighted))
+            return -1;
+        return idx;
+    };
+    const int top_row_idx  = bound_image_row_idx("solid_infill_filament");
+    const int wall_row_idx = bound_image_row_idx("wall_filament");
+    int initial_row_surfaces = 0;
+    {
+        const int bound_idx = top_row_idx >= 0 ? top_row_idx : wall_row_idx;
+        ImageFillParams row_params;
+        if (bound_idx >= 0 && preset_bundle->mixed_filaments.mixed_filaments()[size_t(bound_idx)].enabled &&
+            ImageFillParams::from_string(MixedFilamentManager::decode_image_fill_ref(
+                                             preset_bundle->mixed_filaments.mixed_filaments()[size_t(bound_idx)].image_fill_ref),
+                                         row_params) &&
+            row_params.surfaces != 0)
+            initial_row_surfaces = row_params.surfaces;
+        else
+            initial_row_surfaces = (top_row_idx >= 0 ? IMAGE_FILL_SURFACE_TOP : 0) |
+                                   (wall_row_idx >= 0 ? IMAGE_FILL_SURFACE_WALLS : 0);
     }
 
     GUI::ImageFillDialog dlg(this, filaments, initial, &model().image_assets, volume->mesh().its,
-                             volume->mmu_segmentation_facets.get_data(), painted, initial_image_row);
+                             volume->mmu_segmentation_facets.get_data(), painted, initial_row_surfaces);
     if (dlg.ShowModal() != wxID_OK)
         return;
-    const ImageFillParams params = dlg.params();
-    const bool image_row = dlg.image_row_dither();
+    const ImageFillParams params       = dlg.params();
+    const int             row_surfaces = dlg.image_row_surfaces();
 
     std::vector<std::array<float, 3>> colors;
     std::vector<int>                  ids;
@@ -29995,8 +30338,8 @@ void Plater::apply_image_fill(const wxString &image_path)
         }
 
     take_snapshot("Apply image fill");
-    // Phase 2's facet painting always runs, whether or not the image-row checkbox is ticked - the
-    // dialog's own tooltip explains why (a printer/slicer that never reads the row still gets a
+    // Phase 2's facet painting always runs, whether or not the image-row boxes are ticked - the
+    // dialog's own tooltips explain why (a printer/slicer that never reads the row still gets a
     // correct, if coarser, result).
     const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
     if (!res.ok) {
@@ -30004,25 +30347,21 @@ void Plater::apply_image_fill(const wxString &image_path)
         return;
     }
 
-    // Phase 3 (image row): create-or-update the part's ImageWeighted MixedFilament row and bind
-    // solid_infill_filament to it, or drop the binding (leaving the row itself alone) - see
-    // Fill.cpp's image_row_configured_virtual_id() for the key this reads at slice time, and
-    // docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md's step 5 for the design.
+    // Phases 3-5a (image row): create-or-update the part's ImageWeighted MixedFilament row and bind
+    // it, or drop the bindings (leaving the row itself alone). Fill.cpp's
+    // image_row_configured_virtual_id() reads solid_infill_filament (top and bottom surfaces);
+    // ImageRowWalls.cpp's image_row_wall_configured_virtual_id() reads wall_filament (the outer wall,
+    // including its top edge). See docs/superpowers/specs/2026-10-16-imagemap-phase5-completion.md.
     if (preset_bundle != nullptr) {
         MixedFilamentManager &mixed_mgr = preset_bundle->mixed_filaments;
-        const ConfigOptionInt *existing_opt = volume->config.get().option<ConfigOptionInt>("solid_infill_filament");
-        const unsigned int existing_vid = existing_opt != nullptr ? unsigned(std::max(0, existing_opt->value)) : 0;
-        const int existing_idx = existing_vid != 0 ? mixed_mgr.mixed_index_from_filament_id(existing_vid, num_physical) : -1;
-        const bool existing_is_image_row = existing_idx >= 0 &&
-            mixed_mgr.mixed_filaments()[size_t(existing_idx)].distribution_mode == int(MixedFilament::ImageWeighted);
+        const int existing_idx = top_row_idx >= 0 ? top_row_idx : wall_row_idx;
 
         bool mixed_definitions_changed = false;
-        if (image_row && !ids.empty()) {
-            int row_idx = existing_is_image_row ? existing_idx : -1;
+        if (row_surfaces != 0 && !ids.empty()) {
+            int row_idx = existing_idx;
             if (row_idx < 0) {
-                // add_custom_filament() needs two distinct component ids (they are otherwise
-                // unused by ImageWeighted's own sampling - see the [barb3] test's own comment,
-                // test_image_fill.cpp) and the current physical colours, to seed a valid row.
+                // add_custom_filament() needs two distinct component ids and the current physical
+                // colours, to seed a valid row.
                 const unsigned int a = unsigned(ids.front());
                 const unsigned int b = ids.size() > 1 ? unsigned(ids[1]) : a;
                 std::vector<std::string> colour_strings;
@@ -30037,18 +30376,34 @@ void Plater::apply_image_fill(const wxString &image_path)
                 row.distribution_mode   = int(MixedFilament::ImageWeighted);
                 row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids(
                     std::vector<unsigned int>(ids.begin(), ids.end()));
+                // Phase 5a: keep the pair in step with the allowed list. The plate's used-filament
+                // count, Print::extruders() and the wipe-tower estimate expand a row with two or
+                // fewer ids through component_a/component_b, so a re-apply with a different pair
+                // must move them too.
+                row.component_a = unsigned(ids.front());
+                row.component_b = ids.size() > 1 ? unsigned(ids[1]) : unsigned(ids.front());
                 row.image_fill_ref = MixedFilamentManager::encode_image_fill_ref(params.to_string());
 
                 const unsigned int virtual_id = mixed_mgr.filament_id_from_mixed_index(size_t(row_idx), num_physical);
                 if (virtual_id != 0) {
-                    volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(virtual_id)));
+                    // Top surfaces: solid_infill_filament. The walls are bound for either box: for
+                    // "Side walls" the whole outer wall samples the picture; for "Top surfaces" only
+                    // the stretch seen from above does, and the rest keeps the part's own filament.
+                    if ((row_surfaces & IMAGE_FILL_SURFACE_TOP) != 0)
+                        volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(virtual_id)));
+                    else if (top_row_idx >= 0)
+                        volume->config.erase("solid_infill_filament");
+                    volume->config.set_key_value("wall_filament", new ConfigOptionInt(int(virtual_id)));
                     mixed_definitions_changed = true;
                 }
             }
-        } else if (existing_is_image_row) {
-            // Unticked: remove the BINDING only. The row itself is left alone - it may still be
-            // referenced by another part, or the user may just want to keep it around.
-            volume->config.erase("solid_infill_filament");
+        } else {
+            // Nothing ticked: remove the BINDINGS only. The row itself is left alone - it may still
+            // be referenced by another part, or the user may just want to keep it around.
+            if (top_row_idx >= 0)
+                volume->config.erase("solid_infill_filament");
+            if (wall_row_idx >= 0)
+                volume->config.erase("wall_filament");
         }
 
         if (mixed_definitions_changed) {
