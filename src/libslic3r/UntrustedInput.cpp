@@ -233,6 +233,17 @@ bool host_is_or_under(const std::string &host, const std::string &domain)
     return h.size() > d.size() + 1 && h.compare(h.size() - d.size(), d.size(), d) == 0 && h[h.size() - d.size() - 1] == '.';
 }
 
+const std::vector<std::string> &local_host_suffixes()
+{
+    // localhost / *.local / *.lan / *.home / *.internal / *.intranet / *.localdomain /
+    // *.home.arpa / *.ts.net (Tailscale MagicDNS). "home" is a consumer suffix, distinct
+    // from "home.arpa".
+    static const std::vector<std::string> suffixes = {
+        "localhost", "local", "lan", "home", "internal", "intranet", "localdomain", "home.arpa", "ts.net",
+    };
+    return suffixes;
+}
+
 bool is_local_or_ip_host(const std::string &host_in)
 {
     const std::string host = to_lower(host_in);
@@ -242,7 +253,7 @@ bool is_local_or_ip_host(const std::string &host_in)
         return true; // any IPv6 literal
     if (looks_like_ipv4(host))
         return true;
-    for (const char *local : {"localhost", "local", "lan", "home.arpa", "internal", "intranet", "localdomain"})
+    for (const std::string &local : local_host_suffixes())
         if (host_is_or_under(host, local))
             return true;
     return host.find('.') == std::string::npos; // single-label names resolve on the LAN

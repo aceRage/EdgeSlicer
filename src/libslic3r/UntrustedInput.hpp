@@ -48,8 +48,13 @@ bool parse_url(const std::string &url, Url &out);
 // "printables.com.evil.tld" and "evilprintables.com" do not match "printables.com".
 bool host_is_or_under(const std::string &host, const std::string &domain);
 
-// IPv4 dotted quad (also the short and hex forms browsers accept), IPv6 literal, or a
-// localhost / *.localhost / *.local / *.lan / *.home.arpa / *.internal name.
+// Suffixes that mean the host is on this computer, the LAN, or a Tailscale tailnet.
+// Matched with host_is_or_under(): "home" matches "nas.home" but not "home.arpa".
+// is_local_or_ip_host() is the predicate; this list is the suffix half of it.
+const std::vector<std::string> &local_host_suffixes();
+
+// IPv4 dotted quad (also the short and hex forms browsers accept), IPv6 literal,
+// a single-label name, or a host under one of local_host_suffixes().
 bool is_local_or_ip_host(const std::string &host);
 
 // Page links on the model sites (the model page, not the file). http or https, no userinfo.

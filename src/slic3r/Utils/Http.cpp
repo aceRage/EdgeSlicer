@@ -110,6 +110,10 @@ struct form_file
 // The refusal text http_perform() hands to errorfn(). Prefixing it is what lets a caller tell a
 // refusal (a decision about where the transfer went) from a transport failure, so a retry loop can
 // stop instead of re-sending a request that will be refused in exactly the same way.
+// Plater's import retry loop (the no-retry stop on error_is_redirect_refusal) is the consumer
+// that depends on this exact prefix. The text is asserted in
+// tests/slic3rutils/http_body_redirect_tests.cpp, so rewording it breaks that test rather than
+// silently changing behaviour.
 static const char REDIRECT_REFUSAL_PREFIX[] = "the download was refused: ";
 
 struct Http::priv
@@ -984,14 +988,12 @@ bool Http::tls_host_is_private(const std::string &host_in)
     if (host.find('.') == std::string::npos)
         return true;
 
-    // Names that only exist on a LAN. ts.net is Tailscale MagicDNS: those hosts are reached through
-    // the WireGuard tunnel (already authenticated and encrypted end to end), and a device there
-    // serves its own self-signed certificate unless Tailscale Serve fronts it.
-    static const char *const private_suffixes[] = {
-        ".local", ".lan", ".home", ".internal", ".intranet", ".localdomain", ".home.arpa", ".ts.net",
-    };
-    for (const char *suffix : private_suffixes)
-        if (boost::algorithm::ends_with(host, suffix))
+    // Names that only exist on a LAN. untrusted::local_host_suffixes() is the authority;
+    // ts.net is Tailscale MagicDNS, reached through the WireGuard tunnel (already
+    // authenticated and encrypted end to end), and a device there serves its own
+    // self-signed certificate unless Tailscale Serve fronts it.
+    for (const std::string &suffix : untrusted::local_host_suffixes())
+        if (untrusted::host_is_or_under(host, suffix))
             return true;
     return false;
 }

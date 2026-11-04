@@ -21238,6 +21238,9 @@ void Plater::import_model_id(wxString download_info)
                     // re-sending the same request would be refused in exactly the same way, and each
                     // try is another blind request to a host that already sent us somewhere we would
                     // not go. So it ends the loop here rather than after max_retries.
+                    // error_is_redirect_refusal() matches REDIRECT_REFUSAL_PREFIX in Http.cpp.
+                    // That exact text is asserted in tests/slic3rutils/http_body_redirect_tests.cpp,
+                    // so rewording the prefix breaks the test rather than silently restoring retries.
                     if (Http::error_is_redirect_refusal(error) || retry_count == max_retries) {
                         boost::system::error_code ec;
                         fs::remove(tmp_path, ec);

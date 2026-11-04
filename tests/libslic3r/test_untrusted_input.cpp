@@ -118,9 +118,11 @@ TEST_CASE("the model-site link checks match real URLs and nothing spoofed", "[Un
 TEST_CASE("local and IP hosts are recognised", "[Untrusted][Url]")
 {
     for (const char *h : {"127.0.0.1", "10.0.0.5", "192.168.1.20", "127.1", "2130706433", "0x7f.1", "[::1]", "localhost",
-                          "foo.localhost", "printer.local", "nas.lan", "box.home.arpa", "printer"})
+                          "foo.localhost", "printer.local", "nas.lan", "nas.home", "box.ts.net", "ts.net",
+                          "box.home.arpa", "printer"})
         CHECK(is_local_or_ip_host(h));
-    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org"})
+    for (const char *h : {"files.printables.com", "public-cdn.bblmw.com", "1password.com", "3dprint.example.org",
+                          "nas.home.example.com", "home.com", "box.ts.network", "ts.net.example.com"})
         CHECK_FALSE(is_local_or_ip_host(h));
 }
 
@@ -356,7 +358,7 @@ TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Downl
     for (const char *u : {"https://127.0.0.1/a.3mf", "https://169.254.169.254/latest/meta-data/",
                           "https://192.168.1.20/a.3mf", "https://10.0.0.5:8443/a.3mf", "https://[::1]/a.3mf",
                           "https://localhost/a.3mf", "https://printer.local/a.3mf", "https://nas.lan/a.3mf",
-                          "https://octopi/a.3mf"}) {
+                          "https://nas.home/a.3mf", "https://box.ts.net/a.3mf", "https://octopi/a.3mf"}) {
         INFO(u);
         CHECK_FALSE(redirect_target_refusal(u).empty());
     }
@@ -394,8 +396,10 @@ TEST_CASE("a redirect is refused however the loopback address is spelled", "[Unt
         CHECK(why.find("IP address") != std::string::npos);
         CHECK(why.find("local network") == std::string::npos);
     }
-    // A name on the LAN is still described as one.
+    // A name on the LAN is still described as one. .home is the widening that matters here:
+    // a redirect onto a consumer .home host is refused as local, not as a public model site.
     CHECK(redirect_target_refusal("https://printer.local/x").find("local network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://nas.home/x").find("local network") != std::string::npos);
 
     // The same spellings that must still be allowed: this check is about where a transfer went,
     // not about which sites may be downloaded from.
