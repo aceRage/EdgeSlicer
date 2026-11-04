@@ -132,9 +132,11 @@ TEST_CASE("H3C cube slices with the full Bambu start G-code", "[BblH3C][PrintGCo
             REQUIRE(gcode.find(";===== machine: H3C start") != std::string::npos);
             // The whole template ran (the M620.10 nozzle flush lines sit deep in it) and the cube printed.
             CHECK(gcode.find("\nM620.10 ") != std::string::npos);
-            // ...and the end template ran after the layers.
-            CHECK(gcode.find(";===== H3C endgcode") != std::string::npos);
-            CHECK(gcode.find(";===== H3C endgcode") > gcode.find("\nM620.10 "));
+            // ...and the end template ran after the layers. The config block (which quotes the template text)
+            // sits in the header on BBL output, so look for the emitted line, not the quoted one.
+            const size_t end_block = gcode.rfind("\n;===== H3C endgcode");
+            REQUIRE(end_block != std::string::npos);
+            CHECK(end_block > gcode.find("\nM620.10 "));
             // nozzle_diameter_at_nozzle_id[initial_no_support_nozzle_id] resolved to this machine's nozzle:
             // the M620.10 flush line carries it as H<diameter>.
             CHECK(gcode.find("Not a variable name") == std::string::npos);
