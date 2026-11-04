@@ -207,22 +207,30 @@ TEST_CASE("Connector fit: a footprint radius sets how much of a dome it sees", "
 
 // ------------------------------------------------------------------------ curved (dome) cut
 
-TEST_CASE("Curved cut: TAC Joint and Pin on a dome give closed halves, sockets and parts", "[CutConnectorSurface][CurvedCut]")
+TEST_CASE("Curved cut: TAC Joint and Pin on a dome give closed halves, sockets and parts", "[CutConnectorSurface][CurvedCut][TACAttachment]")
 {
+    const int            attachment = GENERATE(0, 1, 2);
     const CurvedCutSheet sheet = gentle_dome();
     Model                model;
     ModelObject*         mo = surface_cube(model);
     const double tx = 5., ty = -3., px = -6., py = 4.;
-    add_tac_joint_volume(mo, surface_tac(curved_cut_sheet_point(sheet, tx, ty), curved_cut_sheet_frame(sheet, tx, ty)), "TAC Joint-1");
+    auto                 tac = surface_tac(curved_cut_sheet_point(sheet, tx, ty), curved_cut_sheet_frame(sheet, tx, ty));
+    tac.tac_joint.attachment = TacJointAttachment(attachment);
+    add_tac_joint_volume(mo, tac, "TAC Joint-1");
     add_pushfit_volume(mo, surface_pin(curved_cut_sheet_point(sheet, px, py), curved_cut_sheet_frame(sheet, px, py)), "Connector-2");
 
     Cut                    cut(mo, 0, Transform3d::Identity(), surface_attrs());
     const ModelObjectPtrs& res = cut.perform_with_curved_sheet(sheet);
-    REQUIRE(res.size() == 4); // two halves, the TAC connector, the pin
+    REQUIRE(res.size() == (attachment == 0 ? 4 : 3));
     REQUIRE(all_closed(res));
     // Each half: the whole TAC cutter, and the Pin's own hole plus its mouth relief.
     for (size_t i = 0; i < 2; ++i) {
-        REQUIRE(count_holes(res[i], CutConnectorType::TacJoint) == 1);
+        const bool owns = attachment == int(i + 1);
+        REQUIRE(count_holes(res[i], CutConnectorType::TacJoint) == (owns ? 0 : 1));
+        size_t pins = 0;
+        for (const auto* v : res[i]->volumes)
+            pins += v->is_model_part() && v->cut_info.is_tac_joint();
+        REQUIRE(pins == (owns ? 1 : 0));
         REQUIRE(count_holes(res[i], CutConnectorType::PushFit) == 2);
     }
     const double cutter_volume = double(its_volume(tac_joint_cutter_mesh(TacJointParams{})));
@@ -263,8 +271,10 @@ TEST_CASE("Curved cut: a Dowel on a dome gets the whole dowel as a socket in eac
 
 // ------------------------------------------------------------------------ drawn cut
 
-TEST_CASE("Drawn cut: TAC Joint and Pin on a drawn strip give closed halves, sockets and parts", "[CutConnectorSurface][DrawCut]")
+TEST_CASE("Drawn cut: TAC Joint and Pin on a drawn strip give closed halves, sockets and parts",
+          "[CutConnectorSurface][DrawCut][TACAttachment]")
 {
+    const int     attachment = GENERATE(0, 1, 2);
     DrawCutStroke stroke = top_arc(40.0, std::asin(15.0 / 40.0));
     REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
     REQUIRE(stroke.valid());
@@ -280,8 +290,9 @@ TEST_CASE("Drawn cut: TAC Joint and Pin on a drawn strip give closed halves, soc
     for (bool flip_pin : { false, true }) {
         Model        model;
         ModelObject* mo = surface_cube(model);
-        add_tac_joint_volume(mo, surface_tac(draw_cut_surface_point(stroke, params, s1, w), draw_cut_surface_frame(stroke, params, s1, w)),
-                             "TAC Joint-1");
+        auto         tac = surface_tac(draw_cut_surface_point(stroke, params, s1, w), draw_cut_surface_frame(stroke, params, s1, w));
+        tac.tac_joint.attachment = TacJointAttachment(attachment);
+        add_tac_joint_volume(mo, tac, "TAC Joint-1");
         add_pushfit_volume(mo,
                            surface_pin(draw_cut_surface_point(stroke, params, s2, w),
                                        draw_cut_surface_frame(stroke, params, s2, w) * (flip_pin ? upside_down : Transform3d::Identity())),
@@ -290,10 +301,15 @@ TEST_CASE("Drawn cut: TAC Joint and Pin on a drawn strip give closed halves, soc
         Cut                    cut(mo, 0, Transform3d::Identity(), surface_attrs());
         const ModelObjectPtrs& res = cut.perform_with_draw_stroke(stroke, params);
         INFO("flip_pin " << flip_pin);
-        REQUIRE(res.size() == 4);
+        REQUIRE(res.size() == (attachment == 0 ? 4 : 3));
         REQUIRE(all_closed(res));
         for (size_t i = 0; i < 2; ++i) {
-            REQUIRE(count_holes(res[i], CutConnectorType::TacJoint) == 1);
+            const bool owns = attachment == int(i + 1);
+            REQUIRE(count_holes(res[i], CutConnectorType::TacJoint) == (owns ? 0 : 1));
+            size_t pins = 0;
+            for (const auto* v : res[i]->volumes)
+                pins += v->is_model_part() && v->cut_info.is_tac_joint();
+            REQUIRE(pins == (owns ? 1 : 0));
             REQUIRE(count_holes(res[i], CutConnectorType::PushFit) == 2);
         }
         REQUIRE(separate_part(res) != nullptr);

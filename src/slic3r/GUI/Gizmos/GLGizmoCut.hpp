@@ -1141,7 +1141,7 @@ protected:
     bool   is_tac_joint_type() const { return m_connector_type == CutConnectorType::TacJoint; }
     bool   tac_joint_mode_supported() const;
     // Bit mask: scale, side clearance, end clearance, offset. Reset/type changes use all fields.
-    void   sync_tac_joint_params(CutConnectors& connectors, unsigned fields = 0x0f);
+    void   sync_tac_joint_params(CutConnectors& connectors, unsigned fields = 0x1f);
     void   render_tac_joint_inputs(CutConnectors& connectors);
     void   update_tac_joint_models(const CutConnectors& connectors);
     bool   tac_joint_outside_body(const CutConnector& connector, const Vec3d& world_pos) const;
