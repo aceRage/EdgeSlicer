@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <set>
@@ -368,6 +369,9 @@ struct FileCappedSink
     mz_ulong      crc      = 0;
     bool          overflow = false;
     bool          io_error = false;
+    bool          cancelled = false;
+    // Optional: called after every chunk with the bytes written so far; false cancels.
+    const std::function<bool(std::uint64_t)>* on_write = nullptr;
 };
 
 size_t file_capped_sink_write(void* opaque, mz_uint64 file_ofs, const void* data, size_t n)
@@ -383,6 +387,10 @@ size_t file_capped_sink_write(void* opaque, mz_uint64 file_ofs, const void* data
     }
     sink->crc = mz_crc32(sink->crc, static_cast<const unsigned char*>(data), n);
     sink->written += n;
+    if (sink->on_write != nullptr && *sink->on_write && !(*sink->on_write)(sink->written)) {
+        sink->cancelled = true;
+        return 0;
+    }
     return n;
 }
 
@@ -691,8 +699,12 @@ bool exceeds_compression_ratio(std::uint64_t uncomp, std::uint64_t comp, const Z
     return uncomp > comp * caps.max_compression_ratio;
 }
 
-bool extract_entry_capped_to_file(
-    mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, const boost::filesystem::path& path, std::uint64_t cap, std::string& err)
+bool extract_entry_capped_to_file(mz_zip_archive&                           archive,
+                                  const mz_zip_archive_file_stat&           stat,
+                                  const boost::filesystem::path&            path,
+                                  std::uint64_t                             cap,
+                                  std::string&                              err,
+                                  const std::function<bool(std::uint64_t)>* on_write = nullptr)
 {
     if (stat.m_is_directory) {
         err = "directory entry cannot be extracted as a file";
@@ -727,10 +739,13 @@ bool extract_entry_capped_to_file(
     sink.file = f.get();
     sink.cap  = stat.m_uncomp_size; // stop at the declared size (already within cap)
     sink.crc  = mz_crc32(0, nullptr, 0);
+    sink.on_write = on_write;
 
     if (!mz_zip_reader_extract_to_callback(&archive, stat.m_file_index, file_capped_sink_write, &sink, 0)) {
         const mz_zip_error zip_err = mz_zip_get_last_error(&archive);
-        if (sink.overflow)
+        if (sink.cancelled)
+            err = ZIP_EXTRACT_CANCELLED;
+        else if (sink.overflow)
             err = std::string("entry inflates beyond its declared size: ") + stat.m_filename;
         else if (sink.io_error)
             err = "extract write failed: " + path_utf8(path);
@@ -967,8 +982,21 @@ bool extract_entries_confined(mz_zip_archive&                archive,
                               const ZipExtractCaps&          caps,
                               std::string&                   err)
 {
+    ZipExtractDests dests;
+    return extract_entries_confined(archive, indices, dest, caps, dests, err);
+}
+
+bool extract_entries_confined(mz_zip_archive&                archive,
+                              const std::vector<mz_uint>&    indices,
+                              const boost::filesystem::path& dest,
+                              const ZipExtractCaps&          caps,
+                              ZipExtractDests&               dests_out,
+                              std::string&                   err,
+                              const ZipExtractProgressFn&    progress)
+{
     namespace fs = boost::filesystem;
     err.clear();
+    dests_out.clear();
 
     fs::path              dest_root;
     std::vector<fs::path> created_dirs;
@@ -976,9 +1004,11 @@ bool extract_entries_confined(mz_zip_archive&                archive,
         return false;
 
     std::vector<StagedFile> staged;
+    std::vector<mz_uint>    staged_index; // parallel to `staged`
     std::set<fs::path>      reserved;
     auto                    fail = [&]() {
         rollback_extract(staged, created_dirs);
+        dests_out.clear();
         return false;
     };
 
@@ -1115,6 +1145,11 @@ bool extract_entries_confined(mz_zip_archive&                archive,
         }
     }
 
+    std::uint64_t done_bytes = 0;
+    if (progress && !progress(0, total_uncomp)) {
+        err = ZIP_EXTRACT_CANCELLED;
+        return fail();
+    }
     for (const Planned& p : planned) {
         try {
             if (p.is_directory) {
@@ -1132,8 +1167,18 @@ bool extract_entries_confined(mz_zip_archive&                archive,
             }
             reserved.insert(part);
             staged.push_back({p.dest, part, leaf_exists(p.dest)});
-            if (!extract_entry_capped_to_file(archive, p.stat, part, caps.max_entry_uncompressed, err))
+            staged_index.push_back(p.index);
+            const std::uint64_t                      base = done_bytes;
+            const std::function<bool(std::uint64_t)> on_write =
+                progress ? std::function<bool(std::uint64_t)>([&](std::uint64_t w) { return progress(base + w, total_uncomp); }) :
+                           std::function<bool(std::uint64_t)>();
+            if (!extract_entry_capped_to_file(archive, p.stat, part, caps.max_entry_uncompressed, err, &on_write))
                 return fail();
+            done_bytes += p.stat.m_uncomp_size;
+            if (progress && !progress(done_bytes, total_uncomp)) {
+                err = ZIP_EXTRACT_CANCELLED;
+                return fail();
+            }
             BOOST_LOG_TRIVIAL(info) << "Unzip: staged file " << p.index << " to " << path_utf8(part);
         } catch (const std::exception& e) {
             err = e.what();
@@ -1142,7 +1187,8 @@ bool extract_entries_confined(mz_zip_archive&                archive,
         }
     }
 
-    for (StagedFile& s : staged) {
+    for (size_t si = 0; si < staged.size(); ++si) {
+        StagedFile& s = staged[si];
         // Planning folds case with ASCII rules only. On a case- or normalization-insensitive
         // file system (APFS, NTFS) 'É.stl' / 'é.stl', or NFC / NFD spellings of one name, are
         // the same file, and the first commit makes the second dest "exist". Ask the file
@@ -1159,6 +1205,7 @@ bool extract_entries_confined(mz_zip_archive&                archive,
         if (!commit_part(s.part, s.dest, err))
             return fail();
         s.part.clear();
+        dests_out[staged_index[si]] = s.dest;
         BOOST_LOG_TRIVIAL(info) << "Unzip: committed " << path_utf8(s.dest);
     }
     return true;
@@ -1170,6 +1217,19 @@ bool extract_entries_confined(const boost::filesystem::path& zip_path,
                               const ZipExtractCaps&          caps,
                               std::string&                   err)
 {
+    ZipExtractDests dests;
+    return extract_entries_confined(zip_path, indices, dest, caps, dests, err);
+}
+
+bool extract_entries_confined(const boost::filesystem::path& zip_path,
+                              const std::vector<mz_uint>&    indices,
+                              const boost::filesystem::path& dest,
+                              const ZipExtractCaps&          caps,
+                              ZipExtractDests&               dests_out,
+                              std::string&                   err,
+                              const ZipExtractProgressFn&    progress)
+{
+    dests_out.clear();
     MZ_Archive archive;
     if (!archive.open_reader(path_utf8(zip_path))) {
         if (archive.arch.m_last_error == MZ_ZIP_UNSUPPORTED_MULTIDISK)
@@ -1179,7 +1239,7 @@ bool extract_entries_confined(const boost::filesystem::path& zip_path,
         BOOST_LOG_TRIVIAL(error) << err;
         return false;
     }
-    return extract_entries_confined(archive.arch, indices, dest, caps, err);
+    return extract_entries_confined(archive.arch, indices, dest, caps, dests_out, err, progress);
 }
 
 MZ_Archive::MZ_Archive() { mz_zip_zero_struct(&arch); }

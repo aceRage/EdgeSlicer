@@ -2,6 +2,8 @@
 #define MINIZ_EXTENSION_HPP
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <string>
 #include <vector>
 #include <miniz.h>
@@ -95,6 +97,32 @@ bool extract_entries_confined(const boost::filesystem::path& zip_path,
                               const boost::filesystem::path& dest,
                               const ZipExtractCaps&          caps,
                               std::string&                   err);
+
+// Central-directory index -> committed dest file (directory entries are not listed). Filled only
+// on success, after the commit phase, so it reflects any rename made at commit time.
+using ZipExtractDests = std::map<mz_uint, boost::filesystem::path>;
+// (bytes written so far, total selected uncompressed bytes). Called on the extracting thread;
+// returning false cancels: everything staged or created is rolled back and `err` is
+// ZIP_EXTRACT_CANCELLED.
+using ZipExtractProgressFn = std::function<bool(std::uint64_t done, std::uint64_t total)>;
+inline constexpr const char* ZIP_EXTRACT_CANCELLED = "extraction cancelled";
+
+// As above, plus the index -> dest map (callers never re-derive the uniquify order) and an
+// optional progress / cancel callback.
+bool extract_entries_confined(mz_zip_archive&                archive,
+                              const std::vector<mz_uint>&    indices,
+                              const boost::filesystem::path& dest,
+                              const ZipExtractCaps&          caps,
+                              ZipExtractDests&               dests_out,
+                              std::string&                   err,
+                              const ZipExtractProgressFn&    progress = {});
+bool extract_entries_confined(const boost::filesystem::path& zip_path,
+                              const std::vector<mz_uint>&    indices,
+                              const boost::filesystem::path& dest,
+                              const ZipExtractCaps&          caps,
+                              ZipExtractDests&               dests_out,
+                              std::string&                   err,
+                              const ZipExtractProgressFn&    progress = {});
 
 // Extracts one archive entry to dest_path. On Windows the file is opened through the wide API
 // (_wfopen): the path never goes through the ANSI code page, whose best-fit mapping turns

@@ -29,6 +29,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
+#include "libslic3r/ZipWorkDir.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -1955,7 +1956,8 @@ bool MainFrame::can_save_as() const
 
 void MainFrame::save_project()
 {
-    save_project_as(m_plater->get_project_filename(".3mf"));
+    if (m_plater)
+        m_plater->save_project(false);
 }
 
 bool MainFrame::save_project_as(const wxString& filename)
@@ -4708,6 +4710,10 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
 {
+    // Extracted ZIP copies live in the zip working folder and may be auto-cleaned (PR C); keep
+    // them out of recent files until PR D records `archive.zip|entry` instead.
+    if (ZipWorkDir::is_inside_work_dir(into_path(filename)))
+        return;
     if (wxFileExists(filename))
     {
         m_recent_projects.AddFileToHistory(filename);

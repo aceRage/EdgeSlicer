@@ -770,6 +770,8 @@ set(lisbslic3r_sources
     Zipper.hpp
     ZipWorkDir.cpp
     ZipWorkDir.hpp
+    ZipOpen.cpp
+    ZipOpen.hpp
 )
 
 if (APPLE)
@@ -818,6 +820,8 @@ slic3r_unity_build(libslic3r SKIP
     SLA/ConcaveHull.cpp             # its to_vec2() differs only by return type from SupportTreeBuildsteps.hpp's
     MinAreaBoundingBox.cpp          # libnest2d headers (opt namespace, boost.geometry traits for Point) clash with neighbours
     SLAPrint.cpp                    # libnest2d headers clash with neighbours
+    ZipOpen.cpp                     # file-local ascii_lower()/utf8_path() also in ZipWorkDir.cpp
+    ZipWorkDir.cpp                  # file-local ascii_lower()/utf8_path()/leaf_exists() with common names
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours

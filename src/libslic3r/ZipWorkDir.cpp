@@ -114,6 +114,28 @@ void split_stem_ext(const std::string& leaf, std::string& stem, std::string& ext
 
 } // namespace
 
+bool ZipWorkDir::is_inside_work_dir(const boost::filesystem::path& path)
+{
+    namespace fs = boost::filesystem;
+    if (path.empty())
+        return false;
+    boost::system::error_code ec;
+    fs::path                  p = fs::absolute(path, ec);
+    if (ec)
+        p = path;
+    // Start at the parent: the marker sits in the root, and every extracted file is at least
+    // one level (the session folder) below it. The walk is capped (one stat per level) because
+    // MainFrame calls this on the UI thread for every recent-file add.
+    unsigned depth = 0;
+    for (fs::path anc = p.parent_path(); !anc.empty() && depth < MAX_MARKER_DEPTH; anc = anc.parent_path(), ++depth) {
+        if (fs::is_regular_file(anc / marker_name(), ec))
+            return true;
+        if (anc.parent_path() == anc)
+            break;
+    }
+    return false;
+}
+
 bool zip_fs_error_is_transient(const boost::system::error_code& ec)
 {
     if (!ec)
