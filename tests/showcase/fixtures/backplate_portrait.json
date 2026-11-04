@@ -1,0 +1,42 @@
+{
+  "schema": 2,
+  "active": "plate1",
+  "scenes": [
+    {
+      "id": "plate1",
+      "name": "Golden: portrait photo backplate zoomed out",
+      "plate_index": 0,
+      "source": "model",
+      "preset_base": "studio_white",
+      "background": {
+        "type": "backplate",
+        "image": "@IMAGE0@",
+        "blur": 0,
+        "plate_horizon": 0.8,
+        "plate_focal": 50,
+        "plate_zoom": 0.5,
+        "plate_offset_y": 0.2
+      },
+      "floor": {
+        "type": "shadow_catcher",
+        "shadow_strength": 0.55,
+        "contact_shadow": 0.75
+      },
+      "lighting": {
+        "azimuth": 135,
+        "elevation": 35,
+        "key_intensity": 1,
+        "key_temperature": 4800,
+        "environment": "studio",
+        "env_intensity": 0.7,
+        "shadow_softness": 1.5
+      },
+      "export": {
+        "width": 1920,
+        "height": 1080,
+        "quality": "high",
+        "format": "png"
+      }
+    }
+  ]
+}

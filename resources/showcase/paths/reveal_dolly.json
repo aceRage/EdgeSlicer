@@ -1,0 +1,22 @@
+{
+  "format": "edgeslicer-showcase-path",
+  "version": 1,
+  "name": "Dark reveal",
+  "description": "Opens on the front view in a dark look, pushes in, slides across and rises round to the side as the studio light comes up; the callouts fade in, and a text watermark shows for the last seconds.",
+  "fps": 30,
+  "start": "front",
+  "moves": [
+    { "op": "wait", "duration": 0.5 },
+    { "op": "dolly_in", "factor": 1.4, "duration": 3, "ease": "ease_out" },
+    { "op": "pan", "right": 15, "up": 0, "duration": 2 },
+    { "op": "orbit", "deg": -45, "elevation": 20, "duration": 3 },
+    { "op": "zoom", "factor": 0.85, "duration": 1.5 }
+  ],
+  "events": [
+    { "type": "look", "at": 0, "preset": "dark_gradient" },
+    { "type": "look", "at": 5.5, "transition": 2.5, "preset": "studio_white" },
+    { "type": "callouts", "at": 0, "action": "hide" },
+    { "type": "callouts", "at": 6, "transition": 0.8, "action": "show" },
+    { "type": "watermark", "from": 8, "to": 10, "fade": 0.5, "text": "@maker", "anchor": "bottom_right", "opacity": 0.8 }
+  ]
+}

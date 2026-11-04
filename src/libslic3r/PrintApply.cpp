@@ -1,11 +1,16 @@
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
+#include "ToolSlots.hpp"
+#include "NozzleProcess.hpp"
+#include "NozzleOverride.hpp"
+#include "GCode/WipeTowerEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
 #include <cfloat>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 
 namespace Slic3r {
@@ -787,6 +792,32 @@ static bool mm_paint_applies_to_parent_region(const PrintObjectRegions::LayerRan
     return root_model_part != nullptr && root_model_part->is_mm_painted();
 }
 
+// Painted regions are built over a volume region unless it comes from an "Override paint" modifier: there
+// the modifier's own filament wins, so apply_mm_segmentation() finds no painted target for its LayerRegion
+// and keeps it whole. One predicate for generate_print_object_regions(), painted_region_targets_match()
+// and verify_update_print_object_regions(), so the three can never disagree.
+static bool paint_targets_parent_region(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id)
+{
+    const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[size_t(parent_region_id)];
+    return parent_region.region != nullptr &&
+           (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
+           mm_paint_applies_to_parent_region(layer_range, parent_region_id) &&
+           ! parent_region.region->config().override_paint.value;
+}
+
+// A modifier's region config over the volume region parent_region_id. "Override paint" only means
+// something over colour painting: on an unpainted part it would make the modifier's region differ from its
+// parent by this flag alone and split the walls at the modifier's boundary, so it is dropped there.
+static PrintRegionConfig modifier_region_config(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id,
+                                                const ModelVolume &volume, size_t num_extruders)
+{
+    PrintRegionConfig config = region_config_from_model_volume(layer_range.volume_regions[size_t(parent_region_id)].region->config(),
+                                                               nullptr, volume, num_extruders);
+    if (config.override_paint.value && (num_extruders < 2 || ! mm_paint_applies_to_parent_region(layer_range, parent_region_id)))
+        config.override_paint.value = false;
+    return config;
+}
+
 void print_region_ref_inc(PrintRegion &r) { ++ r.m_ref_cnt; }
 void print_region_ref_reset(PrintRegion &r) { r.m_ref_cnt = 0; }
 int  print_region_ref_cnt(const PrintRegion &r) { return r.m_ref_cnt; }
@@ -878,7 +909,7 @@ bool verify_update_print_object_regions(
                             } else if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
                                 // Such parent region does not exist. If it is needed, then we need to reslice.
                                 // Only create new region for a modifier, which actually modifies config of it's parent.
-                                if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, **it_model_volume, num_extruders);
+                                if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, **it_model_volume, num_extruders);
                                     config != parent_region.region->config())
                                     // This modifier newly overrides a region, which it did not before. We need to reslice.
                                     return false;
@@ -887,7 +918,11 @@ bool verify_update_print_object_regions(
                 }
                 PrintRegionConfig cfg = region.parent == -1 ?
                     region_config_from_model_volume(default_region_config, layer_range.config, **it_model_volume, num_extruders) :
-                    region_config_from_model_volume(layer_range.volume_regions[region.parent].region->config(), nullptr, **it_model_volume, num_extruders);
+                    modifier_region_config(layer_range, region.parent, **it_model_volume, num_extruders);
+                // Override paint decides whether painted regions exist over this region at all, so a change of it
+                // cannot be patched into the region in place.
+                if (cfg.override_paint.value != region.region->config().override_paint.value)
+                    return false;
                 if (cfg != region.region->config()) {
                     // Region configuration changed.
                     if (print_region_ref_cnt(*region.region) == 0) {
@@ -908,7 +943,7 @@ bool verify_update_print_object_regions(
     // Verify and / or update PrintRegions produced by color painting.
     for (const PrintObjectRegions::LayerRangeRegions &layer_range : print_object_regions.layer_ranges)
         for (const PrintObjectRegions::PaintedRegion &region : layer_range.painted_regions) {
-            if (!mm_paint_applies_to_parent_region(layer_range, region.parent))
+            if (!paint_targets_parent_region(layer_range, region.parent))
                 return false;
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
@@ -1153,7 +1188,7 @@ static PrintObjectRegions* generate_print_object_regions(
                             if (parent_volume.is_model_part() || parent_volume.is_modifier())
                                 if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
                                     // Only create new region for a modifier, which actually modifies config of it's parent.
-                                    if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders);
+                                    if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, volume, num_extruders);
                                         config != parent_region.region->config()) {
                                         added = true;
                                         layer_range.volume_regions.push_back({ &volume, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1208,7 +1243,7 @@ static PrintObjectRegions* generate_print_object_regions(
                     if (! parent_region.model_volume->is_model_part() || parent_region.region == nullptr)
                         continue;
                     if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
-                        if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, *modifier, num_extruders);
+                        if (PrintRegionConfig config = modifier_region_config(layer_range, parent_region_id, *modifier, num_extruders);
                             config != parent_region.region->config()) {
                             added = true;
                             layer_range.volume_regions.push_back({ modifier, parent_region_id, get_create_region(std::move(config)), bbox });
@@ -1227,8 +1262,7 @@ static PrintObjectRegions* generate_print_object_regions(
         for (unsigned int painted_extruder_id : painting_extruders)
             for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++ parent_region_id)
                 if (const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-                    (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                    mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+                    paint_targets_parent_region(layer_range, parent_region_id)) {
                     PrintRegionConfig cfg = parent_region.region->config();
                     // Image Row Phase 5a: the same rule for the WALLS. A row bound to this part's
                     // wall_filament samples the image along the outer wall at nozzle resolution,
@@ -1384,10 +1418,7 @@ static bool painted_region_targets_match(const PrintObjectRegions           &pri
         expected_targets.reserve(layer_range.volume_regions.size() * expected_extruders.size());
 
         for (int parent_region_id = 0; parent_region_id < int(layer_range.volume_regions.size()); ++parent_region_id) {
-            const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
-            if (parent_region.region != nullptr &&
-                (parent_region.model_volume->is_model_part() || parent_region.model_volume->is_modifier()) &&
-                mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
+            if (paint_targets_parent_region(layer_range, parent_region_id)) {
                 for (unsigned int extruder_id : expected_extruders)
                     expected_targets.emplace_back(parent_region_id, extruder_id);
             }
@@ -1419,6 +1450,85 @@ static bool same_layer_pointillism_enabled(const MixedFilamentManager &mixed_mgr
     return false;
 }
 
+// Orca: The shrinkage compensation is baked into the PrintObject transformations, so it has to be known before apply()
+// creates them. Derive it from the filaments the new model prints with instead of from the existing PrintObjects and
+// their regions, which do not exist yet on the first apply(). Every feature filament of every part, height range and
+// modifier counts, whether the feature ends up printing or not, so filaments that disagree switch the compensation
+// off rather than letting a wrong compensation through.
+void Print::update_shrinkage_compensation(size_t num_extruders)
+{
+    const auto set_compensation = [this](unsigned int extruder) {
+        // 100% from the user is the equivalent to 0 in orca.
+        const double xy_compensation = 100.0 / m_config.filament_shrink.get_at(extruder);
+        const double z_compensation  = 100.0 / m_config.filament_shrinkage_compensation_z.get_at(extruder);
+        m_shrinkage_compensation = { xy_compensation, xy_compensation, z_compensation };
+    };
+    const auto same_shrinkage = [this](unsigned int a, unsigned int b) {
+        return m_config.filament_shrink.get_at(a) == m_config.filament_shrink.get_at(b) &&
+               m_config.filament_shrinkage_compensation_z.get_at(a) == m_config.filament_shrinkage_compensation_z.get_at(b);
+    };
+    // Usually all filaments share the same shrinkage, then it does not matter which of them print.
+    bool uniform = true;
+    for (unsigned int extruder = 1; extruder < num_extruders && uniform; ++ extruder)
+        uniform = same_shrinkage(0, extruder);
+    if (uniform) {
+        m_same_shrinkage_compensations = true;
+        set_compensation(0);
+        return;
+    }
+
+    const size_t num_filaments = m_mixed_filament_mgr.total_filaments(num_extruders);
+    std::vector<unsigned int> extruders;
+    const auto append_feature_extruders = [num_filaments, &extruders](const PrintRegionConfig &config) {
+        for (int id : { config.wall_filament.value, config.outer_wall_filament.value,
+                        config.sparse_infill_filament.value, config.solid_infill_filament.value }) {
+            if (id <= 0)
+                continue; // outer_wall_filament 0 follows wall_filament
+            const unsigned int i = (unsigned int)std::max(0, id - 1);
+            extruders.emplace_back(i >= num_filaments ? 0 : i);
+        }
+    };
+    for (const ModelObject *model_object : m_model.objects) {
+        if (std::none_of(model_object->instances.begin(), model_object->instances.end(), [](const ModelInstance *mi) { return mi->is_printable(); }))
+            continue;
+        std::vector<const ModelVolume*> modifiers;
+        std::copy_if(model_object->volumes.begin(), model_object->volumes.end(), std::back_inserter(modifiers), [](const ModelVolume *mv) { return mv->is_modifier(); });
+        for (const ModelVolume *part : model_object->volumes) {
+            if (! part->is_model_part())
+                continue;
+            std::vector<PrintRegionConfig> parents { region_config_from_model_volume(m_default_region_config, nullptr, *part, num_filaments) };
+            for (const auto &[range, range_config] : model_object->layer_config_ranges)
+                parents.emplace_back(region_config_from_model_volume(m_default_region_config, &range_config.get(), *part, num_filaments));
+            for (const PrintRegionConfig &parent : parents) {
+                append_feature_extruders(parent);
+                for (const ModelVolume *modifier : modifiers)
+                    append_feature_extruders(region_config_from_model_volume(parent, nullptr, *modifier, num_filaments));
+            }
+        }
+        append_model_object_extruders(*model_object, extruders);
+        const PrintObjectConfig object_config = PrintObject::object_config_from_model_object(m_default_object_config, *model_object, num_filaments);
+        if (PrintObject::has_support_material(object_config))
+            append_support_extruders(object_config, (unsigned int)num_filaments, extruders);
+        else if (PrintObject::has_stabilizers(object_config) && object_config.support_filament != 0) {
+            // Stabilizers without supports print with the support filament; 0 follows the object.
+            unsigned int i = (unsigned int)object_config.support_filament - 1;
+            extruders.emplace_back((i >= num_filaments) ? 0 : i);
+        }
+    }
+    this->append_tool_change_extruders(extruders);
+    // A mixed slot prints with its physical components.
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+    // The wipe tower filament may also be flushed into the objects.
+    this->append_wipe_tower_extruder(extruders);
+    m_mixed_filament_mgr.expand_0based_extruder_ids(extruders, num_extruders);
+
+    m_same_shrinkage_compensations = ! extruders.empty() &&
+        std::all_of(extruders.begin(), extruders.end(), [&](unsigned int extruder) { return same_shrinkage(extruders.front(), extruder); });
+    m_shrinkage_compensation = Vec3d::Ones();
+    if (m_same_shrinkage_compensations)
+        set_compensation(extruders.front());
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1427,9 +1537,29 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     //BBS: add more logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter")%__LINE__;
+    // Visual-only keys (multi-colour filament split / angle / twist) never reach the slicer: dropped
+    // before anything below reads, compares or stores the config, so they cannot change G-code or
+    // invalidate a step. tests/design_multicolour_filament_view.md 6.1.
+    strip_visual_only_options(new_full_config);
     // Normalize the config.
     // Per-variant retraction vectors (the printer preset keeps every variant) become one value per tool.
     resolve_printer_extruder_variants(new_full_config);
+    // Per-nozzle process P7: the nozzle size each tool carries in this project (nozzle_diameter_override) becomes its
+    // nozzle_diameter before anything reads it. No-op without an override.
+    apply_nozzle_diameter_override(new_full_config);
+    // Per-nozzle process P4: a filament's values for the nozzle it prints on (filament_nozzle_variants) become its
+    // own values, so every reader and the G-code's config block see what is printed.
+    resolve_filament_nozzle_variants(new_full_config);
+    // Per-nozzle process P6: every line width for the nozzle that prints it (explicit per-nozzle widths, mm widths
+    // scaled to the nozzle's size on a printer with mixed sizes). No-op with one nozzle size.
+    resolve_nozzle_line_widths(new_full_config);
+    // Only WipeTower2 rotates; the Bambu Lab (Type1) tower is always printed unrotated, as the
+    // greyed-out Process field and the inert Rotate tool show. The CLI sets is_BBL_printer() after
+    // apply(), so printer_model decides too (resolve_wipe_tower_type).
+    if (auto *angle = new_full_config.option<ConfigOptionFloat>("wipe_tower_rotation_angle");
+        angle != nullptr && angle->value != 0. &&
+        (m_isBBLPrinter || resolve_wipe_tower_type(new_full_config) == WipeTowerType::Type1))
+        angle->value = 0.;
 	new_full_config.option("print_settings_id",            true);
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
@@ -1951,6 +2081,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // 4) Generate PrintObjects from ModelObjects and their instances.
     {
+        this->update_shrinkage_compensation(num_extruders);
         PrintObjectPtrs print_objects_new;
         print_objects_new.reserve(std::max(m_objects.size(), m_model.objects.size()));
         bool new_objects = false;

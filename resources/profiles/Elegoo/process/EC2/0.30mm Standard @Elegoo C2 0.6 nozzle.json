@@ -1,7 +1,7 @@
 {
     "type": "process",
     "name": "0.30mm Standard @Elegoo C2 0.6 nozzle",
-    "inherits": "fdm_process_elegoo_06030",
+    "inherits": "fdm_process_elegoo_06030_cc2",
     "from": "system",
     "setting_id": "0TPOSfRKT0N1sYSc",
     "instantiation": "true",

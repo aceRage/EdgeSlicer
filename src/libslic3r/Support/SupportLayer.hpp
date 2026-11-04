@@ -112,6 +112,18 @@ public:
 	// and are never merged into one another.
 	uint16_t support_group { 0 };
 
+	// EdgeSlicer (support interface interlock, phase 1): the woven stripes of this interface or base
+	// interface layer, each with the direction its stripes (and their fill lines) run in. Every part
+	// is also inside `polygons`. generate_support_toolpaths takes them out of what it fills normally
+	// and fills them solid along the stripe, in this layer's filament: interface layers hold the
+	// interface stripes, base interface layers the body stripes. Empty unless
+	// support_interface_interlock is on, which keeps the output byte-identical with the feature off.
+	struct InterlockPart {
+		Polygons polygons;
+		float    angle { 0.f };
+	};
+	std::vector<InterlockPart> interlock_parts;
+
 	// Polygons to be filled by the support pattern.
 	Polygons polygons;
 	// Currently for the contact layers only.

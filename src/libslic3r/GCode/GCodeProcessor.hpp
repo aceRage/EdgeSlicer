@@ -2,6 +2,7 @@
 #define slic3r_GCodeProcessor_hpp_
 
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -9,6 +10,7 @@
 
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <map>
 #include <vector>
 #include <mutex>
@@ -20,6 +22,9 @@
 namespace Slic3r {
 
 class Print;
+
+// For a filament whose density is not set, in g/cm³.
+inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
 namespace PreCooling { struct Plan; }
 
 // Ultra: Bambu machine start/end/change gcode emits reserved T<n> markers (n > 254) that are NOT tool
@@ -218,9 +223,45 @@ inline bool is_bbl_special_tool_command(int tool_number)
             std::vector<std::string> params;    // extra msg info
         };
 
+        // Orca #16291: material extruded for the plate, one object instance or one connected body of it, for their
+        // centers of mass.
+        struct ObjectMass
+        {
+            struct Sum
+            {
+                double mass{ 0. };
+                double volume{ 0. };
+                Vec3d  moment{ Vec3d::Zero() };
+                // Of the mass about the origin along each axis, the sums of m x^2, m y^2 and m z^2.
+                Vec3d second{ Vec3d::Zero() };
+
+                void add(const Sum &other)
+                {
+                    mass += other.mass;
+                    volume += other.volume;
+                    moment += other.moment;
+                    second += other.second;
+                }
+            };
+            // Everything printed up to each layer id, the plate's with brim, raft and supports, and the box it fills.
+            std::vector<Sum> printed_up_to_layer;
+            BoundingBoxf3    box;
+            // Of an object, whether it is an assembly.
+            bool assembly{ false };
+
+            Sum  total() const { return printed_up_to_layer.empty() ? Sum{} : printed_up_to_layer.back(); }
+            void add(const Sum &sum, const BoundingBoxf3 &extent, size_t layer);
+        };
+
         std::string filename;
         unsigned int id;
         std::vector<MoveVertex> moves;
+        ObjectMass plate_mass;
+        // One per object instance, and one per connected body of the instances of several, when the sliced objects were at hand.
+        std::vector<ObjectMass> object_masses;
+        std::vector<ObjectMass> body_masses;
+        // One per object instance, of its supports and raft.
+        std::vector<ObjectMass> support_masses;
         // Positions of ends of lines of the final G-code this->filename after TimeProcessor::post_process() finalizes the G-code.
         std::vector<size_t> lines_ends;
         Pointfs printable_area;
@@ -246,6 +287,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // Metadata/filament_sequence.json ("optimal_assignment"); BambuStudio
         // GCodeProcessorResult::optimal_assignment.
         std::vector<int> optimal_assignment;
+        // Per-nozzle process P5: the filament (0-based) each G-code tool prints when the G-code names the tools the
+        // filaments were assigned to (output_tool_filaments of filament_output_tools), empty when it names each
+        // filament's own tool. The send dialog's rows follow it, so they always match the file.
+        std::vector<int> output_tool_filaments;
         SettingsIds settings_ids;
         size_t extruders_count;
         bool backtrace_enabled;
@@ -289,6 +334,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             filename = std::forward<Other>(other).filename;
             id = std::forward<Other>(other).id;
             moves = std::forward<Other>(other).moves;
+            plate_mass = std::forward<Other>(other).plate_mass;
+            object_masses = std::forward<Other>(other).object_masses;
+            body_masses = std::forward<Other>(other).body_masses;
+            support_masses = std::forward<Other>(other).support_masses;
             lines_ends = std::forward<Other>(other).lines_ends;
             printable_area = std::forward<Other>(other).printable_area;
             bed_exclude_area = std::forward<Other>(other).bed_exclude_area;
@@ -302,6 +351,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
             filament_change_sequence = std::forward<Other>(other).filament_change_sequence;
             nozzle_change_sequence = std::forward<Other>(other).nozzle_change_sequence;
             optimal_assignment = std::forward<Other>(other).optimal_assignment;
+            output_tool_filaments = std::forward<Other>(other).output_tool_filaments;
             settings_ids = std::forward<Other>(other).settings_ids;
             extruders_count = std::forward<Other>(other).extruders_count;
             backtrace_enabled = std::forward<Other>(other).backtrace_enabled;
@@ -359,6 +409,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
             Wipe_Tower_Start,
             Wipe_Tower_End,
             PA_Change,
+            Print_Time_Total_Sec_Placeholder,
+            Print_Time_Day_Placeholder,
+            Print_Time_Hour_Placeholder,
+            Print_Time_Minute_Placeholder,
+            Print_Time_Sec_Placeholder,
+            Used_Filament_Length_Placeholder,
+            Normal_Print_Time_Placeholder,
+            Silent_Print_Time_Placeholder,
+            Total_Weight_Placeholder,
+            Total_Cost_Placeholder,
+            Total_Wipe_Tower_Cost_Placeholder,
+            Total_Wipe_Tower_Filament_Placeholder,
         };
 
         static const std::string& reserved_tag(ETags tag) { return s_IsBBLPrinter ? Reserved_Tags[static_cast<unsigned char>(tag)] : Reserved_Tags_compatible[static_cast<unsigned char>(tag)]; }
@@ -805,8 +867,18 @@ inline bool is_bbl_special_tool_command(int tool_number)
         };
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
+        // Orca #16291: the object instance and the connected body of an instance of several that a point lies in, -1 for none.
+        struct MassLocation
+        {
+            int object{ -1 };
+            int body{ -1 };
+        };
+        // For a support, the object instance only.
+        using MassLocator = std::function<MassLocation(const Vec3d &point, bool support)>;
+
     private:
         GCodeReader m_parser;
+        MassLocator m_mass_locator;
         EUnits m_units;
         EPositioningType m_global_positioning_type;
         EPositioningType m_e_local_positioning_type;
@@ -865,6 +937,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
         ExtrusionRole m_extrusion_role;
         unsigned char m_extruder_id;
         unsigned char m_last_extruder_id;
+        std::vector<int> m_output_tool_filaments; // Per-nozzle process P4: see set_output_tool_filaments()
         ExtruderColors m_extruder_colors;
         ExtruderTemps m_extruder_temps;
         ExtruderTemps m_extruder_temps_config;
@@ -933,6 +1006,20 @@ inline bool is_bbl_special_tool_command(int tool_number)
 
         void apply_config(const PrintConfig& config);
         void set_print(Print* print) { m_print = print; }
+        // Per-nozzle process P4: the filament each G-code tool prints (output_tool_filaments), when the G-code names
+        // assigned tools rather than filaments; empty otherwise. T<n> is read back as that filament.
+        void set_output_tool_filaments(std::vector<int> tool_filaments) { m_output_tool_filaments = std::move(tool_filaments); }
+        unsigned int filament_of_output_tool(unsigned int tool) const
+        {
+            return tool < m_output_tool_filaments.size() && m_output_tool_filaments[tool] >= 0 ? unsigned(m_output_tool_filaments[tool]) : tool;
+        }
+        // Orca #16291: locates extrusions in the objects and bodies it numbers, those objects listed beforehand.
+        void set_mass_locator(MassLocator locator, std::vector<GCodeProcessorResult::ObjectMass> objects)
+        {
+            m_mass_locator = std::move(locator);
+            m_result.support_masses.assign(objects.size(), {});
+            m_result.object_masses = std::move(objects);
+        }
         void enable_stealth_time_estimator(bool enabled);
         bool is_stealth_time_estimator_enabled() const {
             return m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].enabled;
@@ -1138,6 +1225,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
         std::map<unsigned int, std::vector<std::string>> plan_pre_cooling(const PreCooling::Plan &plan) const;
 
         void store_move_vertex(EMoveType type, bool internal_only = false);
+        // Orca #16291: centers of mass. In memory only: nothing is written to the G-code.
+        void add_object_mass(int filament_id, float volume);
+        void finalize_object_masses();
 
         void set_extrusion_role(ExtrusionRole role);
 

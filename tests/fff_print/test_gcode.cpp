@@ -1,6 +1,9 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <regex>
+#include <vector>
+#include <algorithm>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -9,6 +12,8 @@
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/calib.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "test_data.hpp"
 
 #include <cmath>
@@ -477,4 +482,411 @@ TEST_CASE("Tool change on wipe tower forces the travel to the Type 2 tower befor
     CHECK(travels_on > travels_off);
     // Every tool change after the first one now goes through the tower.
     CHECK(travels_on + 1 >= tools_on);
+}
+
+// Orca #16422: firmwares read the compatibility header lines, so they must describe the filament
+// the plate prints, not filament 1. Edge keeps first_layer_bed_temperature as the max of used
+// filaments (U1 always heats to the highest bed temp).
+static DynamicPrintConfig two_filament_header_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "nozzle_diameter",                   "0.4,0.4" },
+        { "filament_diameter",                 "1.75,1.75" },
+        { "enable_prime_tower",                "0" },
+        { "single_extruder_multi_material",    "1" },
+        { "nozzle_temperature_initial_layer",  "200,250" },
+        { "nozzle_temperature",                "200,250" },
+        { "supertack_plate_temp_initial_layer","60,100" },
+        { "cool_plate_temp_initial_layer",     "60,100" },
+        { "textured_cool_plate_temp_initial_layer", "60,100" },
+        { "eng_plate_temp_initial_layer",      "60,100" },
+        { "hot_plate_temp_initial_layer",      "60,100" },
+        { "textured_plate_temp_initial_layer", "60,100" },
+        { "skirt_loops",                       "0" },
+        { "brim_type",                         "no_brim" },
+        { "enable_support",                    "0" },
+        { "layer_change_gcode",                "G92 E0\n" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#0000FF" };
+    return config;
+}
+
+static int header_int(const std::string &gcode, const std::string &key)
+{
+    const std::string token = "; " + key + " = ";
+    const size_t pos = gcode.find(token);
+    REQUIRE(pos != std::string::npos);
+    return std::stoi(gcode.substr(pos + token.size()));
+}
+
+TEST_CASE("The G-code header names the first layer temperatures of the filament the plate prints", "[GCode][U1]")
+{
+    DynamicPrintConfig config = two_filament_header_config();
+    config.set_deserialize_strict({
+        { "wall_filament",          "2" },
+        { "sparse_infill_filament", "2" },
+        { "solid_infill_filament",  "2" },
+    });
+    const std::string gcode = slice({ TestMesh::cube_20x20x20 }, config);
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
+    CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
+
+TEST_CASE("The BBL G-code header names the first layer temperatures on a single-filament plate", "[GCode][U1]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "enable_prime_tower",                     "0" },
+        { "nozzle_temperature_initial_layer",       "215" },
+        { "nozzle_temperature",                     "215" },
+        { "supertack_plate_temp_initial_layer",     "55" },
+        { "cool_plate_temp_initial_layer",          "55" },
+        { "textured_cool_plate_temp_initial_layer", "55" },
+        { "eng_plate_temp_initial_layer",           "55" },
+        { "hot_plate_temp_initial_layer",           "55" },
+        { "textured_plate_temp_initial_layer",      "55" },
+        { "skirt_loops",                            "0" },
+        { "brim_type",                              "no_brim" },
+        { "enable_support",                         "0" },
+        { "layer_change_gcode",                     "G92 E0\n" },
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.extruders(true).size() == 1);
+
+    const std::string gcode = Test::gcode(print);
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 55);
+    CHECK(header_int(gcode, "first_layer_temperature") == 215);
+}
+
+TEST_CASE("The G-code header names the first object's filament when printing by object", "[GCode][U1]")
+{
+    DynamicPrintConfig config = two_filament_header_config();
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->config.set("extruder", 2);
+    model.objects[1]->config.set("extruder", 1);
+    print.apply(model, config);
+
+    const std::string gcode = Test::gcode(print);
+
+    const size_t first_t1 = gcode.find("\nT1");
+    const size_t first_t0 = gcode.find("\nT0");
+    REQUIRE(first_t1 != std::string::npos);
+    REQUIRE(first_t0 != std::string::npos);
+    REQUIRE(first_t1 < first_t0);
+
+    CHECK(header_int(gcode, "first_layer_bed_temperature") == 100);
+    CHECK(header_int(gcode, "first_layer_temperature") == 250);
+}
+
+// Orca #12781: wipe_tower_type. Bambu Lab printers always get the Type1 tower; every other printer
+// follows the option, Type2 by default, and a Type1 override slices with the Bambu-style tower.
+namespace {
+
+DynamicPrintConfig two_filament_tower_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+        {"wipe_tower_wall_type",       "rectangle"},
+        {"layer_height",               "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+    return config;
+}
+
+void two_cube_model(Model &model)
+{
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+}
+
+} // namespace
+
+TEST_CASE("Print::wipe_tower_type is Type1 on Bambu Lab printers and follows the option elsewhere", "[GCode][WipeTower][WipeTowerType]")
+{
+    for (const char *value : {"type1", "type2"}) {
+        DYNAMIC_SECTION(value) {
+            DynamicPrintConfig config = two_filament_tower_config();
+            config.set_deserialize_strict("wipe_tower_type", value);
+            Print print;
+            Model model;
+            two_cube_model(model);
+            print.apply(model, config);
+
+            print.is_BBL_printer() = true;
+            CHECK(print.wipe_tower_type() == WipeTowerType::Type1);
+
+            print.is_BBL_printer() = false;
+            CHECK(print.wipe_tower_type() == (std::string(value) == "type1" ? WipeTowerType::Type1 : WipeTowerType::Type2));
+        }
+    }
+
+    SECTION("default") {
+        DynamicPrintConfig config = two_filament_tower_config();
+        Print print;
+        Model model;
+        two_cube_model(model);
+        print.apply(model, config);
+        CHECK(print.wipe_tower_type() == WipeTowerType::Type2);
+    }
+}
+
+TEST_CASE("A Type1 override on a non-Bambu printer slices with compatible G-code tags", "[GCode][WipeTower][WipeTowerType]")
+{
+    auto slice = [](const char *type, bool bbl) {
+        DynamicPrintConfig config = two_filament_tower_config();
+        config.set_deserialize_strict("wipe_tower_type", type);
+        Print print;
+        Model model;
+        two_cube_model(model);
+        print.apply(model, config);
+        print.is_BBL_printer() = bbl;
+        print.set_status_silent();
+        REQUIRE(print.has_wipe_tower());
+        return Test::gcode(print);
+    };
+
+    // The tower G-code of the whole print: every line between a toolchange start and its end. The
+    // header (time stamp) and the config block (which names the option) are left out.
+    auto tower = [](const std::string &gcode) {
+        std::string out;
+        for (size_t start = gcode.find("; CP TOOLCHANGE START"); start != std::string::npos;
+             start = gcode.find("; CP TOOLCHANGE START", start + 1)) {
+            const size_t end = gcode.find("; CP TOOLCHANGE END", start);
+            if (end == std::string::npos)
+                break;
+            out += gcode.substr(start, end - start);
+        }
+        return out;
+    };
+
+    const std::string type1 = slice("type1", false);
+    const std::string type2 = slice("type2", false);
+    REQUIRE(! tower(type1).empty());
+    REQUIRE(! tower(type2).empty());
+    // The override changes the tower.
+    CHECK(tower(type1) != tower(type2));
+    // Edge: the Type1 tower writes the tags the non-Bambu export reads, so the preview and the
+    // statistics see it as a prime tower.
+    CHECK(type1.find(";TYPE:Prime tower") != std::string::npos);
+    CHECK(type1.find("; FEATURE: Prime tower") == std::string::npos);
+
+    // A Bambu Lab printer ignores the option and keeps its own tags.
+    const std::string bbl_type2 = slice("type2", true);
+    CHECK(bbl_type2.find("; FEATURE: Prime tower") != std::string::npos);
+    CHECK(bbl_type2.find(";TYPE:Prime tower") == std::string::npos);
+    CHECK(tower(bbl_type2) == tower(slice("type1", true)));
+}
+
+// ORCA #16719: upstream also rewrote the E conversion in _extrude; Edge keeps its division by the
+// resolved flow ratio (per-filament flow, U1 high-flow design) and only adds the validation. The ratio
+// must still scale the extruded length exactly once.
+TEST_CASE("The filament flow ratio scales the extruded length once", "[GCode]")
+{
+    // Retraction off, so every positive relative E move is extrusion and scales with the ratio.
+    auto extruded_length = [](double flow_ratio) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({ { "use_relative_e_distances", "1" }, { "retraction_length", "0" }, { "wipe", "0" } });
+        config.option<ConfigOptionFloats>("filament_flow_ratio")->values = { flow_ratio };
+        double total = 0.;
+        GCodeReader reader;
+        reader.parse_buffer(slice({ TestMesh::cube_20x20x20 }, config),
+                            [&](GCodeReader &, const GCodeReader::GCodeLine &line) {
+                                if ((line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) && line.has_e() && line.e() > 0.f)
+                                    total += line.e();
+                            });
+        return total;
+    };
+
+    const double full = extruded_length(1.);
+    REQUIRE(full > 0.);
+    const double ratio = extruded_length(0.9) / full;
+    CHECK(std::abs(ratio - 0.9) < 0.9e-3);
+}
+
+// Orca #16898: a temperature tower re-targets the hotend at every layer. On a multi-tool
+// printer that command has to name the tool printing the tower: a bare M104 goes to
+// whichever tool the firmware considers active. Edge maps the filament through
+// temperature_tool_for_filament (physical hotend on U1 / Bambu). A single-tool printer
+// and SEMM keep the bare form — the writer already drops T for those.
+TEST_CASE("The temperature tower steps the temperature of the tool printing it", "[GCode][Calib]")
+{
+    const bool multi_tool = GENERATE(false, true);
+    DYNAMIC_SECTION((multi_tool ? "two tools, the tower on the second one (filament 2 -> T1)" : "one tool")) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        if (multi_tool) {
+            config.set_num_extruders(2);
+            config.set_num_filaments(2);
+            config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+            config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+            config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+        }
+        config.set_deserialize_strict({
+            {"skirt_loops",                      0},
+            {"brim_type",                        "no_brim"},
+            {"single_extruder_multi_material",   0},
+            {"enable_prime_tower",               0},
+            {"nozzle_temperature_initial_layer", multi_tool ? "230,230" : "230"},
+            {"nozzle_temperature",               multi_tool ? "230,230" : "230"},
+            // Without the end G-code's heater-off M104 S0, every temperature command after the
+            // first layer change is the tower's. Edge steps 5 °C every 10.001 mm of Z
+            // (start - floor(z / 10.001) * 5), so a 20 mm cube is the 230 and 225 bands.
+            {"machine_end_gcode",                ""},
+        });
+
+        Print print;
+        Model model;
+        init_print({TestMesh::cube_20x20x20}, print, model, config);
+        if (multi_tool) {
+            REQUIRE(model.objects.size() == 1);
+            model.objects.front()->config.set("extruder", 2);
+            print.apply(model, config);
+        }
+        Calib_Params params;
+        params.mode  = CalibMode::Calib_Temp_Tower;
+        params.start = 230;
+        params.end   = 190;
+        params.step  = 5;
+        print.set_calib_params(params);
+        const std::string gcode = Test::gcode(print);
+
+        const size_t layers_begin = gcode.find(";LAYER_CHANGE");
+        REQUIRE(layers_begin != std::string::npos);
+        const std::regex      temperature_command(R"(^M10[49] S(\d+)(?: T(\d+))?)");
+        std::set<int>         temperatures;
+        std::set<std::string> tools;
+        std::istringstream    stream(gcode.substr(layers_begin));
+        for (std::string line; std::getline(stream, line);) {
+            std::smatch m;
+            if (!std::regex_search(line, m, temperature_command))
+                continue;
+            temperatures.insert(std::stoi(m[1]));
+            tools.insert(m[2].matched ? m[2].str() : "none");
+        }
+        CHECK(temperatures == std::set<int>{225, 230});
+        CHECK(tools == std::set<std::string>{multi_tool ? "1" : "none"});
+    }
+}
+
+static DynamicPrintConfig two_filament_bed_temp_config(const std::string &first_layer_temps, const std::string &later_temps)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"nozzle_diameter",                        "0.4,0.4"},
+        {"filament_diameter",                      "1.75,1.75"},
+        {"enable_prime_tower",                     "0"},
+        {"single_extruder_multi_material",         "1"},
+        {"curr_bed_type",                          "High Temp Plate"},
+        {"supertack_plate_temp_initial_layer",     first_layer_temps},
+        {"cool_plate_temp_initial_layer",          first_layer_temps},
+        {"textured_cool_plate_temp_initial_layer", first_layer_temps},
+        {"eng_plate_temp_initial_layer",           first_layer_temps},
+        {"hot_plate_temp_initial_layer",           first_layer_temps},
+        {"textured_plate_temp_initial_layer",      first_layer_temps},
+        {"supertack_plate_temp",                   later_temps},
+        {"cool_plate_temp",                        later_temps},
+        {"textured_cool_plate_temp",               later_temps},
+        {"eng_plate_temp",                         later_temps},
+        {"hot_plate_temp",                         later_temps},
+        {"textured_plate_temp",                    later_temps},
+        {"skirt_loops",                            "0"},
+        {"brim_type",                              "no_brim"},
+        {"layer_height",                           "0.2"},
+        {"initial_layer_print_height",             "0.2"},
+        {"layer_change_gcode",                     "G92 E0\n"},
+        {"machine_start_gcode",                    "M190 S{bed_temperature_initial_layer_single}\n"},
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#0000FF"};
+    return config;
+}
+
+static std::vector<int> bed_command_temps(const std::string &gcode)
+{
+    std::vector<int> temps;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.compare(0, 6, "M140 S") == 0 || line.compare(0, 6, "M190 S") == 0)
+            temps.push_back(std::stoi(line.substr(6)));
+    }
+    return temps;
+}
+
+static std::string join_ints(const std::vector<int> &values)
+{
+    std::ostringstream out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i)
+            out << ',';
+        out << values[i];
+    }
+    return out.str();
+}
+
+// Orca #16770: a filament that starts above the first layer, such as a support interface,
+// never touches the bed. Heating the bed to its temperature would soften the filament the
+// part stands on, so only first-layer filaments count.
+TEST_CASE("The highest temperature bed policy ignores filaments that start above the first layer", "[GCode][BedTemperature]")
+{
+    // Filament 1: bed 65 on the first layer, 60 after it. Filament 2: bed 100. A 30 mm cap on
+    // a 10 mm tall stem prints with filament 1 and is supported from the bed, the support with
+    // filament 1 and its interface under the cap with filament 2.
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+
+    DynamicPrintConfig config = two_filament_bed_temp_config("65,100", "60,100");
+    config.set_deserialize_strict({
+        {"enable_support",             "1"},
+        {"support_type",               "normal(auto)"},
+        {"support_threshold_angle",    "30"},
+        {"support_filament",           "1"},
+        {"support_interface_filament", "2"},
+    });
+
+    const std::string gcode = Test::slice({mesh}, config);
+    REQUIRE(gcode.find("\nT1") != std::string::npos);
+
+    const std::vector<int> bed_temps = bed_command_temps(gcode);
+    INFO("bed temperatures: " << join_ints(bed_temps));
+    REQUIRE_FALSE(bed_temps.empty());
+    CHECK(bed_temps.front() == 65);
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
 }

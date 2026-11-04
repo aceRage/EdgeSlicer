@@ -406,6 +406,16 @@ uint16_t free_port()
     return a.local_endpoint().port();
 }
 
+bool loopback_connect_fails(uint16_t port)
+{
+    using boost::asio::ip::tcp;
+    boost::asio::io_context   io;
+    tcp::socket               sock(io);
+    boost::system::error_code ec;
+    sock.connect(tcp::endpoint(boost::asio::ip::make_address_v4("127.0.0.1"), port), ec);
+    return bool(ec);
+}
+
 std::string b64url(const std::string& s)
 {
     std::string out(boost::beast::detail::base64::encoded_size(s.size()), '\0');
@@ -521,6 +531,25 @@ TEST_CASE("login callback server keeps its open CORS and needs no token", "[Page
     CHECK(r.status == 404);
     CHECK(r.has_header("Access-Control-Allow-Origin"));
     server.stop();
+}
+
+TEST_CASE("http server start-stop after one request does not re-arm accept", "[PageServer][PageServerHttp]")
+{
+    // Regression for a macOS kqueue crash: do_accept's completion handler started
+    // another async_accept after stop() closed the acceptor (login-callback test
+    // stopped the server right after one request).
+    static constexpr int k_rounds = 20;
+    for (int i = 0; i < k_rounds; ++i) {
+        HttpServer server(free_port());
+        server.set_request_handler([](const std::string&) { return std::make_shared<HttpServer::ResponseNotFound>(); });
+        server.start();
+        server.stop_health_check();
+        const uint16_t port = server.get_port();
+        const Reply    r    = http_get(port, "/");
+        REQUIRE(r.status == 404);
+        server.stop();
+        REQUIRE(loopback_connect_fails(port));
+    }
 }
 
 TEST_CASE("page server does not share a port another process holds", "[PageServer][PageServerHttp]")

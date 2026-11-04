@@ -1,0 +1,155 @@
+{
+  "caps": {
+    "leaves": 1000000,
+    "triangles": 2000000
+  },
+  "formats": {
+    "mesh": "psmesh1",
+    "paint": "pspaint1"
+  },
+  "instances": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      100.0,
+      100.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "object": {
+    "extruder": 1,
+    "key": "o?",
+    "name": "Cube",
+    "obj": 0,
+    "plate": 0
+  },
+  "paint_depth": {
+    "definitions": [
+      {
+        "enum_labels": [
+          "Unlimited",
+          "Limited by walls",
+          "Limited by distance"
+        ],
+        "enum_values": [
+          "unlimited",
+          "walls",
+          "millimeters"
+        ],
+        "key": "paint_depth_mode",
+        "label": "Paint depth mode",
+        "tooltip": "Controls how thick a painted (multi-material/multi-color) claim is before the object reverts to its base filament for walls, solid infill and sparse infill. The depth is measured perpendicular to the painted surface, so it is the same on a vertical wall, on a curve and on a flat top. Without a bound, a small dark painted spot can extrude dark filament all the way to the object's core, showing through light-colored walls/infill above and around it. \"Limited by distance\" sets that thickness directly in millimeters and is the control to reach for; \"Limited by walls\" converts a wall count into the same millimeter thickness; \"Unlimited\" restores the old unbounded behavior (the painted claim reaches the object's medial axis).",
+        "type": "enum"
+      },
+      {
+        "key": "paint_depth_walls",
+        "label": "Paint depth walls",
+        "min": 1.0,
+        "tooltip": "Thickness of a painted claim, expressed as a number of wall widths, when \"Paint depth mode\" is \"Limited by walls\". This is converted to about that many wall widths of material measured perpendicular to the painted surface: one perimeter spacing per wall, plus the inset the wall generator applies before laying its outer loop, plus a margin so the thickness does not sit on a rounding boundary. It is a thickness, not a promise of a loop count - how many loops fit inside it is decided by \"Wall generator\" (the classic generator tiles a band with an even number of loops plus a gap-fill line, and Arachne will not produce more than twice \"Wall loops\" loops in any region, so depth beyond that prints as painted solid/sparse infill). If you want an exact thickness in millimeters, use \"Limited by distance\" instead.",
+        "type": "int",
+        "unit": "walls"
+      },
+      {
+        "key": "paint_depth_mm",
+        "label": "Paint depth distance",
+        "min": 0.0,
+        "tooltip": "How thick a painted claim is, measured perpendicular to the painted surface, when \"Paint depth mode\" is \"Limited by distance\". The same everywhere: a vertical wall gets this much colour measured horizontally, a flat top gets it measured vertically, and a slope gets it measured along its own normal - so a painted region behaves like a shell of the color rather than thinning out on shallow curves. Zero behaves the same as \"Paint depth mode\" = \"Unlimited\": no clamp is applied on any layer.",
+        "type": "float",
+        "unit": "mm"
+      },
+      {
+        "key": "paint_infill_override",
+        "label": "Paint sparse infill",
+        "tooltip": "If enabled (default), a painted claim's sparse infill is printed in the painted filament, matching walls and solid infill. If disabled, a bounded painted claim (\"Paint depth mode\" other than \"Unlimited\") keeps its sparse infill in the object's base filament - walls and solid infill (which can be visible on top surfaces) still print in the painted filament.",
+        "type": "bool"
+      },
+      {
+        "key": "paint_depth_solid_interfaces",
+        "label": "Paint depth solid interfaces",
+        "tooltip": "Print solid shells at colour boundaries inside the object so the base colour cannot show through painted areas from above/below. Turning this off saves solid material and time but can let the base colour bleed through thin painted skins.",
+        "type": "bool"
+      },
+      {
+        "key": "mmu_segmented_region_interlocking_depth",
+        "label": "Interlocking depth of a segmented region",
+        "min": 0.0,
+        "tooltip": "Interlocking depth of a segmented region. Only active when \"Paint depth mode\" is not \"Unlimited\". Zero disables this feature. When \"Paint depth mode\" is \"Limited by walls\", the effective depth is capped at a quarter of one perimeter spacing (about 0.11mm at a 0.45mm line width), because a deeper notch would narrow the painted band on alternating layers by more than a whole wall loop - so \"Paint depth walls\" would silently deliver one wall fewer on every other layer. That cap does not apply when \"Paint depth mode\" is \"Limited by distance\": the value there is used exactly as entered, and setting it large relative to \"Paint depth distance\" can narrow the band on alternating layers enough to cost a loop there too - keep it small relative to that depth if you want the same loop count on every layer.",
+        "type": "float",
+        "unit": "mm"
+      }
+    ],
+    "values": {
+      "mmu_segmented_region_interlocking_depth": 0.1,
+      "paint_depth_mm": 1.2,
+      "paint_depth_mode": "walls",
+      "paint_depth_solid_interfaces": true,
+      "paint_depth_walls": 3,
+      "paint_infill_override": true
+    }
+  },
+  "palette": [
+    {
+      "color": "#FFFFFF",
+      "id": 1,
+      "preset": "Generic PLA",
+      "type": "PLA"
+    },
+    {
+      "color": "#FF0000",
+      "id": 2,
+      "preset": "Generic PLA",
+      "type": "PLA"
+    },
+    {
+      "color": "#0000FF",
+      "id": 3,
+      "preset": "Generic PETG",
+      "type": "PETG"
+    }
+  ],
+  "revision": "f0be86955430cd4d",
+  "session": "0123456789abcdef",
+  "volumes": [
+    {
+      "airbrushed": false,
+      "extruder": 1,
+      "image_fill": false,
+      "index": 0,
+      "matrix": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "mesh_bytes": 252,
+      "mesh_hash": "aa35a1c767f56d60841c592a2601ff1e69b6a5f28e3a3e8bf5e64ec17d834038",
+      "name": "Cube",
+      "painted": true,
+      "triangles": 12,
+      "vertices": 8
+    }
+  ]
+}

@@ -29,6 +29,9 @@
 #include <WebView2.h>
 #include <Shellapi.h>
 #include <slic3r/Utils/Http.hpp>
+#include <slic3r/Utils/WebView2UserData.hpp>
+#include <wx/filename.h>
+#include <wx/stdpaths.h>
 #elif defined __linux__
 #include <gtk/gtk.h>
 #define WEBKIT_API
@@ -49,6 +52,10 @@ webkit_web_view_run_javascript_finish                (WebKitWebView             
 						      GError                    **error);
 WEBKIT_API void
 webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
+WEBKIT_API guint
+webkit_get_major_version                     (void);
+WEBKIT_API guint
+webkit_get_minor_version                     (void);
 WEBKIT_API WebKitWebContext *
 webkit_web_context_get_default              (void);
 WEBKIT_API void
@@ -454,6 +461,70 @@ static void disconnect_script_messages_on_destroy(wxWebView *webView)
 }
 #endif
 
+#ifdef __WIN32__
+// The WebView2 user data folder for this copy, or empty for wx's shared default
+// (%LOCALAPPDATA%\EdgeSlicer). See WebView2UserData.hpp: test copies get their own folder so a
+// copy whose browser arguments differ from the main install's (HideCursorWhileTyping flag, user
+// agent version / theme) no longer gets ERROR_INVALID_STATE and blank web pages while both run.
+static const std::wstring &webview2_user_data_folder()
+{
+    static const std::wstring folder = [] {
+        namespace UD = Slic3r::WebView2UserData;
+        wxFileName exe(wxStandardPaths::Get().GetExecutablePath());
+        const wxString exe_dir = exe.GetPath();
+        UD::Inputs in;
+        in.own_marker    = wxFileExists(exe_dir + wxFILE_SEP_PATH + UD::OWN_MARKER);
+        in.no_hub_marker = wxFileExists(exe_dir + wxFILE_SEP_PATH + UD::NO_HUB_MARKER);
+        in.own_env       = std::getenv(UD::OWN_ENV);
+        in.shared_env    = std::getenv(UD::SHARED_ENV);
+        in.udf_env       = std::getenv(UD::ENV_NAME);
+        if (!UD::wants_own_folder(in)) {
+            BOOST_LOG_TRIVIAL(info) << "WebView2: shared user data folder";
+            return std::wstring();
+        }
+        wxFileName dir(wxStandardPaths::Get().GetUserLocalDataDir(), wxEmptyString);
+        dir.AppendDir(UD::COPIES_SUBFOLDER);
+        dir.AppendDir(wxString::FromUTF8(UD::copy_folder_name(exe_dir.ToUTF8().data())));
+        const wxString path = dir.GetPath();
+        BOOST_LOG_TRIVIAL(info) << "WebView2: this copy uses its own user data folder " << path.ToUTF8().data();
+        return path.ToStdWstring();
+    }();
+    return folder;
+}
+
+// WEBVIEW2_USER_DATA_FOLDER overrides the folder wx passes to CreateCoreWebView2EnvironmentWithOptions,
+// which reads it during that (synchronous) call inside wxWebViewEdge::Create(). It is set only for
+// that call, so the model browser's own isolated folder (ModelBrowserPanel) is never redirected.
+class ScopedWebView2UserDataFolder
+{
+public:
+    ScopedWebView2UserDataFolder()
+    {
+        const std::wstring &folder = webview2_user_data_folder();
+        if (folder.empty())
+            return;
+        wchar_t     buf[32768];
+        const DWORD n = ::GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", buf, DWORD(sizeof(buf) / sizeof(buf[0])));
+        m_had_old     = n > 0 && n < sizeof(buf) / sizeof(buf[0]);
+        if (m_had_old)
+            m_old.assign(buf, n);
+        m_active = ::SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", folder.c_str()) != 0;
+    }
+    ~ScopedWebView2UserDataFolder()
+    {
+        if (m_active)
+            ::SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", m_had_old ? m_old.c_str() : nullptr);
+    }
+    ScopedWebView2UserDataFolder(const ScopedWebView2UserDataFolder &) = delete;
+    ScopedWebView2UserDataFolder &operator=(const ScopedWebView2UserDataFolder &) = delete;
+
+private:
+    bool         m_active { false };
+    bool         m_had_old { false };
+    std::wstring m_old;
+};
+#endif
+
 wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxString const & brand_tag, bool script_bridge)
 {
 #if wxUSE_WEBVIEW_EDGE
@@ -496,7 +567,10 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
             Slic3r::LoginUAPlatform::Windows, Slic3r::GUI::wxGetApp().dark_mode(),
             Slic3r::GUI::wxGetApp().current_language_code().ToStdString(),
             brand_tag.ToStdString(), SLIC3R_VERSION)));
-        webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+        {
+            ScopedWebView2UserDataFolder udf;
+            webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+        }
         // We register the wxfs:// protocol for testing purposes
         webView->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new wxWebViewArchiveHandler("bbl")));
         // And the memory: file system
@@ -600,6 +674,29 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
     webView->EnableAccessToDevTools();
     return webView;
 }
+
+bool WebView::NeedsCompositingWorkaround()
+{
+#ifdef __linux__
+    const guint major = webkit_get_major_version();
+    const guint minor = webkit_get_minor_version();
+    return major < 2 || (major == 2 && minor < 42);
+#else
+    return false;
+#endif
+}
+
+bool WebView::SupportsForceSharedMemory()
+{
+#ifdef __linux__
+    const guint major = webkit_get_major_version();
+    const guint minor = webkit_get_minor_version();
+    return major > 2 || (major == 2 && minor >= 44);
+#else
+    return false;
+#endif
+}
+
 #if wxUSE_WEBVIEW_EDGE
 bool WebView::CheckWebViewRuntime()
 {

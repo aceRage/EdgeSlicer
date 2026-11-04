@@ -1,6 +1,7 @@
 #include "MainFrame.hpp"
 #include "PrintSelectKeys.hpp"
 
+#include <wx/control.h>
 #include <wx/panel.h>
 #include <wx/notebook.h>
 #include <wx/listbook.h>
@@ -47,6 +48,7 @@
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
 #include "HomePanel.hpp"
+#include "LayerlingPanel.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
 // BBS
@@ -260,8 +262,13 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     // BBS
     , m_recent_projects(18)
     , m_settings_dialog(this)
-    , diff_dialog(this)
 {
+    // ORCA_STARTUP_PROFILE: the member initialisers above (PrintHostQueueDialog, the settings
+    // dialog) run before this line; GUI_App logs the uptime just before `new MainFrame`. The
+    // "Compare presets" dialog is built on first use (diff_dialog()).
+    Slic3r::StartupPhase profile("MainFrame ctor");
+    if (profile.enabled())
+        Slic3r::startup_profile_log("MainFrame ctor body begin uptime_ms=" + std::to_string(Slic3r::startup_profile_uptime_ms()));
 #ifdef __WXOSX__
     set_miniaturizable(GetHandle());
 #endif
@@ -289,6 +296,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     // Fonts were created by the DPIFrame constructor for the monitor, on which the window opened.
     wxGetApp().update_fonts(this);
+    profile.mark("config/log level/MarkdownTip/update_fonts");
 
 #ifndef __APPLE__
     m_topbar         = new BBLTopbar(this);
@@ -353,6 +361,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     SetMinSize(wxGetApp().get_min_size());
 #endif
 
+    profile.mark("topbar");
     // initialize tabpanel and menubar
     {
         Slic3r::StartupScopedTimer t("MainFrame ctor step=init_tabpanel");
@@ -365,6 +374,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         else
             init_menubar_as_editor();
     }
+    profile.mark("init_tabpanel + init_menubar (split by their own marks)");
 
     // BBS
 #if 0
@@ -443,6 +453,8 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     //BBS
     Bind(EVT_SELECT_TAB, [this](wxCommandEvent&evt) {
         TabPosition pos = (TabPosition)evt.GetInt();
+        if (m_layerling != nullptr && pos >= 0 && pos < (int) m_tabpanel->GetPageCount() && m_tabpanel->GetPage(pos) == m_layerling)
+            return;
         m_tabpanel->SetSelection(pos);
     });
 
@@ -512,7 +524,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     sizer->Add(m_main_sizer, 1, wxEXPAND);
     SetSizerAndFit(sizer);
     // initialize layout from config
+    profile.mark("event binds + sizer");
     update_layout();
+    profile.mark("update_layout");
     sizer->SetSizeHints(this);
 
 #ifdef WIN32
@@ -545,6 +559,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     Layout();
 
     update_title();
+    profile.mark("Fit/SetSize/Layout/update_title");
 
     // declare events
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& event) {
@@ -638,13 +653,16 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     });
 #endif
 
+    profile.mark("close/other event binds");
     update_ui_from_settings();    // FIXME (?)
+    profile.mark("update_ui_from_settings");
 
     if (m_plater != nullptr) {
         // BBS
         // Constructor-time init: bypass the teardown guard in
         // update_slice_print_status — mainframe is not registered yet.
         update_slice_print_status_impl(eEventSliceUpdate, true, true);
+        profile.mark("update_slice_print_status_impl");
 
         // BBS: backup project
         if (wxGetApp().app_config->get("backup_switch") == "true") {
@@ -706,6 +724,20 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
             }
             return;}
 #endif
+        // ImGui draws its text fields (the text tool's box, a sketch value field) on the GL canvas, so
+        // while one of them is typed into the focused wx window is that canvas or an in-canvas frame:
+        // neither is a wxControl, so IsTextEntryFocused() cannot see it and CHAR_HOOK takes the chord
+        // here first -- Ctrl+P opened Preferences, Ctrl+N a new project, and the field never saw the
+        // key. ImGui raises WantCaptureKeyboard while one of its items owns the keyboard, so leave
+        // the key to it then. A focused wxControl (text field, list, web view) is untouched: those
+        // keep their own keys, and ImGui's flag can outlive the focus moving to one of them.
+        // macOS system chords above (Cmd+H/M/Q, Ctrl+Cmd+F) still run while a field is active.
+        wxWindow* const focus = wxWindow::FindFocus();
+        ImGuiWrapper* const imgui = wxGetApp().imgui();
+        if (focus != nullptr && imgui != nullptr && imgui->want_keyboard() && dynamic_cast<wxControl*>(focus) == nullptr) {
+            evt.Skip();
+            return;
+        }
         if (evt.CmdDown() && evt.GetKeyCode() == 'R')
         {
             if (m_slice_enable)
@@ -782,13 +814,25 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
     wxGetApp().persist_window_geometry(this, true);
     wxGetApp().persist_window_geometry(&m_settings_dialog, true);
-    // bind events from DiffDlg
+    // The "Compare presets" dialog's events are bound when it is built (diff_dialog()).
+}
 
-    bind_diff_dialog();
+DiffPresetDialog& MainFrame::diff_dialog()
+{
+    if (!m_diff_dialog) {
+        const auto started = std::chrono::steady_clock::now();
+        wxBusyCursor busy;
+        m_diff_dialog = std::make_unique<DiffPresetDialog>(this);
+        bind_diff_dialog();
+        BOOST_LOG_TRIVIAL(info) << "DiffPresetDialog built on first use in "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() << " ms";
+    }
+    return *m_diff_dialog;
 }
 
 void MainFrame::bind_diff_dialog()
 {
+    DiffPresetDialog* dlg = m_diff_dialog.get();
     auto get_tab = [](Preset::Type type) {
         Tab* null_tab = nullptr;
         for (Tab* tab : wxGetApp().tabs_list)
@@ -797,23 +841,23 @@ void MainFrame::bind_diff_dialog()
         return null_tab;
     };
 
-    auto transfer = [this, get_tab](Preset::Type type) {
-        get_tab(type)->transfer_options(diff_dialog.get_left_preset_name(type),
-                                        diff_dialog.get_right_preset_name(type),
-                                        diff_dialog.get_selected_options(type));
+    auto transfer = [dlg, get_tab](Preset::Type type) {
+        get_tab(type)->transfer_options(dlg->get_left_preset_name(type),
+                                        dlg->get_right_preset_name(type),
+                                        dlg->get_selected_options(type));
     };
 
-    auto process_options = [this](std::function<void(Preset::Type)> process) {
-        const Preset::Type diff_dlg_type = diff_dialog.view_type();
+    auto process_options = [dlg](std::function<void(Preset::Type)> process) {
+        const Preset::Type diff_dlg_type = dlg->view_type();
         if (diff_dlg_type == Preset::TYPE_INVALID) {
-            for (const Preset::Type& type : diff_dialog.types_list() )
+            for (const Preset::Type& type : dlg->types_list() )
                 process(type);
         }
         else
             process(diff_dlg_type);
     };
 
-    diff_dialog.Bind(EVT_DIFF_DIALOG_TRANSFER,      [process_options, transfer](SimpleEvent&)         { process_options(transfer); });
+    dlg->Bind(EVT_DIFF_DIALOG_TRANSFER,      [process_options, transfer](SimpleEvent&)         { process_options(transfer); });
 }
 
 
@@ -972,10 +1016,13 @@ void MainFrame::update_layout()
             }
         };
 
-        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it
+        // On Linux m_plater needs to be removed from m_tabpanel before to reparent it. It is the
+        // page of Prepare, Preview and Showcase, so remove every one of them.
         int plater_page_id = m_tabpanel->FindPage(m_plater);
-        if (plater_page_id != wxNOT_FOUND)
+        while (plater_page_id != wxNOT_FOUND) {
             m_tabpanel->RemovePage(plater_page_id);
+            plater_page_id = m_tabpanel->FindPage(m_plater);
+        }
 
         if (m_plater->GetParent() != this)
             m_plater->Reparent(this);
@@ -1031,6 +1078,8 @@ void MainFrame::update_layout()
         m_plater->Reparent(m_tabpanel);
         m_tabpanel->InsertPage(tp3DEditor, m_plater, _L("Prepare"), std::string("tab_3d_active"), std::string("tab_3d_active"), false);
         m_tabpanel->InsertPage(tpPreview, m_plater, _L("Preview"), std::string("tab_preview_active"), std::string("tab_preview_active"), false);
+        // Showcase (D1): presentation renders, the plater's third page.
+        m_tabpanel->InsertPage(tpShowcase, m_plater, _L("Showcase"), std::string("tab_showcase_active"), std::string("tab_showcase_active"), false);
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 0);
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
@@ -1132,6 +1181,9 @@ void MainFrame::shutdown(bool isRecreate)
     RemoteAccess::close_gui_gate(!isRecreate);
     if (!isRecreate)
         RemoteAccess::get().stop();
+    // The Layerling tab's local server and any download in progress.
+    if (m_layerling)
+        m_layerling->shutdown();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)
@@ -1394,9 +1446,13 @@ void MainFrame::init_tabpanel() {
                 m_param_panel->OnActivate();
             }
             else if (sel == tpPreview) {
-                if (!m_plater || m_plater->is_view3D_shown())
+                if (!m_plater || m_plater->is_view3D_shown() || m_plater->is_showcase_shown())
                     wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_PREVIEW));
                 m_param_panel->OnActivate();
+            }
+            else if (sel == tpShowcase) {
+                if (m_plater && !m_plater->is_showcase_shown())
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLVIEWTOOLBAR_SHOWCASE));
             }
         }
         //else if (panel == m_param_panel)
@@ -1449,6 +1505,9 @@ void MainFrame::init_tabpanel() {
                 prev_monitored_tab = -1;
             }
         }
+
+        if (m_layerling)
+            m_layerling->set_active(panel == m_layerling);
 
         if (panel)
             panel->SetFocus();
@@ -1567,6 +1626,11 @@ void MainFrame::init_tabpanel() {
         m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
     }
 
+    // Layerling: the last page, when Preferences shows it. Nothing is built or started before the
+    // tab is first opened.
+    if (wxGetApp().is_editor())
+        update_layerling_tab();
+
     if (m_plater) {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=initial_config");
         // load initial config
@@ -1579,6 +1643,47 @@ void MainFrame::init_tabpanel() {
         if (full_config.has("filament_colour")) {
             m_plater->on_filaments_change(full_config.option<ConfigOptionStrings>("filament_colour")->values.size());
         }
+    }
+}
+
+// Where the Device page goes: tpMonitor once update_layout() has inserted the plater's three pages
+// (Prepare, Preview, Showcase), right after Home before that - the inserts then move it to tpMonitor.
+int MainFrame::device_page_position() const
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    if (m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND)
+        return std::min<int>(tpMonitor, count);
+    return std::min(1, count);
+}
+
+int MainFrame::calibration_page_position() const
+{
+    const int count = int(m_tabpanel->GetPageCount());
+    const int idx   = m_layerling != nullptr ? m_tabpanel->FindPage(m_layerling) : wxNOT_FOUND;
+    return idx != wxNOT_FOUND ? idx : count;
+}
+
+void MainFrame::update_layerling_tab()
+{
+    if (m_tabpanel == nullptr)
+        return;
+    const bool want = layerling_tab_enabled();
+    const int  idx  = m_layerling != nullptr ? m_tabpanel->FindPage(m_layerling) : wxNOT_FOUND;
+    if (want && idx == wxNOT_FOUND) {
+        if (m_layerling == nullptr)
+            m_layerling = new LayerlingPanel(m_tabpanel);
+        m_layerling->Show(false);
+        m_tabpanel->AddPage(m_layerling, _L("Layerling"), std::string("tab_layerling_active"), std::string("tab_layerling_active"), false);
+#ifdef _MSW_DARK_MODE
+        wxGetApp().UpdateDarkUIWin(this);
+#endif
+    } else if (!want && idx != wxNOT_FOUND) {
+        if (m_tabpanel->GetSelection() == idx)
+            m_tabpanel->SetSelection(m_plater != nullptr && m_tabpanel->FindPage(m_plater) != wxNOT_FOUND ? int(tp3DEditor) : 0);
+        m_layerling->set_active(false);
+        m_layerling->shutdown(); // the local server stops; the panel is kept for a later show
+        m_layerling->Show(false);
+        m_tabpanel->RemovePage(idx);
     }
 }
 
@@ -1605,15 +1710,15 @@ void MainFrame::show_device(bool bBBLPrinter) {
         if (!m_monitor_holder)
             m_monitor_holder = make_monitor_holder();
         m_monitor_holder->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        m_tabpanel->InsertPage(device_page_position(), m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
         if (!m_calibration_holder)
             m_calibration_holder = make_calibration_holder();
         m_calibration_holder->Show(false);
-        // Calibration is always the last page, so don't use InsertPage here: AddPage needs no index to agree
-        // with TabPosition::tpCalibration.
-        m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
-                               std::string("tab_calibration_active"), false);
+        // Calibration is the last TabPosition page (only the Layerling tab, which has no TabPosition,
+        // comes after it), so its index agrees with TabPosition::tpCalibration.
+        m_tabpanel->InsertPage(calibration_page_position(), m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
+                               std::string("tab_calibration_active"));
 
 #ifdef _MSW_DARK_MODE
         wxGetApp().UpdateDarkUIWin(this);
@@ -1640,7 +1745,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
             });
         }
         m_printer_view->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_printer_view, _L("Device"), std::string("tab_monitor_active"),
+        m_tabpanel->InsertPage(device_page_position(), m_printer_view, _L("Device"), std::string("tab_monitor_active"),
                                std::string("tab_monitor_active"));
     }
 }
@@ -1666,7 +1771,7 @@ void MainFrame::show_flashforge_device()
     if (m_ff_device == nullptr)
         m_ff_device = new FFDeviceTab(m_tabpanel);
     m_ff_device->Show(false);
-    m_tabpanel->InsertPage(tpMonitor, m_ff_device, _L("Device"), std::string("tab_monitor_active"),
+    m_tabpanel->InsertPage(device_page_position(), m_ff_device, _L("Device"), std::string("tab_monitor_active"),
                            std::string("tab_monitor_active"));
     static_cast<FFDeviceTab*>(m_ff_device)->OnActivate();
 #ifdef _MSW_DARK_MODE
@@ -2751,6 +2856,8 @@ void MainFrame::on_sys_color_changed()
     // So does the Printers page.
     if (m_printers)
         m_printers->sys_color_changed();
+    if (m_layerling)
+        m_layerling->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
@@ -3035,7 +3142,10 @@ void MainFrame::open_mobile_hub()
                 // route that does not need it, and the page sends it as a header afterwards.
                 wxLaunchDefaultBrowser(wxString::Format("http://127.0.0.1:%d/hub/", info.admin_port));
             } else {
-                MessageDialog(nullptr, _L("The Mobile Hub did not start. Please try again in a moment."),
+                MessageDialog(nullptr,
+                              RemoteHub::no_hub() ? _L("No phone hub is running. This copy was started with --no-hub (or has an edgeslicer_no_hub marker file), "
+                                                       "so it does not start or take over the hub. Start the hub from the main EdgeSlicer, or start this copy with --take-hub.") :
+                                                    _L("The Mobile Hub did not start. Please try again in a moment."),
                               _L("Mobile Hub"), wxOK | wxICON_INFORMATION)
                     .ShowModal();
             }
@@ -3213,7 +3323,8 @@ void MainFrame::init_menubar_as_editor()
         fileMenu->AppendSeparator();
 
 #ifndef __APPLE__
-        append_menu_item(fileMenu, wxID_EXIT, _L("Quit"), wxString::Format(_L("Quit")),
+        // Orca #16722: Ctrl+Q quits on Windows and Linux (macOS has the system Cmd+Q).
+        append_menu_item(fileMenu, wxID_EXIT, _L("Quit") + sep + ctrl_t + "Q", wxString::Format(_L("Quit")),
             [this](wxCommandEvent&) { request_quit(false); }, "menu_exit", nullptr);
 #else
         append_menu_item(fileMenu, wxID_EXIT, _L("Quit"), wxString::Format(_L("Quit")),
@@ -3498,6 +3609,16 @@ void MainFrame::init_menubar_as_editor()
             this);
 
         viewMenu->AppendSeparator();
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show 3Dconnexion Settings"), _L("Show/Hide 3Dconnexion devices settings dialog"),
+            [this](wxCommandEvent&) {
+                Mouse3DController& controller = m_plater->get_mouse3d_controller();
+                controller.show_settings_dialog(!controller.is_settings_dialog_shown());
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater && m_plater->get_mouse3d_controller().can_show_settings_dialog(); },
+            [this]() { return m_plater && m_plater->get_mouse3d_controller().is_settings_dialog_shown(); }, this);
+
+        viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Labels") + "\t" + ctrl + "E", _L("Show object labels in 3D scene."),
             [this](wxCommandEvent&) { m_plater->show_view3D_labels(!m_plater->are_view3D_labels_shown()); m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT)); }, this,
             [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->are_view3D_labels_shown(); }, this);
@@ -3508,6 +3629,37 @@ void MainFrame::init_menubar_as_editor()
                 m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
             },
             this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_view3D_overhang_shown(); }, this);
+
+        // Orca #15770: global X-Ray view of the Prepare scene. Orca puts the toggle in its canvas menu,
+        // which EdgeSlicer does not have; the per-object Ghost mode stays in the object list.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("X-Ray"), _L("Show every object as a translucent, edge-weighted surface to see inside and behind parts."),
+            [this](wxCommandEvent &) {
+                m_plater->toggle_show_xray();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->is_show_xray(); }, this);
+
+        // Orca #13704: realistic view (Orca: its canvas menu). The details are in Preferences > Graphics.
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Realistic View"),
+            _L("Render objects with Phong shading, and optionally ambient occlusion and cast shadows (Preferences > Graphics)."),
+            [this](wxCommandEvent &) {
+                AppConfig* cfg = wxGetApp().app_config;
+                cfg->set_bool(SETTING_OPENGL_REALISTIC_MODE, !cfg->get_bool(SETTING_OPENGL_REALISTIC_MODE));
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); },
+            []() { return wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE); }, this);
+
+        // Orca #16291: center of mass markers, in Prepare and Preview (Orca: its canvas menu).
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Center of Mass"),
+            _L("Show the center of mass of each plate, object, separate part and support in Prepare and Preview. Click a marker for its weight, volume and moment of inertia."),
+            [this](wxCommandEvent &) {
+                wxGetApp().toggle_show_center_of_mass();
+                m_plater->set_current_canvas_as_dirty();
+                m_plater->get_current_canvas3D()->post_event(SimpleEvent(wxEVT_PAINT));
+            },
+            this, [this]() { return m_plater->is_view3D_shown() || m_plater->is_preview_shown(); }, []() { return wxGetApp().show_center_of_mass(); }, this);
 
         /*viewMenu->AppendSeparator();
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Wireframe") + "\t" + ctrl + shift + _L("Enter"), _L("Show wireframes in 3D scene."),
@@ -3650,6 +3802,15 @@ void MainFrame::init_menubar_as_editor()
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Temperature × retraction stringing grid
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Max Volumetric Speed
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Max flowrate"), _L("Max flowrate"),
         [this](wxCommandEvent&) {
@@ -3772,6 +3933,15 @@ void MainFrame::init_menubar_as_editor()
             if (!m_retraction_calib_dlg)
                 m_retraction_calib_dlg = new Retraction_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
             m_retraction_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Temperature × retraction stringing grid
+    append_menu_item(calib_menu, wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
@@ -4271,7 +4441,8 @@ void MainFrame::select_tab(wxPanel* panel)
         return;
     }
     int page_idx = m_tabpanel->FindPage(panel);
-    if (page_idx == tp3DEditor && m_tabpanel->GetSelection() == tpPreview)
+    // FindPage() gives the plater's first page (Prepare); Preview and Showcase show it too.
+    if (page_idx == tp3DEditor && (m_tabpanel->GetSelection() == tpPreview || m_tabpanel->GetSelection() == tpShowcase))
         return;
     //BBS GUI refactor: remove unused layout new/dlg
     /*if (page_idx != wxNOT_FOUND && m_layout == ESettingsLayout::Dlg)
@@ -4352,6 +4523,19 @@ bool MainFrame::open_printer_device_page(const std::string& id, const PrintersMo
     case OpenWay::PrinterWebView: {
         wxString url = wxString::FromUTF8(target.url);
         m_printer_view->load_url(url);
+        const int idx = m_tabpanel->FindPage(m_printer_view);
+        if (idx != wxNOT_FOUND)
+            select_tab(size_t(idx));
+        return true;
+    }
+    case OpenWay::DevicePage: {
+        // The shared device page for that printer (a Centauri Carbon 2 has no web page of its own).
+        wxString url = PrinterWebView::shared_device_page_url(id);
+        if (url.empty()) {
+            why = "This printer has no device page.";
+            return false;
+        }
+        m_printer_view->load_url(url, wxString(), DevicePageLoad::Kind::Show);
         const int idx = m_tabpanel->FindPage(m_printer_view);
         if (idx != wxNOT_FOUND)
             select_tab(size_t(idx));

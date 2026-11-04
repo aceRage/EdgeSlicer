@@ -544,7 +544,10 @@ public:
                                                            bool                                slowdown_for_curled_edges,
                                                            // Overlap at or below which the overhang fan switches on; negative when the fan
                                                            // does not depend on overlap.
-                                                           float                               fan_overlap_threshold = -1.0f)
+                                                           float                               fan_overlap_threshold = -1.0f,
+                                                           // Overhang Shadow: 0 ratio is stock behaviour (byte-identical).
+                                                           float                               overhang_shadow_ratio = 0.f,
+                                                           float                               overhang_shadow_reach = 0.f)
     {
         size_t                               speed_sections_count = std::min(overlaps.values.size(), speeds.values.size());
         std::vector<std::pair<float, float>> speed_sections;
@@ -715,8 +718,14 @@ public:
                 float curled_speed = calculate_speed(artificial_distance_to_curled_lines);
             	extrusion_speed       = std::min(curled_speed, extrusion_speed); // adjust extrusion speed based on what is smallest - the calculated overhang speed or the artificial curled speed
             }
-            
-            float overlap = std::min(1 - (curr.distance+artificial_distance_to_curled_lines) * width_inv, 1 - (next.distance+artificial_distance_to_curled_lines) * width_inv);
+
+            const float overhang_shadow_shift = overhang_shadow_ratio * overhang_shadow_reach;
+            if (overhang_shadow_shift > 0.f)
+                extrusion_speed = std::min(extrusion_speed, std::min(calculate_speed(curr.distance + overhang_shadow_shift),
+                                                                     calculate_speed(next.distance + overhang_shadow_shift)));
+
+            const float artificial_distance = std::max(artificial_distance_to_curled_lines, overhang_shadow_shift);
+            float overlap = std::min(1 - (curr.distance+artificial_distance) * width_inv, 1 - (next.distance+artificial_distance) * width_inv);
 			
             processed_points.push_back({ scaled(curr.position), extrusion_speed, overlap });
         }

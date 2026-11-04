@@ -416,7 +416,7 @@ TEST_CASE("What Export Bambu 3MF cannot say comes back as a documented approxima
         return k + "=" + v;
     };
     CHECK(round_trip("wipe_tower_wall_type", "cone") == "wipe_tower_wall_type=rectangle"); // Bambu has no cone tower
-    CHECK(round_trip("ironing_angle", "-1") == "<left out>");                               // ours: -1 = default method
+    CHECK(round_trip("ironing_angle", "-1") == "ironing_angle=0");                          // Orca #10841: legacy -1 loads as offset 0
     CHECK(round_trip("ensure_vertical_shell_thickness", "ensure_critical_only") == "ensure_vertical_shell_thickness=ensure_moderate");
 }
 
@@ -488,7 +488,7 @@ TEST_CASE("A genuine Bambu Studio project keeps its prime tower and other rename
     CHECK(cfg.opt_float("extruder_clearance_max_radius") == Approx(73.)); // Bambu's own key, loaded as itself
     CHECK(cfg.opt_bool("role_based_wipe_speed"));
     CHECK(cfg.opt_bool("only_one_wall_top"));
-    CHECK(cfg.opt_float("ironing_angle") == Approx(45.));             // our default is -1
+    CHECK(cfg.opt_float("ironing_angle") == Approx(45.));             // our default is 0 (was -1 before Orca #10841)
     CHECK(cfg.opt_serialize("infill_anchor") == "400%");
     for (const char *bambu : { "prime_tower_rib_wall", "prime_tower_rib_width", "prime_tower_fillet_wall", "prime_tower_max_speed",
                                "prime_tower_extra_rib_length", "extruder_clearance_max_radius", "role_base_wipe_speed",

@@ -9,5 +9,6 @@
     "outer_wall_speed": "120",
     "sparse_infill_density": "20%",
     "top_shell_layers": "6",
-    "wall_loops": "6"
+    "wall_loops": "6",
+    "print_flow_ratio": "0.95"
 }

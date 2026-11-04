@@ -37,6 +37,7 @@
 #include "RemovableDriveManager.hpp"
 #include "BitmapCache.hpp"
 #include "BonjourDialog.hpp"
+#include "CrealityDiscoveryDialog.hpp"
 #include "MsgDialog.hpp"
 #include "OAuthDialog.hpp"
 #include "SimplyPrint.hpp"
@@ -152,6 +153,27 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
         auto sizer = create_sizer_with_btn(parent, &m_printhost_browse_btn, "printer_host_browser", _L("Browse") + " " + dots);
         m_printhost_browse_btn->Bind(wxEVT_BUTTON, [=](wxCommandEvent& e) {
             const auto host_type = m_config->opt_enum<PrintHostType>("host_type");
+            // Creality K-series printers announce themselves under a per-device DNS-SD service type
+            // (_Creality-<hex>._udp), which the fixed-name Bonjour browser cannot find (OrcaSlicer
+            // #13752). Every other host type keeps the Bonjour / FlashForge search below.
+            if (host_type == htCrealityPrint) {
+                CrealityDiscoveryDialog dialog(this, _L("Use"));
+                if (dialog.ShowModal() != wxID_OK || dialog.selected().ip.empty())
+                    return;
+                const CrealityHost& host = dialog.selected();
+                m_optgroup->set_value("print_host", from_u8(host.ip), true);
+                m_optgroup->get_field("print_host")->field_changed();
+                // This editor edits the selected preset, so it never switches presets; it only says
+                // when the printer found is a different model (an unknown model says nothing).
+                const auto* pm = m_config->option<ConfigOptionString>("printer_model");
+                if (!host.printer_model.empty() && pm != nullptr && pm->value != host.printer_model)
+                    show_info(this,
+                              format_wxstr(_L("This printer reports itself as a %1%, but the printer preset is for a %2%. "
+                                              "Select a %1% printer preset before sending to it."),
+                                           from_u8(host.printer_model), from_u8(pm->value)),
+                              _L("Find Creality printers"));
+                return;
+            }
             if (host_type == htFlashforge) {
                 wxBusyCursor                            wait;
                 std::vector<FlashforgeDiscoveredPrinter> printers;
