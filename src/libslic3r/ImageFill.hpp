@@ -209,6 +209,34 @@ struct ImageFillParams
     // nominal width, in percent - 40 means 60 % to 140 %.
     int                 stripe_depth_pct = 40;
 
+    // ---- Phase 5c: where the picture sits -------------------------------------------------------
+    // Placement, applied in image space after the projection (image_fill_place_uv()): the picture's
+    // centre moves by (offset_u, offset_v) - fractions of the projected box - it is turned by
+    // rotation_deg, and it covers scale_u x scale_v of the box (1 x 1 = stretched over the whole
+    // box, which is what every params string before phase 5c meant). Outside the picture nothing
+    // is painted, unless `tile` repeats it. Keys `pu`, `pv`, `su`, `sv`, `pr`, `pt`; the defaults
+    // write nothing, so an old string reads back unchanged and maps exactly as it always did.
+    float               offset_u     = 0.f;
+    float               offset_v     = 0.f;
+    float               scale_u      = 1.f;
+    float               scale_v      = 1.f;
+    float               rotation_deg = 0.f;
+    bool                tile         = false;
+    // Phase 5c, the dialog's own state (key `pk`): scale_u / scale_v were worked out to keep the
+    // picture's proportions. The mapping reads only scale_u / scale_v.
+    bool                keep_aspect  = false;
+
+    // Phase 5c: the projection's own frame, so the picture stays where it was put when the part's
+    // MESH is rewritten - a cut, which re-centres each half and bakes the instance's rotation into
+    // it, or a simplify, which moves the extremes. `box` (key `bx`) is the mesh-space box the
+    // picture was laid over; `frame` (key `fr`) maps today's mesh coordinates into the mesh space
+    // that box is in (identity until a cut moves the mesh). Without `has_box` the box is the
+    // mesh's own, as before phase 5c. image_fill_apply() records the box the first time.
+    bool                has_box   = false;
+    std::array<double, 6> box     {0., 0., 0., 0., 0., 0.};   // min xyz, max xyz
+    bool                has_frame = false;
+    Transform3d         frame     = Transform3d::Identity();
+
     std::string to_string() const;
     static bool from_string(const std::string &s, ImageFillParams &out);
     bool        operator==(const ImageFillParams &r) const { return to_string() == r.to_string(); }
@@ -267,6 +295,24 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
 //
 // flip_u and flip_v still apply on top, globally, as they do for every other projection.
 int image_fill_box_face(const Vec3f &normal);
+
+// Phase 5c: the placement step, on image coordinates the projection produced (0..1 over the box).
+// Returns false when the point falls outside a non-tiled picture. Identity - and true, with u and
+// v untouched - for the default placement.
+bool image_fill_place_uv(const ImageFillParams &params, float &u, float &v);
+
+// Phase 5c: the box a projection is laid over for this mesh (the recorded one, or the mesh's own),
+// and the frame that carries this mesh's coordinates into that box's space.
+BoundingBoxf3 image_fill_projection_box(const ImageFillParams &params, const indexed_triangle_set &mesh);
+Transform3d   image_fill_projection_frame(const ImageFillParams &params);
+
+// Phase 5c: the part's mesh was rewritten as new = new_from_old * old (a cut re-centres each half
+// and bakes the instance's rotation into it). Record the box the picture was laid over (from
+// `old_mesh`, if none was recorded) and fold the change into the frame, so every point of the new
+// mesh still samples the pixel the same surface point sampled before.
+void image_fill_rebase(ImageFillParams &params, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old);
+// The same, on a volume's own image_fill_params; a volume without them is left alone.
+void image_fill_rebase_volume(ModelVolume &volume, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old);
 
 // The unit direction a planar projection travels along: +axis, or -axis when axis_negative.
 Vec3f image_fill_direction(const ImageFillParams &params);

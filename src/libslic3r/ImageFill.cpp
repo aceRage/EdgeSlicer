@@ -224,9 +224,80 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
     } else {
         return false;   // MeshUV is supplied by the caller, not computed here
     }
+    // Phase 5c: where the picture sits inside the box.
+    if (!image_fill_place_uv(params, u, v))
+        return false;
     if (params.flip_u) u = 1.f - u;
     if (params.flip_v) v = 1.f - v;
     return true;
+}
+
+bool image_fill_place_uv(const ImageFillParams &params, float &u, float &v)
+{
+    if (params.offset_u == 0.f && params.offset_v == 0.f && params.scale_u == 1.f && params.scale_v == 1.f &&
+        params.rotation_deg == 0.f && !params.tile)
+        return true;   // the default placement: exactly the mapping every earlier phase used
+    // About the picture's own centre: move it, turn it, then scale it.
+    double x = double(u) - 0.5 - double(params.offset_u);
+    double y = double(v) - 0.5 - double(params.offset_v);
+    if (params.rotation_deg != 0.f) {
+        const double a = -double(params.rotation_deg) * M_PI / 180.0;
+        const double c = std::cos(a), sn = std::sin(a);
+        const double rx = c * x - sn * y, ry = sn * x + c * y;
+        x = rx;
+        y = ry;
+    }
+    x = x / std::max(1e-3, double(params.scale_u)) + 0.5;
+    y = y / std::max(1e-3, double(params.scale_v)) + 0.5;
+    if (params.tile) {
+        x -= std::floor(x);
+        y -= std::floor(y);
+    } else if (x < 0. || x > 1. || y < 0. || y > 1.) {
+        return false;
+    }
+    u = float(std::min(1., std::max(0., x)));
+    v = float(std::min(1., std::max(0., y)));
+    return true;
+}
+
+BoundingBoxf3 image_fill_projection_box(const ImageFillParams &params, const indexed_triangle_set &mesh)
+{
+    BoundingBoxf3 box;
+    if (params.has_box) {
+        box.merge(Vec3d(params.box[0], params.box[1], params.box[2]));
+        box.merge(Vec3d(params.box[3], params.box[4], params.box[5]));
+        return box;
+    }
+    for (const Vec3f &vtx : mesh.vertices) box.merge(vtx.cast<double>());
+    return box;
+}
+
+Transform3d image_fill_projection_frame(const ImageFillParams &params)
+{
+    return params.has_frame ? params.frame : Transform3d::Identity();
+}
+
+void image_fill_rebase(ImageFillParams &params, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old)
+{
+    if (!params.has_box) {
+        const BoundingBoxf3 b = image_fill_projection_box(params, old_mesh);
+        if (!b.defined)
+            return;
+        params.has_box = true;
+        params.box     = {b.min.x(), b.min.y(), b.min.z(), b.max.x(), b.max.y(), b.max.z()};
+    }
+    // frame_new * new = frame_old * old, and new = new_from_old * old.
+    params.frame     = image_fill_projection_frame(params) * new_from_old.inverse();
+    params.has_frame = true;
+}
+
+void image_fill_rebase_volume(ModelVolume &volume, const indexed_triangle_set &old_mesh, const Transform3d &new_from_old)
+{
+    ImageFillParams p;
+    if (!image_fill_params_of(volume, p))
+        return;
+    image_fill_rebase(p, old_mesh, new_from_old);
+    volume.config.set_key_value("image_fill_params", new ConfigOptionString(p.to_string()));
 }
 
 Vec3f image_fill_direction(const ImageFillParams &params)
@@ -288,6 +359,15 @@ static std::string f2s(float f)
     std::snprintf(b, sizeof(b), "%.6g", double(f));
     return b;
 }
+// Box corners and frame entries need more than f2s()'s float precision: a frame is composed again
+// on every cut, and a box edge decides which pixel a point on that edge reads.
+static std::string d2s(double d)
+{
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%.12g", d);
+    return buf;
+}
+
 static std::string rgb2s(const std::array<float, 3> &c)
 {
     return f2s(c[0]) + "," + f2s(c[1]) + "," + f2s(c[2]);
@@ -321,6 +401,22 @@ std::string ImageFillParams::to_string() const
     if (surfaces != 0) os << ";rs=" << surfaces;
     if (wall_method != 0) os << ";wm=" << wall_method;
     if (wall_method != 0 && stripe_depth_pct != 40) os << ";wd=" << stripe_depth_pct;
+    if (offset_u != 0.f) os << ";pu=" << f2s(offset_u);
+    if (offset_v != 0.f) os << ";pv=" << f2s(offset_v);
+    if (scale_u != 1.f) os << ";su=" << f2s(scale_u);
+    if (scale_v != 1.f) os << ";sv=" << f2s(scale_v);
+    if (rotation_deg != 0.f) os << ";pr=" << f2s(rotation_deg);
+    if (tile) os << ";pt=1";
+    if (keep_aspect) os << ";pk=1";
+    if (has_box) {
+        os << ";bx=";
+        for (size_t i = 0; i < 6; ++i) os << (i ? "," : "") << d2s(box[i]);
+    }
+    if (has_frame) {
+        os << ";fr=";
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c) os << ((r || c) ? "," : "") << d2s(frame.matrix()(r, c));
+    }
     if (!allowed.empty()) {
         os << ";f=";
         for (size_t i = 0; i < allowed.size(); ++i) os << (i ? "," : "") << allowed[i];
@@ -362,6 +458,33 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         else if (k == "rs")    out.surfaces = std::max(0, std::min(3, std::atoi(val.c_str())));
         else if (k == "wm")    out.wall_method = std::max(0, std::min(1, std::atoi(val.c_str())));
         else if (k == "wd")    out.stripe_depth_pct = std::max(5, std::min(80, std::atoi(val.c_str())));
+        else if (k == "pu")    out.offset_u = float(std::atof(val.c_str()));
+        else if (k == "pv")    out.offset_v = float(std::atof(val.c_str()));
+        else if (k == "su")    out.scale_u = std::max(0.01f, float(std::atof(val.c_str())));
+        else if (k == "sv")    out.scale_v = std::max(0.01f, float(std::atof(val.c_str())));
+        else if (k == "pr")    out.rotation_deg = float(std::atof(val.c_str()));
+        else if (k == "pt")    out.tile = val != "0";
+        else if (k == "pk")    out.keep_aspect = val != "0";
+        else if (k == "bx" || k == "fr") {
+            std::vector<double> nums;
+            size_t p = 0;
+            while (p <= val.size()) {
+                const size_t n = val.find(',', p);
+                const std::string one = val.substr(p, n == std::string::npos ? std::string::npos : n - p);
+                if (!one.empty()) nums.push_back(std::atof(one.c_str()));
+                if (n == std::string::npos) break;
+                p = n + 1;
+            }
+            if (k == "bx" && nums.size() == 6) {
+                out.has_box = true;
+                for (size_t i = 0; i < 6; ++i) out.box[i] = nums[i];
+            } else if (k == "fr" && nums.size() == 12) {
+                out.has_frame = true;
+                out.frame     = Transform3d::Identity();
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 4; ++c) out.frame.matrix()(r, c) = nums[size_t(r * 4 + c)];
+            }
+        }
         else if (k == "g")     out.gradient.enabled = val != "0";
         else if (k == "g3")    out.gradient.three_stop = val != "0";
         else if (k == "gd")    out.gradient.direction = std::atoi(val.c_str());
@@ -706,8 +829,14 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
     }
 
     // --- the box the projection is normalised over -------------------------------------------
-    BoundingBoxf3 box;
-    for (const Vec3f &v : mesh.vertices) box.merge(v.cast<double>());
+    // Phase 5c: the recorded box and frame, when the params carry them (a cut half samples the
+    // picture where the whole part did); otherwise the mesh's own box, exactly as before.
+    const BoundingBoxf3 box   = image_fill_projection_box(params, mesh);
+    const bool          framed = params.has_frame;
+    const Transform3d   frame = image_fill_projection_frame(params);
+    const Matrix3d      frame_lin = frame.linear();
+    auto in_frame   = [&](const Vec3f &p) -> Vec3f { return framed ? Vec3f((frame * p.cast<double>()).cast<float>()) : p; };
+    auto dir_framed = [&](const Vec3f &n) -> Vec3f { return framed ? Vec3f((frame_lin * n.cast<double>()).cast<float>()) : n; };
 
     // --- which facets take part -------------------------------------------------------------
     // A face selection is the existing MMU paint: only facets whose current state matches
@@ -761,7 +890,7 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
         const Vec3i32 &f = mesh.indices[t];
         const Vec3f   &a = mesh.vertices[f(0)], &b = mesh.vertices[f(1)], &c = mesh.vertices[f(2)];
         const Vec3f    n = (b - a).cross(c - a);
-        if (image_fill_face_is_painted(params, box, n, (a + b + c) / 3.f))
+        if (image_fill_face_is_painted(params, box, dir_framed(n), in_frame((a + b + c) / 3.f)))
             ++facing_facets;
         else
             selected[t] = false;
@@ -800,8 +929,8 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
         // The ORIGINAL facet's normal, computed once and used for every one of its leaves: a Box
         // projection picks its face from this, so all 4^depth leaves of a facet land on the same
         // face and a triangle can never be cut in half by a projection seam.
-        const Vec3f facet_normal = (mesh.vertices[f(1)] - mesh.vertices[f(0)])
-                                       .cross(mesh.vertices[f(2)] - mesh.vertices[f(0)]);
+        const Vec3f facet_normal = dir_framed((mesh.vertices[f(1)] - mesh.vertices[f(0)])
+                                                  .cross(mesh.vertices[f(2)] - mesh.vertices[f(0)]));
         leaves.clear();
         image_fill_subdivide(mesh.vertices[f(0)], mesh.vertices[f(1)], mesh.vertices[f(2)], depth, leaves);
         // Mesh UVs are per vertex; a leaf's UV is the same barycentric blend its position is, so
@@ -828,7 +957,7 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
                 if (params.flip_u) u = 1.f - u;
                 if (params.flip_v) v = 1.f - v;
             } else {
-                ok = image_fill_project(params, box, leaves[i].centroid(), u, v, &facet_normal);
+                ok = image_fill_project(params, box, in_frame(leaves[i].centroid()), u, v, &facet_normal);
             }
             if (!ok) continue;
             const size_t idx = t * per + i;
@@ -940,6 +1069,15 @@ ImageFillResult image_fill_apply(ModelVolume &volume, const ImageFillParams &par
     // no ObjectID and the 3MF writer already round-trips it.
     ImageFillParams stored = params;
     stored.subdivision = res.subdivision_used;
+    // Phase 5c: record the box the picture was laid over, so a later simplify or cut does not
+    // re-stretch it over whatever the mesh's box has become.
+    if (!stored.has_box && params.projection != ImageFillProjection::MeshUV) {
+        const BoundingBoxf3 b = image_fill_projection_box(params, volume.mesh().its);
+        if (b.defined) {
+            stored.has_box = true;
+            stored.box     = {b.min.x(), b.min.y(), b.min.z(), b.max.x(), b.max.y(), b.max.z()};
+        }
+    }
     volume.config.set_key_value("image_fill_params", new ConfigOptionString(stored.to_string()));
     return res;
 }

@@ -109,6 +109,13 @@ private:
     wxCheckBox       *m_row_walls       = nullptr;   // "Nozzle-resolution colour: Side walls"
     wxChoice         *m_wall_method     = nullptr;   // Phase 5b: colour runs / layer stripes
     wxSpinCtrl       *m_stripe_depth    = nullptr;   // Phase 5b: width swing, percent
+    // Phase 5c: where the picture sits.
+    wxSpinCtrlDouble *m_offset_u        = nullptr;   // percent of the box
+    wxSpinCtrlDouble *m_offset_v        = nullptr;
+    wxSpinCtrlDouble *m_scale           = nullptr;   // percent of the box
+    wxSpinCtrlDouble *m_rotation        = nullptr;   // degrees
+    wxCheckBox       *m_keep_aspect     = nullptr;
+    wxCheckBox       *m_tile            = nullptr;
     wxStaticBitmap   *m_preview         = nullptr;
     wxStaticText     *m_summary         = nullptr;
     wxButton         *m_ok              = nullptr;

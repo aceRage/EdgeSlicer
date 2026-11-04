@@ -296,12 +296,23 @@ bool build_context_for_row(const PrintObject &object, const PrintRegion &region,
     if (mv == nullptr)
         return false;
 
-    for (const Vec3f &v : mv->mesh().its.vertices)
-        ctx.mesh_box.merge(v.cast<double>());
+    // Phase 5c: the box and frame the picture was laid over, when the part's own params record
+    // them (they follow the part through a cut); otherwise the mesh's own box, as before.
+    ImageFillParams placed = ctx.params;
+    {
+        ImageFillParams vp;
+        if (image_fill_params_of(*mv, vp) && vp.has_box) {
+            placed.has_box   = true;
+            placed.box       = vp.box;
+            placed.has_frame = vp.has_frame;
+            placed.frame     = vp.frame;
+        }
+    }
+    ctx.mesh_box = image_fill_projection_box(placed, mv->mesh().its);
     if (!ctx.mesh_box.defined)
         return false;
 
-    ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
+    ctx.mesh_from_print = image_fill_projection_frame(placed) * (object.trafo_centered() * mv->get_matrix()).inverse();
     const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
     ctx.up_mesh         = up_mesh.norm() > 1e-9f ? Vec3f(up_mesh.normalized()) : Vec3f(0.f, 0.f, 1.f);
 
