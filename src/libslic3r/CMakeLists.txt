@@ -772,6 +772,8 @@ set(lisbslic3r_sources
     ZipWorkDir.hpp
     ZipOpen.cpp
     ZipOpen.hpp
+    ZipWorkCleaner.cpp
+    ZipWorkCleaner.hpp
 )
 
 if (APPLE)
@@ -822,6 +824,7 @@ slic3r_unity_build(libslic3r SKIP
     SLAPrint.cpp                    # libnest2d headers clash with neighbours
     ZipOpen.cpp                     # file-local ascii_lower()/utf8_path() also in ZipWorkDir.cpp
     ZipWorkDir.cpp                  # file-local ascii_lower()/utf8_path()/leaf_exists() with common names
+    ZipWorkCleaner.cpp              # file-local path_utf8()/utf8_path() and <windows.h>
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours

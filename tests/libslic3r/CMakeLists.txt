@@ -15,6 +15,7 @@ add_executable(${_TEST_NAME}_tests
 	test_untrusted_input.cpp
 	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
+	test_zip_cleaner.cpp
 	test_zip_extract.cpp
 	test_zip_open.cpp
 	test_custom_models.cpp

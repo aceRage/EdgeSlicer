@@ -3,6 +3,7 @@
 #include "libslic3r/InstanceLock.hpp"
 #include "AppConfig.hpp"
 #include "ZipOpen.hpp"
+#include "ZipWorkCleaner.hpp"
 //BBS
 #include "Preset.hpp"
 #include "Exception.hpp"
@@ -511,6 +512,13 @@ void AppConfig::set_defaults()
         set(ZIP_MAX_TOTAL_UNCOMPRESSED_KEY, "4294967296");
     if (get(ZIP_MAX_COMPRESSION_RATIO_KEY).empty())
         set(ZIP_MAX_COMPRESSION_RATIO_KEY, "200");
+    // ZIP work-folder clean-up (PR C): on by default, sessions older than 30 days.
+    if (get(ZIP_WORK_CLEANUP_KEY).empty())
+        set_bool(ZIP_WORK_CLEANUP_KEY, true);
+    if (get(ZIP_WORK_CLEANUP_DAYS_KEY).empty())
+        set(ZIP_WORK_CLEANUP_DAYS_KEY, std::to_string(ZIP_WORK_CLEANUP_DEFAULT_DAYS));
+    if (get(ZIP_WORK_INSTALL_ID_KEY).empty())
+        set(ZIP_WORK_INSTALL_ID_KEY, generate_zip_install_id());
 
     if (get("mouse_wheel").empty()) {
         set("mouse_wheel", "0");

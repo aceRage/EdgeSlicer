@@ -30,6 +30,7 @@
 #include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
 #include "libslic3r/ZipWorkDir.hpp"
+#include "ZipCleanup.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -1185,6 +1186,9 @@ void MainFrame::shutdown(bool isRecreate)
     // The Layerling tab's local server and any download in progress.
     if (m_layerling)
         m_layerling->shutdown();
+    // The ZIP work-folder clean-up thread (cancelled between files, so this is quick).
+    if (!isRecreate)
+        ZipCleanup::shutdown();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)
