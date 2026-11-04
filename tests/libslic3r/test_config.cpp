@@ -1009,18 +1009,20 @@ TEST_CASE("Key-mapped enum choices round-trip between stored value and combo row
         }
     }
 
-    SECTION("nozzle_volume_type & co: \"E3D High Flow\" is row 4 and value 5; no value 4")
+    SECTION("nozzle_volume_type & co: \"TPU285\" is row 4 and value 4, \"E3D High Flow\" row 5 and value 5")
     {
         for (const char *key : { "nozzle_volume_type", "default_nozzle_volume_type", "extruder_nozzle_volume_type" }) {
             INFO("option " << key);
             const ConfigOptionDef *def = print_config_def.get(key);
             REQUIRE(def != nullptr);
-            REQUIRE(def->enum_values.size() == 5);
-            CHECK(def->enum_values[4] == "E3D High Flow");
-            CHECK(enum_choice_value_at_index(*def, 4) == int(nvtE3DHighFlow));
-            CHECK(enum_choice_index_of_value(*def, nvtE3DHighFlow) == 4);
-            CHECK(enum_choice_index_of_value(*def, 4) == -1);
-            for (NozzleVolumeType t : { nvtStandard, nvtHighFlow, nvtHybrid, nvtTPUHighFlow })
+            REQUIRE(def->enum_values.size() == 6);
+            CHECK(def->enum_values[4] == "TPU285");
+            CHECK(def->enum_values[5] == "E3D High Flow");
+            CHECK(enum_choice_value_at_index(*def, 4) == int(nvtTPU285));
+            CHECK(enum_choice_value_at_index(*def, 5) == int(nvtE3DHighFlow));
+            CHECK(enum_choice_index_of_value(*def, nvtE3DHighFlow) == 5);
+            CHECK(enum_choice_index_of_value(*def, nvtTPU285) == 4);
+            for (NozzleVolumeType t : { nvtStandard, nvtHighFlow, nvtHybrid, nvtTPUHighFlow, nvtTPU285, nvtE3DHighFlow })
                 CHECK(enum_choice_value_at_index(*def, enum_choice_index_of_value(*def, t)) == int(t));
         }
     }
