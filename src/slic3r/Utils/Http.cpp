@@ -18,6 +18,8 @@
 
 #include <curl/curl.h>
 
+#include "libslic3r/UntrustedInput.hpp"
+
 #ifdef OPENSSL_CERT_OVERRIDE
 #include <openssl/x509.h>
 #endif
@@ -148,6 +150,9 @@ struct Http::priv
 	size_t body_seen { 0 };        // bytes handed to bodyfn
 	bool body_refused { false };   // bodyfn said stop (as opposed to the size limit)
 	bool follow_location { true };
+	// restrict_redirects(): cap the hops (curl's CURLOPT_MAXREDIRS), keep them on https, and look at
+	// where the transfer actually ended before calling it a success.
+	bool check_final_url { false };
 
 	priv(const std::string &url);
 	~priv();
@@ -170,6 +175,7 @@ struct Http::priv
 	void set_put_body(const fs::path &path);
 	void set_del_body(const std::string& body);
     void set_range(const std::string &range);
+	void restrict_redirects(long max_redirects);
 
 	std::string curl_error(CURLcode curlcode);
 	std::string body_size_error();
@@ -521,6 +527,21 @@ void Http::priv::set_range(const std::string& range)
 	::curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
 }
 
+void Http::priv::restrict_redirects(long max_redirects)
+{
+	if (max_redirects < 0)
+		max_redirects = 0;
+	::curl_easy_setopt(curl, CURLOPT_MAXREDIRS, max_redirects);
+#if LIBCURL_VERSION_NUM >= 0x075500
+	::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+	// The bundled libcurl is 7.75 (deps/CURL/CURL.cmake), so this is the branch that compiles;
+	// the _STR form above arrived in 7.85 and makes the deprecated option go away.
+	::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+	check_final_url = true;
+}
+
 std::string Http::priv::curl_error(CURLcode curlcode)
 {
 	return (boost::format("curl:%1%:\n%2%\n[Error %3%]")
@@ -587,6 +608,29 @@ void Http::priv::http_perform()
 	CURLcode res = ::curl_easy_perform(curl);
 
     putFile.reset();
+
+	// restrict_redirects(): curl keeps the hops on https by itself, but an https -> https redirect
+	// onto this computer or the LAN is still one it will follow, and the checks the caller made on
+	// the original link never see the address the transfer ended on. So look at where it went, and
+	// refuse it if that is somewhere the original link would have been refused.
+	if (res == CURLE_OK && check_final_url) {
+		long  redirects = 0;
+		char *final_url = nullptr;
+		::curl_easy_getinfo(curl, CURLINFO_REDIRECT_COUNT, &redirects);
+		if (redirects > 0) {
+			std::string why;
+			if (::curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final_url) != CURLE_OK || final_url == nullptr)
+				why = "where the download was redirected to is unknown";
+			else
+				why = untrusted::redirect_target_refusal(final_url);
+			if (!why.empty()) {
+				BOOST_LOG_TRIVIAL(error) << "Http: refused " << Http::url_host(url) << " after " << redirects
+				                         << " redirect(s) to " << (final_url != nullptr ? final_url : "(unknown)") << ": " << why;
+				if (errorfn) { errorfn(std::string(), "the download was refused: " + why, 0); }
+				return;
+			}
+		}
+	}
 
 	if (res != CURLE_OK) {
 		if (res == CURLE_ABORTED_BY_CALLBACK) {
@@ -686,6 +730,12 @@ Http& Http::size_limit(size_t sizeLimit)
 Http& Http::set_range(const std::string& range)
 {
 	if (p) { p->set_range(range); }
+	return *this;
+}
+
+Http& Http::restrict_redirects(long max_redirects)
+{
+	if (p) { p->restrict_redirects(max_redirects); }
 	return *this;
 }
 

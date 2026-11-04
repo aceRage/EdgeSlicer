@@ -129,6 +129,15 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
 // The domains (each matching itself and its subdomains) check_model_download() allows.
 const std::vector<std::string> &download_allowlist();
 
+// Where a download that was already checked and allowed actually ended up. Redirects are followed
+// by curl, and the checks above only ever see the link they were given, so the address a transfer
+// ends on gets the same two refusals that do not need to know the intended site: it has to be
+// https, and it has to be a public host (not localhost, a LAN name or an IP address).
+// Returns "" when the target is acceptable, else the reason to refuse. Call it only on a URL that
+// has already been through check_model_download(); it does not look at the host allowlist or the
+// file extension, which a redirect target legitimately differs on (a CDN, a signed storage URL).
+std::string redirect_target_refusal(const std::string &url);
+
 // Model files a download may be saved as and opened: .3mf .stl .step .stp .obj .zip.
 bool has_model_extension(const std::string &file_name);
 

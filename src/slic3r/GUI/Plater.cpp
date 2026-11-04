@@ -21196,7 +21196,9 @@ void Plater::import_model_id(wxString download_info)
 
         auto filesize = 0;
         bool size_limit = false;
-        auto http = Http::get(download_url.ToStdString());
+        // Same rule as the Downloader path: the address above was checked, a redirect out of it
+        // was not. MakerWorld's own links are signed storage URLs, so they do redirect.
+        auto http = Http::get(download_url.ToStdString()).restrict_redirects(10);
 
         while (cont && retry_count < max_retries) {
             retry_count++;

@@ -331,6 +331,37 @@ TEST_CASE("model downloads that are never allowed", "[Untrusted][Download]")
     }
 }
 
+TEST_CASE("a redirect is kept on https and off this machine", "[Untrusted][Download][Redirect]")
+{
+    // The link check above only ever sees the address it was given. This is the check for where
+    // curl actually ended up (Http::restrict_redirects -> untrusted::redirect_target_refusal).
+    for (const char *u : {"https://files.printables.com/a.3mf", "https://public-cdn.bblmw.com/models/a.3mf",
+                          // a redirect legitimately lands on another public host: the allowlist and the
+                          // file extension are not applied here
+                          "https://s3.us-west-2.amazonaws.com/x/a.3mf", "https://storage.example.org/abc?sig=1"}) {
+        INFO(u);
+        CHECK(redirect_target_refusal(u).empty());
+    }
+
+    const std::string downgraded = redirect_target_refusal("http://files.printables.com/a.3mf");
+    CHECK_FALSE(downgraded.empty());
+    CHECK(downgraded.find("not secure") != std::string::npos);
+    CHECK_FALSE(redirect_target_refusal("ftp://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("ftps://files.printables.com/a.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("file:///C:/Windows/evil.3mf").empty());
+    CHECK_FALSE(redirect_target_refusal("not a url").empty());
+    CHECK_FALSE(redirect_target_refusal("https://user:pw@files.printables.com/a.3mf").empty());
+
+    // A public https host that redirects onto the user's own machine or LAN.
+    for (const char *u : {"https://127.0.0.1/a.3mf", "https://169.254.169.254/latest/meta-data/",
+                          "https://192.168.1.20/a.3mf", "https://10.0.0.5:8443/a.3mf", "https://[::1]/a.3mf",
+                          "https://localhost/a.3mf", "https://printer.local/a.3mf", "https://nas.lan/a.3mf",
+                          "https://octopi/a.3mf"}) {
+        INFO(u);
+        CHECK_FALSE(redirect_target_refusal(u).empty());
+    }
+}
+
 TEST_CASE("model extensions", "[Untrusted][Download]")
 {
     for (const char *n : {"a.3mf", "A.STL", "a.step", "a.stp", "a.obj", "a.zip"})

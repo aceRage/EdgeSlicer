@@ -1004,6 +1004,9 @@ void LayerlingPanel::Impl::download(const layerling::ReleaseInfo &r, bool is_upd
 
     http = Http::get(r.asset_url)
                .tls_policy(Http::TlsPolicy::Verify)
+               // GitHub answers a release download with a redirect to its storage. Keep that hop
+               // on https and on a public host, whatever the release JSON named.
+               .restrict_redirects(10)
                .timeout_connect(15)
                .size_limit(size_t(expected + 1024 * 1024))
                .on_body([cancel, sink, expected](unsigned status, const char *data, size_t size) {

@@ -132,6 +132,12 @@ public:
 	Http& size_limit(size_t sizeLimit);
 	// range  of donloaded bytes. example: curl_easy_setopt(curl, CURLOPT_RANGE, "0-199");
 	Http& set_range(const std::string& range);
+	// Follows at most `max_redirects` redirects, only to https, and refuses the transfer when the
+	// redirects end anywhere other than a public https host (see untrusted::redirect_target_refusal()).
+	// For downloading a file that a web page, another program or a third-party service named: the
+	// link was checked before the request, and the address it redirects to never is.
+	// Do not use it for a printer or another LAN device that serves its own files over plain http.
+	Http& restrict_redirects(long max_redirects);
 	// Sets a HTTP header field.
 	Http& header(std::string name, const std::string &value);
 	// Removes a header field.

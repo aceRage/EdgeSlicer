@@ -478,6 +478,20 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
     return r;
 }
 
+std::string redirect_target_refusal(const std::string &url)
+{
+    Url u;
+    if (!parse_url(url, u))
+        return "where the download was redirected to is not a valid web address";
+    if (u.scheme != "https")
+        return "the download was redirected to " + u.scheme + ":, which is not secure";
+    if (u.has_userinfo)
+        return "the download was redirected to an address that hides its real host behind a user name";
+    if (is_local_or_ip_host(u.host))
+        return "the download was redirected to " + u.host + ", which is on this computer or the local network";
+    return std::string();
+}
+
 std::string sanitize_download_filename(const std::string &name_in)
 {
     // Last path component, either separator.

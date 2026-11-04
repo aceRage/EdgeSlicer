@@ -93,6 +93,25 @@ TEST_CASE("http: a redirect is reported, not followed, when asked", "[Http]")
     CHECK(server.served == 1);
 }
 
+TEST_CASE("http: restrict_redirects refuses a redirect off https", "[Http]")
+{
+    // Two answers: a client that followed the redirect would take the second one. A restricted
+    // request must stop at the first, with an error and no completion.
+    LoopbackServer server({"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                           ok_response("followed")});
+    std::string body, error;
+    unsigned    status = 0;
+    bool        completed = false;
+    Slic3r::Http::get(server.url("/start"))
+        .restrict_redirects(10)
+        .on_complete([&](std::string b, unsigned s) { body = std::move(b); status = s; completed = true; })
+        .on_error([&](std::string b, std::string e, unsigned s) { body = std::move(b); error = std::move(e); status = s; })
+        .perform_sync();
+    CHECK_FALSE(completed);
+    CHECK_FALSE(error.empty());
+    CHECK(server.served == 1);
+}
+
 TEST_CASE("http: on_body takes the body in pieces", "[Http]")
 {
     const std::string payload(300000, 'x');
