@@ -5,6 +5,7 @@
 #include "Preset.hpp"
 #include "StartupProfile.hpp"
 #include "BambuFlowSupport.hpp"
+#include "ToolSlots.hpp"
 #include "PresetQuarantine.hpp"
 #include "PresetBundle.hpp"
 #include "AppConfig.hpp"
@@ -235,6 +236,27 @@ static void keep_flow_support_in_differential_save(const Preset &preset, std::ve
     const auto *flow_support = preset.config.option<ConfigOptionStrings>(support_key);
     if (flow_support != nullptr && flow_support->values.size() > 1)
         dirty_options.emplace_back(support_key);
+
+    // Per-nozzle process P1: a saved process vector of per-extruder slots (a left/right edit) is only
+    // readable with the layout it was written for, so the layout is saved with it.
+    if (preset.type == Preset::TYPE_PRINT) {
+        const auto *ids = preset.config.option<ConfigOptionInts>("print_extruder_id");
+        // P5: a process split by nozzle size (diameter slots) saves its whole layout too, the sizes included.
+        const bool by_size = process_has_diameter_slots(preset.config);
+        if (by_size && ids != nullptr)
+            for (const char *key : { "print_extruder_id", "print_extruder_variant", "print_extruder_nozzle_diameter" })
+                if (std::find(dirty_options.begin(), dirty_options.end(), key) == dirty_options.end())
+                    dirty_options.emplace_back(key);
+        if (ids != nullptr && !by_size && !process_extruder_variant_slots(preset.config).empty() &&
+            std::any_of(dirty_options.begin(), dirty_options.end(), [&preset, ids](const std::string &key) {
+                const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(preset.config.option(key));
+                return is_per_nozzle_process_option(key) && opt != nullptr && opt->size() == ids->values.size();
+            })) {
+            for (const char *key : { "print_extruder_id", "print_extruder_variant" })
+                if (std::find(dirty_options.begin(), dirty_options.end(), key) == dirty_options.end())
+                    dirty_options.emplace_back(key);
+        }
+    }
 }
 
 VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem::path &path, bool load_all)
@@ -1175,6 +1197,9 @@ bool Preset::has_cali_lines(PresetBundle* preset_bundle)
 
 static std::vector<std::string> s_Preset_print_options {
     "print_extruder_id", "print_extruder_variant", // Ultra (dual-nozzle)
+    "process_extruder_values", // per-nozzle process P1: the process keeps separate left / right values
+    "print_extruder_nozzle_diameter", // per-nozzle process P4: the diameter dimension of the slot layout
+    "process_nozzle_line_widths", "line_width_nozzle_diameter", // per-nozzle process P6: widths per nozzle
     "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "enable_order_independent_overlap_carving", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "top_color_penetration_layers", "bottom_color_penetration_layers",
@@ -1221,6 +1246,7 @@ static std::vector<std::string> s_Preset_print_options {
      "support_bottom_interface_spacing", "enable_overhang_speed", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
      "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
      "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
+     "min_layer_time_pause", "min_layer_time_pause_park", "min_layer_time_pause_park_x", "min_layer_time_pause_park_y",
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
@@ -1258,6 +1284,7 @@ static std::vector<std::string> s_Preset_print_options {
 
 static std::vector<std::string> s_Preset_filament_options {
     "filament_extruder_variant", "filament_self_index", // Ultra (dual-nozzle)
+    "filament_nozzle_variants", // per-nozzle process P4: values per nozzle size / flow / tool
     /*"filament_colour", */ "default_filament_colour","required_nozzle_HRC","filament_diameter", "pellet_flow_coefficient", "filament_type", "filament_soluble", "filament_is_support",
     "filament_max_volumetric_speed",
     "filament_flow_ratio", "filament_density", "filament_cost", "filament_z_offset", "filament_minimal_purge_on_wipe_tower",
@@ -1333,6 +1360,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
     "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
     "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
+    "tool_slot_model", "support_filament_nozzle_mapping", "extruder_rack_nozzle_diameter", // per-nozzle process P4
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
     "gcode_skip_config_block", "fan_kickstart", "part_cooling_fan_min_pwm", "fan_speedup_time", "fan_speedup_overhangs",

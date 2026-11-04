@@ -220,6 +220,14 @@ void GLGizmoPainterBase::render_cursor()
     if (m_rr.mesh_id == -1)
         return;
 
+    if (m_tool_type == ToolType::AIRBRUSH) {
+        // Edge (Airbrush): a faint ball of the spray radius, or the mode's own cursor (P3: gradient
+        // handles, a pattern's footprint).
+        if (!render_airbrush_cursor(trafo_matrices))
+            render_cursor_sphere(trafo_matrices[m_rr.mesh_id], nullptr, airbrush_cursor_radius(), 0.18f);
+        return;
+    }
+
     if (m_tool_type == ToolType::SPREAD) {
         // Edge: the seed ring while hovering; while held, a faint ball at the max radius (if set).
         if (m_spread == nullptr)
@@ -730,6 +738,13 @@ std::vector<GLGizmoPainterBase::ProjectedHeightRange> GLGizmoPainterBase::get_pr
 bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
     Vec2d _mouse_position = mouse_position;
+    // Edge (Airbrush): the colour gizmo's Airbrush takes the mouse. Alt+wheel (the section view) and
+    // the clipping reset stay here.
+    if (airbrush_owns_mouse() && action != SLAGizmoEventType::ResetClippingPlane) {
+        const bool wheel = action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown;
+        if (! wheel || control_down)
+            return on_airbrush_event(action, mouse_position, shift_down, control_down);
+    }
     if (action == SLAGizmoEventType::MouseWheelUp
      || action == SLAGizmoEventType::MouseWheelDown) {
         // Edge (Spread): the wheel changes nothing while a spread is held, so it stays free for zoom.
@@ -1466,7 +1481,7 @@ void GLGizmoPainterBase::spread_tick()
 bool GLGizmoPainterBase::on_spread_escape()
 {
     if (m_spread == nullptr)
-        return false;
+        return on_airbrush_escape();
     spread_stop_timer();
     SpreadPress &p = *m_spread;
     if (p.mesh_idx < int(m_triangle_selectors.size()) && m_triangle_selectors[p.mesh_idx].get() == p.selector) {

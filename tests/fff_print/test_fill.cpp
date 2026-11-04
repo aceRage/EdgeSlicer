@@ -1718,9 +1718,11 @@ TEST_CASE("Honeycomb simplify only drops the repeated row joint vertex that mult
 
 // Point count, number of turns sharper than 25 degrees and length of the sparse infill of a print.
 // A rounded corner is a run of much gentler turns, so smoothing shows up as fewer sharp ones.
+// Reversals are turns sharper than 150 degrees: the cusps a path folding back on itself makes.
 struct SparseInfillShape {
     size_t point_count { 0 };
     size_t sharp_turns { 0 };
+    size_t reversals { 0 };
     size_t path_count { 0 };
     double length { 0. };
 };
@@ -1740,9 +1742,13 @@ static SparseInfillShape sparse_infill_shape(const Print &print)
         for (size_t i = 1; i + 1 < pts.size(); ++i) {
             const Vec2d incoming = (pts[i] - pts[i - 1]).cast<double>();
             const Vec2d outgoing = (pts[i + 1] - pts[i]).cast<double>();
-            if (incoming.squaredNorm() > 0. && outgoing.squaredNorm() > 0. &&
-                incoming.normalized().dot(outgoing.normalized()) < 0.9)
-                ++shape.sharp_turns;
+            if (incoming.squaredNorm() > 0. && outgoing.squaredNorm() > 0.) {
+                const double cosine = incoming.normalized().dot(outgoing.normalized());
+                if (cosine < 0.9)
+                    ++shape.sharp_turns;
+                if (cosine < -0.866)
+                    ++shape.reversals;
+            }
         }
     };
 
@@ -1933,6 +1939,12 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     // and the outlines of branches that run close to each other merge into one. Rounding the branches
     // before those outlines are built moves them apart, which breaks the merged outlines up into
     // separate loops - many more of them, each needing its own travel move.
+    // EdgeSlicer: our multiline lines are the branch with every vertex moved sideways, not Clipper
+    // outlines, and a curve tighter than that move folds the inner line into a cusp. Such cusps made up
+    // for the rounded turns on macOS (993 sharp turns either way), so they are counted on their own.
+    // Moving the branches also moves where they are clipped to the region, which adds or removes the odd
+    // path or hairpin whatever the platform's lightning trees look like, so both counts get some slack:
+    // a broken up outline or a folded inner line adds them by the dozen.
     auto shape_for = [](const std::string &smooth_factor) {
         Print print;
         Slic3r::Test::init_and_process_print({Slic3r::make_cube(20, 20, 20)}, print,
@@ -1948,9 +1960,12 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     const SparseInfillShape smooth = shape_for("100%");
 
     REQUIRE(sharp.path_count > 0);
-    REQUIRE(smooth.path_count <= sharp.path_count);
+    CAPTURE(sharp.path_count, smooth.path_count);
+    REQUIRE(smooth.path_count <= sharp.path_count + sharp.path_count / 100);
     // The outlines are still rounded.
     REQUIRE(smooth.point_count > sharp.point_count);
+    CAPTURE(sharp.sharp_turns, smooth.sharp_turns, sharp.reversals, smooth.reversals);
+    REQUIRE(smooth.reversals <= sharp.reversals + sharp.reversals / 3);
     REQUIRE(smooth.sharp_turns < sharp.sharp_turns);
 }
 

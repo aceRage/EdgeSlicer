@@ -225,6 +225,11 @@ void CornerSmoother::round_corner(const Vec2d &previous, const Vec2d &corner, co
     double reach = m_corner_distance_ratio * std::min(incoming_length, outgoing_length);
     if (m_max_corner_distance > 0.)
         reach = std::min(reach, m_max_corner_distance);
+    // The tightest radius of the curve is its reach over its peak curvature by reach.
+    if (m_smoothing.min_radius > 0. && reach < m_smoothing.min_radius * peak_curvature_by_reach(cosine)) {
+        m_corner_points.emplace_back(corner);
+        return;
+    }
 
     const std::vector<Vec2d> *vertices = corner_vertices(reach, cosine);
     if (vertices == nullptr || (m_corner_filter && !m_corner_filter(corner - reach * incoming, corner + reach * outgoing))) {

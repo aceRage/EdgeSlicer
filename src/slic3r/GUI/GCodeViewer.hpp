@@ -300,6 +300,7 @@ private:
         bool                                                   hide_wipe_tower = false;
         bool                                                   show_infill     = true;   // S5b
         bool                                                   show_supports   = true;   // S5b
+        bool                                                   show_skirt      = true;   // 1h-2b
     };
     ShowcaseSaved m_showcase;
     // Realism 1b: the prelude libvgcode's material program was last built from, and why it failed.
@@ -389,6 +390,7 @@ public:
         bool   hide_wipe_tower = false;
         bool   show_infill     = true;  // S5b: sparse and internal solid infill, internal bridges
         bool   show_supports   = true;  // S5b: supports, their interfaces and transitions
+        bool   show_skirt      = true;  // Showcase 1h-2b: skirt and brim
         bool   smooth          = false; // the smooth bead look (D13)
         std::array<float, 128> looks{}; // per extruder: see libvgcode::Viewer::set_smooth_look()
         bool   set_light       = false;
@@ -498,6 +500,10 @@ public:
     }
 
     libvgcode::EViewType get_view_type() const { return m_viewer.get_view_type(); }
+    // RemoteAccess (phone preview v2): the libvgcode viewer itself, so a phone frame can be coloured,
+    // have features hidden and moves shown, and the PC's own choice be put back after rendering.
+    libvgcode::Viewer&       get_libvgcode_viewer() { return m_viewer; }
+    const libvgcode::Viewer& get_libvgcode_viewer() const { return m_viewer; }
 
     // ORCA: darken the layers not scrubbed to while using the preview layer slider
     void set_dim_previous_layers(bool value) { m_viewer.set_dim_previous_layers(value); }
