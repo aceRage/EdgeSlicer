@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     BrimFilament.hpp
     PaintDepth.cpp
     PaintDepth.hpp
+    PaintWire.cpp
+    PaintWire.hpp
     ColorSplit.cpp
     ColorSplit.hpp
     ImageFill.cpp
@@ -374,6 +376,8 @@ set(lisbslic3r_sources
     GCode/FanMover.hpp
     GCode/LayerTimeSpeedSmoothingFilter.cpp
     GCode/LayerTimeSpeedSmoothingFilter.hpp
+    GCode/MinLayerTimePause.cpp
+    GCode/MinLayerTimePause.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode/ElegooGCodeProcessorHelper.cpp
@@ -590,6 +594,12 @@ set(lisbslic3r_sources
     SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    NozzleOverride.cpp
+    NozzleOverride.hpp
+    NozzleProcess.cpp
+    NozzleProcess.hpp
+    ToolSlots.cpp
+    ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp

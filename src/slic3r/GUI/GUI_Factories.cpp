@@ -1,7 +1,9 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 // cut_target_label() - how "Copy cut to..." names an object in its submenu.
 #include "libslic3r/CutRecipe.hpp"
 #include "libslic3r/QuadRemesh.hpp"
@@ -13,6 +15,7 @@
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "Plater.hpp"
+#include "LayerlingPanel.hpp"
 #include "ObjectDataViewModel.hpp"
 
 #include "OptionsGroup.hpp"
@@ -184,7 +187,8 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
                     }},
     { L("Speed"), {{"outer_wall_speed", "",1},{"inner_wall_speed", "",2},{"sparse_infill_speed", "",3},{"top_surface_speed", "",4}, {"internal_solid_infill_speed", "",5},
                     {"enable_overhang_speed", "",6}, {"overhang_1_4_speed", "",7}, {"overhang_2_4_speed", "",8}, {"overhang_3_4_speed", "",9}, {"overhang_4_4_speed", "",10},
-                    {"bridge_speed", "",11}, {"gap_infill_speed", "",12}, {"internal_bridge_speed", "", 13}
+                    {"bridge_speed", "",11}, {"gap_infill_speed", "",12}, {"internal_bridge_speed", "", 13},
+                    {"min_layer_time_pause", "", 14}
                     }},
     // Ultra (support groups): the curated part-level support keys, so a part's settings node
     // renders them in the same table style as Quality/Strength/Speed. An OBJECT takes its
@@ -1316,6 +1320,14 @@ void MenuFactory::append_menu_item_edit_in_freecad(wxMenu *menu)
         []() { return plater()->can_edit_in_freecad(); }, m_parent);
 }
 
+void MenuFactory::append_menu_item_edit_in_layerling(wxMenu *menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Edit in Layerling"),
+        _L("Open the selection in the Layerling tab. A design sent from Layerling opens again; anything else becomes a new design"),
+        [](wxCommandEvent &) { layerling_edit_selection(); }, "", menu,
+        []() { return layerling_can_edit_selection(); }, m_parent);
+}
+
 void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
 {
     // BBS
@@ -1782,6 +1794,99 @@ void assign_support_group(const std::vector<ModelVolume*>& volumes,
     // invalidates posSupportMaterial (or posSlice when the soluble rule flips).
     for (int obj_idx : changed_objects)
         obj_list()->changed_object(obj_idx);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Override paint: a per-modifier flag (ModelVolume::config "override_paint"). Inside the modifier its
+// filament wins over colour painting - PrintApply builds no painted regions over the modifier's region.
+// Only modifiers carry it, and it only means something on a modifier that sets a filament.
+// ---------------------------------------------------------------------------------------------
+
+// The PARAMETER_MODIFIER volumes behind the object-list selection, or nothing if anything else is selected.
+static std::vector<ModelVolume*> selected_modifier_volumes()
+{
+    std::vector<ModelVolume*> volumes;
+    wxDataViewItemArray sels;
+    obj_list()->GetSelections(sels);
+    const auto& objects = plater()->model().objects;
+    for (const wxDataViewItem& item : sels) {
+        if (!(list_model()->GetItemType(item) & itVolume))
+            return {};
+        const int obj_idx = list_model()->GetObjectIdByItem(item);
+        const int vol_idx = list_model()->GetVolumeIdByItem(item);
+        if (obj_idx < 0 || obj_idx >= (int) objects.size() || vol_idx < 0 || vol_idx >= (int) objects[obj_idx]->volumes.size())
+            return {};
+        ModelVolume* volume = objects[obj_idx]->volumes[vol_idx];
+        if (!volume->is_modifier())
+            return {};
+        if (std::find(volumes.begin(), volumes.end(), volume) == volumes.end())
+            volumes.push_back(volume);
+    }
+    return volumes;
+}
+
+static bool volume_has_override_paint(const ModelVolume* volume)
+{
+    const ConfigOption* opt = volume->config.option("override_paint");
+    return opt != nullptr && opt->getBool();
+}
+
+static void toggle_override_paint()
+{
+    const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+    if (volumes.empty() || plater() == nullptr)
+        return;
+    const bool on = !std::all_of(volumes.begin(), volumes.end(), volume_has_override_paint);
+    plater()->take_snapshot(on ? "Override paint on" : "Override paint off");
+
+    const auto& objects = plater()->model().objects;
+    std::vector<int> changed_objects;
+    for (ModelVolume* volume : volumes) {
+        // Off is the key's absence, so a project saved with it off reads the same in older builds.
+        if (on)
+            volume->config.set_key_value("override_paint", new ConfigOptionBool(true));
+        else
+            volume->config.erase("override_paint");
+        obj_list()->object_config_options_changed({ volume->get_object(), volume });
+        for (int i = 0; i < (int) objects.size(); ++ i)
+            if (objects[i] == volume->get_object()) {
+                if (std::find(changed_objects.begin(), changed_objects.end(), i) == changed_objects.end())
+                    changed_objects.push_back(i);
+                break;
+            }
+    }
+    // What triggers the re-slice: PrintApply sees the modifier's region config change.
+    for (int obj_idx : changed_objects)
+        obj_list()->changed_object(obj_idx);
+}
+
+void MenuFactory::append_menu_item_override_paint(wxMenu* menu)
+{
+    const wxString label = _L("Override paint");
+    // The part menus are long-lived and the item depends on the selection, so it is rebuilt on every
+    // open - the idiom of append_menu_item_change_filament().
+    if (const int item_id = menu->FindItem(label); item_id != wxNOT_FOUND)
+        menu->Destroy(item_id);
+
+    // Modifiers only, and only with several filaments (painting needs them).
+    if (selected_modifier_volumes().empty() || filaments_count() < 2)
+        return;
+
+    append_menu_check_item(menu, wxID_ANY, label, _L("Inside this modifier its filament replaces painted colour."),
+        [](wxCommandEvent&) { toggle_override_paint(); }, menu,
+        // Greyed until every selected modifier sets a filament of its own: without one there is nothing to override
+        // with. A flag left on (its filament since reset to Default) can still be switched off.
+        []() {
+            const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+            return !volumes.empty() && std::all_of(volumes.begin(), volumes.end(), [](const ModelVolume* v) {
+                return model_volume_sets_filament(*v) || volume_has_override_paint(v);
+            });
+        },
+        []() {
+            const std::vector<ModelVolume*> volumes = selected_modifier_volumes();
+            return !volumes.empty() && std::all_of(volumes.begin(), volumes.end(), volume_has_override_paint);
+        },
+        m_parent);
 }
 
 void MenuFactory::append_menu_items_support_group(wxMenu* menu)
@@ -2332,6 +2437,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_replace_with_stl(&m_object_menu);
     append_menu_item_edit_in_blender(&m_object_menu);
     append_menu_item_edit_in_freecad(&m_object_menu);
+    if (layerling_supported())
+        append_menu_item_edit_in_layerling(&m_object_menu);
     append_menu_item_cad_fillet(&m_object_menu);
     append_menu_item_export_stl(&m_object_menu);
     append_menu_item_export_step(&m_object_menu);
@@ -2475,6 +2582,8 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_replace_with_stl(menu);
     append_menu_item_edit_in_blender(menu);
     append_menu_item_edit_in_freecad(menu);
+    if (layerling_supported())
+        append_menu_item_edit_in_layerling(menu);
     append_menu_item_cad_fillet(menu);
     append_menu_item_export_stl_part(menu);
 }
@@ -2510,6 +2619,119 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     const int item_id = menu->FindItem(_L("Merge with"));
     if (item_id != wxNOT_FOUND)
         menu->Destroy(item_id);
+
+    // Per-nozzle process P2: "Print on nozzle" puts this filament on a tool of a toolchanger (filament_nozzle_assignment),
+    // so it slices with that nozzle's diameter, widths and process. Rebuilt for the filament the menu opens on.
+    const int nozzle_item_id = menu->FindItem(_L("Print on nozzle"));
+    if (nozzle_item_id != wxNOT_FOUND)
+        menu->Destroy(nozzle_item_id);
+    {
+        PresetBundle *bundle = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size() && bundle->filament_nozzle_assignment_supported()) {
+            const auto *nozzles = bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            const int   own     = filament + 1;
+            wxMenu     *nozzle_menu = new wxMenu();
+            for (size_t t = 0; nozzles != nullptr && t < nozzles->values.size(); ++t) {
+                const int tool = int(t) + 1;
+                wxString  label = wxString::Format("T%d  %s mm", tool, from_u8(format_diameter_to_str(nozzles->values[t])));
+                if (tool == own)
+                    label += "  " + _L("(its own)");
+                // Checked: the filament's nozzle now, its assignment or else its own tool.
+                append_menu_check_item(nozzle_menu, wxID_ANY, label, "",
+                    [filament, tool](wxCommandEvent &) { plater()->sidebar().set_filament_nozzle(size_t(filament), tool); }, nozzle_menu,
+                    []() { return true; },
+                    [filament, tool, own]() {
+                        const int assigned = wxGetApp().preset_bundle->filament_assigned_nozzle(size_t(filament));
+                        return assigned > 0 ? assigned == tool : tool == own;
+                    }, m_parent);
+            }
+            append_submenu(menu, nozzle_menu, wxID_ANY, _L("Print on nozzle"),
+                           _L("The nozzle (tool) this filament prints on. It slices with that nozzle's diameter, line widths and process."),
+                           "", []() { return true; }, m_parent);
+        }
+    }
+
+    // Per-nozzle process P5: "Rack nozzle size" pins this filament to a nozzle size of its extruder's rack (H2C,
+    // filament_rack_nozzle_diameter). Only offered when that rack holds nozzles of more than one size.
+    const int rack_item_id = menu->FindItem(_L("Rack nozzle size"));
+    if (rack_item_id != wxNOT_FOUND)
+        menu->Destroy(rack_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig  full    = bundle->full_config();
+            const std::vector<double> choices = filament_rack_pin_choices(full, unsigned(filament + 1));
+            if (!choices.empty()) {
+                wxMenu *rack_menu = new wxMenu();
+                auto    pinned    = [filament]() {
+                    return filament_rack_pin(wxGetApp().preset_bundle->project_config, unsigned(filament + 1));
+                };
+                append_menu_check_item(rack_menu, wxID_ANY, _L("The extruder's nozzle size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), 0.); }, rack_menu,
+                    []() { return true; }, [pinned]() { return !(pinned() > 0.); }, m_parent);
+                for (double d : choices)
+                    append_menu_check_item(rack_menu, wxID_ANY, from_u8(format_nozzle_diameter_word(d)) + " mm", "",
+                        [filament, d](wxCommandEvent &) { plater()->sidebar().set_filament_rack_pin(size_t(filament), d); }, rack_menu,
+                        []() { return true; }, [pinned, d]() { return same_nozzle_diameter(pinned(), d); }, m_parent);
+                append_submenu(menu, rack_menu, wxID_ANY, _L("Rack nozzle size"),
+                               _L("Experimental. The size of the rack nozzle this filament prints with. It slices with that size, "
+                                  "and the slicer puts it on a rack nozzle of that size on every layer."),
+                               "", []() { return true; }, m_parent);
+            }
+        }
+    }
+
+    // Per-nozzle process P9 (owner hand test 2026-11-02): on H2D / H2C / X2D, "Print on": Auto / Left / Right, and the nozzles of a
+    // side's rack by size ("Right 0.6 (slot 6)"), whether or not a rack is set up (Left / Right always).
+    const int side_item_id = menu->FindItem(_L("Print on"));
+    if (side_item_id != wxNOT_FOUND)
+        menu->Destroy(side_item_id);
+    if (const int filament = active_filament_menu_id; filament >= 0 && plater()->sidebar().filament_sides_supported()) {
+        wxMenu *side_menu = new wxMenu();
+        plater()->sidebar().append_filament_side_menu(side_menu, size_t(filament));
+        append_submenu(menu, side_menu, wxID_ANY, _L("Print on"),
+                       _L("The side (nozzle) this filament prints on. Auto lets the grouping decide; Left / Right pin it on this plate. "
+                          "A side with a nozzle rack also lists its nozzles by size."),
+                       "", []() { return true; }, m_parent);
+    }
+
+    // Per-nozzle process P9: "Rack slot" pins this filament to one slot of its extruder's rack (filament_rack_nozzle_slot): it
+    // prints with that slot's size, process and nozzle, so filaments on different slots change nozzles (M632) instead of
+    // purging. Offered when the filament's extruder shows rack slots (two or more rack nozzles declared).
+    const int slot_item_id = menu->FindItem(_L("Rack slot"));
+    if (slot_item_id != wxNOT_FOUND)
+        menu->Destroy(slot_item_id);
+    {
+        PresetBundle *bundle   = wxGetApp().preset_bundle;
+        const int     filament = active_filament_menu_id;
+        if (filament >= 0 && size_t(filament) < bundle->filament_presets.size()) {
+            const DynamicPrintConfig full     = bundle->full_config();
+            const size_t             extruder = nozzle_for_filament(full, unsigned(filament + 1));
+            const size_t             slots    = rack_slot_count(full, extruder);
+            if (slots > 0) {
+                const auto racks     = extruder_rack_nozzles(full);
+                wxMenu    *slot_menu = new wxMenu();
+                auto       pinned    = [filament]() { return wxGetApp().preset_bundle->filament_rack_slot_choice(size_t(filament)); };
+                append_menu_check_item(slot_menu, wxID_ANY, _L("Any slot of its size"), "",
+                    [filament](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), 0); }, slot_menu,
+                    []() { return true; }, [pinned]() { return pinned() <= 0; }, m_parent);
+                for (size_t k = 1; k <= slots && extruder < racks.size() && k <= racks[extruder].size(); ++k) {
+                    const wxString label = from_u8(rack_slot_name(full, extruder, int(k))) + " (" +
+                                           from_u8(format_nozzle_diameter_word(racks[extruder][k - 1].diameter)) + " mm)";
+                    append_menu_check_item(slot_menu, wxID_ANY, label, "",
+                        [filament, k](wxCommandEvent &) { plater()->sidebar().set_filament_rack_slot(size_t(filament), int(k)); }, slot_menu,
+                        []() { return true; }, [pinned, k]() { return pinned() == int(k); }, m_parent);
+                }
+                append_submenu(menu, slot_menu, wxID_ANY, _L("Rack slot"),
+                               _L("Experimental. The rack slot this filament prints with: that slot's nozzle size and process (Process tab), "
+                                  "on that slot's nozzle. Filaments on different slots of one extruder change nozzles instead of purging. "
+                                  "The printer matches the slots to its rack nozzles by size when the job is sent."),
+                               "", []() { return true; }, m_parent);
+            }
+        }
+    }
 
     wxMenu *                      sub_menu         = new wxMenu();
     std::vector<wxBitmap *>       icons            = get_extruder_color_icons(true);
@@ -2777,6 +2999,7 @@ wxMenu* MenuFactory::part_menu()
 {
     append_menu_items_convert_unit(&m_part_menu);
     append_menu_item_change_filament(&m_part_menu);
+    append_menu_item_override_paint(&m_part_menu);
     // Ultra (support groups): rebuilt per open, like Change Filament above it.
     append_menu_items_support_group(&m_part_menu);
     append_menu_item_per_object_settings(&m_part_menu);
@@ -2787,6 +3010,7 @@ wxMenu* MenuFactory::part_menu()
 wxMenu* MenuFactory::text_part_menu()
 {
     append_menu_item_change_filament(&m_text_part_menu);
+    append_menu_item_override_paint(&m_text_part_menu);
     append_menu_item_per_object_settings(&m_text_part_menu);
 
     return &m_text_part_menu;
@@ -2795,6 +3019,7 @@ wxMenu* MenuFactory::text_part_menu()
 wxMenu *MenuFactory::svg_part_menu()
 {
     append_menu_item_change_filament(&m_svg_part_menu);
+    append_menu_item_override_paint(&m_svg_part_menu);
     append_menu_item_per_object_settings(&m_svg_part_menu);
 
     return &m_svg_part_menu;
@@ -2893,6 +3118,7 @@ wxMenu* MenuFactory::multi_selection_menu()
         menu->AppendSeparator();
         append_menu_item_change_filament(menu);
         append_menu_item_change_type(menu);
+        append_menu_item_override_paint(menu);
         append_menu_item_precise_seam_submenu(menu);
     }
     return menu;

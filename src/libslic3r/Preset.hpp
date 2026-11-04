@@ -1,6 +1,7 @@
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <set>
@@ -821,23 +822,29 @@ public:
 
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return true if they differ.
     bool                        current_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &this->get_selected_preset()); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &this->get_selected_preset()) : !this->current_dirty_options().empty(); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_dirty_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), deep_compare)); }
     // Compare the content of get_selected_preset() with get_edited_preset() configs, return the list of keys where they differ.
     std::vector<std::string>    current_different_from_parent_options(const bool deep_compare = false) const
-        { return dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare); }
+        { return without_dirty_ignored(dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), deep_compare)); }
     std::vector<std::string>    current_flow_variant_dirty_options(ConfigFlowDomain domain,
                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), &this->get_selected_preset(), domain, option_keys)); }
     std::vector<std::string>    current_flow_variant_different_from_parent_options(ConfigFlowDomain domain,
                                                                                     const std::vector<std::string> &option_keys) const
-        { return flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys); }
+        { return without_dirty_ignored(flow_variant_dirty_options(&this->get_edited_preset(), this->get_selected_preset_parent(), domain, option_keys)); }
+
+    // Per-nozzle process P8: keys the dirty / modified comparisons above leave out. While the Process tab shows a tool's
+    // profile, its plate-wide keys hold the Plate's shared values; they are not changes to the tool's profile.
+    void                        set_dirty_ignore(std::set<std::string> keys) { m_dirty_ignore = std::move(keys); }
+    const std::set<std::string>& dirty_ignore() const { return m_dirty_ignore; }
 
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return true if they differ.
     bool                        saved_is_dirty() const
-        { return is_dirty(&this->get_edited_preset(), &m_saved_preset); }
+        { return m_dirty_ignore.empty() ? is_dirty(&this->get_edited_preset(), &m_saved_preset) :
+                                          !without_dirty_ignored(dirty_options(&this->get_edited_preset(), &m_saved_preset)).empty(); }
     // Compare the content of get_saved_preset() with get_edited_preset() configs, return the list of keys where they differ.
 //    std::vector<std::string>    saved_dirty_options() const
 //        { return dirty_options(&this->get_edited_preset(), &this->get_saved_preset(), /* deep_compare */ false); }
@@ -977,6 +984,14 @@ private:
     Preset                  m_edited_preset;
     // Contains a copy of the last saved selected preset.
     Preset                  m_saved_preset;
+    // Per-nozzle process P8: keys the dirty comparisons leave out (set_dirty_ignore).
+    std::set<std::string>   m_dirty_ignore;
+    std::vector<std::string> without_dirty_ignored(std::vector<std::string> keys) const
+    {
+        if (!m_dirty_ignore.empty())
+            keys.erase(std::remove_if(keys.begin(), keys.end(), [this](const std::string &key) { return m_dirty_ignore.count(key) > 0; }), keys.end());
+        return keys;
+    }
 
     // Selected preset.
     size_t                  m_idx_selected;

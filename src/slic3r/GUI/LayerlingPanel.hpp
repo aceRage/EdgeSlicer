@@ -16,6 +16,15 @@ bool layerling_supported();
 // (app_config "show_layerling_tab", on by default).
 bool layerling_tab_enabled();
 
+// "Edit in Layerling" from the plate (object and part context menus): something selected that has
+// model parts, and the tab is on.
+bool layerling_can_edit_selection();
+// Opens the selection in the Layerling tab: an object sent from a design of the tab's Layerling
+// opens that design again; anything else is exported (STEP when every part has exact CAD geometry,
+// a coloured 3MF when it has several filament colours, else STL) and handed to Layerling's own
+// import, which makes a new design of it (layerling::import_file_script).
+void layerling_edit_selection();
+
 // The Layerling tab: Layerling (https://github.com/henmedia/layerling, AGPL-3.0, by henmedia), a
 // browser CAD for 3D printing, as an optional download that EdgeSlicer runs locally.
 //
@@ -28,8 +37,15 @@ bool layerling_tab_enabled();
 //  - Updates: when the tab is opened, at most once a day, the latest release is looked up; a newer
 //    one is offered ("Update to vX"), never installed by itself.
 //  - Served by LayerlingServer from 127.0.0.1 on a fixed port, shown in a LayerlingBrowser.
-//    The page address is app_config "layerling_base_url" when that holds an http(s) URL (a
-//    self-hosted Layerling; no UI for it yet), else the local server.
+//  - Layerling source (tab menu, or "Use my own Layerling" on the Get page): the downloaded copy, or
+//    the user's own Layerling at an http(s) address (a NAS or home server, Docker, a dev server,
+//    layerling.com), checked through its /version.json or start page; app_config
+//    "layerling_source" + "layerling_base_url" (layerling::select_source). No downloads or update
+//    checks for an address of the user's. Designs belong to the address they were made at.
+//  - Edit in Layerling (plate context menus): see layerling_edit_selection(). An object keeps the
+//    design it came from (ModelObject::layerling_design); Send to Plate from that design offers to
+//    replace the object, keeping its place, filament, settings and modifiers.
+//  - Connect an AI client (MCP): the settings text for Layerling's MCP server, to copy.
 //  - Send to Plate: every 3MF/STL/OBJ/STEP the page exports is handed over instead of being saved;
 //    3MF colours become filaments (one per colour, an existing filament of the same colour reused).
 //  - Designs live in the browser's storage (LayerlingBrowser.hpp); an update never touches it.
@@ -43,6 +59,8 @@ public:
     // The tab was selected (true) or left (false). Nothing is started before the first true.
     void set_active(bool active);
     void sys_color_changed();
+    // See layerling_edit_selection().
+    void edit_selection();
     // Before the main window goes: stops the server and any download.
     void shutdown();
 

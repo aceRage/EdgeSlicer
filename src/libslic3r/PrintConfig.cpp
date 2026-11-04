@@ -7,8 +7,10 @@
 
 #include "GCode/Thumbnails.hpp"
 #include "Format/BambuKeyAliases.hpp"
+#include "ToolSlots.hpp"
 #include <algorithm>
 #include <set>
+#include <string_view>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -387,6 +389,13 @@ static t_config_enum_values s_keys_map_LayerTimeSlowdownScope {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSlowdownScope)
 
+static t_config_enum_values s_keys_map_MinLayerTimePausePark {
+    { "away",          mltpAway },
+    { "prime_tower",   mltpPrimeTower },
+    { "custom",        mltpCustom }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MinLayerTimePausePark)
+
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -584,16 +593,29 @@ bool has_nozzle_rack(const PrintConfig &config)
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id)
 {
     return physical_extruder_for_filament(config.nozzle_diameter.values.size(), config.filament_diameter.values.size(),
-                                          config.filament_map.values, filament_id);
+                                          config.filament_map.values, filament_id, config.filament_nozzle_assignment.values);
 }
 
-size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id)
+int assigned_nozzle_for_filament(const std::vector<int> &assignment, size_t nozzle_count, unsigned int filament_id)
+{
+    if (filament_id == 0 || size_t(filament_id - 1) >= assignment.size())
+        return -1;
+    const int tool = assignment[filament_id - 1];
+    return tool >= 1 && size_t(tool) <= nozzle_count ? tool - 1 : -1;
+}
+
+size_t physical_extruder_for_filament(size_t nozzle_count, size_t filament_count, const std::vector<int> &fmap, unsigned int filament_id,
+                                      const std::vector<int> &assignment)
 {
     if (filament_id == 0)
         return 0;
     const size_t direct = size_t(filament_id - 1);
     if (nozzle_count == 0)
         return 0;
+    // Per-nozzle process P2: a filament the user put on a tool of its own choosing (a toolchanger's
+    // filament_nozzle_assignment) prints there, whatever its index.
+    if (const int assigned = assigned_nozzle_for_filament(assignment, nozzle_count, filament_id); assigned >= 0)
+        return size_t(assigned);
     // When the printer has at least as many nozzles as filaments, every filament owns a physical
     // extruder (a toolchanger such as the U1, or any printer without an AMS sharing one nozzle),
     // so the filament index already IS the physical extruder. Only when more filaments share
@@ -657,14 +679,8 @@ std::string nozzle_diameter_summary(const ConfigBase &config)
     return nozzle == nullptr ? std::string() : nozzle_diameter_summary(nozzle->values);
 }
 
-double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id)
-{
-    const std::vector<double> &nozzles = config.nozzle_diameter.values;
-    if (nozzles.empty())
-        return 0.;
-    const size_t extruder = physical_extruder_for_filament(config, filament_id);
-    return nozzles[std::min(extruder, nozzles.size() - 1)];
-}
+// nozzle_diameter_for_filament(const PrintConfig &, unsigned int): per-nozzle process P4 made it rack-aware; it
+// lives in ToolSlots.cpp.
 
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 {
@@ -4509,6 +4525,233 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionStrings { "Direct Drive Standard" });
     def->cli = ConfigOptionDef::nocli;
 
+    // Per-nozzle process P1 (tests/design_per_nozzle_process.md). Project-level: the plate's process
+    // stays the process; these name, per physical extruder, the process whose speeds, accelerations and
+    // jerk that extruder prints with. PresetBundle::full_fff_config / the CLI copy them into the
+    // extruder's slots of the process keys (fill_nozzle_process_slots).
+    def = this->add("nozzle_process_presets", coStrings);
+    def->label = L("Process per nozzle");
+    def->tooltip = L("The process preset each nozzle takes its speeds, accelerations and jerk from. "
+                     "Empty for a nozzle that uses the plate's process.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+
+    // Per-nozzle process P8 (NozzleProcess.hpp): project-level. Each tool's unsaved changes to its own process
+    // profile, one entry per tool: the tool id ("T2") on the first line, then "key = value" lines. Ids are generic
+    // so rack slots can be added later without a format change.
+    def = this->add("nozzle_process_edits", coStrings);
+    def->label = "Process changes per nozzle";
+    def->tooltip = "Unsaved changes each nozzle's process profile carries in this project.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P8: filled while the slicing config is assembled. The 1-based tools whose nozzle size the
+    // plate's process is not made for and for which no process of that size exists; Print::validate refuses a job
+    // that prints with one of them. Internal.
+    def = this->add("nozzle_process_missing", coInts);
+    def->label = "Nozzles without a process";
+    def->tooltip = "Nozzles whose size no process fits (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P8: per filament, the region settings of its tool's process ("key = value" lines). Internal.
+    def = this->add("nozzle_region_values", coStrings);
+    def->label = "Region settings per filament";
+    def->tooltip = "Region settings per filament from the process of its nozzle (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // A process preset key: true once the user split the process's speeds per nozzle (left / right on the
+    // Speed page). fill_nozzle_process_slots() also sets it in the slicing config when a per-nozzle process
+    // brings values of its own. False - every system profile, every older preset - means every extruder
+    // reads the flow-mode column, exactly as before per-extruder values existed.
+    def = this->add("process_extruder_values", coBool);
+    def->label = "Process values per extruder";
+    def->tooltip = "The process keeps separate speeds, accelerations and jerk for each nozzle.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P2 (tests/design_per_nozzle_process.md): which tool each filament prints on, on a
+    // toolchanger (Snapmaker U1 and other printers with one nozzle per filament slot). Project-level, like the
+    // filament colours. 0 (or no entry) = the filament's own tool, which is what every project did before.
+    def = this->add("filament_nozzle_assignment", coInts);
+    def->label = L("Filament nozzle");
+    def->tooltip = L("The nozzle (tool) each filament prints on. 0 means the filament's own tool.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+
+    // Per-nozzle process P2: the line widths of each filament's nozzle process, per filament (filled by
+    // fill_nozzle_process_slots, stamped into the region / object widths). Internal.
+    for (const char *key : { "nozzle_outer_wall_line_width", "nozzle_inner_wall_line_width", "nozzle_sparse_infill_line_width",
+                             "nozzle_internal_solid_infill_line_width", "nozzle_top_surface_line_width",
+                             "nozzle_support_line_width",
+                             // P5
+                             "nozzle_skin_infill_line_width", "nozzle_skeleton_infill_line_width", "nozzle_initial_layer_line_width",
+                             // P6: also filled when the nozzles differ in size (resolve_nozzle_line_widths)
+                             "nozzle_bridge_line_width", "nozzle_line_width" }) {
+        def = this->add(key, coFloatsOrPercents);
+        def->label = key;
+        def->tooltip = "Line width per filament from the per-nozzle process of its nozzle (internal).";
+        def->mode = comDevelop;
+        def->set_default_value(new ConfigOptionFloatsOrPercents {});
+        def->cli = ConfigOptionDef::nocli;
+    }
+
+    // Per-nozzle process P6 (NozzleProcess.hpp): process keys. Explicit line widths per nozzle size or tool
+    // ("Line widths per nozzle" table), in the filament_nozzle_variants format:
+    // "0.6: outer_wall_line_width=0.62, inner_wall_line_width=0.65 | T2: support_line_width=0.5".
+    def = this->add("process_nozzle_line_widths", coString);
+    def->label = L("Line widths per nozzle");
+    def->tooltip = L("Line widths for particular nozzle sizes or tools. A width not set here follows the width above: a "
+                     "percentage of the nozzle diameter as it is, a width in mm scaled to the nozzle's size when the printer "
+                     "has nozzles of different sizes.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+    def->cli = ConfigOptionDef::nocli;
+
+    def = this->add("line_width_nozzle_diameter", coFloat);
+    def->label = L("Widths made for nozzle");
+    def->sidetext = "mm";
+    def->tooltip = L("The nozzle diameter this process's line widths in mm were made for. On a printer with nozzles of "
+                     "different sizes they are scaled from it to each nozzle. 0 means the printer preset's nozzle size.");
+    def->min = 0;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    // Per-nozzle process P4 (tests/design_per_nozzle_process.md "P4: Generic N-tool"): the diameter dimension of
+    // the process slot layout. One entry per print_extruder_id / print_extruder_variant slot: the nozzle
+    // diameter the slot is for, 0 = any. A process carrying it holds values per (tool, flow, diameter) and every
+    // filament reads the slot of its tool, flow type and nozzle diameter (ToolSlots.hpp).
+    def = this->add("print_extruder_nozzle_diameter", coFloats);
+    def->label = "Process slot nozzle diameter";
+    def->tooltip = "The nozzle diameter each process slot is for, 0 for any.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P4: a printer that opts into the per-tool slot model. Its processes' slot layout
+    // (print_extruder_id / _variant / _nozzle_diameter) is read for every filament by (tool, flow, diameter),
+    // without "Edit nozzles separately", and replaces process_flow_support whenever the process has a layout.
+    def = this->add("tool_slot_model", coBool);
+    def->label = L("Per-tool process slots");
+    def->tooltip = L("Experimental. The process keeps values per tool, flow type and nozzle diameter, and each filament "
+                     "reads the values of the nozzle it prints on.");
+    def->mode = comAdvanced; // P5: on the Printer tab's Multimaterial page
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-nozzle process P4 (K3 Tier C, tests/research_creality_k3.md item 7): a printer that maps filaments to
+    // physical nozzles itself and wants the fitted nozzles declared in the G-code
+    // ("; physical_nozzle_properties = 0.4-standard,0.6-high_flow,..."). CrealityPrint's key name.
+    def = this->add("support_filament_nozzle_mapping", coBool);
+    def->label = L("Declare physical nozzles");
+    def->tooltip = L("Experimental. Write the diameter and flow type of every physical nozzle into the G-code "
+                     "(physical_nozzle_properties) so the printer can check the fitted nozzles.");
+    def->mode = comAdvanced; // P5: on the Printer tab's Multimaterial page
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Per-nozzle process P4 (spec 09-07 "Phase 4"): the diameters of the nozzles in an extruder's rack (H2C),
+    // one entry per extruder, "0.4,0.4,0.2:high_flow,..." (a nozzle diameter, optionally ":<flow type>"); empty =
+    // every rack nozzle has the extruder's nozzle_diameter, as before.
+    def = this->add("extruder_rack_nozzle_diameter", coStrings);
+    def->label = L("Rack nozzle diameters");
+    def->tooltip = L("Experimental. The diameter of each nozzle in the extruder's nozzle rack, separated by commas. "
+                     "Empty when every rack nozzle has the extruder's nozzle diameter.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+
+    // Per-nozzle process P4: the rack nozzle size each filament prints with (project-level, like
+    // filament_nozzle_assignment); 0 or no entry = its extruder's nozzle_diameter.
+    def = this->add("filament_rack_nozzle_diameter", coFloats);
+    def->label = L("Rack nozzle size");
+    def->tooltip = L("The diameter of the rack nozzle each filament prints with. 0 means the extruder's nozzle diameter.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
+
+    // Per-nozzle process P9 (NozzleProcess.hpp "P9", H2C rack slots as tools): project-level. The rack slot (1-based, in
+    // the order of the extruder's rack nozzle diameters) each filament is pinned to; 0 or no entry = none (its size decides).
+    def = this->add("filament_rack_nozzle_slot", coInts);
+    def->label = L("Rack slot");
+    def->tooltip = L("The rack slot each filament prints with, counted from 1 in the order of the extruder's rack nozzles. "
+                     "0 means any rack nozzle of the filament's size.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts { 0 }); // 0 = unused; an empty vector would load back as { 0 }
+
+    // Per-nozzle process P9 (owner hand test 2026-11-02): project-level, Bambu's two-extruder machines. The side each filament is
+    // pinned to: 0 = auto (the grouping decides), 1 = left, 2 = right. The pins are applied as the plate's manual filament map,
+    // the unpinned filaments keeping the side the grouping gave them; a filament's pin never changes another's.
+    def = this->add("filament_side_pin", coInts);
+    def->label = L("Print on side");
+    def->tooltip = L("The side (extruder) each filament is pinned to: 0 = auto, 1 = left, 2 = right.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts { 0 }); // 0 = unused; an empty vector would load back as { 0 }
+
+    // Per-nozzle process P9: project-level. The process profile each rack slot uses, one entry per slot with a choice:
+    // the slot id ("T2.3": extruder 2, slot 3) on the first line, the process preset's name on the second.
+    def = this->add("nozzle_slot_process_presets", coStrings);
+    def->label = "Process per rack slot";
+    def->tooltip = "The process preset each rack slot uses (slot id, then the preset name).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P9: project-level, the P7 nozzle_diameter_override of the rack. One text per extruder in the
+    // extruder_rack_nozzle_diameter format; "" = the printer preset's rack. Set in Printer settings or synced from the
+    // printer; the printer preset is not changed.
+    def = this->add("extruder_rack_nozzle_override", coStrings);
+    def->label = L("Rack nozzles in this project");
+    def->tooltip = L("The nozzle in each rack slot in this project, separated by commas, without changing the printer preset. "
+                     "Empty means the printer preset's rack nozzle diameters.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+
+    // Per-nozzle process P9: filled while the slicing config is assembled. The rack slot ids ("T2.3") whose size no process
+    // fits; Print::validate refuses a job that prints on one of them. Internal.
+    def = this->add("nozzle_slot_process_missing", coStrings);
+    def->label = "Rack slots without a process";
+    def->tooltip = "Rack slots whose size no process fits (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P9: filled by fill_nozzle_process_slots(). Per filament, the slot of the process layout
+    // (print_extruder_id) its speeds are read from when its rack slot has a process of its own; -1 = its extruder's.
+    // Internal.
+    def = this->add("nozzle_filament_process_slot", coInts);
+    def->label = "Process slot per filament";
+    def->tooltip = "The process layout slot each filament reads (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts {});
+    def->cli = ConfigOptionDef::nocli;
+
+    // Per-nozzle process P7 (NozzleOverride.hpp): the nozzle size each extruder really carries, set per project
+    // (Prepare sidebar, Printer settings > Extruder N), one value per extruder; 0 = the printer preset's nozzle_diameter.
+    def = this->add("nozzle_diameter_override", coFloats);
+    def->label = L("Nozzle size in this project");
+    def->tooltip = L("The nozzle diameter each extruder carries in this project, without changing the printer preset. "
+                     "0 means the printer preset's nozzle diameter.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. }); // 0 = unused; an empty vector would load back as { 0 }
+
+    // Per-nozzle process P4 (spec 09-07 "Phase 5", Bambu filament_extruder_variant style): values a filament
+    // preset takes on a particular nozzle. One string per filament: "<selector>: key=value, key=value | ...",
+    // the selector a nozzle diameter ("0.6"), a flow type ("high_flow") and/or a tool ("T2"), e.g.
+    // "0.6: nozzle_temperature=230, filament_max_volumetric_speed=30 | 0.2: filament_max_volumetric_speed=4".
+    def = this->add("filament_nozzle_variants", coStrings);
+    def->label = L("Values per nozzle");
+    def->tooltip = L("Filament values for particular nozzles, used when the filament prints on a matching nozzle. "
+                     "Entries are separated by \"|\". Each entry is a nozzle diameter (0.6), a flow type (high_flow) "
+                     "and/or a tool (T2: tools are numbered as on the printer from T1, while the G-code counts from T0), "
+                     "a colon, then key=value pairs separated by commas. "
+                     "Example: 0.6: nozzle_temperature=230, filament_max_volumetric_speed=30");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionStrings { "" });
+
     def = this->add("filament_extruder_variant", coStrings);
     def->label = "Filament's extruder variant";
     def->tooltip = "Filament's extruder variant";
@@ -6068,6 +6311,54 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<LayerTimeSlowdownScope>(ltssExcludeOuterWalls));
 
+    // Edge: minimum layer time pause. The filament's cooling slowdown cannot stretch a very small layer
+    // (a thin spike) past its minimum print speed; this parks the head and waits for the rest.
+    def = this->add("min_layer_time_pause", coFloat);
+    def->label = L("Minimum layer time (pause)");
+    def->category = L("Speed");
+    def->tooltip = L("If a layer still takes less than this after the filament's cooling slowdown, the head "
+                     "retracts, lifts, parks and waits for the rest of the time with the fan running, then "
+                     "carries on. For tiny layers such as thin spikes. Not on the first layer or in spiral vase "
+                     "mode. 0 turns it off.");
+    def->sidetext = "s";
+    def->min = 0;
+    def->max = 600;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("min_layer_time_pause_park", coEnum);
+    def->label = L("Pause position");
+    def->category = L("Speed");
+    def->tooltip = L("Where the head waits during a minimum layer time pause. Away from the print: the nearest "
+                     "free bed edge or corner, clear of the objects, the prime tower and excluded areas (beside "
+                     "the current object when printing by object). Next to the prime tower: beside the tower, "
+                     "or away from the print without one. Custom: the X/Y below.");
+    def->enum_keys_map = &ConfigOptionEnum<MinLayerTimePausePark>::get_enum_values();
+    def->enum_values.push_back("away");
+    def->enum_values.push_back("prime_tower");
+    def->enum_values.push_back("custom");
+    def->enum_labels.push_back(L("Away from the print"));
+    def->enum_labels.push_back(L("Next to the prime tower"));
+    def->enum_labels.push_back(L("Custom X/Y"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<MinLayerTimePausePark>(mltpAway));
+
+    def = this->add("min_layer_time_pause_park_x", coFloat);
+    def->label = L("Pause position X");
+    def->category = L("Speed");
+    def->tooltip = L("X of the custom pause position, in bed coordinates.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("min_layer_time_pause_park_y", coFloat);
+    def->label = L("Pause position Y");
+    def->category = L("Speed");
+    def->tooltip = L("Y of the custom pause position, in bed coordinates.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
 
 
     def = this->add("fan_min_speed", coFloats);
@@ -6377,6 +6668,16 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
+
+    // Stored per modifier ModelVolume only (right-click > Override paint); NOT in Preset::print_options(),
+    // so it never reaches a process preset, and GCode::append_full_config() leaves it out of the
+    // CONFIG_BLOCK. No category, so is_improper_category() keeps it out of the "Add settings" menus.
+    def = this->add("override_paint", coBool);
+    def->label = L("Override paint");
+    def->tooltip = L("Inside this modifier its filament replaces painted colour.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+    def->cli = ConfigOptionDef::nocli;
 
     def = this->add("inner_wall_line_width", coFloatOrPercent);
     def->label = L("Inner wall");
@@ -10656,6 +10957,223 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
     return 0;
 }
 
+// ---- Per-nozzle process values (per-nozzle process P1) -------------------------------------------
+
+const std::vector<std::string>& per_nozzle_process_options()
+{
+    static const std::vector<std::string> options = [] {
+        // Read once for the whole print at values.front() (GCode.cpp slow-down, PressureEqualizer,
+        // LayerTimeSpeedSmoothingFilter): a per-extruder value could never take effect.
+        static const std::set<std::string> print_wide { "slow_down_layers", "max_volumetric_extrusion_rate_slope",
+                                                        "max_volumetric_extrusion_rate_slope_segment_length",
+                                                        "extrusion_rate_smoothing_external_perimeter_only" };
+        std::vector<std::string> out;
+        for (const std::string &key : process_flow_variant_options())
+            if (print_wide.count(key) == 0)
+                out.push_back(key);
+        return out;
+    }();
+    return options;
+}
+
+bool is_per_nozzle_process_option(const std::string &key)
+{
+    const auto &options = per_nozzle_process_options();
+    return std::find(options.begin(), options.end(), key) != options.end();
+}
+
+// "Standard" / "High Flow" / "TPU High Flow" ... after the extruder-type prefix, or empty.
+static std::string_view process_variant_nozzle_part(const std::string &variant)
+{
+    const std::string_view v(variant);
+    for (const std::string_view prefix : { std::string_view("Direct Drive "), std::string_view("Bowden ") })
+        if (v.size() > prefix.size() && v.substr(0, prefix.size()) == prefix)
+            return v.substr(prefix.size());
+    return {};
+}
+
+int process_variant_flow_mode(const std::string &variant)
+{
+    const std::string_view nozzle = process_variant_nozzle_part(variant);
+    if (nozzle == "Standard")
+        return int(fvtStandard);
+    if (nozzle == "High Flow")
+        return int(fvtHighFlow);
+    return -1;
+}
+
+FilamentVolumeType process_variant_fill_mode(const std::string &variant)
+{
+    const int mode = process_variant_flow_mode(variant);
+    if (mode >= 0)
+        return FilamentVolumeType(mode);
+    const std::string_view nozzle = process_variant_nozzle_part(variant);
+    if (nozzle.find("TPU") != std::string_view::npos)
+        return fvtStandard;
+    return nozzle.find("High Flow") != std::string_view::npos ? fvtHighFlow : fvtStandard;
+}
+
+std::vector<std::vector<size_t>> process_extruder_variant_slots(const ConfigBase &config)
+{
+    const ConfigOptionInts    *ids      = ints_option(config, "print_extruder_id");
+    const ConfigOptionStrings *variants = strings_option(config, "print_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.empty() || ids->values.size() != variants->values.size())
+        return {};
+    std::vector<std::vector<size_t>> slots;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        const int id = ids->values[i];
+        if (id == int(slots.size()) + 1)
+            slots.emplace_back();
+        else if (slots.empty() || id != int(slots.size()))
+            return {};
+        slots.back().push_back(i);
+    }
+    if (slots.size() < 2)
+        return {};
+    return slots;
+}
+
+// DynamicPrintConfig::support_different_extruders() on any ConfigBase, without allocating: at most two
+// extruders whose extruder_variant_list entries name more than one variant between them.
+bool is_bambu_grouping_machine(const ConfigBase &config, size_t extruder_count)
+{
+    if (extruder_count > 2)
+        return false;
+    const ConfigOptionStrings *list = strings_option(config, "extruder_variant_list");
+    if (list == nullptr)
+        return false;
+    std::string_view first;
+    bool             have_first = false;
+    for (size_t e = 0; e < std::min(extruder_count, list->values.size()); ++e) {
+        const std::string_view entry(list->values[e]);
+        size_t start = 0;
+        while (start <= entry.size()) {
+            size_t comma = entry.find(',', start);
+            if (comma == std::string_view::npos)
+                comma = entry.size();
+            const std::string_view token = entry.substr(start, comma - start);
+            if (!token.empty()) {
+                if (!have_first) {
+                    first      = token;
+                    have_first = true;
+                } else if (token != first)
+                    return true;
+            }
+            start = comma + 1;
+        }
+    }
+    return false;
+}
+
+size_t process_extruder_for_filament(const ConfigBase &config, unsigned int filament_idx, size_t extruder_count)
+{
+    if (extruder_count < 2)
+        return 0;
+    // Per-nozzle process P2: a filament assigned to a tool reads that tool's slots.
+    if (const ConfigOptionInts *assignment = ints_option(config, "filament_nozzle_assignment"))
+        if (const int assigned = assigned_nozzle_for_filament(assignment->values, extruder_count, filament_idx + 1); assigned >= 0)
+            return size_t(assigned);
+    const size_t filaments = flow_variant_filament_count(config);
+    if (filaments > extruder_count || is_bambu_grouping_machine(config, extruder_count)) {
+        const ConfigOptionInts *fmap = ints_option(config, "filament_map");
+        if (fmap != nullptr && filament_idx < fmap->values.size()) {
+            const int e = fmap->values[filament_idx];
+            if (e >= 1 && size_t(e) <= extruder_count)
+                return size_t(e - 1);
+        }
+    }
+    return filament_idx < extruder_count ? filament_idx : 0;
+}
+
+size_t process_config_idx(const ConfigBase &config, size_t opt_size, unsigned int filament_idx)
+{
+    const size_t legacy = get_config_idx(config, ConfigFlowDomain::Process, filament_idx);
+    if (opt_size < 2 || filament_idx == (unsigned int) -1)
+        return legacy;
+    // Per-nozzle process P9: a filament on a rack slot with a process of its own reads that slot's layout slot
+    // (fill_nozzle_process_slots appends them), for an option of the layout's length.
+    if (const ConfigOptionInts *own = ints_option(config, "nozzle_filament_process_slot");
+        own != nullptr && filament_idx < own->values.size() && own->values[filament_idx] >= 0 && size_t(own->values[filament_idx]) < opt_size)
+        if (const ConfigOptionInts *ids = ints_option(config, "print_extruder_id"); ids != nullptr && ids->values.size() == opt_size)
+            return size_t(own->values[filament_idx]);
+    // Per-nozzle process P4: a process with diameter slots, or a layout on a printer that opted into the per-tool
+    // slot model, is read by (tool, flow, diameter) (ToolSlots.hpp).
+    if (const int slot = tool_slot_for_filament(config, opt_size, filament_idx); slot >= 0)
+        return size_t(slot);
+    const ConfigOption *flag = config.option("process_extruder_values");
+    if (flag == nullptr || flag->type() != coBool || !static_cast<const ConfigOptionBool *>(flag)->value)
+        return legacy;
+    const ConfigOptionInts    *ids      = ints_option(config, "print_extruder_id");
+    const ConfigOptionStrings *variants = strings_option(config, "print_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.size() != opt_size || variants->values.size() != opt_size)
+        return legacy;
+    // process_extruder_variant_slots() without the allocation: the ids must run 1, 1, .., 2, .., n.
+    size_t extruders = 0;
+    for (size_t i = 0; i < opt_size; ++i) {
+        const int id = ids->values[i];
+        if (id == int(extruders) + 1)
+            ++extruders;
+        else if (extruders == 0 || id != int(extruders))
+            return legacy;
+    }
+    if (extruders < 2)
+        return legacy;
+    const size_t extruder = process_extruder_for_filament(config, filament_idx, extruders);
+    // Extruder 1 keeps the slot it always read.
+    if (legacy < opt_size && size_t(ids->values[legacy]) == extruder + 1)
+        return legacy;
+    // Another extruder: its slot of the flow mode the legacy slot stands for (Standard / High Flow; the
+    // X2D's second extruder names them "Bowden ..."), else its slot of the same variant name, else its
+    // first slot.
+    const int mode  = legacy < opt_size ? process_variant_flow_mode(variants->values[legacy]) : int(fvtStandard);
+    int       first = -1, named = -1;
+    for (size_t i = 0; i < opt_size; ++i) {
+        if (size_t(ids->values[i]) != extruder + 1)
+            continue;
+        if (first < 0)
+            first = int(i);
+        if (mode >= 0 && process_variant_flow_mode(variants->values[i]) == mode)
+            return i;
+        if (named < 0 && legacy < opt_size && variants->values[i] == variants->values[legacy])
+            named = int(i);
+    }
+    return named >= 0 ? size_t(named) : first >= 0 ? size_t(first) : legacy;
+}
+
+bool process_extruder_slots_differ(const ConfigBase &config)
+{
+    const std::vector<std::vector<size_t>> slots = process_extruder_variant_slots(config);
+    if (slots.empty())
+        return false;
+    const auto  &variants = strings_option(config, "print_extruder_variant")->values;
+    const size_t layout   = variants.size();
+    // Pairs (slot of extruder e, slot of extruder 1) of the same Standard / High Flow mode.
+    std::vector<std::pair<size_t, size_t>> pairs;
+    for (size_t e = 1; e < slots.size(); ++e)
+        for (size_t s : slots[e]) {
+            const int mode = process_variant_flow_mode(variants[s]);
+            if (mode < 0)
+                continue;
+            for (size_t r : slots.front())
+                if (process_variant_flow_mode(variants[r]) == mode) {
+                    pairs.emplace_back(s, r);
+                    break;
+                }
+        }
+    if (pairs.empty())
+        return false;
+    for (const std::string &key : per_nozzle_process_options()) {
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+        if (opt == nullptr || opt->size() != layout)
+            continue;
+        const std::vector<std::string> values = opt->vserialize();
+        for (const auto &[s, r] : pairs)
+            if (values[s] != values[r])
+                return true;
+    }
+    return false;
+}
+
 double filament_cooling_before_tower_at(const ConfigBase &config, unsigned int filament_id, bool with_switcher_extra)
 {
     double      cooling = 0.;
@@ -10711,6 +11229,24 @@ ResolvedFilamentFlow ResolvedFilamentFlow::resolve(const ConfigBase &config)
         out.process_config_idx.reserve(count);
         for (size_t i = 0; i < count; ++i)
             out.process_config_idx.push_back(get_config_idx(config, ConfigFlowDomain::Process, static_cast<unsigned int>(i)));
+        // Per-nozzle process P1: the extruder slots, when the process carries different values per extruder.
+        const ConfigOption *flag = config.option("process_extruder_values");
+        if ((flag != nullptr && flag->type() == coBool && static_cast<const ConfigOptionBool *>(flag)->value &&
+             !process_extruder_variant_slots(config).empty()) ||
+            // Per-nozzle process P4: the per-tool slot model.
+            tool_slot_model_active(config) ||
+            // Per-nozzle process P9: rack slots with processes of their own.
+            [&config]() {
+                const ConfigOptionInts *own = ints_option(config, "nozzle_filament_process_slot");
+                const ConfigOptionInts *ids = ints_option(config, "print_extruder_id");
+                return own != nullptr && ids != nullptr && !ids->values.empty() &&
+                       std::any_of(own->values.begin(), own->values.end(), [](int s) { return s >= 0; });
+            }()) {
+            out.process_layout_size = config.option<ConfigOptionInts>("print_extruder_id")->values.size();
+            out.process_extruder_idx.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+                out.process_extruder_idx.push_back(Slic3r::process_config_idx(config, out.process_layout_size, static_cast<unsigned int>(i)));
+        }
     }
     const auto *ratio   = config.option<ConfigOptionFloats>("filament_flow_ratio");
     const auto *mvs     = config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
