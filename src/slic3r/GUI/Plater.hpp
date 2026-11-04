@@ -198,6 +198,16 @@ public:
     void on_nozzle_sizes_changed();
     // "Sync nozzle sizes from printer" for a Bambu printer: the sizes the selected printer reports become the project's.
     void sync_nozzle_sizes_from_bambu_printer();
+    // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md section 4): its tiles (sizes, used state, filament dots), a
+    // tile's menu and edit (the same project keys as P7 / P9), the Extruder Settings dialog, and the strip's sync.
+    void refresh_nozzle_strip();
+    // Refresh once after the current event (several changes in a row cost one refresh).
+    void request_nozzle_strip_refresh();
+    void on_nozzle_tile_clicked(int index);
+    void edit_nozzle_tile(int index, double diameter, int volume_type);
+    void show_extruder_settings_dialog();
+    void sync_nozzles_from_strip();
+    void relayout_printer_section();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);
@@ -250,6 +260,7 @@ public:
     void update_dynamic_filament_list();
 
     void update_nozzle_settings(bool switch_machine = false);
+    bool m_nozzle_strip_refresh_pending{ false };
     // Sets the per-nozzle Flow combos from the project nozzle_volume_type (after a device auto-match).
     void sync_nozzle_flow_combos();
 

@@ -73,6 +73,9 @@
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/SegmentedToggle.hpp"
+#include "Widgets/NozzleStrip.hpp"
+#include "ExtruderSettingsDialog.hpp"
+#include "libslic3r/NozzleStripModel.hpp"
 #include "FlowVariantEdit.hpp"
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/NozzleOverride.hpp"
@@ -4080,6 +4083,21 @@ void TabPrint::create_tool_selector()
         wxGetApp().CallAfter([this]() { refresh_tool_selector(); toggle_options(); });
     });
     m_tool_row->Add(m_tool_expand_btn, 0, wxALIGN_CENTER_VERTICAL);
+    // The chips (nozzle strip design 4.4): one per selector entry, wrapping onto another row rather than clipping or turning
+    // into a drop-down list. A chip's click picks its entry after the click event.
+    m_tool_chips = new NozzleChipRow(m_tool_panel);
+    m_tool_chips->on_pick = [this](int index) {
+        const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
+        wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
+    };
+    m_tool_chips->on_height_changed = [this]() {
+        if (m_tool_panel != nullptr) {
+            m_tool_panel->Layout();
+            Layout();
+        }
+    };
+    m_tool_chips->Hide();
+    m_tool_row->Add(m_tool_chips, 1, wxALIGN_CENTER_VERTICAL);
     // Per-nozzle process P9 (owner hand test 2026-11-02): the way back. One process for every nozzle again: the per-nozzle choices
     // and changes of this project go (after a confirm) and the selector folds back to the "Process per nozzle..." button.
     m_tool_collapse_btn = new Button(m_tool_panel, _L("Use one process"));
@@ -4111,20 +4129,17 @@ std::vector<wxString> TabPrint::tool_selector_labels() const
     const DynamicPrintConfig printer = m_preset_bundle->printer_config_with_project_sizes(); // P7: the project's sizes
     if (!supports_nozzle_processes(printer))
         return labels;
-    const std::vector<double>& nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter")->values;
-    int        extruder_count = 0;
-    const bool sided          = nozzles.size() == 2 && printer.support_different_extruders(extruder_count);
+    // Nozzle strip design 4.4: "0.4 Std" with the strip's tiles of the entry ("L", "R1-R5", "T3") beside it; the same
+    // vocabulary as the sidebar's tiles and the filament badges.
+    const NozzleStripInput             in    = current_nozzle_strip_input();
+    const std::vector<NozzleStripTile> tiles = nozzle_strip_tiles(in);
     labels.push_back(_L("Plate"));
-    // Per-nozzle process P9: an extruder with a nozzle rack (H2C right) also shows the rack's other sizes: "Right 0.4 | Right 0.6".
     for (size_t tool : m_preset_bundle->nozzle_selector_tools()) {
         const PresetBundle::NozzleToolRef ref = m_preset_bundle->nozzle_tool_ref(tool);
         if (!ref.valid)
             continue;
-        const wxString side = sided ? (ref.extruder == 0 ? _L("Left") : _L("Right")) : wxString::Format("T%d", int(ref.extruder + 1));
-        if (ref.slot > 0)
-            labels.push_back(side + " " + from_u8(format_diameter_to_str(ref.diameter)));
-        else
-            labels.push_back(side + " " + from_u8(format_diameter_to_str(nozzles[ref.extruder])));
+        const NozzleChip chip = nozzle_chip_for(tiles, ref.extruder, ref.diameter);
+        labels.push_back(from_u8(chip.size + " " + chip.flow) + "\t" + from_u8(chip.tiles));
     }
     return labels;
 }
@@ -4177,52 +4192,40 @@ void TabPrint::refresh_tool_selector()
     if (!available)
         m_tools_expanded = false;
     const bool expanded = available && tool_selector_expanded();
-    // P9 (owner hand test 2026-11-02): never clip. Up to five short entries (Plate + four tools) are buttons; more, or longer
-    // labels, a drop-down list.
-    size_t label_chars = 0;
-    for (const wxString& label : labels)
-        label_chars += label.length();
-    const bool as_list = labels.size() > 5 || label_chars > 34;
-    if (labels != m_tool_labels || tool_ids != m_tool_ids || (m_tool_selector == nullptr && m_tool_combo == nullptr) ||
-        as_list != (m_tool_combo != nullptr)) {
-        if (m_tool_selector != nullptr) {
-            m_tool_row->Detach(m_tool_selector);
-            m_tool_selector->Destroy();
-            m_tool_selector = nullptr;
-        }
-        if (m_tool_combo != nullptr) {
-            m_tool_row->Detach(m_tool_combo);
-            m_tool_combo->Destroy();
-            m_tool_combo = nullptr;
-        }
+    if (labels != m_tool_labels || tool_ids != m_tool_ids) {
         m_tool_labels = labels;
         m_tool_ids    = tool_ids;
-        // P9: entry -> tool; after the control's own event returns.
-        auto pick = [this](int index) {
-            const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
-            wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
-        };
-        if (available && as_list) {
-            m_tool_combo = new ComboBox(m_tool_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(160), -1), 0, nullptr,
-                                        wxCB_READONLY);
-            for (const wxString& label : labels)
-                m_tool_combo->Append(label);
-            m_tool_combo->Bind(wxEVT_COMBOBOX, [this, pick](wxCommandEvent&) { pick(m_tool_combo->GetSelection()); });
-            m_tool_row->Insert(0, m_tool_combo, 1, wxALIGN_CENTER_VERTICAL | wxEXPAND);
-        } else if (available) {
-            m_tool_selector = new SegmentedToggle(m_tool_panel, labels, std::max(0, position_of(m_preset_bundle->nozzle_tool_view())),
-                                                  SegmentedToggle::Style::Pill);
-            m_tool_selector->bindSelectionCallback([pick](int index) { pick(index); });
-            m_tool_row->Insert(0, m_tool_selector, 0, wxALIGN_CENTER_VERTICAL);
+    }
+    // Nozzle strip design 4.4: one chip per entry ("0.4 Std" + its tiles), wrapping instead of turning into a list (P9's clipping
+    // fix). Tooltips as before: what each entry prints with.
+    if (m_tool_chips != nullptr) {
+        using Kind = PresetBundle::NozzleToolProcessKind;
+        std::vector<NozzleChipView> chips;
+        for (size_t i = 0; i < m_tool_labels.size(); ++i) {
+            NozzleChipView chip;
+            const wxString label = m_tool_labels[i];
+            const int      tab   = label.Find('\t');
+            chip.label           = tab == wxNOT_FOUND ? label : label.Left(size_t(tab));
+            chip.tools           = tab == wxNOT_FOUND ? wxString() : label.Mid(size_t(tab) + 1);
+            if (i == 0) {
+                chip.tooltip = _L("Settings shared by all nozzles");
+            } else if (i - 1 < m_tool_ids.size()) {
+                const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(m_tool_ids[i - 1]);
+                chip.tooltip = from_u8(m_preset_bundle->nozzle_tool_name(m_tool_ids[i - 1])) + "\n" +
+                               (info.kind == Kind::FollowsPlate ? _L("The plate's process") :
+                                info.kind == Kind::Missing      ? _L("No process fits this nozzle size") :
+                                                                  from_u8(info.name));
+                if (info.kind == Kind::AutoPicked)
+                    chip.tooltip += "\n" + _L("Picked for its size");
+                chip.edited  = info.edited && info.kind != Kind::Missing;
+                chip.missing = info.kind == Kind::Missing;
+                if (chip.edited)
+                    chip.tooltip += "\n" + _L("Changed in this project");
+            }
+            chips.push_back(chip);
         }
-    }
-    if (m_tool_selector != nullptr) {
-        m_tool_selector->setSelected(std::max(0, position_of(m_preset_bundle->nozzle_tool_view())));
-        m_tool_selector->Show(expanded);
-    }
-    if (m_tool_combo != nullptr) {
-        m_tool_combo->SetSelection(std::max(0, position_of(m_preset_bundle->nozzle_tool_view())));
-        m_tool_combo->Show(expanded);
+        m_tool_chips->set_chips(chips, std::max(0, position_of(m_preset_bundle->nozzle_tool_view())));
+        m_tool_chips->Show(available && expanded);
     }
     m_tool_expand_btn->Show(available && !expanded);
     // P9: the way back, while the selector is open.
@@ -4240,21 +4243,6 @@ void TabPrint::refresh_tool_selector()
     }
     // Owner hand test 2026-11-01: no help text under the selector; each button's tooltip says what it prints with.
     m_tool_note->Hide();
-    if (m_tool_selector != nullptr && expanded) {
-        using Kind = PresetBundle::NozzleToolProcessKind;
-        m_tool_selector->setSegmentToolTip(0, _L("Settings shared by all nozzles"));
-        for (size_t e = 0; e + 1 < m_tool_labels.size() && e < m_tool_ids.size(); ++e) {
-            const PresetBundle::NozzleToolProcess info = m_preset_bundle->nozzle_tool_process_info(m_tool_ids[e]);
-            wxString tip = info.kind == Kind::FollowsPlate ? _L("The plate's process") :
-                           info.kind == Kind::Missing      ? _L("No process fits this nozzle size") :
-                                                             from_u8(info.name);
-            if (info.kind == Kind::AutoPicked)
-                tip += "\n" + _L("Picked for its size");
-            if (info.edited && info.kind != Kind::Missing)
-                tip += "\n" + _L("Changed in this project");
-            m_tool_selector->setSegmentToolTip(int(e + 1), tip);
-        }
-    }
     m_tool_panel->Show(available);
     mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
     m_tool_panel->Layout();
@@ -4368,7 +4356,7 @@ void TabPrint::apply_tool_field_states()
     if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr || m_preset_bundle == nullptr || m_tool_panel == nullptr)
         return;
     // On Plate, with the selector open: the per-tool settings are each nozzle's, not the plate's; not editable here.
-    const bool selector_open = (m_tool_selector != nullptr && m_tool_selector->IsShown()) || (m_tool_combo != nullptr && m_tool_combo->IsShown());
+    const bool selector_open = m_tool_chips != nullptr && m_tool_chips->IsShown();
     if (m_preset_bundle->nozzle_tool_view() >= 0 || !selector_open || !m_tool_panel->IsShown())
         return;
     for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
@@ -7653,43 +7641,27 @@ if (is_marlin_flavor)
 
                 auto optgroup = page->new_optgroup(L("Size"), L"param_extruder_size");
                 optgroup->append_single_option_line("nozzle_diameter", "", extruder_idx);
-                // Per-nozzle process P7: the size this extruder carries in this project, mirrored from the Prepare
-                // sidebar. It is a project setting: the printer preset's nozzle diameter above is not changed.
+                // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md 4.3): the nozzles this project gives the extruders
+                // (P7's size, P9's rack slots, the flow type) are set in the Extruder Settings dialog, which replaces the per-page
+                // size picker and the rack text box. The printer preset's own values on this page are not changed by it.
                 {
-                    Line size_line = Line{ _L("Nozzle size in this project"),
-                                           _L("The nozzle this extruder carries in the current project. Each extruder can have its own size "
-                                              "without a printer preset for every combination: the printer preset's nozzle diameter above is "
-                                              "not changed. Saved with the project and remembered for this printer model. Also set in the "
-                                              "Prepare sidebar, or synced from a connected printer.") };
-                    size_line.widget = [this, extruder_idx](wxWindow* parent) {
-                        auto* sizer = new wxBoxSizer(wxHORIZONTAL);
-                        auto* combo = new ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(em_unit(parent) * 20, -1), 0,
-                                                   nullptr, wxCB_READONLY);
-                        sizer->Add(combo, 0, wxALIGN_CENTER_VERTICAL);
-                        combo->Bind(wxEVT_COMBOBOX, [this, extruder_idx, combo](wxCommandEvent&) {
-                            // Entry 0 is the printer preset's size; the others are sizes (their client data index).
-                            const int sel = combo->GetSelection();
-                            const std::vector<double> sizes = project_size_choices();
-                            double d = 0.;
-                            if (sel > 0 && size_t(sel - 1) < sizes.size())
-                                d = sizes[size_t(sel - 1)];
-                            // P9 (owner bug from P8): hold this extruder's page across the size change, which refreshes the
-                            // printer section, the sidebar and the Process tab; released once that is done.
-                            hold_page(wxString::Format(_L("Extruder %d"), int(extruder_idx + 1)));
-                            wxGetApp().CallAfter([this, extruder_idx, d]() {
+                    Line size_line = Line{ _L("Nozzles in this project"),
+                                           _L("The nozzle size and type each extruder carries in the current project, and the nozzles in "
+                                              "a nozzle rack. The printer preset is not changed. Saved with the project and remembered for "
+                                              "this printer model. Also in the Prepare sidebar's nozzle strip, or synced from a connected "
+                                              "printer.") };
+                    size_line.widget = [this](wxWindow* parent) {
+                        auto* sizer  = new wxBoxSizer(wxHORIZONTAL);
+                        auto* button = new Button(parent, _L("Extruder settings") + dots);
+                        button->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+                        button->Bind(wxEVT_BUTTON, [](wxCommandEvent&) {
+                            // After the click: applying the dialog refreshes this page.
+                            wxGetApp().CallAfter([]() {
                                 if (wxGetApp().plater() != nullptr)
-                                    wxGetApp().plater()->sidebar().set_tool_nozzle_size(int(extruder_idx), d);
-                                release_page();
+                                    wxGetApp().plater()->sidebar().show_extruder_settings_dialog();
                             });
                         });
-                        combo->Bind(wxEVT_DESTROY, [this, extruder_idx, combo](wxWindowDestroyEvent& evt) {
-                            evt.Skip();
-                            auto it = m_project_size_controls.find(extruder_idx);
-                            if (it != m_project_size_controls.end() && it->second.get() == combo)
-                                m_project_size_controls.erase(it);
-                        });
-                        m_project_size_controls[extruder_idx] = wxWeakRef<ComboBox>(combo);
-                        update_project_nozzle_size(extruder_idx);
+                        sizer->Add(button, 0, wxALIGN_CENTER_VERTICAL);
                         return sizer;
                     };
                     optgroup->append_line(size_line);
@@ -7872,70 +7844,7 @@ if (is_marlin_flavor)
                     };
                     optgroup->append_line(rack_line);
                 }
-                // Per-nozzle process P9: the rack's sizes in this project (extruder_rack_nozzle_override), the P7 picker's analogue
-                // for rack slots: each entry is a slot (slot 1 first). The printer preset above is not changed. With two or more
-                // nozzles, each slot is a tool of its own on the Process tab and in the filament menu ("Rack slot").
-                {
-                    Line project_rack_line = Line{ _L("Rack nozzles in this project"),
-                                                   _L("The nozzle in each rack slot of this extruder in the current project, separated by commas, slot 1 "
-                                                      "first (e.g. 0.4, 0.4, 0.2, 0.6). Each slot is then a tool of its own: its size, its process "
-                                                      "(Process tab) and the filaments pinned to it (filament menu > Rack slot). The printer preset "
-                                                      "is not changed. Empty means the printer preset's rack. \"Sync\" in the printer section reads "
-                                                      "it from a connected printer.") };
-                    project_rack_line.widget = [this, extruder_idx](wxWindow* parent) {
-                        const int em    = em_unit(parent);
-                        auto*     sizer = new wxBoxSizer(wxVERTICAL);
-                        auto*     edit  = new wxTextCtrl(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(em * 20, -1),
-                                                         wxTE_PROCESS_ENTER);
-                        auto*     label = new wxStaticText(parent, wxID_ANY, wxEmptyString);
-                        label->SetForegroundColour(wxColour("#E14747"));
-                        label->Hide();
-                        sizer->Add(edit, 0);
-                        sizer->Add(label, 0, wxTOP, em / 4);
-                        auto commit = [this, extruder_idx, edit]() {
-                            PresetBundle* bundle = wxGetApp().preset_bundle;
-                            if (bundle == nullptr)
-                                return;
-                            const std::string text = into_u8(edit->GetValue());
-                            if (text == bundle->rack_nozzle_override(extruder_idx))
-                                return;
-                            // The Process tab's tools and this page are refreshed: keep this extruder's page shown.
-                            const wxString page = wxString::Format(_L("Extruder %d"), int(extruder_idx + 1));
-                            hold_page(page);
-                            wxGetApp().CallAfter([this, extruder_idx, text]() {
-                                PresetBundle* bundle = wxGetApp().preset_bundle;
-                                if (bundle != nullptr && bundle->set_rack_nozzle_override(extruder_idx, text)) {
-                                    BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: extruder " << extruder_idx + 1 << " rack in this project: '" << text << "'";
-                                    if (wxGetApp().plater() != nullptr)
-                                        wxGetApp().plater()->sidebar().on_nozzle_sizes_changed();
-                                }
-                                update_project_rack(extruder_idx);
-                                release_page();
-                            });
-                        };
-                        edit->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent&) { commit(); });
-                        edit->Bind(wxEVT_KILL_FOCUS, [commit, edit](wxFocusEvent& evt) {
-                            evt.Skip();
-                            if (!edit->IsBeingDeleted()) // a page switch destroying the box (owner crash report 2026-11-02)
-                                commit();
-                        });
-                        edit->Bind(wxEVT_TEXT, [this, extruder_idx, edit](wxCommandEvent& evt) {
-                            evt.Skip();
-                            update_project_rack_error(extruder_idx, into_u8(edit->GetValue()));
-                        });
-                        for (wxWindow* w : std::initializer_list<wxWindow*>{ edit, label })
-                            w->Bind(wxEVT_DESTROY, [this, extruder_idx, w](wxWindowDestroyEvent& evt) {
-                                evt.Skip();
-                                auto it = m_project_rack_controls.find(extruder_idx);
-                                if (it != m_project_rack_controls.end() && (it->second.first.get() == w || it->second.second.get() == w))
-                                    m_project_rack_controls.erase(it);
-                            });
-                        m_project_rack_controls[extruder_idx] = { wxWeakRef<wxTextCtrl>(edit), wxWeakRef<wxStaticText>(label) };
-                        update_project_rack(extruder_idx);
-                        return sizer;
-                    };
-                    optgroup->append_line(project_rack_line);
-                }
+                // Per-nozzle process P9: the rack's slots in this project are set in the Extruder Settings dialog (the button above).
 
                 optgroup = page->new_optgroup(L("Layer height limits"), L"param_layer_height");
                 optgroup->append_single_option_line("min_layer_height", "", extruder_idx);

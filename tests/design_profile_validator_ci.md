@@ -127,3 +127,27 @@ Costs and risks of C:
   validator has to be built from the PR head, which rules out option B.
 - Negative: X1 Carbon 0.4 machine given `printer_variant "0.6"` -> new error, exit 1.
 - Negative: `OrcaFilamentLibrary.json` with `"filament_list": []` -> new error, exit 1.
+
+## Fork PRs: published Linux validator (option B, added 2026-11-04)
+
+The VM job cannot take fork PRs (public repo). They used to get only the Python JSON check.
+Now:
+
+- `.github/workflows/profile_validator_binary.yml` builds **only** the Linux
+  `Snapmaker_Orca_profile_validator` on `ubuntu-24.04` and uploads it as the Actions artifact
+  `edgeslicer-profile-validator-linux` (90 days). It runs on pushes to main that touch
+  `PrintConfig*`, `Preset*`, `PresetBundle*`, the validator source or `deps/`, on a monthly
+  schedule (so the artifact never expires) and on `workflow_dispatch`. No GitHub Release is
+  created (releases auto-post to Discord). It uses the same deps cache key and path as
+  `build_check_cache.yml`; on a miss it builds the deps and saves them under that key.
+- `check_profiles.yml` job `validate_fork` runs only when the PR head repo is not this repo.
+  It downloads the newest unexpired artifact from main with `GITHUB_TOKEN`
+  (`actions: read`, `contents: read`; no `pull_request_target`), validates a scratch copy of
+  `resources/profiles` with `-l 2`, and, when no artifact exists, falls back to the upstream
+  release-1 validator with the TPU285 -> Standard swap on the scratch copy plus a notice.
+- The self-hosted VM job is unchanged.
+
+**Limit:** the binary is built from main, not from the PR. A fork PR that adds a new engine
+enum (or config key) and uses it in profiles is rejected by main's binary until the engine change
+is on main, exactly the case option C avoids for same-repo PRs. Maintainers handle that case
+by re-running the check from a same-repo branch.
