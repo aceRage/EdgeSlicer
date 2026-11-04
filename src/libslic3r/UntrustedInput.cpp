@@ -456,7 +456,7 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
         return r;
     }
     if (is_local_or_ip_host(u.host)) {
-        r.reason = "the file is on this computer or the local network, not on a model site";
+        r.reason = "the file is on this computer or a private network, not on a model site";
         return r;
     }
     // Model type: the last path segment must carry a model extension, unless the URL has none at
@@ -504,7 +504,7 @@ std::string redirect_target_refusal(const std::string &url)
         // redirect gets bounced past a check that only reads names. Say which of the two it was.
         if (u.host.front() == '[' || looks_like_ipv4(u.host))
             return "the download was redirected to the IP address " + u.host + ", not a host name";
-        return "the download was redirected to " + u.host + ", which is on this computer or the local network";
+        return "the download was redirected to " + u.host + ", which is on this computer or a private network";
     }
     return std::string();
 }

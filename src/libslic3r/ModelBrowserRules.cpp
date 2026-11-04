@@ -76,7 +76,7 @@ NavDecision decide_web_url(const std::string &url)
     if (u.has_userinfo)
         return block("the address carries a user name or password");
     if (is_blocked_host(u.host))
-        return block("addresses on this computer or the local network are not opened in the model browser");
+        return block("addresses on this computer or a private network are not opened in the model browser");
     return allow();
 }
 

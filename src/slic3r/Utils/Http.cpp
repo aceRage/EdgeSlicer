@@ -988,13 +988,16 @@ bool Http::tls_host_is_private(const std::string &host_in)
     if (host.find('.') == std::string::npos)
         return true;
 
-    // Names that only exist on a LAN. untrusted::local_host_suffixes() is the authority;
-    // ts.net is Tailscale MagicDNS, reached through the WireGuard tunnel (already
-    // authenticated and encrypted end to end), and a device there serves its own
-    // self-signed certificate unless Tailscale Serve fronts it.
-    for (const std::string &suffix : untrusted::local_host_suffixes())
-        if (untrusted::host_is_or_under(host, suffix))
+    // Names that only exist on a LAN. untrusted::local_host_suffixes() is the authority.
+    // Match the dotted form only: this predicate decides whether TLS verification is skipped,
+    // so a bare apex like ts.net or home.arpa must keep its certificate checked even though
+    // the suffix itself counts as local for refusal purposes. host_is_or_under() would also
+    // match those two apexes, which is correct for refusal and wrong here.
+    for (const std::string &suffix : untrusted::local_host_suffixes()) {
+        const std::string dotted = "." + suffix;
+        if (boost::algorithm::ends_with(host, dotted))
             return true;
+    }
     return false;
 }
 

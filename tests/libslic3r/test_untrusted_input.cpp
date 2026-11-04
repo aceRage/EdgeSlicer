@@ -389,17 +389,17 @@ TEST_CASE("a redirect is refused however the loopback address is spelled", "[Unt
 
     // A public IP literal is refused too, and for its own reason: the address is not this machine,
     // but a Location that names an address instead of a host name is how a redirect gets past a
-    // check that reads names only. It must not be reported as being on the local network.
+    // check that reads names only. It must not be reported as being on a private network.
     for (const char *u : {"https://8.8.8.8/x", "https://[2606:4700:4700::1111]/x", "https://1.1.1.1/x"}) {
         INFO(u);
         const std::string why = redirect_target_refusal(u);
         CHECK(why.find("IP address") != std::string::npos);
-        CHECK(why.find("local network") == std::string::npos);
+        CHECK(why.find("private network") == std::string::npos);
     }
     // A name on the LAN is still described as one. .home is the widening that matters here:
     // a redirect onto a consumer .home host is refused as local, not as a public model site.
-    CHECK(redirect_target_refusal("https://printer.local/x").find("local network") != std::string::npos);
-    CHECK(redirect_target_refusal("https://nas.home/x").find("local network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://printer.local/x").find("private network") != std::string::npos);
+    CHECK(redirect_target_refusal("https://nas.home/x").find("private network") != std::string::npos);
 
     // The same spellings that must still be allowed: this check is about where a transfer went,
     // not about which sites may be downloaded from.
