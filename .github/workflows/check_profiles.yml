@@ -35,9 +35,15 @@ jobs:
           chmod +x ./OrcaSlicer_profile_validator
 
       # validate profiles
+      # The prebuilt upstream validator does not know the TPU285 nozzle volume type
+      # (Bambu H3C). EdgeSlicer's loader does, so validate a scratch copy with that one
+      # value read as Standard. Drop this once the upstream validator learns TPU285.
       - name: validate system profiles
         run: |
-          ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2
+          rm -rf "${{ runner.temp }}/profiles"
+          cp -r ${{ github.workspace }}/resources/profiles "${{ runner.temp }}/profiles"
+          find "${{ runner.temp }}/profiles" -path '*/machine/*.json' -exec sed -i 's/"TPU285"/"Standard"/g' {} +
+          ./OrcaSlicer_profile_validator -p "${{ runner.temp }}/profiles" -l 2
 
 
 
