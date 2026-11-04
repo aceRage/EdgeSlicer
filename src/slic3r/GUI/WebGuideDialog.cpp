@@ -392,6 +392,19 @@ void GuideFrame::OnFullScreenChanged(wxWebViewEvent &evt)
     ShowFullScreen(evt.GetInt() != 0);
 }
 
+// The data is often ready before the loading page has run its scripts, and a
+// call into a page without HandleStudio is lost, so the message waits for both.
+void GuideFrame::notify_profile_loaded()
+{
+    if (!m_profile_ready || !m_page_ready || m_destroy)
+        return;
+    json res           = json::object();
+    res["command"]     = "userguide_profile_load_finish";
+    res["sequence_id"] = "10001";
+    wxString strJS     = wxString::Format("HandleStudio(%s)", res.dump(-1, ' ', true));
+    RunScript(strJS);
+}
+
 void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
 {
     try {
@@ -402,7 +415,11 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
         wxString strCmd = j["command"];
         // BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;Command:" << strCmd;
 
-        if (strCmd == "close_page") {
+        if (strCmd == "userguide_loading_page_ready") {
+            m_page_ready = true;
+            notify_profile_loaded();
+        }
+        else if (strCmd == "close_page") {
             this->EndModal(wxID_CANCEL);
         }
         if (strCmd == "user_clause") {
@@ -1216,13 +1233,13 @@ int GuideFrame::LoadProfileData()
                 return 0;
         }
 
-        //sync to web
-        json m_Res           = json::object();
-        m_Res["command"]     = "userguide_profile_load_finish";
-        m_Res["sequence_id"] = "10001";
-        wxString strJS       = wxString::Format("HandleStudio(%s)", m_Res.dump(-1, ' ', true));
+        // The data is often ready before the loading page has run its scripts, and a
+        // call into a page without HandleStudio is lost, so the message waits for both.
         if (!m_destroy)
-            CallAfter([this, strJS] { RunScript(strJS); });
+            CallAfter([this] {
+                m_profile_ready = true;
+                notify_profile_loaded();
+            });
 
         //sync to appconfig
         if (!m_destroy)

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <stdexcept>
 
 namespace Slic3r {
 
@@ -22,16 +23,15 @@ bool CutRecipeGroove::operator==(const CutRecipeGroove& o) const
     return depth == o.depth && width == o.width && flaps_angle == o.flaps_angle && angle == o.angle &&
            depth_init == o.depth_init && width_init == o.width_init &&
            flaps_angle_init == o.flaps_angle_init && angle_init == o.angle_init &&
-           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance;
+           depth_tolerance == o.depth_tolerance && width_tolerance == o.width_tolerance &&
+           count == o.count && gap == o.gap && plane_radius == o.plane_radius;
 }
 
 bool CutRecipeConnector::operator==(const CutRecipeConnector& o) const
 {
-    return pos == o.pos && rotation_m.matrix() == o.rotation_m.matrix() &&
-           radius == o.radius && height == o.height &&
-           radius_tolerance == o.radius_tolerance && height_tolerance == o.height_tolerance &&
-           z_angle == o.z_angle && type == o.type && style == o.style && shape == o.shape &&
-           flexi == o.flexi;
+    return pos == o.pos && rotation_m.matrix() == o.rotation_m.matrix() && radius == o.radius && height == o.height &&
+           radius_tolerance == o.radius_tolerance && height_tolerance == o.height_tolerance && z_angle == o.z_angle && type == o.type &&
+           style == o.style && shape == o.shape && flexi == o.flexi && pushfit == o.pushfit && tac_joint == o.tac_joint;
 }
 
 bool CutRecipeStroke::operator==(const CutRecipeStroke& o) const
@@ -77,6 +77,9 @@ bool CutRecipe::operator==(const CutRecipe& o) const
         return false;
     if (connectors != o.connectors)
         return false;
+    if (instance_linear_set != o.instance_linear_set ||
+        (instance_linear_set && instance_linear.matrix() != o.instance_linear.matrix()))
+        return false;
     // The mesh is compared by its content hash, which is what the 3MF stores and
     // what makes two halves share one blob.
     return mesh_hash == o.mesh_hash;
@@ -89,6 +92,13 @@ bool CutRecipe::valid() const
     // from every project saved before the chain landed.
     if (!cut_recipe_version_supported(version))
         return false;
+    for (const CutRecipeConnector& c : connectors) {
+        if (c.type < int(CutConnectorType::Plug) || c.type > int(CutConnectorType::TacJoint))
+            return false;
+        if (c.type == int(CutConnectorType::TacJoint) && (version < 7 || !c.pos.allFinite() || !c.rotation_m.matrix().allFinite() ||
+                                                          !std::isfinite(c.z_angle) || !tac_joint_validate(c.tac_joint).valid))
+            return false;
+    }
     if (!has_mesh())
         return false;
     switch (kind) {
@@ -204,6 +214,8 @@ void cut_recipe_connectors_from_model(const std::vector<CutConnector>& in, std::
         r.style            = int(c.attribs.style);
         r.shape            = int(c.attribs.shape);
         r.flexi            = c.flexi;
+        r.pushfit          = c.pushfit;
+        r.tac_joint        = c.tac_joint;
         out.emplace_back(r);
     }
 }
@@ -215,12 +227,21 @@ void cut_recipe_connectors_to_model(const std::vector<CutRecipeConnector>& in, s
     for (const CutRecipeConnector& r : in) {
         // The recipe may have come from a file: clamp every enum before casting,
         // the same discipline the cut_information.xml reader follows.
-        const int type  = (r.type  >= 0 && r.type  <= int(CutConnectorType::FlexiJoint)) ? r.type  : int(CutConnectorType::Plug);
+        const int    type  = (r.type >= 0 && r.type <= int(CutConnectorType::TacJoint)) ? r.type : int(CutConnectorType::Plug);
         const int style = (r.style >= 0 && r.style <= int(CutConnectorStyle::Undef))     ? r.style : int(CutConnectorStyle::Prism);
         const int shape = (r.shape >= 0 && r.shape <= int(CutConnectorShape::Undef))     ? r.shape : int(CutConnectorShape::Circle);
         CutConnector c(r.pos, r.rotation_m, r.radius, r.height, r.radius_tolerance, r.height_tolerance, r.z_angle,
                        CutConnectorAttributes(CutConnectorType(type), CutConnectorStyle(style), CutConnectorShape(shape)));
-        c.flexi = r.flexi;
+        c.flexi   = r.flexi;
+        c.pushfit = pushfit_sanitize(r.pushfit);
+        c.tac_joint = r.tac_joint;
+        if (c.attribs.type == CutConnectorType::TacJoint) {
+            if (!c.pos.allFinite() || !c.rotation_m.matrix().allFinite() || !std::isfinite(c.z_angle))
+                throw std::invalid_argument("Invalid TAC Joint recipe pose.");
+            const TacJointValidation validation = tac_joint_validate(c.tac_joint);
+            if (!validation.valid)
+                throw std::invalid_argument("Invalid TAC Joint recipe: " + validation.message);
+        }
         out.emplace_back(c);
     }
 }
@@ -530,6 +551,11 @@ static inline Vec3d cut_mirror_local(const Vec3d& v) { return Vec3d(v.x(), -v.y(
 
 CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Vec3d& pivot)
 {
+    // A rigid rotation cannot represent reflection of this asymmetric reference mesh.
+    // Refuse before changing the recipe rather than silently recutting the opposite profile.
+    if (std::any_of(src.connectors.begin(), src.connectors.end(),
+                    [](const CutRecipeConnector& connector) { return connector.type == int(CutConnectorType::TacJoint); }))
+        throw std::invalid_argument("Mirroring a TAC Joint cut is not supported.");
     CutRecipe r = src;
 
     // --- the cut frame ----------------------------------------------------
@@ -585,6 +611,9 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
     // and their _init / _tolerance partners). None of them encodes a direction in
     // the plane, so a mirror passes through them unchanged and only the frame they
     // sit on moves. Nothing to do - r.groove is already the copy.
+    // Version 5's count, gap and plane_radius are scalars too, and the dovetails are
+    // laid out symmetrically about the plane centre along its X, so a mirrored set is
+    // the same set.
 
     // --- connectors -------------------------------------------------------
     for (size_t i = 0; i < r.connectors.size(); ++ i) {
@@ -599,7 +628,8 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
         // orientation the angle negates; for a Circle it means nothing and negating
         // it would only make "mirror twice" fail to be a bit-exact identity for no
         // benefit.
-        if (o.shape != int(CutConnectorShape::Circle))
+        // A Pin is round but its flats are not, so it turns the other way too.
+        if (o.shape != int(CutConnectorShape::Circle) || o.type == int(CutConnectorType::PushFit))
             o.z_angle = -c.z_angle;
         // type, style, shape, the radii, the tolerances and the flexi parameters are
         // all untouched. type especially: Plug / Dowel / Snap / FlexiJoint is a

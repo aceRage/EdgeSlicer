@@ -95,12 +95,55 @@ set(lisbslic3r_sources
     BrimFilament.hpp
     PaintDepth.cpp
     PaintDepth.hpp
+    PaintWire.cpp
+    PaintWire.hpp
     ColorSplit.cpp
     ColorSplit.hpp
     ImageFill.cpp
     FlexiJoint.cpp
     FlexiJoint.hpp
+    PushFit.cpp
+    PushFit.hpp
+    TacJoint.cpp
+    TacJoint.hpp
     ImageFill.hpp
+    RealisticRenderSettings.cpp
+    RealisticRenderSettings.hpp
+    Showcase/ShowcaseScene.cpp
+    Showcase/ShowcaseScene.hpp
+    Showcase/ShowcaseAssets.cpp
+    Showcase/ShowcaseAssets.hpp
+    Showcase/ShowcaseHdr.cpp
+    Showcase/ShowcaseHdr.hpp
+    Showcase/ShowcaseHdriLibrary.cpp
+    Showcase/ShowcaseHdriLibrary.hpp
+    Showcase/ShowcaseLens.cpp
+    Showcase/ShowcaseLens.hpp
+    Showcase/ShowcasePanelRules.hpp
+    Showcase/ShowcaseCallouts.cpp
+    Showcase/ShowcaseCallouts.hpp
+    Showcase/ShowcaseMaterial.cpp
+    Showcase/ShowcaseMaterial.hpp
+    Showcase/ShowcaseMaterialGlsl.cpp
+    Showcase/ShowcaseMaterialGlsl.hpp
+    Showcase/MultiColourFilament.cpp
+    Showcase/MultiColourFilament.hpp
+    Showcase/MultiColourGlsl.cpp
+    Showcase/MultiColourGlsl.hpp
+    Showcase/GlowFilament.cpp
+    Showcase/GlowFilament.hpp
+    Showcase/ShowcaseTone.cpp
+    Showcase/ShowcaseTone.hpp
+    Showcase/ShowcaseWebP.cpp
+    Showcase/ShowcaseWebP.hpp
+    Showcase/ShowcaseVideo.cpp
+    Showcase/ShowcaseVideo.hpp
+    Showcase/ShowcaseEncoder.cpp
+    Showcase/ShowcaseEncoder.hpp
+    Showcase/ShowcasePath.cpp
+    Showcase/ShowcasePath.hpp
+    Showcase/ShowcaseRenderCli.cpp
+    Showcase/ShowcaseRenderCli.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -123,6 +166,8 @@ set(lisbslic3r_sources
     Color.hpp
     Config.cpp
     Config.hpp
+    ConnectedBodies.cpp
+    ConnectedBodies.hpp
     CustomGCode.cpp
     CustomGCode.hpp
     CustomModels.cpp
@@ -137,6 +182,10 @@ set(lisbslic3r_sources
     DrawCut.hpp
     CutRecipe.cpp
     CutRecipe.hpp
+    HeightColourPattern.cpp
+    HeightColourPattern.hpp
+    HeightPatternInput.cpp
+    HeightPatternInput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -204,6 +253,16 @@ set(lisbslic3r_sources
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp
     FillBedPack.hpp
+    Airbrush/AirbrushBake.cpp
+    Airbrush/AirbrushBake.hpp
+    Airbrush/AirbrushField.cpp
+    Airbrush/AirbrushField.hpp
+    Airbrush/AirbrushProcedural.cpp
+    Airbrush/AirbrushProcedural.hpp
+    Airbrush/AirbrushSession.cpp
+    Airbrush/AirbrushSession.hpp
+    Airbrush/BlueNoise.cpp
+    Airbrush/BlueNoise.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp
@@ -212,8 +271,12 @@ set(lisbslic3r_sources
     Fill/FillBase.hpp
     Fill/FillConcentric.cpp
     Fill/FillConcentric.hpp
+    Fill/FillSpiralInset.cpp
+    Fill/FillSpiralInset.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
+    Fill/FillCornerSmoothing.cpp
+    Fill/FillCornerSmoothing.hpp
     FDMHollowing.cpp
     FDMHollowing.hpp
     Fill/Fill.cpp
@@ -232,6 +295,8 @@ set(lisbslic3r_sources
     Fill/FillPlanePath.hpp
     Fill/FillRectilinear.cpp
     Fill/FillRectilinear.hpp
+    Fill/AdaptiveInfillField.cpp
+    Fill/AdaptiveInfillField.hpp
     Fill/FillTpmsD.cpp
     Fill/FillTpmsD.hpp
     Fill/FillTpmsFK.cpp
@@ -264,6 +329,8 @@ set(lisbslic3r_sources
     Format/GLTF.cpp
     Format/GLTF.hpp
     format.hpp
+    Format/DXF.cpp
+    Format/DXF.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
     Format/objparser.cpp
@@ -303,6 +370,8 @@ set(lisbslic3r_sources
     GCode/FanMover.hpp
     GCode/LayerTimeSpeedSmoothingFilter.cpp
     GCode/LayerTimeSpeedSmoothingFilter.hpp
+    GCode/MinLayerTimePause.cpp
+    GCode/MinLayerTimePause.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode/ElegooGCodeProcessorHelper.cpp
@@ -519,6 +588,12 @@ set(lisbslic3r_sources
     SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    NozzleOverride.cpp
+    NozzleOverride.hpp
+    NozzleProcess.cpp
+    NozzleProcess.hpp
+    ToolSlots.cpp
+    ToolSlots.hpp
     LayerTimeSpeedSmoothing.cpp
     LayerTimeSpeedSmoothing.hpp
     Print.cpp
@@ -589,9 +664,15 @@ set(lisbslic3r_sources
     Slicing.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
+    Support/SupportInterlock.cpp
+    Support/SupportInterlock.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportOverhangDetect.cpp
+    Support/SupportOverhangDetect.hpp
+    Support/SupportOverhangHighlight.cpp
+    Support/SupportOverhangHighlight.hpp
     Support/SupportParameters.hpp
     Support/Stabilizers.cpp
     Support/Stabilizers.hpp
@@ -659,6 +740,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    SpreadPaint.cpp
+    SpreadPaint.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp
@@ -669,6 +752,8 @@ set(lisbslic3r_sources
     UntrustedInput.hpp
     ModelBrowserRules.cpp
     ModelBrowserRules.hpp
+    Layerling.cpp
+    Layerling.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp
@@ -700,6 +785,7 @@ slic3r_unity_build(libslic3r SKIP
     SLA/SupportTree.cpp             # libnest2d nlopt optimizer headers clash with Optimize/NLoptOptimizer.hpp
     SLA/SupportTreeMesher.cpp       # sphere()/Portion clash with a neighbour
     Support/SupportMaterial.cpp     # support_types_interface also defined in SupportCommon.cpp
+    Support/SupportOverhangDetect.cpp # new (support highlight phase 4): defines SUPPORT_SURFACES_OFFSET_PARAMETERS; kept apart so the batches stay as they were
     utils.cpp                       # needs <windows.h> without a neighbour's lean/extra macros
     InstanceLock.cpp                # boost::interprocess file_lock pulls in <windows.h>; keep out of unity batches
     Format/bbs_3mf.cpp              # file-local tag/version constants also defined in Format/3mf.cpp
@@ -729,6 +815,13 @@ slic3r_unity_build(libslic3r SKIP
     Shape/TextShape.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Geometry/VoronoiUtilsCgal.cpp   # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
+    Showcase/ShowcaseVideo.cpp      # file-local vector helpers (V3, v_add, PI) with common names
+    Showcase/ShowcaseEncoder.cpp    # boost::process pulls in <windows.h>; png.h setjmp
+    Showcase/ShowcasePath.cpp       # file-local helpers (lower, edit_distance, pv_*) with common names
+    Showcase/ShowcaseRenderCli.cpp  # file-local helpers (cli_lower, parse_number) with common names
+    Showcase/ShowcaseHdr.cpp        # file-local hdr_* helpers and a TBB include; kept out of the unity batches
+    Showcase/ShowcaseHdriLibrary.cpp # file-local hdri_stem; OpenSSL through ImageFill
+    Layerling.cpp                   # file-local helpers (lower, trim, starts_with) with common names
 )
 
 if (SLIC3R_STATIC)

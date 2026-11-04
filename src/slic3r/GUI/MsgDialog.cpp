@@ -11,8 +11,13 @@
 #include <wx/clipbrd.h>
 #include <wx/checkbox.h>
 #include <wx/html/htmlwin.h>
+#include <wx/html/winpars.h>
+
+#include <algorithm>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/classification.hpp>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Utils.hpp"
@@ -212,15 +217,85 @@ void MsgDialog::finalize()
 }
 
 
+// ORCA: A placeholder-parser caret line, pointing at the column where parsing failed.
+static bool is_caret_line(const std::string &line)
+{
+    return std::count(line.begin(), line.end(), '^') == 1 &&
+           std::all_of(line.begin(), line.end(), [](char c) { return c == ' ' || c == '^'; });
+}
+
+// Tag each line as a code excerpt (a caret line or the source line above one) that must stay
+// monospaced for the '^' to align.
+static std::vector<std::pair<std::string, bool>> classify_code_lines(const std::string &msg)
+{
+    std::vector<std::string> lines;
+    boost::split(lines, msg, boost::is_any_of("\n"));
+    for (std::string &line : lines)
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+    std::vector<std::pair<std::string, bool>> tagged;
+    tagged.reserve(lines.size());
+    for (size_t i = 0; i < lines.size(); ++i) {
+        bool is_code = is_caret_line(lines[i]) || (i + 1 < lines.size() && is_caret_line(lines[i + 1]));
+        tagged.emplace_back(std::move(lines[i]), is_code);
+    }
+    return tagged;
+}
+
+// Keeps whitespace literal so the caret's leading spaces survive.
+// Used inside <code>, which supplies the fixed face. <pre> does both but adds a blank line above it.
+class CodeExcerptTagHandler : public wxHtmlWinTagHandler
+{
+public:
+    wxString GetSupportedTags() override { return wxT("EXCERPT"); }
+    bool     HandleTag(const wxHtmlTag &tag) override
+    {
+        const wxHtmlWinParser::WhitespaceMode ws = m_WParser->GetWhitespaceMode();
+        m_WParser->SetWhitespaceMode(wxHtmlWinParser::Whitespace_Pre);
+        ParseInner(tag);
+        m_WParser->SetWhitespaceMode(ws);
+        return true;
+    }
+};
+
+// Render the message as HTML, monospacing only the code excerpts.
+static std::string format_parser_error_html(const std::string &msg)
+{
+    std::string out;
+    for (const auto &[text, is_code] : classify_code_lines(msg)) {
+        if (!out.empty()) out += "<br>"; // join, not trail; a trailing <br> forces a scrollbar
+        std::string escaped = xml_escape(text);
+        if (is_code)
+            out += "<code><excerpt>" + escaped + "</excerpt></code>";
+        else
+            out += escaped;
+    }
+    return out;
+}
+
+// Measure each line in the font it will render in, so the dialog fits the longest line without slack.
+static wxSize measure_mixed_text(wxWindow *parent, const std::string &msg, const wxFont &prose_font, const wxFont &code_font)
+{
+    wxClientDC dc(parent);
+    int width = 0, height = 0;
+    for (const auto &[text, is_code] : classify_code_lines(msg)) {
+        dc.SetFont(is_code ? code_font : prose_font);
+        width   = std::max(width, dc.GetTextExtent(wxString::FromUTF8(text.c_str())).GetWidth());
+        height += dc.GetCharHeight();
+    }
+    return wxSize(width, height);
+}
+
 // Text shown as HTML, so that mouse selection and Ctrl-V to copy will work.
-static void add_msg_content(wxWindow* parent, wxBoxSizer* content_sizer, wxString msg, bool monospaced_font = false, bool is_marked_msg = false)
+static void add_msg_content(wxWindow* parent, wxBoxSizer* content_sizer, wxString msg, bool has_code_excerpts = false, bool is_marked_msg = false)
 {
     wxHtmlWindow* html = new wxHtmlWindow(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO);
     html->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
 
     // count lines in the message
     int msg_lines = 0;
-    if (!monospaced_font) {
+    if (!has_code_excerpts) {
         int line_len = 55;// count of symbols in one line
         int start_line = 0;
         for (auto i = msg.begin(); i != msg.end(); ++i) {
@@ -276,6 +351,16 @@ static void add_msg_content(wxWindow* parent, wxBoxSizer* content_sizer, wxStrin
         int page_height = std::min(int(font.GetPixelSize().y+2) * lines, 68 * em);
         page_size = wxSize(68 * em, page_height);
     }
+    else if (has_code_excerpts) {
+        // ORCA: code excerpts must not wrap or the caret misaligns; measure each line in its own font.
+        wxSize msg_sz = measure_mixed_text(parent, msg.ToUTF8().data(), font, monospace) + parent->FromDIP(wxSize(10, 5));
+        const int max_w = 68 * em;
+        int page_height = msg_sz.GetY();
+        // Reserve the horizontal scrollbar's height, or it clips the last line.
+        if (msg_sz.GetX() > max_w)
+            page_height += wxSystemSettings::GetMetric(wxSYS_HSCROLL_Y, parent);
+        page_size = wxSize(std::min(msg_sz.GetX(), max_w), std::min(page_height, max_w));
+    }
     else {
         Label* wrapped_text = new Label(html, msg);
         wrapped_text->Wrap(68 * em);
@@ -289,12 +374,15 @@ static void add_msg_content(wxWindow* parent, wxBoxSizer* content_sizer, wxStrin
     }
     html->SetMinSize(page_size);
 
-    std::string msg_escaped = xml_escape(msg.ToUTF8().data(), is_marked_msg);
-    boost::replace_all(msg_escaped, "\r\n", "<br>");
-    boost::replace_all(msg_escaped, "\n", "<br>");
-    if (monospaced_font)
-        // Code formatting will be preserved. This is useful for reporting errors from the placeholder parser.
-        msg_escaped = std::string("<pre><code>") + msg_escaped + "</code></pre>";
+    std::string msg_escaped;
+    if (has_code_excerpts) {
+        html->GetParser()->AddTagHandler(new CodeExcerptTagHandler());
+        msg_escaped = format_parser_error_html(msg.ToUTF8().data());
+    } else {
+        msg_escaped = xml_escape(msg.ToUTF8().data(), is_marked_msg);
+        boost::replace_all(msg_escaped, "\r\n", "<br>");
+        boost::replace_all(msg_escaped, "\n", "<br>");
+    }
     html->SetPage("<html><body bgcolor=\"" + bgr_clr_str + "\"><font color=\"" + text_clr_str + "\">" + wxString::FromUTF8(msg_escaped.data()) + "</font></body></html>");
     content_sizer->Add(html, 1, wxEXPAND|wxRIGHT, 8);
     wxGetApp().UpdateDarkUIWin(html);
@@ -302,15 +390,15 @@ static void add_msg_content(wxWindow* parent, wxBoxSizer* content_sizer, wxStrin
 
 // ErrorDialog
 
-ErrorDialog::ErrorDialog(wxWindow *parent, const wxString &msg, bool monospaced_font)
+ErrorDialog::ErrorDialog(wxWindow *parent, const wxString &msg, bool has_code_excerpts)
     : MsgDialog(parent, wxString::Format(_(L("%s error")), SLIC3R_APP_FULL_NAME), 
                         wxString::Format(_(L("%s has encountered an error")), SLIC3R_APP_FULL_NAME), wxOK)
 	, msg(msg)
 {
-    add_msg_content(this, content_sizer, msg, monospaced_font);
+    add_msg_content(this, content_sizer, msg, has_code_excerpts);
 
-	// Use a small bitmap with monospaced font, as the error text will not be wrapped.
-	logo->SetBitmap(create_scaled_bitmap("Snapmaker_Orca_192px_grayscale.png", this, monospaced_font ? 48 : /*1*/84));
+	// Use a small bitmap for code excerpts, which cannot wrap and so need the width.
+	logo->SetBitmap(create_scaled_bitmap("Snapmaker_Orca_192px_grayscale.png", this, has_code_excerpts ? 48 : /*1*/84));
 
     SetMaxSize(wxSize(-1, CONTENT_MAX_HEIGHT*wxGetApp().em_unit()));
 

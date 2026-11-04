@@ -21706,3 +21706,102 @@ msgstr ""
 #~ "Zusammenführung der Äste und spart viel Material (Standard), während der "
 #~ "Hybridmodus bei großen überhängenden Flächen eine ähnliche Struktur wie "
 #~ "bei normalen Stützstrukturen erzeugt."
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Size (%)"
+msgstr "Größe (%)"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Scale the connector. Clearances remain in millimetres."
+msgstr "Größe des Verbinders ändern. Die Toleranzen bleiben in Millimetern erhalten."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Connector: %1$.2f x %2$.2f x %3$.2f mm"
+msgstr "Verbinder: %1$.2f x %2$.2f x %3$.2f mm"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Side clearance"
+msgstr "Seitliche Toleranz"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "End clearance"
+msgstr "Toleranz an den Enden"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Cut offset"
+msgstr "Schnittversatz"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Nominal clearance per side. Adjusts the cutter dimensions; it is not a constant surface offset around every curve. The 0.12 mm default preserves the original cutter."
+msgstr "Nennspiel je Seite. Ändert die Abmessungen des Ausschnitts; an Rundungen kann das Spiel abweichen. Der Standardwert 0,12 mm erhält den ursprünglichen Ausschnitt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Clearance per end. The 0.30 mm default preserves the original cutter."
+msgstr "Spiel je Ende. Der Standardwert 0,30 mm erhält den ursprünglichen Ausschnitt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Move the connector along the cut normal. Both halves must retain a positive insertion depth."
+msgstr "Verbinder senkrecht zur Schnittfläche verschieben. Er muss weiterhin in beide Hälften hineinragen."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Insertion A: %1$.2f mm; B: %2$.2f mm"
+msgstr "Einstecktiefe A: %1$.2f mm; B: %2$.2f mm"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Rotate the asymmetric profile about the cut normal."
+msgstr "Das asymmetrische Profil auf der Schnittfläche drehen."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Reset TAC Joint"
+msgstr "TAC Joint zurücksetzen"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint requires a flat, planar cut."
+msgstr "TAC Joint benötigt einen ebenen Schnitt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint requires a flat, planar cut. Remove these connectors or switch to a flat cut."
+msgstr "TAC Joint benötigt einen ebenen Schnitt. Entferne diese Verbinder oder wechsle zu einem ebenen Schnitt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "The connector is printed as a separate object. The blue outline shows its matching cutter."
+msgstr "Der Verbinder wird als separates Objekt gedruckt. Die blaue Vorschau zeigt den passenden Ausschnitt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Unsupported TAC Joint reference version."
+msgstr "Diese Version der TAC-Joint-Vorlage wird nicht unterstützt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint parameters must be finite."
+msgstr "Die TAC-Joint-Werte müssen gültige Zahlen sein."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint size must be positive and clearances must be nonnegative."
+msgstr "Die TAC-Joint-Größe muss größer als null sein. Toleranzen dürfen nicht negativ sein."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint dimensions are outside the supported numerical range."
+msgstr "Die TAC-Joint-Abmessungen liegen außerhalb des unterstützten Bereichs."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint cut gap must have finite, ordered boundaries."
+msgstr "Der TAC-Joint-Schnittspalt muss gültige, geordnete Grenzen haben."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint needs positive engagement in both retained parts. Reduce the offset or cut gap."
+msgstr "TAC Joint muss in beide Bauteile hineinragen. Verringere den Versatz oder den Schnittspalt."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint cutter intersects the connector profile. Increase the side or end clearance."
+msgstr "Der TAC-Joint-Ausschnitt ist zu eng für den Verbinder. Erhöhe die seitliche Toleranz oder die Toleranz an den Enden."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "Mirroring is unavailable with TAC Joint. Use connector rotation instead."
+msgstr "Spiegeln ist mit TAC Joint nicht verfügbar. Verwende die Drehung des Verbinders."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint does not support individual part selection. Start a new planar cut without assigning individual parts."
+msgstr "TAC Joint unterstützt keine individuelle Teilzuordnung. Starte einen neuen ebenen Schnitt ohne einzelne Teile zuzuordnen."
+
+#: src/slic3r/GUI/Gizmos/GLGizmoCut.cpp
+msgid "TAC Joint cannot be combined with Flexi connectors in the same cut."
+msgstr "TAC Joint kann im selben Schnitt nicht mit Flexi-Verbindern kombiniert werden."

@@ -5,6 +5,7 @@
     "from": "system",
     "setting_id": "49fzd1JgB0epXI3n",
     "instantiation": "true",
+    "filament_id": "EPLAB00",
     "filament_max_volumetric_speed": [
         "21"
     ],

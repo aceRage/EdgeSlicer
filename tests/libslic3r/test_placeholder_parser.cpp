@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/PlaceholderParser.hpp"
+#include <memory>
 #include "libslic3r/PrintConfig.hpp"
 
 using namespace Slic3r;
@@ -372,4 +373,54 @@ SCENARIO("Placeholder parser coFloatsOrPercents vector access", "[PlaceholderPar
     SECTION("coFloats indexed access (outer_wall_speed)") { REQUIRE(std::stod(parser.process("{outer_wall_speed[2]}")) == Approx(80.0)); }
     SECTION("coFloats no-index access (pressure_advance)") { REQUIRE(std::stod(parser.process("{pressure_advance}")) == Approx(1.5)); }
     SECTION("coFloats indexed access (pressure_advance)") { REQUIRE(std::stod(parser.process("{pressure_advance[2]}")) == Approx(3.0)); }
+}
+
+// Orca #16597: values known only after the G-code is generated (PlaceholderParser::set_deferred) hold a
+// post-processing tag. They can be printed or joined to text; a calculation or a comparison on them throws
+// instead of computing with the tag text.
+TEST_CASE("Placeholder parser deferred values can be printed but not computed with", "[PlaceholderParser][Orca16597]") {
+    PlaceholderParser parser;
+    parser.set_deferred("total_weight", "@TOTAL_WEIGHT@");
+    parser.set_deferred("used_filament", "@USED_FILAMENT_LENGTH@");
+    parser.set("label", "W");
+    PlaceholderParser::ContextData context;
+    context.global_config = std::make_unique<DynamicConfig>();
+    auto process = [&parser, &context](const std::string &templ) { return parser.process(templ, 0, nullptr, nullptr, &context); };
+
+    SECTION("printed") {
+        CHECK(process("{total_weight}") == "@TOTAL_WEIGHT@");
+        CHECK(process("[total_weight]") == "@TOTAL_WEIGHT@");
+        CHECK(process("{label + \": \" + total_weight + \"g\"}") == "W: @TOTAL_WEIGHT@g");
+        CHECK(process("{total_weight + \"g, \" + used_filament + \"m\"}") == "@TOTAL_WEIGHT@g, @USED_FILAMENT_LENGTH@m");
+        CHECK(process("{\"W \" + total_weight + \"g for \" + 3 + \" parts\"}") == "W @TOTAL_WEIGHT@g for 3 parts");
+        CHECK(process("{true ? total_weight : 0}") == "@TOTAL_WEIGHT@");
+        CHECK(process("{regex_replace(\"x\", /x/, total_weight)}") == "@TOTAL_WEIGHT@");
+        CHECK(process("{local w = total_weight}{w}") == "@TOTAL_WEIGHT@");
+    }
+    SECTION("used in a calculation or a comparison") {
+        // EDGE: no filament_change() case; our parser has no such function.
+        for (const std::string templ : {
+                 "{total_weight + 1}", "{1 + total_weight}", "{total_weight * 2}", "{-total_weight}", "{int(total_weight)}",
+                 "{min(total_weight, 5)}", "{digits(total_weight, 5)}", "{total_weight + used_filament}",
+                 "{if total_weight > 100}heavy{endif}", "{if total_weight == \"1\"}one{endif}", "{total_weight and true}",
+                 "{total_weight ? 1 : 0}", "{if total_weight =~ /1.*/}one{endif}", "{one_of(total_weight, \"1\")}",
+                 "{regex_replace(total_weight, /1/, \"2\")}", "{(\"W\" + total_weight) == \"W1\"}",
+                 "{regex_replace(\"x\", /x/, total_weight) * 2}", "{if regex_replace(\"x\", /x/, \"W\" + total_weight) > \"W1\"}heavy{endif}",
+                 // A deferred value copied to a variable is still deferred.
+                 "{local w = total_weight}{w > 1}", "{global g = \"W\" + total_weight}{if g == \"W1\"}one{endif}" }) {
+            CAPTURE(templ);
+            CHECK_THROWS_WITH(process(templ), Catch::Contains("known only after the G-code is generated"));
+        }
+        // A mistake unrelated to the value being deferred keeps its own message.
+        CHECK_THROWS_WITH(process("{global v = (1, 2)}{global v = \"W\" + total_weight}"),
+                          Catch::Contains("Cannot assign a scalar value to a vector variable"));
+    }
+    SECTION("ignored in a branch that is not taken") {
+        CHECK(process("{if false}{total_weight * 2}{endif}ok") == "ok");
+    }
+    SECTION("other strings keep their behavior") {
+        CHECK(process("{label + 1}") == "W1");
+        CHECK(process("{if label > \"A\"}yes{endif}") == "yes");
+        CHECK(process("{if regex_replace(label, /X/, total_weight) == \"W\"}yes{endif}") == "yes");
+    }
 }

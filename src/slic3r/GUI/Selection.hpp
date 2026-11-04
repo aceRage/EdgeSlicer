@@ -247,6 +247,10 @@ public:
     void clone(int numbers = 1);
     void center();
     void drop();
+    // ORCA #16323: false when the selection already rests on the bed (or nothing can drop).
+    bool can_drop() const;
+    // Lowest world Z that drop() moves to the bed; whole objects count model parts only, as auto drop does.
+    double get_drop_min_z() const;
     void center_plate(const int plate_idx);
     void set_printable(bool printable);
 

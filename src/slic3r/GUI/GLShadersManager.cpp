@@ -1,5 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Platform.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
 #include "GLShadersManager.hpp"
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
@@ -10,7 +12,9 @@
 using namespace std::literals;
 
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <glad/gl.h>
+#include <sstream>
 
 namespace Slic3r {
 
@@ -37,7 +41,7 @@ std::pair<bool, std::string> GLShadersManager::init()
             return;
 
         error.erase(errorLength);
-        BOOST_LOG_TRIVIAL(warning) << "Selection highlight shader unavailable: " << name;
+        BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: " << name;
     };
 
     assert(m_shaders.empty());
@@ -65,6 +69,10 @@ std::pair<bool, std::string> GLShadersManager::init()
     valid &= append_shader("background", { prefix + "background.vs", prefix + "background.fs" });
     // used to composite the selection fill and outline over the completed scene
     appendOptionalShader("selection_composite", { prefix + "background.vs", prefix + "selection_composite.fs" });
+    // Orca #13538: screen-space FXAA pass (background.vs, as the quad is m_background's P2 one).
+    appendOptionalShader("fxaa", { prefix + "background.vs", prefix + "fxaa.fs" });
+    // Orca #13704: screen-space ambient occlusion of the realistic view (background.vs, as for FXAA).
+    appendOptionalShader("ssao", { prefix + "background.vs", prefix + "ssao.fs" });
     // used to extract the selection edge from the low-resolution selection mask
     appendOptionalShader("selection_edge", { prefix + "background.vs", prefix + "selection_edge.fs" });
     // used to area-downsample the full-resolution selection mask before edge extraction
@@ -104,7 +112,86 @@ std::pair<bool, std::string> GLShadersManager::init()
     // or drawn cut was active, so park them on their own units once, right after linking, where
     // no caller can miss it. 3 and 4 are the units the cut gizmo binds its textures to.
     if (GLShaderProgram* gouraud = get_shader("gouraud"); gouraud != nullptr)
-        gouraud->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 } });
+        gouraud->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 }, { "shadow_map", 5 } });
+    // Orca #15770: used to render objects as translucent, edge weighted surfaces in the X-Ray view.
+    // Optional here: without it the X-Ray toggle just leaves the normal shaded view.
+    appendOptionalShader("xray", { prefix + "xray.vs", prefix + "xray.fs" });
+    // Orca #13704: objects in the realistic view, per-pixel lit. Built from our gouraud shader, so it
+    // has the same samplers, parked on the same units for the same macOS reason. Optional: without
+    // it the realistic view keeps gouraud.
+    appendOptionalShader("phong", { prefix + "phong.vs", prefix + "phong.fs" });
+    if (GLShaderProgram* phong = get_shader("phong"); phong != nullptr)
+        phong->set_sampler_units({ { "curved_sheet_tex", 3 }, { "draw_field_tex", 4 }, { "shadow_map", 5 } });
+    // Orca #14702: casts the object shadow map onto the build plate (realistic view).
+    appendOptionalShader("printbed_shadow", { prefix + "printbed_shadow.vs", prefix + "printbed_shadow.fs" });
+    // Showcase tab: the backdrop and the floor. Core profile (GLSL 1.40) only, and optional: if one
+    // fails to compile the tab draws the plain two-colour gradient and no floor, nothing else changes.
+    if (prefix == "140/") {
+        appendOptionalShader("showcase_background", { prefix + "background.vs", prefix + "showcase_background.fs" });
+        appendOptionalShader("showcase_floor", { prefix + "showcase_floor.vs", prefix + "showcase_floor.fs" });
+        // S2: the filament materials (without it the objects are drawn with phong, as in S1), the
+        // contact shadow's footprint and its blur (without them there is no contact shadow).
+        // Every sampler on a unit of its own: a sampler2D and a samplerCube left together on unit 0
+        // make the program invalid at draw time on macOS (see gouraud above). Parking env_map also
+        // gives it the black fallback cube whenever no environment is bound (a plain backdrop, or the
+        // "None" environment), which macOS otherwise reports as an unloadable cube map texture.
+        appendOptionalShader("showcase_material", { prefix + "showcase_material.vs", prefix + "showcase_material.fs" });
+        appendOptionalShader("showcase_contact", { prefix + "showcase_material.vs", prefix + "showcase_contact.fs" });
+        appendOptionalShader("showcase_blur", { prefix + "background.vs", prefix + "showcase_blur.fs" });
+        // S5: the layer build-up's shadow casters, cut at the height laid so far.
+        appendOptionalShader("showcase_shadow_clip", { prefix + "showcase_material.vs", prefix + "showcase_shadow_clip.fs" });
+        // Realism 1a: the post pass (tone curve, exposure, sRGB) over the objects' HDR layer. Without
+        // it the objects tone-map in their own shader, as before.
+        appendOptionalShader("showcase_post", { prefix + "background.vs", prefix + "showcase_post.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_post"); s != nullptr)
+            s->set_sampler_units({ { "source", 0 } });
+        // The same with multisampling, per sample (sampler2DMS, GLSL 1.50). Without it a multisampled
+        // frame draws without the HDR layer.
+        appendOptionalShader("showcase_post_ms", { prefix + "showcase_post_ms.vs", prefix + "showcase_post_ms.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_post_ms"); s != nullptr)
+            s->set_sampler_units({ { "scene_ms", 1 }, { "hdr_ms", 2 } });
+        // Realism 1h-2: depth of field over the finished frame. Without it the frame stays sharp.
+        appendOptionalShader("showcase_dof", { prefix + "background.vs", prefix + "showcase_dof.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_dof"); s != nullptr)
+            s->set_sampler_units({ { "depth_tex", 0 }, { "color_tex", 1 }, { "coc_tex", 2 } });
+        if (GLShaderProgram* s = get_shader("showcase_background"); s != nullptr)
+            s->set_sampler_units({ { "image_tex", 0 }, { "env_map", 6 } });
+        if (GLShaderProgram* s = get_shader("showcase_floor"); s != nullptr)
+            s->set_sampler_units({ { "floor_tex", 0 }, { "reflection_tex", 1 }, { "contact_tex", 2 }, { "transmit_map", 3 }, { "shadow_map", 5 } });
+        if (GLShaderProgram* s = get_shader("showcase_material"); s != nullptr)
+            s->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
+        // Realism 1d: the thickness pass and the coloured shadows' map (both use showcase_material.vs).
+        // Without them translucent plastics take a typical wall thickness and shadows stay grey.
+        appendOptionalShader("showcase_thickness", { prefix + "showcase_material.vs", prefix + "showcase_thickness.fs" });
+        appendOptionalShader("showcase_transmit", { prefix + "showcase_material.vs", prefix + "showcase_transmit.fs" });
+        // Realism 1g: the camera effects over the finished frame (grain, vignette, bloom, colour
+        // fringes, distortion) and the bloom's bright pass. Without it the frame is left as it is.
+        appendOptionalShader("showcase_lens", { prefix + "background.vs", prefix + "showcase_lens.fs" });
+        if (GLShaderProgram* s = get_shader("showcase_lens"); s != nullptr)
+            s->set_sampler_units({ { "color_tex", 0 }, { "bloom_tex", 1 }, { "hdr_tex", 2 } });
+        // Multi-colour P4 (tests/design_multicolour_filament_view.md 7.3): the same material with
+        // the coextruded-colour functions put in after its #version line (they live in C++, shared
+        // with the toolpaths and the unit tests). Optional: without it coextruded slots show their
+        // plain colour on the model, as before.
+        if (get_shader("showcase_material") != nullptr) {
+            auto read = [](const std::string& name) {
+                boost::nowide::ifstream in(resources_dir() + "/shaders/" + name, boost::nowide::ifstream::binary);
+                std::stringstream       ss;
+                if (in.good())
+                    ss << in.rdbuf();
+                return ss.str();
+            };
+            GLShaderProgram::ShaderSources sources = {};
+            sources[size_t(GLShaderProgram::EShaderType::Vertex)]   = read(prefix + "showcase_material.vs");
+            sources[size_t(GLShaderProgram::EShaderType::Fragment)] = MultiColour::mesh_fragment_source(read(prefix + "showcase_material.fs"));
+            auto program = std::make_unique<GLShaderProgram>();
+            if (!sources[0].empty() && !sources[1].empty() && program->init_from_texts("showcase_material_mc", sources)) {
+                m_shaders.push_back(std::move(program));
+                m_shaders.back()->set_sampler_units({ { "shadow_map", 5 }, { "env_map", 6 }, { "layer_table", 7 }, { "thickness_map", 8 }, { "seam_table", 9 } });
+            } else
+                BOOST_LOG_TRIVIAL(warning) << "Optional shader unavailable: showcase_material_mc";
+        }
+    }
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
     // used to render highlight contour around selected triangles inside the multi-material gizmo

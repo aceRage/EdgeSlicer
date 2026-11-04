@@ -46,6 +46,7 @@ private:
 
     WinFirewall::Diagnosis m_diag;
     bool                   m_fixing { false };
+    bool                   m_public_defaulted { false }; // the first check has set the Public box
     std::shared_ptr<bool>  m_alive;
 
     wxStaticText* m_summary { nullptr };

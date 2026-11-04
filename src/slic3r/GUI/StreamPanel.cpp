@@ -1,17 +1,22 @@
 #include "StreamPanel.hpp"
 
+#include "ElegooCamRelay.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
 #include "GUI_App.hpp"
 #include "HttpServer.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <nlohmann/json.hpp>
 #include <wx/sizer.h>
 #include <wx/webview.h>
 #include <wx/event.h>
 #include <wx/frame.h>
+#include <wx/msgdlg.h>
 #include <wx/uri.h>
 #include <wx/weakref.h>
 
@@ -67,6 +72,34 @@ void StreamPanel::OnShow(wxShowEvent& evt)
 {
     evt.Skip();
     SetPageActive(evt.IsShown() && !m_iconized);
+    // A printer added in Printer settings since the page loaded.
+    if (evt.IsShown())
+        SeedElegoo();
+}
+
+void StreamPanel::SeedElegoo()
+{
+    if (m_browser == nullptr)
+        return;
+    nlohmann::json list = nlohmann::json::array();
+    if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+        for (const PhysicalPrinter& printer : bundle->physical_printers) {
+            const DynamicPrintConfig& cfg = printer.config;
+            if (!cfg.has("host_type") || cfg.opt_enum<PrintHostType>("host_type") != htElegooLink)
+                continue;
+            // The Centauri (Carbon) 2 uses the same host type but a different camera.
+            bool cc2 = ElegooCam::is_cc2_name(printer.name);
+            for (const std::string& preset : printer.get_preset_names())
+                cc2 = cc2 || ElegooCam::is_cc2_name(preset);
+            if (cc2)
+                continue;
+            const std::string host = ElegooCam::host_from_address(cfg.has("print_host") ? cfg.opt_string("print_host") : std::string());
+            if (host.empty())
+                continue;
+            list.push_back({ { "ip", host }, { "name", printer.name } });
+        }
+    }
+    WebView::RunScript(m_browser, wxString::Format("if (window.__elegooSeed) window.__elegooSeed(%s);", wxString::FromUTF8(list.dump())));
 }
 
 void StreamPanel::OnIconize(wxIconizeEvent& evt)
@@ -85,6 +118,7 @@ void StreamPanel::OnPageLoaded(wxWebViewEvent& evt)
         m_active = true; // force the call: the new page has not been told anything
         SetPageActive(false);
     }
+    SeedElegoo();
 }
 
 void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
@@ -163,14 +197,21 @@ void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
                 info = RemoteHub::query();
             wxGetApp().CallAfter([weak, what, info]() {
                 auto* cfg = wxGetApp().app_config;
-                if (what == "remote_on")
+                if (RemoteHub::no_hub()) {
+                    // --no-hub / marker: the hub, if any, belongs to another copy. Nothing was changed;
+                    // the page shows what that hub says, and this copy's saved phone settings stay put.
+                    if (what != "remote_info")
+                        wxMessageBox(_L("The phone hub is owned by another copy of EdgeSlicer, or this copy was started with --no-hub, "
+                                        "so phone access cannot be changed here. Change it in the copy that owns the hub, or start this copy with --take-hub."),
+                                     _L("Phone hub"), wxOK | wxICON_INFORMATION);
+                } else if (what == "remote_on")
                     cfg->set("stream_phone_access", info.alive && info.phone ? "1" : "0");
                 else if (what == "remote_off")
                     cfg->set("stream_phone_access", "0");
                 // Remember whatever link the hub is using now - after a new one, and after it was
                 // turned off too: off stops the link, it does not throw it away. This is what a
                 // later hub is seeded with if it comes up with no memory of its own.
-                if (!info.token.empty())
+                if (!info.token.empty() && !RemoteHub::no_hub())
                     cfg->set("stream_phone_token", info.token);
                 if (weak == nullptr || weak->m_browser == nullptr)
                     return;

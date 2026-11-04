@@ -71,6 +71,11 @@ struct Perimeter {
   // Stores precise seam coordinates found by Precise Seam modifiers
   std::optional<Vec3f> precise_seam_point;
   size_t precise_seam_index{};
+
+  // The loop came from extract_perimeter_polygons()' fallback: every point of an island collection with no
+  // recognisable outer loop, merged into one (self-intersecting) polygon. place_seam() uses it like any other
+  // loop; seam auto-paint skips it (plan_object_seams).
+  bool from_fallback = false;
 };
 
 //Struct over which all processing of perimeters is done. For each perimeter point, its respective candidate is created,

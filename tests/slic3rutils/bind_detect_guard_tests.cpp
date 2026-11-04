@@ -2,6 +2,8 @@
 
 #include "slic3r/GUI/BindDetectGuard.hpp"
 
+#include <stdexcept>
+
 using BBL::detectResult;
 using Slic3r::GUI::is_usable_serial;
 using Slic3r::GUI::kBindDetectConnectFailed;
@@ -100,4 +102,43 @@ TEST_CASE("bind_detect: what counts as a usable serial", "[BindDetectGuard]")
     CHECK_FALSE(is_usable_serial(""));
     CHECK_FALSE(is_usable_serial("SN_FAKE_0001"));
     CHECK_FALSE(is_usable_serial(std::string(65, 'A')));
+}
+
+TEST_CASE("bind worker: run_guarded turns an exception into a failure instead of terminating", "[BindDetectGuard]")
+{
+    using Slic3r::GUI::run_guarded;
+    std::string seen;
+
+    CHECK(run_guarded([] {}, [&](const std::string &w) { seen = w; }));
+    CHECK(seen.empty());
+
+    CHECK_FALSE(run_guarded([] { throw std::runtime_error("plug-in boom"); }, [&](const std::string &w) { seen = w; }));
+    CHECK(seen == "plug-in boom");
+
+    seen.clear();
+    CHECK_FALSE(run_guarded([] { throw 42; }, [&](const std::string &w) { seen = w; }));
+    CHECK(seen == "unknown exception");
+
+    // an error handler that throws must not escape either
+    CHECK_FALSE(run_guarded([] { throw std::runtime_error("x"); }, [](const std::string &) { throw std::runtime_error("y"); }));
+}
+
+TEST_CASE("bind worker: the alive token cuts off a worker's posts once the dialog is gone", "[BindDetectGuard]")
+{
+    using namespace Slic3r::GUI;
+    CHECK_FALSE(ui_alive(AliveToken()));
+
+    AliveToken token = make_alive_token();
+    AliveToken worker_copy = token; // what the worker thread holds
+    CHECK(ui_alive(worker_copy));
+
+    int touched = 0;
+    auto post = [&](const AliveToken &t) { if (ui_alive(t)) ++touched; };
+    post(worker_copy);
+    CHECK(touched == 1);
+
+    kill_alive_token(token); // dialog cancelled / destroyed on the UI thread
+    post(worker_copy);
+    CHECK(touched == 1);
+    kill_alive_token(AliveToken()); // null is fine
 }

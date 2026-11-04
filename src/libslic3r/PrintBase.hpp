@@ -37,7 +37,8 @@ struct StringObjectException
     std::string string;
     ObjectBase const *object = nullptr;
     std::string opt_key;
-    StringExceptionType         type;   // warning type for tips
+    StringExceptionType         type = STRING_EXCEPT_NOT_DEFINED;   // warning type for tips
+    bool is_warning = false;
     std::vector<std::string>    params; // warning params for tips
 };
 
@@ -122,7 +123,17 @@ public:
         // active_step_add_warning de-duplicates by id.
         SlicingStabilizerPaintUnreachable,
         // Side stabilizers set to Manual on an object with no painted stabilizer points. Appended; own id.
-        SlicingStabilizerManualUnpainted
+        SlicingStabilizerManualUnpainted,
+        // Airbrush P3: an airbrushed part's grain is finer than the slicing nozzle prints cleanly.
+        // Appended; own id.
+        SlicingAirbrushGrainBelowNozzle,
+        // A filament-only modifier on a colour-painted object whose filament equals the object's:
+        // reported instead of the plain "no settings" notice because painted areas override modifier
+        // filaments anyway. Appended; own id because active_step_add_warning de-duplicates by id.
+        SlicingModifierSameFilamentPainted,
+        // A modifier with a different filament overlapping colour-painted volumes: the painted areas
+        // win where they overlap. Appended; own id.
+        SlicingModifierOverriddenByPaint
     };
 
     typedef size_t TimeStamp;
@@ -456,7 +467,7 @@ public:
 
     // Validate the print, return empty string if valid, return error if process() cannot (or should not) be started.
     //BBS: add more paremeters to validate
-    virtual StringObjectException validate(StringObjectException *warning = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const { return {}; }
+    virtual StringObjectException validate(std::vector<StringObjectException> *warnings = nullptr, Polygons* collison_polygons = nullptr, std::vector<std::pair<Polygon, float>>* height_polygons = nullptr) const { return {}; }
 
     enum ApplyStatus {
         // No change after the Print::apply() call.

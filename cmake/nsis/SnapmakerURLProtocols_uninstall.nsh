@@ -15,6 +15,8 @@ nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="Ed
 Pop $0
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer FlashForge discovery"'
 Pop $0
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer mDNS discovery"'
+Pop $0
 ; Both the UDP and the TCP WebRTC rules share one name, so one delete removes them.
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer WebRTC video"'
 Pop $0

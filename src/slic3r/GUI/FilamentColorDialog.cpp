@@ -1,19 +1,24 @@
 #include "FilamentColorDialog.hpp"
 
 #include "FilamentColorUtils.hpp"
+#include "FilamentColourPicker.hpp"
 #include "GUI_App.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/Label.hpp"
 #include "Widgets/StateColor.hpp"
 #include "Widgets/StaticBox.hpp"
+#include "Widgets/SpinInput.hpp"
 #include "wxExtensions.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Showcase/MultiColourFilament.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 
 #include <ColorSpaceConvert.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <wx/colordlg.h>
 #include <wx/dcbuffer.h>
+#include <wx/image.h>
 #include <wx/dcmemory.h>
 #include <wx/display.h>
 #include <wx/panel.h>
@@ -26,6 +31,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -290,7 +296,275 @@ wxColour FilamentColorLightBorderColor()
     return StateColor::darkModeColorFor(wxColour(180, 180, 180));
 }
 
-wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size);
+wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size, const std::string& split, double angleDeg);
+
+// The editor's cross-section model: colours (#RRGGBB, strand order), proportions in percent, rotation.
+MultiColour::Filament MakeFilamentModel(const std::vector<std::string>& colors, const std::array<int, 4>& percent,
+                                        double angleDeg)
+{
+    MultiColour::Filament f;
+    f.n = std::clamp<int>(int(colors.size()), 1, MultiColour::MAX_COLOURS);
+    float sum = 0.f;
+    for (int i = 0; i < f.n; ++i)
+        sum += float(percent[size_t(i)]);
+    for (int i = 0; i < f.n; ++i)
+    {
+        MultiColour::RGB c{ 0.15f, 0.65f, 0.6f };
+        MultiColour::parse_hex(colors[size_t(i)], c);
+        f.colour[size_t(i)] = MultiColour::srgb_to_linear(c);
+        f.proportion[size_t(i)] = sum > 0.f ? float(percent[size_t(i)]) / sum : 1.f / float(f.n);
+    }
+    f.rotation_deg = float(angleDeg);
+    return f;
+}
+
+// The editor's gradient model (P6): colours (#RRGGBB, palette order), the dwell and the transition in mm
+// (negative = the default).
+MultiColour::Filament MakeGradientModel(const std::vector<std::string>& colors, double dwellMm, double transitionMm)
+{
+    MultiColour::Filament f;
+    std::vector<MultiColour::RGB> palette;
+    for (const std::string& colour : colors)
+    {
+        MultiColour::RGB c{ 0.15f, 0.65f, 0.6f };
+        MultiColour::parse_hex(colour, c);
+        palette.push_back(MultiColour::srgb_to_linear(c));
+    }
+    if (palette.size() >= 2)
+    {
+        const std::vector<MultiColour::RGB> stops =
+            MultiColour::resample_cyclic_palette(palette, std::min<int>(int(palette.size()), MultiColour::GRADIENT_MAX_STOPS));
+        f.gradient_stops = int(stops.size());
+        for (size_t i = 0; i < stops.size(); ++i)
+            f.gradient[i] = stops[i];
+    }
+    else if (!palette.empty())
+        f.colour[0] = palette.front();
+    f.dwell_mm = MultiColour::gradient_dwell_mm(dwellMm);
+    f.transition_mm = MultiColour::gradient_transition_mm(transitionMm);
+    return f;
+}
+
+/**
+ * @brief A colour chip of the make-up editor; a click asks for a new colour.
+ */
+class MakeUpChip : public wxPanel
+{
+public:
+    MakeUpChip(wxWindow* parent, const wxSize& size, std::function<void()> onClick, std::function<void()> onDoubleClick)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, size)
+        , _onClick(std::move(onClick))
+        , _onDoubleClick(std::move(onDoubleClick))
+    {
+        SetMinSize(size);
+        SetMaxSize(size);
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        SetCursor(wxCursor(wxCURSOR_HAND));
+        Bind(wxEVT_PAINT, &MakeUpChip::OnPaint, this);
+        Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&)
+        {
+            if (_onClick)
+                _onClick();
+        });
+        Bind(wxEVT_LEFT_DCLICK, [this](wxMouseEvent&)
+        {
+            if (_onDoubleClick)
+                _onDoubleClick();
+        });
+    }
+
+    void SetChipColour(const wxColour& colour)
+    {
+        _colour = colour;
+        Refresh();
+    }
+
+    /** The chip the palette and the picker change. */
+    void SetActive(bool active)
+    {
+        if (_active == active)
+            return;
+        _active = active;
+        Refresh();
+    }
+
+private:
+    void OnPaint(wxPaintEvent&)
+    {
+        wxAutoBufferedPaintDC dc(this);
+        const wxSize size = GetClientSize();
+        dc.SetBackground(wxBrush(StateColor::darkModeColorFor(wxColour("#FFFFFF"))));
+        dc.Clear();
+        dc.SetPen(wxPen(FilamentColorLightBorderColor(), 1));
+        dc.SetBrush(wxBrush(_colour.IsOk() ? _colour : wxColour("#26A69A")));
+        dc.DrawRoundedRectangle(0, 0, size.GetWidth(), size.GetHeight(), FromDIP(4));
+        if (_active)
+        {
+            dc.SetBrush(*wxTRANSPARENT_BRUSH);
+            dc.SetPen(wxPen(wxColour("#019687"), 2));
+            dc.DrawRoundedRectangle(1, 1, size.GetWidth() - 2, size.GetHeight() - 2, FromDIP(4));
+        }
+    }
+
+    std::function<void()> _onClick;
+    std::function<void()> _onDoubleClick;
+    bool _active { false };
+    wxColour _colour;
+};
+
+/**
+ * @brief The filament end-on (a pie) or, with `wall`, a printed cylinder seen from above (a ring).
+ * The front of the printer is at the bottom (a small arrow); dragging the disc turns colour 1.
+ */
+class MakeUpDiscPanel : public wxPanel
+{
+public:
+    MakeUpDiscPanel(wxWindow* parent, int size, bool wall, std::function<MultiColour::Filament()> model,
+                    std::function<void(double)> onRotate)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
+        , _wall(wall)
+        , _model(std::move(model))
+        , _onRotate(std::move(onRotate))
+    {
+        const wxSize panelSize(size, size + FromDIP(8));
+        SetMinSize(panelSize);
+        SetMaxSize(panelSize);
+        SetSize(panelSize);
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        Bind(wxEVT_PAINT, &MakeUpDiscPanel::OnPaint, this);
+        if (!wall)
+        {
+            SetCursor(wxCursor(wxCURSOR_HAND));
+            Bind(wxEVT_LEFT_DOWN, &MakeUpDiscPanel::OnMouse, this);
+            Bind(wxEVT_MOTION, [this](wxMouseEvent& event)
+            {
+                if (event.Dragging() && event.LeftIsDown())
+                    OnMouse(event);
+            });
+        }
+    }
+
+private:
+    int Side() const
+    {
+        return std::max(2, std::min(GetClientSize().GetWidth(), GetClientSize().GetHeight() - FromDIP(8)));
+    }
+
+    void OnMouse(wxMouseEvent& event)
+    {
+        const double half = 0.5 * double(Side());
+        const float dx = float(event.GetX() - half), dy = float(event.GetY() - half);
+        if (std::abs(dx) + std::abs(dy) < 2.f || !_onRotate)
+            return;
+        double deg = double(MultiColour::direction_turns(dx, -dy)) * 360.0;
+        deg = std::round(deg / 5.0) * 5.0;
+        if (deg >= 360.0)
+            deg -= 360.0;
+        _onRotate(deg);
+    }
+
+    void OnPaint(wxPaintEvent&)
+    {
+        wxAutoBufferedPaintDC dc(this);
+        const wxColour bg = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+        dc.SetBackground(wxBrush(bg));
+        dc.Clear();
+        if (!_model)
+            return;
+        const MultiColour::Filament filament = _model();
+        const int side = Side();
+        const float radius = 0.5f * float(side) - 1.f;
+        const float inner = _wall ? 0.6f * radius : 0.f;
+        wxImage image(side, side, false);
+        unsigned char* data = image.GetData();
+        for (int y = 0; y < side; ++y)
+            for (int x = 0; x < side; ++x)
+            {
+                float r = 0.f, g = 0.f, b = 0.f;
+                for (int sy = 0; sy < 2; ++sy)
+                    for (int sx = 0; sx < 2; ++sx)
+                    {
+                        const float px = float(x) + 0.25f + 0.5f * float(sx) - 0.5f * float(side);
+                        const float py = float(y) + 0.25f + 0.5f * float(sy) - 0.5f * float(side);
+                        const float d = std::sqrt(px * px + py * py);
+                        if (d > radius || d < inner)
+                        {
+                            r += bg.Red() / 255.f; g += bg.Green() / 255.f; b += bg.Blue() / 255.f;
+                            continue;
+                        }
+                        const MultiColour::RGB c = MultiColour::linear_to_srgb(
+                            filament.colour_at(filament.filament_angle(MultiColour::direction_turns(px, -py), 0.f)));
+                        r += c[0]; g += c[1]; b += c[2];
+                    }
+                unsigned char* p = data + 3 * (size_t(y) * size_t(side) + size_t(x));
+                p[0] = (unsigned char) std::clamp(int(std::lround(r * 0.25f * 255.f)), 0, 255);
+                p[1] = (unsigned char) std::clamp(int(std::lround(g * 0.25f * 255.f)), 0, 255);
+                p[2] = (unsigned char) std::clamp(int(std::lround(b * 0.25f * 255.f)), 0, 255);
+            }
+        dc.DrawBitmap(wxBitmap(image), 0, 0, false);
+        // The front of the printer: a small arrow under the disc.
+        const int cx = side / 2, top = side + 1, bottom = side + FromDIP(7);
+        const wxPoint arrow[3] = { wxPoint(cx - FromDIP(4), bottom), wxPoint(cx + FromDIP(4), bottom), wxPoint(cx, top) };
+        dc.SetPen(*wxTRANSPARENT_PEN);
+        dc.SetBrush(wxBrush(StateColor::darkModeColorFor(wxColour("#8A8A8A"))));
+        dc.DrawPolygon(3, arrow);
+    }
+
+    bool _wall { false };
+    std::function<MultiColour::Filament()> _model;
+    std::function<void(double)> _onRotate;
+};
+
+/**
+ * @brief The gradient palette laid out along the filament: two cycles side by side, so the wrap from the
+ * last colour back to the first shows. CPU-drawn with MultiColour::Filament::gradient_colour().
+ */
+class MakeUpGradientStrip : public wxPanel
+{
+public:
+    MakeUpGradientStrip(wxWindow* parent, const wxSize& size, std::function<MultiColour::Filament()> model)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, size)
+        , _model(std::move(model))
+    {
+        SetMinSize(size);
+        SetMaxSize(size);
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+        Bind(wxEVT_PAINT, &MakeUpGradientStrip::OnPaint, this);
+    }
+
+private:
+    void OnPaint(wxPaintEvent&)
+    {
+        wxAutoBufferedPaintDC dc(this);
+        dc.SetBackground(wxBrush(StateColor::darkModeColorFor(wxColour("#FFFFFF"))));
+        dc.Clear();
+        const wxSize size = GetClientSize();
+        if (!_model || size.GetWidth() < 2 || size.GetHeight() < 2)
+            return;
+        const MultiColour::Filament filament = _model();
+        wxImage image(size.GetWidth(), size.GetHeight(), false);
+        unsigned char* data = image.GetData();
+        for (int x = 0; x < size.GetWidth(); ++x)
+        {
+            const float cycles = 2.f * (float(x) + 0.5f) / float(size.GetWidth());
+            const MultiColour::RGB c = MultiColour::linear_to_srgb(filament.gradient_colour(cycles * filament.gradient_cycle_mm() / 1000.f));
+            const unsigned char r = (unsigned char) std::clamp(int(std::lround(c[0] * 255.f)), 0, 255);
+            const unsigned char g = (unsigned char) std::clamp(int(std::lround(c[1] * 255.f)), 0, 255);
+            const unsigned char b = (unsigned char) std::clamp(int(std::lround(c[2] * 255.f)), 0, 255);
+            for (int y = 0; y < size.GetHeight(); ++y)
+            {
+                unsigned char* p = data + 3 * (size_t(y) * size_t(size.GetWidth()) + size_t(x));
+                p[0] = r; p[1] = g; p[2] = b;
+            }
+        }
+        dc.DrawBitmap(wxBitmap(image), 0, 0, false);
+        dc.SetPen(wxPen(FilamentColorLightBorderColor(), 1));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawRectangle(0, 0, size.GetWidth(), size.GetHeight());
+    }
+
+    std::function<MultiColour::Filament()> _model;
+};
 
 wxFont DialogFont(wxFontWeight weight)
 {
@@ -439,7 +713,7 @@ private:
     ScalableBitmap _icon;
 };
 
-wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size)
+wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size, const std::string& split, double angleDeg)
 {
     size = std::max(1, size);
     wxBitmap output(size, size);
@@ -450,8 +724,9 @@ wxBitmap MakePreviewBitmap(const FilamentColor& colorData, int size)
 
     const wxColour borderColor = FilamentColorLightBorderColor();
     const FilamentColorMode colorMode = colorData.NormalizedMode();
-    wxBitmap* bitmap = FilamentColorUtils::GetFilamentColorIcon(colorData.colors, colorMode, "",
-                                                                size, size, borderColor);
+    wxBitmap* bitmap = colorData.colors.size() > 1 && colorMode != FilamentColorMode::Gradient ?
+        FilamentColorUtils::GetSplitFilamentColorIcon(colorData.colors, split, angleDeg, "", size, size, borderColor) :
+        FilamentColorUtils::GetFilamentColorIcon(colorData.colors, colorMode, "", size, size, borderColor);
     if (bitmap != nullptr)
         dc.DrawBitmap(*bitmap, 0, 0, true);
 
@@ -511,10 +786,12 @@ wxRect WindowClientScreenRect(const wxWindow* window)
 } // namespace
 
 FilamentColorDialog::FilamentColorDialog(wxWindow* parent, const FilamentColorInfo& filament,
-                                         const FilamentColor& currentColor)
+                                         const FilamentColor& currentColor,
+                                         const FilamentColorUtils::ColourMakeUp& currentMakeUp)
     : DPIDialog(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE | wxFRAME_SHAPED)
     , _filament(filament)
     , _languageCode(GetLanguageCode())
+    , _makeUp(currentMakeUp)
 {
     const FilamentColor normalizedCurrent =
         FilamentColor::FromColors(currentColor.colors, currentColor.mode, "#26A69A");
@@ -533,9 +810,13 @@ FilamentColorDialog::FilamentColorDialog(wxWindow* parent, const FilamentColorIn
         _selection = normalizedCurrent;
     }
 
+    _gradient = _selection.NormalizedMode() == FilamentColorMode::Gradient;
+    SyncMakeUpFromSelection(false);
     BuildUi();
-    UpdatePreview();
+    RefreshMakeUp();
     UpdateSwatchSelection();
+    // The make-up rows differ by kind, so the dialog was fitted to the current one: place it again.
+    PlaceNearFilamentPanel();
 }
 
 void FilamentColorDialog::BuildUi()
@@ -544,6 +825,7 @@ void FilamentColorDialog::BuildUi()
 
     wxBoxSizer* root = new wxBoxSizer(wxVERTICAL);
     const int dialogWidth = FromDIP(380);
+    _dialogWidth = dialogWidth;
     const int contentMargin = FromDIP(16);
     const int buttonMargin = FromDIP(20);
     const int contentWidth = dialogWidth - contentMargin * 2;
@@ -575,50 +857,54 @@ void FilamentColorDialog::BuildUi()
     cardSizer->AddSpacer(FromDIP(28));
     cardSizer->Add(currentRow, 0, wxEXPAND | wxLEFT | wxRIGHT, contentMargin);
 
-    wxStaticText* officialLabel = new wxStaticText(card, wxID_ANY, _L("Official Filaments"));
-    officialLabel->SetFont(DialogFont(wxFONTWEIGHT_MEDIUM));
-    officialLabel->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
-    officialLabel->SetMinSize(wxSize(-1, FromDIP(20)));
-    BindDragWindow(officialLabel);
-    cardSizer->AddSpacer(FromDIP(20));
-    cardSizer->Add(officialLabel, 0, wxLEFT | wxRIGHT, contentMargin);
-
-    wxPanel* swatchPanel = new wxPanel(card, wxID_ANY);
-    swatchPanel->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
-    const int swatchColumns = 10;
-    const int swatchColorSize = FromDIP(24);
-    const int swatchFrameInset = FromDIP(3);
-    const wxSize swatchSize(swatchColorSize + swatchFrameInset * 2, swatchColorSize + swatchFrameInset * 2);
-    const int swatchHGap = FromDIP(5);
-    const int swatchVGap = 0;
-    wxGridSizer* swatchSizer = new wxGridSizer(0, swatchColumns, swatchVGap, swatchHGap);
-    const std::vector<ColorSortItem> sortedItems = BuildSortedColorItems(_filament.colors);
-    for (const ColorSortItem& item : sortedItems)
+    // Without a library entry (a filament that has no official colours) only the make-up shows.
+    if (!_filament.colors.empty())
     {
-        if (item.colorItem == nullptr)
-            continue;
+        wxStaticText* officialLabel = new wxStaticText(card, wxID_ANY, _L("Official Filaments"));
+        officialLabel->SetFont(DialogFont(wxFONTWEIGHT_MEDIUM));
+        officialLabel->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+        officialLabel->SetMinSize(wxSize(-1, FromDIP(20)));
+        BindDragWindow(officialLabel);
+        cardSizer->AddSpacer(FromDIP(20));
+        cardSizer->Add(officialLabel, 0, wxLEFT | wxRIGHT, contentMargin);
 
-        const FilamentColorItem* colorItem = item.colorItem;
-        FilamentColorSwatch* swatch = new FilamentColorSwatch(swatchPanel, *colorItem, _languageCode, swatchSize);
-        swatch->Bind(wxEVT_LEFT_UP, [this, colorItem](wxMouseEvent&)
+        wxPanel* swatchPanel = new wxPanel(card, wxID_ANY);
+        swatchPanel->SetBackgroundColour(StateColor::darkModeColorFor(wxColour("#FFFFFF")));
+        const int swatchColumns = 10;
+        const int swatchColorSize = FromDIP(24);
+        const int swatchFrameInset = FromDIP(3);
+        const wxSize swatchSize(swatchColorSize + swatchFrameInset * 2, swatchColorSize + swatchFrameInset * 2);
+        const int swatchHGap = FromDIP(5);
+        const int swatchVGap = 0;
+        wxGridSizer* swatchSizer = new wxGridSizer(0, swatchColumns, swatchVGap, swatchHGap);
+        const std::vector<ColorSortItem> sortedItems = BuildSortedColorItems(_filament.colors);
+        for (const ColorSortItem& item : sortedItems)
         {
-            if (colorItem != nullptr)
-                SelectFilamentColor(*colorItem);
-        });
-        swatchSizer->Add(swatch, 0);
-        _swatchBySku.emplace_back(swatch, colorItem->sku);
+            if (item.colorItem == nullptr)
+                continue;
+
+            const FilamentColorItem* colorItem = item.colorItem;
+            FilamentColorSwatch* swatch = new FilamentColorSwatch(swatchPanel, *colorItem, _languageCode, swatchSize);
+            swatch->Bind(wxEVT_LEFT_UP, [this, colorItem](wxMouseEvent&)
+            {
+                if (colorItem != nullptr)
+                    SelectFilamentColor(*colorItem);
+            });
+            swatchSizer->Add(swatch, 0);
+            _swatchBySku.emplace_back(swatch, colorItem->sku);
+        }
+        const size_t swatchCount = _swatchBySku.size();
+        const size_t swatchColumnCount = static_cast<size_t>(swatchColumns);
+        int swatchRows = 0;
+        if (swatchCount > 0)
+            swatchRows = static_cast<int>((swatchCount + swatchColumnCount - 1) / swatchColumnCount);
+        const int swatchVisibleRows = std::max(2, swatchRows);
+        const int swatchPanelHeight = swatchVisibleRows * swatchSize.GetHeight() + (swatchVisibleRows - 1) * swatchVGap;
+        swatchPanel->SetMinSize(wxSize(contentWidth, swatchPanelHeight));
+        swatchPanel->SetSizer(swatchSizer);
+        cardSizer->AddSpacer(FromDIP(20));
+        cardSizer->Add(swatchPanel, 0, wxLEFT | wxRIGHT, contentMargin);
     }
-    const size_t swatchCount = _swatchBySku.size();
-    const size_t swatchColumnCount = static_cast<size_t>(swatchColumns);
-    int swatchRows = 0;
-    if (swatchCount > 0)
-        swatchRows = static_cast<int>((swatchCount + swatchColumnCount - 1) / swatchColumnCount);
-    const int swatchVisibleRows = std::max(2, swatchRows);
-    const int swatchPanelHeight = swatchVisibleRows * swatchSize.GetHeight() + (swatchVisibleRows - 1) * swatchVGap;
-    swatchPanel->SetMinSize(wxSize(contentWidth, swatchPanelHeight));
-    swatchPanel->SetSizer(swatchSizer);
-    cardSizer->AddSpacer(FromDIP(20));
-    cardSizer->Add(swatchPanel, 0, wxLEFT | wxRIGHT, contentMargin);
 
     MoreColorPanel* moreButton = new MoreColorPanel(card, wxSize(contentWidth, FromDIP(40)));
     moreButton->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&)
@@ -627,6 +913,9 @@ void FilamentColorDialog::BuildUi()
     });
     cardSizer->AddSpacer(FromDIP(20));
     cardSizer->Add(moreButton, 0, wxLEFT | wxRIGHT, contentMargin);
+
+    cardSizer->AddSpacer(FromDIP(16));
+    BuildMakeUpUi(card, cardSizer, contentMargin, contentWidth);
 
     cardSizer->AddSpacer(FromDIP(16));
     wxPanel* divider = new wxPanel(card, wxID_ANY);
@@ -675,6 +964,18 @@ void FilamentColorDialog::BuildUi()
 
     ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent&)
     {
+        // The split string stays empty for the default (equal) split and for gradients.
+        const int count = static_cast<int>(_selection.colors.size());
+        if (count < 2 || count > MultiColour::MAX_COLOURS || _selection.NormalizedMode() == FilamentColorMode::Gradient)
+            _makeUp.split.clear();
+        else
+        {
+            std::array<float, MultiColour::MAX_COLOURS> proportion{ 0.f, 0.f, 0.f, 0.f };
+            for (int i = 0; i < count; ++i)
+                proportion[size_t(i)] = float(_percent[size_t(i)]) / 100.f;
+            _makeUp.split = MultiColour::format_split(proportion, count);
+        }
+        RememberFilamentColours(_selection.colors);
         EndModal(wxID_OK);
     });
 
@@ -689,6 +990,7 @@ void FilamentColorDialog::BuildUi()
     UpdateRoundedShape();
     Layout();
     PlaceNearFilamentPanel();
+    _uiBuilt = true;
 }
 
 void FilamentColorDialog::SelectFilamentColor(const FilamentColorItem& colorItem)
@@ -698,9 +1000,14 @@ void FilamentColorDialog::SelectFilamentColor(const FilamentColorItem& colorItem
         return;
 
     _selection = colorData;
+    _gradient = _selection.NormalizedMode() == FilamentColorMode::Gradient;
     _selectedSku = colorItem.sku;
     _highlightSku = colorItem.sku;
-    UpdatePreview();
+    // A library SKU may carry the proportions of a coextruded filament ("split"); the slot's
+    // rotation and twist belong to the spool and stay as they are.
+    _makeUp.split = colorItem.split;
+    SyncMakeUpFromSelection(false);
+    RefreshMakeUp();
     UpdateSwatchSelection();
 }
 
@@ -708,9 +1015,12 @@ void FilamentColorDialog::SelectCustomColor(const std::string& color)
 {
     const std::string normalized = FilamentColorUtils::NormalizeHexColor(color, "#26A69A");
     _selection = FilamentColor::FromMultiColors(normalized, FilamentColorMode::Segment, normalized);
+    _gradient = false;
     _selectedSku.clear();
     _highlightSku.clear();
-    UpdatePreview();
+    _makeUp.split.clear();
+    SyncMakeUpFromSelection(false);
+    RefreshMakeUp();
     UpdateSwatchSelection();
 }
 
@@ -719,12 +1029,630 @@ void FilamentColorDialog::UpdatePreview()
     if (_previewBitmap == nullptr || _nameLabel == nullptr || _skuLabel == nullptr)
         return;
 
-    _previewBitmap->SetBitmap(MakePreviewBitmap(_selection, FromDIP(60)));
+    {
+        const int count = std::clamp<int>(int(_selection.colors.size()), 1, MultiColour::MAX_COLOURS);
+        std::array<float, MultiColour::MAX_COLOURS> proportion{ 0.f, 0.f, 0.f, 0.f };
+        for (int i = 0; i < count; ++i)
+            proportion[size_t(i)] = float(_percent[size_t(i)]) / 100.f;
+        _previewBitmap->SetBitmap(MakePreviewBitmap(_selection, FromDIP(60),
+                                                    IsGradient() ? std::string() : MultiColour::format_split(proportion, count),
+                                                    IsGradient() ? 0.0 : _makeUp.angle));
+    }
 
     const wxString name = FromStdString(GetSelectionDisplayName(_filament, _selection, _selectedSku, _languageCode));
     _nameLabel->SetLabel(name);
     _skuLabel->SetLabel(_selectedSku.empty() ? wxString(wxEmptyString) : FromStdString("sku " + _selectedSku));
     _skuLabel->Show(!_selectedSku.empty());
+    Layout();
+}
+
+// ---- Colour make-up editor (multi-colour P2) ----
+
+void FilamentColorDialog::BuildMakeUpUi(wxWindow* parent, wxSizer* sizer, int margin, int contentWidth)
+{
+    const wxColour textColour = StateColor::darkModeColorFor(wxColour("#242424"));
+    auto makeLabel = [&](const wxString& text, wxFontWeight weight)
+    {
+        wxStaticText* label = new wxStaticText(parent, wxID_ANY, text);
+        label->SetFont(DialogFont(weight));
+        label->SetForegroundColour(textColour);
+        BindDragWindow(label);
+        return label;
+    };
+    auto makeSpin = [&](int min, int max, int initial, int step, int width, const wxString& unit)
+    {
+        return new SpinInput(parent, wxEmptyString, unit, wxDefaultPosition, wxSize(FromDIP(width), FromDIP(28)),
+                             wxSP_ARROW_KEYS, min, max, initial, step);
+    };
+
+    sizer->Add(makeLabel(_L("Colour make-up"), wxFONTWEIGHT_MEDIUM), 0, wxLEFT | wxRIGHT, margin);
+    _makeUpSizer = sizer;
+
+    // Split (the colours side by side across the strand) or gradient (one after another along it).
+    wxBoxSizer* kindRow = new wxBoxSizer(wxHORIZONTAL);
+    kindRow->Add(makeLabel(_L("Type"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    const struct { const char* label; bool gradient; const char* tip; } kinds[] = {
+        { "Split", false, "The colours sit side by side across the filament, like slices of a pie." },
+        { "Gradient", true, "The colour changes along the length of the filament and repeats." } };
+    for (const auto& kind : kinds)
+    {
+        Button* button = new Button(parent, _L(kind.label), wxEmptyString, wxBORDER_NONE, 0, wxID_ANY);
+        const wxSize buttonSize(FromDIP(84), FromDIP(26));
+        button->SetMinSize(buttonSize);
+        button->SetSize(buttonSize);
+        button->SetCornerRadius(FromDIP(4));
+        button->SetBorderWidth(FromDIP(1));
+        button->SetFont(DialogFont(wxFONTWEIGHT_NORMAL));
+        button->SetToolTip(_L(kind.tip));
+        const bool gradient = kind.gradient;
+        button->Bind(wxEVT_BUTTON, [this, gradient](wxCommandEvent&) { SetKind(gradient); });
+        (gradient ? _gradientButton : _splitButton) = button;
+        kindRow->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+    }
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(kindRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // Number of colours and the colour chips.
+    wxBoxSizer* countRow = new wxBoxSizer(wxHORIZONTAL);
+    countRow->Add(makeLabel(_L("Colours"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _countSpin = makeSpin(1, MultiColour::GRADIENT_MAX_STOPS, 2, 1, 78, wxEmptyString);
+    _countSpin->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&)
+    {
+        if (!_syncingMakeUp)
+            SetColourCount(_countSpin->GetValue());
+    });
+    countRow->Add(_countSpin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    for (int i = 0; i < MultiColour::GRADIENT_MAX_STOPS; ++i)
+    {
+        MakeUpChip* chip = new MakeUpChip(parent, wxSize(FromDIP(30), FromDIP(26)), [this, i]() { SelectChip(i); },
+                                          [this, i]() { PickChipColour(i); });
+        chip->SetToolTip(_L("Click to choose this colour from the palette below, double-click for the colour picker"));
+        _chips[size_t(i)] = chip;
+        countRow->Add(chip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
+    }
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(countRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // The palette and the recent colours change the chip that is marked.
+    std::vector<SwatchEntry> paletteEntries;
+    for (const MultiColour::NamedColour& colour : MultiColour::basic_palette())
+        paletteEntries.push_back({ colour.hex, colour.name });
+    _palette = new ColourSwatchGrid(parent, 14, 4, 18, 3, [this](const std::string& hex) { SetChipColour(_activeChip, hex); });
+    _palette->SetEntries(paletteEntries);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(_palette, 0, wxLEFT | wxRIGHT, margin);
+    wxBoxSizer* recentRow = new wxBoxSizer(wxHORIZONTAL);
+    recentRow->Add(makeLabel(_L("Recent"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _recent = new ColourSwatchGrid(parent, 8, 1, 18, 3, [this](const std::string& hex) { SetChipColour(_activeChip, hex); });
+    std::vector<SwatchEntry> recentEntries;
+    for (const std::string& hex : RecentFilamentColours())
+        recentEntries.push_back({ hex, std::string() });
+    _recent->SetEntries(recentEntries);
+    recentRow->Add(_recent, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(6));
+    sizer->Add(recentRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // Gradient (P6): the palette along the filament, and how long one run through it is.
+    wxBoxSizer* stripRow = new wxBoxSizer(wxVERTICAL);
+    _strip = new MakeUpGradientStrip(parent, wxSize(contentWidth, FromDIP(22)),
+                                     [this]() { return MakeGradientModel(_selection.colors, _makeUp.dwell, _makeUp.transition); });
+    _strip->SetToolTip(_L("The colours along the filament, two cycles: each colour holds, then changes to the next. The last one changes back into the first."));
+    stripRow->Add(_strip, 0);
+    stripRow->Add(makeLabel(_L("Along the filament, two cycles"), wxFONTWEIGHT_NORMAL), 0, wxTOP, FromDIP(2));
+    _stripRow = stripRow;
+    sizer->AddSpacer(FromDIP(10));
+    sizer->Add(stripRow, 0, wxLEFT | wxRIGHT, margin);
+
+    auto makeLengthRow = [&](const wxString& label, const wxString& tip, int initial, int step, SpinInput*& spin, wxSizer*& rowOut,
+                             std::function<void(double)> store)
+    {
+        wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
+        row->Add(makeLabel(label, wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+        spin = makeSpin(0, int(MultiColour::GRADIENT_LENGTH_MM_MAX), initial, step, 130, "mm");
+        spin->SetToolTip(tip);
+        SpinInput* control = spin;
+        spin->Bind(wxEVT_SPINCTRL, [this, control, store](wxCommandEvent&)
+        {
+            if (_syncingMakeUp)
+                return;
+            store(double(control->GetValue()));
+            if (_strip != nullptr)
+                _strip->Refresh();
+        });
+        row->Add(spin, 0, wxALIGN_CENTER_VERTICAL);
+        rowOut = row;
+        sizer->AddSpacer(FromDIP(8));
+        sizer->Add(row, 0, wxLEFT | wxRIGHT, margin);
+    };
+    makeLengthRow(_L("Colour length"),
+                  _L("How many millimetres of filament each colour holds before it starts changing to the next. "
+                     "Match it to your spool by comparing a print."),
+                  int(MultiColour::GRADIENT_DWELL_MM_DEFAULT), 500, _dwellSpin, _cycleRow, [this](double v) { _makeUp.dwell = v; });
+    makeLengthRow(_L("Transition length"),
+                  _L("How many millimetres of filament the change from one colour to the next takes."),
+                  int(MultiColour::GRADIENT_TRANSITION_MM_DEFAULT), 100, _transitionSpin, _transitionRow,
+                  [this](double v) { _makeUp.transition = v; });
+
+    // Proportions in 5% steps, at least 5% each.
+    wxBoxSizer* percentRow = new wxBoxSizer(wxHORIZONTAL);
+    for (int i = 0; i < MultiColour::MAX_COLOURS; ++i)
+    {
+        SpinInput* spin = makeSpin(MultiColour::MIN_PERCENT, 100, _percent[size_t(i)], MultiColour::STEP_PERCENT, 78, "%");
+        spin->SetToolTip(_L("Share of this colour in the filament (5% steps, at least 5%)"));
+        spin->Bind(wxEVT_SPINCTRL, [this, i, spin](wxCommandEvent&)
+        {
+            if (!_syncingMakeUp)
+                SetPercent(i, spin->GetValue());
+        });
+        _percentSpin[size_t(i)] = spin;
+        percentRow->Add(spin, 0, wxRIGHT, FromDIP(6));
+    }
+    _percentRow = percentRow;
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(percentRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // The filament end-on (drag to turn it) and the printed wall seen from above.
+    wxBoxSizer* previewRow = new wxBoxSizer(wxHORIZONTAL);
+    const int discSize = FromDIP(84);
+    auto model = [this]() { return MakeFilamentModel(_selection.colors, _percent, _makeUp.angle); };
+    wxBoxSizer* discColumn = new wxBoxSizer(wxVERTICAL);
+    _disc = new MakeUpDiscPanel(parent, discSize, false, model, [this](double deg) { SetAngle(deg); });
+    _disc->SetToolTip(_L("The filament end-on. The arrow marks the front of the printer. Drag to turn it."));
+    discColumn->Add(_disc, 0, wxALIGN_CENTER_HORIZONTAL);
+    discColumn->Add(makeLabel(_L("Filament"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_HORIZONTAL | wxTOP, FromDIP(2));
+    wxBoxSizer* wallColumn = new wxBoxSizer(wxVERTICAL);
+    _wall = new MakeUpDiscPanel(parent, discSize, true, model, nullptr);
+    _wall->SetToolTip(_L("A printed wall seen from above: which colour faces which way on the plate."));
+    wallColumn->Add(_wall, 0, wxALIGN_CENTER_HORIZONTAL);
+    wallColumn->Add(makeLabel(_L("Wall from above"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_HORIZONTAL | wxTOP, FromDIP(2));
+    previewRow->AddStretchSpacer(1);
+    previewRow->Add(discColumn, 0, wxRIGHT, FromDIP(28));
+    previewRow->Add(wallColumn, 0);
+    previewRow->AddStretchSpacer(1);
+    _discRow = previewRow;
+    sizer->AddSpacer(FromDIP(10));
+    sizer->Add(previewRow, 0, wxEXPAND | wxLEFT | wxRIGHT, margin);
+
+    // Rotation: where colour 1 faces. 0 = the front, turning anticlockwise seen from above.
+    wxBoxSizer* angleRow = new wxBoxSizer(wxHORIZONTAL);
+    angleRow->Add(makeLabel(_L("Rotation"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _angleSpin = makeSpin(0, 355, 0, 5, 90, wxString::FromUTF8("\xC2\xB0"));
+    _angleSpin->SetToolTip(_L("Where colour 1 faces on the printed wall: 0 = the front of the printer, counter-clockwise seen from above."));
+    _angleSpin->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&)
+    {
+        if (!_syncingMakeUp)
+            SetAngle(double(_angleSpin->GetValue()));
+    });
+    angleRow->Add(_angleSpin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    const struct { const char* label; double deg; } faces[] = { { "Front", 0. }, { "Right", 90. }, { "Back", 180. }, { "Left", 270. } };
+    for (const auto& face : faces)
+    {
+        Button* button = new Button(parent, _L(face.label), wxEmptyString, wxBORDER_NONE, 0, wxID_ANY);
+        const wxSize buttonSize(FromDIP(52), FromDIP(26));
+        button->SetMinSize(buttonSize);
+        button->SetSize(buttonSize);
+        button->SetCornerRadius(FromDIP(4));
+        button->SetBorderWidth(FromDIP(1));
+        button->SetBackgroundColorNormal(wxColour("#FFFFFF"));
+        button->SetBorderColorNormal(wxColour("#D1D5DC"));
+        button->SetTextColorNormal(wxColour("#242424"));
+        button->SetFont(DialogFont(wxFONTWEIGHT_NORMAL));
+        const double deg = face.deg;
+        button->Bind(wxEVT_BUTTON, [this, deg](wxCommandEvent&) { SetAngle(deg); });
+        angleRow->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+    }
+    _angleRow = angleRow;
+    sizer->AddSpacer(FromDIP(10));
+    sizer->Add(angleRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // Twist (advanced), degrees per metre of filament.
+    wxBoxSizer* twistRow = new wxBoxSizer(wxHORIZONTAL);
+    twistRow->Add(makeLabel(_L("Twist"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _twistSpin = makeSpin(-3600, 3600, 0, 5, 110, wxString::FromUTF8("\xC2\xB0/m"));
+    _twistSpin->SetToolTip(_L("Some feed paths turn the filament slowly while it prints, so the colours drift with height. Leave at 0 unless your prints show it."));
+    _twistSpin->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&)
+    {
+        if (!_syncingMakeUp)
+            _makeUp.twist = double(_twistSpin->GetValue());
+    });
+    twistRow->Add(_twistSpin, 0, wxALIGN_CENTER_VERTICAL);
+    _twistRow = twistRow;
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(twistRow, 0, wxLEFT | wxRIGHT, margin);
+
+    BuildGlowUi(parent, sizer, margin);
+
+    wxStaticText* note = makeLabel(_L("Visual only: changes how the print looks in Showcase and Preview. The G-code is not affected."),
+                                   wxFONTWEIGHT_NORMAL);
+    note->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#4A4A4A")));
+    note->Wrap(contentWidth);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(note, 0, wxLEFT | wxRIGHT, margin);
+}
+
+// ---- Glow in the dark (G1) ----
+
+void FilamentColorDialog::BuildGlowUi(wxWindow* parent, wxSizer* sizer, int margin)
+{
+    const wxColour textColour = StateColor::darkModeColorFor(wxColour("#242424"));
+    auto makeLabel = [&](const wxString& text, wxFontWeight weight)
+    {
+        wxStaticText* label = new wxStaticText(parent, wxID_ANY, text);
+        label->SetFont(DialogFont(weight));
+        label->SetForegroundColour(textColour);
+        BindDragWindow(label);
+        return label;
+    };
+    auto makeButton = [&](const wxString& text, int width)
+    {
+        Button* button = new Button(parent, text, wxEmptyString, wxBORDER_NONE, 0, wxID_ANY);
+        const wxSize buttonSize(FromDIP(width), FromDIP(26));
+        button->SetMinSize(buttonSize);
+        button->SetSize(buttonSize);
+        button->SetCornerRadius(FromDIP(4));
+        button->SetBorderWidth(FromDIP(1));
+        button->SetBorderColorNormal(wxColour("#D1D5DC"));
+        button->SetFont(DialogFont(wxFONTWEIGHT_NORMAL));
+        return button;
+    };
+
+    sizer->AddSpacer(FromDIP(14));
+    sizer->Add(makeLabel(_L("Glow in the dark"), wxFONTWEIGHT_MEDIUM), 0, wxLEFT | wxRIGHT, margin);
+
+    // Automatic follows the preset (a name or type with "Glow"); On and Off override it.
+    wxBoxSizer* stateRow = new wxBoxSizer(wxHORIZONTAL);
+    const struct { const char* label; int state; } states[] = { { "Automatic", -1 }, { "On", 1 }, { "Off", 0 } };
+    for (size_t i = 0; i < 3; ++i)
+    {
+        Button* button = makeButton(_L(states[i].label), i == 0 ? 84 : 56);
+        const int state = states[i].state;
+        button->SetToolTip(state < 0 ? _L("Glows when the filament preset is a glow filament (its name or type contains \"Glow\").") :
+                           state > 0 ? _L("This filament glows in the dark.") : _L("This filament does not glow."));
+        button->Bind(wxEVT_BUTTON, [this, state](wxCommandEvent&) { SetGlowState(state); });
+        _glowButtons[i] = button;
+        stateRow->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+    }
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(stateRow, 0, wxLEFT | wxRIGHT, margin);
+
+    _glowHint = makeLabel(wxString(), wxFONTWEIGHT_NORMAL);
+    _glowHint->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#4A4A4A")));
+    sizer->AddSpacer(FromDIP(4));
+    sizer->Add(_glowHint, 0, wxLEFT | wxRIGHT, margin);
+
+    // The glow colour: the chip shows what it is now; click it to pick another, or go back to the
+    // vibrant version of the filament's own colour.
+    wxBoxSizer* colourRow = new wxBoxSizer(wxHORIZONTAL);
+    colourRow->Add(makeLabel(_L("Glow colour"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _glowChip = new MakeUpChip(parent, wxSize(FromDIP(34), FromDIP(26)), [this]() { PickGlowColour(); }, [this]() { PickGlowColour(); });
+    _glowChip->SetToolTip(_L("Click to choose the colour this filament glows in."));
+    colourRow->Add(_glowChip, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    Button* reset = makeButton(_L("Vibrant"), 64);
+    reset->SetToolTip(_L("Glow in a more vibrant version of the filament's own colour (the default)."));
+    reset->SetBackgroundColorNormal(wxColour("#FFFFFF"));
+    reset->SetTextColorNormal(wxColour("#242424"));
+    reset->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { ResetGlowColour(); });
+    _glowColourReset = reset;
+    colourRow->Add(reset, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(colourRow, 0, wxLEFT | wxRIGHT, margin);
+
+    // One intensity for every glow filament of the project.
+    wxBoxSizer* intensityRow = new wxBoxSizer(wxHORIZONTAL);
+    intensityRow->Add(makeLabel(_L("Intensity"), wxFONTWEIGHT_NORMAL), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    _glowIntensitySpin = new SpinInput(parent, wxEmptyString, "%", wxDefaultPosition, wxSize(FromDIP(90), FromDIP(28)),
+                                       wxSP_ARROW_KEYS, 0, int(Glow::INTENSITY_MAX_PERCENT), 100, 10);
+    _glowIntensitySpin->SetToolTip(_L("How strongly all glow filaments shine with the lights off in Showcase and Preview. "
+                                      "This is one setting for the whole project, not for this filament."));
+    _glowIntensitySpin->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent&)
+    {
+        if (!_syncingMakeUp)
+            _makeUp.glowIntensity = double(_glowIntensitySpin->GetValue());
+    });
+    intensityRow->Add(_glowIntensitySpin, 0, wxALIGN_CENTER_VERTICAL);
+    sizer->AddSpacer(FromDIP(8));
+    sizer->Add(intensityRow, 0, wxLEFT | wxRIGHT, margin);
+    RefreshGlow();
+}
+
+void FilamentColorDialog::SetGlowState(int state)
+{
+    _makeUp.glow = std::clamp(state, -1, 1);
+    RefreshGlow();
+}
+
+void FilamentColorDialog::PickGlowColour()
+{
+    std::string current = _makeUp.glowColour;
+    if (current.empty() && !_selection.colors.empty())
+        Glow::vibrant_hex(_selection.colors[size_t(std::clamp(_activeChip, 0, int(_selection.colors.size()) - 1))], current);
+    FilamentColourPickerDialog dialog(this, current.empty() ? std::string("#7CFF6B") : current);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+    const std::string normalized = FilamentColorUtils::NormalizeHexColor(dialog.Colour(), "");
+    if (normalized.empty())
+        return;
+    _makeUp.glowColour = normalized;
+    // Choosing a glow colour is meant to make the filament glow, unless it was switched off.
+    if (_makeUp.glow < 0 && !_makeUp.glowSuggested)
+        _makeUp.glow = 1;
+    RefreshGlow();
+}
+
+void FilamentColorDialog::ResetGlowColour()
+{
+    _makeUp.glowColour.clear();
+    RefreshGlow();
+}
+
+void FilamentColorDialog::RefreshGlow()
+{
+    if (_glowChip == nullptr)
+        return;
+    const int selected = _makeUp.glow < 0 ? 0 : (_makeUp.glow > 0 ? 1 : 2);
+    for (int i = 0; i < 3; ++i)
+    {
+        Button* button = static_cast<Button*>(_glowButtons[size_t(i)]);
+        const bool on = i == selected;
+        button->SetBackgroundColorNormal(on ? wxColour("#019687") : wxColour("#FFFFFF"));
+        button->SetTextColorNormal(on ? wxColour("#FFFFFF") : wxColour("#242424"));
+        button->Refresh();
+    }
+    const bool glows = _makeUp.glow < 0 ? _makeUp.glowSuggested : _makeUp.glow > 0;
+    if (_glowHint != nullptr)
+        _glowHint->SetLabel(_makeUp.glow >= 0 ? (glows ? _L("This filament glows in the dark.") : _L("This filament does not glow.")) :
+                            _makeUp.glowSuggested ? _L("Automatic: on, this preset is a glow filament.") :
+                                                    _L("Automatic: off, this preset is not a glow filament."));
+    std::string shown = _makeUp.glowColour;
+    if (shown.empty() && !_selection.colors.empty())
+        Glow::vibrant_hex(_selection.colors[size_t(std::clamp(_activeChip, 0, int(_selection.colors.size()) - 1))], shown);
+    if (!shown.empty())
+        static_cast<MakeUpChip*>(_glowChip)->SetChipColour(wxColour(shown));
+    if (_glowColourReset != nullptr)
+        _glowColourReset->Enable(!_makeUp.glowColour.empty());
+    if (_glowIntensitySpin != nullptr)
+    {
+        const bool syncing = _syncingMakeUp;
+        _syncingMakeUp = true;
+        _glowIntensitySpin->SetValue(int(std::lround(std::clamp(_makeUp.glowIntensity, 0., double(Glow::INTENSITY_MAX_PERCENT)))));
+        _syncingMakeUp = syncing;
+    }
+}
+
+// Reads the proportions for the current colours from the make-up (equal when resetSplit or unusable).
+void FilamentColorDialog::SyncMakeUpFromSelection(bool resetSplit)
+{
+    const int count = std::clamp<int>(int(_selection.colors.size()), 1, MultiColour::MAX_COLOURS);
+    const std::array<float, MultiColour::MAX_COLOURS> proportion =
+        MultiColour::parse_split(resetSplit ? std::string() : _makeUp.split, count);
+    _percent = MultiColour::quantize_percent(proportion, count);
+}
+
+bool FilamentColorDialog::IsGradient() const
+{
+    return _gradient && _selection.colors.size() >= 2;
+}
+
+int FilamentColorDialog::MaxColours() const
+{
+    return _gradient ? MultiColour::GRADIENT_MAX_STOPS : MultiColour::MAX_COLOURS;
+}
+
+FilamentColor FilamentColorDialog::MakeSelection(const std::vector<std::string>& colors) const
+{
+    return FilamentColor::FromColors(colors, _gradient && colors.size() >= 2 ? FilamentColorMode::Gradient : FilamentColorMode::Segment);
+}
+
+void FilamentColorDialog::SetColourCount(int count)
+{
+    count = std::clamp(count, 1, MaxColours());
+    if (count == static_cast<int>(_selection.colors.size()))
+    {
+        RefreshMakeUp();   // the spin may have gone past this kind's limit
+        return;
+    }
+    static const char* const fresh[] = { "#E53935", "#1E88E5", "#43A047", "#FDD835", "#8E24AA" };
+    std::vector<std::string> colors = _selection.colors;
+    if (colors.empty())
+        colors.emplace_back("#26A69A");
+    while (static_cast<int>(colors.size()) > count)
+        colors.pop_back();
+    for (size_t i = colors.size(); static_cast<int>(i) < count; ++i)
+        colors.emplace_back(fresh[i % 5]);
+    _selection = MakeSelection(colors);
+    _selectedSku.clear();
+    _highlightSku.clear();
+    _makeUp.split.clear();
+    SyncMakeUpFromSelection(true);
+    RefreshMakeUp();
+    UpdateSwatchSelection();
+}
+
+// Split <-> gradient: the colours stay (a split holds at most 4, a gradient needs at least 2).
+void FilamentColorDialog::SetKind(bool gradient)
+{
+    if (_gradient == gradient)
+        return;
+    _gradient = gradient;
+    std::vector<std::string> colors = _selection.colors;
+    if (colors.empty())
+        colors.emplace_back("#26A69A");
+    if (!gradient && static_cast<int>(colors.size()) > MultiColour::MAX_COLOURS)
+        colors.resize(size_t(MultiColour::MAX_COLOURS));
+    if (gradient && colors.size() < 2)
+        colors.emplace_back("#1E88E5");
+    _selection = MakeSelection(colors);
+    _selectedSku.clear();
+    _highlightSku.clear();
+    _makeUp.split.clear();
+    SyncMakeUpFromSelection(true);
+    RefreshMakeUp();
+    UpdateSwatchSelection();
+    PlaceNearFilamentPanel();
+}
+
+void FilamentColorDialog::SetPercent(int index, int value)
+{
+    const int count = std::clamp<int>(int(_selection.colors.size()), 1, MultiColour::MAX_COLOURS);
+    if (index < 0 || index >= count || count < 2)
+    {
+        RefreshMakeUp();
+        return;
+    }
+    const int step = MultiColour::STEP_PERCENT, minimum = MultiColour::MIN_PERCENT;
+    value = static_cast<int>(std::lround(double(value) / step)) * step;
+    value = std::clamp(value, minimum, 100 - (count - 1) * minimum);
+    int delta = value - _percent[size_t(index)];
+    _percent[size_t(index)] = value;
+    // The others give up (or take) the difference, in order after this one, never below the minimum.
+    for (int k = 1; k < count && delta != 0; ++k)
+    {
+        const size_t j = size_t((index + k) % count);
+        const int next = std::max(minimum, _percent[j] - delta);
+        delta -= _percent[j] - next;
+        _percent[j] = next;
+    }
+    if (delta != 0)
+        _percent[size_t(index)] -= delta;
+    RefreshMakeUp();
+}
+
+void FilamentColorDialog::SetAngle(double angleDeg)
+{
+    angleDeg = std::fmod(angleDeg, 360.0);
+    if (angleDeg < 0.0)
+        angleDeg += 360.0;
+    _makeUp.angle = angleDeg;
+    RefreshMakeUp();
+}
+
+void FilamentColorDialog::PickChipColour(int index)
+{
+    if (index < 0 || index >= static_cast<int>(_selection.colors.size()))
+        return;
+    SelectChip(index);
+    FilamentColourPickerDialog dialog(this, _selection.colors[size_t(index)]);
+    if (dialog.ShowModal() != wxID_OK)
+        return;
+    SetChipColour(index, dialog.Colour());
+}
+
+void FilamentColorDialog::SelectChip(int index)
+{
+    if (index < 0 || index >= static_cast<int>(_selection.colors.size()))
+        return;
+    _activeChip = index;
+    RefreshMakeUp();
+}
+
+void FilamentColorDialog::SetChipColour(int index, const std::string& hex)
+{
+    const std::string normalized = FilamentColorUtils::NormalizeHexColor(hex, "");
+    if (normalized.empty())
+        return;
+    std::vector<std::string> colors = _selection.colors;
+    if (colors.empty())
+        colors.emplace_back(normalized);
+    if (index < 0 || index >= static_cast<int>(colors.size()))
+        index = 0;
+    const bool changed = colors[size_t(index)] != normalized;
+    colors[size_t(index)] = normalized;
+    _selection = MakeSelection(colors);
+    if (changed)
+    {
+        _selectedSku.clear();
+        _highlightSku.clear();
+    }
+    RefreshMakeUp();
+    UpdateSwatchSelection();
+}
+
+// Pushes the data to the controls and repaints everything that shows the make-up.
+void FilamentColorDialog::RefreshMakeUp()
+{
+    _syncingMakeUp = true;
+    const bool gradient = IsGradient();
+    const int count = std::clamp<int>(int(_selection.colors.size()), 1, gradient ? MultiColour::GRADIENT_MAX_STOPS : MultiColour::MAX_COLOURS);
+    _activeChip = std::clamp(_activeChip, 0, count - 1);
+    // The rows of the kind that is not chosen go away (before the individual controls below).
+    if (_makeUpSizer != nullptr)
+    {
+        for (wxSizer* row : { _percentRow, _discRow, _angleRow, _twistRow })
+            if (row != nullptr)
+                _makeUpSizer->Show(row, !gradient, true);
+        for (wxSizer* row : { _cycleRow, _transitionRow, _stripRow })
+            if (row != nullptr)
+                _makeUpSizer->Show(row, gradient, true);
+    }
+    // The kind that is chosen is the filled button.
+    for (const auto& item : { std::make_pair(_splitButton, !_gradient), std::make_pair(_gradientButton, _gradient) })
+        if (Button* button = dynamic_cast<Button*>(item.first))
+        {
+            button->SetBackgroundColorNormal(item.second ? wxColour("#019687") : wxColour("#FFFFFF"));
+            button->SetBorderColorNormal(item.second ? wxColour("#019687") : wxColour("#D1D5DC"));
+            button->SetTextColorNormal(item.second ? wxColour("#FFFFFF") : wxColour("#242424"));
+            button->Refresh();
+        }
+    if (_countSpin != nullptr)
+        _countSpin->SetValue(count);
+    for (int i = 0; i < MultiColour::GRADIENT_MAX_STOPS; ++i)
+    {
+        const bool used = i < count;
+        if (i < MultiColour::MAX_COLOURS)
+            if (SpinInput* spin = _percentSpin[size_t(i)])
+            {
+                spin->Show(used && count > 1 && !gradient);
+                if (used && !gradient)
+                    spin->SetValue(_percent[size_t(i)]);
+            }
+        if (wxWindow* chip = _chips[size_t(i)])
+        {
+            chip->Show(used);
+            if (used)
+            {
+                static_cast<MakeUpChip*>(chip)->SetChipColour(wxColour(_selection.colors[size_t(i)]));
+                static_cast<MakeUpChip*>(chip)->SetActive(i == _activeChip);
+            }
+        }
+    }
+    if (_palette != nullptr && !_selection.colors.empty())
+        _palette->SetSelected(_selection.colors[size_t(_activeChip)]);
+    if (_recent != nullptr && !_selection.colors.empty())
+        _recent->SetSelected(_selection.colors[size_t(_activeChip)]);
+    if (_angleSpin != nullptr)
+        _angleSpin->SetValue(static_cast<int>(std::lround(_makeUp.angle / 5.0)) % 72 * 5);
+    if (_twistSpin != nullptr)
+        _twistSpin->SetValue(static_cast<int>(std::lround(_makeUp.twist)));
+    if (_dwellSpin != nullptr)
+        _dwellSpin->SetValue(static_cast<int>(std::lround(MultiColour::gradient_dwell_mm(_makeUp.dwell))));
+    if (_transitionSpin != nullptr)
+        _transitionSpin->SetValue(static_cast<int>(std::lround(MultiColour::gradient_transition_mm(_makeUp.transition))));
+    _syncingMakeUp = false;
+    RefreshGlow();
+    if (_disc != nullptr)
+        _disc->Refresh();
+    if (_wall != nullptr)
+        _wall->Refresh();
+    if (_strip != nullptr)
+        _strip->Refresh();
+    UpdatePreview();
+    Layout();
+    if (_uiBuilt)
+        ResizeToContent();
+}
+
+// Fits the dialog to the rows that are showing (the split and gradient kinds have different ones).
+void FilamentColorDialog::ResizeToContent()
+{
+    if (GetSizer() == nullptr || _dialogWidth <= 0)
+        return;
+    const wxSize client(_dialogWidth, GetSizer()->CalcMin().GetHeight());
+    if (GetClientSize() == client && GetMinClientSize() == client)
+        return;
+    SetMinClientSize(wxDefaultSize);
+    SetClientSize(client);
+    SetMinClientSize(client);
+    UpdateRoundedShape();
     Layout();
 }
 
@@ -877,35 +1805,13 @@ void FilamentColorDialog::PlaceNearFilamentPanel()
 
 void FilamentColorDialog::OpenMoreColorDialog()
 {
-    wxColourData data;
-    data.SetChooseFull(true);
-    data.SetChooseAlpha(false);
-    data.SetColour(wxColour(_selection.PrimaryColor("#26A69A")));
-
-    std::vector<std::string> custom_colors;
-    if (wxGetApp().app_config != nullptr)
-        custom_colors = wxGetApp().app_config->get_custom_color_from_config();
-
-    const int custom_count = std::min(static_cast<int>(custom_colors.size()), CUSTOM_COLOR_COUNT);
-    for (int index = 0; index < custom_count; ++index)
-        data.SetCustomColour(index, string_to_wxColor(custom_colors[index]));
-
-    wxColourDialog dialog(this, &data);
-    dialog.SetTitle(_L("Please choose the filament color"));
+    // The colour picker for the marked chip (or the only colour).
+    const int chip = std::clamp(_activeChip, 0, std::max(0, int(_selection.colors.size()) - 1));
+    const std::string start = _selection.colors.empty() ? std::string("#26A69A") : _selection.colors[size_t(chip)];
+    FilamentColourPickerDialog dialog(this, start);
     if (dialog.ShowModal() != wxID_OK)
         return;
-
-    const wxColourData result = dialog.GetColourData();
-    if (custom_colors.size() != CUSTOM_COLOR_COUNT)
-        custom_colors.resize(CUSTOM_COLOR_COUNT);
-    for (int index = 0; index < CUSTOM_COLOR_COUNT; ++index)
-        custom_colors[index] = color_to_string(result.GetCustomColour(index));
-    if (wxGetApp().app_config != nullptr)
-        wxGetApp().app_config->save_custom_color_to_config(custom_colors);
-
-    const wxColour color = result.GetColour();
-    if (color.IsOk())
-        SelectCustomColor(color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString());
+    SetChipColour(chip, dialog.Colour());
 }
 
 } // namespace GUI

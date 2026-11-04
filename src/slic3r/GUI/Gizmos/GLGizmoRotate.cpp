@@ -222,9 +222,51 @@ void GLGizmoRotate3D::on_render_input_window(float x, float y, float bottom_limi
 {
     //if (wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology() != ptSLA)
     //    return;
+    if (m_parent.get_selection().is_wipe_tower()) {
+        // The prime tower turns about Z only: the object panel's X/Y fields and coordinate
+        // modes would act on the model, not the tower.
+        render_wipe_tower_input_window(x, y, bottom_limit);
+        return;
+    }
     if (m_object_manipulation)
         m_object_manipulation->do_render_rotate_window(m_imgui, "Rotate", x, y, bottom_limit, this);
     //RotoptimzeWindow popup{m_imgui, m_rotoptimizewin_state, {x, y, bottom_limit}};
+}
+
+void GLGizmoRotate3D::render_wipe_tower_input_window(float x, float y, float bottom_limit)
+{
+    const std::string title = _u8L("Rotate prime tower");
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+    m_imgui->set_next_window_bg_alpha(gizmo_panel_opacity());
+    m_imgui->begin(title + "##RotateWipeTower", dock_window_flags(ImGuiWrapper::TOOLBAR_WINDOW_FLAGS | ImGuiWindowFlags_NoTitleBar));
+    if (dock_render_titlebar(title)) {
+        // The field shows the Process setting; it is committed when the edit ends (Enter or focus
+        // out) and turns the tower about its centre, as dragging the Z ring does.
+        const double current = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_float("wipe_tower_rotation_angle");
+        if (!m_wipe_tower_angle_editing)
+            m_wipe_tower_angle_input = current;
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Angle (Z)"));
+        ImGui::SameLine();
+        ImGui::PushItemWidth(ImGui::CalcTextSize("-000.000").x + 2.f * ImGui::GetStyle().FramePadding.x);
+        ImGui::BBLInputDouble("##wipe_tower_rotation_angle", &m_wipe_tower_angle_input, 0.0, 0.0, "%.2f");
+        m_wipe_tower_angle_editing = ImGui::IsItemActive();
+        const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        m_imgui->text("°");
+        m_imgui->text_wrapped(_L("Also set in Process > Multimaterial > Prime tower."), ImGui::CalcTextSize("Also set in Process > Multimaterial").x);
+        if (committed && std::abs(m_wipe_tower_angle_input - current) > EPSILON) {
+            Selection &selection = m_parent.get_selection();
+            selection.setup_cache();
+            selection.rotate(Vec3d(0., 0., Geometry::deg2rad(m_wipe_tower_angle_input - current)),
+                             TransformationType(TransformationType::World_Relative_Joint));
+            m_parent.do_rotate(L("Gizmo-Rotate"));
+        }
+    }
+    m_imgui->end();
+    ImGuiWrapper::pop_toolbar_style();
 }
 
 void GLGizmoRotate3D::load_rotoptimize_state()
@@ -573,6 +615,8 @@ bool GLGizmoRotate3D::on_init()
 std::string GLGizmoRotate3D::on_get_name() const
 {
     if (!on_is_activable() && m_state == EState::Off) {
+        if (m_parent.get_selection().is_wipe_tower())
+            return _u8L("Rotate") + ":\n" + _u8L("The Bambu Lab prime tower cannot be rotated.");
         return _u8L("Rotate") + ":\n" + _u8L("Please select at least one object.");
     } else {
         return _u8L("Rotate");
@@ -610,12 +654,11 @@ void GLGizmoRotate3D::data_changed(bool is_serializing) {
 
     bool is_wipe_tower = selection.is_wipe_tower();
     if (is_wipe_tower) {
-        DynamicPrintConfig& config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-        float wipe_tower_rotation_angle =
-            dynamic_cast<const ConfigOptionFloat *>(
-                config.option("wipe_tower_rotation_angle"))
-                ->value;
-        set_rotation(Vec3d(0., 0., (M_PI / 180.) * wipe_tower_rotation_angle));
+        // Z only. The ring's angle is what on_mouse() hands Selection::rotate() as a turn relative
+        // to the drag start, so it starts at 0 as for objects; seeding it with the tower's current
+        // angle (as upstream did while the tool was disabled for the tower) would add it twice.
+        // The absolute angle is in the panel and the Process tab.
+        set_rotation(Vec3d::Zero());
         m_gizmos[0].disable_grabber();
         m_gizmos[1].disable_grabber();
     } else {
@@ -627,9 +670,14 @@ void GLGizmoRotate3D::data_changed(bool is_serializing) {
 
 bool GLGizmoRotate3D::on_is_activable() const
 {
-    // BBS: don't support rotate wipe tower
+    // The prime tower turns about Z when its generator can rotate it (WipeTower2); the Bambu Lab
+    // (Type1) tower is printed unrotated, so the tool stays inert on it.
     const Selection& selection = m_parent.get_selection();
-    return !m_parent.get_selection().is_empty() && !selection.is_wipe_tower();
+    if (selection.is_empty())
+        return false;
+    if (selection.is_wipe_tower())
+        return wipe_tower_rotation_supported() && m_parent.get_canvas_type() != GLCanvas3D::CanvasAssembleView;
+    return true;
 }
 
 void GLGizmoRotate3D::on_start_dragging()

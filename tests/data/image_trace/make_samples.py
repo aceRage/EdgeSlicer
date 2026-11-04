@@ -67,3 +67,31 @@ for y in range(h):
             v = 20
         px[x, y] = int(v)
 img.save('radial_gradient.png', optimize=True)
+
+
+# 4. Neon line art on a dark background (like a glowing sticker): thin lines in five colours with a
+# soft glow, saved as JPEG (no chroma subsampling, like a large photo of a screen scaled down). Most pixels are background, the pink diamond is tiny.
+from PIL import ImageFilter
+
+
+def neon(d, f):
+    def diamond(cx, cy, r):
+        return [((cx) * f, (cy - r) * f), ((cx + r * 0.7) * f, cy * f), (cx * f, (cy + r) * f), ((cx - r * 0.7) * f, cy * f)]
+    purple, mint, green, pink, white = (150, 85, 240), (125, 250, 215), (95, 225, 120), (235, 95, 235), (250, 250, 250)
+    d.arc([60 * f, 60 * f, 300 * f, 300 * f], 140, 400, fill=purple, width=7 * f)
+    d.line([(90 * f, 330 * f), (200 * f, 440 * f)], fill=purple, width=7 * f)
+    d.polygon(diamond(360, 120, 40), outline=mint, width=6 * f)
+    d.polygon(diamond(180, 180, 30), outline=mint, width=6 * f)
+    d.ellipse([300 * f, 300 * f, 440 * f, 440 * f], outline=green, width=7 * f)
+    d.ellipse([340 * f, 340 * f, 400 * f, 400 * f], outline=green, width=6 * f)
+    d.polygon(diamond(70, 64, 26), outline=pink, width=6 * f)
+    for x, y in ((250, 250), (270, 262), (232, 268)):
+        d.ellipse([(x - 6) * f, (y - 6) * f, (x + 6) * f, (y + 6) * f], fill=white)
+
+
+lines = supersampled(512, 512, 'RGB', (0, 0, 0), neon)
+glow = lines.filter(ImageFilter.GaussianBlur(4))
+background = Image.new('RGB', (512, 512), (46, 42, 42))
+art = Image.composite(lines, Image.blend(background, Image.eval(glow, lambda v: min(255, v * 2)), 0.45),
+                      lines.convert('L').point(lambda v: 255 if v > 40 else v * 6))
+art.save('neon_on_dark.jpg', quality=85, subsampling=0)

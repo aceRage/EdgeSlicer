@@ -311,6 +311,11 @@ SCENARIO("A normal project save names this application and still loads as a full
                 continue;
             INFO("option " << key);
             REQUIRE(back.config.has(key));
+            if (key == "ironing_angle") {
+                // Orca #10841: the legacy -1 ("default method") loads back as offset 0.
+                CHECK(back.config.opt_serialize(key) == "0");
+                continue;
+            }
             CHECK(back.config.opt_serialize(key) == cfg.opt_serialize(key));
         }
         REQUIRE(back.model.objects.size() == 1);

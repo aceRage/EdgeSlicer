@@ -163,9 +163,11 @@ bool GLGizmoAlignment::distribute_objects_generic(GetCoordFunc get_coord, int ax
 
     if (selection.is_single_full_object() || selection.is_multiple_volume() || selection.is_multiple_modifier()) {
         std::vector<const GLVolume*> volumes;
+        // Orca #16479: a whole object distributes its solid parts only.
+        const bool solid_only = selection.is_single_full_object();
         for (unsigned int idx : selection.get_volume_idxs()) {
             const GLVolume* v = selection.get_volume(idx);
-            if (v) volumes.push_back(v);
+            if (v && !(solid_only && v->is_modifier)) volumes.push_back(v);
         }
 
         if (volumes.size() < 3) return false;
@@ -324,9 +326,12 @@ std::vector<GLGizmoAlignment::AlignItem> GLGizmoAlignment::collect_items(bool pa
     const Selection &       selection = get_selection();
     std::vector<AlignItem> items;
     if (parts) {
+        // Orca #16479: aligning a whole object arranges its solid parts and leaves modifiers and
+        // negative volumes where they are.
+        const bool solid_only = selection.is_single_full_object();
         for (unsigned int idx : selection.get_volume_idxs()) {
             const GLVolume *volume = selection.get_volume(idx);
-            if (volume != nullptr)
+            if (volume != nullptr && !(solid_only && volume->is_modifier))
                 items.push_back({volume->object_idx(), volume->instance_idx(), volume->volume_idx(), volume->transformed_convex_hull_bounding_box()});
         }
     } else {

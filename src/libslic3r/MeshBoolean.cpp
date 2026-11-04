@@ -1153,5 +1153,31 @@ bool union_all(const std::vector<indexed_triangle_set> &meshes, indexed_triangle
 
 } // namespace mfd
 
+bool make_boolean_chain(const TriangleMesh &a, const TriangleMesh &b, const std::string &op, TriangleMesh &out,
+                        const char *log_tag)
+{
+    std::vector<TriangleMesh> dst;
+    bool ok = mfd::make_boolean(a, b, dst, op);
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(warning) << log_tag << ": Manifold boolean " << op << " failed, falling back to mcut";
+        dst.clear();
+        try {
+            mcut::make_boolean(a, b, dst, op);
+        } catch (const std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << log_tag << ": mcut boolean " << op << " failed: " << ex.what();
+            return false;
+        }
+    }
+    if (dst.empty())
+        return false;
+    TriangleMesh merged = dst.front();
+    for (size_t i = 1; i < dst.size(); ++ i)
+        merged.merge(dst[i]);
+    if (merged.empty())
+        return false;
+    out = std::move(merged);
+    return true;
+}
+
 } // namespace MeshBoolean
 } // namespace Slic3r

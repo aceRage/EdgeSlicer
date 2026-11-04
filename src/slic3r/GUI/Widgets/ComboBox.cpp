@@ -290,7 +290,7 @@ void ComboBox::mouseDown(wxMouseEvent &event)
     SetFocus();
     if (drop_down) {
         drop.Hide();
-    } else if (drop.HasDismissLongTime()) {
+    } else if (!texts.empty() && drop.HasDismissLongTime()) { // DropDown paints nothing for an empty list
         drop.autoPosition();
         drop_down = true;
         drop.Popup(&drop);
@@ -318,7 +318,7 @@ void ComboBox::keyDown(wxKeyEvent& event)
         case WXK_SPACE:
             if (drop_down) {
                 drop.DismissAndNotify();
-            } else if (drop.HasDismissLongTime()) {
+            } else if (!texts.empty() && drop.HasDismissLongTime()) {
                 drop.autoPosition();
                 drop_down = true;
                 drop.Popup();

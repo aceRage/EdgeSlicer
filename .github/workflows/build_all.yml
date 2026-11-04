@@ -21,6 +21,10 @@ on:
         description: 'Sentry environment override (blank = release/ci by ref)'
         type: string
         default: ''
+      include-macos:
+        description: 'Also build the macOS dmg on a hosted runner (releases take the dmg from build_mac_selfhosted.yml instead)'
+        type: boolean
+        default: false
 
   workflow_call:
     inputs:
@@ -35,6 +39,10 @@ on:
         description: 'Sentry environment compiled into the app'
         type: string
         default: ''
+      include-macos:
+        description: 'Also build the macOS dmg on a hosted runner (nightly.yml needs it)'
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,13 +55,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-2022
-          - os: macos-14
-            arch: arm64
+        # Deprecated: ubuntu-20.04 appimage. The hosted macos-14 job (3-4 h) runs only when
+        # include-macos is set: release dispatches leave it off because the release dmg comes from
+        # the self-hosted Mac mini (build_mac_selfhosted.yml, about 25 min); nightly.yml keeps it.
+        include: ${{ fromJSON(inputs.include-macos && '[{"os":"ubuntu-24.04"},{"os":"windows-2022"},{"os":"macos-14","arch":"arm64"}]' || '[{"os":"ubuntu-24.04"},{"os":"windows-2022"}]') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}

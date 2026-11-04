@@ -1,5 +1,8 @@
 #include "PresetMirrorCore.hpp"
 
+#include <cstdint>
+#include <cstdio>
+
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -597,10 +600,55 @@ std::string source_tree_fingerprint(const std::string& src_uid_dir)
 
 std::string fingerprint_source_part(const std::string& fingerprint)
 {
-    const size_t pos = fingerprint.rfind("manifest=");
-    if (pos == std::string::npos || (pos != 0 && fingerprint[pos - 1] != '\n'))
-        return fingerprint;
-    return fingerprint.substr(0, pos);
+    // The first line that starts with "manifest=": source lines start with "uid=", "src=", a
+    // type folder or "<empty>", and the output-folder listing comes after the manifest line.
+    size_t pos = 0;
+    while (pos < fingerprint.size()) {
+        if (fingerprint.compare(pos, 9, "manifest=") == 0)
+            return fingerprint.substr(0, pos);
+        const size_t nl = fingerprint.find('\n', pos);
+        if (nl == std::string::npos)
+            break;
+        pos = nl + 1;
+    }
+    return fingerprint;
+}
+
+namespace {
+const char* const kMirrorGateHeader = "edgeslicer-preset-mirror-gate";
+
+std::string fingerprint_digest(const std::string& fingerprint)
+{
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : fingerprint) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long) h);
+    return std::string(buf) + "-" + std::to_string(fingerprint.size());
+}
+} // namespace
+
+std::string mirror_gate_record(const std::string& app_version, const std::string& fingerprint)
+{
+    if (fingerprint.empty())
+        return std::string();
+    return std::string(kMirrorGateHeader) + " " + std::to_string(kMirrorGateFormat) + "\nversion=" + app_version +
+           "\nfingerprint=" + fingerprint_digest(fingerprint) + "\n";
+}
+
+bool mirror_gate_record_allows_skip(const std::string& record, const std::string& app_version, const std::string& fingerprint)
+{
+    if (fingerprint.empty() || record.empty())
+        return false;
+    // Normalise line ends, then compare with what a record for this fingerprint would be.
+    std::string r;
+    r.reserve(record.size());
+    for (char c : record)
+        if (c != '\r')
+            r += c;
+    return r == mirror_gate_record(app_version, fingerprint);
 }
 
 std::string file_stamp(const std::string& path)

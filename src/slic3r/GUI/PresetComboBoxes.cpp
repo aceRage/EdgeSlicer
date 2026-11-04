@@ -27,7 +27,9 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/FilamentSyncMatch.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -149,8 +151,24 @@ wxBitmap* GetFilamentColorPickerBitmap(const DynamicPrintConfig& config,
     const int colorModeValue = ConfigIntAt(config, "filament_colour_mode", filamentIdx);
     const FilamentColorMode colorMode = FilamentColorModeFromConfig(colorModeValue);
     const std::string label = filamentIdx >= 0 ? std::to_string(filamentIdx + 1) : std::string();
+    const FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&config, size_t(std::max(filamentIdx, 0)));
     return FilamentColorUtils::GetFilamentColorIcon(multiColors, colorMode, fallbackColor, label,
-                                                    std::max(1, size.GetWidth()), std::max(1, size.GetHeight()));
+                                                    std::max(1, size.GetWidth()), std::max(1, size.GetHeight()),
+                                                    wxNullColour, &makeUp.split, makeUp.angle);
+}
+
+// The make-up of a slot for the colour dialog, with whether its preset looks like a glow filament (G1).
+FilamentColorUtils::ColourMakeUp GetDialogMakeUp(const DynamicPrintConfig& config, size_t slot, const std::string& presetName)
+{
+    FilamentColorUtils::ColourMakeUp makeUp = FilamentColorUtils::GetColourMakeUp(&config, slot);
+    std::string type;
+    if (wxGetApp().preset_bundle != nullptr)
+        if (const Preset* preset = wxGetApp().preset_bundle->filaments.find_preset(presetName, false, true))
+            if (const ConfigOptionStrings* t = preset->config.option<ConfigOptionStrings>("filament_type"))
+                if (!t->values.empty())
+                    type = t->values.front();
+    makeUp.glowSuggested = Glow::suggests_glow(presetName, type);
+    return makeUp;
 }
 
 } // namespace
@@ -289,8 +307,11 @@ std::string PresetComboBox::favorite_key_of_row(unsigned int n) const
 
 void PresetComboBox::enable_favorites(bool live)
 {
-    if (m_type != Preset::TYPE_FILAMENT)
+    // Only filament and process lists have favourites; the kind decides which stored set the stars use.
+    FavoritePresets::Kind kind;
+    if (!FavoriteFilamentsUI::kind_of(m_type, kind))
         return;
+    m_favorites_kind = kind;
     if (!m_favorites_enabled) {
         m_favorites_enabled = true;
         // A star click: toggle, redraw the stars at once, regroup when the list closes.
@@ -298,7 +319,7 @@ void PresetComboBox::enable_favorites(bool live)
             const std::string key = favorite_key_of_row(unsigned(e.GetInt()));
             if (key.empty())
                 return;
-            FavoriteFilamentsUI::toggle(key);
+            FavoriteFilamentsUI::toggle(key, m_favorites_kind);
             update_favorite_stars();
             m_favorites_regroup = true;
         });
@@ -318,7 +339,7 @@ void PresetComboBox::enable_favorites(bool live)
                 return;
             }
             wxMenu menu;
-            FavoriteFilamentsUI::append_toggle_item(menu, key);
+            FavoriteFilamentsUI::append_toggle_item(menu, key, m_favorites_kind);
             PopupMenu(&menu);
         });
     }
@@ -330,7 +351,7 @@ void PresetComboBox::enable_favorites(bool live)
             } else {
                 update();
             }
-        });
+        }, m_favorites_kind);
     } else if (!live && m_favorites_subscription) {
         FavoriteFilamentsUI::unsubscribe(m_favorites_subscription);
         m_favorites_subscription = 0;
@@ -343,7 +364,7 @@ void PresetComboBox::append_favorite_group(const std::vector<std::pair<wxString,
     m_favorites_first = m_favorites_end = -1;
     if (!m_favorites_enabled || !m_collection)
         return;
-    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load(m_favorites_kind);
     if (favorites.empty())
         return;
     std::map<wxString, wxBitmap*> rows; // sorted by name, one row per shown name
@@ -356,7 +377,9 @@ void PresetComboBox::append_favorite_group(const std::vector<std::pair<wxString,
     }
     if (rows.empty())
         return;
-    set_label_marker(Append(separator(L("Favorite filaments")), wxNullBitmap));
+    set_label_marker(Append(separator(m_favorites_kind == FavoritePresets::Kind::Process ? L("Favorite process presets")
+                                                                                         : L("Favorite filaments")),
+                            wxNullBitmap));
     m_favorites_first = int(GetCount());
     for (const auto &[name, bmp] : rows) {
         const int item = Append(name, bmp ? *bmp : wxNullBitmap);
@@ -373,7 +396,7 @@ void PresetComboBox::update_favorite_stars()
 {
     if (!m_favorites_enabled)
         return;
-    const std::set<std::string> favorites = FavoriteFilamentsUI::load();
+    const std::set<std::string> favorites = FavoriteFilamentsUI::load(m_favorites_kind);
     const wxBitmap on  = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(true)), this, 16);
     const wxBitmap off = create_scaled_bitmap(into_u8(FavoriteFilamentsUI::star_icon_name(false)), this, 16);
     for (unsigned int i = 0; i < GetCount(); ++i) {
@@ -470,6 +493,61 @@ void PresetComboBox::update_selection()
     // Only the list of cells must be freed, the renderer isn't ours to free
     g_list_free(cells);
 #endif
+}
+
+// "0.4", "0.40", "0.4mm" and " 0.4 mm" all as "0.4", for comparing a toolhead's reported nozzle with
+// the printer preset's.
+static std::string normalized_nozzle(std::string nozzle)
+{
+    boost::algorithm::trim(nozzle);
+    if (boost::iends_with(nozzle, "mm")) {
+        nozzle.resize(nozzle.size() - 2);
+        boost::algorithm::trim(nozzle);
+    }
+    if (nozzle.find('.') != std::string::npos) {
+        while (!nozzle.empty() && nozzle.back() == '0')
+            nozzle.pop_back();
+        if (!nozzle.empty() && nozzle.back() == '.')
+            nozzle.pop_back();
+    }
+    return nozzle;
+}
+
+// The preset a U1 toolhead's filament shows as in the dropdown's "Machine Filament" section: the
+// Snapmaker naming first ("<name> @U1 0.4 nozzle", "<name> @U1"...), then the same rules the Sync
+// button uses (FilamentSyncMatch::match_preset): a user preset of that name or vendor, then the
+// "Generic <type>" preset. Before, a spool with no preset of exactly the Snapmaker name - any
+// third-party tag - was left out of the section altogether.
+static const Preset* machine_filament_preset(const PresetCollection& collection, const ConnectMachineInfo& info)
+{
+    const std::string& filament_name   = info.filament_info;
+    const std::string& machine_nozzles = info.nozzle_info;
+    const auto&        presets         = collection.get_presets();
+    for (const std::string& candidate : { filament_name + " @U1 " + machine_nozzles + " nozzle", filament_name + " @U1 " + machine_nozzles,
+                                          filament_name + " @U1", filament_name }) {
+        auto it = std::find_if(presets.begin(), presets.end(), [&candidate](const Preset& f) { return f.is_compatible && f.name == candidate; });
+        if (it != presets.end())
+            return &*it;
+    }
+
+    std::vector<const Preset*>                index;
+    std::vector<FilamentSyncMatch::Candidate> candidates;
+    for (const Preset& preset : presets) {
+        if (preset.is_default || preset.is_project_embedded || !preset.is_compatible)
+            continue;
+        FilamentSyncMatch::Candidate c;
+        c.name      = preset.name;
+        c.vendor    = preset.config.opt_string("filament_vendor", 0u);
+        c.type      = preset.config.opt_string("filament_type", 0u);
+        c.colour    = preset.config.opt_string("default_filament_colour", 0u);
+        c.is_system = preset.is_system;
+        c.is_base   = collection.get_preset_base(preset) == &preset;
+        index.push_back(&preset);
+        candidates.push_back(std::move(c));
+    }
+    const FilamentSyncMatch::Match m = FilamentSyncMatch::match_preset(candidates, filament_name, info.filament_type, info.filament_vendor,
+                                                                       info.color_info);
+    return m.index >= 0 ? index[size_t(m.index)] : nullptr;
 }
 
 int PresetComboBox::update_ams_color()
@@ -1091,6 +1169,8 @@ PlaterPresetComboBox::~PlaterPresetComboBox()
 {
     if (edit_btn)
         edit_btn->Destroy();
+    if (tool_btn)
+        tool_btn->Destroy();
 
     // BBS.
     if (clr_picker)
@@ -1268,11 +1348,11 @@ void PlaterPresetComboBox::ChangeExtruderColor()
     {
         const FilamentColorMode currentMode = FilamentColorModeFromConfig(currentModeValue);
         const FilamentColor currentColor = FilamentColor::FromMultiColors(currentMultiColors, currentMode, currentColorHex);
-        FilamentColorDialog dialog(this, filament, currentColor);
+        FilamentColorDialog dialog(this, filament, currentColor, GetDialogMakeUp(config, size_t(m_filament_idx), filamentPresetName));
 
         if (dialog.ShowModal() == wxID_OK)
         {
-            ApplyFilamentColor(dialog.Selection());
+            ApplyFilamentColor(dialog.Selection(), &dialog.MakeUp());
         }
         return;
     }
@@ -1286,40 +1366,22 @@ void PlaterPresetComboBox::SelectLegacyFilamentColor()
         return;
 
     DynamicPrintConfig& config = wxGetApp().preset_bundle->project_config;
-    wxColour current_color(ConfigStringAt(config, "filament_colour", m_filament_idx));
-    if (!current_color.IsOk())
-        current_color = wxColour(0, 0, 0);
 
-    m_clrData.SetColour(current_color);
-    m_clrData.SetChooseFull(true);
-    m_clrData.SetChooseAlpha(false);
-
-    std::vector<std::string> custom_colors;
-    if (wxGetApp().app_config != nullptr)
-        custom_colors = wxGetApp().app_config->get_custom_color_from_config();
-
-    const int custom_count = std::min(static_cast<int>(custom_colors.size()), CUSTOM_COLOR_COUNT);
-    for (int i = 0; i < custom_count; ++i)
-        m_clrData.SetCustomColour(i, string_to_wxColor(custom_colors[i]));
-
-    wxColourDialog dialog(this, &m_clrData);
-    dialog.SetTitle(_L("Please choose the filament color"));
-    if (dialog.ShowModal() != wxID_OK)
-        return;
-
-    m_clrData = dialog.GetColourData();
-    if (custom_colors.size() != CUSTOM_COLOR_COUNT)
-        custom_colors.resize(CUSTOM_COLOR_COUNT);
-    for (int i = 0; i < CUSTOM_COLOR_COUNT; ++i)
-        custom_colors[i] = color_to_string(m_clrData.GetCustomColour(i));
-    if (wxGetApp().app_config != nullptr)
-        wxGetApp().app_config->save_custom_color_to_config(custom_colors);
-
-    const std::string selected_color = m_clrData.GetColour().GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
-    ApplyFilamentColor(FilamentColor::FromMultiColors("", FilamentColorMode::Segment, selected_color));
+    // Any other filament: the colour dialog without a library, so a plain colour, a few
+    // colours (a coextruded multi-colour filament) and their make-up can be set on every slot
+    // (multi-colour P2). The chips and "Other Colors" pick colours as the system dialog did.
+    const FilamentColor current = FilamentColor::FromMultiColors(
+        ConfigStringAt(config, "filament_multi_colors", m_filament_idx),
+        FilamentColorModeFromConfig(ConfigIntAt(config, "filament_colour_mode", m_filament_idx)),
+        ConfigStringAt(config, "filament_colour", m_filament_idx));
+    FilamentColorInfo noLibraryEntry;
+    FilamentColorDialog dialog(this, noLibraryEntry, current,
+                               GetDialogMakeUp(config, size_t(m_filament_idx), CurrentFilamentPresetName()));
+    if (dialog.ShowModal() == wxID_OK)
+        ApplyFilamentColor(dialog.Selection(), &dialog.MakeUp());
 }
 
-void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
+void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData, const FilamentColorUtils::ColourMakeUp* makeUp)
 {
     if (m_filament_idx < 0 || wxGetApp().preset_bundle == nullptr)
         return;
@@ -1352,12 +1414,23 @@ void PlaterPresetComboBox::ApplyFilamentColor(const FilamentColor& colorData)
             filament_extruder_map.erase(m_filament_idx);
     }
 
+    // Multi-colour P1: a slot given new colours starts with an equal split (design 4.5).
+    std::vector<std::string> old_multi_colors;
+    if (const ConfigOptionStrings *multi = config->option<ConfigOptionStrings>("filament_multi_colors"))
+        old_multi_colors = multi->values;
+
     DynamicPrintConfig new_config = *config;
     new_config.set_key_value("filament_colour", filament_colors);
     new_config.set_key_value("filament_multi_colors", filament_multi_colors);
     new_config.set_key_value("filament_colour_mode", filament_colour_modes);
+    if (makeUp != nullptr)
+        FilamentColorUtils::SetColourMakeUp(new_config, index, *makeUp);
 
     config->apply(new_config);
+    reset_colour_split_where_colours_changed(*config, old_multi_colors);
+    // The editor's proportions, rotation and twist (visual only) win over the reset above.
+    if (makeUp != nullptr)
+        FilamentColorUtils::SetColourMakeUp(*config, index, *makeUp);
     wxGetApp().plater()->update_project_dirty_from_presets();
     if (wxGetApp().app_config != nullptr)
         wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
@@ -1606,7 +1679,6 @@ void PlaterPresetComboBox::update()
 
     if (m_type == Preset::TYPE_FILAMENT && wxGetApp().preset_bundle->machine_filaments.size() > 0) {
         set_label_marker(Append(separator(L("Machine Filament")), wxNullBitmap));
-        auto& filaments         = m_collection->get_presets();
         auto  machine_nozzles_list = wxGetApp().preset_bundle->m_connect_machine_info_list;
         m_first_ams_filament    = GetCount();
 
@@ -1621,35 +1693,12 @@ void PlaterPresetComboBox::update()
         }
         
         for (int i = 0; i < machine_nozzles_list.size(); i++) {
-            std::string filament_name   = machine_nozzles_list[i].filament_info;
-            std::string machine_nozzles = machine_nozzles_list[i].nozzle_info;
-
             // Filter by nozzle for display only; machine_filaments / m_connect_machine_info_list stay from sync (SSWCP).
-            if (currentNozzleInfo != machine_nozzles)
+            if (normalized_nozzle(currentNozzleInfo) != normalized_nozzle(machine_nozzles_list[i].nozzle_info))
                 continue;
 
-            auto item_iter = std::find_if(filaments.begin(), filaments.end(),
-            [&filament_name, &machine_nozzles, &currentNozzleInfo](auto& f) {
-                if (f.name == filament_name + " @U1 " + machine_nozzles + " nozzle")
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1 " + machine_nozzles)
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name + " @U1")
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name)
-                    if (f.is_compatible)
-                        return true;
-
-                return false;
-            });
-
-            if (item_iter != filaments.end()) {
+            const Preset* item_iter = machine_filament_preset(*m_collection, machine_nozzles_list[i]);
+            if (item_iter != nullptr) {
                 const_cast<Preset&>(*item_iter).is_visible = true;
                 const ConnectMachineInfo& machineInfo = machine_nozzles_list[i];
                 std::vector<std::string> colors = machineInfo.multiColors;
@@ -2175,7 +2224,7 @@ void TabPresetComboBox::update()
         }
     }
 
-    if (m_type == Preset::TYPE_FILAMENT) {
+    if (m_type == Preset::TYPE_FILAMENT || m_type == Preset::TYPE_PRINT) {
         std::vector<std::pair<wxString, wxBitmap*>> candidates;
         for (const auto *group : { &project_embedded_presets, &nonsys_presets, &system_presets })
             for (const auto &[name, bmp_enabled] : *group)
@@ -2188,7 +2237,6 @@ void TabPresetComboBox::update()
     
     if (m_type == Preset::TYPE_FILAMENT && wxGetApp().preset_bundle->m_connect_machine_info_list.size() > 0) {
         set_label_marker(Append(separator(L("Machine Filament")), wxNullBitmap));
-        auto& filaments            = m_collection->get_presets();
         auto  machine_nozzles_list = wxGetApp().preset_bundle->m_connect_machine_info_list;
         m_first_ams_filament       = GetCount();
 
@@ -2203,34 +2251,12 @@ void TabPresetComboBox::update()
         }
 
         for (int i = 0; i < machine_nozzles_list.size(); i++) {
-            std::string filament_name   = machine_nozzles_list[i].filament_info;
-            std::string machine_nozzles = machine_nozzles_list[i].nozzle_info;
-
-            if (currentNozzleInfo != machine_nozzles)
+            // Filter by nozzle for display only; machine_filaments / m_connect_machine_info_list stay from sync (SSWCP).
+            if (normalized_nozzle(currentNozzleInfo) != normalized_nozzle(machine_nozzles_list[i].nozzle_info))
                 continue;
 
-            auto item_iter = std::find_if(filaments.begin(), filaments.end(),[&filament_name, &machine_nozzles, &currentNozzleInfo](auto& f) {               
-
-                if (f.name == filament_name + " @U1 " + machine_nozzles + " nozzle")
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1 " + machine_nozzles)
-                    if (f.is_compatible)
-                        return true;
-                
-                if (f.name == filament_name + " @U1")
-                    if (f.is_compatible)
-                        return true;
-
-                if (f.name == filament_name)
-                    if (f.is_compatible)
-                        return true;
-
-                return false;                
-                });
-
-            if (item_iter != filaments.end()) {
+            const Preset* item_iter = machine_filament_preset(*m_collection, machine_nozzles_list[i]);
+            if (item_iter != nullptr) {
                 const_cast<Preset&>(*item_iter).is_visible = true;
                 const ConnectMachineInfo& machineInfo = machine_nozzles_list[i];
                 std::vector<std::string> colors = machineInfo.multiColors;
