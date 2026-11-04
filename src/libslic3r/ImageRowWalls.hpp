@@ -104,6 +104,14 @@ struct ImageRowWallContext
     int                              surfaces = 0;
     // The mesh-space "up" direction, for the top-visible samples.
     Vec3f                            up_mesh{0.f, 0.f, 1.f};
+
+    // ---- Phase 5b -------------------------------------------------------------------------------
+    // ImageFillParams::wall_method and stripe_depth_pct / 100. With IMAGE_FILL_WALL_STRIPES the
+    // walls are NOT cut into runs: ToolOrdering and GCode.cpp leave the whole wall on the row's
+    // per-layer filament (MixedFilamentManager::resolve() cycles through the row's filaments in
+    // order), and image_row_stripe_wall_entity() widens or narrows the outer wall along its length.
+    int                              wall_method  = 0;
+    float                            stripe_depth = 0.4f;
 };
 
 // Phase 5a: the part's own filament for `region` on this layer - see ImageRowWallContext::
@@ -194,6 +202,22 @@ std::vector<std::unique_ptr<ExtrusionEntityCollection>> image_row_split_wall_ent
 // registered colour (image_row_nearest_registered()).
 std::vector<int> image_row_wall_entity_filaments(const ImageAssetStore &assets, const ImageRowWallContext &ctx,
                                                  const ExtrusionEntity &entity, double print_z, const Layer *layer);
+
+// Phase 5b, IMAGE_FILL_WALL_STRIPES: the outer wall `entity` (seam already placed), printed on
+// this layer with `layer_filament` (1-based, one of ctx.candidate_ids), with its width modulated
+// along its length by how much of that filament the picture wants there
+// (image_fill_stripe_width_factor()). The bead's INNER edge stays where it was - the centre line
+// moves out by half the width change - so a wider bead stands proud of the layers above and below
+// it and a narrower one sits back, and the inner walls never see a difference. Overhang pieces are
+// left at their own width. Returns null when there is nothing to modulate (the picture does not
+// land on this wall, or wants this filament at the nominal width all the way round); the caller
+// then prints the wall as it was.
+std::unique_ptr<ExtrusionEntityCollection> image_row_stripe_wall_entity(const ImageAssetStore      &assets,
+                                                                        const ImageRowWallContext  &ctx,
+                                                                        const ExtrusionEntity      &entity,
+                                                                        double                      print_z,
+                                                                        const Layer                *layer,
+                                                                        int                         layer_filament);
 
 // Phase 5a: of the 0-based extruders in `registered`, the one whose filament colour is nearest
 // `wanted` (0-based). Returns `wanted` when it is registered, and `fallback` when nothing is.

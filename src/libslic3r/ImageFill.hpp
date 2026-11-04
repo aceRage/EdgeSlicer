@@ -198,6 +198,16 @@ struct ImageFillParams
     // string from before phase 5a: the binding alone decides (a row named by wall_filament colours
     // the walls, one named by solid_infill_filament the top). See ImageRowWalls.hpp.
     int                 surfaces = 0;
+    // Phase 5b: how the walls carry the picture (key `wm`). IMAGE_FILL_WALL_RUNS (0, phase 4) cuts
+    // each layer's outer wall into runs of different filaments. IMAGE_FILL_WALL_STRIPES (1) is
+    // ImageMap's own side-wall method: every layer prints its walls with ONE filament, cycling
+    // through the row's filaments layer by layer, and the outer wall is wider where the picture
+    // wants that layer's filament and narrower where it does not - so from the side each colour
+    // shows more or less, and a layer costs at most one tool change.
+    int                 wall_method = 0;
+    // Phase 5b, stripes only (key `wd`): how far the outer wall's width swings either side of its
+    // nominal width, in percent - 40 means 60 % to 140 %.
+    int                 stripe_depth_pct = 40;
 
     std::string to_string() const;
     static bool from_string(const std::string &s, ImageFillParams &out);
@@ -207,6 +217,10 @@ struct ImageFillParams
 // ImageFillParams::surfaces bits.
 static constexpr int IMAGE_FILL_SURFACE_TOP   = 1;
 static constexpr int IMAGE_FILL_SURFACE_WALLS = 2;
+
+// ImageFillParams::wall_method values.
+static constexpr int IMAGE_FILL_WALL_RUNS    = 0;
+static constexpr int IMAGE_FILL_WALL_STRIPES = 1;
 
 static constexpr int IMAGE_FILL_MAX_SUBDIVISION = 6;
 // A hard ceiling on leaves per volume, so a dense mesh at depth 6 cannot allocate for ever.
@@ -520,6 +534,26 @@ std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSam
                                                    float                                     min_run_len_mm,
                                                    int                                       fallback_id    = 0,
                                                    const std::array<float, 3>               &fallback_color = {0.f, 0.f, 0.f});
+
+// ---------------------------------------------------------------------------------------------
+// 9. Phase 5b: layer stripes on the walls
+// ---------------------------------------------------------------------------------------------
+
+// The share of each candidate filament in the nearest reachable mix to `target` (sRGB 0..1),
+// one weight per entry of `candidate_colors`, summing to 1 - the phase 1 solver's continuous
+// answer (BlendClosestTwo). Empty when there are no candidates.
+std::vector<float> image_fill_mix_weights(const std::array<float, 3>              &target,
+                                          const std::vector<std::array<float, 3>> &candidate_colors);
+
+// The outer wall's width, as a factor of its nominal width, on a layer printed with candidate
+// `layer_component` (an index into `weights`), where the picture asks for the mix `weights`.
+//
+// t = clamp(w * N / 2, 0, 1) for that filament's share w among N filaments, and the factor is
+// 1 + depth * (2t - 1): an even mix puts every layer at its nominal width (so the part's size is
+// unchanged where the picture is a neutral mix of the filaments); a pure colour puts its own layers
+// at 1 + depth and every other layer at 1 - depth. `depth` is ImageFillParams::stripe_depth_pct /
+// 100.
+float image_fill_stripe_width_factor(const std::vector<float> &weights, size_t layer_component, float depth);
 
 } // namespace Slic3r
 

@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
 	test_image_row_p5a.cpp
+	test_image_row_p5b.cpp
 	test_model.cpp
 	test_print.cpp
 	test_custom_gcode_placeholders.cpp

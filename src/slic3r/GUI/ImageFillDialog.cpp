@@ -224,6 +224,37 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     row_boxes->Add(m_row_walls, 0);
     left->Add(row_boxes, 0, wxEXPAND | wxTOP, FromDIP(4));
 
+    // ---- Phase 5b: how the walls carry the picture ----------------------------------------------
+    wxArrayString wall_methods;
+    wall_methods.Add(_L("Colour runs along each layer"));
+    wall_methods.Add(_L("Layer stripes (experimental)"));
+    m_wall_method = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wall_methods);
+    m_wall_method->SetSelection(m_params.wall_method == IMAGE_FILL_WALL_STRIPES ? 1 : 0);
+    m_wall_method->SetToolTip(_L("Colour runs: each layer's outer wall changes filament along its length wherever "
+                                 "the picture changes colour - the sharpest result, at the cost of a tool change "
+                                 "for every filament a layer uses.\n\n"
+                                 "Layer stripes: every layer prints its walls with one filament, taking the "
+                                 "allowed filaments in turn, layer after layer; the outer wall is printed wider "
+                                 "where the picture wants that layer's colour and narrower where it does not, "
+                                 "so each colour shows more or less from the side. At most one tool change per "
+                                 "layer for the walls; softer than colour runs, and best with fine layers. "
+                                 "Experimental: how strongly it reads depends on your filaments."));
+    row(_L("Side wall method") + ":", m_wall_method);
+    m_stripe_depth = new wxSpinCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(100), -1),
+                                    wxSP_ARROW_KEYS, 5, 80, m_params.stripe_depth_pct);
+    m_stripe_depth->SetToolTip(_L("Layer stripes only: how far the outer wall's width swings either side of its "
+                                  "normal width, in percent. 40 prints it between 60 % and 140 % of its width. "
+                                  "Only the outside of the wall moves; the part's inside is unchanged."));
+    row(_L("Stripe width swing (%)") + ":", m_stripe_depth);
+    auto update_wall_controls = [this]() {
+        const bool walls = m_row_walls->GetValue();
+        m_wall_method->Enable(walls);
+        m_stripe_depth->Enable(walls && m_wall_method->GetSelection() == 1);
+    };
+    update_wall_controls();
+    m_row_walls->Bind(wxEVT_CHECKBOX, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
+    m_wall_method->Bind(wxEVT_CHOICE, [update_wall_controls](wxCommandEvent &evt) { update_wall_controls(); evt.Skip(); });
+
     cols->Add(left, 1, wxEXPAND | wxALL, FromDIP(10));
 
     // ---- the preview ------------------------------------------------------------------------------
@@ -335,6 +366,10 @@ void ImageFillDialog::collect()
     // Phase 5a: the row's surfaces travel in the params, so the row's own reference says what it
     // was asked to colour (ImageRowWalls.cpp reads it at slice time).
     m_params.surfaces = image_row_surfaces();
+    // Phase 5b: the wall method and its swing ride the same params.
+    m_params.wall_method      = (m_wall_method != nullptr && m_wall_method->GetSelection() == 1) ? IMAGE_FILL_WALL_STRIPES
+                                                                                                   : IMAGE_FILL_WALL_RUNS;
+    m_params.stripe_depth_pct = m_stripe_depth != nullptr ? m_stripe_depth->GetValue() : 40;
 
     m_params.allowed.clear();
     for (size_t i = 0; i < m_filaments.size(); ++i)

@@ -2391,3 +2391,48 @@ TEST_CASE("Image Fill 5a: the surfaces key round-trips and old strings read as 0
     REQUIRE(ImageFillParams::from_string(s, back));
     CHECK(back.surfaces == 0);
 }
+
+TEST_CASE("Image Fill 5b: the stripe width factor and the wall-method keys", "[imagefill][p5b]")
+{
+    SECTION("an even mix keeps every layer at its nominal width")
+    {
+        const std::vector<float> even = {1.f / 3.f, 1.f / 3.f, 1.f / 3.f};
+        for (size_t c = 0; c < 3; ++c)
+            CHECK(image_fill_stripe_width_factor(even, c, 0.4f) == Approx(1.f));
+    }
+    SECTION("a pure colour widens its own layers and narrows the others")
+    {
+        const std::vector<float> red = {1.f, 0.f, 0.f};
+        CHECK(image_fill_stripe_width_factor(red, 0, 0.4f) == Approx(1.4f));
+        CHECK(image_fill_stripe_width_factor(red, 1, 0.4f) == Approx(0.6f));
+        CHECK(image_fill_stripe_width_factor(red, 2, 0.4f) == Approx(0.6f));
+    }
+    SECTION("out of range is the nominal width")
+    {
+        CHECK(image_fill_stripe_width_factor({}, 0, 0.4f) == Approx(1.f));
+        CHECK(image_fill_stripe_width_factor({1.f}, 3, 0.4f) == Approx(1.f));
+    }
+    SECTION("a filament's own colour solves to that filament")
+    {
+        const std::vector<std::array<float, 3>> rgb = {{1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}};
+        const std::vector<float> w = image_fill_mix_weights({0.f, 1.f, 0.f}, rgb);
+        REQUIRE(w.size() == 3);
+        CHECK(w[1] > 0.9f);
+        CHECK(w[0] + w[1] + w[2] == Approx(1.f).margin(1e-3));
+    }
+    SECTION("wm and wd round-trip, and the defaults write nothing")
+    {
+        ImageFillParams p;
+        p.asset            = "abc";
+        p.wall_method      = IMAGE_FILL_WALL_STRIPES;
+        p.stripe_depth_pct = 25;
+        ImageFillParams back;
+        REQUIRE(ImageFillParams::from_string(p.to_string(), back));
+        CHECK(back.wall_method == IMAGE_FILL_WALL_STRIPES);
+        CHECK(back.stripe_depth_pct == 25);
+        ImageFillParams plain;
+        plain.asset = "abc";
+        CHECK(plain.to_string().find("wm=") == std::string::npos);
+        CHECK(plain.to_string().find("wd=") == std::string::npos);
+    }
+}
