@@ -1,6 +1,7 @@
 #include "AdaptiveLayerMerge.hpp"
 
 #include "ClipperUtils.hpp"
+#include "Layer.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
 
@@ -60,6 +61,33 @@ ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter)
         append(core, std::move(opened));
     }
     return adaptive_printable_pieces(std::move(core), nozzle_diameter);
+}
+
+// BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.cpp. The plan records which steps a region gives up
+// as an explicit suppressed footprint, because recovering that from the raw slices afterwards would also report
+// the hairline by which every step inside a band differs from the band's anchor contour, and those are not holes.
+ExPolygons adaptive_suppressed_orphan_area(const Layer &layer)
+{
+    Polygons suppressed;
+    Polygons extruded;
+    for (const LayerRegion *layerm : layer.regions()) {
+        if (layerm->adaptive_merge_patches.empty()) {
+            polygons_append(extruded, to_polygons(layerm->slices.surfaces));
+            continue;
+        }
+        for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches) {
+            // Only an orphan carries an explicit footprint. The whole-region marker of a band is left out: the
+            // region's material there lies under another extrusion, which is what stands on that step.
+            if (patch.group_top && patch.area().empty() && patch.has_suppressed_area())
+                polygons_append(suppressed, to_polygons(patch.suppressed_area()));
+            else
+                polygons_append(extruded, to_polygons(patch.area()));
+        }
+    }
+    if (suppressed.empty())
+        return {};
+    // A slab spanning this step may still stand where another region lost its orphan.
+    return extruded.empty() ? union_ex(suppressed) : diff_ex(union_ex(suppressed), union_ex(extruded));
 }
 
 bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids)

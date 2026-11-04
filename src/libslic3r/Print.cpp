@@ -1,3 +1,4 @@
+#include "AdaptiveLayerMerge.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
@@ -1247,6 +1248,51 @@ unsigned int Print::num_object_instances() const
     for (const PrintObject *print_object : m_objects)
         instances += (unsigned int)print_object->instances().size();
     return instances;
+}
+
+// Mixed-layer-height band merge (BambuStudio v02.09.01.70 Print::uses_multiple_nozzle_diameters()).
+//
+// Bambu gates this on its project-only multi_nozzle_diameter_mode key and then on the real filament-to-nozzle
+// set. Edge has no such key and, per Lance's decision, deliberately does not get one: there is no config flag
+// and no UI toggle, so this is purely mixed-diameter detection and it is the ONLY gate on the band merge.
+//
+// Two more Bambu clauses are dropped, both because Edge's grid anchor is a different thing from Bambu's:
+//   * m_single_diameter_layering_nozzle - Bambu slices a single-diameter plate directly at that nozzle's band
+//     height. Edge has no such member (and no such step), so there is nothing to short-circuit on.
+//   * the "one coarse filament over the finer grid anchor" clause. In Bambu the anchor is the preset's primary
+//     nozzle (0.2 in multi-diameter mode), so a 0.4 preset on a 0.2 grid has to be compared against 0.2 here.
+//     In Edge the whole stack is sliced at the smallest USED nozzle (adaptive_band_reference_nozzle, the grid
+//     PR #850 plans on and equal_layering PR #849 syncs the prime tower to), so the anchor is by construction the
+//     smallest diameter in the list and that comparison can never be true. Keeping it would be dead code.
+//
+// Filaments are collected from print regions and object configs only. This is queried from inside the
+// per-object slicing steps, and support generation runs them in parallel, while Print::extruders() reaches
+// into the model volumes and updates their lazy paint caches on the way.
+void Print::used_printing_filaments(std::vector<unsigned int> &filaments) const
+{
+    filaments.clear();
+    for (const PrintRegion *region : m_print_regions)
+        region->collect_object_printing_extruders(*this, filaments);
+    for (const PrintObject *object : m_objects)
+        if (object->has_support_material()) {
+            // A "don't care" support filament prints with one of the filaments collected above.
+            if (object->config().support_filament > 0)
+                filaments.emplace_back((unsigned int) object->config().support_filament - 1);
+            if (object->config().support_interface_filament > 0)
+                filaments.emplace_back((unsigned int) object->config().support_interface_filament - 1);
+        }
+    sort_remove_duplicates(filaments);
+    // Mixed virtual filaments are recorded as their physical components; expand so a mixed filament printed
+    // through two different nozzles is seen as two diameters. Same expansion Print::extruders() applies.
+    m_mixed_filament_mgr.expand_0based_extruder_ids(filaments, m_config.filament_diameter.size());
+    sort_remove_duplicates(filaments);
+}
+
+bool Print::uses_multiple_nozzle_diameters() const
+{
+    std::vector<unsigned int> filaments;
+    this->used_printing_filaments(filaments);
+    return has_multiple_used_nozzle_diameters(m_config, filaments);
 }
 
 double Print::max_allowed_layer_height() const

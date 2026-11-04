@@ -2,9 +2,10 @@
 #define slic3r_AdaptiveLayerMerge_hpp_
 
 // Mixed-layer-height band planner, ported from BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.{hpp,cpp}
-// (AGPL-3.0). Standalone step 1: pure planning functions only. Nothing in the slicer calls them yet, so G-code is
-// unchanged. Left out for the later region-merge step: AdaptiveMergePatch and adaptive_suppressed_orphan_area(),
-// which need a LayerRegion member Edge does not have yet.
+// (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Nothing in the slicer
+// calls the planner yet, so G-code is unchanged. The extrusion half (combine_adaptive_infill(), the group-top
+// perimeter pass, and the G-code / ToolOrdering / SeamPlacer / Brim readers of LayerRegion::adaptive_merge_patches)
+// is the follow-up PR.
 
 #include "ExPolygon.hpp"
 
@@ -16,6 +17,7 @@
 
 namespace Slic3r {
 
+class Layer;
 class PrintConfig;
 
 struct AdaptiveLayerHeightRange
@@ -24,6 +26,50 @@ struct AdaptiveLayerHeightRange
     double max_height { 0. };
 
     bool contains(double height) const;
+};
+
+// One planned merge: a region extrudes `area()` once, on layer `top_idx`, at `merged_height`, and extrudes
+// nothing on the layers below it in the span.
+struct AdaptiveMergePatch
+{
+    // A region may carry multiple disjoint patches on one group-top layer. They keep the nozzle's common
+    // top_idx but may start at different bottom_idx values after local Z-conflict clipping.
+    size_t     bottom_idx { 0 };
+    size_t     top_idx { 0 };
+    // Only set on the copy owned by the group-top LayerRegion. Layer::id() may be offset against the
+    // PrintObject layer index (raft layers, bottom layers dropped by fix_slicing_errors), so the role
+    // has to be stored explicitly instead of being derived from top_idx.
+    bool       group_top { false };
+    double     merged_height { 0. };
+
+    // The retained contour is extruded on the group top and marks the swallowed footprint on lower layers.
+    const ExPolygons &area() const
+    {
+        static const ExPolygons empty;
+        return m_area ? *m_area : empty;
+    }
+
+    void set_area(ExPolygons area) { m_area = std::make_shared<const ExPolygons>(std::move(area)); }
+
+    // Geometry that could not be assigned to a printable slab. It is intentionally separate from area():
+    // the patch must suppress fill in this footprint without generating walls or claiming Z occupancy.
+    const ExPolygons &suppressed_area() const
+    {
+        static const ExPolygons empty;
+        return m_suppressed_area ? *m_suppressed_area : empty;
+    }
+
+    void set_suppressed_area(ExPolygons area)
+    {
+        m_suppressed_area = std::make_shared<const ExPolygons>(std::move(area));
+    }
+
+    bool has_suppressed_area() const { return bool(m_suppressed_area); }
+
+private:
+    // All copies stored across a merge span share the same immutable geometry.
+    std::shared_ptr<const ExPolygons> m_area;
+    std::shared_ptr<const ExPolygons> m_suppressed_area;
 };
 
 // One band of the layer stack, [bottom_idx, top_idx] inclusive. A nozzle prints the band as a single
@@ -55,6 +101,10 @@ ExPolygons adaptive_printable_pieces(ExPolygons pieces, double nozzle_diameter);
 // fits into. A sloped wall's fringe that widens at one corner passes the yes/no test as a whole, and its
 // hairline tails would otherwise become a patch of their own and be walled as fragmented thin lines.
 ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter);
+
+// The footprint of a layer whose orphans were suppressed: sliced, but extruded by no region. What rests on it
+// is not supported there.
+ExPolygons adaptive_suppressed_orphan_area(const Layer &layer);
 
 // Id convention (kept deliberately, documented rather than unified): the vector-taking gates below
 // (has_multiple_used_nozzle_diameters, adaptive_band_reference_nozzle) take 0-based filament indices, as Bambu's
@@ -135,6 +185,13 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 // comparing are enforced here instead, per band, so every nozzle keeps its own window while all of them stay on the
 // one shared grid the wipe tower syncs to.
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id);
+
+// Test-only accessor for PrintObject::compute_adaptive_merge_groups(). The planner has no production caller yet
+// (it is wired into the perimeter step by the follow-up PR), so a unit test reaching it through this friend is the
+// only way to exercise it. No such test is written yet: the planner needs a sliced print, and the only slicing
+// harness here (tests/fff_print) has to run on a Mac/Windows gate, so the test has to be developed against a build
+// this PR's authoring step did not have. The friend is kept so that test can be added without changing Print.hpp.
+struct AdaptiveMergePlanAccess;
 
 } // namespace Slic3r
 

@@ -1,3 +1,4 @@
+#include "AdaptiveLayerMerge.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
 #include "DeterminismDump.hpp"
@@ -5946,6 +5947,723 @@ void PrintObject::combine_infill()
             }
         }
     }
+}
+
+// Decide which layers each wall region keeps. The object is sliced at the layer height of the smallest
+// nozzle of the print; a larger nozzle then keeps one contour out of every band and drops the ones below
+// it, instead of merging them into it. Bands are a global grid shared by every region using the same
+// diameter, so two such regions never straddle each other's band boundaries.
+//
+// Ported from BambuStudio v02.09.01.70 src/libslic3r/PrintObject.cpp:4312-4998. Edge differences, all
+// deliberate:
+//   * The gate is Print::uses_multiple_nozzle_diameters(), which in Edge is pure mixed-diameter detection
+//     (no multi_nozzle_diameter_mode key, no UI toggle - Lance's decision).
+//   * The band reference nozzle is Edge's adaptive_band_reference_nozzle() over Print::used_printing_filaments(),
+//     i.e. the smallest nozzle the plate actually prints with. Bambu reads layer_grid_nozzle_diameter() (the
+//     preset's 0.2 layer-grid nozzle) and only falls back to the finest wall nozzle when the preset has none.
+//     Edge has no separate layer-grid nozzle - the stack is sliced at the smallest USED nozzle - so the anchor
+//     and the grid are the same thing here. That keeps the planner, PR #850's band sizing and the prime-tower
+//     grid of equal_layering (#849) on one number. The whole plate still slices on that one shared grid, which
+//     is exactly the contract #849 requires.
+//   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
+//     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
+//     count (Bambu's get_at() pitfall).
+//   * It has NO production caller in this PR, so G-code is unchanged; see the declaration in Print.hpp.
+//
+// Id conventions, per the F3 precedent of PR #850: the filament ids in here are 1-based when handed to
+// nozzle_diameter_for_filament() (Edge-wide convention) and 0-based everywhere else.
+void PrintObject::compute_adaptive_merge_groups()
+{
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions())
+            layerm->adaptive_merge_patches.clear();
+
+    // Only meaningful when different nozzle diameters are present.
+    if (! this->print()->uses_multiple_nozzle_diameters())
+        return;
+
+    // m_slicing_params.layer_height is the fine grid this object was sliced on, which is what a band size is
+    // measured in. Populate it if a caller reached the planner before the slicing step filled it in.
+    this->update_slicing_parameters();
+
+    const PrintConfig &print_config = this->print()->config();
+    const size_t       region_count = this->num_printing_regions();
+    const size_t       layer_count  = m_layers.size();
+    if (region_count == 0 || layer_count < 2)
+        return;
+
+    std::vector<double> layer_heights;
+    layer_heights.reserve(layer_count);
+    for (const Layer *layer : m_layers)
+        layer_heights.emplace_back(layer->height);
+
+    std::vector<double> region_nozzles(region_count, 0.);
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        const PrintRegionConfig &config = this->printing_region(region_id).config();
+        const unsigned int filament = (unsigned int) config.wall_filament.value;
+        region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
+    }
+    std::vector<unsigned int> used_filaments;
+    this->print()->used_printing_filaments(used_filaments);
+    const double min_nozzle = adaptive_band_reference_nozzle(print_config, used_filaments);
+    if (min_nozzle <= EPSILON)
+        return;
+
+    // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
+    // pass has already aligned painted ownership to each band's anchor contour.
+    const std::vector<uint8_t> band_tops;
+
+    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] layers=" << layer_count << " min_nozzle=" << min_nozzle
+                             << " band_tops=none (fixed nozzle ladders)";
+
+    // Plan every region on the fixed ladder shared by its nozzle diameter, then arbitrate the resulting
+    // slabs from bottom to top. Colours never create a new ladder phase.
+    struct MergeEvent {
+        size_t                   region_id;
+        double                   nozzle;
+        AdaptiveLayerHeightRange range;
+        AdaptiveLayerBand        band;
+        size_t                    source_bottom_idx;
+        bool                      merged;
+    };
+    std::vector<MergeEvent> events;
+    auto span_height = [&layer_heights](size_t bottom_idx, size_t top_idx) {
+        double height = 0.;
+        for (size_t layer_idx = bottom_idx; layer_idx <= top_idx; ++ layer_idx)
+            height += layer_heights[layer_idx];
+        return height;
+    };
+    // Keep the previous slab's floor and the tail's top fixed. Borrow only enough steps from the
+    // previous slab to make the tail printable, e.g. 0.5 + 0.1 becomes 0.4 + 0.2 for a 0.8 nozzle.
+    // Callers try this only once growing a neighbour inside the preferred window has failed.
+    // A slab resting on the bed belongs to the first band, whose height is fixed; it never donates steps.
+    auto split_before_tail = [&](size_t bottom_idx, size_t previous_top_idx, size_t tail_top_idx,
+                                 const AdaptiveLayerHeightRange &range, size_t &split_top_idx) {
+        if (bottom_idx == 0 || bottom_idx >= previous_top_idx || previous_top_idx >= tail_top_idx)
+            return false;
+        double tail_height = span_height(previous_top_idx + 1, tail_top_idx);
+        if (tail_height >= range.min_height - EPSILON)
+            return false;
+        size_t tail_bottom_idx = previous_top_idx + 1;
+        while (tail_bottom_idx > bottom_idx && tail_height < range.min_height - EPSILON)
+            tail_height += layer_heights[-- tail_bottom_idx];
+        if (tail_bottom_idx == bottom_idx || ! range.contains(tail_height) ||
+            ! range.contains(span_height(bottom_idx, tail_bottom_idx - 1)))
+            return false;
+        split_top_idx = tail_bottom_idx - 1;
+        return true;
+    };
+    // A run of steps a region owns that no band of its nozzle could take. It is carried to the end of
+    // planning as an explicit record instead of being suppressed right away, because absorbing it needs to
+    // know the space the other nozzles occupy. Recovering it afterwards by subtracting the planned
+    // extrusions from the raw slices would also report the hairline by which every step inside a band
+    // differs from that band's anchor contour, and those hairlines are not holes.
+    struct PendingOrphan {
+        size_t                   region_id;
+        AdaptiveLayerHeightRange range;
+        // The relaxed ceiling, 1.0D. Passing the preferred 0.7D is the last resort before giving the run away.
+        double                   max_height;
+        size_t                   bottom_idx;
+        size_t                   top_idx;
+        // "no-band" - no band of this nozzle covers the step. "too-thin" - a band covers it, but everything
+        // under the step is occupied and the clear span left is thinner than this nozzle can extrude.
+        const char              *source;
+        // What was lost. Recovery takes back only the column over it, so the rest of the slab that takes it
+        // keeps its own span.
+        ExPolygons               area;
+        // A too-thin bottom face resting on nothing. It is dropped rather than absorbed: the slab above keeps
+        // its own floor, and the step above the face is typed as the bridge over it instead.
+        bool                     floating { false };
+    };
+    std::vector<PendingOrphan> pending_orphans;
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        const double nozzle = region_nozzles[region_id];
+        if (nozzle <= EPSILON)
+            continue;
+        const AdaptiveLayerHeightRange range = adaptive_layer_height_range(nozzle);
+        const size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height);
+
+        std::vector<unsigned char> has_material(layer_count, 0);
+        for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
+            has_material[layer_idx] = ! m_layers[layer_idx]->get_region(region_id)->raw_slices.empty();
+
+        if (band_size < 2) {
+            // This nozzle extrudes the slicing grid itself, so it prints every layer exactly as sliced.
+            for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
+                if (has_material[layer_idx])
+                    events.push_back({ region_id, nozzle, range,
+                                       { layer_idx, layer_idx, layer_heights[layer_idx] },
+                                       layer_idx, false });
+            BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id << " nozzle=" << nozzle
+                                     << " band_size=1 -> prints every layer";
+            continue;
+        }
+
+        // One diameter owns one ladder. Region/colour start layers do not create a new phase.
+        const std::vector<AdaptiveLayerBand> bands =
+            build_adaptive_layer_bands(layer_heights, band_size, range, band_tops);
+
+        std::vector<AdaptiveLayerBand> live_bands;
+        std::vector<unsigned char>     covered(layer_count, 0);
+        for (const AdaptiveLayerBand &band : bands) {
+            AdaptiveLayerBand live = band;
+            // The first band is a snapshot of the object base and keeps its grid top whatever it holds.
+            if (band.bottom_idx != 0 &&
+                ! pull_adaptive_band_top_to_material(live, layer_heights, range, has_material))
+                continue;
+            for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx; ++ layer_idx)
+                covered[layer_idx] = 1;
+            live_bands.emplace_back(live);
+        }
+
+        // Layers this region owns that no band covers: a colour tail ending inside a band, or a step the
+        // ladder had to bridge with a single-layer group. A run the nozzle can extrude gets bands of its own.
+        // Printing a thinner one as sliced is what put a 0.1 mm extrusion under a 0.6 nozzle, so it is folded
+        // into a neighbouring band while that band's height stays printable, and otherwise recorded as an
+        // orphan for the resolution pass below.
+        std::string orphans;
+        for (size_t layer_idx = 0; layer_idx < layer_count; ) {
+            if (covered[layer_idx] || ! has_material[layer_idx]) {
+                ++ layer_idx;
+                continue;
+            }
+            size_t run_top = layer_idx;
+            while (run_top + 1 < layer_count && ! covered[run_top + 1] && has_material[run_top + 1])
+                ++ run_top;
+            orphans += "[" + std::to_string(layer_idx) + "," + std::to_string(run_top) + "]";
+
+            // A run this nozzle can extrude on its own is not thin, it is just off the ladder: 0.1 under a 0.4
+            // nozzle. It is cut into printable bands of its own, which then go through arbitration like every
+            // other band. Only a run thinner than one extrusion is left to the repairs below.
+            std::vector<std::pair<size_t, size_t>> own_bands;
+            if (split_adaptive_layer_span(layer_heights, layer_idx, run_top, band_size, range, own_bands)) {
+                for (const std::pair<size_t, size_t> &own : own_bands)
+                    live_bands.push_back({ own.first, own.second, span_height(own.first, own.second) });
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    covered[idx] = 1;
+                layer_idx = run_top + 1;
+                continue;
+            }
+
+            AdaptiveLayerBand *below = nullptr;
+            AdaptiveLayerBand *above = nullptr;
+            for (AdaptiveLayerBand &band : live_bands) {
+                if (layer_idx > 0 && band.top_idx == layer_idx - 1)
+                    below = &band;
+                if (band.bottom_idx == run_top + 1)
+                    above = &band;
+            }
+            // Growing the band above pulls its floor down; growing the one below lifts this colour's top face
+            // by the run. Either keeps the material, so prefer them over giving the run away. The band above
+            // goes first: it keeps its group top, so no new print Z appears off the ladder.
+            auto absorb = [&](double ceiling) {
+                if (above != nullptr) {
+                    const double height = span_height(layer_idx, above->top_idx);
+                    if (height >= range.min_height - EPSILON && height <= ceiling + EPSILON) {
+                        above->bottom_idx    = layer_idx;
+                        above->merged_height = height;
+                        return true;
+                    }
+                }
+                if (below != nullptr) {
+                    const double height = span_height(below->bottom_idx, run_top);
+                    if (height >= range.min_height - EPSILON && height <= ceiling + EPSILON) {
+                        below->top_idx       = run_top;
+                        below->merged_height = height;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            // Re-cut the band below and the run into two slabs inside the window, keeping both outer faces.
+            auto split = [&]() {
+                size_t split_top_idx;
+                if (below == nullptr ||
+                    ! split_before_tail(below->bottom_idx, below->top_idx, run_top, range, split_top_idx))
+                    return false;
+                below->top_idx       = split_top_idx;
+                below->merged_height = span_height(below->bottom_idx, split_top_idx);
+                // Invalidates below and above, so nothing may follow a successful split.
+                live_bands.push_back({ split_top_idx + 1, run_top, span_height(split_top_idx + 1, run_top) });
+                return true;
+            };
+            // Heights inside the preferred window come first, and a whole slab before a cut one: both neighbours
+            // are offered the preferred ceiling, then the run may be re-cut with the band below, and only then
+            // may a neighbour grow to the relaxed ceiling. Same order as the orphan resolution below.
+            if (absorb(range.max_height) || split() || absorb(nozzle))
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    covered[idx] = 1;
+            else {
+                Polygons run_area;
+                for (size_t idx = layer_idx; idx <= run_top; ++ idx)
+                    polygons_append(run_area, to_polygons(m_layers[idx]->get_region(region_id)->raw_slices));
+                pending_orphans.push_back({ region_id, range, nozzle, layer_idx, run_top, "no-band",
+                                            union_ex(run_area) });
+            }
+            layer_idx = run_top + 1;
+        }
+
+        std::string span;
+        for (const AdaptiveLayerBand &band : live_bands) {
+            span += "[" + std::to_string(band.bottom_idx) + "," + std::to_string(band.top_idx) + "]";
+            events.push_back({ region_id, nozzle, range, band, band.bottom_idx, true });
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id << " nozzle=" << nozzle
+                                 << " band_size=" << band_size
+                                 << " range=[" << range.min_height << "," << range.max_height << "]"
+                                 << " bands=" << live_bands.size() << " " << span
+                                 << " orphans=" << (orphans.empty() ? "none" : orphans);
+    }
+    // Bottom to top for merged slabs. Outside the layer-0 reservation of a first band, fixed-grid events are
+    // registered as immutable occupancy before this arbitration, so a coarse band cannot claim a layer that
+    // a fine nozzle will extrude later. Where two merged ladders start together the coarser one still wins.
+    std::stable_sort(events.begin(), events.end(), [](const MergeEvent &lhs, const MergeEvent &rhs) {
+        if (lhs.band.bottom_idx != rhs.band.bottom_idx)
+            return lhs.band.bottom_idx < rhs.band.bottom_idx;
+        if (std::abs(lhs.nozzle - rhs.nozzle) > EPSILON)
+            return lhs.nozzle > rhs.nozzle;
+        if (lhs.band.top_idx != rhs.band.top_idx)
+            return lhs.band.top_idx < rhs.band.top_idx;
+        return lhs.region_id < rhs.region_id;
+    });
+
+    // Physical occupancy on the fine slicing grid. A merged patch occupies every step of its Z span even
+    // though its G-code is emitted only on the group-top layer.
+    std::vector<ExPolygons> occupied(layer_count);
+    auto occupy = [&occupied](size_t layer_idx, const ExPolygons &area) {
+        if (area.empty())
+            return;
+        Polygons combined = to_polygons(occupied[layer_idx]);
+        polygons_append(combined, to_polygons(area));
+        occupied[layer_idx] = union_ex(combined);
+    };
+    struct FirstBandClaim {
+        size_t     region_id;
+        size_t     top_idx;
+        ExPolygons area;
+    };
+    std::vector<FirstBandClaim> first_band_claims;
+    // Resolved slabs, kept in planning order until the orphan resolution below can no longer change them.
+    struct PlannedPatch {
+        size_t             region_id;
+        // The band's planned floor. Marker copies start here even when the patch itself was clipped higher.
+        size_t             store_bottom_idx;
+        AdaptiveMergePatch patch;
+    };
+    std::vector<PlannedPatch> planned;
+
+    // The first coarse band is anchored to its true layer-0 contour, which owns that footprint throughout
+    // the band. Reserve it before registering fixed-grid regions; later coarse bands still yield to those
+    // immutable fine-nozzle extrusions.
+    std::vector<ExPolygons> first_band_reservations(layer_count);
+    for (const MergeEvent &event : events) {
+        if (! event.merged || event.band.bottom_idx != 0)
+            continue;
+        const ExPolygons &anchor = m_layers.front()->get_region(event.region_id)->raw_slices;
+        if (anchor.empty())
+            continue;
+        for (size_t layer_idx = 0; layer_idx <= event.band.top_idx; ++ layer_idx) {
+            Polygons combined = to_polygons(first_band_reservations[layer_idx]);
+            polygons_append(combined, to_polygons(anchor));
+            first_band_reservations[layer_idx] = union_ex(combined);
+        }
+    }
+
+    // Fixed-grid regions are emitted exactly as sliced and have no later clipping pass. Register their
+    // unreserved footprint first, including events whose layer lies inside a non-first merged band's span.
+    for (const MergeEvent &event : events) {
+        if (event.merged)
+            continue;
+        ExPolygons area = m_layers[event.band.top_idx]->get_region(event.region_id)->raw_slices;
+        if (! first_band_reservations[event.band.top_idx].empty())
+            area = diff_ex(area, first_band_reservations[event.band.top_idx]);
+        occupy(event.band.top_idx, area);
+    }
+
+    for (const MergeEvent &event : events) {
+        m_print->throw_if_canceled();
+        const size_t region_id = event.region_id;
+        if (! event.merged)
+            continue;
+
+        const AdaptiveLayerBand &band       = event.band;
+        const bool               first_band = band.bottom_idx == 0;
+        // Planning already resolved the top against the material this region owns.
+        const AdaptiveLayerBand &live = band;
+        if (first_band && m_layers.front()->get_region(region_id)->raw_slices.empty()) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = live.bottom_idx;
+            patch.top_idx       = live.top_idx;
+            patch.merged_height = live.merged_height;
+            patch.set_area({});
+            for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx; ++ layer_idx) {
+                AdaptiveMergePatch stored = patch;
+                stored.group_top = layer_idx == live.top_idx;
+                m_layers[layer_idx]->get_region(region_id)->adaptive_merge_patches.emplace_back(std::move(stored));
+            }
+            continue;
+        }
+        // The first band is a snapshot of the true first layer. Later bands use their top contour.
+        const size_t anchor_idx  = first_band ? 0 : live.top_idx;
+        const ExPolygons  anchor = m_layers[anchor_idx]->get_region(region_id)->raw_slices;
+        const double top_area    = ::Slic3r::area(anchor) * SCALING_FACTOR * SCALING_FACTOR;
+
+        // A band shows one contour over its whole Z span, so a volume whose top face falls inside the band
+        // is not in that contour at all: on the steps it does occupy it would be neither walled nor filled.
+        // Give what ends inside the band its own group top, on the highest step where it still exists.
+        //
+        // The fringe by which a shrinking shape - a cone, a dome - exceeds the contour above it is not such a
+        // volume: it cannot hold a bead, and the ladder has always accepted it as inherent underfill. Only
+        // what this nozzle could really lay a bead into is worth a ceiling of its own.
+        //
+        // The first band is excluded. Its anchor is the object base by design, and pulling side-wall
+        // material up into it is exactly what that choice exists to prevent.
+        struct Slab {
+            size_t     top_idx;
+            ExPolygons area;
+        };
+        std::vector<Slab> slabs { { live.top_idx, anchor } };
+        if (! first_band) {
+            Polygons inside;
+            for (size_t layer_idx = live.bottom_idx; layer_idx < live.top_idx; ++ layer_idx)
+                polygons_append(inside, to_polygons(m_layers[layer_idx]->get_region(region_id)->raw_slices));
+            ExPolygons ends_inside =
+                adaptive_printable_core(diff_ex(union_ex(inside), anchor), event.nozzle);
+            // Top down, so each piece is claimed by the highest step it still exists on.
+            for (size_t layer_idx = live.top_idx; layer_idx-- > live.bottom_idx && ! ends_inside.empty();) {
+                ExPolygons here = adaptive_printable_core(
+                    intersection_ex(ends_inside, m_layers[layer_idx]->get_region(region_id)->raw_slices),
+                    event.nozzle);
+                if (here.empty())
+                    continue;
+                ends_inside = diff_ex(ends_inside, here);
+                slabs.push_back({ layer_idx, std::move(here) });
+            }
+        }
+
+        std::vector<AdaptiveMergePatch> patches;
+        // Too-thin orphans recorded for this band, kept to decide whether the empty marker is still needed.
+        struct BandOrphan {
+            size_t     bottom_idx;
+            size_t     top_idx;
+            ExPolygons area;
+        };
+        std::vector<BandOrphan> band_orphans;
+        for (const Slab &slab : slabs) {
+            ExPolygons area = occupied[slab.top_idx].empty() ?
+                slab.area : diff_ex(slab.area, occupied[slab.top_idx]);
+
+            // Partition the XY footprint by the highest occupied step underneath it. Every piece keeps this
+            // slab's group top, but starts immediately above its own local obstruction. This avoids both
+            // overlap and the gap that would result from raising the complete patch for a partial conflict.
+            ExPolygons assigned;
+            // The first step whose clear span is too thin to extrude. From there up this slab can place
+            // nothing, so whatever footprint is still unassigned has lost its owner.
+            size_t     thin_bottom_idx = slab.top_idx + 1;
+            // A merged extrusion is laid onto whatever is below its floor, so it cannot reach down into a step
+            // that holds no object material under its footprint: a colour starting on a bridge in the middle
+            // of a band would otherwise hang below the real bottom face. The first band rests on the bed.
+            // Fringes too narrow to hold a bead of this nozzle are the usual underfill of a sloped wall.
+            //
+            // Only a face too thin for this nozzle is held off, and then dropped as an orphan. A face that could be
+            // extruded on its own is not cut out of the slab: a patch of its own would wall it off from the
+            // material it rests against, so it hangs from the band floor with the rest of the contour.
+            std::vector<ExPolygons> unsupported(slab.top_idx + 1);
+            if (! first_band && ! area.empty()) {
+                Polygons thin_faces;
+                for (size_t layer_idx = live.bottom_idx; layer_idx < slab.top_idx; ++ layer_idx) {
+                    unsupported[layer_idx] = adaptive_printable_pieces(
+                        diff_ex(area, m_layers[layer_idx]->lslices), event.nozzle);
+                    // Missing on this step, so it starts on the step above at the earliest.
+                    if (span_height(layer_idx + 1, slab.top_idx) < event.range.min_height - EPSILON)
+                        polygons_append(thin_faces, to_polygons(unsupported[layer_idx]));
+                }
+                const ExPolygons thin_area = union_ex(thin_faces);
+                for (size_t layer_idx = live.bottom_idx; layer_idx < slab.top_idx; ++ layer_idx)
+                    unsupported[layer_idx] = thin_area.empty() ? ExPolygons{} : adaptive_printable_pieces(
+                        intersection_ex(unsupported[layer_idx], thin_area), event.nozzle);
+            }
+            for (size_t bottom_idx = live.bottom_idx; bottom_idx <= slab.top_idx && ! area.empty(); ++ bottom_idx) {
+                const double height = span_height(bottom_idx, slab.top_idx);
+                // A band that absorbed an orphan may exceed the preferred 0.7D ceiling. Keep the same 1.0D
+                // ceiling used when it was accepted; otherwise it is turned into an empty patch here.
+                if (height > event.nozzle + EPSILON)
+                    continue;
+                if (height < event.range.min_height - EPSILON) {
+                    thin_bottom_idx = bottom_idx;
+                    break;
+                }
+
+                Polygons blockers;
+                for (size_t layer_idx = bottom_idx; layer_idx < slab.top_idx; ++ layer_idx) {
+                    polygons_append(blockers, to_polygons(occupied[layer_idx]));
+                    polygons_append(blockers, to_polygons(unsupported[layer_idx]));
+                }
+                ExPolygons clear = blockers.empty() ? area : diff_ex(area, union_ex(blockers));
+                if (! assigned.empty())
+                    clear = diff_ex(clear, assigned);
+                if (clear.empty())
+                    continue;
+
+                AdaptiveMergePatch patch;
+                patch.bottom_idx    = bottom_idx;
+                patch.top_idx       = slab.top_idx;
+                patch.merged_height = height;
+                patch.set_area(std::move(clear));
+                Polygons combined = to_polygons(assigned);
+                polygons_append(combined, to_polygons(patch.area()));
+                assigned = union_ex(combined);
+                patches.emplace_back(std::move(patch));
+            }
+
+            // Steps the partition had to give up on are the second way a step loses its owner: a slab does
+            // cover them, but everything underneath is occupied and the clear span left is below this
+            // nozzle's minimum. Recorded for the same reason as a step no band could take - the alternative
+            // is rediscovering it later from the raw slices, where it cannot be told from a fringe.
+            const ExPolygons unassigned = diff_ex(area, assigned);
+            if (thin_bottom_idx <= slab.top_idx && ! unassigned.empty()) {
+                const bool floating = thin_bottom_idx > 0 && ! adaptive_printable_pieces(
+                    diff_ex(unassigned, m_layers[thin_bottom_idx - 1]->lslices), event.nozzle).empty();
+                pending_orphans.push_back({ region_id, event.range, event.nozzle,
+                                            thin_bottom_idx, slab.top_idx, "too-thin", unassigned, floating });
+                band_orphans.push_back({ thin_bottom_idx, slab.top_idx, unassigned });
+            }
+
+            BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id
+                                     << " band=[" << band.bottom_idx << "," << band.top_idx << "]"
+                                     << " slab=[" << live.bottom_idx << "," << slab.top_idx << "]"
+                                     << (slab.top_idx == live.top_idx ? " anchor" : " local_top")
+                                     << " raw_area="
+                                     << ::Slic3r::area(slab.area) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " after_occupied="
+                                     << ::Slic3r::area(area) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " unassigned="
+                                     << ::Slic3r::area(unassigned) * SCALING_FACTOR * SCALING_FACTOR
+                                     << " thin_from=" << (thin_bottom_idx > slab.top_idx ?
+                                                          std::string("none") : std::to_string(thin_bottom_idx))
+                                     << (area.empty() ? " DROPPED" : " KEPT");
+        }
+
+        // The empty marker suppresses the whole region over the band. It can be left out only when every piece
+        // of material the region holds inside the band belongs to one of its too-thin orphans: orphan resolution
+        // then absorbs or suppresses all of it, while the marker would void the orphan's own fill (a bridge,
+        // say) before the slab absorbing it could lift it. Anything else - material under another nozzle's
+        // occupancy, a fringe no slab took - would otherwise fall back to the base layer height.
+        bool orphans_own_band = ! band_orphans.empty();
+        for (size_t layer_idx = live.bottom_idx; layer_idx <= live.top_idx && orphans_own_band; ++ layer_idx) {
+            const ExPolygons &raw = m_layers[layer_idx]->get_region(region_id)->raw_slices;
+            if (raw.empty())
+                continue;
+            Polygons owned;
+            for (const BandOrphan &orphan : band_orphans)
+                if (orphan.bottom_idx <= layer_idx && layer_idx <= orphan.top_idx)
+                    polygons_append(owned, to_polygons(orphan.area));
+            // Only numerical slivers between the two polygonisations may be left over.
+            orphans_own_band = ! owned.empty() &&
+                opening_ex(diff_ex(raw, union_ex(owned)), float(scale_(0.01))).empty();
+        }
+        if (patches.empty() && ! orphans_own_band) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = live.bottom_idx;
+            patch.top_idx       = live.top_idx;
+            patch.merged_height = live.merged_height;
+            patch.set_area({});
+            patches.emplace_back(std::move(patch));
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] region=" << region_id
+                                 << " band=[" << band.bottom_idx << "," << band.top_idx << "]"
+                                 << " live=[" << live.bottom_idx << "," << live.top_idx << "]"
+                                 << " top_raw_area=" << top_area
+                                 << " slabs=" << slabs.size()
+                                 << " patches=" << patches.size();
+
+        for (AdaptiveMergePatch &patch : patches) {
+            for (size_t layer_idx = patch.bottom_idx; layer_idx <= patch.top_idx; ++ layer_idx)
+                occupy(layer_idx, patch.area());
+
+            // Held back until orphan resolution below has had its say: it may still drop a slab's floor,
+            // and the marker layers under a locally clipped patch have to grow with it.
+            planned.push_back({ region_id, event.source_bottom_idx, std::move(patch) });
+        }
+    }
+
+    // Resolve the runs recorded while planning, in the same order as a run is resolved during planning:
+    // heights inside the preferred window come first, a whole slab before a cut one, and the relaxed 1.0D
+    // ceiling is the last resort before giving the run away.
+    //   1. the slab above lowers its floor over the run, within 0.7D;
+    //   2. the slab below lifts its top over the run, within 0.7D;
+    //   3. the run is re-cut with the slab below into two slabs inside the window;
+    //   4. as 1. and 2., up to the relaxed ceiling.
+    // A floating face skips all of them: the slab above keeps its floor and bridges over it.
+    //
+    // A run nobody can absorb keeps its empty group top. That marker is the established "nothing is
+    // extruded here": it clears the perimeters and makes combine_adaptive_infill() void the fill, so the
+    // step cannot fall back to a base-grid extrusion this nozzle is unable to lay down.
+    enum class Recovery { FromAbove, FromBelow, Split };
+    for (const PendingOrphan &orphan : pending_orphans) {
+        m_print->throw_if_canceled();
+        ExPolygons remaining = orphan.area;
+
+        // Take the run back column by column into a slab of its region touching it. Only the column over the
+        // lost footprint changes; the rest of that slab keeps its own span.
+        //   FromAbove - the slab above lowers the column's floor to the run's bottom, keeping its group top.
+        //   FromBelow - the slab below lifts the column's top to the run's top, keeping its floor.
+        //   Split     - the column is re-cut with the slab below into two slabs inside the window, keeping
+        //               the slab's floor and the run's top.
+        // A slab resting on the bed belongs to the first band, whose height is fixed; it is never lifted or cut.
+        auto recover = [&](Recovery mode, double ceiling) {
+            const size_t planned_count = planned.size();
+            for (size_t planned_idx = 0; planned_idx < planned_count && ! remaining.empty(); ++ planned_idx) {
+                PlannedPatch &donor = planned[planned_idx];
+                if (donor.region_id != orphan.region_id || donor.patch.area().empty())
+                    continue;
+                if (mode == Recovery::FromAbove ? donor.patch.bottom_idx != orphan.top_idx + 1 :
+                        donor.patch.bottom_idx == 0 || donor.patch.top_idx + 1 != orphan.bottom_idx)
+                    continue;
+                size_t split_top_idx = 0;
+                if (mode == Recovery::Split) {
+                    if (! split_before_tail(donor.patch.bottom_idx, donor.patch.top_idx, orphan.top_idx,
+                                            orphan.range, split_top_idx))
+                        continue;
+                } else if (mode == Recovery::FromAbove ?
+                               span_height(orphan.bottom_idx, donor.patch.top_idx) > ceiling + EPSILON :
+                               span_height(donor.patch.bottom_idx, orphan.top_idx) > ceiling + EPSILON)
+                    continue;
+
+                m_print->throw_if_canceled();
+                ExPolygons recovered = intersection_ex(donor.patch.area(), remaining);
+                // The column has to exist on every step from where a new group top starts: the run's bottom, or
+                // the split when cut, where the lower slab now ends and shows its contour. Below that the donor
+                // already holds it. Only the run is checked against other occupancy: the donor owns its own steps.
+                // A nozzle cannot dip below an extrusion standing on the run, so a conflict only removes its own
+                // part of the column.
+                const size_t check_from = mode == Recovery::Split ? split_top_idx : orphan.bottom_idx;
+                for (size_t idx = check_from; idx <= orphan.top_idx && ! recovered.empty(); ++ idx) {
+                    recovered = intersection_ex(recovered, m_layers[idx]->get_region(orphan.region_id)->raw_slices);
+                    if (idx >= orphan.bottom_idx && ! occupied[idx].empty())
+                        recovered = diff_ex(recovered, occupied[idx]);
+                }
+                recovered = adaptive_printable_pieces(std::move(recovered), region_nozzles[orphan.region_id]);
+                if (recovered.empty())
+                    continue;
+
+                std::vector<PlannedPatch> pieces;
+                if (mode == Recovery::Split) {
+                    PlannedPatch lower = donor;
+                    lower.patch.top_idx       = split_top_idx;
+                    lower.patch.merged_height = span_height(lower.patch.bottom_idx, split_top_idx);
+                    lower.patch.set_area(recovered);
+                    pieces.emplace_back(std::move(lower));
+                }
+                PlannedPatch column = donor;
+                if (mode == Recovery::FromAbove)
+                    column.patch.bottom_idx = orphan.bottom_idx;
+                else {
+                    if (mode == Recovery::Split) {
+                        column.store_bottom_idx = split_top_idx + 1;
+                        column.patch.bottom_idx = split_top_idx + 1;
+                    }
+                    column.patch.top_idx = orphan.top_idx;
+                }
+                column.patch.merged_height = span_height(column.patch.bottom_idx, column.patch.top_idx);
+                column.patch.set_area(recovered);
+                pieces.emplace_back(std::move(column));
+
+                ExPolygons unchanged = diff_ex(donor.patch.area(), recovered);
+                remaining = diff_ex(remaining, recovered);
+                // Occupancy outside the run is unchanged; only the run is filled in.
+                for (size_t idx = orphan.bottom_idx; idx <= orphan.top_idx; ++ idx)
+                    occupy(idx, recovered);
+                const AdaptiveMergePatch &taken = pieces.back().patch;
+                if (mode == Recovery::Split)
+                    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                             << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                             << " " << orphan.source << " rebalanced from below, split=" << split_top_idx
+                                             << " h=" << pieces.front().patch.merged_height << "+" << taken.merged_height;
+                else
+                    BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                             << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                             << " " << orphan.source
+                                             << (mode == Recovery::FromAbove ? " absorbed from above into [" :
+                                                                               " lifted from below into [")
+                                             << taken.bottom_idx << "," << taken.top_idx << "] h=" << taken.merged_height
+                                             << (taken.merged_height > orphan.range.max_height + EPSILON ?
+                                                 " RELAXED_MAX" : "");
+                // The donor itself is reused for the first piece, or keeps what the column left of it.
+                // Do not use donor after appending: growing planned may invalidate the reference.
+                size_t first_new = 0;
+                if (unchanged.empty())
+                    donor = std::move(pieces[first_new ++]);
+                else
+                    donor.patch.set_area(std::move(unchanged));
+                for (size_t idx = first_new; idx < pieces.size(); ++ idx)
+                    planned.emplace_back(std::move(pieces[idx]));
+            }
+            return remaining.empty();
+        };
+
+        if (! orphan.floating &&
+            (recover(Recovery::FromAbove, orphan.range.max_height) ||
+             recover(Recovery::FromBelow, orphan.range.max_height) ||
+             recover(Recovery::Split, orphan.range.max_height) ||
+             recover(Recovery::FromAbove, orphan.max_height) ||
+             recover(Recovery::FromBelow, orphan.max_height)))
+            continue;
+
+        for (size_t idx = orphan.bottom_idx; idx <= orphan.top_idx; ++ idx) {
+            AdaptiveMergePatch patch;
+            patch.bottom_idx    = idx;
+            patch.top_idx       = idx;
+            patch.group_top     = true;
+            patch.merged_height = layer_heights[idx];
+            patch.set_area({});
+            patch.set_suppressed_area(intersection_ex(
+                remaining, m_layers[idx]->get_region(orphan.region_id)->raw_slices));
+            m_layers[idx]->get_region(orphan.region_id)->adaptive_merge_patches.emplace_back(std::move(patch));
+        }
+        BOOST_LOG_TRIVIAL(debug) << "[adaptive_merge] orphan region=" << orphan.region_id
+                                 << " [" << orphan.bottom_idx << "," << orphan.top_idx << "]"
+                                 << " " << orphan.source << (orphan.floating ? " floating" : "") << " suppressed";
+    }
+
+    for (const PlannedPatch &planned_patch : planned) {
+        // Orphan recovery may lower a patch after the initial partition. Build claims from the final span,
+        // but only for patches whose source band and resolved floor are both truly anchored at layer 0.
+        if (planned_patch.store_bottom_idx == 0 && planned_patch.patch.bottom_idx == 0 &&
+            ! planned_patch.patch.area().empty())
+            first_band_claims.push_back(
+                { planned_patch.region_id, planned_patch.patch.top_idx, planned_patch.patch.area() });
+
+        // Marker copies reach down to the band's planned floor as well as to the absorbed one: every step
+        // the slab stands on is swallowed and must not fall back to a thin-layer toolpath.
+        const size_t store_bottom = std::min(planned_patch.store_bottom_idx, planned_patch.patch.bottom_idx);
+        for (size_t layer_idx = store_bottom; layer_idx <= planned_patch.patch.top_idx; ++ layer_idx) {
+            AdaptiveMergePatch stored = planned_patch.patch;
+            stored.group_top = layer_idx == planned_patch.patch.top_idx;
+            m_layers[layer_idx]->get_region(planned_patch.region_id)
+                ->adaptive_merge_patches.emplace_back(std::move(stored));
+        }
+    }
+
+    // The layer-0 snapshot owns its XY footprint through its group top against fixed-grid regions. Merged
+    // regions were already partitioned through patch.area(); trimming their source slices here would corrupt
+    // the layer-0 contour from which their own first-band walls are generated.
+    for (const FirstBandClaim &claim : first_band_claims)
+        for (size_t layer_idx = 0; layer_idx <= claim.top_idx; ++ layer_idx)
+            for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+                if (region_id == claim.region_id)
+                    continue;
+                LayerRegion *region = m_layers[layer_idx]->get_region(region_id);
+                if (! region->adaptive_merge_patches.empty())
+                    continue;
+                Surfaces kept;
+                for (const Surface &surface : region->slices.surfaces)
+                    for (ExPolygon &expolygon : diff_ex(ExPolygons{ surface.expolygon }, claim.area))
+                        kept.emplace_back(surface, std::move(expolygon));
+                region->slices.set(std::move(kept));
+            }
 }
 
 void PrintObject::_generate_support_material()
