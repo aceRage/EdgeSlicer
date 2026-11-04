@@ -389,6 +389,13 @@ static t_config_enum_values s_keys_map_LayerTimeSlowdownScope {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSlowdownScope)
 
+static t_config_enum_values s_keys_map_MinLayerTimePausePark {
+    { "away",          mltpAway },
+    { "prime_tower",   mltpPrimeTower },
+    { "custom",        mltpCustom }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MinLayerTimePausePark)
+
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -6304,6 +6311,54 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<LayerTimeSlowdownScope>(ltssExcludeOuterWalls));
 
+    // Edge: minimum layer time pause. The filament's cooling slowdown cannot stretch a very small layer
+    // (a thin spike) past its minimum print speed; this parks the head and waits for the rest.
+    def = this->add("min_layer_time_pause", coFloat);
+    def->label = L("Minimum layer time (pause)");
+    def->category = L("Speed");
+    def->tooltip = L("If a layer still takes less than this after the filament's cooling slowdown, the head "
+                     "retracts, lifts, parks and waits for the rest of the time with the fan running, then "
+                     "carries on. For tiny layers such as thin spikes. Not on the first layer or in spiral vase "
+                     "mode. 0 turns it off.");
+    def->sidetext = "s";
+    def->min = 0;
+    def->max = 600;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("min_layer_time_pause_park", coEnum);
+    def->label = L("Pause position");
+    def->category = L("Speed");
+    def->tooltip = L("Where the head waits during a minimum layer time pause. Away from the print: the nearest "
+                     "free bed edge or corner, clear of the objects, the prime tower and excluded areas (beside "
+                     "the current object when printing by object). Next to the prime tower: beside the tower, "
+                     "or away from the print without one. Custom: the X/Y below.");
+    def->enum_keys_map = &ConfigOptionEnum<MinLayerTimePausePark>::get_enum_values();
+    def->enum_values.push_back("away");
+    def->enum_values.push_back("prime_tower");
+    def->enum_values.push_back("custom");
+    def->enum_labels.push_back(L("Away from the print"));
+    def->enum_labels.push_back(L("Next to the prime tower"));
+    def->enum_labels.push_back(L("Custom X/Y"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<MinLayerTimePausePark>(mltpAway));
+
+    def = this->add("min_layer_time_pause_park_x", coFloat);
+    def->label = L("Pause position X");
+    def->category = L("Speed");
+    def->tooltip = L("X of the custom pause position, in bed coordinates.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("min_layer_time_pause_park_y", coFloat);
+    def->label = L("Pause position Y");
+    def->category = L("Speed");
+    def->tooltip = L("Y of the custom pause position, in bed coordinates.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
 
 
     def = this->add("fan_min_speed", coFloats);
@@ -6613,6 +6668,16 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
+
+    // Stored per modifier ModelVolume only (right-click > Override paint); NOT in Preset::print_options(),
+    // so it never reaches a process preset, and GCode::append_full_config() leaves it out of the
+    // CONFIG_BLOCK. No category, so is_improper_category() keeps it out of the "Add settings" menus.
+    def = this->add("override_paint", coBool);
+    def->label = L("Override paint");
+    def->tooltip = L("Inside this modifier its filament replaces painted colour.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+    def->cli = ConfigOptionDef::nocli;
 
     def = this->add("inner_wall_line_width", coFloatOrPercent);
     def->label = L("Inner wall");

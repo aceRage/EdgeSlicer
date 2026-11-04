@@ -1811,6 +1811,13 @@ TEST_CASE("G4 dwell counts towards the layer time", "[PrintGCode][CoolingBuffer]
         REQUIRE(bare.find("G4 ; Stop Pause") != std::string::npos);
         CHECK(cooling_comparable(bare, drop) == cooling_comparable(none, drop));
     }
+    SECTION("with both S and P, S is the dwell") {
+        // As in Marlin and RepRapFirmware (and GCodeProcessor::process_G4).
+        const std::string both = slice_with_toolchange("G92 E0\nG4 S2 P500");
+        const std::string s    = slice_with_toolchange("G92 E0\nG4 S2");
+        REQUIRE(both.find("G4 S2 P500") != std::string::npos);
+        CHECK(cooling_comparable(both, drop) == cooling_comparable(s, drop));
+    }
 }
 
 // Orca #15849 / Edge #113: OozePrevention::pre_toolchange turns a tool fully off
