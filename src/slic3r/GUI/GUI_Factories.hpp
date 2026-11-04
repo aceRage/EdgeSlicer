@@ -207,6 +207,8 @@ private:
     void        append_menu_item_assemble_separately(wxMenu *menu);
     void        append_menu_items_visibility(wxMenu *menu);
     void        append_menu_items_support_group(wxMenu *menu);
+    // Check item "Override paint" for modifier selections, rebuilt per open.
+    void        append_menu_item_override_paint(wxMenu *menu);
     void        append_menu_item_merge_to_single_object(wxMenu* menu);
     void        append_menu_item_merge_parts_to_single_part(wxMenu *menu);
     void        append_menu_item_merge_some_parts_to_single_part(wxMenu *menu);

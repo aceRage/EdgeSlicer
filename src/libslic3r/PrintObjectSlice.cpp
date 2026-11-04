@@ -914,11 +914,31 @@ void PrintObject::slice()
         // 1. Overrides nothing relative to its parent region, so it is an alias of the parent's own
         //    PrintRegion and literally cannot print differently. An extruder override that really
         //    differs is an effect and does not land here - see modifiers_without_overrides().
-        if (const std::vector<std::string> inert = this->modifiers_without_overrides(); ! inert.empty())
+        //    Painted areas are applied after modifiers (apply_mm_segmentation) and replace their
+        //    filament, so a filament-only modifier on a painted part gets its own explanation.
+        const PrintObject::ModifierPaintNotes paint_notes = this->modifier_paint_notes();
+        std::vector<std::string> inert = this->modifiers_without_overrides();
+        inert.erase(std::remove_if(inert.begin(), inert.end(), [&paint_notes](const std::string &n) {
+                        return std::find(paint_notes.same_filament_painted.begin(), paint_notes.same_filament_painted.end(), n) !=
+                               paint_notes.same_filament_painted.end();
+                    }), inert.end());
+        if (! inert.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                 Slic3r::format(_u8L("Modifier %1% on \"%2%\" changes no settings and has no effect."),
                                join_names(inert), object_name),
                 PrintStateBase::SlicingModifierNoOverrides);
+        if (! paint_notes.same_filament_painted.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% on \"%2%\" uses the same filament as the object, and painted areas override "
+                                    "modifier filaments, so it has no effect. To print it in its own colour, make it a part "
+                                    "(or paint over it)."),
+                               join_names(paint_notes.same_filament_painted), object_name),
+                PrintStateBase::SlicingModifierSameFilamentPainted);
+        if (! paint_notes.filament_overridden.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Painted areas of \"%2%\" override the filament of modifier %1% where they overlap."),
+                               join_names(paint_notes.filament_overridden), object_name),
+                PrintStateBase::SlicingModifierOverriddenByPaint);
         // 2. Never attached to any part, so its geometry is dropped entirely.
         if (const std::vector<std::string> orphan = this->modifiers_without_parent(); ! orphan.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,

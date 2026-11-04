@@ -1828,7 +1828,8 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 case '2': { process_G2_G3(line, true); break; }  // Move, clockwise arc
                 case '3': { process_G2_G3(line, false); break; } // Move, counter-clockwise arc
                 //BBS
-                case 4:  { process_G4(line); break; }  // Delay
+                // EDGE: '4', not 4 (which never matched, so no G4 was ever seen, see process_G4).
+                case '4':  { process_G4(line); break; }  // Delay
                 default: break;
                 }
                 break;
@@ -3577,10 +3578,23 @@ void GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line, bool cloc
 //BBS
 void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
 {
+    // EDGE: the dispatch read `case 4:` (BambuStudio fixed it to '4' in ced9e43be6, the BS 1.7.4 merge 2a478ab4f9 put
+    // the old line back), so no G4 ever counted in the estimate. Every G4 wait counts now (start G-code, tool changes,
+    // custom and filament change G-code, the minimum layer time pause), booked on the move that follows it.
     float value_s = 0.0;
     float value_p = 0.0;
-    if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
-        value_s += value_p * 0.001;
+    // S (seconds) wins over P (milliseconds), as in Marlin and RepRapFirmware; a bare G4 waits 0 s.
+    if (line.has_value('S', value_s))
+        value_p = 0.f;
+    else
+        line.has_value('P', value_p);
+    value_s = (value_s > 0.f ? value_s : 0.f) + (value_p > 0.f ? value_p * 0.001f : 0.f);
+    // A G4 without a time adds nothing and leaves the move queue alone (flushing it would change how the moves
+    // around it are blended, and so their time). Otherwise the dwell starts once the queued moves are done; booked
+    // after flushing them, it lands on the first move after it, so it stays on its own layer (the minimum layer
+    // time pause relies on that).
+    if (value_s > 0.f) {
+        simulate_st_synchronize(0.f);
         simulate_st_synchronize(value_s);
     }
 }

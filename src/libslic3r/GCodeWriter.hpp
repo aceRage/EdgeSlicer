@@ -183,6 +183,15 @@ public:
     // travel's feedrate, else empty. For G-code that follows a Z move and moves without an F word of its own.
     std::string restore_uncapped_z_feedrate() const;
     double      get_zhop() const { return m_lifted; }
+    // Edge (min_layer_time_pause): G-code that parks the head at `park` (bed coordinates) and brings it back,
+    // returned as {there, back} so the caller can put the dwell between them. `there` retracts (unless the
+    // filament already is), lifts to at least `clearance` above the layer (never above `max_z` when it is
+    // positive) and travels to `park`; `back` travels back, lowers and unretracts. It leaves this writer's
+    // state (position, lift, retraction, E) untouched: the G-code after it is the same with or without it,
+    // apart from the feedrate, which the caller restores. Empty when the head position is not known.
+    std::pair<std::string, std::string> park_and_return(const Vec2d &park, double clearance, double max_z) const;
+    // Edge: whether the active extruder can reach `bed_point` (bed coordinates). True when no area is known.
+    bool        can_reach(const Vec2d &bed_point) const;
 
     //BBS: set offset for gcode writer
     void set_xy_offset(double x, double y) { m_x_offset = x; m_y_offset = y; }

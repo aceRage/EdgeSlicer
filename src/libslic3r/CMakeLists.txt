@@ -144,6 +144,12 @@ set(lisbslic3r_sources
     Showcase/ShowcasePath.hpp
     Showcase/ShowcaseRenderCli.cpp
     Showcase/ShowcaseRenderCli.hpp
+    Showcase/ShowcaseBlender.cpp
+    Showcase/ShowcaseBlender.hpp
+    Showcase/ShowcaseGltf.cpp
+    Showcase/ShowcaseGltf.hpp
+    Showcase/ShowcaseTubes.cpp
+    Showcase/ShowcaseTubes.hpp
     ImageRowWalls.cpp
     ImageRowWalls.hpp
     ColorSplitInternal.hpp
@@ -370,6 +376,8 @@ set(lisbslic3r_sources
     GCode/FanMover.hpp
     GCode/LayerTimeSpeedSmoothingFilter.cpp
     GCode/LayerTimeSpeedSmoothingFilter.hpp
+    GCode/MinLayerTimePause.cpp
+    GCode/MinLayerTimePause.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     GCode/ElegooGCodeProcessorHelper.cpp
@@ -658,6 +666,8 @@ set(lisbslic3r_sources
     SlicesToTriangleMesh.hpp
     SlicingAdaptive.cpp
     SlicingAdaptive.hpp
+    AdaptiveLayerMerge.cpp
+    AdaptiveLayerMerge.hpp
     Slicing.cpp
     Slicing.hpp
     Support/SupportCommon.cpp

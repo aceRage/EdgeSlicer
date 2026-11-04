@@ -3684,13 +3684,18 @@ void TabPrint::build()
         // Edge: layer-time speed smoothing. S1 UI stub — visibility of A/B vs C fields
         // is toggled in ConfigManipulation::toggle_print_fff_options.
         // Plan: 09-concept-layer-time-speed-smoothing.md
-        optgroup = page->new_optgroup(L("Layer time smoothing"), L"param_speed", 15);
+        // Edge: "Layer time control" (was "Layer time smoothing") also holds the minimum layer time pause.
+        optgroup = page->new_optgroup(L("Layer time control"), L"param_speed", 15);
         optgroup->append_single_option_line("layer_time_speed_smoothing");
         optgroup->append_single_option_line("layer_time_speed_max_variation");
         optgroup->append_single_option_line("layer_time_speed_max_speedup");
         optgroup->append_single_option_line("layer_time_speed_max_slowdown");
         optgroup->append_single_option_line("layer_time_speed_max_time_increase");
         optgroup->append_single_option_line("layer_time_speed_slowdown_scope");
+        optgroup->append_single_option_line("min_layer_time_pause");
+        optgroup->append_single_option_line("min_layer_time_pause_park");
+        optgroup->append_single_option_line("min_layer_time_pause_park_x");
+        optgroup->append_single_option_line("min_layer_time_pause_park_y");
 
         optgroup = page->new_optgroup(L("Travel speed"), L"param_travel_speed", 15);
         optgroup->append_single_option_line("travel_speed", "speed_settings_travel");

@@ -104,7 +104,8 @@ echo "size $SIZE, tolerance max $MAXD / mean $MEAND (8-bit steps)" | tee -a "$RE
 [ -n "$CENV" ] && echo "candidate env: $CENV" | tee -a "$REPORT"
 # Fixtures a baseline from before them cannot render differ on purpose: realism 1d-1g and the rest of
 # 1h-2. (The 1h-1 and 1h-2 fixtures are compared strictly: main has them since c5b7546a45 and #828.)
-NEW_FIXTURES="translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights,build_infill_mid,build_model_mid"
+# build_model_mid is strict too: main already renders the model build-up as "source": "clip".
+NEW_FIXTURES="translucent_backlit,translucency_plain,finish_sparkle,finish_marble,finish_wood,finish_textured,finish_satin,imperfections_visible,lens_effects,dof_spill_highlights,build_infill_mid"
 EXPECT="${EXPECT:+$EXPECT,}$NEW_FIXTURES"
 [ -n "$EXPECT" ] && echo "expected to change: $EXPECT" | tee -a "$REPORT"
 
