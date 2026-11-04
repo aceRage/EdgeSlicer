@@ -16,7 +16,7 @@ using namespace Slic3r;
 
 namespace {
 
-DynamicPrintConfig mixed_diameter_config(double d0, double d1)
+DynamicPrintConfig mixed_diameter_config(double d0, double d1, double layer_height = 0.2)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -26,9 +26,9 @@ DynamicPrintConfig mixed_diameter_config(double d0, double d1)
     config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FFFFFF", "#804020" };
     config.option<ConfigOptionInts>("filament_map")->values        = { 1, 2 };
     config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
-    config.option<ConfigOptionFloat>("layer_height")->value               = 0.2;
-    config.option<ConfigOptionFloat>("initial_layer_print_height")->value = 0.2;
-    config.option<ConfigOptionFloats>("min_layer_height")->values = { 0.08, 0.08 };
+    config.option<ConfigOptionFloat>("layer_height")->value               = layer_height;
+    config.option<ConfigOptionFloat>("initial_layer_print_height")->value = layer_height;
+    config.option<ConfigOptionFloats>("min_layer_height")->values = { 0.07, 0.07 };
     config.option<ConfigOptionFloats>("max_layer_height")->values = { 0.56, 0.56 };
     config.option<ConfigOptionBool>("enable_prime_tower")->value  = false;
     config.option<ConfigOptionBool>("enable_support")->value      = false;
@@ -44,8 +44,10 @@ DynamicPrintConfig single_diameter_config(double d)
     config.set_num_filaments(1);
     config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { d };
     config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75 };
-    config.option<ConfigOptionFloat>("layer_height")->value               = 0.2;
-    config.option<ConfigOptionFloat>("initial_layer_print_height")->value = 0.2;
+    // 0.07 so the uses_multiple_nozzle_diameters() early return is what fires: at 0.2 on a 0.4
+    // nozzle, adaptive_layer_band_size is 1 anyway and the case would not pin the gate.
+    config.option<ConfigOptionFloat>("layer_height")->value               = 0.07;
+    config.option<ConfigOptionFloat>("initial_layer_print_height")->value = 0.07;
     config.option<ConfigOptionBool>("enable_prime_tower")->value = false;
     config.option<ConfigOptionBool>("enable_support")->value     = false;
     config.option<ConfigOptionInt>("skirt_loops")->value         = 0;
@@ -81,6 +83,40 @@ ModelObject *add_two_filament_block(Model &model, double height)
 }
 
 ModelObject *add_two_filament_cube(Model &model) { return add_two_filament_block(model, 20.); }
+
+// One volume: walls/solid on `wall_filament`, sparse infill on `infill_filament` (1-based).
+ModelObject *add_wall_infill_cube(Model &model, int wall_filament, int infill_filament)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "wall-infill";
+    ModelVolume *volume = object->add_volume(make_cube(20., 20., 20.));
+    volume->config.set("extruder", wall_filament);
+    volume->config.set("sparse_infill_filament", infill_filament);
+    object->add_instance();
+    object->ensure_on_bed();
+    return object;
+}
+
+// Two side-by-side volumes. The first prints walls with `wall_on_filament`. The second has walls
+// off (`wall_loops` 0) but still names `walls_off_filament` as wall_filament, so an ungated
+// collector would pick it up.
+ModelObject *add_walls_off_second_volume(Model &model, int wall_on_filament, int walls_off_filament)
+{
+    ModelObject *object = model.add_object();
+    object->name        = "walls-off";
+    TriangleMesh left   = make_cube(20., 10., 20.);
+    TriangleMesh right  = make_cube(20., 10., 20.);
+    right.translate(0.f, 10.f, 0.f);
+    ModelVolume *v0 = object->add_volume(left);
+    v0->config.set("extruder", wall_on_filament);
+    ModelVolume *v1 = object->add_volume(right);
+    v1->config.set("extruder", walls_off_filament);
+    v1->config.set("wall_loops", 0);
+    v1->config.set("wall_filament", walls_off_filament);
+    object->add_instance();
+    object->ensure_on_bed();
+    return object;
+}
 
 void apply_print(Print &print, Model &model, const DynamicPrintConfig &config)
 {
@@ -230,7 +266,9 @@ TEST_CASE("Adaptive region merge: a single-diameter plate produces no patches", 
 
 TEST_CASE("Adaptive region merge: zero layers and one layer do not crash", "[AdaptiveRegionMerge]")
 {
-    SECTION("zero layers: applied, not sliced") {
+    // Unsliced objects have m_slicing_params.valid == false. The F11 guard returns before reading
+    // layer_height, so this is safe in release builds too, not merely loud under assert.
+    SECTION("zero layers: an unsliced object plans nothing") {
         Model model;
         add_two_filament_cube(model);
         Print print;
@@ -238,19 +276,21 @@ TEST_CASE("Adaptive region merge: zero layers and one layer do not crash", "[Ada
         REQUIRE(print.objects().size() == 1);
         PrintObject *object = print.objects_mutable().front();
         REQUIRE(object->layer_count() == 0);
-        REQUIRE_NOTHROW(AdaptiveMergePlanAccess::compute(*object));
+        AdaptiveMergePlanAccess::compute(*object);
         CHECK(snapshot_patches(*object).empty());
     }
 
-    SECTION("one layer") {
+    SECTION("one layer: sliced, no bands possible") {
         Model model;
         add_two_filament_block(model, 0.2);
         Print print;
         apply_print(print, model, mixed_diameter_config(0.4, 0.8));
         PrintObject *object = print.objects_mutable().front();
         object->slice();
+        REQUIRE(object->layer_count() >= 1);
         REQUIRE(object->layer_count() <= 1);
-        REQUIRE_NOTHROW(AdaptiveMergePlanAccess::compute(*object));
+        AdaptiveMergePlanAccess::compute(*object);
+        CHECK(snapshot_patches(*object).empty());
     }
 }
 
@@ -285,4 +325,87 @@ TEST_CASE("Adaptive region merge: planner is idempotent on the same sliced input
     REQUIRE_FALSE(first.empty());
     AdaptiveMergePlanAccess::compute(*object);
     CHECK(snapshot_patches(*object) == first);
+}
+
+TEST_CASE("Adaptive region merge: an object whose own nozzle is the reference never bands", "[AdaptiveRegionMerge]")
+{
+    CHECK(adaptive_layer_band_size(0.4, 0.4, 0.07) == 1);
+    CHECK(adaptive_layer_band_size(0.8, 0.4, 0.07) >= 2);
+
+    Model model;
+    ModelObject *fine   = add_cube(model, "fine-only", 20., 20., 20., 1);
+    ModelObject *coarse = add_cube(model, "coarse-mate", 20., 20., 20., 2);
+    coarse->instances[0]->set_offset(Vec3d(40., 0., 0.));
+    Print print;
+    apply_print(print, model, mixed_diameter_config(0.4, 0.8, 0.07));
+    REQUIRE(print.objects().size() == 2);
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+
+    PrintObject *fine_object = nullptr;
+    for (PrintObject *obj : print.objects_mutable())
+        if (obj->model_object() == fine)
+            fine_object = obj;
+    REQUIRE(fine_object != nullptr);
+    fine_object->slice();
+    REQUIRE(fine_object->layer_count() >= 2);
+    AdaptiveMergePlanAccess::compute(*fine_object);
+    CHECK(snapshot_patches(*fine_object).empty());
+}
+
+TEST_CASE("Adaptive region merge: a finer infill-only nozzle does not size the walls", "[AdaptiveRegionMerge]")
+{
+    Model model;
+    add_wall_infill_cube(model, 1, 2);
+    Print print;
+    apply_print(print, model, mixed_diameter_config(0.4, 0.2, 0.07));
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+
+    PrintObject *object = print.objects_mutable().front();
+    object->slice();
+    REQUIRE(object->layer_count() >= 2);
+
+    bool saw_split = false;
+    for (size_t region_id = 0; region_id < object->num_printing_regions(); ++ region_id) {
+        const PrintRegionConfig &config = object->printing_region(region_id).config();
+        if (config.wall_filament.value == 1 && config.sparse_infill_filament.value == 2)
+            saw_split = true;
+    }
+    REQUIRE(saw_split);
+
+    AdaptiveMergePlanAccess::compute(*object);
+    CHECK(adaptive_layer_band_size(0.4, 0.2, 0.07) >= 2);
+    CHECK(adaptive_layer_band_size(0.4, 0.4, 0.07) == 1);
+    CHECK(snapshot_patches(*object).empty());
+}
+
+TEST_CASE("Adaptive region merge: a walls-off region does not size the band", "[AdaptiveRegionMerge]")
+{
+    Model model;
+    add_walls_off_second_volume(model, 1, 2);
+    Print print;
+    apply_print(print, model, mixed_diameter_config(0.4, 0.2, 0.07));
+    REQUIRE(print.objects().size() == 1);
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+
+    PrintObject *object = print.objects_mutable().front();
+    object->slice();
+    REQUIRE(object->layer_count() >= 2);
+
+    bool saw_wall_04  = false;
+    bool saw_gated_02 = false;
+    for (size_t region_id = 0; region_id < object->num_printing_regions(); ++ region_id) {
+        const PrintRegionConfig &config = object->printing_region(region_id).config();
+        if (config.wall_loops.value > 0 && config.wall_filament.value == 1)
+            saw_wall_04 = true;
+        if (config.wall_loops.value == 0 && config.wall_filament.value == 2)
+            saw_gated_02 = true;
+    }
+    REQUIRE(saw_wall_04);
+    REQUIRE(saw_gated_02);
+
+    AdaptiveMergePlanAccess::compute(*object);
+    CHECK(adaptive_layer_band_size(0.4, 0.2, 0.07) >= 2);
+    CHECK(adaptive_layer_band_size(0.4, 0.4, 0.07) == 1);
+    CHECK(snapshot_patches(*object).empty());
 }

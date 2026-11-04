@@ -6037,11 +6037,12 @@ void PrintObject::combine_infill()
 // Edge differences, all deliberate:
 //   * The gate is Print::uses_multiple_nozzle_diameters(), which in Edge is pure mixed-diameter detection
 //     (no multi_nozzle_diameter_mode key, no UI toggle - Lance's decision).
-//   * The band reference is adaptive_band_reference_nozzle() over THIS object's own used filaments
-//     (object_extruders()), not the plate-wide used_printing_filaments() and not Bambu's
-//     layer_grid_nozzle_diameter(). Edge has no separate grid nozzle, so the "some filament uses a
-//     nozzle larger than D" clause cannot trigger: D is the smallest nonzero diameter over the same
-//     object-local list the bands are sized from, whatever layer_height the user set.
+//   * The band reference is adaptive_band_reference_nozzle() over THIS object's used WALL filaments
+//     (object_wall_filament_ids()), not object_extruders() (which also collects infill) and not the
+//     plate-wide used_printing_filaments(). A finer infill-only nozzle, or a wall_filament on a region
+//     whose walls are off, must not size this object's walls. Edge has no separate grid nozzle, so the
+//     "some filament uses a nozzle larger than D" clause cannot trigger: D is the smallest nonzero
+//     diameter over the same object-local wall list the bands are sized from.
 //   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
 //     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
 //     count (Bambu's get_at() pitfall).
@@ -6049,6 +6050,32 @@ void PrintObject::combine_infill()
 //
 // Id conventions, per the F3 precedent of PR #850: the filament ids in here are 1-based when handed to
 // nozzle_diameter_for_filament() (Edge-wide convention) and 0-based everywhere else.
+
+// 0-based wall filament ids this object actually prints walls with. Band sizing matches Bambu in using
+// wall nozzles only; infill-only nozzles deliberately do not enter the ratio. The enable gates match
+// PrintRegion.cpp:143 and MixedFilamentCliGates.cpp:150: wall_filament counts only when wall_loops > 0,
+// and outer_wall_filament counts only when wall_loops > 0 and the override is set. Brim is not threaded
+// through (default brim_type is AutoBrim, so PrintObject::has_brim() is true on every object and would
+// keep a walls-off wall_filament in the set). A region with walls off whose wall_filament still names a
+// finer nozzle must not coarsen the walls that do print. append_gated_feature_filament_ids is file-local
+// in MixedFilamentCliGates.cpp, so this is a local loop rather than a new header.
+static std::vector<unsigned int> object_wall_filament_ids(const PrintObject &object)
+{
+    std::vector<unsigned int> ids;
+    ids.reserve(object.num_printing_regions() * 2);
+    for (size_t region_id = 0; region_id < object.num_printing_regions(); ++ region_id) {
+        const PrintRegionConfig &config = object.printing_region(region_id).config();
+        if (config.wall_loops.value > 0) {
+            if (config.wall_filament.value > 0)
+                ids.emplace_back((unsigned int) config.wall_filament.value - 1);
+            if (config.outer_wall_filament.value > 0)
+                ids.emplace_back((unsigned int) config.outer_wall_filament.value - 1);
+        }
+    }
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
 void PrintObject::compute_adaptive_merge_groups()
 {
     for (Layer *layer : m_layers)
@@ -6060,9 +6087,12 @@ void PrintObject::compute_adaptive_merge_groups()
     if (! this->print()->uses_multiple_nozzle_diameters())
         return;
 
-    // m_slicing_params.layer_height is the user's base step this object was sliced on, which is what
-    // a band size is measured in. The perimeter-path caller must already have sliced; do not mutate
-    // slicing parameters here.
+    // m_slicing_params.layer_height is the user's base step this object was sliced on, which is what a band
+    // size is measured in. A caller that has not sliced yet has no grid to merge on, and m_slicing_params is
+    // cleared by every invalidating step (PrintObject.cpp:1823, :1828, :1845), so refuse rather than read a
+    // stale layer_height. This makes the planner safe to call from anywhere, not merely loud in a debug build.
+    if (! m_slicing_params.valid)
+        return;
     assert(m_slicing_params.valid);
 
     const PrintConfig &print_config = this->print()->config();
@@ -6085,12 +6115,12 @@ void PrintObject::compute_adaptive_merge_groups()
         const unsigned int filament = (unsigned int) config.wall_filament.value;
         region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
     }
-    // Band reference is this object's own used filaments (regions' wall/infill plus volume extruders,
-    // mixed-expanded), not the plate-wide used_printing_filaments(). A 0.2 support on another object
-    // must not size this object's 0.4 walls. object_extruders() is 0-based; adaptive_band_reference_nozzle()
-    // adds 1 to reach the config id. Support on this object is excluded: Bambu's object-local set is
-    // the used wall nozzles, and object_extruders() already matches that plus this object's infill.
-    const double min_nozzle = adaptive_band_reference_nozzle(print_config, this->object_extruders());
+    // Band reference is this object's wall nozzles only, matching Bambu. Infill-only nozzles
+    // deliberately do not size the walls: a 0.2 infill next to 0.4 walls must not coarsen those
+    // walls. object_extruders() is left untouched for its other callers; wall_filament /
+    // outer_wall_filament are 1-based and converted to 0-based here because
+    // adaptive_band_reference_nozzle() adds 1 to reach the config id.
+    const double min_nozzle = adaptive_band_reference_nozzle(print_config, object_wall_filament_ids(*this));
     if (min_nozzle <= EPSILON)
         return;
 

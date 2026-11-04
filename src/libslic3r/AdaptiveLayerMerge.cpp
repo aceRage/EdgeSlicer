@@ -110,6 +110,13 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
     if (nozzle_diameter <= EPSILON || min_nozzle_diameter <= EPSILON || base_layer_height <= EPSILON)
         return 1;
 
+    // A nozzle that IS the object's reference already prints the slicing grid: its band is one layer, always.
+    // Without this, the min-height growth below would inflate it to 2 whenever the base layer height sits under
+    // 0.2 x nozzle (0.4 at 0.07 gets 2), so the same object would merge on a mixed-diameter plate and not on a
+    // single-diameter one. The caller's reference is this object's wall nozzles; ratio 1 means no merge.
+    if (nozzle_diameter <= min_nozzle_diameter + EPSILON)
+        return 1;
+
     const AdaptiveLayerHeightRange range = adaptive_layer_height_range(nozzle_diameter);
     // The diameter ratio is how many of the user's base layers a larger nozzle covers with one extrusion.
     // The stack itself is sliced at object_config.layer_height; min_nozzle_diameter is only this ratio's
