@@ -327,7 +327,6 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: legacy zero max width maps t
 
     // A project/preset that saved walls explicitly keeps it (and a stale legacy zero does not override it).
     DynamicPrintConfig saved_walls;
-    saved_walls.load_from_ini_string("paint_depth_mode = walls
-mmu_segmented_region_max_width = 0\n", ForwardCompatibilitySubstitutionRule::Disable);
+    saved_walls.load_from_ini_string("paint_depth_mode = walls\nmmu_segmented_region_max_width = 0\n", ForwardCompatibilitySubstitutionRule::Disable);
     CHECK(saved_walls.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmWalls);
 }
