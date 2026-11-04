@@ -218,6 +218,10 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
                                                   const DynamicPrintConfig *layer_range_config,
                                                   const ModelVolume        &volume,
                                                   size_t                    num_extruders);
+// The volume's own config sets a filament (extruder, wall, sparse or solid infill filament > 0).
+bool model_volume_sets_filament(const ModelVolume &volume);
+// A modifier with "Override paint" on that sets a filament: inside it its filament wins over colour painting.
+bool model_volume_overrides_paint(const ModelVolume &volume);
 
 template<typename T>
 class ConstVectorOfPtrsAdaptor {
@@ -378,6 +382,16 @@ private:
     // ref_cnt could only be modified by the main thread, thus it does not need to be atomic.
     size_t                                      m_ref_cnt{ 0 };
 };
+
+// How colour painting shadows a modifier's filament. Pure so the selection logic can be tested.
+//  region_is_alias: the modifier overrides nothing (its region is its parent's own).
+//  sets_filament: the modifier carries an explicit filament/extruder.
+//  filament_differs: its region's filament differs from the parent region's.
+//  overlaps_painted: the part it overlaps carries colour painting.
+//  overrides_paint: "Override paint" is on (and the modifier sets a filament), so paint does not shadow it.
+enum class ModifierPaintNote { None, SameFilamentPainted, FilamentOverriddenByPaint };
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint = false);
 
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
@@ -627,6 +641,17 @@ public:
     // folds into wall_filament/sparse_infill_filament/solid_infill_filament, which makes the
     // region config differ and gives the modifier a region of its own.
     std::vector<std::string>    modifiers_without_overrides() const;
+    // Modifiers whose filament is shadowed by colour painting (names, ModelObject::volumes order).
+    //  same_filament_painted: filament-only modifier, same filament as its parent, parent painted -
+    //    a subset of modifiers_without_overrides(); the caller reports it instead of the plain notice.
+    //  filament_overridden: modifier with a different filament overlapping a painted volume.
+    // Painted areas are applied after modifiers (apply_mm_segmentation) and replace the filament.
+    struct ModifierPaintNotes
+    {
+        std::vector<std::string> same_filament_painted;
+        std::vector<std::string> filament_overridden;
+    };
+    ModifierPaintNotes          modifier_paint_notes() const;
     // Modifiers that got no region in ANY layer range - no part's extruded bounding box intersects
     // them - so their geometry never reaches the slice at all.
     std::vector<std::string>    modifiers_without_parent() const;

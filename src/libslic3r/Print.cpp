@@ -793,7 +793,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "layer_time_speed_max_speedup",
         "layer_time_speed_max_slowdown",
         "layer_time_speed_max_time_increase",
-        "layer_time_speed_slowdown_scope"
+        "layer_time_speed_slowdown_scope",
+        // Edge: minimum layer time pause position (G-code export only).
+        "min_layer_time_pause_park",
+        "min_layer_time_pause_park_x",
+        "min_layer_time_pause_park_y"
     };
 
     static std::unordered_set<std::string> steps_ignore;
@@ -2684,16 +2688,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject* object : m_objects)
             if (object->has_stabilizers())
                 return {L("Spiral vase mode can't be used with side stabilizers. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
-        assert(m_objects.size() == 1);
-        const auto all_regions = m_objects.front()->all_regions();
-        if (all_regions.size() > 1) {
-            // Orca: make sure regions are not compatible
-            if (std::any_of(all_regions.begin() + 1, all_regions.end(), [ra = all_regions.front()](const auto rb) {
-                return !Layer::is_perimeter_compatible(ra, rb);
-            })) {
-                return {L("The spiral vase mode does not work when an object contains more than one materials."), nullptr, "spiral_mode"};
-            }
-        }
+        // Orca #17143: the vase is refused for the filaments it prints, not for regions that merely differ.
+        // A height range or modifier that only changes a speed or a wall setting splits the object into
+        // regions that are not perimeter compatible, yet still prints one filament. object_extruders()
+        // expands an Edge mixed (virtual) filament into its physical components, so a mixed filament
+        // counts as more than one material here as well.
+        for (const PrintObject *object : m_objects)
+            if (object->object_extruders().size() > 1)
+                return {L("The spiral vase mode does not work when an object contains more than one materials."), object, "spiral_mode"};
     }
 
     // Cache of layer height profiles for checking:
@@ -2882,14 +2884,11 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                // Per-nozzle process P2: objects printed through nozzles of different sizes carry their own nozzles'
-                // min / max layer height limits, which only clamp a variable layer height profile; the layers the
-                // tower shares are compared below (has_custom_layering) and by layer_height above. So the limits
-                // do not have to match.
-                SlicingParameters same_limits = slicing_params;
-                same_limits.min_layer_height  = slicing_params0.min_layer_height;
-                same_limits.max_layer_height  = slicing_params0.max_layer_height;
-                if (!equal_layering(same_limits, slicing_params0))
+                // Per-nozzle process P2 / Orca #17000: objects printed through nozzles of different sizes carry their
+                // own nozzles' min / max layer height limits, which only clamp a variable layer height profile; the
+                // layers the tower shares are compared below (has_custom_layering) and by layer_height above.
+                // equal_layering() itself no longer compares the limits.
+                if (!equal_layering(slicing_params, slicing_params0))
                     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
                 if (has_custom_layering) {
                     auto &lh         = layer_height_profile(i);

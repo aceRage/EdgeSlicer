@@ -1246,6 +1246,7 @@ static std::vector<std::string> s_Preset_print_options {
      "support_bottom_interface_spacing", "enable_overhang_speed", "overhang_shadow_inner_wall", "overhang_shadow_speed_ratio", "overhang_shadow_distance", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
      "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
      "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
+     "min_layer_time_pause", "min_layer_time_pause_park", "min_layer_time_pause_park_x", "min_layer_time_pause_park_y",
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
