@@ -832,9 +832,11 @@ SCENARIO("obj_import_vertex_color_deal serialisation is unchanged by the shared 
 
         THEN("every painted triangle serialises to its recorded golden string")
         {
-            REQUIRE(Slic3r::Model::obj_import_vertex_color_deal(ids, 2, &model));
-            REQUIRE(object->config.extruder() == 2);
-            REQUIRE(volume->config.extruder() == 2);
+            // first_extruder_id 1 keeps the recorded encoding: the skip is now "== first",
+            // and these corners include 2, which the old hardcoded skip still painted.
+            REQUIRE(Slic3r::Model::obj_import_vertex_color_deal(ids, 1, &model));
+            REQUIRE(object->config.extruder() == 1);
+            REQUIRE(volume->config.extruder() == 1);
             REQUIRE(volume->is_mm_painted());
             std::string serialised;
             for (int i = 0; i < (int) volume->mesh().its.indices.size(); ++i)
