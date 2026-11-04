@@ -74,6 +74,7 @@ using namespace nlohmann;
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/SL1.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/ZipOpen.hpp"
 #include "libslic3r/DataDirMigration.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
@@ -82,6 +83,7 @@ using namespace nlohmann;
 #include "libslic3r/LayOnFace.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentCliGates.hpp"
+#include "libslic3r/CliPresetSlots.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -1844,6 +1846,15 @@ int CLI::run(int argc, char **argv)
         flush_and_exit(CLI_INVALID_PARAMS);
     }
 
+    for (const std::string& input_file : m_input_files) {
+        if (is_zip_archive_path(input_file)) {
+            boost::nowide::cerr << "ZIP archives cannot be sliced from the command line. Open the ZIP in " SLIC3R_APP_NAME ", or extract it first."
+                                << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
     // Read input file(s) if any.
     BOOST_LOG_TRIVIAL(info) << "Will start to read model file now, file count :" << m_input_files.size() << "\n";
     ConfigOptionInt* slice_option = m_config.option<ConfigOptionInt>("slice");
@@ -2602,8 +2613,7 @@ int CLI::run(int argc, char **argv)
         }
     }
 
-    if (filament_count == 0)
-        filament_count = load_filament_count;
+    filament_count = cli_filament_slot_count(filament_count, load_filament_count);
 
     if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
     {
@@ -3111,8 +3121,8 @@ int CLI::run(int argc, char **argv)
 
     std::vector<std::string>& different_settings = m_print_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values;
     std::vector<std::string>& inherits_group = m_print_config.option<ConfigOptionStrings>("inherits_group", true)->values;
-    inherits_group.resize(filament_count + 2, std::string());
-    different_settings.resize(filament_count + 2, std::string());
+    resize_cli_preset_slots(inherits_group, filament_count);
+    resize_cli_preset_slots(different_settings, filament_count);
     if (!is_bbl_3mf && !different_process_setting.empty()) {
         different_settings[0] = different_process_setting;
     }
@@ -3518,7 +3528,16 @@ int CLI::run(int argc, char **argv)
             }
 
             //computing
-            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support", true);
+            // Standalone filament presets may leave out the per-filament options read here, and option defaults are
+            // only applied further down: fill in the default for each filament.
+            for (const char *key : {"filament_diameter", "filament_is_support"}) {
+                if (!m_print_config.has(key)) {
+                    ConfigOption *option = print_config_def.get(key)->create_default_option();
+                    static_cast<ConfigOptionVectorBase *>(option)->resize(project_filament_count);
+                    m_print_config.set_key_value(key, option);
+                }
+            }
+            ConfigOptionBools* filament_is_support = m_print_config.option<ConfigOptionBools>("filament_is_support");
             std::vector<double>& flush_vol_matrix = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values;
             //std::vector<float>& flush_vol_vector = m_print_config.option<ConfigOptionFloats>("flush_volumes_vector", true)->values;
             flush_vol_matrix.resize(project_filament_count*project_filament_count, 0.f);
