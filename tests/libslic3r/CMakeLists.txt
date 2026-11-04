@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_lightning.cpp
 	test_arachne_walls.cpp
 	test_skirt_distance.cpp
 	test_ams_lookup.cpp
