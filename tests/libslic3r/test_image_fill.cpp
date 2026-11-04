@@ -887,6 +887,8 @@ struct GlbBeforeAfter
     size_t filaments_old = 0, filaments_new = 0;
     double mean_de_old = 0., mean_de_new = 0.;
     double max_de_old  = 0., max_de_new  = 0.;
+    // Phase 5e: every leaf prints a filament the colour dialog chose.
+    bool   chosen_only = true;
 };
 
 bool measure_glb(const std::string &file, GlbBeforeAfter &out)
@@ -938,8 +940,10 @@ bool measure_glb(const std::string &file, GlbBeforeAfter &out)
         std::vector<int> used;
         double sum = 0.;
         for (size_t t = 0; t < out.triangles; ++t) {
+            // What the face PRINTS: its own filament; a face on the part's own filament is the
+            // one left unpainted (Phase 5e - the rule used to be "id 1", whatever the part's was).
             const int id = int(match.filament_ids[t]);
-            if (id > 1) {
+            if (id != int(match.first_extruder_id)) {
                 ++out.painted_old;
                 if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
             }
@@ -973,8 +977,14 @@ bool measure_glb(const std::string &file, GlbBeforeAfter &out)
         std::vector<int> used;
         double           sum = 0.;
         for (size_t i = 0; i < out.leaves; ++i) {
-            const int id = states[i];
-            if (id > 1) {
+            // An unpainted leaf prints the part's own filament, which is what it is measured
+            // against (Phase 5e: until now no leaf was ever left unpainted by this path, and an
+            // unpainted one was mis-measured as a grey slot that does not exist).
+            const int id = states[i] > 0 ? states[i] : int(match.first_extruder_id);
+            out.chosen_only = out.chosen_only &&
+                              std::find(match.filament_ids.begin(), match.filament_ids.end(), (unsigned char) id) !=
+                                  match.filament_ids.end();
+            if (states[i] > 0) {
                 ++out.painted_new;
                 if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
             }
@@ -1033,11 +1043,27 @@ TEST_CASE("Image Fill: a textured GLB is at least as good through the new path",
         // "At least as good" means the colour error, not the filament count: a search that
         // reproduces a texture with SIX spools where the incumbent needed eight has done better,
         // not worse, so counting filaments is not the bar. What is:
-        //   - every leaf still gets a filament (nothing is left unpainted that used to be),
+        //   - every leaf prints a filament the colour dialog chose (Phase 5e: a leaf left
+        //     unpainted prints the part's own filament, which is one of them - so "painted" is no
+        //     longer the same question as "has a filament", and the old painted-count bar is gone),
         //   - the mean error against the true texture colour does not rise,
         //   - and neither does the worst single leaf.
-        CHECK(r.painted_new >= r.painted_old);
+        CHECK(r.chosen_only);
         CHECK(r.mean_de_new <= r.mean_de_old);
+        // Phase 5e, set deliberately from the measured run (job 237): the palette fix moves no leaf
+        // of these two fixtures, because filament 1 (white, in the spool list above) is not in
+        // either texture, so the error is unchanged - plaque 31.698 / 139.558, medallion 1.903 /
+        // 4.736. What did change is how many leaves are painted: the ones on the part's own
+        // filament are now left unpainted (plaque 192 -> 124, medallion 1024 -> 882), and an
+        // unpainted leaf is scored as that filament. The bounds sit just above the measured values,
+        // so a regression in the importer shows up here instead of passing a loose "not worse".
+        if (std::string(file) == "agent_plaque.glb") {
+            CHECK(r.mean_de_new <= 31.71);
+            CHECK(r.max_de_new <= 139.57);
+        } else {
+            CHECK(r.mean_de_new <= 1.91);
+            CHECK(r.max_de_new <= 4.74);
+        }
         CHECK(r.max_de_new <= r.max_de_old);
         CHECK(r.filaments_new >= 2);
     }
@@ -2435,4 +2461,170 @@ TEST_CASE("Image Fill 5b: the stripe width factor and the wall-method keys", "[i
         CHECK(plain.to_string().find("wm=") == std::string::npos);
         CHECK(plain.to_string().find("wd=") == std::string::npos);
     }
+}
+
+// =============================================================================================
+// Phase 5e: the part's own filament is the one left unpainted - not filament 1
+// =============================================================================================
+//
+// The colour dialog sets the part's filament to its first cluster's slot, which need not be 1.
+// The face-colour importers used to leave filament 1 out (unpainted, and out of the sub-facet
+// palette) whatever the part's filament was: with the part on filament 3, faces meant for
+// filament 1 printed filament 3, and a sub-facet whose colour was filament 1's could only be
+// painted with the nearest OTHER filament.
+TEST_CASE("Image Fill 5e: face-colour imports leave the part's own filament unpainted, and paint filament 1",
+          "[imagefill][glb][p5e]")
+{
+    const RGBA white{1.f, 1.f, 1.f, 1.f}, red{0.9f, 0.1f, 0.1f, 1.f};
+    auto make = [](Model &model) {
+        ModelObject *object = model.add_object();
+        object->add_volume(TriangleMesh(its_make_cube(10., 10., 10.)), ModelVolumeType::MODEL_PART);
+        object->add_instance();
+        return object->volumes.front();
+    };
+    // The first six triangles are white (filament 1), the other six red (filament 3, the part's).
+    std::vector<unsigned char> ids;
+    std::vector<RGBA>          faces, subs;
+    for (int t = 0; t < 12; ++t) {
+        const bool w = t < 6;
+        ids.push_back(w ? 1 : 3);
+        faces.push_back(w ? white : red);
+        for (int k = 0; k < 4; ++k)
+            subs.push_back(w ? white : red);
+    }
+    auto facets_of = [](const ModelVolume &v, int state) {
+        TriangleSelector sel(v.mesh());
+        sel.deserialize(v.mmu_segmentation_facets.get_data(), true);
+        return sel.get_facets(EnforcerBlockerType(state)).indices.size();
+    };
+
+    SECTION("sub-facet path")
+    {
+        Model        model;
+        ModelVolume *v = make(model);
+        REQUIRE(Model::import_multi_volume_face_color_deal(ids, faces, subs, 1, 3, &model));
+        CHECK(model.objects.front()->config.option("extruder")->getInt() == 3);
+        CHECK(facets_of(*v, 1) > 0);    // white is painted with filament 1
+        CHECK(facets_of(*v, 3) == 0);   // red is the part's own filament: left unpainted
+    }
+    SECTION("per-face path")
+    {
+        Model        model;
+        ModelVolume *v = make(model);
+        REQUIRE(Model::obj_import_face_color_deal(ids, 3, &model));
+        CHECK(facets_of(*v, 1) > 0);
+        CHECK(facets_of(*v, 3) == 0);
+    }
+    SECTION("with the part on filament 1 the white faces are the unpainted ones")
+    {
+        Model                      model;
+        ModelVolume               *v = make(model);
+        std::vector<unsigned char> ids1 = ids;
+        for (unsigned char &id : ids1)
+            id = id == 3 ? 2 : id;   // red on filament 2 now
+        REQUIRE(Model::import_multi_volume_face_color_deal(ids1, faces, subs, 1, 1, &model));
+        CHECK(facets_of(*v, 1) == 0);
+        CHECK(facets_of(*v, 2) > 0);
+    }
+}
+
+// Phase 5e, measured on a real texture: the medallion GLB with filament 1 loaded as one of the
+// texture's own colours, so filament 1 IS in the picture. The OLD sub-facet rule is reproduced
+// exactly - the palette built from ids > 1, no background - next to the new one (every chosen id,
+// the part's filament as background), through the same image_fill_from_face_colors() call the
+// importer makes, and both are scored the way the before/after above scores them: CIE76 dE between
+// each leaf's texture colour and the colour of the filament the leaf PRINTS (an unpainted leaf
+// prints the part's own filament).
+TEST_CASE("Image Fill 5e: with filament 1 in the picture, the new palette prints it where the old one could not",
+          "[imagefill][glb][p5e]")
+{
+    const std::string path = std::string(TEST_DATA_DIR) + "/image_fill/agent_medallion.glb";
+    Model       probe;
+    GltfInfo    info;
+    std::string message;
+    REQUIRE(load_gltf(path.c_str(), &probe, info, message));
+    REQUIRE(probe.objects.size() == 1);
+    REQUIRE(probe.objects.front()->volumes.size() == 1);
+    const indexed_triangle_set &mesh = probe.objects.front()->volumes.front()->mesh().its;
+    REQUIRE(info.sub_face_depth > 0);
+    REQUIRE(info.face_colors.size() == mesh.indices.size());
+
+    // Filament 1 is the texture's most frequent per-triangle colour.
+    std::map<std::array<int, 3>, size_t> freq;
+    for (const RGBA &c : info.face_colors)
+        ++freq[{int(std::lround(c[0] * 255.f)), int(std::lround(c[1] * 255.f)), int(std::lround(c[2] * 255.f))}];
+    std::array<int, 3> top{0, 0, 0};
+    size_t             top_n = 0;
+    for (const auto &kv : freq)
+        if (kv.second > top_n) { top_n = kv.second; top = kv.first; }
+    const std::vector<RGBA> existing = {RGBA{top[0] / 255.f, top[1] / 255.f, top[2] / 255.f, 1.f},
+                                        RGBA{0.f, 0.f, 0.f, 1.f}, RGBA{0.1f, 0.2f, 0.8f, 1.f}};
+    ObjColorMatchResult match;
+    REQUIRE(obj_color_auto_match(info.face_colors, false, existing, match));
+    REQUIRE(match.filament_ids.size() == info.face_colors.size());
+    REQUIRE(std::count(match.filament_ids.begin(), match.filament_ids.end(), (unsigned char) 1) > 0);
+    const int first = int(match.first_extruder_id);
+
+    auto slot_color = [&](int id) -> RGBA {
+        if (id >= 1 && size_t(id) <= existing.size())
+            return existing[size_t(id) - 1];
+        const size_t k = size_t(id) - 1 - existing.size();
+        return k < match.added_colors.size() ? match.added_colors[k] : RGBA{0.5f, 0.5f, 0.5f, 1.f};
+    };
+    // The palette exactly as Model::import_multi_volume_face_color_deal builds it: one entry per
+    // distinct chosen id, standing for the mean colour of the faces mapped to it.
+    auto palette_of = [&](int min_id, std::vector<int> &ids, std::vector<std::array<float, 3>> &cols) {
+        std::map<int, std::array<double, 4>> acc;
+        for (size_t i = 0; i < match.filament_ids.size(); ++i) {
+            const int id = int(match.filament_ids[i]);
+            if (id < min_id)
+                continue;
+            auto &a = acc[id];
+            for (int c = 0; c < 3; ++c) a[c] += info.face_colors[i][c];
+            a[3] += 1.;
+        }
+        for (const auto &kv : acc) {
+            ids.push_back(kv.first);
+            cols.push_back({float(kv.second[0] / kv.second[3]), float(kv.second[1] / kv.second[3]),
+                            float(kv.second[2] / kv.second[3])});
+        }
+    };
+    std::vector<std::array<float, 3>> subs;
+    for (const RGBA &c : info.sub_face_colors)
+        subs.push_back({c[0], c[1], c[2]});
+
+    auto score = [&](int min_id, int background, size_t &leaves_on_1) -> double {
+        std::vector<int>                  ids;
+        std::vector<std::array<float, 3>> cols;
+        palette_of(min_id, ids, cols);
+        const ImageFillResult res = image_fill_from_face_colors(mesh, subs, cols, ids, background, info.sub_face_depth);
+        REQUIRE(res.ok);
+        TriangleMesh           tm(mesh);
+        const std::vector<int> states = leaf_states(tm, res.painting, mesh.indices.size(), info.sub_face_depth);
+        double sum = 0.;
+        leaves_on_1 = 0;
+        for (size_t i = 0; i < states.size(); ++i) {
+            const int id = states[i] > 0 ? states[i] : first;
+            if (id == 1)
+                ++leaves_on_1;
+            sum += double(obj_color_distance(info.sub_face_colors[i], slot_color(id)));
+        }
+        return sum / double(states.size());
+    };
+    size_t       old_on_1 = 0, new_on_1 = 0;
+    const double old_mean = score(2, 0, old_on_1);
+    const double new_mean = score(1, first, new_on_1);
+    WARN("medallion, filament 1 in the picture (first extruder " << first << "): OLD rule meanDE=" << old_mean
+         << " leaves printing filament 1=" << old_on_1 << " | NEW rule meanDE=" << new_mean
+         << " leaves printing filament 1=" << new_on_1);
+    // The old rule could put a leaf on filament 1 only by leaving it unpainted when 1 happened to
+    // be the part's filament; the new one prints filament 1 wherever the picture is filament 1.
+    CHECK(new_on_1 > 0);
+    CHECK(new_on_1 >= old_on_1);
+    CHECK(new_mean < old_mean);
+    // Measured (job 237): OLD 7.305 with no leaf on filament 1, NEW 1.135 with 142 leaves on it.
+    // Pinned just outside those values, both ways, so the comparison cannot quietly collapse.
+    CHECK(old_mean >= 7.29);
+    CHECK(new_mean <= 1.14);
+    CHECK(new_on_1 >= 140);
 }
