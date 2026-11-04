@@ -5183,9 +5183,6 @@ void Sidebar::edit_rack_nozzles(size_t extruder)
         if (const auto *racks = bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter");
             racks != nullptr && extruder < racks->values.size())
             text = racks->values[extruder];
-    // Owner hand test 2026-11-03: else the machine's full rack (H3C nine slots, H2C right six), as Bambu Studio shows it.
-    if (text.empty())
-        text = default_rack_nozzle_text(bundle->printer_config_with_project_sizes(), extruder);
     if (text.empty())
         text = format_nozzle_diameter_word(sizes[extruder]) + ", " + format_nozzle_diameter_word(sizes[extruder]);
     for (;;) {
