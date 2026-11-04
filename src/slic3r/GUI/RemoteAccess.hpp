@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <deque>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -11,11 +13,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "slic3r/GUI/RemotePaintV1.hpp"
 #include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
 class LoopbackAcceptLoop;
 namespace GUI {
+namespace SliceV1 { struct PreviewLook; }
 
 // This slicer instance's JSON API, on a loopback-only port picked by the OS.
 //
@@ -147,7 +151,10 @@ private:
     ApiResponse api_plate_thumbnail(int plate);
     ApiResponse api_plate_layout(int plate);
     ApiResponse api_plate_preview(int plate);
-    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy);
+    ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy,
+                                      const SliceV1::PreviewLook& look);
+    ApiResponse api_plate_preview_legend(int plate, const std::string& color_by, const std::string& hide); // PR E
+    ApiResponse api_plate_preview_layers(int plate);                                                       // PR E
     ApiResponse api_plate_preview_status(int plate);
     // slice_v1 (the app's native Slice tab): results detail and warnings of a sliced plate, and
     // cancelling a running slice job the way the desktop's slicing notification does.
@@ -161,6 +168,15 @@ private:
     ApiResponse api_plate_arrange(int plate, bool loose, bool orient);
     ApiResponse api_object_printable(const std::string& form_body);
     ApiResponse api_undo(const std::string& expect);
+    // PR G (G8-G10, parity section 6.1): plates add / delete / rename / bed type, objects delete /
+    // duplicate and saving the project, each as the PC's own control does it.
+    ApiResponse api_plate_add();
+    ApiResponse api_plate_delete(int plate, const std::string& objects, bool confirm);
+    ApiResponse api_plate_rename(int plate, const std::string& name);
+    ApiResponse api_plate_bed_type(int plate, const std::string& bed_type);
+    ApiResponse api_object_delete(const std::string& form_body);
+    ApiResponse api_object_duplicate(const std::string& form_body);
+    ApiResponse api_project_save();
     // watching=false: the hub's own background poll while nobody looks (ElegooSdcpMonitor::note_watching).
     ApiResponse api_printers(int plate = -1, bool watching = true);
     ApiResponse api_snapmaker_devices();
@@ -188,6 +204,21 @@ private:
     ApiResponse api_process_set(const std::string& form_body);
     ApiResponse api_process_revert();
     ApiResponse api_process_save();
+    // PR F: filament settings, per slot
+    ApiResponse api_filament_settings(int slot);
+    ApiResponse api_filament_set(int slot, const std::string& form_body);
+    ApiResponse api_filament_revert(int slot);
+    ApiResponse api_filament_save(int slot, const std::string& name);
+    ApiResponse api_filament_remove(int slot, int replace, bool confirm);
+    // paint_v1 (H1, pen colouring; RemotePaintV1.hpp): the objects a tablet can paint, opening a
+    // session on one, and that session's state, one volume's mesh and its painting. Read-only.
+    ApiResponse api_paint_objects();
+    ApiResponse api_paint_session_open(const std::string& form_body);
+    ApiResponse api_paint_session(const std::string& id, const std::string& what, const std::string& query);
+    // H2: the tablet's paint, spooled by the hub to `path` (in its uploads folder); applied in one undo step.
+    ApiResponse api_paint_apply(const std::string& id, const std::string& path);
+    // The paint a session read at `revision` (what a later apply painted on), kept for the last few reads.
+    void        paint_remember(const std::string& id, const std::string& revision, const PaintV1::ObjectSnapshot& object);
 
     struct Job
     {
@@ -228,6 +259,16 @@ private:
     long long        m_gui_tick_ms { 0 };
     int              m_modal_depth { 0 };
     int              m_requests_done { 0 };
+    // paint_v1: open sessions by id, each bound to an object key (PaintV1::MAX_SESSIONS at most)
+    struct PaintSession
+    {
+        std::string                           object_key;
+        std::chrono::steady_clock::time_point opened;
+        // revision -> each model part's paint as served then (the newest few; see paint_remember)
+        std::vector<std::pair<std::string, PaintV1::PaintByVolume>> seen;
+    };
+    std::mutex                          m_paint_mutex;
+    std::map<std::string, PaintSession> m_paint_sessions;
 };
 
 } // namespace GUI

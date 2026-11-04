@@ -1,6 +1,8 @@
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Print.hpp"
+#include "NozzleProcess.hpp"
+#include "ToolSlots.hpp"
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -593,6 +595,24 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     // Cache the plenty of parameters, which influence the G-code generator only,
     // or they are only notes not influencing the generated G-code.
     static std::unordered_set<std::string> steps_gcode = {
+        // Per-nozzle process P1: the names only reach the G-code's config block; the values they
+        // stand for are the process keys' extruder slots.
+        "nozzle_process_presets",
+        // Per-nozzle process P8: the tools' changes reach the slicer as the values they fill in; the missing list is
+        // read by validate() only.
+        "nozzle_process_edits",
+        "nozzle_process_missing",
+        // Per-nozzle process P9: likewise the rack slots' processes (their values are filled in) and the missing slots.
+        "nozzle_slot_process_presets",
+        "nozzle_slot_process_missing",
+        // Per-nozzle process P4: the per-nozzle filament values reach the slicer as the filament values they set
+        // (resolve_filament_nozzle_variants), which invalidate what they change; the physical nozzle declaration
+        // is a G-code line.
+        "filament_nozzle_variants",
+        // Per-nozzle process P6: they reach the slicer as the nozzle_*_line_width arrays they resolve to.
+        "process_nozzle_line_widths",
+        "line_width_nozzle_diameter",
+        "support_filament_nozzle_mapping",
         //BBS
         "additional_cooling_fan_speed",
         "reduce_crossing_wall",
@@ -772,7 +792,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "layer_time_speed_max_speedup",
         "layer_time_speed_max_slowdown",
         "layer_time_speed_max_time_increase",
-        "layer_time_speed_slowdown_scope"
+        "layer_time_speed_slowdown_scope",
+        // Edge: minimum layer time pause position (G-code export only).
+        "min_layer_time_pause_park",
+        "min_layer_time_pause_park_x",
+        "min_layer_time_pause_park_y"
     };
 
     static std::unordered_set<std::string> steps_ignore;
@@ -794,7 +818,25 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "filament_flow_support"
             || opt_key == "process_flow_support"
             || opt_key == "printer_flow_support"
-            || opt_key == "filament_flow_step_size") {
+            || opt_key == "filament_flow_step_size"
+            // Per-nozzle process P1: which extruder slot of the process keys a filament reads.
+            || opt_key == "print_extruder_id"
+            || opt_key == "print_extruder_variant"
+            || opt_key == "process_extruder_values"
+            // Per-nozzle process P2: which nozzle a filament prints on decides its widths, flows and speeds.
+            || opt_key == "filament_nozzle_assignment"
+            // Per-nozzle process P4: the slot model and rack nozzle sizes decide each filament's values and widths.
+            || opt_key == "print_extruder_nozzle_diameter"
+            || opt_key == "tool_slot_model"
+            || opt_key == "extruder_rack_nozzle_diameter"
+            || opt_key == "filament_rack_nozzle_diameter"
+            // Per-nozzle process P7: an overridden nozzle size (Print::apply wrote it into nozzle_diameter already).
+            || opt_key == "nozzle_diameter_override"
+            // Per-nozzle process P9: rack slot pins, the project's rack sizes and the per-filament process slots decide each
+            // filament's nozzle, size and values.
+            || opt_key == "filament_rack_nozzle_slot"
+            || opt_key == "extruder_rack_nozzle_override"
+            || opt_key == "nozzle_filament_process_slot") {
             // Snapmaker: switching a filament's flow variant changes the values read out of
             // flow-variant arrays without the arrays themselves changing.
             invalidated |= this->invalidate_all_steps();
@@ -978,6 +1020,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             osteps.emplace_back(posSimplifySupportPath);
         } else if (
                opt_key == "initial_layer_line_width"
+            || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
+            || opt_key == "nozzle_line_width" // per-nozzle process P6
             || opt_key == "min_layer_height"
             || opt_key == "max_layer_height"
             //|| opt_key == "resolution"
@@ -1213,7 +1257,7 @@ double Print::max_allowed_layer_height() const
 {
     double nozzle_diameter_max = 0.;
     for (unsigned int extruder_id : this->extruders())
-        nozzle_diameter_max = std::max(nozzle_diameter_max, m_config.nozzle_diameter.get_at(extruder_id));
+        nozzle_diameter_max = std::max(nozzle_diameter_max, nozzle_diameter_for_filament(m_config, extruder_id + 1));
     return nozzle_diameter_max;
 }
 
@@ -2686,24 +2730,58 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                   "on the first layer. Enable the prime tower, or turn \"Preload all filaments\" off."),
                 nullptr, "enable_prime_tower"};
 
+    // Per-nozzle process P2 (design D10): a Bambu printer (H2D / H2C / X2D) printing through left and right nozzles of
+    // different diameters slices like any mixed job, but whether its firmware accepts such a third-party slice is
+    // not documented and not yet confirmed on hardware. Say so plainly instead of refusing.
+    if (this->is_BBL_printer() && ! m_objects.empty() && nozzles >= 2) {
+        double first_used = -1.;
+        bool   mixed_used = false;
+        for (unsigned int extruder_idx : extruders) {
+            const double d = nozzle_diameter_for_filament(m_config, extruder_idx + 1);
+            if (first_used < 0.)
+                first_used = d;
+            else if (std::abs(d - first_used) > EPSILON)
+                mixed_used = true;
+        }
+        if (mixed_used)
+            warn(L("Experimental: this print uses left and right nozzles of different diameters. Bambu firmware support for "
+                   "this is not confirmed. Do a small test print first and watch the first layers."), "nozzle_diameter");
+    }
+
+    // Per-nozzle process P4: rack nozzle sizes (H2C) that cannot be honoured refuse the slice; per-nozzle filament
+    // values that cannot be read, and filaments sharing a tool (the G-code then keeps naming each filament's own
+    // tool), are reported.
+    if (! m_objects.empty()) {
+        if (std::string rack_error = validate_rack_nozzle_diameters(m_config, extruders); ! rack_error.empty())
+            return { rack_error, nullptr, "extruder_rack_nozzle_diameter" };
+        if (has_mixed_rack_diameters(m_config))
+            warn(L("Experimental: this printer's nozzle rack holds nozzles of different diameters. Each filament prints with the "
+                   "rack nozzle size set for it. Bambu firmware support for this is not confirmed."), "extruder_rack_nozzle_diameter");
+        std::vector<std::string> variant_errors;
+        for (const std::string &text : m_config.filament_nozzle_variants.values)
+            parse_filament_nozzle_variants(text, &variant_errors);
+        for (const std::string &key_value : m_config.filament_nozzle_variants.values)
+            for (const FilamentNozzleVariant &variant : parse_filament_nozzle_variants(key_value))
+                for (const auto &kv : variant.values)
+                    if (! is_filament_nozzle_variant_key(kv.first))
+                        variant_errors.push_back("\"" + kv.first + "\" is not a filament value");
+        if (! variant_errors.empty())
+            warn(std::string(L("Some per-nozzle filament values were ignored: ")) + variant_errors.front(), "filament_nozzle_variants");
+        bool shared_tool = false;
+        filament_output_tools(m_config, extruders, &shared_tool);
+        if (shared_tool)
+            warn(L("Two filaments are set to print on the same nozzle. The G-code names each filament's own tool, so map "
+                   "the filaments to that nozzle when you send the print."), "filament_nozzle_assignment");
+    }
+
     if (this->has_wipe_tower() && ! m_objects.empty()) {
-        // Make sure all extruders use same diameter filament and have the same nozzle diameter
-        // EPSILON comparison is used for nozzles and 10 % tolerance is used for filaments
-        // Mixed nozzle sizes (Phase 2 gate): the prime tower is still generated at ONE line width -
-        // WipeTower::set_extruder() overwrites the single m_perimeter_width scalar for every
-        // registered filament, so a mixed-diameter job would print the tower at whichever nozzle
-        // happened to register last. Refuse the combination with a message that names the way out
-        // instead of warning and printing something wrong. Phase 3 makes the tower per-tool.
-        auto nozzle_dmr_of = [this](unsigned int filament_id_0based) -> double {
-            return m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, filament_id_0based + 1));
-        };
-        double first_nozzle_diam = nozzle_dmr_of(extruders.front());
+        // Make sure all extruders use same diameter filament.
+        // 10 % tolerance is used for filaments.
+        // Mixed nozzle sizes (per-nozzle P2): both prime towers lay each tool's ramming and purge at that
+        // tool's own width (nozzle x 1.25) and keep one structure width for the footprint, the wall, the
+        // brim and the sparse fill (WipeTower2: FOrca 0b1f80cd22, AGPL-3.0; WipeTower: the same design,
+        // Edge's own), so mixed nozzle diameters no longer refuse the tower.
         double first_filament_diam = m_config.filament_diameter.get_at(extruders.front());
-        for (const auto& extruder_idx : extruders)
-            if (std::abs(nozzle_dmr_of(extruder_idx) - first_nozzle_diam) > EPSILON)
-                return {L("The prime tower does not support mixed nozzle diameters: it is generated at a single line "
-                          "width for every filament. Turn the prime tower off, or use filaments that all print through "
-                          "nozzles of the same diameter."), nullptr, "enable_prime_tower"};
         for (const auto& extruder_idx : extruders) {
             double filament_diam = m_config.filament_diameter.get_at(extruder_idx);
             if (std::abs((filament_diam - first_filament_diam) / first_filament_diam) > 0.1) {
@@ -2762,7 +2840,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     slicing_params0.gap_support_object != slicing_params.gap_support_object)
                     return {L("The prime tower is only supported for multiple objects if they are printed with the same support_top_z_distance."), object};
 #endif
-                if (!equal_layering(slicing_params, slicing_params0))
+                // Per-nozzle process P2: objects printed through nozzles of different sizes carry their own nozzles'
+                // min / max layer height limits, which only clamp a variable layer height profile; the layers the
+                // tower shares are compared below (has_custom_layering) and by layer_height above. So the limits
+                // do not have to match.
+                SlicingParameters same_limits = slicing_params;
+                same_limits.min_layer_height  = slicing_params0.min_layer_height;
+                same_limits.max_layer_height  = slicing_params0.max_layer_height;
+                if (!equal_layering(same_limits, slicing_params0))
                     return  { L("The prime tower requires that all objects are sliced with the same layer heights."), object };
                 if (has_custom_layering) {
                     auto &lh         = layer_height_profile(i);
@@ -2803,13 +2888,34 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
+    // Per-nozzle process P8: a tool that prints and has no process for its nozzle size (the plate's is made for another
+    // size, and the printer has no system process for this one) is refused, naming the tool.
+    if (!m_config.nozzle_process_missing.values.empty())
+        for (unsigned int filament : extruders) {
+            const size_t e = nozzle_for_filament(m_config, filament + 1);
+            const auto  &missing = m_config.nozzle_process_missing.values;
+            if (std::find(missing.begin(), missing.end(), int(e) + 1) != missing.end() && nozzle_filament_group_id(m_config, filament + 1).empty())
+                return { nozzle_process_missing_error(m_config, e) };
+        }
+    // Per-nozzle process P9: likewise a rack nozzle size that prints, naming it ("Right 0.6").
+    if (!m_config.nozzle_slot_process_missing.values.empty())
+        for (unsigned int filament : extruders) {
+            const std::string id = nozzle_filament_group_id(m_config, filament + 1);
+            if (id.empty())
+                continue;
+            const auto &missing = m_config.nozzle_slot_process_missing.values;
+            if (std::find(missing.begin(), missing.end(), id) != missing.end())
+                return { nozzle_size_group_missing_error(m_config, nozzle_for_filament(m_config, filament + 1),
+                                                         nozzle_diameter_for_filament(m_config, filament + 1)) };
+        }
+
 	{
         // Mixed nozzle sizes (Phase 1): `extruders` holds 0-based FILAMENT indices. The diameter a
         // filament prints at is the diameter of the nozzle it is loaded into, which on a machine with
         // more filaments than nozzles is only known through filament_map - indexing nozzle_diameter
         // by the filament number silently returned the first nozzle for every filament past the last.
         auto nozzle_dmr_of_filament0 = [this](unsigned int filament_id_0based) -> double {
-            return m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, filament_id_0based + 1));
+            return nozzle_diameter_for_filament(m_config, filament_id_0based + 1);
         };
 		// Find the smallest used nozzle diameter and the number of unique nozzle diameters.
 		double min_nozzle_diameter = std::numeric_limits<double>::max();
@@ -2853,7 +2959,32 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // upper bound was 5 x the COARSEST nozzle of the print, so a 0.62 mm outer wall routed to a
         // 0.2 mm head sliced silently. The message names the feature and the filament so the user
         // knows which of the two to change.
-        auto validate_feature_width_vs_nozzle = [](const char *opt_key, unsigned int filament_id, double extrusion_width, double nozzle_diameter, std::string &err_msg) -> bool {
+        // Per-nozzle process P8 (owner design E): on a printer with several nozzles a width error names the tool and its size,
+        // and its jump link ("key@T2") opens that tool's process.
+        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2;
+        // P9: a filament on a rack slot names the slot ("Right slot 3") and jumps to it ("key@T2.3").
+        auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_filament_tool_name(m_config, std::max(filament_id, 1u)); };
+        auto tool_opt_key = [this, several_nozzles](const char *opt_key, unsigned int filament_id) {
+            return several_nozzles ? std::string(opt_key) + "@" + nozzle_filament_tool_id(m_config, std::max(filament_id, 1u)) :
+                                     std::string(opt_key);
+        };
+        auto width_error = [&tool_of_filament, several_nozzles](const std::string &generic, const char *opt_key, unsigned int filament_id, double width,
+                                                                 double nozzle_diameter, double layer_height) -> std::string {
+            if (!several_nozzles)
+                return generic;
+            const ConfigOptionDef *def = print_config_def.get(opt_key);
+            char buf_w[32], buf_n[32], buf_h[32];
+            snprintf(buf_w, sizeof(buf_w), "%g", std::round(width * 1000.) / 1000.);
+            snprintf(buf_n, sizeof(buf_n), "%g", std::round(nozzle_diameter * 1000.) / 1000.);
+            snprintf(buf_h, sizeof(buf_h), "%g", std::round(layer_height * 1000.) / 1000.);
+            const std::string label = def ? def->label : std::string(opt_key);
+            if (width <= layer_height)
+                return (boost::format(L("%1% has a %2% mm nozzle; its %3% of %4% mm is not wider than the layer height %5% mm. Widen it in %1%'s process, or lower the layer height on Plate."))
+                        % tool_of_filament(filament_id) % buf_n % label % buf_w % buf_h).str();
+            return (boost::format(L("%1% has a %2% mm nozzle; its %3% of %4% mm is too wide for it. Narrow it in %1%'s process, or change %1%'s nozzle."))
+                    % tool_of_filament(filament_id) % buf_n % label % buf_w).str();
+        };
+        auto validate_feature_width_vs_nozzle = [this, &tool_of_filament](const char *opt_key, unsigned int filament_id, double extrusion_width, double nozzle_diameter, std::string &err_msg) -> bool {
             if (extrusion_width <= 0. || nozzle_diameter <= 0.)
                 return true;
             if (extrusion_width <= nozzle_diameter * MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO + EPSILON)
@@ -2866,6 +2997,9 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
             err_msg = (boost::format(L("Line width of %1% (%2% mm) is more than %3% x the diameter of the nozzle that prints it "
                                        "(filament %4%, nozzle %5% mm). Reduce the line width, or print this feature with a coarser nozzle."))
                        % (def ? def->label : std::string(opt_key)) % buf_w % buf_k % filament_id % buf_n).str();
+            // P8: name the tool too.
+            if (m_config.nozzle_diameter.values.size() >= 2)
+                err_msg += " (" + tool_of_filament(filament_id) + ")";
             return false;
         };
         for (PrintObject *object : m_objects) {
@@ -2969,11 +3103,16 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 object_filaments = extruders;
 
             double object_min_nozzle_diameter = std::numeric_limits<double>::max();
+            unsigned int object_min_filament  = object_filaments.empty() ? 0 : object_filaments.front(); // 0-based
             for (unsigned int filament_id : object_filaments)
-                object_min_nozzle_diameter = std::min(object_min_nozzle_diameter, nozzle_dmr_of_filament0(filament_id));
+                if (const double d = nozzle_dmr_of_filament0(filament_id); d < object_min_nozzle_diameter) {
+                    object_min_nozzle_diameter = d;
+                    object_min_filament        = filament_id;
+                }
 
             double initial_layer_print_height = m_config.initial_layer_print_height.value;
             double first_layer_min_nozzle_diameter;
+            unsigned int first_layer_min_filament = object_min_filament;
             if (object->has_raft()) {
                 // if we have raft layers, only support material extruder is used on first layer
                 int first_layer_filament = object->config().raft_layers == 1
@@ -2982,17 +3121,22 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 first_layer_min_nozzle_diameter = (first_layer_filament <= 0) ?
                     object_min_nozzle_diameter :
                     nozzle_dmr_of_filament0(unsigned(first_layer_filament - 1));
+                if (first_layer_filament > 0)
+                    first_layer_min_filament = unsigned(first_layer_filament - 1);
             } else {
                 // if we don't have raft layers, any nozzle diameter of this object is potentially used in first layer
                 first_layer_min_nozzle_diameter = object_min_nozzle_diameter;
             }
+            // Per-nozzle process P8 (owner design E): the message names the tool, its size and the setting.
             if (initial_layer_print_height > first_layer_min_nozzle_diameter)
-                return {L("Layer height cannot exceed nozzle diameter."), object, "initial_layer_print_height"};
+                return {nozzle_layer_height_error(m_config, first_layer_min_filament + 1, true, initial_layer_print_height,
+                                                  first_layer_min_nozzle_diameter), object, "initial_layer_print_height"};
 
             // validate layer_height
             double layer_height = object->config().layer_height.value;
             if (layer_height > object_min_nozzle_diameter)
-                return {L("Layer height cannot exceed nozzle diameter."), object, "layer_height"};
+                return {nozzle_layer_height_error(m_config, object_min_filament + 1, false, layer_height, object_min_nozzle_diameter), object,
+                        "layer_height"};
 
             // Validate extrusion widths, each against the nozzle that prints it.
             std::string err_msg;
@@ -3014,10 +3158,12 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 if (support_width == 0.)
                     support_width = object->config().get_abs_value("line_width", support_nozzle_diameter);
                 if (!validate_extrusion_width(support_width, support_nozzle_diameter, layer_height, err_msg))
-                    return {err_msg, object, "support_line_width"};
+                    return {width_error(err_msg, "support_line_width", unsigned(std::max(sup, supi)), support_width, support_nozzle_diameter,
+                                        layer_height),
+                            object, tool_opt_key("support_line_width", unsigned(std::max(sup, supi)))};
                 if (!validate_feature_width_vs_nozzle("support_line_width", unsigned(std::max(sup, supi)), support_width,
                                                       support_nozzle_diameter, err_msg))
-                    return {err_msg, object, "support_line_width"};
+                    return {err_msg, object, tool_opt_key("support_line_width", unsigned(std::max(sup, supi)))};
             }
             // Each width option is bounded against the nozzle of the filament its own FlowRole is
             // routed to (PrintRegion::extruder), the same mapping PrintRegion::flow() uses to size
@@ -3050,9 +3196,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                     if (width == 0.)
                         width = object->config().get_abs_value("line_width", nozzle_diameter);
                     if (!validate_extrusion_width(width, nozzle_diameter, layer_height, err_msg))
-                        return {err_msg, object, width_role.first};
+                        return {width_error(err_msg, width_role.first, filament_id, width, nozzle_diameter, layer_height), object,
+                                tool_opt_key(width_role.first, filament_id)};
                     if (!validate_feature_width_vs_nozzle(width_role.first, filament_id, width, nozzle_diameter, err_msg))
-                        return {err_msg, object, width_role.first};
+                        return {err_msg, object, tool_opt_key(width_role.first, filament_id)};
                 }
 
             // ORCA: Bridge line width. It sizes the bridges and overhang walls of every role that
@@ -3415,7 +3562,8 @@ double Print::skirt_first_layer_height() const
 
 Flow Print::brim_flow() const
 {
-    ConfigOptionFloatOrPercent width = m_config.initial_layer_line_width;
+    // Per-nozzle process P6: the first-layer width of the brim filament's nozzle (P5 deferred item).
+    ConfigOptionFloatOrPercent width = initial_layer_line_width_for_filament(m_config, unsigned(m_print_regions.front()->config().wall_filament.value));
     if (width.value <= 0)
         width = m_print_regions.front()->config().inner_wall_line_width;
     if (width.value <= 0)
@@ -3430,7 +3578,7 @@ Flow Print::brim_flow() const
         frPerimeter,
         // Flow::new_from_config_width takes care of the percent to value substitution
 		width,
-        (float)m_config.nozzle_diameter.get_at(m_print_regions.front()->config().wall_filament-1),
+        (float)nozzle_diameter_for_filament(m_config, unsigned(m_print_regions.front()->config().wall_filament.value)),
 		(float)this->skirt_first_layer_height());
 }
 
@@ -3438,9 +3586,12 @@ Flow Print::skirt_flow() const
 {
 
     // Orca: fall back to m_config if no objects are present
-    ConfigOptionFloatOrPercent width = m_config.initial_layer_line_width;
+    // Per-nozzle process P6: the first-layer / default width of the skirt filament's nozzle (P5 deferred item).
+    // Support "0 = current filament" reads the first extruder's nozzle below, which filament 1 prints on.
+    const unsigned int skirt_filament = m_objects.empty() ? 1u : unsigned(std::max(1, m_objects.front()->config().support_filament.value));
+    ConfigOptionFloatOrPercent width = initial_layer_line_width_for_filament(m_config, skirt_filament);
     if (width.value <= 0)
-        width = m_objects.empty() ? m_config.initial_layer_line_width : m_objects.front()->config().line_width;
+        width = m_objects.empty() ? m_config.initial_layer_line_width : line_width_for_filament(m_config, m_objects.front()->config().line_width, skirt_filament);
 
     /* We currently use a random object's support material extruder.
        While this works for most cases, we should probably consider all of the support material
@@ -3450,8 +3601,7 @@ Flow Print::skirt_flow() const
     return Flow::new_from_config_width(frPerimeter,
                                        // Flow::new_from_config_width takes care of the percent to value substitution
                                        width,
-                                       (float) m_config.nozzle_diameter.get_at(
-                                           m_objects.empty() ? 0 : m_objects.front()->config().support_filament - 1),
+                                       (float) nozzle_diameter_for_filament(m_config, m_objects.empty() ? 1u : unsigned(m_objects.front()->config().support_filament.value)),
                                        (float) this->skirt_first_layer_height());
 }
 

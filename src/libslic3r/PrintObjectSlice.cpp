@@ -18,6 +18,7 @@
 #include "FDMHollowing.hpp"
 #include "MixedFilament.hpp"
 #include "MultiMaterialSegmentation.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 #include "Print.hpp"
 #include "SVG.hpp"
 //BBS
@@ -905,11 +906,31 @@ void PrintObject::slice()
         // 1. Overrides nothing relative to its parent region, so it is an alias of the parent's own
         //    PrintRegion and literally cannot print differently. An extruder override that really
         //    differs is an effect and does not land here - see modifiers_without_overrides().
-        if (const std::vector<std::string> inert = this->modifiers_without_overrides(); ! inert.empty())
+        //    Painted areas are applied after modifiers (apply_mm_segmentation) and replace their
+        //    filament, so a filament-only modifier on a painted part gets its own explanation.
+        const PrintObject::ModifierPaintNotes paint_notes = this->modifier_paint_notes();
+        std::vector<std::string> inert = this->modifiers_without_overrides();
+        inert.erase(std::remove_if(inert.begin(), inert.end(), [&paint_notes](const std::string &n) {
+                        return std::find(paint_notes.same_filament_painted.begin(), paint_notes.same_filament_painted.end(), n) !=
+                               paint_notes.same_filament_painted.end();
+                    }), inert.end());
+        if (! inert.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                 Slic3r::format(_u8L("Modifier %1% on \"%2%\" changes no settings and has no effect."),
                                join_names(inert), object_name),
                 PrintStateBase::SlicingModifierNoOverrides);
+        if (! paint_notes.same_filament_painted.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% on \"%2%\" uses the same filament as the object, and painted areas override "
+                                    "modifier filaments, so it has no effect. To print it in its own colour, make it a part "
+                                    "(or paint over it)."),
+                               join_names(paint_notes.same_filament_painted), object_name),
+                PrintStateBase::SlicingModifierSameFilamentPainted);
+        if (! paint_notes.filament_overridden.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Painted areas of \"%2%\" override the filament of modifier %1% where they overlap."),
+                               join_names(paint_notes.filament_overridden), object_name),
+                PrintStateBase::SlicingModifierOverriddenByPaint);
         // 2. Never attached to any part, so its geometry is dropped entirely.
         if (const std::vector<std::string> orphan = this->modifiers_without_parent(); ! orphan.empty())
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
@@ -5365,6 +5386,30 @@ void PrintObject::slice_volumes()
                 L("An object's XY size compensation will not be used because it is also color-painted.\nXY Size "
                   "compensation cannot be combined with color-painting."));
             BOOST_LOG_TRIVIAL(info) << "xy compensation will not work for object " << this->model_object()->name << " for multi filament.";
+        }
+
+        // Airbrush P3 (item B): the grain was chosen for a nozzle (the "Printer Nozzle Diameter" in
+        // the painting panel, or the printer selected then). Slicing always uses the real nozzle;
+        // when an airbrushed part's grain is finer than it prints cleanly, say so (never blocks).
+        {
+            const double nozzle = mm_segmentation_finest_nozzle(*this);
+            for (const ModelVolume *mv : volumes) {
+                if (!mv->is_model_part() || !mv->airbrush_field || mv->mmu_segmentation_facets.empty())
+                    continue;
+                Airbrush::AirbrushBakeParams bp;
+                if (!Airbrush::AirbrushBakeParams::from_string(mv->airbrush_field->bake_params(), bp))
+                    continue;
+                if (nozzle > 0. && Airbrush::airbrush_grain_below_floor(bp.grain_mm, float(nozzle))) {
+                    const Airbrush::AirbrushFloors f = Airbrush::airbrush_floors_for_nozzle(float(nozzle));
+                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                        Slic3r::format(_u8L("Object %1%: part \"%2%\" is airbrushed with a %3% mm grain, finer than the %4% mm nozzle "
+                                            "prints cleanly on walls (about %5% mm). Some specks will merge or disappear."),
+                                       this->model_object()->name, mv->name, std::round(bp.grain_mm * 100.f) / 100.f,
+                                       std::round(nozzle * 100.) / 100., std::round(f.wall_mm * 100.f) / 100.f),
+                        PrintStateBase::SlicingAirbrushGrainBelowNozzle);
+                    break;
+                }
+            }
         }
 
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";

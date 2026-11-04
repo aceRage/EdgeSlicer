@@ -118,11 +118,15 @@ class GLGizmoCut3D : public GLGizmoBase
         unsigned int    outside_cut_contour;
         unsigned int    outside_bb;
         bool            is_overlap;
+        // 2026-10-31: on a curved or drawn cut, connectors standing where the surface strays
+        // more than CutConnectorMaxSurfaceDeviation from their own plane over their footprint.
+        unsigned int    not_flat_enough;
 
         void invalidate() {
             outside_cut_contour = 0;
             outside_bb = 0;
             is_overlap = false;
+            not_flat_enough = 0;
         } 
     } m_info_stats;
 
@@ -288,6 +292,42 @@ class GLGizmoCut3D : public GLGizmoBase
     // cap; for a curved sheet the cap is the sheet itself restricted to the
     // object's interior, sampled here on the same grid the sheet is drawn on.
     GLModel        m_curved_cap_model;
+    // 2026-10-31: the same cross-section as a PICK target for connectors (cut_surface_section()
+    // over the sheet, in the world), so a connector lands only where the curved cut goes
+    // through the part. Rebuilt when m_curved_section_key (the sheet + plane) changes.
+    TriangleMesh                   m_curved_section_mesh;
+    std::unique_ptr<MeshRaycaster> m_curved_section_raycaster;
+    size_t                         m_curved_section_key{ 0 };
+    size_t curved_surface_key() const;
+    // The part in the plane frame, for "is this connector inside the cross-section" on a curved or
+    // drawn cut. Rebuilt when the plane or the sheet moves.
+    CutSolidTest m_section_object;
+    size_t       m_section_object_key{ 0 };
+    void   update_curved_section();
+    // Drawn cut: the strip's cross-section with the part, drawn while connectors are placed.
+    GLModel m_draw_section_model;
+    void    render_draw_section();
+    // 2026-10-31, owner hand test of #811 round 3: while connectors are placed on a curved or
+    // drawn cut, the LOWER HALF is shown as the real split (one boolean, cached until the cut
+    // changes) instead of clipping the whole mesh with the colour field, whose voxel resolution
+    // left a staircase of the hidden half along a drawn line. Falls back to the colour clip when
+    // the split fails.
+    GLModel m_split_preview_model;
+    size_t  m_split_preview_key{ 0 };
+    bool    m_split_preview_ok{ false };
+    bool    m_split_preview_tried{ false };
+    void    update_split_preview();
+    void    render_split_preview();
+    bool    split_preview_shown() const { return m_split_preview_ok && non_planar_connector_editing(); }
+    // Curved: the split preview's own cut face (in the world), the click target while the preview
+    // is shown - it is the face the user sees, which runs on past the sheet's control grid.
+    TriangleMesh                   m_split_cap_mesh;
+    std::unique_ptr<MeshRaycaster> m_split_cap_raycaster;
+    // Connectors are being placed on a curved or drawn surface: the flat clipper must stay out of
+    // it, the upper half is hidden (as the flat clipper hides it on a flat cut) and the section
+    // of the real surface is shown and picked.
+    bool   non_planar_connector_editing() const;
+    bool   clip_during_connector_editing() const;
     bool           m_curved_cap_dirty{ true };
     // Hash of everything the cap depends on, so a redraw that changed nothing
     // (camera orbit, hover) does not pay for a rebuild.
@@ -689,6 +729,29 @@ class GLGizmoCut3D : public GLGizmoBase
     TriangleMesh                   m_draw_surface_mesh;
     std::unique_ptr<MeshRaycaster> m_draw_surface_raycaster;
     bool                           m_draw_surface_pick_dirty{ true };
+    // 2026-10-31: the same cutter in the PLANE frame, as a probe: which side of the strip is the
+    // upper half (so a connector stands the right way up) and how flat the strip is under a
+    // connector. Built with the raycaster; ignored while the pick is dirty.
+    std::shared_ptr<CutSurfaceProbe> m_draw_probe;
+    // Turns a drawn-surface frame over when its +Z points into the LOWER half (the strip's own
+    // normal is pinned to the stroke's outward binormal, which on a loop is out of the plug).
+    Transform3d draw_frame_upright(const Transform3d& frame, double s, double w) const;
+    // The connector's fit on the curved sheet or the drawn strip; empty on a flat cut and for
+    // the flexi kinds (they have their own path and their own patch check).
+    std::optional<CutConnectorFit> connector_surface_fit(const CutConnector& connector) const;
+    // perform_cut() closes the gizmo - which flattens the sheet, clears the stroke and zeroes
+    // the thickness - BEFORE apply_connectors_in_model() bakes the connectors. So it takes each
+    // connector's point and frame on the curved / drawn surface (and that cut's kerf faces)
+    // first, and the bake uses them. Consumed (and cleared) by apply_connectors_in_model().
+    struct BakedConnectorFrame
+    {
+        Vec3d       pos;
+        Transform3d rotation_m;
+    };
+    std::vector<BakedConnectorFrame> m_baked_connector_frames;
+    double                           m_baked_face_lo{ 0.0 };
+    double                           m_baked_face_hi{ 0.0 };
+    bool                             m_baked_non_planar{ false };
     int                            m_draw_tilted_connectors{ 0 };
     int                            m_draw_unflat_connectors{ 0 };
     int                            m_draw_offsurface_connectors{ 0 };
@@ -1091,6 +1154,10 @@ protected:
     void render_cut_plane_input_window(CutConnectors &connectors, float x, float y, float bottom_limit);
     void init_input_window_data(CutConnectors &connectors);
     void render_input_window_warning() const;
+    void render_input_window_warning_lines() const;
+    // Docked width from the rows the panel lays out, and where its text wraps (2026-10-31).
+    float docked_panel_width() const;
+    float panel_wrap_pos() const;
     bool add_connector(CutConnectors&connectors, const Vec2d&mouse_position);
     bool delete_selected_connectors(CutConnectors&connectors);
     void select_connector(int idx, bool select);

@@ -123,7 +123,17 @@ public:
         // active_step_add_warning de-duplicates by id.
         SlicingStabilizerPaintUnreachable,
         // Side stabilizers set to Manual on an object with no painted stabilizer points. Appended; own id.
-        SlicingStabilizerManualUnpainted
+        SlicingStabilizerManualUnpainted,
+        // Airbrush P3: an airbrushed part's grain is finer than the slicing nozzle prints cleanly.
+        // Appended; own id.
+        SlicingAirbrushGrainBelowNozzle,
+        // A filament-only modifier on a colour-painted object whose filament equals the object's:
+        // reported instead of the plain "no settings" notice because painted areas override modifier
+        // filaments anyway. Appended; own id because active_step_add_warning de-duplicates by id.
+        SlicingModifierSameFilamentPainted,
+        // A modifier with a different filament overlapping colour-painted volumes: the painted areas
+        // win where they overlap. Appended; own id.
+        SlicingModifierOverriddenByPaint
     };
 
     typedef size_t TimeStamp;
