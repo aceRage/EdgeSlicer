@@ -5054,7 +5054,15 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         //goto __error_process;
     }
 
-    if (vendor_name == ORCA_FILAMENT_LIBRARY && filament_subfiles.empty()) {
+    if (vendor_name == ORCA_FILAMENT_LIBRARY && filament_subfiles.empty() && validation_mode) {
+        // The profile validator must not paper over an empty manifest: the manifest's filament_list
+        // is what defines load order (parents before children), and other Orca-derived loaders
+        // (upstream OrcaSlicer) have no disk-scan fallback. Fail validation instead of scanning.
+        ++m_errors;
+        BOOST_LOG_TRIVIAL(error) << "Error in a Vendor Config Bundle \"" << root_file << "\": " << ORCA_FILAMENT_LIBRARY
+                                 << " has an empty filament_list; list every filament profile in the manifest "
+                                    "(topologically sorted, parents first).";
+    } else if (vendor_name == ORCA_FILAMENT_LIBRARY && filament_subfiles.empty()) {
         const fs::path vendor_dir   = fs::path(path) / vendor_name;
         const fs::path filament_dir = vendor_dir / "filament";
 
@@ -5404,6 +5412,39 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                     preset_name << "\" defines invalid printer variant \"" << printer_variant << "\", it will be ignored.";
                 reason = std::string("can not find printer_variant in vendor profile");
                 return reason;
+            }
+            // An instantiation printer profile's nozzle_diameter must match the numeric (diameter)
+            // prefix of its printer_variant: "0.4" -> {0.4}, "0.8HF" -> {0.8} (a trailing
+            // non-numeric suffix such as "HF"/"HS" distinguishes a hardware sub-variant and is
+            // ignored here), and for multi-nozzle printers "0.4+0.6" -> {0.4, 0.6}.
+            // A variant may legitimately repeat across presets of the same model (speed modes,
+            // IDEX copy/mirror, control boards), so only the diameter is validated.
+            // Validation-only so the app keeps loading existing profiles unchanged.
+            // Ported from OrcaSlicer 10a1b17381 (#14084).
+            if (validation_mode && instantiation == "true") {
+                const auto *nd = config.option<ConfigOptionFloats>("nozzle_diameter");
+                std::set<double> nozzles, variant_nozzles;
+                if (nd != nullptr)
+                    nozzles.insert(nd->values.begin(), nd->values.end());
+                std::vector<std::string> variant_tokens;
+                boost::algorithm::split(variant_tokens, printer_variant, boost::algorithm::is_any_of("+"));
+                bool variant_ok = true; // printer_variant is already guaranteed non-empty above
+                for (const std::string &tok : variant_tokens) {
+                    size_t consumed = 0;
+                    double d = string_to_double_decimal_point(tok, &consumed);
+                    // Require a leading numeric diameter; a trailing suffix (e.g. "HF") is allowed.
+                    if (consumed == 0) { variant_ok = false; break; }
+                    variant_nozzles.insert(d);
+                }
+                if (!variant_ok || variant_nozzles != nozzles) {
+                    ++m_errors;
+                    BOOST_LOG_TRIVIAL(error) << "Error in a Vendor Config Bundle \"" << path << "\": The printer preset \"" <<
+                        preset_name << "\" has printer_variant \"" << printer_variant <<
+                        "\" that does not match its nozzle_diameter \"" << (nd ? nd->serialize() : std::string()) << "\". "
+                        "printer_variant must begin with the nozzle diameter, optionally followed by a non-numeric suffix "
+                        "(e.g. \"0.4\", \"0.8HF\"); for multi-nozzle printers, join the per-nozzle diameters with \"+\" in "
+                        "nozzle order (e.g. \"0.4+0.6\").";
+                }
             }
         }
         const Preset *preset_existing = presets_collection->find_preset(preset_name, false);
