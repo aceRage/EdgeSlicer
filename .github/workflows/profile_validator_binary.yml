@@ -9,7 +9,7 @@ name: Profile validator binary
 # Only the validator target is built (libslic3r plus one .cpp, no GUI). The dependency cache key
 # and path are the ones build_check_cache.yml uses for the full Linux build, so a cache that
 # build_all.yml saved is reused; on a miss the deps are built here and saved under that key.
-# The monthly schedule exists so the artifact (90 day retention) never expires.
+# The monthly schedule keeps the artifact (90 day retention) from expiring.
 
 on:
   push:
