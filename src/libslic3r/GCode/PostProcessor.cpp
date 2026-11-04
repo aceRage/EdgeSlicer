@@ -376,4 +376,23 @@ bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::
     return true;
 }
 
+bool should_post_process_packed_gcode(bool with_gcode, bool skip_static, PrinterTechnology tech, bool is_bbl_printer)
+{
+    return with_gcode && !skip_static && tech == ptFFF && !is_bbl_printer;
+}
+
+void post_process_packed_gcodes(std::vector<PackedGcodePlate> &plates, const std::string &output_name, std::vector<std::string> &tmp_files)
+{
+    for (PackedGcodePlate &plate : plates) {
+        if (plate.gcode_file == nullptr || plate.gcode_file->empty() || plate.config == nullptr)
+            continue;
+        std::string src_path = *plate.gcode_file;
+        std::string name     = output_name;
+        if (run_post_process_scripts(src_path, true, "File", name, *plate.config)) {
+            tmp_files.push_back(src_path);
+            *plate.gcode_file = src_path;
+        }
+    }
+}
+
 } // namespace Slic3r

@@ -10,6 +10,8 @@
 #include "libslic3r/CostEstimate.hpp"
 #include "libslic3r/CostPricing.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Showcase/MultiColourGlsl.hpp"
+#include "libslic3r/Showcase/GlowFilament.hpp"
 #include "IMSlider.hpp"
 #include "GLModel.hpp"
 #include "I18N.hpp"
@@ -40,7 +42,8 @@ class OpenGLManager;
 static const float GCODE_VIEWER_SLIDER_SCALE = 0.6f;
 static const float SLIDER_DEFAULT_RIGHT_MARGIN  = 10.0f;
 static const float SLIDER_DEFAULT_BOTTOM_MARGIN = 10.0f;
-static const float SLIDER_RIGHT_MARGIN = 124.0f;
+// ORCA: match right margin to the vertical slider window width to prevent overlap.
+static inline const float SLIDER_RIGHT_MARGIN = IMSlider::vertical_slider_window_width();
 static const float SLIDER_BOTTOM_MARGIN = 64.0f;
 class GCodeViewer
 {
@@ -194,6 +197,35 @@ private:
     float m_max_print_height{ 0.0f };
     float m_z_offset{ 0.0f };
 
+    // Edge (support highlight, phase 2): each layer's supported overhangs (what the support
+    // generator holds up, red) and unsupported overhangs (yellow), drawn over the toolpaths and
+    // following the layer slider. Built from the slice (support_overhang_overlay()) the first time
+    // one of the two legend toggles is on after a G-code load.
+    struct SupportOverhangOverlay
+    {
+        struct Part
+        {
+            GLModel model;
+            // Per vgcode layer id present in the model, sorted: {layer id, first index}.
+            std::vector<std::pair<size_t, size_t>> layer_starts;
+            size_t indices_count{ 0 };
+            // Index range [first, second) of the triangles on layers [min_layer, max_layer].
+            std::pair<size_t, size_t> range(size_t min_layer, size_t max_layer) const;
+            void reset() { model.reset(); layer_starts.clear(); indices_count = 0; }
+        };
+        Part   supported;
+        Part   unsupported;
+        bool   show_supported{ false };
+        bool   show_unsupported{ false };
+        bool   dirty{ true };      // rebuild before the next render that shows it
+        bool   available{ false }; // the last build found a sliced print with layers
+        double build_ms{ 0. };     // CPU time of the last build (log)
+        void reset() { supported.reset(); unsupported.reset(); dirty = true; available = false; }
+    };
+    SupportOverhangOverlay m_support_overlay;
+    void load_support_overhang_overlay();
+    void render_support_overhang_overlay();
+
     ConfigOptionMode m_user_mode;
     bool m_fold = {false};
 
@@ -236,6 +268,11 @@ private:
     GCodeProcessorResult::SettingsIds m_settings_ids;
 
     std::vector<CustomGCode::Item> m_custom_gcode_per_print_z;
+    // Orca #16291: centers of mass of the loaded G-code.
+    GCodeProcessorResult::ObjectMass              m_plate_mass;
+    std::vector<GCodeProcessorResult::ObjectMass> m_object_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_body_masses;
+    std::vector<GCodeProcessorResult::ObjectMass> m_support_masses;
 
     bool m_contained_in_bed{ true };
     // EDGE (#642 memory guard): set when the toolpaths were not loaded because memory ran low while
@@ -245,6 +282,68 @@ private:
 
     libvgcode::Viewer m_viewer;
     bool m_loaded_as_preview{ false };
+
+    // EDGE (Showcase S5): the Preview's settings, kept aside while Showcase draws the toolpaths.
+    struct ShowcaseSaved
+    {
+        bool                                                   active = false;
+        libvgcode::EViewType                                   view_type = libvgcode::EViewType::FeatureType;
+        std::array<bool, libvgcode::OPTION_TYPES_COUNT>        options{};
+        std::vector<std::pair<libvgcode::EGCodeExtrusionRole, bool>> roles;
+        bool                                                   top_layer_only = false;
+        bool                                                   dim_previous   = false;
+        libvgcode::Interval                                    layers{ 0, 0 };
+        libvgcode::Interval                                    visible{ 0, 0 };
+        // What Showcase set last, so a frame like the one before changes nothing.
+        int                                                    top_layer = -2;
+        double                                                 top_progress = -1.;
+        bool                                                   hide_wipe_tower = false;
+        bool                                                   show_infill     = true;   // S5b
+        bool                                                   show_supports   = true;   // S5b
+        bool                                                   show_skirt      = true;   // 1h-2b
+    };
+    ShowcaseSaved m_showcase;
+    // Realism 1b: the prelude libvgcode's material program was last built from, and why it failed.
+    std::string   m_showcase_prelude;
+    std::string   m_showcase_prelude_error;
+    // Puts the Preview's settings back; `ranges` = also its layer and move ranges (not after a load).
+    void restore_from_showcase(bool ranges);
+    // Multi-colour P3: libvgcode's segments program with the coextruded-colour prelude (0 = not
+    // built), and whether building it failed (not retried).
+    unsigned int m_showcase_mc_program = 0;
+    bool         m_showcase_mc_failed  = false;
+    // (apply_showcase_multicolour() is declared after ShowcaseLook, below.)
+    // Multi-colour P5 (tests/design_multicolour_filament_view.md 7.4): the Preview toggle "Show
+    // coextruded colours", kept in the app config ("preview_multicolour"), on by default (a saved untick keeps it off). It colours
+    // the Tool and Color Print views' toolpaths by the split slots' make-up, through the same shader
+    // functions as Showcase. The slot table is rebuilt only when the project's values change.
+    bool                      m_preview_multicolour = true;
+    bool                      m_preview_multicolour_read = false;
+    bool                      m_preview_mc_volume = false;     // the extruded-volume buffer is ours (twist)
+    std::string               m_preview_mc_signature;
+    std::vector<float>        m_preview_mc_diameters;
+    MultiColour::UniformTable m_preview_mc_table;
+    bool                      m_preview_mc_has_split = false;  // a slot the G-code uses is a split one
+    bool                      m_preview_mc_has_twist = false;
+    bool preview_multicolour_enabled();
+    void refresh_preview_multicolour_table();
+    void apply_preview_multicolour();
+    bool preview_multicolour_view() const;
+    // Glow in the dark G1 (tests/design_multicolour_filament_view.md section 10): the legend's "Lights off
+    // (glow)" toggle, shown in the Tool view when a slot the G-code uses glows. Session only, off by default.
+    // Preview has no shader of its own for it: the tool colours (and the split slots' table) are swapped
+    // for their lights-off versions on the CPU and put back when the toggle goes off.
+    bool                      m_preview_lights_off = false;
+    bool                      m_preview_lights_applied = false;     // m_preview_saved_tool_colors is the palette to put back
+    std::string               m_preview_lights_key;                 // what the applied colours were made from
+    libvgcode::Palette        m_preview_saved_tool_colors;
+    std::string               m_preview_glow_signature;
+    std::vector<Glow::Slot>   m_preview_glow_slots;
+    float                     m_preview_glow_intensity = 1.f;
+    bool                      m_preview_has_glow = false;           // a slot the G-code uses glows
+    bool preview_glow_view() const;
+    void refresh_preview_glow();
+    void apply_preview_lights_off();
 
 public:
     GCodeViewer();
@@ -280,6 +379,48 @@ public:
     // EDGE (phone / remote preview, GLCanvas3D::render_gcode_preview_image): the toolpaths alone,
     // with whatever camera is current on the Plater; no legend, sliders or other ImGui.
     void render_toolpaths_for_capture();
+    // EDGE (Showcase S5): the toolpaths in a presentation render, through the same libvgcode viewer as
+    // Preview. Showcase sets the viewer up for it (the whole print, or the layer build-up; extrusions
+    // only; colours by filament; nothing dimmed or greyed), keeping the Preview's own settings aside
+    // until end_showcase() - which Preview's render() also calls first, so Preview never sees them.
+    struct ShowcaseLook
+    {
+        int    top_layer       = -1;    // the last layer shown, 0-based; -1 = all of them
+        double top_progress    = 1.;    // how much of that layer, by moves (0..1)
+        bool   hide_wipe_tower = false;
+        bool   show_infill     = true;  // S5b: sparse and internal solid infill, internal bridges
+        bool   show_supports   = true;  // S5b: supports, their interfaces and transitions
+        bool   show_skirt      = true;  // Showcase 1h-2b: skirt and brim
+        bool   smooth          = false; // the smooth bead look (D13)
+        std::array<float, 128> looks{}; // per extruder: see libvgcode::Viewer::set_smooth_look()
+        bool   set_light       = false;
+        std::array<float, 3> light_dir_eye{ { -0.4574957f, 0.4574957f, 0.7624929f } };   // to the key light
+        float  exposure        = 1.f;
+        // Realism 1b: light the smooth look with the prelude program (showcase_material_program()),
+        // whose uniforms the caller has set; false keeps libvgcode's own lighting.
+        bool   material        = false;
+
+        // ---- Multi-colour (coextruded) filaments, P3 (tests/design_multicolour_filament_view.md 7.2) ----
+        // The slot table for Showcase/MultiColourGlsl.hpp's uniforms (MultiColour::pack_uniforms()),
+        // drawn only with the smooth look. coextruded_look = false (the scene's "Coextruded colours"
+        // switch, P2) draws every slot in its plain colour.
+        bool                         coextruded_look = true;
+        MultiColour::UniformTable    multicolour;
+        // ---- end multi-colour ----
+    };
+    void render_for_showcase(const ShowcaseLook &look);
+    // Realism 1b: libvgcode's segments program with Showcase's material lighting put in front of its
+    // fragment shader (libvgcode::Viewer::set_fragment_prelude). Built once per distinct prelude, and
+    // not retried after a failure (`error` then says why). 0 = none.
+    unsigned int showcase_material_program(const std::string &prelude, const std::vector<std::pair<std::string, int>> &sampler_units,
+                                           std::string &error);
+    // Multi-colour P3: builds the coextruded-colour prelude into libvgcode's programs (the built-in
+    // one and 1b's material one) and loads the slot table into both. render_for_showcase() calls it;
+    // call it also before showcase_material_program() so that program is built with it first.
+    void apply_showcase_multicolour(const ShowcaseLook &look);
+    void end_showcase();
+    bool showcase_active() const { return m_showcase.active; }
+    size_t layers_count() const { return m_viewer.get_layers_count(); }
     // EDGE: id of the GCodeProcessorResult loaded last (the phone preview checks it is current).
     unsigned int loaded_result_id() const { return m_last_result_id; }
     // EDGE (#642): true while only the per-layer summary is loaded (memory guard).
@@ -301,6 +442,10 @@ public:
     std::vector<float> get_layers_times() const { return m_viewer.get_layers_estimated_times(); }
 
     const libvgcode::Interval& get_layers_z_range() const { return m_viewer.get_layers_view_range(); }
+    const GCodeProcessorResult::ObjectMass&              get_plate_mass() const { return m_plate_mass; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_object_masses() const { return m_object_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_body_masses() const { return m_body_masses; }
+    const std::vector<GCodeProcessorResult::ObjectMass>& get_support_masses() const { return m_support_masses; }
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
     void update_sequential_view_current(unsigned int first, unsigned int last);
@@ -324,6 +469,15 @@ public:
     void set_view_type(libvgcode::EViewType type) {
         m_viewer.set_view_type(type);
     }
+    // Multi-colour P5: the benchmark behind EDGESLICER_PREVIEW_MC_BENCH (GLCanvas3D::bench_preview_multicolour)
+    // turns the toggle and the Tool view on or off without touching the app config.
+    void bench_preview_multicolour(bool on) {
+        m_viewer.set_view_type(libvgcode::EViewType::Tool);
+        m_preview_multicolour_read = true;
+        m_preview_multicolour      = on;
+    }
+    size_t bench_vertices_count() const { return m_viewer.get_vertices_count(); }
+    bool   bench_multicolour_active() const { return m_viewer.is_multicolour_preview_active(); }
     // ORCA (#15769): select a view type in the preview combo box and apply it
     void select_view_type(libvgcode::EViewType type);
     // ORCA: apply the "preview_default_view_type" preference, see the definition for the supported values
@@ -346,6 +500,10 @@ public:
     }
 
     libvgcode::EViewType get_view_type() const { return m_viewer.get_view_type(); }
+    // RemoteAccess (phone preview v2): the libvgcode viewer itself, so a phone frame can be coloured,
+    // have features hidden and moves shown, and the PC's own choice be put back after rendering.
+    libvgcode::Viewer&       get_libvgcode_viewer() { return m_viewer; }
+    const libvgcode::Viewer& get_libvgcode_viewer() const { return m_viewer; }
 
     // ORCA: darken the layers not scrubbed to while using the preview layer slider
     void set_dim_previous_layers(bool value) { m_viewer.set_dim_previous_layers(value); }

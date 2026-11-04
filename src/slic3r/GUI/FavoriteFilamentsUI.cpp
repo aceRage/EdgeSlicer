@@ -23,19 +23,25 @@ namespace Slic3r { namespace GUI { namespace FavoriteFilamentsUI {
 
 namespace {
 
-std::map<int, std::function<void()>> &fav_subscribers()
+struct Subscriber
 {
-    static std::map<int, std::function<void()>> subs;
+    Kind                  kind;
+    std::function<void()> on_changed;
+};
+
+std::map<int, Subscriber> &fav_subscribers()
+{
+    static std::map<int, Subscriber> subs;
     return subs;
 }
 
-std::set<std::string> fav_read_config()
+std::set<std::string> fav_read_config(Kind kind)
 {
     std::set<std::string> keys;
     AppConfig *config = wxGetApp().app_config;
     if (!config)
         return keys;
-    const std::string serialized = config->get(FavoriteFilaments::config_key());
+    const std::string serialized = config->get(FavoritePresets::config_key(kind));
     std::vector<std::string> values;
     if (!serialized.empty() && unescape_strings_cstyle(serialized, values))
         for (const std::string &v : values)
@@ -44,30 +50,34 @@ std::set<std::string> fav_read_config()
     return keys;
 }
 
-void fav_write_config(const std::set<std::string> &keys)
+void fav_write_config(Kind kind, const std::set<std::string> &keys)
 {
     AppConfig *config = wxGetApp().app_config;
     if (!config)
         return;
-    config->set(FavoriteFilaments::config_key(), escape_strings_cstyle(std::vector<std::string>(keys.begin(), keys.end())));
+    config->set(FavoritePresets::config_key(kind), escape_strings_cstyle(std::vector<std::string>(keys.begin(), keys.end())));
     config->save();
 }
 
-// Once per session, after the system presets are loaded: a favourite whose system preset a vendor
-// renamed (renamed_from in the new profile) moves to the new name.
-void fav_migrate_once(std::set<std::string> &keys)
+// Once per session and kind, after the system presets are loaded: a favourite whose system preset a
+// vendor renamed (renamed_from in the new profile) moves to the new name.
+void fav_migrate_once(Kind kind, std::set<std::string> &keys)
 {
-    static bool done = false;
-    if (done || keys.empty())
+    static bool done[2] = {false, false};
+    bool       &kind_done = done[kind == Kind::Process ? 1 : 0];
+    if (kind_done || keys.empty())
         return;
     PresetBundle *bundle = wxGetApp().preset_bundle;
-    if (!bundle || bundle->filaments.size() <= bundle->filaments.num_default_presets())
+    if (!bundle)
+        return;
+    PresetCollection &collection = kind == Kind::Process ? bundle->prints : bundle->filaments;
+    if (collection.size() <= collection.num_default_presets())
         return; // not loaded yet; try again on the next read
-    done = true;
+    kind_done = true;
 
     std::set<std::string>                            current;
     std::vector<std::pair<std::string, std::string>> renamed;
-    for (const Preset &preset : bundle->filaments.get_presets()) {
+    for (const Preset &preset : collection.get_presets()) {
         const std::string key = key_for(preset);
         if (!key.empty())
             current.insert(key);
@@ -75,74 +85,107 @@ void fav_migrate_once(std::set<std::string> &keys)
             renamed.emplace_back(key, old_name);
     }
     if (FavoriteFilaments::migrate(keys, current, FavoriteFilaments::rename_map(renamed)))
-        fav_write_config(keys);
+        fav_write_config(kind, keys);
 }
 
-void fav_notify()
+void fav_notify(Kind kind)
 {
     // After the event that changed the set has finished: a picker may rebuild its own list.
-    wxGetApp().CallAfter([]() {
+    wxGetApp().CallAfter([kind]() {
         // Copy: a subscriber may unsubscribe (a dialog closing) while we iterate.
         const auto subs = fav_subscribers();
-        for (const auto &[id, fn] : subs)
-            if (fav_subscribers().count(id) > 0 && fn)
-                fn();
+        for (const auto &[id, sub] : subs) {
+            // Only the pickers of this kind: a star on a process preset leaves the filament lists alone.
+            if (sub.kind != kind)
+                continue;
+            // Call the copy: the subscriber may unsubscribe itself from inside the call.
+            if (fav_subscribers().count(id) > 0 && sub.on_changed)
+                sub.on_changed();
+        }
     });
 }
 
 } // namespace
+
+bool kind_of(Preset::Type preset_type, Kind &kind)
+{
+    switch (preset_type) {
+    case Preset::TYPE_FILAMENT: kind = Kind::Filament; return true;
+    case Preset::TYPE_PRINT:    kind = Kind::Process;  return true;
+    default:                    return false;
+    }
+}
 
 std::string key_for(const Preset &preset)
 {
     return FavoriteFilaments::key_for(preset.name, preset.alias, preset.is_system);
 }
 
-std::set<std::string> load()
+std::set<std::string> load(Kind kind)
 {
-    std::set<std::string> keys = fav_read_config();
-    fav_migrate_once(keys);
+    std::set<std::string> keys = fav_read_config(kind);
+    fav_migrate_once(kind, keys);
     return keys;
 }
 
-bool is_favorite(const std::string &key) { return !key.empty() && load().count(key) > 0; }
+bool is_favorite(const std::string &key, Kind kind) { return !key.empty() && load(kind).count(key) > 0; }
 
-bool is_favorite(const Preset &preset) { return is_favorite(key_for(preset)); }
+bool is_favorite(const Preset &preset)
+{
+    Kind kind;
+    return kind_of(preset.type, kind) && is_favorite(key_for(preset), kind);
+}
 
-bool toggle(const std::string &key)
+bool toggle(const std::string &key, Kind kind)
 {
     if (key.empty())
         return false;
-    std::set<std::string> keys  = load();
+    std::set<std::string> keys  = load(kind);
     const bool            state = FavoriteFilaments::toggle(keys, key);
-    fav_write_config(keys);
-    fav_notify();
+    fav_write_config(kind, keys);
+    fav_notify(kind);
     return state;
 }
 
-int subscribe(std::function<void()> on_changed)
+int subscribe(std::function<void()> on_changed, Kind kind)
 {
     static int next_id = 1;
     const int  id      = next_id++;
-    fav_subscribers().emplace(id, std::move(on_changed));
+    fav_subscribers().emplace(id, Subscriber{kind, std::move(on_changed)});
     return id;
 }
 
 void unsubscribe(int id) { fav_subscribers().erase(id); }
 
-int append_toggle_item(wxMenu &menu, const std::string &key)
+int append_toggle_item(wxMenu &menu, const std::string &key, Kind kind)
 {
     if (key.empty())
         return wxID_NONE;
     if (menu.GetMenuItemCount() > 0)
         menu.AppendSeparator();
     const int       id   = wxWindow::NewControlId();
-    const bool      fav  = is_favorite(key);
+    const bool      fav  = is_favorite(key, kind);
     const wxString  name = from_u8(key);
-    // TRN %s is a filament name, e.g. "Bambu PLA Basic"
-    menu.Append(id, fav ? wxString::Format(_L("Remove \"%s\" from favorite filaments"), name)
-                        : wxString::Format(_L("Add \"%s\" to favorite filaments"), name));
-    menu.Bind(wxEVT_MENU, [key](wxCommandEvent &) { toggle(key); }, id);
+    if (kind == Kind::Process) {
+        // TRN %s is a process preset name, e.g. "0.20mm Standard"
+        menu.Append(id, fav ? wxString::Format(_L("Remove \"%s\" from favorite process presets"), name)
+                            : wxString::Format(_L("Add \"%s\" to favorite process presets"), name));
+    } else {
+        // TRN %s is a filament name, e.g. "Bambu PLA Basic"
+        menu.Append(id, fav ? wxString::Format(_L("Remove \"%s\" from favorite filaments"), name)
+                            : wxString::Format(_L("Add \"%s\" to favorite filaments"), name));
+    }
+    menu.Bind(wxEVT_MENU, [key, kind](wxCommandEvent &) { toggle(key, kind); }, id);
     return id;
+}
+
+wxString star_button_tooltip(bool favorite, Kind kind)
+{
+    if (kind == Kind::Process)
+        return favorite ? _L("Remove this process preset from your favorite process presets")
+                        : _L("Add this process preset to your favorite process presets (they are listed first in the process list)");
+    return favorite ? _L("Remove this filament from your favorite filaments")
+                    : _L("Add this filament to your favorite filaments (they are listed first in every filament list)");
 }
 
 wxString star_icon_name(bool favorite) { return favorite ? "score_star_light" : "score_star_outline"; }

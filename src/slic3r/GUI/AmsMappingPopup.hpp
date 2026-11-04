@@ -86,9 +86,14 @@ public:
 
     bool m_selected {false};
     bool m_warning{false};
+    // Optional extras for ThirdPartyFilamentMapPanel. Defaults keep the Bambu send dialog unchanged.
+    bool     m_dropdown_visible {true};
+    wxString m_nozzle_badge;
 
     void msw_rescale();
     void set_ams_info(wxColour col, wxString txt, int ctype=0, std::vector<wxColour> cols= std::vector<wxColour>());
+    void set_dropdown_visible(bool visible);
+    void set_nozzle_badge(const wxString &badge);
 
     void disable();
     void enable();

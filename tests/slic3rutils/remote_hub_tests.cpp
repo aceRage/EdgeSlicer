@@ -7,6 +7,8 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/GUI/RemoteHub.hpp"
+#include "slic3r/GUI/RemoteSliceV1.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -984,4 +986,498 @@ TEST_CASE("a P1/A1 live-view camera (b<hash>) is registered once and kept across
     const LiveMap   live       = live_of(registered, true);
     CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams(tab, own), registered, &live)));
     CHECK(nothing_to_do(plan_stream_sync(merge_desired_streams({}, own), merge_desired_streams({}, own), &live)));
+}
+
+// ---- PR D: arrange (EdgeSlicerApp docs/design_native_slice_parity.md section 5) ------------
+// The allow-list entries of the new instance routes, the /pair flags, the manifest version and the
+// `blocked` reason /api/plates gives a plate the PC will not slice.
+
+TEST_CASE("arrange: the hub proxies the new instance routes and nothing around them", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    // arrange / orient one plate (loose=1 is a query value, so the path stays this closed set)
+    CHECK(instance_api_allowed("POST", "/api/plates/0/arrange"));
+    CHECK(instance_api_allowed("POST", "/api/plates/12/arrange"));
+    CHECK(instance_api_allowed("POST", "/api/plates/3/orient"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/arrange"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/plates/0/arrange"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/orient"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates//arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/arrange/x"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/all/arrange"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/arrange"));
+
+    // the instances on no plate: a name in the index position, matched on its own
+    CHECK(instance_api_allowed("GET", "/api/plates/loose"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/loose"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loose/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loose/layout"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/loosely"));
+
+    CHECK(instance_api_allowed("POST", "/api/objects/printable"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/objects/printable"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/objects/printable/x"));
+    CHECK(instance_api_allowed("POST", "/api/undo"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/undo"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/redo"));
+
+    // what was there before is unchanged
+    CHECK(instance_api_allowed("GET", "/api/plates"));
+    CHECK(instance_api_allowed("GET", "/api/plates/0/layout"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/layout"));
+    CHECK(instance_api_allowed("POST", "/api/objects/transform"));
+    CHECK(instance_api_allowed("POST", "/api/plates/0/send"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/debug/anything"));
+}
+
+TEST_CASE("arrange: /pair lists slice_arrange, slice_orient and slice_undo, and the manifest is v4", "[RemoteHub][arrange]")
+{
+    const auto f   = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    auto       has = [&f](const char* s) { return std::find(f.begin(), f.end(), s) != f.end(); };
+    CHECK(has("slice_arrange"));
+    CHECK(has("slice_orient"));
+    CHECK(has("slice_undo"));
+    for (const char* s : { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live" })
+        CHECK(has(s));
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size()); // no flag twice
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 4);
+}
+
+TEST_CASE("arrange: why a plate cannot slice", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::plate_blocked;
+    // { outside, printable, off_plate }
+    const PlateInstance inside { false, true }, over { true, true }, off_inside { false, false }, off_over { true, false };
+    const PlateInstance away { true, true, true }, off_away { true, false, true };
+
+    CHECK(plate_blocked({}, false) == "empty");
+    CHECK(plate_blocked({}, true) == "empty");
+    CHECK(plate_blocked({ inside }, false) == "");
+    CHECK(plate_blocked({ inside, off_inside }, false) == "");
+    // locked alone does not stop a slice: only when Arrange would be the fix
+    CHECK(plate_blocked({ inside }, true) == "");
+
+    // a printable object over the edge greys Slice out even next to one that fits
+    CHECK(plate_blocked({ over }, false) == "outside");
+    CHECK(plate_blocked({ inside, over }, false) == "outside");
+    CHECK(plate_blocked({ over, off_inside }, false) == "outside");
+    CHECK(plate_blocked({ over }, true) == "locked");
+    CHECK(plate_blocked({ inside, over }, true) == "locked");
+
+    // nothing set to print: an object over the edge that is not printed does not matter
+    CHECK(plate_blocked({ off_inside }, false) == "not_printable");
+    CHECK(plate_blocked({ off_inside, off_over }, false) == "not_printable");
+    CHECK(plate_blocked({ off_over }, true) == "not_printable");
+    // ... and one printable object inside is enough
+    CHECK(plate_blocked({ off_over, inside }, false) == "");
+
+    // an instance still registered to the plate but wholly off it is left out of the slice: it only
+    // matters when nothing printable is left (and Arrange plate then picks it up)
+    CHECK(plate_blocked({ inside, away }, false) == "");
+    CHECK(plate_blocked({ away }, false) == "outside");
+    CHECK(plate_blocked({ away }, true) == "locked");
+    CHECK(plate_blocked({ away, off_inside }, false) == "outside");
+    CHECK(plate_blocked({ away, over, inside }, false) == "outside");
+    CHECK(plate_blocked({ off_away }, false) == "not_printable");
+}
+
+TEST_CASE("arrange: blocked is null or one of the documented strings", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::blocked_json;
+    CHECK(blocked_json("").is_null());
+    CHECK(blocked_json("outside") == "outside");
+    const std::set<std::string> allowed = { "empty", "outside", "locked", "not_printable" };
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    for (bool locked : { false, true })
+        for (int n = 0; n <= 2; ++n)
+            for (int mask = 0; mask < (1 << (3 * n)); ++mask) {
+                std::vector<PlateInstance> v;
+                for (int i = 0; i < n; ++i) {
+                    const bool outside = mask >> (3 * i) & 1;
+                    v.push_back({ outside, bool(mask >> (3 * i + 1) & 1), outside && (mask >> (3 * i + 2) & 1) });
+                }
+                const std::string r = Slic3r::GUI::SliceV1::plate_blocked(v, locked);
+                CHECK((r.empty() || allowed.count(r) == 1));
+            }
+}
+
+TEST_CASE("arrange: place loose objects counts only what it moves", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::place_count;
+    // { outside, printable, off_plate }
+    const PlateInstance inside { false, true }, over { true, true }, away { true, true, true };
+    const PlateInstance off_inside { false, false }, off_over { true, false };
+
+    // nothing off a plate: nothing to place, however full the plates are
+    CHECK(place_count({}, {}, 0) == 0);
+    CHECK(place_count({ { inside, inside }, { inside }, {} }, { false, false, false }, 0) == 0);
+    CHECK(place_count({ { inside, off_inside } }, { false }, 0) == 0);
+    // over the edge or wholly off the plate it is registered to, and on no plate at all
+    CHECK(place_count({ { inside, over } }, { false }, 0) == 1);
+    CHECK(place_count({ { away }, { over, over } }, { false, false }, 0) == 3);
+    CHECK(place_count({ { inside } }, { false }, 2) == 2);
+    CHECK(place_count({ { over }, {} }, { false, false }, 1) == 2);
+    // objects set not to print stay where they are
+    CHECK(place_count({ { off_over, inside } }, { false }, 0) == 0);
+    // a locked plate is left alone, its overhanging objects included
+    CHECK(place_count({ { over }, { over } }, { true, false }, 0) == 1);
+    CHECK(place_count({ { over, away } }, { true }, 1) == 1);
+    // a plate the lock list does not cover counts as unlocked
+    CHECK(place_count({ { over }, { over } }, { false }, 0) == 2);
+}
+
+TEST_CASE("arrange: place loose objects moves exactly what it counts", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::LooseRoute;
+    using Slic3r::GUI::SliceV1::loose_route;
+    using Slic3r::GUI::SliceV1::PlateInstance;
+    using Slic3r::GUI::SliceV1::place_count;
+    // (on_plate, wholly_on_plate, user_locked, printable)
+    CHECK(loose_route(true, true, false, true) == LooseRoute::Stay);
+    CHECK(loose_route(true, false, false, true) == LooseRoute::Place);
+    CHECK(loose_route(false, false, false, true) == LooseRoute::Place);
+    // the person's lock keeps what hangs over that plate's edge; a lock the arrange takes for a
+    // plate's own print sequence is not passed as user_locked, so that plate's overhang is placed
+    CHECK(loose_route(true, false, true, true) == LooseRoute::Stay);
+    // set not to print: stays on its plate as a fixed item, and is left out when it is on none
+    CHECK(loose_route(true, false, false, false) == LooseRoute::Stay);
+    CHECK(loose_route(false, false, false, false) == LooseRoute::Skip);
+
+    // every combination on a plate: the instances it places are the ones place_count promises
+    for (int mask = 0; mask < 8; ++mask) {
+        const bool outside = mask & 1, printable = mask & 2, locked = mask & 4;
+        const bool placed  = loose_route(true, !outside, locked, printable) == LooseRoute::Place;
+        CHECK(place_count({ { PlateInstance{ outside, printable } } }, { locked }, 0) == (placed ? 1 : 0));
+    }
+    for (int printable = 0; printable < 2; ++printable)
+        CHECK(place_count({}, {}, printable) == (loose_route(false, false, false, printable) == LooseRoute::Place ? 1 : 0));
+}
+
+TEST_CASE("arrange: a guarded undo only takes back the step it was told about", "[RemoteHub][arrange]")
+{
+    using Slic3r::GUI::SliceV1::undo_matches;
+    CHECK(undo_matches("", "Arrange"));
+    CHECK(undo_matches("", ""));
+    CHECK(undo_matches("Arrange", "Arrange"));
+    CHECK_FALSE(undo_matches("Arrange", "Set Position"));
+    CHECK_FALSE(undo_matches("Arrange", ""));
+    CHECK_FALSE(undo_matches("Arrange", "arrange"));
+}
+
+// ---- PR F: filament settings (EdgeSlicerApp docs/design_native_slice_parity.md section 4) ----
+
+TEST_CASE("filament settings: /pair lists slice_filament_settings, the manifest is v5 or later, the routes are allowed", "[RemoteHub][filament]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_filament_settings") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 5);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/settings/filament"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament/revert"));
+    CHECK(instance_api_allowed("POST", "/api/settings/filament/save"));
+    CHECK(instance_api_allowed("POST", "/api/presets/filament_remove"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/settings/filament/save"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/presets/filament_remove"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/settings/filament/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/settings/printer")); // printer settings stay out
+}
+
+TEST_CASE("filament settings: the slots an edit changes", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::slots_sharing;
+    const std::vector<std::string> slots { "Bambu PLA Basic", "Generic PETG", "Bambu PLA Basic", "Generic PETG", "Bambu PLA Basic" };
+    CHECK(slots_sharing(slots, 0) == std::vector<int> { 0, 2, 4 });
+    CHECK(slots_sharing(slots, 3) == std::vector<int> { 1, 3 });
+    CHECK(slots_sharing({ "Generic PLA" }, 0) == std::vector<int> { 0 });
+    CHECK(slots_sharing(slots, 5).empty());
+    CHECK(slots_sharing(slots, -1).empty());
+}
+
+TEST_CASE("filament settings: which slot the Filament tab may open", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::bind_filament_slot;
+    // nothing unsaved: any slot
+    CHECK(bind_filament_slot(2, 4, 0, false, "Generic PETG", "Bambu PLA Basic").ok());
+    // unsaved edits of the slot's own preset, from this slot or another one using it: they are shared
+    CHECK(bind_filament_slot(0, 4, 0, true, "Bambu PLA Basic", "Bambu PLA Basic").ok());
+    CHECK(bind_filament_slot(2, 4, 0, true, "Bambu PLA Basic", "Bambu PLA Basic").ok());
+    // another preset has unsaved edits: the desktop would ask Save / Discard, the phone is told
+    const auto r = bind_filament_slot(1, 4, 2, true, "Generic PETG", "Bambu PLA Basic");
+    CHECK(r.status == 409);
+    CHECK(r.error == "filament 3 has unsaved changes (Bambu PLA Basic): save or revert them first");
+    // the tab bound to nothing yet holds slot 1's preset
+    CHECK(bind_filament_slot(1, 4, -1, true, "Generic PETG", "Bambu PLA Basic").error.rfind("filament 1 ", 0) == 0);
+    CHECK(bind_filament_slot(4, 4, 0, false, "", "Bambu PLA Basic").status == 404);
+    CHECK(bind_filament_slot(-1, 4, 0, false, "", "Bambu PLA Basic").status == 404);
+}
+
+TEST_CASE("filament settings: the name a save uses and the slots Save as moves", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::filament_save_name;
+    using Slic3r::GUI::SliceV1::slots_after_save_as;
+    CHECK(filament_save_name("", "Bambu PLA Basic @BBL X1C", true) == "Bambu PLA Basic @BBL X1C - Custom");
+    CHECK(filament_save_name("", "My PLA", false) == "My PLA");
+    CHECK(filament_save_name("  Silk PLA 215  ", "My PLA", false) == "Silk PLA 215");
+    CHECK(filament_save_name(" \t ", "My PLA", false) == "My PLA");
+
+    // the desktop renamed every slot that used "My PLA"; Save as is for slot 2 only
+    const std::vector<std::string> before { "My PLA", "Generic PETG", "My PLA" };
+    CHECK(slots_after_save_as(before, 2, "Silk PLA 215") == std::vector<std::string> { "My PLA", "Generic PETG", "Silk PLA 215" });
+    CHECK(slots_after_save_as(before, 7, "Silk PLA 215") == before);
+}
+
+TEST_CASE("filament settings: when a slot may be removed", "[RemoteHub][filament]")
+{
+    using Slic3r::GUI::SliceV1::filament_remove_check;
+    CHECK(filament_remove_check(1, 3, -1, 0, false).ok());
+    CHECK(filament_remove_check(1, 3, 0, 0, false).ok());
+    CHECK(filament_remove_check(0, 3, 2, 0, false).ok());
+    CHECK(filament_remove_check(0, 1, -1, 0, false).status == 409); // the last one
+    CHECK(filament_remove_check(3, 3, -1, 0, false).status == 404);
+    CHECK(filament_remove_check(1, 3, 1, 0, false).status == 400); // replaced by itself
+    CHECK(filament_remove_check(1, 3, 3, 0, false).status == 400);
+    CHECK(filament_remove_check(1, 3, -2, 0, false).status == 400); // not a number
+    // mixed filaments made from it: the desktop asks, so the phone confirms
+    const auto r = filament_remove_check(1, 3, -1, 2, false);
+    CHECK(r.status == 409);
+    CHECK(r.error == "2 mixed filaments are made from this filament and would be removed with it: confirm=1 to go ahead");
+    CHECK(filament_remove_check(1, 3, -1, 1, true).ok());
+    CHECK(filament_remove_check(1, 3, 0, 1, false).ok()); // a replacement: the desktop does not ask either
+}
+
+// ---- PR E: preview v2 (EdgeSlicerApp docs/design_native_slice_parity.md section 2.3) ----
+
+TEST_CASE("preview v2: /pair lists slice_preview_v2, the manifest is v6 or later, the routes are allowed", "[RemoteHub][preview_v2]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "slice_preview_v2") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 6);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/plates/0/preview/legend"));
+    CHECK(instance_api_allowed("GET", "/api/plates/12/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/preview/legend"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/x/preview/layers"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/preview/moves"));
+}
+
+TEST_CASE("preview v2: feature and move ids", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(preview_role_ids().size() == 22); // libvgcode::EGCodeExtrusionRole::COUNT, static_asserted in RemoteAccess
+    CHECK(preview_role_index("external_perimeter") == 2);
+    CHECK(preview_role_index("support") == 11);
+    CHECK(preview_role_index("bottom_surface_over_support") == 21);
+    CHECK(preview_role_index("Outer wall") == -1);
+    CHECK(preview_option_ids() == std::vector<std::string> { "travel", "wipe", "retract", "unretract", "seam", "tool_change" });
+    CHECK(preview_option_index("seam") == 4);
+    CHECK(preview_option_index("pause") == -1);
+    CHECK(std::set<std::string>(preview_role_ids().begin(), preview_role_ids().end()).size() == preview_role_ids().size());
+}
+
+TEST_CASE("preview v2: id lists and colours", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(split_ids("seam,travel") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids(" seam , ,travel,seam ") == std::vector<std::string> { "seam", "travel" });
+    CHECK(split_ids("").empty());
+    CHECK(split_ids(",,").empty());
+    CHECK(hex_color(255, 128, 0) == "#FF8000");
+    CHECK(hex_color(0, 0, 0) == "#000000");
+    CHECK(preview_from_layer(-3, 10) == 0u);
+    CHECK(preview_from_layer(4, 10) == 4u);
+    CHECK(preview_from_layer(40, 10) == 10u);
+}
+
+TEST_CASE("preview v2: a gradient legend", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    // the palette colours the bins in value order; stops come out sorted, rounded to the legend's decimals
+    const auto g = gradient_legend("speed", { 20.4f, 60.2f, 100.f, 140.f, 180.f }, { "#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000" });
+    CHECK(g["unit"] == "mm/s");
+    CHECK(g["decimals"] == 0);
+    CHECK(g["min"] == 20.0);
+    CHECK(g["max"] == 180.0);
+    REQUIRE(g["stops"].size() == 5);
+    CHECK(g["stops"][1]["value"] == 60.0);
+    CHECK(g["stops"][1]["color"] == "#00FFFF");
+    // one value: one colour; two values: the palette's ends
+    const auto one = gradient_legend("height", { 0.2f }, { "#0000FF", "#FF0000" });
+    CHECK(one["stops"].size() == 1);
+    CHECK(one["min"] == one["max"]);
+    const auto two = gradient_legend("width", { 0.42f, 0.45f }, { "#0000FF", "#00FF00", "#FF0000" });
+    REQUIRE(two["stops"].size() == 2);
+    CHECK(two["stops"][1]["color"] == "#FF0000");
+    CHECK(two["max"] == 0.45);
+    // nothing detected
+    const auto none = gradient_legend("temperature", {}, { "#0000FF" });
+    CHECK(none["stops"].empty());
+    CHECK(none["min"].is_null());
+    CHECK(gradient_unit("feature_type").empty());
+    CHECK(gradient_decimals("pressure_advance") == 3);
+}
+
+TEST_CASE("preview v2: layer rows", "[RemoteHub][preview_v2]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    const auto rows = layer_rows({ 0.2, 0.4, 0.6000001 }, { 12.345f, 30.f, 29.999f });
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[0]["z"] == 0.2);
+    CHECK(rows[0]["height"] == 0.2);
+    CHECK(rows[0]["time_s"] == 12.35);
+    CHECK(rows[2]["z"] == 0.6);
+    CHECK(rows[2]["height"] == 0.2);
+    CHECK(rows[2]["time_s"] == 30.0);
+    // times that do not match the layers are not guessed
+    const auto untimed = layer_rows({ 0.2, 0.4 }, { 5.f });
+    CHECK(untimed[1]["time_s"].is_null());
+    CHECK(layer_rows({}, {}).empty());
+}
+
+TEST_CASE("plates edit: /pair lists the PR G features, the manifest is v7, the routes are allowed", "[RemoteHub][plates_edit]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    for (const char* name : { "slice_plates_edit", "slice_objects_edit", "slice_project_save" })
+        CHECK(std::find(f.begin(), f.end(), name) != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 7);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("POST", "/api/plates/add"));
+    CHECK(instance_api_allowed("POST", "/api/plates/0/delete"));
+    CHECK(instance_api_allowed("POST", "/api/plates/3/rename"));
+    CHECK(instance_api_allowed("POST", "/api/plates/12/bed_type"));
+    CHECK(instance_api_allowed("POST", "/api/objects/delete"));
+    CHECK(instance_api_allowed("POST", "/api/objects/duplicate"));
+    CHECK(instance_api_allowed("POST", "/api/project/save"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/add"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/add/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/plates/0/delete"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/plates/0/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/x/rename"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/plates/0/duplicate")); // a plate copy is not offered
+    CHECK_FALSE(instance_api_allowed("GET", "/api/objects/delete"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/objects/delete/x"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/project/save"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/project/save_as"));
+}
+
+TEST_CASE("plates edit: a plate name is cleaned", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(clean_plate_name("  Plate A  ") == "Plate A");
+    CHECK(clean_plate_name("Two\tlines\nhere") == "Twolineshere");
+    CHECK(clean_plate_name("   ").empty());
+    CHECK(clean_plate_name("").empty());
+    CHECK(clean_plate_name("Grüße 🙂") == "Grüße 🙂");
+    // cut at 250 code points, never inside a UTF-8 sequence
+    std::string long_name;
+    for (int i = 0; i < 300; ++i) long_name += "é";
+    const std::string cut = clean_plate_name(long_name);
+    CHECK(cut.size() == 250 * 2);
+    CHECK(clean_plate_name(std::string(251, 'a')).size() == 250);
+    // a blank at the cut is trimmed too
+    CHECK(clean_plate_name(std::string(249, 'a') + "  b") == std::string(249, 'a'));
+}
+
+TEST_CASE("plates edit: when a plate may be added or deleted", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(plate_add_check(1, 36).ok());
+    CHECK(plate_add_check(36, 36).status == 409);
+
+    CHECK(plate_delete_check(1, 3, 0, "", false, 0).ok());
+    CHECK(plate_delete_check(3, 3, 0, "", false, 0).status == 404);
+    CHECK(plate_delete_check(-1, 3, 0, "", false, 0).status == 404);
+    CHECK(plate_delete_check(0, 1, 0, "", false, 0).status == 409);   // the last plate
+    CHECK(plate_delete_check(0, 2, 4, "keep", false, 0).status == 409); // objects need confirm
+    CHECK(plate_delete_check(0, 2, 4, "keep", true, 0).ok());
+    CHECK(plate_delete_check(0, 2, 4, "delete", true, 0).ok());
+    CHECK(plate_delete_check(0, 2, 4, "delete", true, 1).status == 409); // a cut part
+    CHECK(plate_delete_check(0, 2, 4, "keep", true, 1).ok());            // keeping it is fine
+    CHECK(plate_delete_check(0, 2, 0, "move", true, 0).status == 400);
+    CHECK(plate_delete_check(0, 2, 1, "", false, 0).error.find("1 object is") == 0);
+}
+
+TEST_CASE("plates edit: object delete and duplicate checks", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(object_delete_check(0, 2, -1, 1, false).ok());
+    CHECK(object_delete_check(1, 2, 2, 3, false).ok());
+    CHECK(object_delete_check(2, 2, -1, 0, false).status == 404);
+    CHECK(object_delete_check(0, 2, 3, 3, false).status == 404);
+    CHECK(object_delete_check(0, 2, -1, 1, true).status == 409);
+
+    CHECK(object_duplicate_check(0, 1, 0, 1, 1).ok());
+    CHECK(object_duplicate_check(0, 1, 0, 1, DUPLICATE_MAX).ok());
+    CHECK(object_duplicate_check(0, 1, 0, 1, 0).status == 400);
+    CHECK(object_duplicate_check(0, 1, 0, 1, DUPLICATE_MAX + 1).status == 400);
+    CHECK(object_duplicate_check(1, 1, 0, 1, 2).status == 404);
+    CHECK(object_duplicate_check(0, 1, 1, 1, 2).status == 404);
+}
+
+TEST_CASE("plates edit: bed type ids", "[RemoteHub][plates_edit]")
+{
+    using namespace Slic3r::GUI::SliceV1;
+    CHECK(bed_type_id(Slic3r::btDefault) == "default");
+    CHECK(bed_type_id(Slic3r::btPTE) == "Textured PEI Plate");
+    CHECK(bed_type_id(Slic3r::btPC) == "Cool Plate");
+    CHECK(bed_type_from_id("default") == Slic3r::btDefault);
+    CHECK(bed_type_from_id("Textured PEI Plate") == Slic3r::btPTE);
+    CHECK(bed_type_from_id("Default Plate") == -1); // "default" is the one way to follow the project
+    CHECK(bed_type_from_id("Glass Plate") == -1);
+    CHECK(bed_type_from_id("") == -1);
+    for (int bt = Slic3r::btDefault; bt < Slic3r::btCount; ++bt)
+        CHECK(bed_type_from_id(bed_type_id(bt)) == bt);
+}
+
+TEST_CASE("paint_v1: /pair lists paint_v1, the manifest is v8, the read routes are allowed", "[RemoteHub][paint_v1]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "paint_v1") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION >= 8);
+
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK(instance_api_allowed("GET", "/api/paint/objects"));
+    CHECK(instance_api_allowed("POST", "/api/paint/sessions"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/mesh"));
+    CHECK(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/paint"));
+    // read side only: no writes, no other verbs
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/objects"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef"));
+    CHECK_FALSE(instance_api_allowed("DELETE", "/api/paint/sessions/0123456789abcdef"));
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef/paint"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/apply"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/mesh/x"));
+    // the id is exactly 16 lowercase hex characters, one segment
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcde"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef0"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789ABCDEF"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/../../../info/mesh"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcd%2f/mesh"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint"));
+}
+
+TEST_CASE("paint_v1 apply: /pair lists paint_v1_apply, the manifest is v9, the proxy never takes the apply", "[RemoteHub][paint_v1]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "paint_v1_apply") != f.end());
+    CHECK(std::set<std::string>(f.begin(), f.end()).size() == f.size());
+    CHECK(Slic3r::GUI::SliceV1::INSTANCE_API_VERSION == 9);
+    // The hub spools /i/<pid>/paint/<id>/apply itself and calls the slicer; the instance's own apply
+    // route is not proxied (a phone cannot point it at a file).
+    using Slic3r::GUI::RemoteHub::Testing::instance_api_allowed;
+    CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef/apply"));
+    CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/apply"));
 }

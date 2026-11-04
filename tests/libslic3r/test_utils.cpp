@@ -1005,6 +1005,18 @@ TEST_CASE("Floats print as printf prints them in the C locale", "[LocalesUtils]"
 
 TEST_CASE("Floats print with a decimal point in a locale whose decimal separator is a comma", "[LocalesUtils]")
 {
+    // The setlocale below is process-wide outside Windows: the setter there uses uselocale and
+    // cannot undo it. Put the previous LC_NUMERIC back on every exit, or later tests parse "0.4" as 0.
+    struct RestoreNumericLocale
+    {
+        std::string previous;
+        RestoreNumericLocale()
+        {
+            const char *cur = std::setlocale(LC_NUMERIC, nullptr);
+            previous        = cur ? cur : "C";
+        }
+        ~RestoreNumericLocale() { std::setlocale(LC_NUMERIC, previous.c_str()); }
+    } restore_numeric_locale;
     CNumericLocalesSetter outer;
     const char *candidates[] = {"de_DE.UTF-8", "de_DE", "fr_FR.UTF-8", "fr_FR", "C"};
     bool applied_comma = false;

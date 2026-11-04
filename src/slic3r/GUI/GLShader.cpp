@@ -234,6 +234,10 @@ unsigned int GLShaderProgram::sampler_target(unsigned int sampler_type)
     case GL_INT_SAMPLER_BUFFER:
     case GL_UNSIGNED_INT_SAMPLER_BUFFER:
         return GL_TEXTURE_BUFFER;
+    case GL_SAMPLER_CUBE:
+    case GL_INT_SAMPLER_CUBE:
+    case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        return GL_TEXTURE_CUBE_MAP;
     default:
         return 0;
     }
@@ -258,8 +262,9 @@ std::vector<GLShaderProgram::SamplerUniform> GLShaderProgram::list_samplers(unsi
         switch (type) {
         case GL_SAMPLER_1D: case GL_SAMPLER_2D: case GL_SAMPLER_3D: case GL_SAMPLER_CUBE:
         case GL_SAMPLER_1D_SHADOW: case GL_SAMPLER_2D_SHADOW: case GL_SAMPLER_2D_RECT: case GL_SAMPLER_BUFFER:
-        case GL_INT_SAMPLER_2D: case GL_INT_SAMPLER_3D: case GL_INT_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_2D: case GL_INT_SAMPLER_3D: case GL_INT_SAMPLER_BUFFER: case GL_INT_SAMPLER_CUBE:
         case GL_UNSIGNED_INT_SAMPLER_2D: case GL_UNSIGNED_INT_SAMPLER_3D: case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
             return true;
         default:
             return false;

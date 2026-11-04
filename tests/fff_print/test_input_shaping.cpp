@@ -3,6 +3,7 @@
 // (default off: nothing is written until a user turns it on), and the calibration towers.
 #include <catch2/catch.hpp>
 
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -206,8 +207,20 @@ TEST_CASE("Input shaping frequency calibration steps the frequency across layers
     params.freqEndY    = 60.;
     params.shaper_type = "MZV";
 
-    const std::string g = slice_cube(printer_config("klipper"), false, &params);
-    CHECK(lines_starting_with(g, "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=0").size() == 1);
+    // Port OrcaSlicer #15545: the calibration (Plater::calib_input_shaping_freq) sets accel_to_decel to 100%,
+    // so every acceleration change keeps Klipper's cruise ratio at 0 instead of one MINIMUM_CRUISE_RATIO=0 line
+    // that the next acceleration change replaced.
+    const std::string g = slice_cube(printer_config("klipper", {{"accel_to_decel_enable", "1"}, {"accel_to_decel_factor", "100%"}}),
+                                     false, &params);
+    CHECK(lines_starting_with(g, "SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO=").empty());
+    const std::regex ratio_zero(" MINIMUM_CRUISE_RATIO=0(\\s|$)");
+    size_t           accel_lines = 0;
+    for (const std::string &line : lines_starting_with(g, "SET_VELOCITY_LIMIT ACCEL=")) {
+        INFO(line);
+        ++accel_lines;
+        CHECK(std::regex_search(line, ratio_zero));
+    }
+    CHECK(accel_lines > 0);
     const std::vector<std::string> lines = lines_starting_with(g, "SET_INPUT_SHAPER");
     // The type is set once (second layer, damping 0: the firmware's), then one frequency per layer,
     // from the start up to (and clamped at) the end.

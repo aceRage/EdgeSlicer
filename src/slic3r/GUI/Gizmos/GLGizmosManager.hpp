@@ -207,6 +207,11 @@ public:
         IC_DISTRIBUTE_Y_DARK,
         IC_DISTRIBUTE_Z,
         IC_DISTRIBUTE_Z_DARK,
+        // Edge: the quick view options button next to the view cube (light, hover, dark, dark hover)
+        IC_VIEW_OPTIONS,
+        IC_VIEW_OPTIONS_HOVER,
+        IC_VIEW_OPTIONS_DARK,
+        IC_VIEW_OPTIONS_DARK_HOVER,
         IC_NAME_COUNT,
     };
 
@@ -307,6 +312,8 @@ public:
     ClippingPlane get_clipping_plane() const;
     ClippingPlane get_assemble_view_clipping_plane() const;
     bool wants_reslice_supports_on_undo() const;
+    // Edge (Airbrush P3, A3): commit (or cancel) airbrush strokes still baking before an undo/redo.
+    void flush_pending_paint(bool commit);
 
     bool is_in_editing_mode(bool error_notification = false) const;
     bool is_hiding_instances() const;

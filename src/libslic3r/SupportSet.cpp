@@ -53,6 +53,8 @@ const std::vector<std::string>& support_set_excluded_keys()
         // because the plan designates this list as the place such adjustments live.
         "brim_width", "brim_type", "brim_object_gap",
         "brim_ears_max_angle", "brim_ears_detection_length",
+        // Orca OD1 brim options (also category "Support").
+        "brim_flow_ratio", "brim_use_efc_outline", "brim_ears_outer_only",
         "bridge_no_support", "max_bridge_length",
     };
     return s_excluded;

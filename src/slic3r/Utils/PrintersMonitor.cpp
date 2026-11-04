@@ -134,6 +134,7 @@ std::map<std::string, Target> targets_of(const json& printers)
         Target t;
         if (p.contains("kind") && p["kind"].is_string()) t.kind = p["kind"].get<std::string>();
         if (p.contains("url") && p["url"].is_string()) t.url = p["url"].get<std::string>();
+        t.device_page = uses_device_page(p);
         out.emplace(id, t);
     }
     return out;
@@ -153,6 +154,9 @@ bool is_web_url(const std::string& url)
 
 OpenWay open_way(const Target& t, bool bambu_monitor_shown, bool printer_view_shown)
 {
+    // The shared device page needs no web address of the printer's own, only the Device tab's view.
+    if (t.device_page && printer_view_shown)
+        return OpenWay::DevicePage;
     if (t.kind == "bambu")
         return bambu_monitor_shown ? OpenWay::BambuMonitor : OpenWay::NotHere;
     if (!is_web_url(t.url))
@@ -165,6 +169,50 @@ std::string not_here_reason(const Target& t)
     if (t.kind == "bambu")
         return "The Device tab shows Bambu Lab printers while a Bambu Lab printer preset is selected. Select one, then try again.";
     return "This printer has no web page to open.";
+}
+
+bool uses_device_page(const json& row)
+{
+    if (!row.is_object()) return false;
+    if (row.contains("device_page") && row["device_page"].is_boolean() && row["device_page"].get<bool>()) return true;
+    return row.contains("cc2") && row["cc2"].is_object();
+}
+
+std::string device_page_path(const std::string& id, bool dark)
+{
+    if (!valid_printer_id(id)) return std::string();
+    return std::string("/web/orca/device.html?embed=1&theme=") + (dark ? "dark" : "light") + "&id=" + url_encode_segment(id);
+}
+
+std::string device_page_id(const std::string& url)
+{
+    const size_t page = url.find("/web/orca/device.html?");
+    if (page == std::string::npos) return std::string();
+    const size_t q = url.find('?', page);
+    std::string  query = url.substr(q + 1);
+    const size_t hash  = query.find('#');
+    if (hash != std::string::npos) query = query.substr(0, hash);
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        const size_t amp  = query.find('&', pos);
+        const std::string kv = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        if (kv.compare(0, 3, "id=") == 0) {
+            std::string out;
+            const std::string v = kv.substr(3);
+            for (size_t i = 0; i < v.size(); ++i) {
+                if (v[i] == '%' && i + 2 < v.size() && std::isxdigit((unsigned char) v[i + 1]) && std::isxdigit((unsigned char) v[i + 2])) {
+                    out += (char) std::stoi(v.substr(i + 1, 2), nullptr, 16);
+                    i += 2;
+                } else {
+                    out += v[i];
+                }
+            }
+            return valid_printer_id(out) ? out : std::string();
+        }
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return std::string();
 }
 
 bool valid_archive_id(const std::string& id)

@@ -438,6 +438,12 @@ Slic3r::ExPolygons diff_clipped(const Slic3r::ExPolygons &src, const Slic3r::ExP
 Slic3r::Polygons   diff(const Slic3r::ExPolygons &subject, const Slic3r::Polygons &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
 Slic3r::Polygons   diff(const Slic3r::ExPolygons &subject, const Slic3r::ExPolygons &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
 Slic3r::Polygons   diff(const Slic3r::Surfaces &subject, const Slic3r::Polygons &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
+// The part of subject farther than delta from clip, as diff(subject, expand(clip, delta)). Expanding finely detailed polygons by
+// a large delta is slow, so a cheaper, smaller round expansion of the simplified clip, which lies within the full one, is tried
+// first: where it covers the subject, so does the full expansion. That holds as long as both expansions grow the regions their
+// paths enclose; the offsets' own input decimation can fold a sliver thinner than about 0.01 * delta and break it, so the
+// result may then differ from diff with expand. Callers use it where such a difference cannot matter.
+Slic3r::Polygons   diff_expanded(const Slic3r::Polygons &subject, const Slic3r::Polygons &clip, float delta);
 Slic3r::ExPolygons diff_ex(const Slic3r::Polygons &subject, const Slic3r::Polygons &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
 Slic3r::ExPolygons diff_ex(const Slic3r::Polygons &subject, const Slic3r::ExPolygons &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
 Slic3r::ExPolygons diff_ex(const Slic3r::Polygons &subject, const Slic3r::Surfaces &clip, ApplySafetyOffset do_safety_offset = ApplySafetyOffset::No);
@@ -524,6 +530,10 @@ Slic3r::Polylines  intersection_pl(const Slic3r::Polyline &subject, const Slic3r
 Slic3r::Polylines  intersection_pl(const Slic3r::Polylines &subject, const Slic3r::Polygons &clip);
 Slic3r::Polylines  intersection_pl(const Slic3r::Polylines &subject, const Slic3r::ExPolygons &clip);
 Slic3r::Polylines  intersection_pl(const Slic3r::Polygons &subject, const Slic3r::Polygons &clip);
+
+// Orca: Sort and orient open polyline fragments produced by clipping `source` with
+// intersection_pl(), so that they run in the same order and direction as the source polyline.
+void restore_source_path_order(const Slic3r::Polyline &source, Slic3r::Polylines &fragments);
 
 inline Slic3r::Lines intersection_ln(const Slic3r::Lines &subject, const Slic3r::Polygons &clip)
 {

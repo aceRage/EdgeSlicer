@@ -8,6 +8,7 @@
 #include "libslic3r/format.hpp"
 #include "GCodeProcessor.hpp"
 #include "PreCoolingInjector.hpp"
+#include "libslic3r/CostEstimate.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -50,7 +51,6 @@ static const float DEFAULT_TRAVEL_ACCELERATION = 1250.0f;
 static const size_t MIN_EXTRUDERS_COUNT = 5;
 static const float DEFAULT_FILAMENT_DIAMETER = 1.75f;
 static const int   DEFAULT_FILAMENT_HRC = 0;
-static const float DEFAULT_FILAMENT_DENSITY = 1.245f;
 static const float DEFAULT_FILAMENT_COST = 29.99f;
 static const int   DEFAULT_FILAMENT_VITRIFICATION_TEMPERATURE = 0;
 static const Slic3r::Vec3f DEFAULT_EXTRUDER_OFFSET = Slic3r::Vec3f::Zero();
@@ -75,7 +75,19 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     "_DURING_PRINT_EXHAUST_FAN",
     " WIPE_TOWER_START",
     " WIPE_TOWER_END",
-    " PA_CHANGE:"
+    " PA_CHANGE:",
+    "@PRINT_TIME_TOTAL_SEC@",
+    "@PRINT_TIME_DAY@",
+    "@PRINT_TIME_HOUR@",
+    "@PRINT_TIME_MINUTE@",
+    "@PRINT_TIME_SEC@",
+    "@USED_FILAMENT_LENGTH@",
+    "@NORMAL_PRINT_TIME@",
+    "@SILENT_PRINT_TIME@",
+    "@TOTAL_WEIGHT@",
+    "@TOTAL_COST@",
+    "@TOTAL_WIPE_TOWER_COST@",
+    "@TOTAL_WIPE_TOWER_FILAMENT@"
 };
 
 const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
@@ -96,7 +108,19 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
     "_DURING_PRINT_EXHAUST_FAN",
     " WIPE_TOWER_START",
     " WIPE_TOWER_END",
-    " PA_CHANGE:"
+    " PA_CHANGE:",
+    "@PRINT_TIME_TOTAL_SEC@",
+    "@PRINT_TIME_DAY@",
+    "@PRINT_TIME_HOUR@",
+    "@PRINT_TIME_MINUTE@",
+    "@PRINT_TIME_SEC@",
+    "@USED_FILAMENT_LENGTH@",
+    "@NORMAL_PRINT_TIME@",
+    "@SILENT_PRINT_TIME@",
+    "@TOTAL_WEIGHT@",
+    "@TOTAL_COST@",
+    "@TOTAL_WIPE_TOWER_COST@",
+    "@TOTAL_WIPE_TOWER_FILAMENT@"
 };
 
 
@@ -693,6 +717,10 @@ void GCodeProcessorResult::reset() {
     lock();
 
     moves = std::vector<GCodeProcessorResult::MoveVertex>();
+    plate_mass = {};
+    object_masses.clear();
+    body_masses.clear();
+    support_masses.clear();
     printable_area = Pointfs();
     //BBS: add bed exclude area
     bed_exclude_area = Pointfs();
@@ -721,6 +749,10 @@ void GCodeProcessorResult::reset() {
     // moves and lines_ends grow with the print: free them, as no reset result reuses the capacity.
     clear_and_shrink(moves);
     clear_and_shrink(lines_ends);
+    plate_mass = {};
+    object_masses.clear();
+    body_masses.clear();
+    support_masses.clear();
     printable_area = Pointfs();
     //BBS: add bed exclude area
     bed_exclude_area = Pointfs();
@@ -747,6 +779,7 @@ void GCodeProcessorResult::reset() {
     z_offset = 0.0f;
     bed_match_result = BedMatchResult(true);
     warnings.clear();
+    output_tool_filaments.clear();
 
     //BBS: add mutex for protection of gcode result
     unlock();
@@ -1313,6 +1346,8 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
 
 void GCodeProcessor::reset()
 {
+    m_mass_locator = nullptr;
+    m_output_tool_filaments.clear();
     m_booked_times.clear();
     m_booking_tool_change = false;
     m_skip_end_gcode_delays = false;
@@ -1502,6 +1537,9 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 void GCodeProcessor::finalize(bool post_process)
 {
     m_result.z_offset = m_z_offset;
+    // Per-nozzle process P5: the G-code's tool -> filament map, for the send dialog.
+    m_result.output_tool_filaments = m_output_tool_filaments;
+    finalize_object_masses();
 
     // update width/height of wipe moves
     for (GCodeProcessorResult::MoveVertex& move : m_result.moves) {
@@ -1790,7 +1828,8 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                 case '2': { process_G2_G3(line, true); break; }  // Move, clockwise arc
                 case '3': { process_G2_G3(line, false); break; } // Move, counter-clockwise arc
                 //BBS
-                case 4:  { process_G4(line); break; }  // Delay
+                // EDGE: '4', not 4 (which never matched, so no G4 was ever seen, see process_G4).
+                case '4':  { process_G4(line); break; }  // Delay
                 default: break;
                 }
                 break;
@@ -3260,6 +3299,10 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
         if (machine.enabled && !machine.blocks.empty())
             machine.blocks.back().move_id = static_cast<unsigned int>(m_result.moves.size());
 
+    // Orca #16291: centers of mass (in memory only).
+    if (type == EMoveType::Extrude)
+        add_object_mass(m_extruder_id, area_filament_cross_section * delta_pos[E]);
+
     // store move
     store_move_vertex(type, origin == G1DiscretizationOrigin::G2G3);
 
@@ -3535,10 +3578,23 @@ void GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line, bool cloc
 //BBS
 void GCodeProcessor::process_G4(const GCodeReader::GCodeLine& line)
 {
+    // EDGE: the dispatch read `case 4:` (BambuStudio fixed it to '4' in ced9e43be6, the BS 1.7.4 merge 2a478ab4f9 put
+    // the old line back), so no G4 ever counted in the estimate. Every G4 wait counts now (start G-code, tool changes,
+    // custom and filament change G-code, the minimum layer time pause), booked on the move that follows it.
     float value_s = 0.0;
     float value_p = 0.0;
-    if (line.has_value('S', value_s) || line.has_value('P', value_p)) {
-        value_s += value_p * 0.001;
+    // S (seconds) wins over P (milliseconds), as in Marlin and RepRapFirmware; a bare G4 waits 0 s.
+    if (line.has_value('S', value_s))
+        value_p = 0.f;
+    else
+        line.has_value('P', value_p);
+    value_s = (value_s > 0.f ? value_s : 0.f) + (value_p > 0.f ? value_p * 0.001f : 0.f);
+    // A G4 without a time adds nothing and leaves the move queue alone (flushing it would change how the moves
+    // around it are blended, and so their time). Otherwise the dwell starts once the queued moves are done; booked
+    // after flushing them, it lands on the first move after it, so it stays on its own layer (the minimum layer
+    // time pause relies on that).
+    if (value_s > 0.f) {
+        simulate_st_synchronize(0.f);
         simulate_st_synchronize(value_s);
     }
 }
@@ -4142,7 +4198,8 @@ void GCodeProcessor::process_T(const std::string_view command)
             if ((m_flavor != gcfRepRapFirmware && m_flavor != gcfRepRapSprinter) || new_extruder != -1)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         } else {
-            unsigned char id = static_cast<unsigned char>(new_extruder);
+            // Per-nozzle process P4: a G-code that names assigned tools is read back in filaments.
+            unsigned char id = static_cast<unsigned char>(filament_of_output_tool(new_extruder));
             bool tool_change_stored = false;
             if (m_extruder_id != id) {
                 if (id >= m_result.extruders_count)
@@ -4692,6 +4749,68 @@ void GCodeProcessor::run_post_process()
         return ret;
     };
 
+    // Process inline placeholders (print_time_*, used_filament_length and the print statistics known only after export)
+    auto process_inline_placeholders = [&](std::string& gcode_line) {
+        bool processed = false;
+        // Every inline placeholder contains '@', so a line without one has nothing to replace.
+        if (gcode_line.find('@') == std::string::npos)
+            return processed;
+
+        auto replace_tag = [&gcode_line, &processed](ETags tag, const std::string& value) {
+            const std::string& placeholder = reserved_tag(tag);
+            size_t pos = gcode_line.find(placeholder);
+            while (pos != std::string::npos) {
+                gcode_line.replace(pos, placeholder.length(), value);
+                processed = true;
+                pos = gcode_line.find(placeholder, pos + value.length());
+            }
+        };
+
+        double print_time_total_sec = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
+        if (print_time_total_sec < 0.0)
+            print_time_total_sec = 0.0;
+
+        int total_seconds = static_cast<int>(print_time_total_sec);
+        int print_time_day = total_seconds / 86400;
+        int day_remainder_seconds = total_seconds % 86400;
+        int print_time_hour = day_remainder_seconds / 3600;
+        int print_time_minute = (day_remainder_seconds % 3600) / 60;
+        int print_time_sec = day_remainder_seconds % 60;
+
+        double total_filament_mm = 0.0;
+        for (const auto& mm : filament_mm) {
+            total_filament_mm += mm;
+        }
+
+        replace_tag(ETags::Print_Time_Total_Sec_Placeholder, Slic3r::float_to_string_decimal_point(print_time_total_sec, 2));
+        replace_tag(ETags::Print_Time_Day_Placeholder, std::to_string(print_time_day));
+        replace_tag(ETags::Print_Time_Hour_Placeholder, std::to_string(print_time_hour));
+        replace_tag(ETags::Print_Time_Minute_Placeholder, std::to_string(print_time_minute));
+        replace_tag(ETags::Print_Time_Sec_Placeholder, std::to_string(print_time_sec));
+        replace_tag(ETags::Used_Filament_Length_Placeholder,
+                    Slic3r::float_to_string_decimal_point(total_filament_mm / 1000.0, 2)); // Convert mm to m
+        // Same values as the print statistics that filename_format gets (PrintStatistics::config(), filled in by
+        // update_print_estimated_stats() in GCode.cpp), which runs only after this post-processing.
+        // EDGE: from m_result's modes, which include the machine prepare time (get_time()), as the statistics do.
+        const auto mode_time_dhm = [this](PrintEstimatedStatistics::ETimeMode mode) {
+            return short_time(get_time_dhms(m_result.print_statistics.modes[static_cast<size_t>(mode)].time));
+        };
+        replace_tag(ETags::Normal_Print_Time_Placeholder, mode_time_dhm(PrintEstimatedStatistics::ETimeMode::Normal));
+        replace_tag(ETags::Silent_Print_Time_Placeholder, is_stealth_time_estimator_enabled() ?
+                                                              mode_time_dhm(PrintEstimatedStatistics::ETimeMode::Stealth) :
+                                                              short_time("N/A"));
+        // EDGE: total_cost is the cost breakdown's total (filament, flush and tower included, plus time_cost per
+        // hour), the value update_print_estimated_stats() gives PrintStatistics::total_cost.
+        replace_tag(ETags::Total_Weight_Placeholder, Slic3r::float_to_string_decimal_point(filament_total_g, 2));
+        replace_tag(ETags::Total_Cost_Placeholder, Slic3r::float_to_string_decimal_point(compute_cost(m_result).total, 2));
+        replace_tag(ETags::Total_Wipe_Tower_Cost_Placeholder,
+                    Slic3r::float_to_string_decimal_point(m_print->print_statistics().total_wipe_tower_cost, 2));
+        replace_tag(ETags::Total_Wipe_Tower_Filament_Placeholder,
+                    Slic3r::float_to_string_decimal_point(m_print->print_statistics().total_wipe_tower_filament, 2));
+
+        return processed;
+    };
+
     // check for temporary lines
     auto is_temporary_decoration = [](const std::string_view gcode_line) {
         // remove trailing '\n'
@@ -4798,7 +4917,8 @@ void GCodeProcessor::run_post_process()
         if (cmd.size() >= 2) {
             // Reserved BBL special T markers (T1000/T65535/...) are not toolchanges; don't clamp or warn.
             if (tool_number != -1 && !is_bbl_special_tool_command(tool_number)) {
-                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= tool_number) {
+                // Per-nozzle process P4: the temperatures are the filament's; the line keeps the G-code's tool.
+                if (tool_number < 0 || (int)m_extruder_temps_config.size() <= int(filament_of_output_tool(unsigned(tool_number)))) {
                     // found an invalid value, clamp it to a valid one
                     tool_number = std::clamp<int>(0, m_extruder_temps_config.size() - 1, tool_number);
                     // emit warning
@@ -4815,8 +4935,9 @@ void GCodeProcessor::run_post_process()
                     backtrace, cmd,
                     // line inserter
                     [tool_number, this, &current_layer_id](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[tool_number] :
-                                                                    m_extruder_temps_first_layer_config[tool_number]);
+                        const size_t filament_number = filament_of_output_tool(unsigned(tool_number));
+                        const int temperature = int(current_layer_id > 1 ? m_extruder_temps_config[filament_number] :
+                                                                    m_extruder_temps_first_layer_config[filament_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
                         /**
@@ -4943,6 +5064,8 @@ void GCodeProcessor::run_post_process()
                         gcode_line.clear();
                     if (!processed)
                         processed = process_used_filament(gcode_line);
+                    if (!gcode_line.empty())
+                        process_inline_placeholders(gcode_line);
                     if (!processed && !is_temporary_decoration(gcode_line)) {
                         if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G0") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G1")) {
                             export_lines.append_line(gcode_line);
@@ -5264,6 +5387,74 @@ void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
             machine.stop_times.push_back({ m_g1_line_id, 0.0f });
         }
     }
+}
+
+void GCodeProcessorResult::ObjectMass::add(const Sum &sum, const BoundingBoxf3 &extent, size_t layer)
+{
+    box.merge(extent);
+    if (printed_up_to_layer.size() <= layer)
+        printed_up_to_layer.resize(layer + 1);
+    printed_up_to_layer[layer].add(sum);
+}
+
+void GCodeProcessor::add_object_mass(int filament_id, float volume)
+{
+    // Skirt, prime tower and custom G-code belong to no object.
+    const ExtrusionRole role = m_extrusion_role;
+    if (volume <= 0.f || role == erNone || role == erSkirt || role == erWipeTower || role == erCustom || role == erMixed)
+        return;
+
+    const bool   has_density = size_t(filament_id) < m_result.filament_densities.size() && m_result.filament_densities[filament_id] > 0.f;
+    const double mass        = double(volume) * (has_density ? m_result.filament_densities[filament_id] : DEFAULT_FILAMENT_DENSITY);
+    // In the frame of the stored moves, the bead's center half its height below the nozzle, from the move's start to its end.
+    const Vec3d half_height = 0.5 * double(m_height) * Vec3d::UnitZ();
+    const Vec3f extruder_offset = size_t(filament_id) < m_extruder_offsets.size() ? m_extruder_offsets[filament_id] : Vec3f::Zero();
+    const Vec3d offset      = Vec3d(m_x_offset, m_y_offset, -m_z_offset) - half_height + extruder_offset.cast<double>();
+    const Vec3d start       = Vec3d(m_start_position[X], m_start_position[Y], m_start_position[Z]) + offset;
+    const Vec3d end         = Vec3d(m_end_position[X], m_end_position[Y], m_end_position[Z]) + offset;
+    // The second moments of a uniform segment.
+    const GCodeProcessorResult::ObjectMass::Sum sum{ mass, double(volume), 0.5 * mass * (start + end),
+                                                     mass / 3. * (start.cwiseProduct(start) + start.cwiseProduct(end) + end.cwiseProduct(end)) };
+    // Of the bead's center line and its height, as its width is only estimated. Merged, as a wall along an axis is flat.
+    BoundingBoxf3 extent;
+    extent.merge(start.cwiseMin(end) - half_height);
+    extent.merge(start.cwiseMax(end) + half_height);
+    const bool   part  = role != erBrim && !is_support(role);
+    const size_t layer = std::max<unsigned int>(1, m_layer_id) - 1;
+
+    m_result.plate_mass.add(sum, extent, layer);
+    // The brim belongs to the plate alone.
+    if (role == erBrim || !m_mass_locator)
+        return;
+    const auto add = [&sum, &extent, layer](std::vector<GCodeProcessorResult::ObjectMass> &masses, int index) {
+        if (index < 0)
+            return;
+        if (masses.size() <= size_t(index))
+            masses.resize(index + 1);
+        masses[index].add(sum, extent, layer);
+    };
+    // At the nozzle's height, which the layers print at.
+    const MassLocation location = m_mass_locator(0.5 * (start + end) + half_height, !part);
+    if (part) {
+        add(m_result.object_masses, location.object);
+        add(m_result.body_masses, location.body);
+    } else
+        add(m_result.support_masses, location.object);
+}
+
+void GCodeProcessor::finalize_object_masses()
+{
+    const auto accumulate = [](GCodeProcessorResult::ObjectMass &object) {
+        for (size_t i = 1; i < object.printed_up_to_layer.size(); ++i)
+            object.printed_up_to_layer[i].add(object.printed_up_to_layer[i - 1]);
+    };
+    accumulate(m_result.plate_mass);
+    for (GCodeProcessorResult::ObjectMass &object : m_result.object_masses)
+        accumulate(object);
+    for (GCodeProcessorResult::ObjectMass &body : m_result.body_masses)
+        accumulate(body);
+    for (GCodeProcessorResult::ObjectMass &support : m_result.support_masses)
+        accumulate(support);
 }
 
 void GCodeProcessor::set_extrusion_role(ExtrusionRole role)

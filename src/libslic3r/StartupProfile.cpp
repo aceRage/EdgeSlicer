@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 
 #include <boost/log/trivial.hpp>
@@ -21,6 +22,15 @@ bool startup_profile_enabled()
         return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
     }();
     return enabled;
+}
+
+namespace {
+const std::chrono::steady_clock::time_point s_static_init_time = std::chrono::steady_clock::now();
+}
+
+long long startup_profile_uptime_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - s_static_init_time).count();
 }
 
 void startup_profile_log(const std::string &message)

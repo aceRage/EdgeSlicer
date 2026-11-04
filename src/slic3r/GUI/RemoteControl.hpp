@@ -99,6 +99,16 @@ struct Prepared
     // How long a Moonraker command may take: a filament load or unload runs for minutes and the
     // printer answers the script only when it is done.
     int         timeout_s { 15 };
+    // An Elegoo SDCP printer (kind "elegoo"): the command and its Data, sent over the hub's own
+    // connection to the printer at sdcp_host (ElegooSdcpMonitor).
+    std::string    sdcp_host;
+    int            sdcp_cmd { -1 };
+    nlohmann::json sdcp_data;
+    // An Elegoo Centauri Carbon 2 (kind "elegoo", cc2 true): the MQTT method sent over the hub's own
+    // connection to sdcp_host (ElegooCc2Monitor), with the device's access code.
+    bool           cc2 { false };
+    int            cc2_method { -1 };
+    std::string    cc2_token;
 };
 
 struct Sink
@@ -131,6 +141,14 @@ void run(std::shared_ptr<Prepared> p, Sink sink);
 // the same rule needs_job_id follows.
 void describe_bambu(MachineObject* m, nlohmann::json& p);
 
+// Whether a print host speaks Elegoo's SDCP (a Centauri Carbon 1 on "elegoolink"): its live state
+// comes from the hub's persistent connection to it, not from a Moonraker probe. `printer_model` is
+// the device's or preset's model; the Centauri Carbon 2 speaks MQTT instead and is left out.
+bool speaks_sdcp(const std::string& host_type_key, const std::string& printer_model);
+// The Centauri Carbon 2 / Centauri 2 on "elegoolink": its live state comes from the hub's MQTT
+// connection to it (ElegooCc2Monitor).
+bool speaks_cc2(const std::string& host_type_key, const std::string& printer_model);
+
 // Whether an action is one of the settings verbs (set_temp, set_speed, set_light, set_fan).
 bool is_setting_verb(const std::string& action);
 // load_filament / unload_filament.
@@ -154,6 +172,12 @@ struct HostTarget
     // them). Empty host_type = ask as a Moonraker printer, which is what every other target is.
     std::string host_type;
     std::string auth_type, apikey, user, password;
+    // What a person calls it (the device's alias), for the event watcher's notifications; empty =
+    // the address. An Elegoo SDCP printer (host_type "elegoolink") has its bare host in `base`.
+    std::string name;
+    // "cc2" for an Elegoo Centauri Carbon 2 (host_type "elegoolink", bare host in `base`, its access
+    // code in `apikey`); empty for everything else.
+    std::string protocol;
 };
 void list_host_targets(std::vector<HostTarget>& out);
 
@@ -161,7 +185,8 @@ void list_host_targets(std::vector<HostTarget>& out);
 // control fields into its entry of the printers array, plus the temperatures a Bambu entry carries
 // (bed_temp, bed_target, nozzles) when the printer reports them. A printer that does not answer
 // keeps its buttons off and gets no temperatures. Safe to call with an empty list.
-void describe_hosts(const std::vector<HostTarget>& targets, nlohmann::json& printers);
+// `demand`: somebody is looking (an Elegoo SDCP printer then connects; see ElegooSdcpMonitor).
+void describe_hosts(const std::vector<HostTarget>& targets, nlohmann::json& printers, bool demand = false);
 
 } // namespace RemoteControl
 } // namespace GUI

@@ -81,7 +81,11 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                                               const std::vector<float>                                       &segmentation_claim_width_gapfill_off_by_color,
                                                               bool                                                             segmentation_interlocking_beam,
                                                               IncludeTopAndBottomLayers                                        include_top_and_bottom_layers,
-                                                              const std::function<void()>                                     &throw_on_cancel_callback);
+                                                              const std::function<void()>                                     &throw_on_cancel_callback,
+                                                              // Airbrush P3 (item B): scales the along-the-wall run filters
+                                                              // (0.1 / 0.2 / 0.5 mm at a 0.4 mm nozzle), see
+                                                              // mm_segmentation_run_filter_scale(). 1 = today's values.
+                                                              float                                                            segmentation_run_filter_scale = 1.f);
 
 // ITEM 1 (.superpowers/sdd/2026-08-31-paint-depth/interclaim-absorb-report.md): given a thin,
 // fully-interior base island and the final per-colour claims on its layer (index 0 = base,
@@ -116,6 +120,15 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo
 std::vector<std::vector<ExPolygons>> fuzzy_skin_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
+
+// Airbrush P3 (item B): segmentation absorbs off-colour runs along a wall of 0.2 mm and 0.5 mm or
+// less (and merges painted pieces within 0.1 mm), sized for a 0.4 mm nozzle. A finer nozzle prints
+// finer runs, so those thresholds scale with the finest nozzle the object prints with: nozzle / 0.4,
+// never above 1 (a 0.4 mm or larger nozzle keeps exactly today's thresholds, so their G-code is
+// unchanged) and never below 0.25. <= 0 (unknown) is 1.
+float mm_segmentation_run_filter_scale(double nozzle_mm);
+// The finest nozzle among the extruders that print the object's filaments; 0 when unknown.
+double mm_segmentation_finest_nozzle(const PrintObject &print_object);
 
 // Effective outer-wall line width for a region, resolved against its own nozzle with PrintRegion::flow's fallback.
 double resolve_outer_wall_line_width(const PrintRegionConfig &region_config, const PrintObjectConfig &object_config, const PrintConfig &print_config);

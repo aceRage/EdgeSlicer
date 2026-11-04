@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "Airbrush/AirbrushBake.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/GLTF.hpp"
@@ -26,6 +27,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#ifdef _WIN32
+#include <boost/nowide/convert.hpp>
+#endif
 #include <boost/nowide/iostream.hpp>
 
 #include "SVG.hpp"
@@ -48,6 +52,18 @@
 #define _L(s) Slic3r::I18N::translate(s)
 
 namespace Slic3r {
+bool CutConnectorAttributes::operator==(const CutConnectorAttributes& other) const
+{
+    return type == other.type && style == other.style && shape == other.shape;
+}
+
+bool CutConnector::operator==(const CutConnector& other) const
+{
+    return pos == other.pos && rotation_m.matrix() == other.rotation_m.matrix() && radius == other.radius && height == other.height &&
+           radius_tolerance == other.radius_tolerance && height_tolerance == other.height_tolerance && z_angle == other.z_angle &&
+           attribs == other.attribs && flexi == other.flexi && pushfit == other.pushfit && tac_joint == other.tac_joint;
+}
+
 const std::vector<std::string> CONST_FILAMENTS = {
     "", "4", "8", "0C", "1C", "2C", "3C", "4C", "5C", "6C", "7C", "8C", "9C", "AC", "BC", "CC", "DC",
 }; // 5                           10                            15    16
@@ -106,6 +122,7 @@ Model& Model::assign_copy(const Model &rhs)
 
     // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
     this->image_assets = rhs.image_assets;
+    this->showcase     = rhs.showcase;
 
     return *this;
 }
@@ -154,6 +171,8 @@ Model& Model::assign_copy(Model &&rhs)
     // Image Fill (Phase 2): move the image store with everything else.
     this->image_assets = std::move(rhs.image_assets);
     rhs.image_assets.clear();
+    this->showcase = std::move(rhs.showcase);
+    rhs.showcase.clear();
     return *this;
 }
 
@@ -1168,43 +1187,71 @@ std::string Model::get_auxiliary_file_temp_path()
 }
 
 // BBS: backup dir
+// A fresh backup folder for a model under parent, named by date, pid and model id.
+static std::string new_backup_path(const std::string &parent, size_t model_id)
+{
+    std::time_t t = std::time(0);
+    std::tm* now_time = std::localtime(&t);
+    std::stringstream buf;
+    buf << "/snapmaker_orca_model/";
+    buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
+    buf << get_current_pid() << "#";
+    buf << model_id;
+    return boost::filesystem::path(parent).string() + buf.str();
+}
+
 std::string Model::get_backup_path()
 {
+    bool generated = false;
     if (backup_path.empty())
     {
-        auto pid = get_current_pid();
-        boost::filesystem::path parent_path(temporary_dir());
-        std::time_t t = std::time(0);
-        std::tm* now_time = std::localtime(&t);
-        std::stringstream buf;
-        buf << "/snapmaker_orca_model/";
-        buf << std::put_time(now_time, "%a_%b_%d/%H_%M_%S#");
-        buf << pid << "#";
-        buf << this->id().id;
-
-        backup_path = parent_path.string() + buf.str();
+        backup_path = new_backup_path(temporary_dir(), this->id().id);
+        generated = true;
         BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, backup_path empty, set to %3%")%this%this->id().id%backup_path;
-        boost::filesystem::path temp_path(backup_path);
-        if (boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
-            boost::filesystem::remove_all(temp_path);
-        }
     }
-    boost::filesystem::path temp_path(backup_path);
-    try {
-        if (!boost::filesystem::exists(temp_path))
-        {
-            BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/3D/Objects");
-            BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
-            boost::filesystem::create_directories(backup_path + "/Metadata");
-            BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
-            save_string_file(backup_path + "/lock.txt",
-                boost::lexical_cast<std::string>(get_current_pid()));
+    auto create_backup_dirs = [this, generated]() -> bool {
+        boost::filesystem::path temp_path(backup_path);
+        try {
+            if (generated && boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << boost::format("model %1%, id %2%, remove previous %3%")%this%this->id().id%backup_path;
+                boost::filesystem::remove_all(temp_path);
+            }
+            if (!boost::filesystem::exists(temp_path))
+            {
+                BOOST_LOG_TRIVIAL(info) << "create /3D/Objects in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/3D/Objects");
+                BOOST_LOG_TRIVIAL(info) << "create /Metadata in " << temp_path;
+                boost::filesystem::create_directories(backup_path + "/Metadata");
+                BOOST_LOG_TRIVIAL(info) << "create /lock.txt in " << temp_path;
+                save_string_file(backup_path + "/lock.txt",
+                    boost::lexical_cast<std::string>(get_current_pid()));
+            }
+            return true;
+        } catch (std::exception &ex) {
+            BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+            return false;
         }
-    } catch (std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to create backup path" << temp_path << ": " << ex.what();
+    };
+    if (!create_backup_dirs() && generated) {
+        // temporary_dir() is unset or not writable (unset, the path is "/snapmaker_orca_model", read-only
+        // on macOS). The 3MF importer extracts the project settings into this folder, so fall back to the
+        // system temp folder rather than hand out one nothing can be written to.
+        boost::system::error_code ec;
+        const boost::filesystem::path system_temp = boost::filesystem::temp_directory_path(ec);
+        if (!ec && !system_temp.empty()) {
+#ifdef _WIN32
+            // Wide path to UTF-8: path::string() is a narrow ACP conversion on Windows and mangles a
+            // non-ASCII %TEMP% (an accented user name). wstring() can throw under a C locale on POSIX,
+            // so this stays Windows only.
+            const std::string system_temp_utf8 = boost::nowide::narrow(system_temp.wstring());
+#else
+            const std::string system_temp_utf8 = system_temp.string();
+#endif
+            backup_path = new_backup_path(system_temp_utf8, this->id().id);
+            BOOST_LOG_TRIVIAL(warning) << boost::format("model %1%, id %2%, backup path falls back to %3%")%this%this->id().id%backup_path;
+            create_backup_dirs();
+        }
     }
 
     return backup_path;
@@ -1342,6 +1389,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     //BBS: add module name
     this->module_name                 = rhs.module_name;
     this->input_file                  = rhs.input_file;
+    this->layerling_design            = rhs.layerling_design;
     // Copies the config's ID
     this->config                      = rhs.config;
     assert(this->config.id() == rhs.config.id());
@@ -1350,6 +1398,7 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->brim_points                 = rhs.brim_points;
     this->layer_config_ranges         = rhs.layer_config_ranges;
+    this->height_colour_patterns      = rhs.height_colour_patterns;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
@@ -1385,6 +1434,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     //BBS: add module name
     this->module_name                 = std::move(rhs.module_name);
     this->input_file                  = std::move(rhs.input_file);
+    this->layerling_design            = std::move(rhs.layerling_design);
     // Moves the config's ID
     this->config                      = std::move(rhs.config);
     assert(this->config.id() == rhs.config.id());
@@ -1393,6 +1443,7 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->brim_points                 = std::move(brim_points);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
+    this->height_colour_patterns      = std::move(rhs.height_colour_patterns);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
     this->origin_translation          = std::move(rhs.origin_translation);
@@ -1538,6 +1589,13 @@ ModelVolume* ModelObject::replace_volume_with_object_mesh(size_t src_idx, Triang
     new_volume->config.apply(old_volume->config);
     new_volume->set_type(old_volume->type());
     new_volume->set_material_id(old_volume->material_id());
+    // Airbrush P3 (A4): the boolean drops the paint, but the colour field is position-keyed, so the
+    // spray comes back on the result where it still has surface (over no other paint, as before).
+    if (old_volume->airbrush_field && new_volume->is_model_part()) {
+        const TriangleSelector::TriangleSplittingData none;
+        Airbrush::airbrush_carry_field(*new_volume, *old_volume->airbrush_field, old_volume->mesh().its, old_volume->mmu_segmentation_facets.get_data(),
+                                       new_volume->get_matrix().inverse() * old_volume->get_matrix(), &none);
+    }
 
     // The new volume takes the source's slot; the source is deleted.
     std::swap(this->volumes[src_idx], this->volumes.back());
@@ -1850,6 +1908,9 @@ indexed_triangle_set ModelObject::raw_indexed_triangle_set() const
             size_t j = out.indices.size();
             append(out.vertices, v->mesh().its.vertices);
             append(out.indices,  v->mesh().its.indices);
+            // Orca: Point the volume's triangles at its own vertices, which follow those of the volumes before it.
+            for (size_t k = j; k < out.indices.size(); ++ k)
+                out.indices[k] += stl_triangle_vertex_indices::Constant(int(i));
             const Transform3d& m = v->get_matrix();
             for (; i < out.vertices.size(); ++ i)
                 out.vertices[i] = (m * out.vertices[i].cast<double>()).cast<float>().eval();
@@ -2147,6 +2208,8 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->seam_facets.assign(volume->seam_facets);
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
+            // Airbrush P3 (A4): same triangles, same field; a unit conversion below re-bakes it.
+            vol->airbrush_field = volume->airbrush_field;
 
             // Perform conversion only if the target "imperial" state is different from the current one.
             // This check supports conversion of "mixed" set of volumes, each with different "imperial" state.
@@ -2263,6 +2326,9 @@ void ModelVolume::reset_extra_facets()
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
     this->fuzzy_skin_facets.reset();
+    // Airbrush P3 (A4): the colour field goes with the paint it was baked into. A caller that keeps
+    // the paint (restore_painting(), Cut::finalize()) carries the field over again.
+    this->airbrush_field.reset();
     // Texture-displacement paint data has no remap-across-topology-change support yet (see
     // build_texture_displacement()'s documented limitation), so it must be dropped here rather
     // than left referring to a mesh that no longer matches it.
@@ -2285,6 +2351,7 @@ std::optional<TriangleSelector::SavedPainting> ModelVolume::save_painting() cons
         sp.seam      = seam_facets.get_data();
         sp.mmu       = mmu_segmentation_facets.get_data();
         sp.fuzzy     = fuzzy_skin_facets.get_data();
+        sp.airbrush_field = airbrush_field;
         return sp;
     }
 
@@ -2315,8 +2382,25 @@ void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPa
     };
     remap_one(saved->supported, supported_facets);
     remap_one(saved->seam,      seam_facets);
-    remap_one(saved->mmu,       mmu_segmentation_facets);
+    // Airbrush P3 (A4): with a colour field, carry only the paint UNDER the airbrush; the specks are
+    // baked again from the field on the new mesh (here, or by Cut::finalize() once every saved part
+    // has been remapped).
+    if (saved->airbrush_field)
+        remap_one(Airbrush::airbrush_paint_under(*saved->airbrush_field, saved->mesh.its.indices.size(), saved->mmu), mmu_segmentation_facets);
+    else
+        remap_one(saved->mmu, mmu_segmentation_facets);
     remap_one(saved->fuzzy,     fuzzy_skin_facets);
+    if (saved->airbrush_field && !keep_existing_paint && is_model_part()) {
+        const TriangleSelector::TriangleSplittingData base = mmu_segmentation_facets.get_data();
+        Airbrush::airbrush_carry_field(*this, *saved->airbrush_field, saved->mesh.its, saved->mmu,
+                                       airbrush_saved_to_mesh(*saved), &base);
+    }
+}
+
+Transform3d ModelVolume::airbrush_saved_to_mesh(const TriangleSelector::SavedPainting &saved) const
+{
+    // restore_painting() maps this mesh into the saved frame by its init shift.
+    return Geometry::translation_transform(-mesh().get_init_shift()) * saved.field_to_saved;
 }
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
@@ -3236,16 +3320,30 @@ void ModelVolume::mirror(Axis axis)
 // This method could only be called before the meshes of this ModelVolumes are not shared!
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small
         this->calculate_convex_hull();
     else
         const_cast<TriangleMesh*>(m_convex_hull.get())->scale(versor);
+    // Airbrush P3 (A4): the field scales with the mesh and is baked again at the printed grain.
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.scale(versor.cast<double>());
+        Airbrush::airbrush_carry_field(*this, *field, mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(mesh_trafo, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3254,10 +3352,17 @@ void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_le
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    // Airbrush P3 (A4): the field follows the mesh and is baked again.
+    if (field)
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, mesh_trafo, &under);
 }
 
 void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_handed)
 {
+    const auto field = this->airbrush_field;
+    TriangleSelector::TriangleSplittingData under;
+    if (field)
+        under = Airbrush::airbrush_paint_under(*field, this->mesh().its.indices.size(), mmu_segmentation_facets.get_data());
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(matrix, fix_left_handed);
 	this->set_mesh(std::move(mesh));
@@ -3266,6 +3371,11 @@ void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_hand
     m_convex_hull = std::make_shared<TriangleMesh>(std::move(convex_hull));
     // Let the rest of the application know that the geometry changed, so the meshes have to be reloaded.
     this->set_new_unique_id();
+    if (field) {
+        Transform3d t = Transform3d::Identity();
+        t.linear()    = matrix;
+        Airbrush::airbrush_carry_field(*this, *field, this->mesh().its, {}, t, &under);
+    }
 }
 
 void ModelVolume::convert_from_imperial_units()
@@ -3762,6 +3872,8 @@ double Model::findMaxSpeed(const ModelObject* object) {
     double topSolidInfillSpeedObj = Model::printSpeedMap.topSolidInfillSpeed;
     double supportSpeedObj = Model::printSpeedMap.supportSpeed;
     double smallPerimeterSpeedObj = Model::printSpeedMap.smallPerimeterSpeed;
+    double smallSupportPerimeterSpeedObj = Model::printSpeedMap.smallSupportPerimeterSpeed;
+    std::optional<FloatOrPercent> smallSupportPerimeterSpeedOpt;
     for (std::string objectKey : objectKeys) {
         if (objectKey == "inner_wall_speed"){
             perimeterSpeedObj = object->config.get().opt_float(objectKey, 0);
@@ -3783,8 +3895,18 @@ double Model::findMaxSpeed(const ModelObject* object) {
                 smallPerimeterSpeedObj = v.percent ? v.value / 100.0 * perimeterSpeedObj : v.value;
             }
         }
+        // OrcaSlicer #13459 / #15232: a FloatOrPercent; a percentage is of the support speed, which is
+        // resolved after the loop (the keys come sorted, "small_support..." before "support_speed").
+        if (objectKey == "small_support_perimeter_speed") {
+            if (const auto *opt = object->config.get().option<ConfigOptionFloatsOrPercents>(objectKey))
+                smallSupportPerimeterSpeedOpt = opt->get_at(0);
+        }
     }
-    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, objMaxSpeed)))))));
+    if (smallSupportPerimeterSpeedOpt)
+        smallSupportPerimeterSpeedObj = smallSupportPerimeterSpeedOpt->percent ?
+                                            smallSupportPerimeterSpeedOpt->value / 100.0 * supportSpeedObj :
+                                            smallSupportPerimeterSpeedOpt->value;
+    objMaxSpeed = std::max(perimeterSpeedObj, std::max(externalPerimeterSpeedObj, std::max(infillSpeedObj, std::max(solidInfillSpeedObj, std::max(topSolidInfillSpeedObj, std::max(supportSpeedObj, std::max(smallPerimeterSpeedObj, std::max(smallSupportPerimeterSpeedObj, objMaxSpeed))))))));
     if (objMaxSpeed <= 0) objMaxSpeed = 250.;
     return objMaxSpeed;
 }
@@ -4374,6 +4496,48 @@ bool model_has_advanced_features(const Model &model)
             	return true;
     }
     return false;
+}
+
+// Orca #14591: a project may store only the bare filename of a source (the default), while the file read
+// back from disk carries its full path (or the reverse), so compare the exact path first and then the
+// filename alone, case-insensitively.
+static bool same_reload_source(const std::string &new_input_file, const std::string &old_input_file)
+{
+    return new_input_file == old_input_file ||
+           boost::algorithm::iequals(boost::filesystem::path(new_input_file).filename().string(),
+                                     boost::filesystem::path(old_input_file).filename().string());
+}
+
+std::pair<int, int> find_reload_from_disk_match(const Model &new_model, const ModelVolume &old_volume,
+                                                bool file_matches_source, bool file_named_like_volume)
+{
+    // The volume at the indices the old volume remembers, when it still comes from the same file.
+    int source_object = -1, source_volume = -1;
+    if (file_matches_source) {
+        const int o = old_volume.source.object_idx, v = old_volume.source.volume_idx;
+        if (o >= 0 && o < int(new_model.objects.size()) && v >= 0 && v < int(new_model.objects[o]->volumes.size()) &&
+            same_reload_source(new_model.objects[o]->volumes[v]->source.input_file, old_volume.source.input_file)) {
+            source_object = o;
+            source_volume = v;
+        }
+    }
+    // Trust the remembered indices only while they still point at a volume of that name.
+    if (source_object >= 0 && (old_volume.name.empty() || new_model.objects[source_object]->volumes[source_volume]->name == old_volume.name))
+        return {source_object, source_volume};
+
+    if ((file_matches_source || file_named_like_volume) && !old_volume.name.empty()) {
+        for (int o = 0; o < int(new_model.objects.size()); ++o) {
+            const ModelObject *obj = new_model.objects[o];
+            for (int v = 0; v < int(obj->volumes.size()); ++v)
+                if (obj->volumes[v]->name == old_volume.name)
+                    return {o, v};
+            // A STEP model loaded as one volume: the object carries the name.
+            if (obj->name == old_volume.name)
+                return {o, -1};
+        }
+    }
+    // Nothing of that name: the volume was renamed, so the remembered indices are all there is.
+    return {source_object, source_volume};
 }
 
 #ifndef NDEBUG

@@ -63,7 +63,8 @@ const char* const FIXTURE_TABLE = R"({
 // writes the fixture where get_hms_file() will look for it.
 struct FixtureTables
 {
-    fs::path dir;
+    fs::path    dir;
+    std::string old_data_dir = Slic3r::data_dir();
     explicit FixtureTables(const std::string& series)
     {
         dir = fs::temp_directory_path() / fs::unique_path("snorca-hms-%%%%-%%%%");
@@ -76,6 +77,7 @@ struct FixtureTables
     }
     ~FixtureTables()
     {
+        Slic3r::set_data_dir(old_data_dir);
         boost::system::error_code ig;
         fs::remove_all(dir, ig);
     }
@@ -395,4 +397,22 @@ TEST_CASE("stealth mode drops the error picture's web URL", "[HmsLookup]")
     CHECK(HMSQuery::stealth_image_url(wxEmptyString, true).IsEmpty());
     // a local picture (no web address) is kept either way
     CHECK(HMSQuery::stealth_image_url("hms/0300_8003.png", true) == "hms/0300_8003.png");
+}
+
+// --order rand used to crash here: other tests in this binary start a plain wxApp, and the
+// lookups read the app config through wxGetApp(), which assumed any wxApp was a GUI_App.
+TEST_CASE("a plain wxApp is not taken for the slicer's app", "[HmsLookup]")
+{
+    struct PlainWxApp
+    {
+        wxAppConsole* saved = wxApp::GetInstance();
+        wxApp*        plain = new wxApp();
+        PlainWxApp() { wxApp::SetInstance(plain); }
+        ~PlainWxApp() { wxApp::SetInstance(saved); delete plain; }
+    } app;
+
+    FixtureTables tables("31B");
+    HMSQuery      q;
+    CHECK(HMSQuery::hms_language_code() == "en");
+    CHECK(q.describe_error(H2C, "0C00010000020014", true).Contains("Nozzle Camera is malfunctioning"));
 }

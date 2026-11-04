@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <numeric>
+#include <limits>
 
 #include <cmath>
 #include "../ClipperUtils.hpp"
@@ -14,6 +15,7 @@
 
 #include "FillBase.hpp"
 #include "FillConcentric.hpp"
+#include "FillSpiralInset.hpp"
 #include "FillHoneycomb.hpp"
 #include "Fill3DHoneycomb.hpp"
 #include "FillGyroid.hpp"
@@ -40,6 +42,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
 {
     switch (type) {
     case ipConcentric:          return new FillConcentric();
+    case ipSpiralInset:         return new FillSpiralInset();
     case ipHoneycomb:           return new FillHoneycomb();
     case ipLateralHoneycomb:         return new FillLateralHoneycomb();
     case ip3DHoneycomb:         return new Fill3DHoneycomb();
@@ -105,6 +108,13 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
 {
     // Perform offset.
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
+    // Orca: Separated infills move the box center onto each body; origin-aligned patterns follow it.
+    // EdgeSlicer: not while an adaptive density field grades the pattern (Gyroid / TPMS, OD6): the
+    // field is sampled at the region's own coordinates, which the shift would move off the object.
+    const bool  graded = params.adaptive_infill_mode != AdaptiveInfillMode::Disabled && this->adaptive_infill_field != nullptr;
+    const Point shift  = this->aligned_to_origin() && this->align_to_box_center && ! graded && ! empty(this->bounding_box) ?
+                             this->bounding_box.center() : Point(0, 0);
+    translate(expp, -shift);
     // Create the infills for each of the regions.
     Polylines polylines_out;
     for (size_t i = 0; i < expp.size(); ++ i)
@@ -114,6 +124,8 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
             _infill_direction(surface),
             std::move(expp[i]),
             polylines_out);
+    for (Polyline &pl : polylines_out)
+        pl.translate(shift);
     return polylines_out;
 }
 
@@ -164,7 +176,11 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
         // ORCA: special flag for flow rate calibration
         auto is_flow_calib = params.extrusion_role == erTopSolidInfill && this->print_object_config->has("calib_flowrate_topinfill_special_order") &&
                              this->print_object_config->option("calib_flowrate_topinfill_special_order")->getBool();
-        if (is_flow_calib) {
+        // Orca: a forced surface fill order must survive the G-code path planner, which would
+        // otherwise re-chain and possibly reverse the paths. The same applies to the flow rate
+        // calibration's special toolpath order.
+        const bool keep_fill_order = params.fill_order != SurfaceFillOrder::Default;
+        if (is_flow_calib || keep_fill_order) {
             eec->no_sort = true;
         }
         size_t idx   = eec->entities.size();
@@ -179,7 +195,7 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
                 params.extrusion_role,
                 flow_mm3_per_mm, float(flow_width), params.flow.height());
         }
-        if (!params.can_reverse || is_flow_calib) {
+        if (!params.can_reverse || is_flow_calib || keep_fill_order) {
             for (size_t i = idx; i < eec->entities.size(); i++)
                 eec->entities[i]->set_reverse();
         }
@@ -187,6 +203,86 @@ void Fill::fill_surface_extrusion(const Surface* surface, const FillParams& para
         // Orca: run gap fill
         this->_create_gap_fill(surface, params, eec);
     }
+}
+
+// Orca: inserts the gap fills of a fill whose extrusions keep their order (monotonic surfaces, a forced fill
+// order) where they add the least travel, ported from Bambu Studio. The fill's own extrusions keep their order
+// and direction. The result is kept only if it travels less than printing the gap fills after the fill.
+void insert_gap_fill(const ThickPolylines &all_gaps, const Flow &flow, ExtrusionEntitiesPtr &entities)
+{
+    if (entities.empty()) {
+        variable_width(all_gaps, erGapFill, flow, entities);
+        return;
+    }
+    // EdgeSlicer: each gap fill goes through variable_width() on its own below, which skips the near-duplicate
+    // closed loop removal (#375) for a single polyline. Remove them here, or such loops would print twice.
+    const ThickPolylines gaps = remove_near_duplicate_gap_fill_loops(all_gaps);
+    static constexpr size_t npos = size_t(-1);
+    // An extrusion of the fill, or gaps[gap], with the points where the nozzle enters and leaves it.
+    struct Item { Point in, out; size_t gap; bool reversed; };
+    auto distance = [](const Point &a, const Point &b) { return (b - a).cast<double>().norm(); };
+    auto closed   = [&gaps](size_t gap) { return gaps[gap].first_point() == gaps[gap].last_point(); };
+    // GCode::extrude_loop starts a loop at its point nearest the nozzle. This relies on variable_width() emitting
+    // a closed gap fill as an ExtrusionLoop (its paths start and end on the same point); an open one is an
+    // ExtrusionPath per width step, printed from the end the slot chose.
+    auto travel = [&](const std::vector<Item> &seq) {
+        double sum = 0.;
+        Point  at  = seq.front().out;
+        for (auto it = seq.begin() + 1; it != seq.end(); ++ it) {
+            const Point in = it->gap != npos && closed(it->gap) ? *gaps[it->gap].closest_point(at) : it->in;
+            sum += distance(at, in);
+            at = it->gap != npos && closed(it->gap) ? in : it->out;
+        }
+        return sum;
+    };
+
+    std::vector<Item> items, appended;
+    items.reserve(entities.size() + gaps.size());
+    for (const ExtrusionEntity *ee : entities)
+        items.push_back({ ee->first_point(), ee->last_point(), npos, false });
+    appended = items;
+    for (size_t gap = 0; gap < gaps.size(); ++ gap) {
+        appended.push_back({ gaps[gap].first_point(), gaps[gap].last_point(), gap, false });
+        double best      = std::numeric_limits<double>::max();
+        size_t best_slot = 0;
+        Item   best_item{};
+        for (size_t slot = 0; slot <= items.size(); ++ slot) {
+            const Point *prev = slot > 0 ? &items[slot - 1].out : nullptr;
+            const Point *next = slot < items.size() ? &items[slot].in : nullptr;
+            auto consider = [&](const Point &in, const Point &out, bool reversed) {
+                const double added = (prev ? distance(*prev, in) : 0.) + (next ? distance(out, *next) : 0.) - (prev && next ? distance(*prev, *next) : 0.);
+                if (added < best) {
+                    best      = added;
+                    best_slot = slot;
+                    best_item = { in, out, gap, reversed };
+                }
+            };
+            if (closed(gap)) {
+                const Point &entry = *gaps[gap].closest_point(prev ? *prev : *next);
+                consider(entry, entry, false);
+            } else {
+                consider(gaps[gap].first_point(), gaps[gap].last_point(), false);
+                consider(gaps[gap].last_point(), gaps[gap].first_point(), true);
+            }
+        }
+        items.insert(items.begin() + best_slot, best_item);
+    }
+    if (travel(appended) <= travel(items))
+        items = std::move(appended);
+
+    ExtrusionEntitiesPtr out;
+    out.reserve(entities.size() + gaps.size());
+    size_t next_entity = 0;
+    for (const Item &item : items)
+        if (item.gap == npos)
+            out.push_back(entities[next_entity ++]);
+        else {
+            ThickPolylines gap { gaps[item.gap] };
+            if (item.reversed)
+                gap.front().reverse();
+            variable_width(gap, erGapFill, flow, out);
+        }
+    entities = std::move(out);
 }
 
 // Orca: Dedicated function to calculate gap fill lines for the provided surface, according to the print object parameters
@@ -239,7 +335,11 @@ void Fill::_create_gap_fill(const Surface* surface, const FillParams& params, Ex
             }), polylines.end());
 
             // Append in-place. out->append(lvalue) would clone every path and leak the originals.
-            variable_width(polylines, erGapFill, params.flow, out->entities);
+            // Orca: a fill that keeps its order would otherwise print all of its gap fills after its last line.
+            if (out->no_sort)
+                insert_gap_fill(polylines, params.flow, out->entities);
+            else
+                variable_width(polylines, erGapFill, params.flow, out->entities);
         }
     }
 }
@@ -1565,13 +1665,18 @@ BoundaryInfillGraph create_boundary_infill_graph(const Polylines &infill_ordered
 // The extended bounding box of the whole object that covers any rotation of every layer.
 BoundingBox Fill::extended_object_bounding_box() const
 {
-    BoundingBox out = bounding_box;
+    // Orca: Extend about the box center, which separated infills move off the origin.
+    const Point c   = this->bounding_box.center();
+    BoundingBox out = this->bounding_box;
+    out.translate(-c.x(), -c.y());
     out.merge(Point(out.min.y(), out.min.x()));
     out.merge(Point(out.max.y(), out.max.x()));
 
     // The bounding box is scaled by sqrt(2.) to ensure that the bounding box
     // covers any possible rotations.
-    return out.scaled(sqrt(2.));
+    out = out.scaled(sqrt(2.));
+    out.translate(c.x(), c.y());
+    return out;
 }
 
 void Fill::connect_infill(Polylines &&infill_ordered, const std::vector<const Polygon*> &boundary_src, const BoundingBox &bbox, Polylines &polylines_out, const double spacing, const FillParams &params)

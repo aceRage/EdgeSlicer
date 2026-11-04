@@ -334,3 +334,47 @@ TEST_CASE("hub handover: the timeouts hang together", "[HubHandover]")
     CHECK(LOCK_RETRY_MS >= 500);                 // a probe holds the lock for microseconds; a few retries ride it out
     CHECK(QUIT_WAIT_MS + PORT_FREE_WAIT_MS <= 30000);
 }
+
+TEST_CASE("hub mode: precedence of --take-hub, --no-hub, the environment and the marker", "[HubHandover]")
+{
+    HubModeInputs in;
+    CHECK(decide_hub_mode(in).mode == HubMode::Normal);
+    CHECK(decide_hub_mode(in).rule == HubModeRule::Default);
+
+    in.marker_file = true;
+    CHECK(decide_hub_mode(in).mode == HubMode::NoHub);
+    CHECK(decide_hub_mode(in).rule == HubModeRule::Marker);
+
+    in.no_hub_env = true;
+    CHECK(decide_hub_mode(in).rule == HubModeRule::NoHubEnv);
+    in.no_hub_flag = true;
+    CHECK(decide_hub_mode(in).rule == HubModeRule::NoHubFlag);
+
+    in.take_hub_env = true;
+    CHECK(decide_hub_mode(in).mode == HubMode::Normal);
+    CHECK(decide_hub_mode(in).rule == HubModeRule::TakeHubEnv);
+    in.take_hub_flag = true;
+    CHECK(decide_hub_mode(in).rule == HubModeRule::TakeHubFlag);
+
+    // --take-hub alone beats the marker; --no-hub alone works without a marker.
+    HubModeInputs take_over_marker;
+    take_over_marker.marker_file    = true;
+    take_over_marker.take_hub_flag = true;
+    CHECK(decide_hub_mode(take_over_marker).mode == HubMode::Normal);
+    HubModeInputs flag_only;
+    flag_only.no_hub_flag = true;
+    CHECK(decide_hub_mode(flag_only).mode == HubMode::NoHub);
+}
+
+TEST_CASE("hub mode: only Normal may spawn or take over, and env switches parse", "[HubHandover]")
+{
+    CHECK(should_spawn_or_take_over(HubMode::Normal));
+    CHECK(!should_spawn_or_take_over(HubMode::NoHub));
+    CHECK(!env_switch_on(nullptr));
+    CHECK(!env_switch_on(""));
+    CHECK(!env_switch_on("0"));
+    CHECK(!env_switch_on("false"));
+    CHECK(env_switch_on("1"));
+    CHECK(env_switch_on("yes"));
+    CHECK(std::string(hub_mode_rule_name(HubModeRule::Marker)).find("edgeslicer_no_hub") != std::string::npos);
+}
