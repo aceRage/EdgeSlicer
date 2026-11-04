@@ -2642,16 +2642,14 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject* object : m_objects)
             if (object->has_stabilizers())
                 return {L("Spiral vase mode can't be used with side stabilizers. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
-        assert(m_objects.size() == 1);
-        const auto all_regions = m_objects.front()->all_regions();
-        if (all_regions.size() > 1) {
-            // Orca: make sure regions are not compatible
-            if (std::any_of(all_regions.begin() + 1, all_regions.end(), [ra = all_regions.front()](const auto rb) {
-                return !Layer::is_perimeter_compatible(ra, rb);
-            })) {
-                return {L("The spiral vase mode does not work when an object contains more than one materials."), nullptr, "spiral_mode"};
-            }
-        }
+        // Orca #17143: the vase is refused for the filaments it prints, not for regions that merely differ.
+        // A height range or modifier that only changes a speed or a wall setting splits the object into
+        // regions that are not perimeter compatible, yet still prints one filament. object_extruders()
+        // expands an Edge mixed (virtual) filament into its physical components, so a mixed filament
+        // counts as more than one material here as well.
+        for (const PrintObject *object : m_objects)
+            if (object->object_extruders().size() > 1)
+                return {L("The spiral vase mode does not work when an object contains more than one materials."), object, "spiral_mode"};
     }
 
     // Cache of layer height profiles for checking:
