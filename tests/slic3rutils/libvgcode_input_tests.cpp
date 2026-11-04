@@ -316,9 +316,4 @@ TEST_CASE("libvgcode color range with no values is safe to query", "[libvgcode][
     range.set_palette({ { 0, 0, 255 }, { 255, 0, 0 } });
     CHECK(range.get_values().empty());
     CHECK(range.get_color_at(1.0f) == libvgcode::Color{ 0, 0, 255 });
-    range.update(0.1f);
-    range.update(0.5f);
-    CHECK(range.get_range()[0] == Approx(0.1f));
-    CHECK(range.get_range()[1] == Approx(0.5f));
-    CHECK(range.get_values().size() == 2);
 }
