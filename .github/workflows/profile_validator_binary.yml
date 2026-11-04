@@ -1,0 +1,142 @@
+name: Profile validator binary
+
+# Builds EdgeSlicer's own Snapmaker_Orca_profile_validator for Linux on a hosted runner and
+# keeps it as an Actions artifact (NOT a GitHub Release: releases auto-post to Discord).
+# check_profiles.yml downloads the newest artifact from main to validate profile PRs that come
+# from forks, which must never run on the self-hosted VM. Same-repo PRs build the validator
+# from their own head on the VM and do not use this.
+#
+# Only the validator target is built (libslic3r plus one .cpp, no GUI). The dependency cache key
+# and path are the ones build_check_cache.yml uses for the full Linux build, so a cache that
+# build_all.yml saved is reused; on a miss the deps are built here and saved under that key.
+# The monthly schedule keeps the artifact (90 day retention) from expiring.
+
+on:
+  push:
+    branches:
+    - main
+    paths:
+    - 'src/libslic3r/PrintConfig.cpp'
+    - 'src/libslic3r/PrintConfig.hpp'
+    - 'src/libslic3r/Preset.cpp'
+    - 'src/libslic3r/Preset.hpp'
+    - 'src/libslic3r/PresetBundle.cpp'
+    - 'src/libslic3r/PresetBundle.hpp'
+    - 'src/dev-utils/Snapmaker_Orca_profile_validator.cpp'
+    - 'deps/**'
+    - '.github/workflows/profile_validator_binary.yml'
+  schedule:
+    # 03:17 UTC on the 1st of each month.
+    - cron: '17 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profile-validator-binary-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Linux profile validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          lfs: 'true'
+
+      # hashFiles is not available in job-level env, so the key is computed in a step.
+      - name: Compute the deps cache key
+        run: |
+          echo "DEPS_CACHE_KEY=ubuntu-24.04-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }}" >> "$GITHUB_ENV"
+          echo "DEPS_CACHE_PATH=${{ github.workspace }}/deps/build/destdir" >> "$GITHUB_ENV"
+
+      - name: Restore cached deps
+        id: deps_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DEPS_CACHE_PATH }}
+          key: ${{ env.DEPS_CACHE_KEY }}
+
+      - uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~3.28.0"  # same as the other Linux builds
+
+      # System packages: the list build_orca.yml uses for the Linux app, then build_linux.sh -u.
+      - name: Install system dependencies
+        env:
+          webkit-ver: '4.1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf build-essential cmake curl eglexternalplatform-dev \
+          extra-cmake-modules file git libcairo2-dev libcurl4-openssl-dev libdbus-1-dev libglew-dev libglu1-mesa-dev \
+          libgstreamer1.0-dev libgstreamerd-3-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-good1.0-dev \
+          libgtk-3-dev libmspack-dev libsecret-1-dev libsoup2.4-dev libssl-dev libudev-dev libwayland-dev \
+          libwebkit2gtk-${{ env.webkit-ver }}-dev libxkbcommon-dev locales locales-all m4 pkgconf sudo wayland-protocols wget \
+          ninja-build
+          sudo ./build_linux.sh -ur
+          sudo chown "$USER" -R ./
+
+      - name: Build dependencies (cache miss only)
+        if: steps.deps_cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p deps/build/destdir
+          ./build_linux.sh -dr
+
+      - name: Save dependencies to the cache
+        if: steps.deps_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DEPS_CACHE_PATH }}
+          key: ${{ env.DEPS_CACHE_KEY }}
+
+      # Same configure line as build_linux.sh -s, then only the validator target.
+      - name: Build Snapmaker_Orca_profile_validator
+        run: |
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake -S . -B build -G "Ninja Multi-Config" \
+            -DSLIC3R_PCH=ON \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/deps/build/destdir/usr/local" \
+            -DSLIC3R_STATIC=1 \
+            -DSLIC3R_GTK=3 \
+            -DORCA_TOOLS=ON \
+            -DBBL_RELEASE_TO_PUBLIC=1 -DBBL_INTERNAL_TESTING=0
+          cmake --build build --config Release --target Snapmaker_Orca_profile_validator
+
+      # The runner that uses the binary is the same image, but ship any shared library the
+      # binary needs from the deps tree (none are expected with SLIC3R_STATIC) next to it.
+      - name: Package the validator
+        run: |
+          set -euo pipefail
+          out=validator_pkg
+          mkdir -p "$out/lib"
+          cp build/src/Release/Snapmaker_Orca_profile_validator "$out/"
+          chmod +x "$out/Snapmaker_Orca_profile_validator"
+          ldd "$out/Snapmaker_Orca_profile_validator" | tee ldd.txt
+          grep -F "$GITHUB_WORKSPACE/deps/build/destdir" ldd.txt | awk '{print $3}' | while read -r lib; do
+            cp -L "$lib" "$out/lib/"
+          done || true
+          if grep -q "not found" ldd.txt; then
+            echo "::error::the validator has unresolved shared libraries (see ldd above)"
+            exit 1
+          fi
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run=$GITHUB_RUN_ID"
+          } > "$out/BUILD_INFO.txt"
+          # Smoke test: the binary must start and print its usage/help without a profiles dir.
+          LD_LIBRARY_PATH="$PWD/$out/lib" "$out/Snapmaker_Orca_profile_validator" -h || true
+          ls -l "$out" "$out/lib"
+
+      - name: Upload the validator artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: edgeslicer-profile-validator-linux
+          path: validator_pkg/
+          retention-days: 90
+          if-no-files-found: error

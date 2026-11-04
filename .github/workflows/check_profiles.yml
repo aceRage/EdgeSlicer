@@ -10,8 +10,9 @@ name: Check profiles
 #    links upstream's libslic3r and so rejects config values only EdgeSlicer's engine knows
 #    (e.g. the TPU285 nozzle volume type). Design and costs: tests/design_profile_validator_ci.md.
 #
-# The validator job runs only for pull requests from branches of this repository (and manual
-# dispatch). This repository is public: a fork's PR must never run code on the VM.
+# The VM validator job runs only for pull requests from branches of this repository (and manual
+# dispatch). This repository is public: a fork's PR must never run code on the VM. Fork PRs get
+# validate_fork instead (hosted Ubuntu, a validator binary published by profile_validator_binary.yml).
 
 on:
   pull_request:
@@ -144,3 +145,71 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $env:CI_ROOT 'src\resources\profiles') -Destination $profiles -Recurse
           & $exe -p $profiles -l $env:LOG_LEVEL
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::profile validation failed (exit $LASTEXITCODE)"; exit 1 }
+
+  # Fork pull requests never reach the self-hosted VM (this repository is public). They are
+  # checked here, on a hosted runner, with a validator that profile_validator_binary.yml built
+  # from main. Limit: the binary is main's, so a fork PR that adds a new engine enum AND uses it
+  # in a profile is rejected by it (see tests/design_profile_validator_ci.md, "Fork PRs").
+  validate_fork:
+    name: Check profiles (fork PR, published validator)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOG_LEVEL: '2'
+      BINARY_WORKFLOW: profile_validator_binary.yml
+      BINARY_BRANCH: main
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Get the validator (main's published build, else upstream's)
+        id: get
+        run: |
+          set -u
+          dest="$RUNNER_TEMP/validator"
+          rm -rf "$dest"; mkdir -p "$dest"
+          source_kind=none
+          # Newest successful runs first; a run's artifact can have expired (90 days), so try a few.
+          run_ids=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$BINARY_WORKFLOW" \
+            --branch "$BINARY_BRANCH" --status success --limit 5 --json databaseId \
+            --jq '.[].databaseId' 2>/dev/null || true)
+          for id in $run_ids; do
+            if gh run download "$id" -R "$GITHUB_REPOSITORY" -n edgeslicer-profile-validator-linux -D "$dest"; then
+              chmod +x "$dest/Snapmaker_Orca_profile_validator"
+              echo "Using EdgeSlicer's validator from $BINARY_WORKFLOW run $id on $BINARY_BRANCH:"
+              cat "$dest/BUILD_INFO.txt" || true
+              source_kind=edgeslicer
+              break
+            fi
+            rm -rf "$dest"; mkdir -p "$dest"
+          done
+          if [ "$source_kind" = none ]; then
+            echo "::notice::No published EdgeSlicer validator was available ($BINARY_WORKFLOW has no unexpired successful run on $BINARY_BRANCH). Falling back to the UPSTREAM OrcaSlicer validator: it does not know EdgeSlicer-only config values, so TPU285 is swapped for Standard in a scratch copy and other EdgeSlicer-only values may be reported as errors."
+            curl -fL -o "$dest/Snapmaker_Orca_profile_validator" \
+              https://github.com/SoftFever/Orca_tools/releases/download/1/OrcaSlicer_profile_validator
+            chmod +x "$dest/Snapmaker_Orca_profile_validator"
+            source_kind=upstream
+          fi
+          echo "kind=$source_kind" >> "$GITHUB_OUTPUT"
+          echo "dir=$dest" >> "$GITHUB_OUTPUT"
+
+      - name: Validate system profiles
+        env:
+          VALIDATOR_DIR: ${{ steps.get.outputs.dir }}
+          VALIDATOR_KIND: ${{ steps.get.outputs.kind }}
+        run: |
+          set -eu
+          # The validator makes a user/ folder next to the profiles: validate a scratch copy.
+          profiles="$RUNNER_TEMP/profiles"
+          rm -rf "$profiles"
+          cp -r resources/profiles "$profiles"
+          if [ "$VALIDATOR_KIND" = upstream ]; then
+            grep -rl '"TPU285"' "$profiles" | while read -r f; do sed -i 's/"TPU285"/"Standard"/g' "$f"; done || true
+          fi
+          if [ -d "$VALIDATOR_DIR/lib" ]; then export LD_LIBRARY_PATH="$VALIDATOR_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+          "$VALIDATOR_DIR/Snapmaker_Orca_profile_validator" -p "$profiles" -l "$LOG_LEVEL"
