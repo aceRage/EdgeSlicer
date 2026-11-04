@@ -1250,6 +1250,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line("layer_time_speed_slowdown_scope", ltssm_slow_down);
     }
 
+    // Edge: the custom pause position only for Custom X/Y.
+    if (config->has("min_layer_time_pause_park")) {
+        const bool custom_park = config->opt_enum<MinLayerTimePausePark>("min_layer_time_pause_park") == mltpCustom;
+        toggle_line("min_layer_time_pause_park_x", custom_park);
+        toggle_line("min_layer_time_pause_park_y", custom_park);
+    }
+
     toggle_line("flush_into_objects", !is_global_config);
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));

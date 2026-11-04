@@ -792,7 +792,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "layer_time_speed_max_speedup",
         "layer_time_speed_max_slowdown",
         "layer_time_speed_max_time_increase",
-        "layer_time_speed_slowdown_scope"
+        "layer_time_speed_slowdown_scope",
+        // Edge: minimum layer time pause position (G-code export only).
+        "min_layer_time_pause_park",
+        "min_layer_time_pause_park_x",
+        "min_layer_time_pause_park_y"
     };
 
     static std::unordered_set<std::string> steps_ignore;

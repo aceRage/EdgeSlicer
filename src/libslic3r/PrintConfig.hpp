@@ -380,6 +380,13 @@ enum LayerTimeSlowdownScope {
     ltssExcludeOuterWalls   = 1
 };
 
+// Edge: where the head waits during a minimum layer time pause (min_layer_time_pause).
+enum MinLayerTimePausePark {
+    mltpAway        = 0,
+    mltpPrimeTower  = 1,
+    mltpCustom      = 2
+};
+
 enum LiftType {
     NormalLift,
     SpiralLift,
@@ -1077,6 +1084,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSlowdownScope)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(MinLayerTimePausePark)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
@@ -1948,6 +1956,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt, wall_filament))
     // Ultra: 0 = same as wall_filament
     ((ConfigOptionInt, outer_wall_filament))
+    // Per modifier only (never in a preset): inside the modifier its filament wins over colour painting.
+    // region_config_from_model_volume() keeps it only on a modifier that sets a filament; PrintApply keeps it
+    // only on a painted part; painted regions are then never built over such a region.
+    ((ConfigOptionBool, override_paint))
     ((ConfigOptionFloatOrPercent, inner_wall_line_width))
     ((ConfigOptionFloats, inner_wall_speed))
     // Total number of perimeters.
@@ -2038,6 +2050,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                zaa_min_z))
     ((ConfigOptionFloat,                zaa_minimize_perimeter_height))
     ((ConfigOptionBool,                 zaa_speed_scaling))
+
+    // Edge: a layer shorter than this (after the cooling slowdown) waits parked for the rest. 0 = off.
+    ((ConfigOptionFloat,                min_layer_time_pause))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
@@ -2168,6 +2183,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,             layer_time_speed_max_slowdown))
     ((ConfigOptionPercent,             layer_time_speed_max_time_increase))
     ((ConfigOptionEnum<LayerTimeSlowdownScope>, layer_time_speed_slowdown_scope))
+    // Edge: where a minimum layer time pause waits (min_layer_time_pause is per region). G-code export only.
+    ((ConfigOptionEnum<MinLayerTimePausePark>, min_layer_time_pause_park))
+    ((ConfigOptionFloat,               min_layer_time_pause_park_x))
+    ((ConfigOptionFloat,               min_layer_time_pause_park_y))
 
     
     ((ConfigOptionPercents,            retract_before_wipe))

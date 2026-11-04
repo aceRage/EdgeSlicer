@@ -29,7 +29,11 @@ void Filler::_fill_surface_single(
     const double branch_width   = scaled<double>(this->spacing) * params.multiline;
     const double branch_spacing = branch_width / std::max(double(params.density), EPSILON);
     const double max_reach      = 0.5 * (params.multiline > 1 ? branch_width : branch_spacing);
-    smooth_polylines_corners(fill_lines, params.corner_smoothing(), max_reach);
+    // EdgeSlicer: our multiline_fill offsets every vertex sideways instead of drawing Clipper outlines, so a
+    // curve tighter than the outermost offset would fold the inner line into a cusp; such corners stay sharp.
+    CornerSmoothing smoothing = params.corner_smoothing();
+    smoothing.min_radius      = 0.5 * double(params.multiline - 1) * scaled<double>(this->spacing);
+    smooth_polylines_corners(fill_lines, smoothing, max_reach);
 
     // Apply multiline offset if needed
     multiline_fill(fill_lines, params, spacing);
