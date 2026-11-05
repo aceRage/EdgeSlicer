@@ -2,9 +2,10 @@
 #define slic3r_AdaptiveLayerMerge_hpp_
 
 // Mixed-layer-height band planner, ported from BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.{hpp,cpp}
-// (AGPL-3.0). Standalone step 1: pure planning functions only. Nothing in the slicer calls them yet, so G-code is
-// unchanged. Left out for the later region-merge step: AdaptiveMergePatch and adaptive_suppressed_orphan_area(),
-// which need a LayerRegion member Edge does not have yet.
+// (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Nothing in the slicer
+// calls the planner yet, so G-code is unchanged. The extrusion half (combine_adaptive_infill(), the group-top
+// perimeter pass, and the G-code / ToolOrdering / SeamPlacer / Brim readers of LayerRegion::adaptive_merge_patches)
+// is the follow-up PR.
 
 #include "ExPolygon.hpp"
 
@@ -16,7 +17,9 @@
 
 namespace Slic3r {
 
+class Layer;
 class PrintConfig;
+class PrintObject;
 
 struct AdaptiveLayerHeightRange
 {
@@ -24,6 +27,50 @@ struct AdaptiveLayerHeightRange
     double max_height { 0. };
 
     bool contains(double height) const;
+};
+
+// One planned merge: a region extrudes `area()` once, on layer `top_idx`, at `merged_height`, and extrudes
+// nothing on the layers below it in the span.
+struct AdaptiveMergePatch
+{
+    // A region may carry multiple disjoint patches on one group-top layer. They keep the nozzle's common
+    // top_idx but may start at different bottom_idx values after local Z-conflict clipping.
+    size_t     bottom_idx { 0 };
+    size_t     top_idx { 0 };
+    // Only set on the copy owned by the group-top LayerRegion. Layer::id() may be offset against the
+    // PrintObject layer index (raft layers, bottom layers dropped by fix_slicing_errors), so the role
+    // has to be stored explicitly instead of being derived from top_idx.
+    bool       group_top { false };
+    double     merged_height { 0. };
+
+    // The retained contour is extruded on the group top and marks the swallowed footprint on lower layers.
+    const ExPolygons &area() const
+    {
+        static const ExPolygons empty;
+        return m_area ? *m_area : empty;
+    }
+
+    void set_area(ExPolygons area) { m_area = std::make_shared<const ExPolygons>(std::move(area)); }
+
+    // Geometry that could not be assigned to a printable slab. It is intentionally separate from area():
+    // the patch must suppress fill in this footprint without generating walls or claiming Z occupancy.
+    const ExPolygons &suppressed_area() const
+    {
+        static const ExPolygons empty;
+        return m_suppressed_area ? *m_suppressed_area : empty;
+    }
+
+    void set_suppressed_area(ExPolygons area)
+    {
+        m_suppressed_area = std::make_shared<const ExPolygons>(std::move(area));
+    }
+
+    bool has_suppressed_area() const { return bool(m_suppressed_area); }
+
+private:
+    // All copies stored across a merge span share the same immutable geometry.
+    std::shared_ptr<const ExPolygons> m_area;
+    std::shared_ptr<const ExPolygons> m_suppressed_area;
 };
 
 // One band of the layer stack, [bottom_idx, top_idx] inclusive. A nozzle prints the band as a single
@@ -56,6 +103,10 @@ ExPolygons adaptive_printable_pieces(ExPolygons pieces, double nozzle_diameter);
 // hairline tails would otherwise become a patch of their own and be walled as fragmented thin lines.
 ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter);
 
+// The footprint of a layer whose orphans were suppressed: sliced, but extruded by no region. What rests on it
+// is not supported there.
+ExPolygons adaptive_suppressed_orphan_area(const Layer &layer);
+
 // Id convention (kept deliberately, documented rather than unified): the vector-taking gates below
 // (has_multiple_used_nozzle_diameters, adaptive_band_reference_nozzle) take 0-based filament indices, as Bambu's
 // API and Print::extruders() do. adaptive_layer_height_range_for_filament takes a 1-based filament id, because it
@@ -68,11 +119,12 @@ ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter);
 // gate cannot disagree with the flows behind it.
 bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids);
 
-// How many base layers one nozzle merges into a single extrusion. The whole print is sliced at the layer
-// height of its smallest nozzle, so a larger nozzle simply keeps one layer out of every diameter-ratio
-// layers: a 0.8 nozzle next to a 0.2 one keeps one contour out of every four. The ratio is corrected when
-// the resulting thickness falls outside what the nozzle can actually extrude. Returns 1 when the nozzle
-// has to print every layer on its own.
+// How many base layers one nozzle merges into a single extrusion. The stack is sliced at the user's
+// layer_height; min_nozzle_diameter is only the ratio's denominator (how many of those base layers a
+// bigger nozzle covers per extrusion), not a grid. A 0.8 nozzle next to a 0.2 reference keeps one
+// contour out of every four at equal layer_height. The ratio is corrected when the resulting thickness
+// falls outside what the nozzle can actually extrude. Returns 1 when the nozzle has to print every
+// layer on its own.
 size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height);
 
 // Split the complete layer stack into bands of band_size layers. The first band starts at the object base
@@ -120,21 +172,32 @@ bool split_adaptive_layer_span(
 
 // ---- EdgeSlicer additions (not in BambuStudio) ----------------------------------------------------------------
 
-// The band reference nozzle: the smallest diameter among the used filaments (0 based ids), i.e. the nozzle whose
-// layer height the whole stack is sliced at. 0 when none resolves to a positive diameter.
+// The band reference nozzle: the smallest nonzero diameter among the given filaments (0-based ids).
+// It is the ratio denominator for adaptive_layer_band_size(), not the height the stack is sliced at.
+// 0 when none resolves to a positive diameter.
 double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids);
 
 // The printable window of the nozzle 1-based `filament_id` prints with: Bambu's [0.2d, 0.7d] window, narrowed by
 // the min_layer_height / max_layer_height of the PHYSICAL extruder the filament maps to
 // (physical_extruder_for_filament, so filament_nozzle_assignment is honored and slots past the nozzle count do not
-// fall back to extruder 0 - the get_at() pitfall Bambu's comment above warns about). Zero or negative limits are
-// ignored. If the two windows do not overlap the Bambu window is returned unchanged.
+// fall back to extruder 0 via get_at() - the pitfall Bambu's comment above warns about). An unmapped mixed
+// virtual filament id still falls back to nozzle 0, so that failure mode is a silently wrong nozzle rather
+// than a crash. Zero or negative limits are ignored. If the two windows do not overlap the Bambu window is
+// returned unchanged.
 //
 // Consistency with Orca #17000 (equal_layering): after #17000 the prime tower no longer requires objects to share
 // min/max_layer_height; it only requires one base layer grid. The per-nozzle limits that equal_layering stopped
 // comparing are enforced here instead, per band, so every nozzle keeps its own window while all of them stay on the
 // one shared grid the wipe tower syncs to.
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id);
+
+// Test-only accessor for PrintObject::compute_adaptive_merge_groups(). The planner has no production caller yet
+// (it is wired into the perimeter step by the follow-up PR), so a unit test reaching it through this friend is the
+// only way to exercise it.
+struct AdaptiveMergePlanAccess
+{
+    static void compute(PrintObject &object);
+};
 
 } // namespace Slic3r
 
