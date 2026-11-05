@@ -1327,8 +1327,15 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
     // of mm long, so it joins the tower layer below. The floor matches the towers' own WT_EPSILON
     // merge, which would otherwise size the joined tool changes with the sliver's height. The EPSILON
     // margin keeps layers sliced at exactly the minimum height, whose sums round below it, apart.
+    //
+    // Gap is measured from the previous object/support layer, not the previous tower layer.
+    // Edge's per-object extruder assignment (and the volume-extruder stamp init_print applies)
+    // produces singleton-filament LayerTools that have no wipe tower; skipping those without
+    // updating the gap made a 0.0008 mm sliver look 0.2 mm above the last tower and never join.
     const double min_tower_layer_height = std::max(calc_min_layer_height(config), 1e-3);
     coordf_t     wipe_tower_print_z_last = 0.;
+    coordf_t     prev_print_z            = 0.;
+    bool         have_prev_print_z       = false;
     // The layer that finishes the current tower layer, and whether any layer of it changes tools.
     LayerTools  *tower_layer_end         = nullptr;
     bool         tower_layer_changes     = false;
@@ -1341,10 +1348,16 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             (current_extruder == (unsigned int) -1 || lt.extruders.size() > 1 || lt.extruders.front() != current_extruder);
         if (! lt.extruders.empty())
             current_extruder = lt.extruders.back();
-        if (! lt.has_wipe_tower)
+        if (! lt.has_wipe_tower) {
+            if (! lt.extruders.empty()) {
+                prev_print_z      = lt.print_z;
+                have_prev_print_z = true;
+            }
             continue;
+        }
         // Only a layer that prints joins, so the tower layer is always finished by a printing layer.
-        if (tower_layer_end != nullptr && ! lt.extruders.empty() && lt.print_z - wipe_tower_print_z_last + EPSILON < min_tower_layer_height) {
+        const coordf_t gap_from = have_prev_print_z ? prev_print_z : wipe_tower_print_z_last;
+        if (tower_layer_end != nullptr && ! lt.extruders.empty() && lt.print_z - gap_from + EPSILON < min_tower_layer_height) {
             lt.wipe_tower_print_z      = tower_layer_end->wipe_tower_print_z;
             lt.wipe_tower_layer_height = tower_layer_end->wipe_tower_layer_height;
             // The finish rides on the last tool change of the joined layers, as it does on its own
@@ -1362,6 +1375,8 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             tower_layer_end            = &lt;
             tower_layer_changes        = changes;
         }
+        prev_print_z      = lt.print_z;
+        have_prev_print_z = true;
     }
 }
 

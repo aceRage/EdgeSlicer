@@ -990,6 +990,31 @@ static DynamicPrintConfig wipe_tower_prime_config()
     return config;
 }
 
+// init_print's auto_assign_extruders writes volume extruder=1, and that stamp overwrites
+// print-level wall/infill filaments. Set the feature filaments on the volume after that
+// so both tools actually print. Walls filament 2, infill filament 1, matching Orca #17204.
+static void set_object_filaments(ModelObject *object, int wall, int infill)
+{
+    object->config.set("wall_filament", wall);
+    object->config.set("outer_wall_filament", wall);
+    object->config.set("sparse_infill_filament", infill);
+    object->config.set("solid_infill_filament", infill);
+    if (object->volumes.empty())
+        return;
+    ModelVolume *volume = object->volumes.front();
+    volume->config.set("extruder", 0);
+    volume->config.set("wall_filament", wall);
+    volume->config.set("outer_wall_filament", wall);
+    volume->config.set("sparse_infill_filament", infill);
+    volume->config.set("solid_infill_filament", infill);
+}
+
+static void set_both_filaments(Model &model)
+{
+    for (ModelObject *object : model.objects)
+        set_object_filaments(object, 2, 1);
+}
+
 TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal locale", "[WipeTower]")
 {
     const bool is_bbl = GENERATE(false, true);
@@ -1106,6 +1131,10 @@ TEST_CASE("Tower consumption is classified separately for each printer kind", "[
 // Two cubes at 0.2 mm layers with precise Z height on: the 20 mm cube stays on the 0.2 mm grid, and
 // precise Z height spreads the other's gap to `short_height` over its last five layers, moving them
 // off the grid. Slices and exports the plate; the emitter throws if it loses step with the tower.
+// Both filaments print on every layer of both cubes (walls 2, infill 1), matching Orca #17204, so
+// every off-grid layer has a wipe tower and join_layer can fire. A second apply after the volume
+// filament stamp is what keeps enable_prime_tower: the first apply from init_print still sees one
+// volume extruder and normalize_fdm_2 would otherwise clear it.
 static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *tower_type, double short_height, Print &print)
 {
     config.set_deserialize_strict({
@@ -1113,12 +1142,15 @@ static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *t
         {"wipe_tower_type", tower_type},
         {"wipe_tower_x", "15"},
         {"wipe_tower_y", "15"},
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
     });
     const bool is_bbl = std::string(tower_type) == "type1";
     Model model;
     init_print({make_cube(20., 20., 20.), make_cube(20., 20., short_height)}, print, model, config);
-    if (model.objects.size() > 1)
-        model.objects[1]->volumes.front()->config.set("extruder", 2);
+    set_both_filaments(model);
     print.is_BBL_printer() = is_bbl;
     print.apply(model, config);
     REQUIRE(print.has_wipe_tower());
@@ -1186,8 +1218,11 @@ TEST_CASE("A layer less than the minimum layer height above another prints its t
     GCodeReader parser;
     parser.parse_buffer(out, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
         const std::string_view raw = line.raw();
+        // Type1 on a Bambu printer writes "; Z_HEIGHT:", everyone else writes ";Z:".
         if (raw.rfind(";Z:", 0) == 0)
             layer_z = std::stod(std::string(raw.substr(3)));
+        else if (raw.rfind("; Z_HEIGHT:", 0) == 0)
+            layer_z = std::stod(std::string(raw.substr(11)));
         else if (line.has_z() && ! line.has_x() && ! line.has_y() && line.z() < layer_z - 1e-3) {
             ++descents;
             if (! tower_box.contains(Point(scaled(self.x()), scaled(self.y())))) {
@@ -1214,9 +1249,14 @@ TEST_CASE("Layers sliced at the printer's minimum layer height keep their own to
 
     Print print;
     Model model;
-    init_print({make_cube(20., 20., 20.), make_cube(20., 20., 20.)}, print, model, config);
-    if (model.objects.size() > 1)
-        model.objects[1]->volumes.front()->config.set("extruder", 2);
+    config.set_deserialize_strict({
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
+    });
+    init_print({make_cube(20., 20., 20.)}, print, model, config);
+    set_both_filaments(model);
     print.is_BBL_printer() = std::string(tower_type) == "type1";
     print.apply(model, config);
     REQUIRE(print.has_wipe_tower());
@@ -1239,10 +1279,17 @@ TEST_CASE("A joined layer that keeps its filament leaves finishing the tower lay
         {"min_layer_height", "0.07"},
         {"layer_height", "0.2"},
         {"initial_layer_print_height", "0.2"},
+        {"wall_filament", "2"},
+        {"outer_wall_filament", "2"},
+        {"sparse_infill_filament", "1"},
+        {"solid_infill_filament", "1"},
     });
     init_print({make_cube(20., 20., 20.), make_cube(20., 20., 10.004)}, print, model, config);
     REQUIRE(model.objects.size() == 2);
-    model.objects[1]->volumes.front()->config.set("extruder", filament);
+    // The 20 mm cube prints both filaments on every layer; the short one only `filament`.
+    // Setting both objects to filament 1 used to make normalize_fdm_2 clear the tower.
+    set_object_filaments(model.objects[0], 2, 1);
+    set_object_filaments(model.objects[1], filament, filament);
     print.is_BBL_printer() = std::string(tower_type) == "type1";
     print.apply(model, config);
     REQUIRE(print.has_wipe_tower());
