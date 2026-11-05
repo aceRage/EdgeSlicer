@@ -1146,6 +1146,9 @@ static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *t
         {"outer_wall_filament", "2"},
         {"sparse_infill_filament", "1"},
         {"solid_infill_filament", "1"},
+        // Type2 reserves ramming depth that Type1 (Bambu) does not; the sliver
+        // join assertion is on wipe depth staying under 30 mm, not ramming.
+        {"enable_filament_ramming", "0"},
     });
     const bool is_bbl = std::string(tower_type) == "type1";
     Model model;
@@ -1309,7 +1312,12 @@ TEST_CASE("A joined layer that keeps its filament leaves finishing the tower lay
 TEST_CASE("Smooth timelapse prints each tower layer's wall once when a layer joins it", "[WipeTower]")
 {
     DynamicPrintConfig config = wipe_tower_prime_config();
-    config.set_deserialize_strict({{"timelapse_type", "1"}});
+    config.set_deserialize_strict({
+        {"timelapse_type", "1"},
+        {"min_layer_height", "0.07"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
 
     Print print;
     slice_precise_z_pair(config, "type1", 10.004, print);

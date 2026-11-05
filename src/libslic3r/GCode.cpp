@@ -2103,8 +2103,12 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                     ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;
                     if (m_tool_change_idx == 0 && !ignore_sparse)
                         wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
-                } else if (m_layer_joined)
-                    wipe_tower_z = joined_tower_z();
+                } else if (!m_tool_changes[m_layer_idx].empty()) {
+                    // Type2 generate() writes XY-only moves. -1 reprints them at the current object z,
+                    // so leftover toolchanges of a merged sliver land on the sliver instead of the
+                    // tower layer below. Always print at the planned tower z (the join target).
+                    wipe_tower_z = m_tool_changes[m_layer_idx].front().print_z + m_z_offset;
+                }
 
                 if (!ignore_sparse) {
                     realign_nominal_toolchange_idx(extruder_id);
