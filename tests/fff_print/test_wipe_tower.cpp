@@ -990,32 +990,6 @@ static DynamicPrintConfig wipe_tower_prime_config()
     return config;
 }
 
-// Type1 is the Bambu planner (is_BBL_printer). Test::slice cannot set that flag, and
-// a brand-new Print's first apply() can clear enable_prime_tower when it still sees
-// one filament. Two objects with different extruders plus a second apply keep the tower.
-static std::string slice_with_prime_tower(const DynamicPrintConfig &config)
-{
-    Print print;
-    Model model;
-    ModelObject *first = model.add_object();
-    first->name        = "cube-a.stl";
-    first->add_volume(mesh(TestMesh::cube_20x20x20));
-    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
-    first->ensure_on_bed();
-    ModelObject *second = model.add_object();
-    second->name        = "cube-b.stl";
-    second->add_volume(mesh(TestMesh::cube_20x20x20));
-    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
-    second->ensure_on_bed();
-    second->volumes.front()->config.set("extruder", 2);
-    print.apply(model, config);
-    print.is_BBL_printer() = true;
-    print.apply(model, config);
-    print.set_status_silent();
-    REQUIRE(print.has_wipe_tower());
-    return gcode(print);
-}
-
 TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal locale", "[WipeTower]")
 {
     const bool is_bbl = GENERATE(false, true);
