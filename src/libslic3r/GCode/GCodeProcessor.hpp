@@ -1025,6 +1025,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
             return m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].enabled;
         }
         void enable_machine_envelope_processing(bool enabled) { m_time_processor.machine_envelope_processing_enabled = enabled; }
+        // EDGE: what the MACHINE_END_GCODE_START marker does, without writing it: the machine end G-code starts
+        // here and its timed M400 waits are post-print (m_skip_end_gcode_delays). For the streaming export of a
+        // Bambu printer that gets no marker (GCode.cpp writes it only with a pre-cooling plan).
+        void start_machine_end_gcode() { m_skip_end_gcode_delays = true; }
         void reset();
 
         const GCodeProcessorResult& get_result() const { return m_result; }

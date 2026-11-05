@@ -4855,6 +4855,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // BBS: mark the start of the machine end G-code for the idle-nozzle pre-cooling (BambuStudio GCode.cpp:3356).
     if (m_pre_cooling_markers)
         file.write_format(";%s\n", PreCooling::MachineEndGCodeStartMarker);
+    else if (is_bbl_printers)
+        // EDGE: the other Bambu printers get no marker, so their G-code stays as it was, but their machine end
+        // G-code waits are just as post-print. The H3C's air filtration is M400 S180 twice: six minutes on every
+        // print's estimate (a 20 mm cube read 14m40s). Tell the processor directly; the file is written through it.
+        m_processor.start_machine_end_gcode();
 
     // Process filament-specific gcode in extruder order.
     {
