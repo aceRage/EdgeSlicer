@@ -37,7 +37,6 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
-#include <boost/nowide/convert.hpp>
 #include <thread>
 #include <chrono>
 #include <boost/spirit/include/karma.hpp>
@@ -910,39 +909,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 #define L(s) (s)
 #define _(s) Slic3r::I18N::translate(s)
 
-    // User-provided file names arrive as UTF-8 std::string. boost::filesystem::path(std::string)
-    // converts them with whatever codecvt is imbued into path (the application imbues UTF-8 at
-    // startup, a library consumer or the tests do not, and then it is the ANSI code page, which
-    // mangles characters outside it). Building the path from a wide string removes that
-    // dependency on Windows; elsewhere narrow paths already are UTF-8.
-    static boost::filesystem::path utf8_fs_path(const std::string &s)
-    {
-#ifdef _WIN32
-        return boost::filesystem::path(boost::nowide::widen(s));
-#else
-        return boost::filesystem::path(s);
-#endif
-    }
-
-    // Move a just-written file into place. Right after a file is closed, a virus scanner, the
-    // search indexer or a cloud-sync client (Downloads, OneDrive) may hold it for a moment and the
-    // rename fails with a sharing violation, so retry for about two seconds, then fall back to
-    // copy + remove. Returns the last error in ec.
+    // Move a just-written file into place. Right after a file is closed, a virus scanner, the search
+    // indexer or a cloud-sync client (Downloads, OneDrive) can hold it for a moment and the rename
+    // fails with a sharing violation. Retry briefly on that, and always log the error code so a
+    // failure that remains can be diagnosed.
     static void rename_into_place(const std::string &from, const std::string &to, boost::system::error_code &ec)
     {
-        const boost::filesystem::path pf = utf8_fs_path(from), pt = utf8_fs_path(to);
-        for (int attempt = 0; attempt < 20; ++attempt) {
-            boost::filesystem::rename(pf, pt, ec);
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            boost::filesystem::rename(from, to, ec);
             if (!ec)
                 return;
-            BOOST_LOG_TRIVIAL(warning) << "3MF rename attempt " << (attempt + 1) << " failed: " << ec.message();
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        boost::system::error_code ec_copy;
-        boost::filesystem::copy_file(pf, pt, boost::filesystem::copy_options::overwrite_existing, ec_copy);
-        if (!ec_copy) {
-            boost::filesystem::remove(pf, ec_copy);
-            ec.clear();
+            BOOST_LOG_TRIVIAL(error) << "3MF rename to final name failed (attempt " << (attempt + 1) << " of 4), error "
+                                     << ec.value() << " (" << ec.category().name() << "): " << ec.message();
+            if (attempt < 3)
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
 
@@ -7221,7 +7201,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         boost::system::error_code ec;
         std::string filename = store_params.path;
-        boost::filesystem::remove(utf8_fs_path(filename + ".tmp"), ec);
+        boost::filesystem::remove(filename + ".tmp", ec);
 
         bool result = _save_model_to_file(filename + ".tmp", *store_params.model, store_params.plate_data_list, store_params.project_presets, store_params.config,
                                           store_params.thumbnail_data, store_params.no_light_thumbnail_data, store_params.top_thumbnail_data, store_params.pick_thumbnail_data,
@@ -7231,7 +7211,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             rename_into_place(filename + ".tmp", filename, ec);
             if (ec) {
                 add_error("Failed to move the finished file to " + filename + ": " + ec.message());
-                boost::filesystem::remove(utf8_fs_path(filename + ".tmp"), ec);
+                boost::filesystem::remove(filename + ".tmp", ec);
                 return false;
             }
             if (!(store_params.strategy & SaveStrategy::Silence)) {
@@ -7264,7 +7244,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         std::string filepath = temp_path + "/" + filename.str();
         std::string filepath_tmp = filepath + ".tmp";
         boost::system::error_code ec;
-        boost::filesystem::remove(utf8_fs_path(filepath_tmp), ec);
+        boost::filesystem::remove(filepath_tmp, ec);
         if (!open_zip_writer(&archive, filepath_tmp)) {
             add_error("Unable to open the file"+filepath_tmp);
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", Unable to open the file\n");
@@ -7283,7 +7263,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (filename) {
                     close_zip_writer(&archive);
                     boost::system::error_code ec;
-                    boost::filesystem::remove(utf8_fs_path(*filename), ec);
+                    boost::filesystem::remove(*filename, ec);
                 }
             }
         } lock{archive, &filepath_tmp};
@@ -7350,7 +7330,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 close_zip_writer(&archive);
                 if (filename) {
                     boost::system::error_code ec;
-                    boost::filesystem::remove(utf8_fs_path(*filename), ec);
+                    boost::filesystem::remove(*filename, ec);
                 }
             }
         } lock{ archive, &filename};

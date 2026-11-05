@@ -18,7 +18,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/nowide/convert.hpp>
+#include <boost/nowide/integration/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -393,19 +393,14 @@ TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regr
     const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
     boost::filesystem::create_directories(tmp_root);
     Slic3r::set_temporary_dir(tmp_root.string());
+    // As the application does at startup (Snapmaker_Orca.cpp), so boost::filesystem paths are UTF-8.
+    boost::nowide::nowide_filesystem();
     const std::string leaf     = u8"\u6CE3\u8840_\u00E9_test.3mf";
     const std::string tmp_leaf = leaf + ".tmp";
     const std::string test_dir = tmp_root.string();
     const std::string test_file = test_dir + "/" + leaf;
-    auto fs_path = [](const std::string &utf8) {
-#ifdef _WIN32
-        return boost::filesystem::path(boost::nowide::widen(utf8));
-#else
-        return boost::filesystem::path(utf8);
-#endif
-    };
     boost::system::error_code ec;
-    boost::filesystem::remove(fs_path(test_file), ec);
+    boost::filesystem::remove(test_file, ec);
 
     StoreParams store_params;
     store_params.path     = test_file;
@@ -416,8 +411,8 @@ TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regr
     INFO(store_params.error);
     REQUIRE(stored);
     CHECK(store_params.error.empty());
-    CHECK(boost::filesystem::exists(fs_path(test_file), ec));
-    CHECK_FALSE(boost::filesystem::exists(fs_path(test_dir + "/" + tmp_leaf), ec));
+    CHECK(boost::filesystem::exists(test_file, ec));
+    CHECK_FALSE(boost::filesystem::exists(test_dir + "/" + tmp_leaf, ec));
 
     Model                     dst_model;
     DynamicPrintConfig        dst_config;
@@ -431,7 +426,7 @@ TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regr
                                      LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
                                          LoadStrategy::Silence);
     release_PlateData_list(plate_data);
-    boost::filesystem::remove(fs_path(test_file), ec);
+    boost::filesystem::remove(test_file, ec);
     REQUIRE(loaded);
     CHECK(dst_model.objects.size() == 1);
 }
