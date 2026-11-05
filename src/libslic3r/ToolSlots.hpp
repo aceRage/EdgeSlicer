@@ -134,6 +134,10 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
 // Configuration errors of the rack keys (an extruder's nozzle_diameter missing from its rack, a pin no rack nozzle
 // has, a slot pin past the end of the rack), or empty.
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
+// Bambu Studio 2.9.1: on a printer with the TPU285 path (H3C), a used 2.85 mm filament needs a TPU285 nozzle on its
+// extruder and a 1.75 mm one a nozzle that is not TPU285. "The <type> nozzle can not print <filament>." or empty.
+// Part of validate_rack_nozzle_diameters.
+std::string validate_tpu285_nozzles(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
 
 // ---- P9: rack slots as tools (H2C) -------------------------------------------------------------------------------
 //

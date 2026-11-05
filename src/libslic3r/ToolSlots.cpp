@@ -620,6 +620,43 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
             return "Filament " + std::to_string(f + 1) + " is set to print on " + rack_slot_name(config, e, slot) + ", but that rack has " +
                    std::to_string(e < racks.size() ? racks[e].size() : 0) + " nozzles.";
     }
+    if (std::string error = validate_tpu285_nozzles(config, used_filaments); !error.empty())
+        return error;
+    return {};
+}
+
+std::string validate_tpu285_nozzles(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)
+{
+    // Bambu Studio 2.9.1 (FilamentGroup filament_diameter_matches_nozzle_volume, PartPlate::check_filament_printable /
+    // check_missing_tpu285_nozzle): a 2.85 mm filament prints only on a TPU285 nozzle, a 1.75 mm one never on it. Only a
+    // printer that has the TPU285 path (the H3C) is checked; elsewhere a 2.85 mm filament is an ordinary filament.
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    bool machine_has_tpu285 = std::any_of(config.default_nozzle_volume_type.values.begin(), config.default_nozzle_volume_type.values.end(),
+                                          [](int v) { return v == int(nvtTPU285); });
+    for (const std::vector<RackNozzle> &rack : racks)
+        machine_has_tpu285 |= std::any_of(rack.begin(), rack.end(), [](const RackNozzle &n) { return n.volume_type == nvtTPU285; });
+    if (!machine_has_tpu285)
+        return {};
+    for (unsigned int f : used_filaments) {
+        if (f >= config.filament_diameter.size())
+            continue;
+        const double d = config.filament_diameter.get_at(f);
+        if (!(d > 0.))
+            continue;
+        const bool   needs_285 = d > 2.5;
+        const size_t e         = physical_extruder_for_filament(config, f + 1);
+        std::vector<NozzleVolumeType> types;
+        if (e < racks.size() && !racks[e].empty())
+            for (const RackNozzle &n : racks[e])
+                types.push_back(n.volume_type);
+        else
+            types.push_back(extruder_volume_type(config, e));
+        if (std::any_of(types.begin(), types.end(), [needs_285](NozzleVolumeType t) { return (t == nvtTPU285) == needs_285; }))
+            continue;
+        // Bambu's text: "The %s nozzle can not print %s." (it names the preset; the print config has its number and type).
+        const std::string name = "filament " + std::to_string(f + 1) + " (" + format_diameter_to_str(d) + " mm " + config.filament_type.get_at(f) + ")";
+        return "The " + get_nozzle_volume_type_string(types.front()) + " nozzle can not print " + name + ".";
+    }
     return {};
 }
 
