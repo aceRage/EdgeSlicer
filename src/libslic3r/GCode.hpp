@@ -109,6 +109,7 @@ public:
         m_final_purge_drop(final_purge_drop),
         m_layer_idx(-1),
         m_tool_change_idx(0),
+        m_layer_joined(false),
         m_local_z_tool_change_idx(local_z_tool_changes.size(), 0),
         m_local_z_reserve_slot_idx(local_z_reserve_boxes.size(), 0),
         m_plate_origin(plate_origin),
@@ -116,6 +117,7 @@ public:
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
         m_is_first_print(true),
         m_last_wipe_tower_print_z(print_config.z_offset.value),
+        m_z_offset(print_config.z_offset.value),
         m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config)),
         m_sparse_layers_combined(wipe_tower_sparse_layers_combined(print_config))
     {
@@ -129,11 +131,15 @@ public:
     void next_layer() {
         ++ m_layer_idx;
         m_tool_change_idx = 0;
+        m_layer_joined = false;
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_tool_change_idx.size())
             m_local_z_tool_change_idx[size_t(m_layer_idx)] = 0;
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_reserve_slot_idx.size())
             m_local_z_reserve_slot_idx[size_t(m_layer_idx)] = 0;
     }
+    // The next object layer joined the current tower layer, so its purges print down at that layer's z.
+    // Do not increment m_layer_idx: generate() merges same-z plan entries, including local_z_tool_changes.
+    void join_layer() { m_layer_joined = true; }
     std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer,
                             bool local_z_unplanned = false,
                             double local_z_nominal_layer_z = -1.);
@@ -166,6 +172,8 @@ private:
                                             const Vec2f &outward) const;
     BoundingBox printer_travel_bounds(GCode &gcodegen) const;
     std::string travel_to_tower_gap(GCode &gcodegen, const Point &route_start, const Point &start_wipe_pos) const;
+    // The current tower layer's z in the G-code frame, where a joined layer prints its purges.
+    double joined_tower_z() const { return m_tool_changes[m_layer_idx].front().print_z + m_z_offset; }
 
 private:
     const float                                                  m_left;
@@ -184,6 +192,7 @@ private:
     // Current layer index.
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
+    bool                                                         m_layer_joined;
     std::vector<size_t>                                          m_local_z_tool_change_idx;
     std::vector<size_t>                                          m_local_z_reserve_slot_idx;
 
@@ -193,6 +202,7 @@ private:
     bool                                                         m_enable_timelapse_print;
     bool                                                         m_is_first_print;
     double                                                       m_last_wipe_tower_print_z = 0.f;
+    const double                                                 m_z_offset;
     // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
     // option: smooth timelapse keeps a tower on every layer regardless.
     const bool                                                   m_sparse_layers_skipped;

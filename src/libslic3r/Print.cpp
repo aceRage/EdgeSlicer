@@ -7002,6 +7002,9 @@ static coordf_t last_active_wipe_tower_layer_height(ToolOrdering &tool_ordering)
 
 void Print::_make_wipe_tower()
 {
+    // Use the printer's G-code tag format so the processor can classify wipe tower filament usage.
+    GCodeProcessor::s_IsBBLPrinter = is_BBL_printer();
+
     m_wipe_tower_data.clear();
 
     // Get wiping matrix to get number of extruders and convert vector<double> to vector<float>:
@@ -7100,7 +7103,7 @@ void Print::_make_wipe_tower()
                 if (!layer_tools.has_wipe_tower)
                     continue;
                 bool first_layer = &layer_tools == &m_wipe_tower_data.tool_ordering.front();
-                wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
+                wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id);
 
                 // The order GCode::process_layer() prints the layer in: rotated to start with the loaded
@@ -7127,7 +7130,7 @@ void Print::_make_wipe_tower()
                         // volume_to_purge += (float)get_value_at(m_config, m_config.filament_minimal_purge_on_wipe_tower, ConfigFlowDomain::Filament, extruder_id);
 
                         // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                        wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
+                        wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
                                                    current_extruder_id, extruder_id, m_config.prime_volume, volume_to_purge);
                         current_extruder_id = extruder_id;
                     }
@@ -7261,7 +7264,7 @@ void Print::_make_wipe_tower()
                                                  << " sequence=" << local_z_sequence.str();
                     }
                     for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
-                        wipe_tower.plan_local_z_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
+                        wipe_tower.plan_local_z_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
                                                            toolchange.old_tool, toolchange.new_tool, (float) m_config.prime_volume);
                     }
                     if (!local_z_toolchanges.empty())
@@ -7271,7 +7274,7 @@ void Print::_make_wipe_tower()
                 const std::vector<unsigned int> nominal_layer_extruders =
                     layer_tools.nominal_extruder_order(int(current_extruder_id));
 
-                wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
+                wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height, current_extruder_id,
                                            current_extruder_id, false);
                 for (const auto extruder_id : nominal_layer_extruders) {
                     if ((first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || extruder_id !=
@@ -7292,13 +7295,16 @@ void Print::_make_wipe_tower()
                         }
 
                         // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                        wipe_tower.plan_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
+                        wipe_tower.plan_toolchange((float) layer_tools.wipe_tower_print_z, (float) layer_tools.wipe_tower_layer_height,
                                                    current_extruder_id, extruder_id, volume_to_wipe);
                         current_extruder_id = extruder_id;
                     }
                 }
 
                 layer_tools.wiping_extrusions().ensure_perimeters_infills_order(*this);
+                // Smooth timelapse needs a tower on every object layer, same as Type1.
+                if (enable_timelapse_print())
+                    continue;
                 if (&layer_tools == &m_wipe_tower_data.tool_ordering.back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
                     break;
             }
