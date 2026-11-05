@@ -2357,6 +2357,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             extruder_rack_nozzle_override))
     ((ConfigOptionStrings,             nozzle_slot_process_missing))
     ((ConfigOptionInts,                nozzle_filament_process_slot))
+    // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
+    ((ConfigOptionStrings,             nozzle_filament_tool))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))

@@ -236,6 +236,16 @@ const int IMPORT_STAGE_MAX              = 13;
 typedef std::function<void(int export_stage, int current, int total, bool& cancel)> Export3mfProgressFn;
 typedef std::function<void(int import_stage, int current, int total, bool& cancel)> Import3mfProgressFn;
 
+// slice_info.config's per-plate <metadata key="nozzle_diameters">, one value per extruder as Bambu Studio writes it ("0.4,0.4").
+// Each extruder gets the size this plate prints with on it: its own size (the project's, P7 nozzle_diameter_override, carried in
+// plate.nozzle_diameters) when the plate uses that nozzle or does not use the extruder at all, else the first nozzle of the
+// extruder the plate prints with (nozzle_change_sequence order, else the lowest nozzle id). An H2C rack: two cubes on the right's
+// 0.6 then 0.8 -> "0.4,0.6".
+// `config`, when given, supplies the sizes if the plate carries none (effective_nozzle_diameters) and the extruder count.
+// Before (owner report 2026-11-05) the exporter wrote the printer preset's nozzle_diameter, so Bambu Connect showed
+// "0.4 | 0.4" for a plate printed with 0.8 and 0.6 rack nozzles.
+std::string slice_info_nozzle_diameters(const PlateData &plate, const DynamicPrintConfig *config);
+
 typedef std::vector<PlateData*> PlateDataPtrs;
 
 typedef std::map<int, PlateData*> PlateDataMaps;
