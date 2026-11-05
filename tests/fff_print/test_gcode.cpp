@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <cstdio>
 #include <regex>
 #include <vector>
 #include <algorithm>
@@ -889,4 +890,67 @@ TEST_CASE("The highest temperature bed policy ignores filaments that start above
     CHECK(bed_temps.front() == 65);
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
+}
+
+// change_filament_gcode receives the flush both as a total, flush_length, and split into chunks of
+// about 135 mm³, flush_length_1..4. Profiles purge the chunks, so a flush too small to round up to
+// one chunk must still land in flush_length_1 instead of being dropped.
+// Edge: no multifilament_config / slice_with_object_overrides harness; two cubes plus a re-apply,
+// same as the by-object header case in this file. The type1 tower path also clamps purge volume to
+// 100 mm³, so 30/50 mm³ only fail on the by-object path without the fix.
+TEST_CASE("The flush chunks add up to the whole flush, however small", "[GCode][MultiFilament]")
+{
+    const std::string path   = GENERATE(as<std::string>{}, "direct", "type1");
+    const double      volume = GENERATE(30., 50., 100., 300., 1000.);
+    CAPTURE(path, volume);
+
+    const std::string flush = "0," + std::to_string(volume) + "," + std::to_string(volume) + ",0";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00"};
+    config.set_deserialize_strict({
+        { "change_filament_gcode", "; FLUSH {flush_length} {flush_length_1} {flush_length_2} {flush_length_3} {flush_length_4}\n" },
+        { "flush_volumes_matrix",  flush },
+        { "flush_multiplier",      1 },
+        { "skirt_loops",           0 },
+        { "brim_type",             "no_brim" },
+        { "layer_change_gcode",    "G92 E0\n" },
+        { "enable_support",        0 },
+    });
+    if (path == "direct")
+        config.set_deserialize_strict({ { "print_sequence", "by object" }, { "enable_prime_tower", false } });
+    else
+        config.set_deserialize_strict({
+            { "enable_prime_tower", true },
+            { "wipe_tower_type",    "type1" },
+            { "prime_tower_width",  35 },
+            { "wipe_tower_x",       15 },
+            { "wipe_tower_y",       15 },
+        });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->config.set("extruder", 1);
+    model.objects[1]->config.set("extruder", 2);
+    print.apply(model, config);
+
+    const std::string gcode = Test::gcode(print);
+
+    size_t flushes = 0;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        double total, chunks[4];
+        if (std::sscanf(line.c_str(), "; FLUSH %lf %lf %lf %lf %lf", &total, &chunks[0], &chunks[1], &chunks[2], &chunks[3]) != 5 || total <= 0.)
+            continue;
+        ++flushes;
+        CAPTURE(line);
+        CHECK(chunks[0] > 0.);
+        CHECK_THAT(chunks[0] + chunks[1] + chunks[2] + chunks[3], Catch::Matchers::WithinRel(total, 1e-3));
+    }
+    CHECK(flushes > 0);
 }
