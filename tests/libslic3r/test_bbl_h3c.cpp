@@ -281,3 +281,87 @@ TEST_CASE("The H3C's TPU285 slot reaches the nozzle strip and survives an edit",
     CHECK(rack[7].volume_given);
     CHECK(validate_rack_nozzle_text(edit.rack_texts[0], 0.4).empty());
 }
+
+// Owner request 2026-11-04 (Bambu Studio 2.9.1 rule): a 2.85 mm filament prints only on a TPU285 nozzle, a 1.75 mm one
+// never on it. The grouping puts each where it fits; a rack without the needed path refuses the slice.
+TEST_CASE("H3C: 2.85 mm filament goes to the TPU285 nozzle, 1.75 mm stays off it", "[BblH3C][TPU285]")
+{
+    auto group_of = [](const DynamicPrintConfig &cfg) {
+        Print print;
+        Model model;
+        ModelObject *object = model.add_object();
+        object->add_volume(Test::mesh(Test::TestMesh::cube_20x20x20));
+        object->add_instance();
+        object->center_around_origin();
+        object->instances.front()->set_offset(Vec3d(165., 160., 0.));
+        object->ensure_on_bed();
+        print.is_BBL_printer() = true;
+        print.apply(model, cfg);
+        print.validate();
+        print.set_status_silent();
+        Test::gcode(print);
+        auto group = print.get_layered_nozzle_group_result();
+        REQUIRE(group != nullptr);
+        auto nozzle = group->get_first_nozzle_for_filament(0);
+        REQUIRE(nozzle.has_value());
+        return nozzle->volume_type;
+    };
+
+    SECTION("Generic TPU (2.85 mm) prints on slot 8, TPU285")
+    {
+        const DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Generic TPU(2.85mm) @BBL H3C");
+        REQUIRE(cfg.option<ConfigOptionFloats>("filament_diameter")->get_at(0) == Approx(2.85));
+        CHECK(group_of(cfg) == nvtTPU285);
+    }
+    SECTION("Bambu PLA Basic (1.75 mm) prints on a Standard slot")
+    {
+        const DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
+        CHECK(group_of(cfg) == nvtStandard);
+    }
+    SECTION("validation: the needed nozzle missing from the rack refuses the slice, Bambu's wording")
+    {
+        DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Generic TPU(2.85mm) @BBL H3C");
+        PrintConfig pc;
+        pc.apply(cfg, true);
+        CHECK(validate_tpu285_nozzles(pc, { 0 }).empty());
+        // A project rack without the TPU285 slot.
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "0.4,0.4,0.4" };
+        pc.apply(cfg, true);
+        const std::string error = validate_tpu285_nozzles(pc, { 0 });
+        CHECK(error.find("The Standard nozzle can not print") == 0);
+        CHECK(error.find("2.85") != std::string::npos);
+        CHECK(validate_rack_nozzle_diameters(pc, { 0 }) == error);
+        // A rack of only TPU285 nozzles cannot print a 1.75 mm filament.
+        DynamicPrintConfig pla = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
+        pla.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "0.4:tpu285,0.4:tpu285" };
+        pc.apply(pla, true);
+        CHECK(validate_tpu285_nozzles(pc, { 0 }).find("The TPU285 nozzle can not print") == 0);
+    }
+    SECTION("a printer without the TPU285 path keeps treating 2.85 mm as an ordinary filament")
+    {
+        DynamicPrintConfig cfg = h3c_config("Bambu Lab H2C 0.4 nozzle", "0.20mm Standard @BBL H2C", "Bambu PLA Basic @BBL H2C");
+        cfg.option<ConfigOptionFloats>("filament_diameter")->values = { 2.85 };
+        PrintConfig pc;
+        pc.apply(cfg, true);
+        CHECK(validate_tpu285_nozzles(pc, { 0 }).empty());
+    }
+}
+
+// Owner hand test 2026-11-04: first-layer travels on the H3C were slower than Bambu Studio's. Bambu's H3C processes set
+// initial_layer_travel_acceleration 6000; ours reads first_layer_travel_acceleration (0 = the initial layer acceleration,
+// 500), so the H3C base carries 6000 and the first layer's travels get M204 S6000 as in Bambu Studio's G-code.
+TEST_CASE("H3C first-layer travels use 6000 mm/s2 like Bambu Studio", "[BblH3C][Accel]")
+{
+    const DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
+    const auto *opt = cfg.option<ConfigOptionFloatOrPercent>("first_layer_travel_acceleration");
+    REQUIRE(opt != nullptr);
+    CHECK(opt->value == Approx(6000.));
+    CHECK_FALSE(opt->percent);
+    const std::string gcode = slice_cube(cfg);
+    const size_t layer1 = gcode.find("; CHANGE_LAYER");
+    const size_t layer2 = gcode.find("; CHANGE_LAYER", layer1 + 1);
+    REQUIRE(layer2 != std::string::npos);
+    const std::string first = gcode.substr(layer1, layer2 - layer1);
+    CHECK(first.find("\nM204 S6000") != std::string::npos);
+    CHECK(first.find("\nM204 S500") != std::string::npos);
+}
