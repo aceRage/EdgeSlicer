@@ -222,10 +222,10 @@ static std::string wipe_tower_regions(const std::string &gcode)
     return regions;
 }
 
-// A WipeTower2 (non-Bambu) two-filament print: outer wall in filament 2, the rest in filament 1,
-// so every layer runs the toolchange path and its flush_planner_queue(). Same shape as
-// test_print.cpp's "prepare and slice agree on the plate filaments" case (one apply keeps the tower).
-static std::string slice_two_filament_tower(const std::string &gcode_flavor, bool snapmaker_u1)
+// A two-filament print: outer wall in filament 2, the rest in filament 1, so every layer
+// runs the toolchange path and its flush_planner_queue(). Same shape as test_print.cpp's
+// "prepare and slice agree on the plate filaments" case (one apply keeps the tower).
+static DynamicPrintConfig two_filament_tower_config(const std::string &gcode_flavor, bool snapmaker_u1)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -248,7 +248,11 @@ static std::string slice_two_filament_tower(const std::string &gcode_flavor, boo
     config.set_deserialize_strict({ { "gcode_flavor", gcode_flavor } });
     if (snapmaker_u1)
         config.set_key_value("printer_model", new ConfigOptionString("Snapmaker U1"));
+    return config;
+}
 
+static std::string slice_two_filament_tower(const DynamicPrintConfig &config)
+{
     Print print;
     Model model;
     init_print({TestMesh::cube_20x20x20}, print, model, config);
@@ -256,19 +260,70 @@ static std::string slice_two_filament_tower(const std::string &gcode_flavor, boo
     return Test::gcode(print);
 }
 
+static std::string slice_two_filament_tower(const std::string &gcode_flavor, bool snapmaker_u1)
+{
+    return slice_two_filament_tower(two_filament_tower_config(gcode_flavor, snapmaker_u1));
+}
+
+// change_filament_gcode for the Klipper sections: a marker comment, so no slicer output changes.
+static const char *const toolchange_mark = "; TOOLCHANGE_MARK\n";
+
+// On Klipper the tower syncs motion only right before a temperature command and, with
+// `sync_before_change`, once per toolchange at the end of the unload, so change_filament_gcode
+// can't run while the unload is still queued. Any other M400 just stalls the toolhead.
+static bool m400_only_where_needed(const std::string &gcode, bool sync_before_change)
+{
+    bool synced = false; // a bare M400 since the last change_filament_gcode
+    std::istringstream lines(gcode);
+    for (std::string line, prev; std::getline(lines, line); prev = line) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (prev == "M400" && line.rfind("M104", 0) != 0 && line.rfind("M109", 0) != 0) {
+            if (!sync_before_change || synced)
+                return false;
+            synced = true;
+        }
+        if (line.find("; TOOLCHANGE_MARK") != std::string::npos) {
+            if (sync_before_change && !synced)
+                return false;
+            synced = false;
+        }
+    }
+    return true;
+}
+
 TEST_CASE("The wipe tower's toolchange planner flush follows the gcode flavor", "[WipeTower][KlipperFlush]")
 {
     SECTION("klipper") {
-        const std::string tower = wipe_tower_regions(slice_two_filament_tower("klipper", false));
+        const std::string tower_type = GENERATE(as<std::string>{}, "type1", "type2");
+        CAPTURE(tower_type);
+        DynamicPrintConfig config = two_filament_tower_config("klipper", false);
+        config.set_deserialize_strict({ { "wipe_tower_type", tower_type }, { "change_filament_gcode", toolchange_mark } });
+        const std::string tower = wipe_tower_regions(slice_two_filament_tower(config));
         REQUIRE_FALSE(tower.empty());
-        CHECK_THAT(tower, Catch::Matchers::Contains("M400"));
-        CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S"));
+        CHECK_THAT(tower, !Catch::Matchers::Contains("G4 S0"));
+        // Only type2 syncs at the end of the unload; type1's toolchange_Unload is compiled out.
+        CHECK(m400_only_where_needed(tower, tower_type == std::string("type2")));
     }
     SECTION("marlin") {
         const std::string tower = wipe_tower_regions(slice_two_filament_tower("marlin", false));
         REQUIRE_FALSE(tower.empty());
         CHECK_THAT(tower, Catch::Matchers::Contains("G4 S0"));
         CHECK_THAT(tower, !Catch::Matchers::Contains("M400"));
+    }
+    SECTION("klipper, single extruder multi material") {
+        // The SEMM path changes the temperature inside the tower; the sync before M104 must stay.
+        DynamicPrintConfig config = two_filament_tower_config("klipper", false);
+        config.set_deserialize_strict({
+            { "single_extruder_multi_material", "1" },
+            { "change_filament_gcode",          toolchange_mark },
+            { "nozzle_temperature",             "200,220" },
+            { "nozzle_temperature_initial_layer", "200,220" },
+        });
+        const std::string tower = wipe_tower_regions(slice_two_filament_tower(config));
+        REQUIRE_FALSE(tower.empty());
+        CHECK_THAT(tower, Catch::Matchers::Contains("M400\nM104"));
+        CHECK(m400_only_where_needed(tower, true));
     }
 }
 
