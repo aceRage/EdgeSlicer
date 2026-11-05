@@ -26,6 +26,7 @@ CutConnector tac_connector()
     c.tac_joint.clearance     = 0.25f;
     c.tac_joint.end_clearance = 0.45f;
     c.tac_joint.offset        = -0.75f;
+    c.tac_joint.attachment    = TacJointAttachment::Lower;
     return c;
 }
 
@@ -122,6 +123,9 @@ TEST_CASE("TAC connector definitions and volume undo payloads retain every param
     REQUIRE(copied == original);
     copied.tac_joint.offset = 0.f;
     REQUIRE(copied != original);
+    copied                      = original;
+    copied.tac_joint.attachment = TacJointAttachment::Upper;
+    REQUIRE(copied != original);
     ModelVolume::CutInfo info(CutConnectorType::TacJoint, 0.f, 0.f, true);
     info.tac_joint                  = original.tac_joint;
     const CutRecipe    r            = recipe(original);
@@ -153,16 +157,22 @@ TEST_CASE("TAC connector definitions and volume undo payloads retain every param
 
 TEST_CASE("TAC placed and processed connector volume metadata round-trips through 3MF", "[TACJoint][TACPersistence]")
 {
+    const auto attachment = GENERATE(TacJointAttachment::Separate, TacJointAttachment::Upper, TacJointAttachment::Lower);
+    const auto type       = GENERATE(ModelVolumeType::NEGATIVE_VOLUME, ModelVolumeType::MODEL_PART);
     for (bool processed : {false, true}) {
+        if (!processed && type == ModelVolumeType::MODEL_PART)
+            continue;
         Model        source;
         ModelObject* o = fixture(source);
         // Before a cut even the object cut_id is unset; both export gates must admit TAC.
         if (!processed)
             o->cut_id = CutObjectBase{};
-        ModelVolume* v        = o->add_volume(TriangleMesh(its_make_cube(4., 3., 11.)), ModelVolumeType::NEGATIVE_VOLUME);
+        ModelVolume* v                   = o->add_volume(TriangleMesh(its_make_cube(4., 3., 11.)), type);
         v->name               = "TAC connector";
         v->cut_info           = ModelVolume::CutInfo(CutConnectorType::TacJoint, 0.f, 0.f, processed);
         v->cut_info.tac_joint = tac_connector().tac_joint;
+        v->cut_info.tac_joint.attachment = attachment;
+        const auto expected              = v->cut_info.tac_joint;
         Model loaded;
         round_trip(source, loaded, processed ? "processed" : "placed");
         REQUIRE(loaded.objects.size() == 1);
@@ -170,7 +180,8 @@ TEST_CASE("TAC placed and processed connector volume metadata round-trips throug
         const auto& info = loaded.objects.front()->volumes.back()->cut_info;
         REQUIRE(info.is_tac_joint());
         REQUIRE(info.is_processed == processed);
-        REQUIRE(info.tac_joint == tac_connector().tac_joint);
+        REQUIRE(info.tac_joint == expected);
+        REQUIRE(loaded.objects.front()->volumes.back()->type() == type);
     }
 }
 
@@ -184,7 +195,7 @@ TEST_CASE("A TAC recipe retains its type, pose and parameters in a project", "[T
     REQUIRE(loaded.objects.size() == 1);
     REQUIRE(loaded.objects.front()->cut_recipe.has_value());
     const CutRecipe& r = *loaded.objects.front()->cut_recipe;
-    REQUIRE(r.version >= 7);
+    REQUIRE(r.version == 8);
     std::vector<CutConnector> connectors;
     cut_recipe_connectors_to_model(r.connectors, connectors);
     REQUIRE(connectors.size() == 1);
@@ -204,7 +215,7 @@ TEST_CASE("Mirroring refuses an asymmetric TAC recipe without changing it", "[TA
 
 TEST_CASE("Invalid or future TAC definitions never become editable recipes", "[TACJoint][TACPersistence]")
 {
-    for (int mode = 0; mode < 7; ++mode) {
+    for (int mode = 0; mode < 8; ++mode) {
         CutConnector c = tac_connector();
         if (mode == 0)
             c.tac_joint.version = 999;
@@ -220,6 +231,8 @@ TEST_CASE("Invalid or future TAC definitions never become editable recipes", "[T
             c.pos.x() = std::numeric_limits<double>::quiet_NaN();
         if (mode == 6)
             c.rotation_m(0, 0) = std::numeric_limits<double>::infinity();
+        if (mode == 7)
+            c.tac_joint.attachment = TacJointAttachment(999);
         CutRecipe r = recipe(c);
         REQUIRE_FALSE(r.valid());
         std::vector<CutConnector> connectors;
@@ -245,21 +258,38 @@ TEST_CASE("A legacy recipe loads with its original connector behavior", "[TACJoi
     REQUIRE(connectors.front().tac_joint == TacJointParams{});
 }
 
+TEST_CASE("A version 7 TAC project without attachment retains separate connectors", "[TACJoint][TACPersistence]")
+{
+    CutConnector c = tac_connector();
+    Model        source;
+    auto*        object         = fixture(source);
+    object->cut_recipe          = recipe(c);
+    object->cut_recipe->version = 7;
+    auto* volume                = object->add_volume(TriangleMesh(its_make_cube(4., 3., 11.)), ModelVolumeType::NEGATIVE_VOLUME);
+    volume->cut_info            = ModelVolume::CutInfo(CutConnectorType::TacJoint, 0.f, 0.f, true);
+    volume->cut_info.tac_joint  = c.tac_joint;
+    Model loaded;
+    round_trip(source, loaded, "legacy_tac", [&](const std::string& file) {
+        rewrite_metadata(file, "Metadata/cut_recipe.xml", "tac_joint_attachment", std::nullopt);
+        rewrite_metadata(file, "Metadata/cut_information.xml", "tac_joint_attachment", std::nullopt);
+    });
+    c.tac_joint.attachment = TacJointAttachment::Separate;
+    REQUIRE(loaded.objects.front()->cut_recipe.has_value());
+    REQUIRE(loaded.objects.front()->cut_recipe->connectors.front().tac_joint == c.tac_joint);
+    REQUIRE(loaded.objects.front()->volumes.back()->cut_info.tac_joint == c.tac_joint);
+}
+
 TEST_CASE("Untrusted TAC XML is rejected while baked project geometry remains available", "[TACJoint][TACPersistence]")
 {
-    const std::pair<std::string, std::string> corrupt[] = {{"tac_joint_version", "999"},
-                                                           {"tac_joint_version", "1.5"},
-                                                           {"tac_joint_version", "nan"},
-                                                           {"tac_joint_version", "inf"},
-                                                           {"tac_joint_version", "1e100"},
-                                                           {"tac_joint_version", "invalid"},
-                                                           {"tac_joint_scale", "nan"},
-                                                           {"tac_joint_scale", "0"},
-                                                           {"tac_joint_scale", "1e100"},
-                                                           {"tac_joint_clearance", "-1"},
-                                                           {"tac_joint_offset", "inf"},
-                                                           {"tac_joint_end_clearance", "invalid"},
-                                                           {"type", "999"}};
+    const std::pair<std::string, std::string> corrupt[] = {{"tac_joint_version", "999"},        {"tac_joint_version", "1.5"},
+                                                           {"tac_joint_version", "nan"},        {"tac_joint_version", "inf"},
+                                                           {"tac_joint_version", "1e100"},      {"tac_joint_version", "invalid"},
+                                                           {"tac_joint_scale", "nan"},          {"tac_joint_scale", "0"},
+                                                           {"tac_joint_scale", "1e100"},        {"tac_joint_clearance", "-1"},
+                                                           {"tac_joint_offset", "inf"},         {"tac_joint_end_clearance", "invalid"},
+                                                           {"tac_joint_attachment", "3"},       {"tac_joint_attachment", "-1"},
+                                                           {"tac_joint_attachment", "1.5"},     {"tac_joint_attachment", "nan"},
+                                                           {"tac_joint_attachment", "invalid"}, {"type", "999"}};
     for (const auto& [attribute, value] : corrupt) {
         INFO(attribute << "=" << value);
         Model        source;
@@ -292,6 +322,7 @@ TEST_CASE("A TAC file missing optional parameters uses documented defaults", "[T
         rewrite_metadata(file, "Metadata/cut_recipe.xml", "tac_joint_clearance", std::nullopt);
         rewrite_metadata(file, "Metadata/cut_recipe.xml", "tac_joint_end_clearance", std::nullopt);
         rewrite_metadata(file, "Metadata/cut_recipe.xml", "tac_joint_offset", std::nullopt);
+        rewrite_metadata(file, "Metadata/cut_recipe.xml", "tac_joint_attachment", std::nullopt);
     });
     REQUIRE(loaded.objects.front()->cut_recipe.has_value());
     REQUIRE(loaded.objects.front()->cut_recipe->connectors.front().tac_joint == TacJointParams{});

@@ -46,6 +46,8 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/ZipOpen.hpp"
@@ -1292,6 +1294,50 @@ static nlohmann::json layout_instance_json(ModelObject* o, size_t oi, size_t ii,
     return ji;
 }
 
+// slice_prime_tower: plate `plate`'s prime tower as the 3D view draws it, or false when the plate prints
+// none. The same inputs as GLCanvas3D::reload_scene (the full config's filaments and print sequence,
+// the print preset's timelapse) and the same placement: estimate_wipe_tower_polygon with a relocation,
+// which is the position reload_scene stores and draws. GUI thread.
+static bool plate_prime_tower(Plater* plater, int plate, SliceV1::PrimeTower& out)
+{
+    if (plater->printer_technology() != ptFFF) return false;
+    PartPlateList& plates = plater->get_partplate_list();
+    if (plate < 0 || plate >= plates.get_plate_count()) return false;
+    PartPlate* p = plates.get_plate(plate);
+    const DynamicPrintConfig full = wxGetApp().preset_bundle->full_config();
+    const auto* colours = full.option<ConfigOptionStrings>("filament_colour");
+    const auto* enabled = full.option<ConfigOptionBool>("enable_prime_tower");
+    const auto* seq     = full.option<ConfigOptionEnum<PrintSequence>>("print_sequence");
+    const auto* tl      = wxGetApp().preset_bundle->prints.get_edited_preset().config.option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
+    const bool  by_object = p->get_print_seq() == PrintSequence::ByObject ||
+                           (p->get_print_seq() == PrintSequence::ByDefault && seq != nullptr && seq->value == PrintSequence::ByObject);
+    auto has = [&](double depth) {
+        return SliceV1::plate_has_prime_tower(enabled != nullptr && enabled->value, tl != nullptr && tl->value == TimelapseType::tlSmooth,
+                                              colours != nullptr ? (int) colours->values.size() : 0, by_object,
+                                              p->printable_instance_size(), !p->get_objects_on_this_plate().empty(), depth);
+    };
+    if (!has(1.)) return false; // the cheap half first: the estimate walks the plate's objects
+    const WipeTowerFootprint footprint = p->estimate_wipe_tower_footprint(full);
+    if (!has(footprint.depth)) return false;
+    Vec3d               pos, size;
+    WipeTowerRelocation relocation;
+    const arrangement::ArrangePolygon ap = p->estimate_wipe_tower_polygon(full, plate, pos, size, 0, false, &relocation);
+    const Vec3d origin = p->get_origin();
+    out          = SliceV1::PrimeTower();
+    out.x        = pos.x() + origin.x();
+    out.y        = pos.y() + origin.y();
+    out.width    = size.x();
+    out.depth    = size.y();
+    out.brim     = footprint.brim_width;
+    out.rotation = gui_wipe_tower_rotation_deg(full);
+    for (const Point& pt : ap.poly.contour.points)
+        out.footprint.emplace_back(unscale<double>(pt.x()) + origin.x(), unscale<double>(pt.y()) + origin.y());
+    // Both plate-local: the footprint is anchored at the stored position, the obstacles are the
+    // objects' hulls grown by their brim and WIPE_TOWER_MARGIN (what a re-placed tower keeps clear of).
+    out.overlaps = !intersection(Polygons{ ap.poly.contour }, p->wipe_tower_obstacles(full)).empty();
+    return true;
+}
+
 // Top-down view of one plate: every instance registered on it with the convex hull of the
 // transformed model (world mm), bounding box, position / Z rotation / uniform scale and the
 // colour of its filament. The phone draws this and edits it through api_object_transform.
@@ -1329,6 +1375,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_plate_layout(int plate)
                 j["objects"].push_back(ji);
             }
         }
+        SliceV1::PrimeTower tower; // slice_prime_tower: null when the plate prints none
+        j["prime_tower"] = plate_prime_tower(plater, plate, tower) ? SliceV1::prime_tower_json(tower) : nlohmann::json();
     }, 30000);
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); }
@@ -1458,6 +1506,60 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
         (*out)["undo_label"] = undo_label;
         *result = { 200, "" };
     }, 60000);
+    if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
+    r.body = out->dump();
+    return r;
+}
+
+// slice_prime_tower: move plate `plate`'s prime tower, as dragging it in the 3D view does. Form x=&y=:
+// the anchor in the layout's frame (world mm). The PC selects that plate (as Arrange does), takes an
+// undo snapshot (which records every plate's tower position), stores the position and reloads the
+// scene, whose clamp keeps the tower on the plate - a drop just past the edge snaps onto it, one far
+// out is re-placed clear of the objects - and stores where it ended up. Answers {prime_tower,
+// undo_label}, prime_tower where it is now.
+RemoteAccess::ApiResponse RemoteAccess::api_plate_prime_tower(int plate, const std::string& form)
+{
+    auto num = [&](const char* k, bool& has) {
+        const std::string v = query_param(form, k);
+        has = !v.empty();
+        try { return has ? std::stod(v) : 0.; } catch (...) { has = false; return 0.; }
+    };
+    bool         has_x, has_y;
+    const double x = num("x", has_x), y = num("y", has_y);
+    auto result = std::make_shared<std::pair<int, std::string>>(500, "");
+    auto out    = std::make_shared<nlohmann::json>();
+    bool ok     = run_on_main([=]() {
+        Plater*        plater = wxGetApp().plater();
+        PartPlateList& plates = plater->get_partplate_list();
+        const int      count  = plates.get_plate_count();
+        const bool     valid  = plate >= 0 && plate < count;
+        SliceV1::PrimeTower tower;
+        const bool has_tower = valid && plate_prime_tower(plater, plate, tower);
+        const SliceV1::Refusal refusal = SliceV1::prime_tower_move_check(plate, count, has_x, has_y, x, y, has_tower,
+                                                                         valid && plates.get_plate(plate)->is_locked(),
+                                                                         plater->is_background_process_slicing());
+        if (!refusal.ok()) { *result = { refusal.status, refusal.error }; return; }
+        plater->select_view_3D("3D");
+        if (plates.get_curr_plate_index() != plate && plater->select_plate(plate) != 0) { *result = { 500, "could not select the plate" }; return; }
+        const Vec3d origin = plates.get_plate(plate)->get_origin();
+        plater->take_snapshot("Move Prime Tower");
+        DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
+        const ConfigOptionFloat tx(x - origin.x()), ty(y - origin.y());
+        proj_cfg.option<ConfigOptionFloats>("wipe_tower_x", true)->set_at(&tx, plate, 0);
+        proj_cfg.option<ConfigOptionFloats>("wipe_tower_y", true)->set_at(&ty, plate, 0);
+        GLCanvas3D* canvas = plater->get_view3D_canvas3D();
+        canvas->reload_scene(true); // clamps the tower onto the plate and stores where it lands
+        plater->update();           // the print picks the new position up, as after a drag
+        canvas->set_as_dirty();
+        if (!plate_prime_tower(plater, plate, tower)) { *result = { 500, "the prime tower is gone" }; return; }
+        (*out)["prime_tower"] = SliceV1::prime_tower_json(tower);
+        std::string undo_label;
+        plater->undo_redo_topmost_string_getter(true, undo_label);
+        (*out)["undo_label"] = undo_label;
+        *result = { 200, "" };
+    }, 60000);
+    ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
     if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
     r.body = out->dump();
@@ -4248,7 +4350,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/plates"},                 {"description", "project, project_dirty (PR G), printer preset, filaments, bed_types [{id, label}] (the bed types a plate may take; empty when the printer has one) and every plate with name, objects, bed_type {id, label, own} (null without bed_types), slice state, time and filament estimates; loose_count = instances on no plate; place_count = objects Place loose objects (arrange?loose=1) would move; per plate blocked = why the PC will not slice it (null | empty | outside (a printable object hangs over the edge: Arrange fixes it) | locked (the same on a locked plate) | not_printable (every object set not to print)) and outside_count"} },
             { {"method", "GET"},  {"path", "/api/plates/loose"},           {"description", "the instances on no plate (pushed fully off the bed, e.g. by a printer change): {count, objects [the layout's per-instance fields, outside true]}"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/thumbnail.png"}, {"description", "rendered plate preview"} },
-            { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area)"} },
+            { {"method", "GET"},  {"path", "/api/plates/{index}/layout"},  {"description", "top-down layout: plate box, locked, exclude areas, every instance registered on the plate (those hanging over its edge too) with its convex hull (mm), bbox, position, Z rotation, scale, colour, printable and outside (the slicer's own test: it hangs over the edge or into an exclude area); prime_tower (slice_prime_tower): null when the plate prints none, else {x, y (its anchor, the body's front left corner), width, depth, brim, rotation (degrees about the anchor), footprint [[x, y]] (brim included, turned), overlaps (it meets an object's outline grown by its brim and the tower margin)}"} },
+            { {"method", "POST"}, {"path", "/api/plates/{index}/prime_tower"}, {"description", "form x=&y= (slice_prime_tower): move that plate's prime tower to anchor x, y (the layout's frame) like dragging it on the PC (undoable; selects the plate); the PC keeps it on the plate (a drop just past the edge snaps onto it; one far out is re-placed clear of the objects); answers {prime_tower (the layout's shape, where it is now), undo_label}; 404 when the plate prints no tower, 409 while slicing or for a locked plate"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/arrange[?loose=1]"}, {"description", "arrange that plate like its Arrange icon, or with loose=1 place loose objects: only the printable objects on no plate or over the edge of an unlocked plate move, into free space on the plates there are (a new plate when none has room); every object already on a plate stays where it is and no plate is removed; one that fits on no plate of the printer (too large or too tall) stays where it is and the job ends error naming it; returns {job, plate (-1 = loose), kind arrange, undo_label}; the job (kind arrange) ends done | error | cancelled with result {plates, loose_count, place_count, blocked []}; 409 while slicing, while another task runs on the PC, for an empty or locked plate, or with loose=1 when place_count is 0; all=1 (re-arrange every plate) is refused with 400"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/orient"},  {"description", "auto-orient the objects on that plate like its Orient icon; the same job shape as arrange (kind orient)"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview"}, {"description", "slice preview state: sliced flag, layer heights, current layer range; loads that plate's G-code into the PC's preview. Sliced: color_by {current, choices [{id, label}]} (the desktop's view types by config name) and options [{id travel|wipe|retract|unretract|seam|tool_change, label, visible}] (the PC's own)"} },
@@ -4430,6 +4533,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             return api_send(num(rest.substr(0, slash), -1), body.empty() ? query : body);
         if (slash != std::string::npos && rest.substr(slash) == "/send/preview")
             return api_send_preview(num(rest.substr(0, slash), -1), body.empty() ? query : body);
+        if (slash != std::string::npos && rest.substr(slash) == "/prime_tower") // slice_prime_tower
+            return api_plate_prime_tower(num(rest.substr(0, slash), -1), body.empty() ? query : body);
         if (slash != std::string::npos && (rest.substr(slash) == "/arrange" || rest.substr(slash) == "/orient")) {
             auto param = [&](const char* name) { std::string v = query_param(query, name); return v.empty() ? query_param(body, name) : v; };
             // all=1 re-arranged every plate, moving objects people had placed; it is gone rather

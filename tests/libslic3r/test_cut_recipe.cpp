@@ -876,13 +876,14 @@ TEST_CASE("Cut recipe: current and older supported versions remain editable", "[
 {
     // Version 5 (OD11, multiple dovetails) added groove fields only; version 6 (the push-fit
     // Pin) added the connector's pushfit block only.
-    REQUIRE(CutRecipeVersion == 7);
+    REQUIRE(CutRecipeVersion == 8);
     REQUIRE(cut_recipe_version_supported(3));
     REQUIRE(cut_recipe_version_supported(4));
     REQUIRE(cut_recipe_version_supported(5));
     REQUIRE(cut_recipe_version_supported(6));
     REQUIRE(cut_recipe_version_supported(7));
-    REQUIRE_FALSE(cut_recipe_version_supported(8));
+    REQUIRE(cut_recipe_version_supported(8));
+    REQUIRE_FALSE(cut_recipe_version_supported(9));
 
     // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
     // numbers: version 4 changed no meanings, only added a field, so the angle, the

@@ -138,6 +138,7 @@
 // For stl export
 #include "libslic3r/CSGMesh/ModelToCSGMesh.hpp"
 #include "libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp"
+#include "libslic3r/TacJointBoolean.hpp"
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -25168,8 +25169,12 @@ TriangleMesh Plater::combine_mesh_fff(const ModelObject& mo, int instance_id, st
     }
     else {
         try {
-            MeshBoolean::mcut::McutMeshPtr meshPtr = csg::perform_csgmesh_booleans_mcut(Range{ std::begin(csgmesh), std::end(csgmesh) });
-            mesh = MeshBoolean::mcut::mcut_to_triangle_mesh(*meshPtr);
+            if (has_tac_joint_volumes(mo))
+                mesh = bake_tac_joint_object(mo);
+            else {
+                MeshBoolean::mcut::McutMeshPtr meshPtr = csg::perform_csgmesh_booleans_mcut(Range{std::begin(csgmesh), std::end(csgmesh)});
+                mesh                                   = MeshBoolean::mcut::mcut_to_triangle_mesh(*meshPtr);
+            }
         }
         catch (...) {}
 #if 0
@@ -25257,12 +25262,17 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
                               csg::mpartsPositive | csg::mpartsNegative | csg::mpartsDoSplits);
 
         auto csgrange = range(csgmesh);
-        if (csg::is_all_positive(csgrange)) {
+        const bool tac_joint = has_tac_joint_volumes(mo);
+        if (!tac_joint && csg::is_all_positive(csgrange)) {
             mesh = TriangleMesh{csg::csgmesh_merge_positive_parts(csgrange)};
         } else if (std::get<2>(csg::check_csgmesh_booleans(csgrange)) == csgrange.end()) {
             try {
-                auto cgalm = csg::perform_csgmesh_booleans(csgrange);
-                mesh = MeshBoolean::cgal::cgal_to_triangle_mesh(*cgalm);
+                if (tac_joint)
+                    mesh = bake_tac_joint_object(mo);
+                else {
+                    auto cgalm = csg::perform_csgmesh_booleans(csgrange);
+                    mesh       = MeshBoolean::cgal::cgal_to_triangle_mesh(*cgalm);
+                }
             } catch (...) {}
         }
 

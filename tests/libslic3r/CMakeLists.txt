@@ -126,6 +126,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
 	test_cli_preset_slots.cpp
+	test_cli_output.cpp
 	test_mixed_nozzle.cpp
 	test_nozzle_process.cpp
 	test_tool_slots.cpp

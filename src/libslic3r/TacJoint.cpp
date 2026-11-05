@@ -91,6 +91,9 @@ TacJointValidation validate_scalars(const TacJointParams& p)
 {
     if (p.version != 1)
         return {false, L("Unsupported TAC Joint reference version.")};
+    if (p.attachment != TacJointAttachment::Separate && p.attachment != TacJointAttachment::Upper &&
+        p.attachment != TacJointAttachment::Lower)
+        return {false, L("Unsupported TAC Joint attachment.")};
     if (!std::isfinite(p.scale) || !std::isfinite(p.clearance) || !std::isfinite(p.end_clearance) || !std::isfinite(p.offset))
         return {false, L("TAC Joint parameters must be finite.")};
     if (p.scale <= 0 || p.clearance < 0 || p.end_clearance < 0)
@@ -228,11 +231,8 @@ indexed_triangle_set tac_joint_cutter_mesh(const TacJointParams& p)
 
 std::vector<std::pair<std::string, double>> tac_joint_attributes(const TacJointParams& p)
 {
-    return {{"tac_joint_scale", p.scale},
-            {"tac_joint_clearance", p.clearance},
-            {"tac_joint_end_clearance", p.end_clearance},
-            {"tac_joint_offset", p.offset},
-            {"tac_joint_version", p.version}};
+    return {{"tac_joint_scale", p.scale},   {"tac_joint_clearance", p.clearance}, {"tac_joint_end_clearance", p.end_clearance},
+            {"tac_joint_offset", p.offset}, {"tac_joint_version", p.version},     {"tac_joint_attachment", int(p.attachment)}};
 }
 
 TacJointParams tac_joint_from_attributes(const std::function<std::optional<double>(const std::string&)>& get)
@@ -253,6 +253,10 @@ TacJointParams tac_joint_from_attributes(const std::function<std::optional<doubl
                             *version <= std::numeric_limits<int>::max() ?
                         int(*version) :
                         -1;
+    if (const auto attachment = get("tac_joint_attachment"))
+        p.attachment = std::isfinite(*attachment) && std::floor(*attachment) == *attachment && *attachment >= 0 && *attachment <= 2 ?
+                           TacJointAttachment(int(*attachment)) :
+                           TacJointAttachment(-1);
     return p;
 }
 

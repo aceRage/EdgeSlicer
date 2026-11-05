@@ -12487,8 +12487,11 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
 #define PRINT_CONFIG_CACHE_INITIALIZE(CLASSES_SEQ) \
     BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_DEFINITION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
     int print_config_static_initializer() { \
-        /* Putting a trace here to avoid the compiler to optimize out this function. */ \
-        BOOST_LOG_TRIVIAL(trace) << "Initializing StaticPrintConfigs"; \
+        /* A volatile store here keeps the compiler from optimizing out this function. It used to be a */ \
+        /* BOOST_LOG_TRIVIAL(trace) line, which runs before any log level is set and so printed to    */ \
+        /* standard output on every start, ahead of --info / --export-settings - output.               */ \
+        static volatile int print_config_static_touched = 0; \
+        print_config_static_touched = 1; \
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
         return 1; \
     }
@@ -12705,6 +12708,38 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("This exports settings to a file. Use - to write them to stdout.");
     def->cli_params = "settings.json";
     def->set_default_value(new ConfigOptionString("output.json"));
+
+    def = this->add("export_gcode", coString);
+    def->label = L("Export G-code");
+    def->tooltip = L("Name of the G-code file to write for each sliced plate (use with --slice). With --outputdir "
+                     "a relative name is placed in that directory; an absolute name is used as given. "
+                     "The token {plate} stands for the plate number; without it, slicing several plates adds _<plate> "
+                     "before the extension. The default is plate_<N>.gcode in --outputdir.");
+    def->cli_params = "filename.gcode";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("validate", coBool);
+    def->label = L("Validate only");
+    def->tooltip = L("Load the input, check that the presets are compatible and run the same checks as before slicing "
+                     "(objects inside the volume, filaments and bed, collisions, spiral vase and so on), then exit "
+                     "without slicing. The exit codes are the ones slicing would have returned (-5, -16, -17, -50 to -65 "
+                     "and so on); 0 means the plates would have been sliced. --slice N picks one plate. "
+                     "Cannot be combined with actions that write files.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("list_presets", coBool);
+    def->label = L("List presets (JSON to stdout)");
+    def->tooltip = L("Print the system presets and the user presets of --datadir as JSON, grouped into machine, process and "
+                     "filament, each with its vendor, source, inherited preset and compatibility, then exit. "
+                     "With --printer-preset <name> only that printer and the process and filament presets compatible with it "
+                     "are listed (those of the printer's vendor and of the shared filament library).");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("list_exit_codes", coBool);
+    def->label = L("List exit codes");
+    def->tooltip = L("Print every exit code the command line can return, with its name and meaning, then exit. "
+                     "A table, or JSON with --quiet.");
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("pipe", coString);
     def->label = L("Send progress to pipe");
@@ -12970,9 +13005,17 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("outputdir", coString);
     def->label = L("Output directory");
-    def->tooltip = L("Output directory for the exported files.");
+    def->tooltip = L("Output directory for the exported files. It is created when it does not exist.");
     def->cli_params = "dir";
     def->set_default_value(new ConfigOptionString());
+
+    def = this->add("quiet", coBool);
+    def->label = L("Quiet");
+    def->cli = "quiet|q";
+    def->tooltip = L("Keep standard output clean for machine-readable output: log lines and the 'found error' line go to "
+                     "standard error instead, so --info, --inspect-mesh, --inspect-paint, --export-settings -, --list-presets "
+                     "and --list-exit-codes print only their payload on standard output. result.json and --progress-json are not affected.");
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("debug", coInt);
     def->label = L("Debug level");

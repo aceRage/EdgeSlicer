@@ -150,6 +150,7 @@ private:
     ApiResponse api_plates();
     ApiResponse api_plate_thumbnail(int plate);
     ApiResponse api_plate_layout(int plate);
+    ApiResponse api_plate_prime_tower(int plate, const std::string& form_body); // slice_prime_tower
     ApiResponse api_plate_preview(int plate);
     ApiResponse api_plate_preview_png(int plate, const std::string& view, int layer, int w, int h, double zoom, double cx, double cy,
                                       const SliceV1::PreviewLook& look);
