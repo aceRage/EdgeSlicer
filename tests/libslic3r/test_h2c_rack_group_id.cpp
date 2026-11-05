@@ -32,14 +32,14 @@ namespace {
 
 const char *OWNER_RACK = "0.4,0.4,0.4,0.4,0.8,0.6";
 
-// An H2C: left one 0.4 nozzle, right a rack of six (the project's rack text, extruder_rack_nozzle_override), two filaments.
+// An H2C: left one 0.4 nozzle, right a rack of six (the project's rack text, extruder_rack_nozzle_override), three filaments: 1 on the left, 2 and 3 on the right (with only two, each would own an extruder).
 DynamicPrintConfig h2c(const std::string &right_rack)
 {
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
-    cfg.set_num_filaments(2);
+    cfg.set_num_filaments(3);
     cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4, 0.4 };
     cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = false;
-    cfg.option<ConfigOptionInts>("filament_map", true)->values                  = { 2, 2 };
+    cfg.option<ConfigOptionInts>("filament_map", true)->values                  = { 1, 2, 2 };
     cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1, 6 }));
     cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "", right_rack };
     return cfg;
@@ -77,18 +77,18 @@ void check_same_list(const std::vector<NozzleInfo> &a, const std::vector<NozzleI
     }
 }
 
-// The owner's plate grouped: filament 1 pinned to the 0.8, filament 2 to the 0.6 (filament_rack_nozzle_diameter), both on the
+// The owner's plate grouped: filament 2 pinned to the 0.8, filament 3 to the 0.6 (the owner's filaments 1 and 2) (filament_rack_nozzle_diameter), both on the
 // right. Returns the grouping result over grouping_nozzle_list.
 std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> owner_plate_group(std::vector<NozzleInfo> *list_out = nullptr)
 {
     DynamicPrintConfig cfg = h2c(OWNER_RACK);
-    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0.8, 0.6 };
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0., 0.8, 0.6 };
     PrintConfig print_config;
     print_config.apply(cfg, true);
     const std::vector<NozzleInfo>   list = grouping_nozzle_list(print_config, nozzle_groups(cfg));
-    const std::vector<unsigned int> used{ 0, 1 };
+    const std::vector<unsigned int> used{ 1, 2 };
     // The engine's first answer: both on the right's first nozzle; the pins move them to their sizes.
-    std::vector<int> map{ 1, 1 };
+    std::vector<int> map{ 0, 1, 1 };
     pin_rack_nozzle_diameters(print_config, list, used, map);
     if (list_out)
         *list_out = list;
@@ -128,13 +128,13 @@ TEST_CASE("Filaments pinned to the 0.8 and the 0.6 get group ids 5 and 6", "[H2C
     const auto              group = owner_plate_group(&list);
     REQUIRE(group);
     const std::vector<int> nozzle_map = group->get_nozzle_map();
-    CHECK(nozzle_map[0] == 5);
-    CHECK(nozzle_map[1] == 6);
-    auto first = group->get_first_nozzle_for_filament(0);
+    CHECK(nozzle_map[1] == 5);
+    CHECK(nozzle_map[2] == 6);
+    auto first = group->get_first_nozzle_for_filament(1);
     REQUIRE(first);
     CHECK(first->group_id == 5);
     CHECK(first->diameter == "0.8");
-    first = group->get_first_nozzle_for_filament(1);
+    first = group->get_first_nozzle_for_filament(2);
     REQUIRE(first);
     CHECK(first->group_id == 6);
     CHECK(first->diameter == "0.6");
@@ -148,16 +148,16 @@ TEST_CASE("Filaments pinned to the 0.8 and the 0.6 get group ids 5 and 6", "[H2C
 TEST_CASE("Filaments pinned to rack slots 5 and 6 print on global slots 5 and 6", "[H2CRackGroupId]")
 {
     DynamicPrintConfig cfg = h2c(OWNER_RACK);
-    cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 5, 6 };
+    cfg.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 0, 5, 6 };
     PrintConfig print_config;
     print_config.apply(cfg, true);
     const std::vector<NozzleInfo> list = grouping_nozzle_list(print_config, nozzle_groups(cfg));
-    std::vector<int>              map{ 1, 1 };
-    pin_rack_nozzle_diameters(print_config, list, { 0, 1 }, map);
-    CHECK(map == std::vector<int>{ 5, 6 });
+    std::vector<int>              map{ 0, 1, 1 };
+    pin_rack_nozzle_diameters(print_config, list, { 0, 1, 2 }, map);
+    CHECK(map == std::vector<int>{ 0, 5, 6 });
     // The P9 slot a filament prints with names the same rack position.
-    CHECK(filament_rack_slot(print_config, 1) == 5);
-    CHECK(filament_rack_slot(print_config, 2) == 6);
+    CHECK(filament_rack_slot(print_config, 2) == 5);
+    CHECK(filament_rack_slot(print_config, 3) == 6);
 }
 
 TEST_CASE("A rack of one kind of nozzle numbers exactly as before", "[H2CRackGroupId][Identity]")
@@ -213,9 +213,9 @@ TEST_CASE("The V0 nozzle mapping request carries the physical slot ids", "[H2CRa
     REQUIRE(group);
     // As SelectMachineDialog builds it: each mapped filament with the grouping's nozzles for it.
     BambuNozzleMapping::RequestInput in;
-    in.filament_change_sequence = { 1, 0 };
-    in.mapped.push_back({ 0, "0", "0", -1, "GFA00", "000000FF" });
-    in.mapped.push_back({ 1, "0", "1", -1, "GFA00", "FFFFFFFF" });
+    in.filament_change_sequence = { 2, 1 };
+    in.mapped.push_back({ 1, "0", "0", -1, "GFA00", "000000FF" });
+    in.mapped.push_back({ 2, "0", "1", -1, "GFA00", "FFFFFFFF" });
     for (const auto &fila : in.mapped)
         for (const NozzleInfo &nz : group->get_nozzles_for_filament(fila.id))
             in.filament_nozzles.push_back({ fila.id, nz.extruder_id, nz.group_id, nz.diameter, nz.volume_type });
@@ -223,11 +223,11 @@ TEST_CASE("The V0 nozzle mapping request carries the physical slot ids", "[H2CRa
     in.preset_diameters      = { 0.4, 0.4 };
     const auto fila_info = nlohmann::json::parse(BambuNozzleMapping::build_v0_request(in))["print"]["fila_info"];
     REQUIRE(fila_info.size() == 2);
-    CHECK(fila_info[0]["id"] == 1);
+    CHECK(fila_info[0]["id"] == 2);
     CHECK(fila_info[0]["group"] == 5);
     CHECK(fila_info[0]["nozzle_d"] == "0.80");
     CHECK(fila_info[0]["direction"] == 2);
-    CHECK(fila_info[1]["id"] == 2);
+    CHECK(fila_info[1]["id"] == 3);
     CHECK(fila_info[1]["group"] == 6);
     CHECK(fila_info[1]["nozzle_d"] == "0.60");
 }
@@ -252,8 +252,8 @@ SCENARIO("A stored 3MF's slice_info names the rack slots", "[H2CRackGroupId][3mf
             store_config.option(key, true);
         }
     store_config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
-    store_config.set_key_value("filament_colour", new ConfigOptionStrings({ "#000000", "#FFFFFF" }));
-    store_config.set_key_value("filament_map", new ConfigOptionInts({ 2, 2 }));
+    store_config.set_key_value("filament_colour", new ConfigOptionStrings({ "#808080", "#000000", "#FFFFFF" }));
+    store_config.set_key_value("filament_map", new ConfigOptionInts({ 1, 2, 2 }));
     store_config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values      = { 0, 0 };
     store_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { 0, 0 };
 
@@ -265,15 +265,15 @@ SCENARIO("A stored 3MF's slice_info names the rack slots", "[H2CRackGroupId][3mf
     plate->gcode_prediction    = "1000";
     plate->gcode_weight        = "12.34";
     plate->first_layer_time    = "42";
-    plate->filament_maps       = { 2, 2 };
+    plate->filament_maps       = { 1, 2, 2 };
     plate->nozzle_group_result = *group;
     plate->objects_and_instances.emplace_back(0, 0);
     // As PartPlate fills slice_filaments_info from the grouping result.
-    for (int fid = 0; fid < 2; ++fid) {
+    for (int fid = 1; fid < 3; ++fid) {
         FilamentInfo info;
         info.id                 = fid;
         info.type               = "PLA";
-        info.color              = fid == 0 ? "#000000" : "#FFFFFF";
+        info.color              = fid == 1 ? "#000000" : "#FFFFFF";
         info.filament_id        = "GFA00";
         info.used_m             = 1.5f;
         info.used_g             = 4.5f;
