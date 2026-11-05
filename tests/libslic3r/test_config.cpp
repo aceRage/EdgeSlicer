@@ -1761,19 +1761,23 @@ TEST_CASE("normalize_fdm reads generic enum options and tolerates a missing prin
     }
 }
 
-TEST_CASE("Orca's initial_layer_travel_acceleration / _jerk names are not process options; ours are first_layer_travel_*", "[Config][ConfigDefs][Orca11674][Snap937]")
+TEST_CASE("Orca's initial_layer_travel_jerk is not a process option; initial_layer_travel_acceleration is Bambu's", "[Config][ConfigDefs][Orca11674][Snap937]")
 {
     // Orca #11674 adds first-layer travel acceleration / jerk as initial_layer_travel_acceleration and
     // initial_layer_travel_jerk. EdgeSlicer has the same feature as first_layer_travel_acceleration /
-    // first_layer_travel_jerk (Snapmaker #937 + #980, PR #497). Orca's acceleration name is also Bambu
-    // Studio's per-extruder key, carried with values such as 6000 by 74 BBL process presets and one QIDI
-    // preset: declaring it (or aliasing it) would make those presets change their first-layer travels.
-    CHECK(print_config_def.get("initial_layer_travel_acceleration") == nullptr);
+    // first_layer_travel_jerk (Snapmaker #937 + #980, PR #497). The acceleration name is also Bambu Studio's
+    // per-extruder-variant key, carried with 6000 by the BBL H2D/H2C/H3C processes and a QIDI preset. Owner
+    // decision 2026-11-04 (#854): it is ported as Bambu's per-variant key (default 0 = unset), so those presets
+    // print first-layer travels at 6000 as in Bambu Studio; Orca's jerk name stays undeclared.
+    const ConfigOptionDef *ilta = print_config_def.get("initial_layer_travel_acceleration");
+    REQUIRE(ilta != nullptr);
+    CHECK(ilta->type == coFloats);
+    CHECK(ilta->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{ 0. });
     CHECK(print_config_def.get("initial_layer_travel_jerk") == nullptr);
-    for (const char *key : {"initial_layer_travel_acceleration", "initial_layer_travel_jerk"}) {
-        INFO(key);
+    {
         const std::vector<std::string> &opts = Preset::print_options();
-        CHECK(std::find(opts.begin(), opts.end(), key) == opts.end());
+        CHECK(std::find(opts.begin(), opts.end(), "initial_layer_travel_jerk") == opts.end());
+        CHECK(std::find(opts.begin(), opts.end(), "initial_layer_travel_acceleration") != opts.end());
     }
     // Orca #11674 / #13320 are reconciled onto these keys: the same feature (float or percent of the travel
     // acceleration / jerk, in the print options), with EdgeSlicer's default 0 = "keep the initial layer value".
