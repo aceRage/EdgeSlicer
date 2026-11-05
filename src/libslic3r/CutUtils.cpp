@@ -695,7 +695,7 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
         clip.translate(lo.cast<float>());
         std::vector<TriangleMesh> pieces;
         if (!MeshBoolean::mfd::make_boolean(source, clip, pieces, "INTERSECTION") || pieces.size() != 1 || pieces.front().empty())
-            throw std::runtime_error(L("Unable to create a valid TAC Joint socket."));
+            throw std::invalid_argument(L("Unable to create a valid TAC Joint socket."));
         TriangleMesh hole(std::move(pieces.front()));
         add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
     };
