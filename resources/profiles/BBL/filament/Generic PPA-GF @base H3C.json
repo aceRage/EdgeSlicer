@@ -1,0 +1,20 @@
+{
+    "type": "filament",
+    "name": "Generic PPA-GF @base H3C",
+    "inherits": "fdm_filament_ppa_h3c",
+    "from": "system",
+    "filament_id": "GFN96",
+    "instantiation": "false",
+    "filament_max_volumetric_speed": [
+        "6"
+    ],
+    "filament_type": [
+        "PPA-GF"
+    ],
+    "filament_vendor": [
+        "Generic"
+    ],
+    "temperature_vitrification": [
+        "100"
+    ]
+}

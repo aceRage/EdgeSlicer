@@ -75,13 +75,32 @@ TEST_CASE("Strip tiles: one per physical nozzle, named like the printer", "[Nozz
         CHECK(tiles[4].reason == "Empty slot");
         CHECK(tiles[1].usable);
     }
-    SECTION("H2C without a rack in the project: R1 is the extruder's own nozzle")
+    SECTION("H2C without a rack in the project: the machine's default rack, R1..R6 all of the right nozzle's size")
     {
+        // Owner hand test 2026-11-03 (#854): no rack text means the full rack (default_rack_nozzle_text), not one nozzle.
         const auto tiles = nozzle_strip_tiles(nozzle_strip_input(printer({ 0.4, 0.6 }, { 1, 6 }), true));
         REQUIRE(tiles.size() == 7);
-        CHECK(tiles[1].label == "R1");
+        CHECK(labels_of(tiles) == std::vector<std::string>{ "L", "R1", "R2", "R3", "R4", "R5", "R6" });
+        CHECK(tiles[0].diameter == Approx(0.4));
+        for (size_t i = 1; i < 7; ++i) {
+            INFO("tile " << tiles[i].label);
+            CHECK_FALSE(tiles[i].empty());
+            CHECK(tiles[i].usable);
+            CHECK(tiles[i].diameter == Approx(0.6));
+        }
+    }
+    SECTION("H2D-like 1,1 capacity: no rack, R is the extruder's own nozzle")
+    {
+        const auto tiles = nozzle_strip_tiles(nozzle_strip_input(printer({ 0.4, 0.6 }, { 1, 1 }), true));
+        CHECK(labels_of(tiles) == std::vector<std::string>{ "L", "R" });
         CHECK(tiles[1].diameter == Approx(0.6));
-        CHECK(tiles[2].empty());
+    }
+    SECTION("H3C-like single extruder without a rack text: nine positions of its size")
+    {
+        const auto tiles = nozzle_strip_tiles(nozzle_strip_input(printer({ 0.4 }, { 9 }), false));
+        REQUIRE(tiles.size() == 9);
+        for (const NozzleStripTile &t : tiles)
+            CHECK((!t.empty() && t.diameter == Approx(0.4)));
     }
     SECTION("H3C-like single extruder with nine positions: 1..9")
     {
@@ -219,13 +238,16 @@ TEST_CASE("Strip edits write the project keys", "[NozzleStrip][Edit]")
         CHECK(edit.rack_texts[1] == "0.8,0.6:standard");
         CHECK(validate_rack_nozzle_text(edit.rack_texts[1], edit.diameters[1]).empty());
     }
-    SECTION("A rack not set up: R1 is the extruder, R2 starts the rack")
+    SECTION("A rack not set up in the project: the default rack (six of the extruder's size), R2 changes in place")
     {
         const NozzleStripInput in   = nozzle_strip_input(printer({ 0.4, 0.4 }, { 1, 6 }), true);
         const auto             tiles = nozzle_strip_tiles(in);
         NozzleStripEdit        edit = nozzle_strip_edit_start(in);
         CHECK(nozzle_strip_edit_tile(edit, in, tiles[2], 0.6, nvtStandard).empty());
-        CHECK(edit.rack_texts[1] == "0.4,0.6");
+        const std::vector<RackNozzle> rack = parse_rack_nozzles(edit.rack_texts[1]);
+        REQUIRE(rack.size() == 6);
+        for (size_t i = 0; i < rack.size(); ++i)
+            CHECK(rack[i].diameter == Approx(i == 1 ? 0.6 : 0.4));
         CHECK(edit.diameters[1] == Approx(0.4));
     }
     SECTION("More nozzles than the rack holds are refused")

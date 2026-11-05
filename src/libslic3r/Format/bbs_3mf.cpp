@@ -37,6 +37,9 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/stat.hpp>
+#include <thread>
+#include <chrono>
 #include <boost/spirit/include/karma.hpp>
 #include <boost/spirit/include/qi_int.hpp>
 #include <boost/log/trivial.hpp>
@@ -907,6 +910,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 #define L(s) (s)
 #define _(s) Slic3r::I18N::translate(s)
 
+    // Move a just-written file into place. Right after a file is closed, a virus scanner, the search
+    // indexer or a cloud-sync client (Downloads, OneDrive) can hold it for a moment and the rename
+    // fails with a sharing violation. Retry briefly on that, and always log the error code so a
+    // failure that remains can be diagnosed.
+    static void rename_into_place(const std::string &from, const std::string &to, boost::system::error_code &ec)
+    {
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            boost::filesystem::rename(from, to, ec);
+            if (!ec)
+                return;
+            BOOST_LOG_TRIVIAL(error) << "3MF rename to final name failed (attempt " << (attempt + 1) << " of 4), error "
+                                     << ec.value() << " (" << ec.category().name() << "): " << ec.message();
+            if (attempt < 3)
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
     // Base class with error messages management
     class _BBS_3MF_Base
     {
@@ -918,6 +938,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void clear_errors() { m_errors.clear(); }
 
     public:
+        std::string joined_errors() const
+        {
+            boost::unique_lock l(mutex);
+            std::string out;
+            for (const std::string &error : m_errors)
+                out += (out.empty() ? "" : "; ") + error;
+            return out;
+        }
         void log_errors()
         {
             for (const std::string& error : m_errors)
@@ -7181,9 +7209,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                           store_params.proFn,
             store_params.calibration_thumbnail_data, store_params.id_bboxes, store_params.project, store_params.export_plate_idx);
         if (result) {
-            boost::filesystem::rename(filename + ".tmp", filename, ec);
+            rename_into_place(filename + ".tmp", filename, ec);
             if (ec) {
-                add_error("Failed to rename file: " + ec.message());
+                add_error("Failed to move the finished file to " + filename + ": " + ec.message());
                 boost::filesystem::remove(filename + ".tmp", ec);
                 return false;
             }
@@ -7253,7 +7281,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         mz_zip_writer_finalize_archive(&archive);
         lock.close();
-        boost::filesystem::rename(filepath_tmp, filepath, ec);
+        rename_into_place(filepath_tmp, filepath, ec);
         return true;
     }
 
@@ -7764,7 +7792,32 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         auto end = nocomp_exts + sizeof(nocomp_exts) / sizeof(nocomp_exts[0]);
         bool nocomp = std::find_if(nocomp_exts, end, [&path_in_zip](auto & ext) { return boost::algorithm::ends_with(path_in_zip, ext); }) != end;
 #if WRITE_ZIP_LANGUAGE_ENCODING
-        bool result = mz_zip_writer_add_file(&archive, path_in_zip.c_str(), encode_path(src_file_path.c_str()).c_str(), NULL, 0, nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL);
+        // Read the source through the wide-character API. mz_zip_writer_add_file() opens it with a narrow
+        // fopen(), so the path had to go through encode_path() to the ANSI code page, which turns
+        // characters outside it (Chinese file names under a Western code page) into '?' and fails.
+        bool result = false;
+        if (FILE *src = boost::nowide::fopen(src_file_path.c_str(), "rb")) {
+            boost::nowide::stat_t st;
+            MZ_TIME_T             modified = 0;
+            const MZ_TIME_T      *p_time   = nullptr;
+            if (boost::nowide::stat(src_file_path.c_str(), &st) == 0) {
+                modified = MZ_TIME_T(st.st_mtime);
+                p_time   = &modified;
+            }
+            // Mirrors mz_zip_writer_add_file(): size by seeking, then the data is read from the stream.
+#ifdef _WIN32
+            const bool sized = _fseeki64(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) _ftelli64(src) : -1;
+            if (size >= 0 && _fseeki64(src, 0, SEEK_SET) == 0)
+#else
+            const bool sized = fseeko(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) ftello(src) : -1;
+            if (size >= 0 && fseeko(src, 0, SEEK_SET) == 0)
+#endif
+                result = mz_zip_writer_add_cfile(&archive, path_in_zip.c_str(), src, (mz_uint64) size, p_time, NULL, 0,
+                                                 nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL, NULL, 0, NULL, 0);
+            fclose(src);
+        }
 #else
         std::string native_path = encode_path(path_in_zip.c_str());
         std::string extra = ZipUnicodePathExtraField::encode(path_in_zip, native_path);
@@ -11112,8 +11165,10 @@ bool store_bbs_3mf(StoreParams& store_params)
 
     _BBS_3MF_Exporter exporter;
     bool res = exporter.save_model_to_file(store_params);
-    if (!res)
+    if (!res) {
         exporter.log_errors();
+        store_params.error = exporter.joined_errors();
+    }
 
     store_params.config          = caller_config;
     store_params.project_presets = caller_presets;

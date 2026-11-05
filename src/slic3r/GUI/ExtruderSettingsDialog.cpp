@@ -138,6 +138,10 @@ std::vector<NozzleVolumeType> nozzle_strip_type_choices()
     std::vector<NozzleVolumeType> out{ nvtStandard };
     if (FlowType::printer_supports_high_flow())
         out.push_back(nvtHighFlow);
+    // A printer that declares a TPU285 nozzle (the H3C's rack slot 8) offers it too.
+    if (PresetBundle *bundle = wxGetApp().preset_bundle)
+        if (nozzle_strip_printer_has_type(bundle->printer_config_with_project_sizes(), nvtTPU285))
+            out.push_back(nvtTPU285);
     return out;
 }
 
@@ -146,6 +150,7 @@ wxString nozzle_type_name(NozzleVolumeType type)
     switch (type) {
     case nvtHighFlow: return _L("High Flow");
     case nvtTPUHighFlow: return _L("TPU High Flow");
+    case nvtTPU285: return _L("TPU285");
     case nvtE3DHighFlow: return _L("E3D High Flow");
     default: return _L("Standard");
     }

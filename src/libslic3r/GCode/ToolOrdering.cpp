@@ -1694,6 +1694,8 @@ FilamentGroupContext build_filament_group_context(
             info.usage_type = filament_usage_types[idx];
         else
             info.usage_type = filament_usage_types.empty() ? FilamentUsageType::ModelOnly : filament_usage_types.front();
+        if (idx < print_config.filament_diameter.size())
+            info.diameter = float(print_config.filament_diameter.get_at(idx));
         context.model_info.filament_info.emplace_back(std::move(info));
     }
 
