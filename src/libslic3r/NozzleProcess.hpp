@@ -243,13 +243,6 @@ bool                            is_nozzle_region_option(const std::string &key);
 bool                            is_per_tool_process_option(const std::string &key);
 // Whether a process key is plate-wide: one value for the whole plate, edited on Plate.
 bool                            is_plate_process_option(const std::string &key);
-// Whether the Process tab greys a key on the Plate entry while the per-nozzle selector is open (owner hand test 2026-11-04,
-// H2C): only the keys bound to a nozzle's size or its own slots - the per-nozzle speeds / accelerations / jerk (P1 slots), the
-// line widths and the per-nozzle width table. Region settings (walls, seams, wipe, bridges, overhangs, ironing, flow ratios...)
-// stay editable on Plate: the Plate's value is what every tool that follows the plate prints with, and a tool with a process of
-// its own keeps that process's value (fill_nozzle_region_values). Before, every per-tool key was greyed (P8), which locked most
-// of the Quality and Strength pages.
-bool                            is_locked_on_plate(const std::string &key);
 // Every plate-wide process key, sorted (the PR's list; tests).
 std::vector<std::string>        plate_process_option_keys();
 

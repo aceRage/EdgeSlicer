@@ -4353,19 +4353,12 @@ void TabPrint::mark_plate_fields(bool on)
 
 void TabPrint::apply_tool_field_states()
 {
-    if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr || m_preset_bundle == nullptr || m_tool_panel == nullptr)
-        return;
-    // On Plate, with the selector open: the settings bound to each nozzle's size (per-nozzle speeds, line widths) are each
-    // nozzle's, not the plate's; not editable here. Owner hand test 2026-11-04 (H2C): every per-tool key used to be greyed,
-    // region settings included (walls, seams, wipe, bridges, overhangs...), which locked most of Quality and Strength. Those
-    // are the Plate's again: what every tool that follows the plate prints with (is_locked_on_plate).
-    const bool selector_open = m_tool_chips != nullptr && m_tool_chips->IsShown();
-    if (m_preset_bundle->nozzle_tool_view() >= 0 || !selector_open || !m_tool_panel->IsShown())
-        return;
-    for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
-        for (const auto& option : group->opt_map())
-            if (is_locked_on_plate(option.second.first))
-                toggle_option(option.second.first, false, option.second.second);
+    // Owner model (hand test 2026-11-04, H2C): Plate is the base layer and every setting on it is editable; a nozzle chip is an
+    // override layered over it (nozzle_tool_process: the tool's own changes over its profile, the plate's for a tool that
+    // follows the plate). P8 greyed every per-tool key on Plate while the selector was open - speeds, widths and every region
+    // setting (walls, seams, wipe, bridges, overhangs, ironing, infill, top / bottom, flow ratios) - which locked most of
+    // Quality and Strength. "Can be overridden by a chip" is not "locked on Plate": nothing is greyed here any more. The
+    // Speed page's own per-nozzle split (disable_fields_of_nozzle_process) is a different rule and stays.
 }
 
 // ---------------------------------------------------------------------------------------------
