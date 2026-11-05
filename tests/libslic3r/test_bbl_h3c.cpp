@@ -4,6 +4,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/NozzleStripModel.hpp"
 #include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -239,4 +240,44 @@ TEST_CASE("Rack machines default to their full rack", "[BblH3C][NozzleRackSlots]
         REQUIRE(racks[0].size() == 4);
         CHECK(racks[0][2].diameter == Approx(0.6));
     }
+}
+
+// Owner hand test 2026-11-04: the strip and the Extruder Settings dialog showed slot 8 as "0.4 Std" / Standard, with no
+// TPU285 in the type list. The default rack carries the type; the strip names it, offers it, and an edit keeps it.
+TEST_CASE("The H3C's TPU285 slot reaches the nozzle strip and survives an edit", "[BblH3C][NozzleStrip]")
+{
+    PresetBundle &b = h3c_bundle();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+    b.update_compatible(PresetSelectCompatibleType::Never);
+    b.set_rack_nozzle_override({});
+    const DynamicPrintConfig cfg = b.printer_config_with_project_sizes();
+
+    NozzleStripInput in = nozzle_strip_input(cfg, false);
+    // As the sidebar does: the project's flow type (Standard) for the slots that do not name their own.
+    nozzle_strip_set_volume_types(in, { nvtStandard });
+    const auto tiles = nozzle_strip_tiles(in);
+    REQUIRE(tiles.size() == 9);
+    for (size_t i = 0; i < 9; ++i) {
+        INFO("slot " << i + 1);
+        CHECK(tiles[i].volume_type == (i == 7 ? nvtTPU285 : nvtStandard));
+        CHECK(nozzle_flow_short(tiles[i].volume_type) == (i == 7 ? "TPU285" : "Std"));
+    }
+    CHECK(nozzle_chip_for(tiles, 0, 0.4).flow == "Std/TPU285");
+
+    CHECK(nozzle_strip_printer_has_type(cfg, nvtTPU285));
+    for (const char *printer : { "Bambu Lab X1 Carbon 0.4 nozzle", "Bambu Lab H2C 0.4 nozzle" }) {
+        INFO(printer);
+        REQUIRE(b.printers.select_preset_by_name(printer, true));
+        CHECK_FALSE(nozzle_strip_printer_has_type(b.printer_config_with_project_sizes(), nvtTPU285));
+    }
+
+    // Editing slot 3 to 0.6 writes the rack with slot 8 still TPU285.
+    NozzleStripEdit edit = nozzle_strip_edit_start(in);
+    REQUIRE(nozzle_strip_edit_tile(edit, in, tiles[2], 0.6, nvtStandard).empty());
+    const std::vector<RackNozzle> rack = parse_rack_nozzles(edit.rack_texts[0]);
+    REQUIRE(rack.size() == 9);
+    CHECK(rack[2].diameter == Approx(0.6));
+    CHECK(rack[7].volume_type == nvtTPU285);
+    CHECK(rack[7].volume_given);
+    CHECK(validate_rack_nozzle_text(edit.rack_texts[0], 0.4).empty());
 }
