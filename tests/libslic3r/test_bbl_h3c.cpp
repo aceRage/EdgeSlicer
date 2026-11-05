@@ -54,7 +54,7 @@ DynamicPrintConfig h3c_config(const char *printer, const char *process, const ch
     return b.full_config_secure();
 }
 
-std::string slice_cube(const DynamicPrintConfig &cfg)
+std::string slice_cube(const DynamicPrintConfig &cfg, bool bbl = true)
 {
     Print print;
     Model model;
@@ -65,7 +65,7 @@ std::string slice_cube(const DynamicPrintConfig &cfg)
     object->center_around_origin();
     object->instances.front()->set_offset(Vec3d(165., 160., 0.));
     object->ensure_on_bed();
-    print.is_BBL_printer() = true;
+    print.is_BBL_printer() = bbl;
     print.apply(model, cfg);
     print.validate();
     print.set_status_silent();
@@ -368,4 +368,24 @@ TEST_CASE("H3C first-layer travels use 6000 mm/s2 like Bambu Studio", "[BblH3C][
     const std::string first = gcode.substr(layer1, layer2 - layer1);
     CHECK(first.find("\nM204 S6000") != std::string::npos);
     CHECK(first.find("\nM204 S500") != std::string::npos);
+}
+
+// Owner decision 2026-11-05 (#854): Bambu Studio writes every spiral lift as one G3 on its printers, also when the
+// process turns arc fitting off (the H3C presets do). Ours wrote ~24 short Z-climbing G1 segments per lift there, which
+// doubled the G1 count and slowed the time estimate. Non-BBL printers keep the segmented spiral without arc fitting.
+TEST_CASE("H3C spiral lifts are G3 arcs with arc fitting off, as in Bambu Studio", "[BblH3C][SpiralLift]")
+{
+    const DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
+    REQUIRE_FALSE(cfg.opt_bool("enable_arc_fitting"));
+    auto count = [](const std::string &gcode, const char *what) {
+        size_t n = 0;
+        for (size_t pos = gcode.find(what); pos != std::string::npos; pos = gcode.find(what, pos + 1))
+            ++n;
+        return n;
+    };
+    const std::string bbl = slice_cube(cfg, true);
+    const size_t      arcs = count(bbl, "\nG3 Z") + count(bbl, "\nG2 Z");
+    CHECK(arcs > 50); // a lift on (nearly) every layer change of the 100 layers
+    const std::string other = slice_cube(cfg, false);
+    CHECK(count(other, "\nG3 Z") + count(other, "\nG2 Z") == 0);
 }
