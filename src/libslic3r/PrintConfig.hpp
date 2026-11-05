@@ -1786,6 +1786,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              travel_acceleration))
     // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
     ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
+    ((ConfigOptionFloats,              initial_layer_travel_acceleration)) // BBS 2.9.1, per process variant; 0 = unset
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 

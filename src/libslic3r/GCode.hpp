@@ -860,6 +860,11 @@ private:
     std::string _extrude(const ExtrusionPath &path, const std::string &path_description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
 
+    // The acceleration of first-layer travels: Bambu Studio 2.9.1's initial_layer_travel_acceleration when it is set
+    // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
+    // keeps the initial layer acceleration). Defined after process_flow_value.
+    double first_layer_travel_acceleration_override() const;
+
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>
     auto process_flow_value(const VectorOption &opt) const -> decltype(opt.get_at(0))

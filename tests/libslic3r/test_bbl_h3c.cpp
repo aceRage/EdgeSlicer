@@ -347,16 +347,20 @@ TEST_CASE("H3C: 2.85 mm filament goes to the TPU285 nozzle, 1.75 mm stays off it
     }
 }
 
-// Owner hand test 2026-11-04: first-layer travels on the H3C were slower than Bambu Studio's. Bambu's H3C processes set
-// initial_layer_travel_acceleration 6000; ours reads first_layer_travel_acceleration (0 = the initial layer acceleration,
-// 500), so the H3C base carries 6000 and the first layer's travels get M204 S6000 as in Bambu Studio's G-code.
+// Owner hand test 2026-11-04: first-layer travels on the H3C were slower than Bambu Studio's. Bambu's processes set
+// initial_layer_travel_acceleration (6000, one value per variant), a key we used to drop on load; first-layer travels
+// then ran at the initial layer acceleration (M204 S500). The key is ported and wins over first_layer_travel_acceleration.
 TEST_CASE("H3C first-layer travels use 6000 mm/s2 like Bambu Studio", "[BblH3C][Accel]")
 {
     const DynamicPrintConfig cfg = h3c_config("Bambu Lab H3C 0.4 nozzle", "0.20mm Standard @BBL H3C", "Bambu PLA Basic @BBL H3C");
-    const auto *opt = cfg.option<ConfigOptionFloatOrPercent>("first_layer_travel_acceleration");
+    const auto *opt = cfg.option<ConfigOptionFloats>("initial_layer_travel_acceleration");
     REQUIRE(opt != nullptr);
-    CHECK(opt->value == Approx(6000.));
-    CHECK_FALSE(opt->percent);
+    REQUIRE(opt->values.size() == 3); // Standard, High Flow, TPU285 columns
+    for (double v : opt->values)
+        CHECK(v == Approx(6000.));
+    CHECK(cfg.option<ConfigOptionFloatOrPercent>("first_layer_travel_acceleration")->value == Approx(0.));
+    // The default is unset, so printers whose presets lack the key keep their old first-layer travels.
+    CHECK(print_config_def.get("initial_layer_travel_acceleration")->get_default_value<ConfigOptionFloats>()->values == std::vector<double>{ 0. });
     const std::string gcode = slice_cube(cfg);
     const size_t layer1 = gcode.find("; CHANGE_LAYER");
     const size_t layer2 = gcode.find("; CHANGE_LAYER", layer1 + 1);

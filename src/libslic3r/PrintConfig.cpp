@@ -3849,6 +3849,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
+    // BBS 2.9.1: Bambu's first-layer travel acceleration, one value per process extruder variant (its H2D/H2C/H3C
+    // processes set 6000). It wins over first_layer_travel_acceleration when set. Bambu's default is 500; ours is 0
+    // (unset), so printers whose presets do not carry it slice as before.
+    def = this->add("initial_layer_travel_acceleration", coFloats);
+    def->label = L("Initial layer travel");
+    def->tooltip = L("The acceleration of travel of initial layer. 0 means First layer travel (above) decides.");
+    def->sidetext = u8"mm/s²";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
     def = this->add("accel_to_decel_enable", coBools);
     def->label = L("Enable accel_to_decel");
     def->tooltip = L("Klipper's max_accel_to_decel will be adjusted automatically. "
@@ -10734,6 +10745,7 @@ const std::vector<std::string>& process_flow_variant_options()
         "initial_layer_acceleration",
         "bridge_acceleration",
         "travel_acceleration",
+        "initial_layer_travel_acceleration",
         "sparse_infill_acceleration",
         "internal_solid_infill_acceleration",
         "accel_to_decel_enable",

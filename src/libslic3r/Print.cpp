@@ -683,6 +683,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "inner_wall_acceleration",
         "initial_layer_acceleration",
         "first_layer_travel_acceleration",
+        "initial_layer_travel_acceleration",
         "first_layer_travel_jerk",
         "top_surface_acceleration",
         "bridge_acceleration",
