@@ -779,6 +779,10 @@ TEST_CASE("slice_info nozzle_diameters: per extruder, the size the plate prints 
     plate.nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.8" }, { 1, "0.6" } });
     REQUIRE(plate.nozzle_group_result);
     CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.8");
+    // tests/h2c_mixedslice.gcode.3mf prints the 0.6 first (nozzle_sequence [5,6]): the extruder's first nozzle in print order.
+    plate.nozzle_change_sequence = { 2, 1 };
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    plate.nozzle_change_sequence.clear();
     // Left 0.4 for one cube, right rack 0.6 for the other.
     plate.nozzle_group_result = rack_group({ 0, 2 }, { { 0, "0.4" }, { 1, "0.4" }, { 1, "0.6" } });
     CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");

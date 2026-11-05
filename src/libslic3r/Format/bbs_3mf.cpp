@@ -11057,7 +11057,16 @@ std::string slice_info_nozzle_diameters(const PlateData &plate, const DynamicPri
         for (size_t e = 0; e < sizes.size(); ++e) {
             std::vector<MultiNozzleUtils::NozzleInfo> used = plate.nozzle_group_result->get_used_nozzles_in_extruder(int(e));
             std::vector<double>                       used_sizes;
-            std::sort(used.begin(), used.end(), [](const auto &a, const auto &b) { return a.group_id < b.group_id; });
+            // The order the plate prints them in (nozzle_change_sequence) when known, else by nozzle id.
+            auto print_order = [&plate](const MultiNozzleUtils::NozzleInfo &n) {
+                const auto &seq = plate.nozzle_change_sequence;
+                const auto  it  = std::find(seq.begin(), seq.end(), unsigned(std::max(n.group_id, 0)));
+                return it == seq.end() ? seq.size() : size_t(it - seq.begin());
+            };
+            std::sort(used.begin(), used.end(), [&](const auto &a, const auto &b) {
+                const size_t oa = print_order(a), ob = print_order(b);
+                return oa != ob ? oa < ob : a.group_id < b.group_id;
+            });
             for (const MultiNozzleUtils::NozzleInfo &nozzle : used) {
                 const double d = string_to_double_decimal_point(nozzle.diameter); // locale-independent
                 if (d > 0.)
