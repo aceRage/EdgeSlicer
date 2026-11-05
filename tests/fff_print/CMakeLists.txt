@@ -79,6 +79,7 @@ add_executable(${_TEST_NAME}_tests
 	test_trianglemesh.cpp
 	test_wipe.cpp
 	test_wipe_tower.cpp
+	test_multimaterial_segmentation.cpp
 	test_adaptive_pa.cpp
 	test_adaptive_pressure_advance.cpp
 	test_extruder_variant_arrays.cpp

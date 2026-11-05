@@ -511,7 +511,8 @@ nlohmann::json objects_json(const std::vector<ObjectSnapshot>& objects)
 
 // The options that decide how deep paint goes into the print (PrintConfig, Multimaterial page).
 static const char* const PAINT_DEPTH_KEYS[] = { "paint_depth_mode", "paint_depth_walls", "paint_depth_mm", "paint_infill_override",
-                                                "paint_depth_solid_interfaces", "mmu_segmented_region_interlocking_depth" };
+                                                "paint_depth_solid_interfaces", "mmu_segmented_region_min_area",
+                                                "mmu_segmented_region_opening_threshold", "mmu_segmented_region_interlocking_depth" };
 
 static const char* option_type_name(ConfigOptionType t)
 {

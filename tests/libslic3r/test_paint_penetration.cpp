@@ -342,6 +342,28 @@ TEST_CASE("Paint penetration 0 follows the shell exactly: same segmentation and 
     CHECK(without_config_block(a_gcode) == without_config_block(b_gcode));
 }
 
+// Orca #17265: writing the new options at their defaults must not change painted G-code.
+TEST_CASE("Explicit default min-area and opening values leave painted G-code unchanged", "[paintpen][paintdepth]")
+{
+    SlabSetup s;
+    Model     a_model, b_model;
+    Print     a, b;
+    apply_painted_slab(TOP_CAP, s, a_model, a);
+    apply_painted_slab(TOP_CAP, s, b_model, b);
+
+    DynamicPrintConfig cfg = slab_config(s);
+    cfg.option<ConfigOptionFloat>("mmu_segmented_region_min_area")->value         = 0.01;
+    cfg.option<ConfigOptionFloat>("mmu_segmented_region_opening_threshold")->value = -1.;
+    b.apply(b_model, cfg);
+    REQUIRE(b.objects().size() == 1);
+
+    const std::string a_gcode = Slic3r::Test::gcode(a);
+    const std::string b_gcode = Slic3r::Test::gcode(b);
+    REQUIRE(!a_gcode.empty());
+    CHECK(segmentation_of(*a.objects().front()) == segmentation_of(*b.objects().front()));
+    CHECK(without_config_block(a_gcode) == without_config_block(b_gcode));
+}
+
 TEST_CASE("Top paint penetration sets the painted depth of a top in layers, whatever the shell", "[paintpen]")
 {
     for (const PaintDepthMode mode : { pdmUnlimited, pdmWalls }) {
