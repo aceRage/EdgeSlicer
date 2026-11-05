@@ -333,13 +333,16 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: legacy zero max width maps t
 }
 
 // Orca #17265: the previous hardcoded filter was sqr(scale_(0.1f)) = 0.01 mm^2 and an automatic
-// opening radius. Defaults must reproduce that exactly so G-code is unchanged when the options
-// are left alone.
+// opening radius. Production uses the double 0.01 / sqr(SCALING_FACTOR) (= 1e10 scaled units).
+// The old float conversion is ~3e-8 relative away (10000000298 vs 10000000000); 1e-6 abs is
+// tighter than that rounding. Gate G-code stayed identical on the default, which is the
+// evidence the double is the value in use.
 TEST_CASE("mmu_segmented_region_min_area / opening_threshold defaults match the previous hardcoded filters", "[paintdepth][MultiMaterialSegmentation]")
 {
     const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
     CHECK_THAT(defaults.opt_float("mmu_segmented_region_min_area"), WithinAbs(0.01, 1e-12));
     CHECK_THAT(defaults.opt_float("mmu_segmented_region_opening_threshold"), WithinAbs(-1., 1e-12));
-    CHECK_THAT(defaults.opt_float("mmu_segmented_region_min_area") / Slic3r::sqr(SCALING_FACTOR),
-               WithinAbs(Slic3r::sqr(scale_(0.1f)), 1e-6));
+    const double scaled_now = defaults.opt_float("mmu_segmented_region_min_area") / Slic3r::sqr(SCALING_FACTOR);
+    const double scaled_old = Slic3r::sqr(scale_(0.1f));
+    CHECK(std::abs(scaled_now - scaled_old) / scaled_old < 1e-7);
 }
