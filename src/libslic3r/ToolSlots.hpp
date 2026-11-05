@@ -88,8 +88,15 @@ struct RackNozzle
 
 // "0.4,0.4,0.2:high_flow" -> its nozzles; entries that are not a positive number are skipped.
 std::vector<RackNozzle> parse_rack_nozzles(const std::string &text);
-// The rack nozzles of each extruder (an empty list for an extruder without declared rack diameters).
+// The rack nozzles of each extruder (an empty list for an extruder without a rack). The project's rack text
+// (extruder_rack_nozzle_override) wins, then the printer preset's (extruder_rack_nozzle_diameter), then the machine's
+// default rack (default_rack_nozzle_text).
 std::vector<std::vector<RackNozzle>> extruder_rack_nozzles(const ConfigBase &config);
+// The rack an extruder has when neither the project nor the printer preset sets one: extruder_max_nozzle_count slots of
+// the extruder's nozzle size ("0.4,0.4,...,0.4:tpu285,0.4" on the H3C 0.4, six 0.4 on the H2C right), the per-slot
+// types from a default_nozzle_volume_type list that has one entry per slot (Bambu Studio 2.9.1). Empty for an extruder
+// without a rack (count < 2) or a Hybrid one (that rack comes from extruder_nozzle_stats).
+std::string default_rack_nozzle_text(const ConfigBase &config, size_t extruder);
 // Whether some extruder's rack holds nozzles of more than one diameter.
 bool has_mixed_rack_diameters(const ConfigBase &config);
 // P5 (the Printer tab's rack field): why one extruder's extruder_rack_nozzle_diameter text is wrong, or empty when
@@ -127,6 +134,10 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
 // Configuration errors of the rack keys (an extruder's nozzle_diameter missing from its rack, a pin no rack nozzle
 // has, a slot pin past the end of the rack), or empty.
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
+// Bambu Studio 2.9.1: on a printer with the TPU285 path (H3C), a used 2.85 mm filament needs a TPU285 nozzle on its
+// extruder and a 1.75 mm one a nozzle that is not TPU285. "The <type> nozzle can not print <filament>." or empty.
+// Part of validate_rack_nozzle_diameters.
+std::string validate_tpu285_nozzles(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
 
 // ---- P9: rack slots as tools (H2C) -------------------------------------------------------------------------------
 //

@@ -119,13 +119,17 @@ TEST_CASE("Rack size process choices are stored by tool id; bad entries are drop
 
 TEST_CASE("The selector groups an extruder's rack by nozzle size", "[NozzleRackSlots][Entries]")
 {
-    SECTION("no rack: one entry per extruder, as in P8")
+    SECTION("no rack text: the machine's default rack (six of the right nozzle's size), so one entry per extruder, as in P8")
     {
         const std::vector<NozzleToolEntry> entries = nozzle_tool_entries(h2c(""));
         REQUIRE(entries.size() == 2);
         CHECK(entries[1].slot == 0);
         CHECK(nozzle_slot_tools(h2c("")).empty());
-        CHECK(rack_slot_count(h2c(""), 1) == 0);
+        CHECK(rack_slot_count(h2c(""), 1) == 6);
+        CHECK(rack_slot_count(h2c(""), 0) == 0);
+        DynamicPrintConfig no_rack = h2c("");
+        no_rack.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1, 1 }));
+        CHECK(rack_slot_count(no_rack, 1) == 0);
     }
     SECTION("a rack of one size is the extruder itself: Right 0.4, nothing more")
     {
@@ -214,6 +218,7 @@ TEST_CASE("A filament pinned to a rack slot prints with that slot's size and pro
     CHECK(has(error, "slot 7"));
     // Without a rack, slot pins do nothing.
     DynamicPrintConfig plain = h2c("");
+    plain.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1, 1 }));
     plain.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 0, 2, 3 };
     CHECK(filament_rack_slot(plain, 2) == 0);
     CHECK(nozzle_diameter_for_filament(static_cast<const ConfigBase &>(plain), 3) == Approx(0.4));
@@ -558,7 +563,11 @@ TEST_CASE("H2C: rack sizes are tools of the preset bundle with their own picked 
         CHECK(counts->values[1] > 1);
         const auto racks = extruder_rack_nozzles(sized);
         REQUIRE(racks.size() == 2);
-        CHECK(racks[1].empty());
+        // Owner hand test 2026-11-03: with no rack text the right extruder shows its full rack, six of its nozzle size.
+        CHECK(racks[0].empty());
+        REQUIRE(racks[1].size() == 6);
+        for (const RackNozzle &n : racks[1])
+            CHECK(n.diameter == Approx(0.4));
         for (size_t e = 0; e < 2; ++e) {
             CHECK(b.rack_nozzle_override(e).empty());
             CHECK(validate_rack_nozzle_text(b.rack_nozzle_override(e), b.effective_nozzle_diameters()[e]).empty());

@@ -102,6 +102,8 @@ NozzleVolumeType parse_nozzle_volume(std::string word, bool &ok)
         return nvtHighFlow;
     if (word == "tpu_high_flow")
         return nvtTPUHighFlow;
+    if (word == "tpu285")
+        return nvtTPU285;
     if (word == "e3d_high_flow")
         return nvtE3DHighFlow;
     ok = false;
@@ -114,6 +116,7 @@ const char *nozzle_volume_word(NozzleVolumeType type)
     case nvtHighFlow: return "high_flow";
     case nvtHybrid: return "hybrid";
     case nvtTPUHighFlow: return "tpu_high_flow";
+    case nvtTPU285: return "tpu285";
     case nvtE3DHighFlow: return "e3d_high_flow";
     default: return "standard";
     }
@@ -143,9 +146,10 @@ std::string rack_text_of(const ConfigBase &config, size_t e)
         if (e < own->values.size() && !trimmed(own->values[e]).empty())
             return own->values[e];
     if (const auto *opt = opt_of<ConfigOptionStrings>(config, "extruder_rack_nozzle_diameter"))
-        if (e < opt->values.size())
+        if (e < opt->values.size() && !trimmed(opt->values[e]).empty())
             return opt->values[e];
-    return std::string();
+    // Owner hand test 2026-11-03: neither sets a rack, so the machine's own (Bambu Studio shows its full rack).
+    return default_rack_nozzle_text(config, e);
 }
 
 bool any_rack_text(const ConfigBase &config)
@@ -155,10 +159,56 @@ bool any_rack_text(const ConfigBase &config)
             for (const std::string &text : opt->values)
                 if (!trimmed(text).empty())
                     return true;
+    for (size_t e = 0; e < floats_of(config, "nozzle_diameter").size(); ++e)
+        if (!default_rack_nozzle_text(config, e).empty())
+            return true;
     return false;
 }
 
 } // namespace
+
+std::string default_rack_nozzle_text(const ConfigBase &config, size_t e)
+{
+    // Only a machine that declares a rack (extruder_max_nozzle_count > 1: H2C right 6, H3C 9).
+    std::vector<int> counts;
+    if (const auto *opt = opt_of<ConfigOptionIntsNullable>(config, "extruder_max_nozzle_count")) {
+        for (size_t i = 0; i < opt->values.size(); ++i)
+            counts.push_back(opt->is_nil(i) ? 1 : std::max(1, opt->values[i]));
+    } else if (const auto *opt = opt_of<ConfigOptionInts>(config, "extruder_max_nozzle_count")) {
+        for (int c : opt->values)
+            counts.push_back(std::max(1, c));
+    }
+    if (e >= counts.size() || counts[e] < 2)
+        return std::string();
+    // A Hybrid extruder keeps its mixed rack from extruder_nozzle_stats, as before.
+    if (extruder_volume_type(config, e) == nvtHybrid)
+        return std::string();
+    const std::vector<double> sizes = effective_nozzle_diameters(config);
+    if (e >= sizes.size() || !(sizes[e] > 0.))
+        return std::string();
+    // Bambu Studio 2.9.1 default_nozzle_volume_slots: a default_nozzle_volume_type list as long as all slots of all extruders
+    // holds one type per slot (H3C: slot 8 TPU285); a shorter one holds one per extruder, which the extruder's
+    // nozzle_volume_type already gives (unannotated slots follow it).
+    std::vector<int> slot_types;
+    if (const auto *types = opt_of<ConfigOptionEnumsGeneric>(config, "default_nozzle_volume_type")) {
+        size_t total = 0, first = 0;
+        for (size_t i = 0; i < counts.size(); ++i) {
+            if (i == e)
+                first = total;
+            total += size_t(counts[i]);
+        }
+        if (types->values.size() == total && total > counts.size())
+            slot_types.assign(types->values.begin() + first, types->values.begin() + first + counts[e]);
+    }
+    const std::string size = format_nozzle_diameter_word(sizes[e]);
+    std::string       text;
+    for (int slot = 0; slot < counts[e]; ++slot) {
+        text += (text.empty() ? "" : ",") + size;
+        if (size_t(slot) < slot_types.size() && slot_types[slot] != int(nvtStandard) && slot_types[slot] != int(nvtHybrid))
+            text += std::string(":") + nozzle_volume_word(NozzleVolumeType(slot_types[slot]));
+    }
+    return text;
+}
 
 bool same_nozzle_diameter(double a, double b) { return std::abs(a - b) < 0.001; }
 
@@ -328,7 +378,7 @@ std::string validate_rack_nozzle_text(const std::string &text, double extruder_d
             bool ok = false;
             parse_nozzle_volume(trimmed(entry.substr(colon + 1)), ok);
             if (!ok)
-                return "\"" + entry + "\": the flow type after \":\" must be standard, high_flow, tpu_high_flow or e3d_high_flow";
+                return "\"" + entry + "\": the flow type after \":\" must be standard, high_flow, tpu_high_flow, tpu285 or e3d_high_flow";
         }
         any = true;
         has_own |= extruder_diameter > 0. && same_nozzle_diameter(d, extruder_diameter);
@@ -569,6 +619,43 @@ std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std:
         if (e >= racks.size() || size_t(slot) > racks[e].size())
             return "Filament " + std::to_string(f + 1) + " is set to print on " + rack_slot_name(config, e, slot) + ", but that rack has " +
                    std::to_string(e < racks.size() ? racks[e].size() : 0) + " nozzles.";
+    }
+    if (std::string error = validate_tpu285_nozzles(config, used_filaments); !error.empty())
+        return error;
+    return {};
+}
+
+std::string validate_tpu285_nozzles(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)
+{
+    // Bambu Studio 2.9.1 (FilamentGroup filament_diameter_matches_nozzle_volume, PartPlate::check_filament_printable /
+    // check_missing_tpu285_nozzle): a 2.85 mm filament prints only on a TPU285 nozzle, a 1.75 mm one never on it. Only a
+    // printer that has the TPU285 path (the H3C) is checked; elsewhere a 2.85 mm filament is an ordinary filament.
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    bool machine_has_tpu285 = std::any_of(config.default_nozzle_volume_type.values.begin(), config.default_nozzle_volume_type.values.end(),
+                                          [](int v) { return v == int(nvtTPU285); });
+    for (const std::vector<RackNozzle> &rack : racks)
+        machine_has_tpu285 |= std::any_of(rack.begin(), rack.end(), [](const RackNozzle &n) { return n.volume_type == nvtTPU285; });
+    if (!machine_has_tpu285)
+        return {};
+    for (unsigned int f : used_filaments) {
+        if (f >= config.filament_diameter.size())
+            continue;
+        const double d = config.filament_diameter.get_at(f);
+        if (!(d > 0.))
+            continue;
+        const bool   needs_285 = d > 2.5;
+        const size_t e         = physical_extruder_for_filament(config, f + 1);
+        std::vector<NozzleVolumeType> types;
+        if (e < racks.size() && !racks[e].empty())
+            for (const RackNozzle &n : racks[e])
+                types.push_back(n.volume_type);
+        else
+            types.push_back(extruder_volume_type(config, e));
+        if (std::any_of(types.begin(), types.end(), [needs_285](NozzleVolumeType t) { return (t == nvtTPU285) == needs_285; }))
+            continue;
+        // Bambu's text: "The %s nozzle can not print %s." (it names the preset; the print config has its number and type).
+        const std::string name = "filament " + std::to_string(f + 1) + " (" + format_diameter_to_str(d) + " mm " + config.filament_type.get_at(f) + ")";
+        return "The " + get_nozzle_volume_type_string(types.front()) + " nozzle can not print " + name + ".";
     }
     return {};
 }
@@ -1083,7 +1170,7 @@ bool is_filament_nozzle_size_key(const std::string &key)
     // The spool's and the bed's values, not the nozzle's.
     static const std::set<std::string> not_per_nozzle { "filament_cost", "filament_density", "filament_soluble", "filament_is_support",
                                                         "filament_shrink", "filament_shrinkage_compensation_z", "required_nozzle_HRC",
-                                                        "temperature_vitrification", "chamber_temperature", "filament_flow_step_size",
+                                                        "temperature_vitrification", "fins_extrude_safe_temp", "chamber_temperature", "filament_flow_step_size",
                                                         "pellet_flow_coefficient", "filament_change_length", "idle_temperature" };
     if (not_per_nozzle.count(key) > 0)
         return false;

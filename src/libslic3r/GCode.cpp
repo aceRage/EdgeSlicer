@@ -4118,6 +4118,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             // result, so single-nozzle machines are unaffected.
             int shim_nozzle_id = 0;
             int shim_physical_extruder = 0;
+            int shim_no_support_nozzle_id = 0;
             auto group_result_g = print.get_layered_nozzle_group_result();
             if (group_result_g && has_nozzle_rack(m_config)) {
                 auto diams = get_nozzle_diameters_by_nozzle_id(group_result_g.get());
@@ -4129,14 +4130,28 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (first->extruder_id >= 0 && first->extruder_id < int(m_config.physical_extruder_map.size()))
                         shim_physical_extruder = m_config.physical_extruder_map.get_at(first->extruder_id);
                 }
+                // BBS 2.9.1 (H3C start G-code): initial_no_support_nozzle_id = logical nozzle (group id) of the
+                // first non-support filament, the index into nozzle_diameter_at_nozzle_id.
+                if (initial_non_support_extruder_id != (unsigned int) -1)
+                    if (auto first_ns = group_result_g->get_first_nozzle_for_filament(int(initial_non_support_extruder_id)))
+                        shim_no_support_nozzle_id = std::max(0, first_ns->group_id);
             } else {
                 this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionInts(nozzle_vts));
             }
             this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diams));
+            // BBS 2.9.1 initial_layer_travel_acceleration (H3C change_filament_gcode: M204 S[...] on the first layer)
+            // is a per-variant vector; the template reads it as a scalar, so publish the value travel_to() uses on the
+            // first layer (no override: the initial layer acceleration).
+            {
+                const double fl_travel   = this->first_layer_travel_acceleration_override();
+                const double fl_accel    = fl_travel > 0 ? fl_travel : double(this->process_flow_value(m_config.initial_layer_acceleration));
+                this->placeholder_parser().set("initial_layer_travel_acceleration", new ConfigOptionFloat(std::floor(fl_accel + 0.5)));
+            }
 
             this->placeholder_parser().set("current_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("next_nozzle_id",                 new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("initial_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("initial_no_support_nozzle_id",   new ConfigOptionInt(shim_no_support_nozzle_id));
             this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));
@@ -7562,7 +7577,7 @@ LayerResult GCode::process_layer(const Print& print,
         // Snapmaker #937 / #980: reset the travel acceleration and jerk at the second layer when a first-layer travel
         // override was in effect, resolved the same way as in travel_to(). With the default 0 nothing is written here.
         if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0 &&
-            m_config.first_layer_travel_acceleration.get_abs_value(this->process_flow_value(m_config.travel_acceleration)) > 0) {
+            this->first_layer_travel_acceleration_override() > 0) {
             gcode += m_writer.set_travel_acceleration((unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5));
         }
         if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0 &&
@@ -12137,6 +12152,14 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 }
 
 // This method accepts &point in print coordinates.
+double GCode::first_layer_travel_acceleration_override() const
+{
+    const double bambu = this->process_flow_value(m_config.initial_layer_travel_acceleration);
+    if (bambu > 0)
+        return bambu;
+    return m_config.first_layer_travel_acceleration.get_abs_value(this->process_flow_value(m_config.travel_acceleration));
+}
+
 std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z /* = DBL_MAX*/)
 {
     /*  Define the travel move as a line between current position and the taget point.
@@ -12160,8 +12183,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         // Snapmaker #937 / #980: a first-layer travel acceleration / jerk overrides the initial layer value for
         // travels. A percentage resolves over the effective (flow-variant) travel value, the one written on later
         // layers, not over the raw first entry. 0 (the default) keeps the initial layer value, as before.
-        const double first_layer_travel_accel = m_config.first_layer_travel_acceleration.get_abs_value(
-            this->process_flow_value(m_config.travel_acceleration));
+        // Bambu Studio 2.9.1's initial_layer_travel_acceleration (H2D/H2C/H3C processes: 6000) wins when set.
+        const double first_layer_travel_accel = this->first_layer_travel_acceleration_override();
         const double first_layer_accel = first_layer_travel_accel > 0 ? first_layer_travel_accel :
                                                                         double(this->process_flow_value(m_config.initial_layer_acceleration));
         if (this->process_flow_value(m_config.default_acceleration) > 0 && first_layer_accel > 0) {

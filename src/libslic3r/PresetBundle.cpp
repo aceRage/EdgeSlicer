@@ -6328,6 +6328,13 @@ bool print_carry_is_printer_coupled(const std::string &key)
            boost::starts_with(key, "wipe_tower_") || boost::starts_with(key, "prime_tower_");
 }
 
+bool print_carry_is_motion_key(const std::string &key)
+{
+    static const std::set<std::string> travel { "travel_speed", "travel_speed_z", "initial_layer_travel_speed", "travel_jerk",
+                                                "first_layer_travel_jerk" };
+    return boost::ends_with(key, "_acceleration") || travel.count(key) > 0;
+}
+
 bool print_carry_is_nozzle_geometry(const std::string &key)
 {
     return s_print_carry_nozzle_geometry_keys.count(key) > 0 || boost::ends_with(key, "line_width");
@@ -6527,7 +6534,8 @@ static const std::vector<PrintCarryConflict> &print_carry_conflicts()
 }
 
 std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const DynamicPrintConfig &src, bool same_nozzle_size,
-                                              const DynamicPrintConfig *printer, std::map<std::string, std::string> *kept)
+                                              const DynamicPrintConfig *printer, std::map<std::string, std::string> *kept,
+                                              bool same_printer_model)
 {
     const DynamicPrintConfig matched = dst;
     std::vector<std::string> changed;
@@ -6542,6 +6550,10 @@ std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const Dyn
             continue;
         if (print_carry_is_printer_coupled(key)) {
             keep(key, "printer-coupled (denylist)");
+            continue;
+        }
+        if (!same_printer_model && print_carry_is_motion_key(key)) {
+            keep(key, "printer-coupled (acceleration / travel, printer model changed)");
             continue;
         }
         if (!same_nozzle_size && print_carry_is_nozzle_geometry(key)) {
@@ -6640,6 +6652,8 @@ PrintSettingsCarry PresetBundle::capture_print_settings_carry() const
         return carry;
     carry.from_preset  = this->prints.get_edited_preset().name;
     carry.from_printer = printer.name;
+    if (const auto *model = printer.config.option<ConfigOptionString>("printer_model"))
+        carry.from_printer_model = model->value;
     // Still on the preset a previous carry was applied onto: the values came from further back.
     carry.origin_preset = !m_print_carry_origin.empty() && m_print_carry_applied_onto == carry.from_preset ? m_print_carry_origin :
                                                                                                              carry.from_preset;
@@ -6689,10 +6703,12 @@ std::vector<std::string> PresetBundle::apply_print_settings_carry(const PrintSet
     if (!carry.from_printer.empty())
         m_print_carry_last_by_printer[carry.from_printer] = carry.from_preset;
     const bool same_nozzle_size = print_carry_same_nozzle_size(carry.nozzle_diameters, print_carry_nozzles(printer));
+    const auto *model_opt        = printer.config.option<ConfigOptionString>("printer_model");
+    const bool  same_model       = carry.from_printer_model.empty() || (model_opt != nullptr && model_opt->value == carry.from_printer_model);
     std::map<std::string, std::string>  kept_local;
     std::map<std::string, std::string> &why     = kept != nullptr ? *kept : kept_local;
     std::vector<std::string>            changed = carry_print_settings(this->prints.get_edited_preset().config, carry.config, same_nozzle_size,
-                                                                       &printer.config, &why);
+                                                                       &printer.config, &why, same_model);
     this->prints.update_dirty();
     m_print_carry_origin       = carry.origin_preset;
     m_print_carry_applied_onto = this->prints.get_edited_preset().name;

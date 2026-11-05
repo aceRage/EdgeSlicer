@@ -3712,6 +3712,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("internal_solid_infill_acceleration", "speed_settings_acceleration#internal-solid-infill");
         optgroup->append_single_option_line("initial_layer_acceleration", "speed_settings_acceleration#initial-layer");
         optgroup->append_single_option_line("first_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
+        optgroup->append_single_option_line("initial_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
         optgroup->append_single_option_line("top_surface_acceleration", "speed_settings_acceleration#top-surface");
         optgroup->append_single_option_line("travel_acceleration", "speed_settings_acceleration#travel");
         optgroup->append_single_option_line("accel_to_decel_enable", "speed_settings_acceleration");
@@ -5918,6 +5919,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_z_offset");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
+        optgroup->append_single_option_line("fins_extrude_safe_temp");
         // filament_is_high_temperature is controlled by preset data, not user-facing
         optgroup->append_single_option_line("idle_temperature");
         // BBS: Bambu Studio shows its wipe-tower cooling (a Develop-mode option) in this group, next to
