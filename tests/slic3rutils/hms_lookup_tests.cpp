@@ -64,12 +64,17 @@ const char* const FIXTURE_TABLE = R"({
 struct FixtureTables
 {
     fs::path    dir;
-    std::string old_data_dir = Slic3r::data_dir();
+    std::string old_data_dir      = Slic3r::data_dir();
+    std::string old_resources_dir = Slic3r::resources_dir();
     explicit FixtureTables(const std::string& series)
     {
         dir = fs::temp_directory_path() / fs::unique_path("snorca-hms-%%%%-%%%%");
         fs::create_directories(dir / "hms");
         Slic3r::set_data_dir(dir.string());
+        // An empty resources folder, so the cross-model fallback sees only the fixture tables
+        // whatever another test left resources_dir() pointing at.
+        fs::create_directories(dir / "res");
+        Slic3r::set_resources_dir((dir / "res").string());
         const std::string name = HMSQuery::get_hms_file(QUERY_HMS_INFO, "en", series);
         std::ofstream(( dir / "hms" / name).string().c_str()) << FIXTURE_TABLE;
         const std::string de = HMSQuery::get_hms_file(QUERY_HMS_INFO, "de", series);
@@ -78,6 +83,7 @@ struct FixtureTables
     ~FixtureTables()
     {
         Slic3r::set_data_dir(old_data_dir);
+        Slic3r::set_resources_dir(old_resources_dir);
         boost::system::error_code ig;
         fs::remove_all(dir, ig);
     }
@@ -232,14 +238,108 @@ TEST_CASE("an empty code describes nothing", "[HmsLookup]")
 
 TEST_CASE("a series with no table of its own still names the code", "[HmsLookup]")
 {
-    // 094 is the H2D; the fixture only wrote 31B. The surfaces must degrade to the code and a
-    // hint rather than to an empty string, which is what left the hub event saying only
-    // "X reported an error" with nothing after it.
+    // 094 is the H2D; the fixture only wrote 31B, and no table has this code. The surfaces must
+    // degrade to the code and a hint rather than to an empty string, which is what left the hub
+    // event saying only "X reported an error" with nothing after it.
+    FixtureTables tables("31B");
+    HMSQuery      q;
+    const wxString described = q.describe_error("094A0123456789", "0C0001000002FFFF", /*local_only*/ true);
+    CHECK(described.StartsWith("Printer error 0C00 0100 0002 FFFF"));
+}
+
+// ---- the cross-model fallback (2026-11-05) ----
+//
+// An A1 refused a new job with print_error 05024007 and the dialog said only "Printer error 0502
+// 4007 - see the printer screen...". Bambu's A1 table (serial prefix 039) - shipped or live - has
+// that code with an empty description, as do six of the seven other series; only the H2D's (094)
+// says "Failed to start a new task: filament loading/unloading not completed." The codes mean the
+// same on every model, so a miss in the printer's own table is answered from another model's.
+
+TEST_CASE("a series with no table of its own is answered from another model's table", "[HmsLookup]")
+{
     FixtureTables tables("31B");
     HMSQuery      q;
     const wxString described = q.describe_error("094A0123456789", "0C00010000020014", /*local_only*/ true);
-    CHECK(described.StartsWith("Printer error 0C00 0100 0002 0014"));
+    CHECK(described.StartsWith("Nozzle Camera is malfunctioning"));
+    CHECK(described.EndsWith("(0C00 0100 0002 0014)"));
+
+    // A print_error code (device_error) the same way.
+    CHECK(q.describe_error("039A0123456789", "0500808F", true).StartsWith("Nozzle camera lens is dirty"));
 }
+
+TEST_CASE("an empty description in the printer's own table is filled from another model's", "[HmsLookup]")
+{
+    // The A1's own table: the code is there, with "intro": "".
+    FixtureTables tables("094");
+    const fs::path a1 = tables.dir / "hms" / HMSQuery::get_hms_file(QUERY_HMS_INFO, "en", "039");
+    std::ofstream(a1.string().c_str()) << R"({"result":0,"ver":1,"data":{"device_error":{"en":[
+        {"ecode":"05024007","intro":""}]},"device_hms":{"en":[]}}})";
+    const fs::path h2d = tables.dir / "hms" / HMSQuery::get_hms_file(QUERY_HMS_INFO, "en", "094");
+    std::ofstream(h2d.string().c_str()) << R"({"result":0,"ver":1,"data":{"device_error":{"en":[
+        {"ecode":"05024007","intro":"Failed to start a new task: filament loading/unloading not completed."}]},
+        "device_hms":{"en":[]}}})";
+
+    HMSQuery q;
+    // The own-table lookup still says nothing - the fallback is describe_error's, not the table's.
+    wxString own;
+    CHECK_FALSE(q.query_print_error_msg_local("039A0123456789", 0x05024007, "en", own));
+    CHECK(q.describe_print_error("039A0123456789", 0x05024007, /*local_only*/ true) ==
+          "Failed to start a new task: filament loading/unloading not completed. (0502 4007)");
+}
+
+TEST_CASE("the cross-model fallback prefers the app's language, then English", "[HmsLookup]")
+{
+    FixtureTables tables("31B"); // en and de copies of the fixture, both under 31B
+    HMSQuery      q;
+    CHECK(q.find_in_other_tables("0C00010000020014", "de") == "Die Duesenkamera funktioniert nicht richtig.");
+    // de has no 0500060000020032; English answers it.
+    CHECK(q.find_in_other_tables("0500060000020032", "de").StartsWith("Nozzle Camera is not connected"));
+    // A language with no tables at all still reaches English.
+    CHECK(q.find_in_other_tables("0500808F", "sv").StartsWith("Nozzle camera lens is dirty"));
+    // An empty description is never an answer, and an unknown code is none either.
+    CHECK(q.find_in_other_tables("0C00010000020015", "en").IsEmpty());
+    CHECK(q.find_in_other_tables("DEADBEEF", "en").IsEmpty());
+}
+
+#ifdef SLIC3R_TEST_RESOURCES_DIR
+TEST_CASE("the owner's A1 report resolves against the shipped tables", "[HmsLookup]")
+{
+    // Against resources/hms as shipped, with a scratch data dir so nothing downloaded interferes.
+    struct Dirs
+    {
+        std::string old_res = Slic3r::resources_dir();
+        std::string old_data = Slic3r::data_dir();
+        fs::path    scratch  = fs::temp_directory_path() / fs::unique_path("snorca-hms-res-%%%%-%%%%");
+        Dirs()
+        {
+            fs::create_directories(scratch);
+            Slic3r::set_resources_dir(SLIC3R_TEST_RESOURCES_DIR);
+            Slic3r::set_data_dir(scratch.string());
+        }
+        ~Dirs()
+        {
+            Slic3r::set_resources_dir(old_res);
+            Slic3r::set_data_dir(old_data);
+            boost::system::error_code ig;
+            fs::remove_all(scratch, ig);
+        }
+    } dirs;
+
+    // Every Bambu serial prefix in resources/printers has a shipped English table, A1 and A1 mini
+    // included (they had none before this change).
+    for (const char* series : {"00M", "00W", "01S", "01P", "03W", "030", "039", "093", "094", "20P", "22E", "239", "26A", "31B", "32X"}) {
+        INFO(series);
+        CHECK(fs::exists(fs::path(SLIC3R_TEST_RESOURCES_DIR) / "hms" / HMSQuery::get_hms_file(QUERY_HMS_INFO, "en", series)));
+        CHECK(fs::exists(fs::path(SLIC3R_TEST_RESOURCES_DIR) / "hms" / HMSQuery::get_hms_file(QUERY_HMS_ACTION, "en", series)));
+    }
+
+    HMSQuery q;
+    const wxString a1 = q.describe_print_error("039A0123456789", 0x05024007, /*local_only*/ true);
+    CHECK(a1.StartsWith("Failed to start a new task"));
+    CHECK(a1.EndsWith("(0502 4007)"));
+    CHECK(q.describe_print_error("030A0123456789", 0x05024007, true).StartsWith("Failed to start a new task"));
+}
+#endif
 
 // ---- overrides: EdgeSlicer's own descriptions, ahead of Bambu's tables ----
 //

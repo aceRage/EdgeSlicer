@@ -735,6 +735,8 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
+    // Test-only entry point to compute_adaptive_merge_groups(), which has no production caller in this PR.
+    friend struct AdaptiveMergePlanAccess;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
@@ -757,6 +759,11 @@ public:
 
 private:
     void make_perimeters();
+    // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
+    // Decides which layers each wall region keeps and records the decision in
+    // LayerRegion::adaptive_merge_patches. It mutates LayerRegion::slices, so it is only safe to call from the
+    // perimeter step; until the extrusion half lands it has no production caller and G-code is unchanged.
+    void compute_adaptive_merge_groups();
     void prepare_infill();
     void infill();
     void ironing();
@@ -1288,6 +1295,19 @@ public:
     std::vector<unsigned int> object_extruders() const;
     std::vector<unsigned int> support_material_extruders() const;
     std::vector<unsigned int> extruders(bool conside_custom_gcode = false) const;
+    // Mixed-layer-height band merge. True when the plate prints with more than one nozzle diameter, and from
+    // then on the band merge is automatic: there is deliberately no config flag and no UI toggle (Lance's
+    // decision), so this detection is the only gate. BambuStudio's version also checked its
+    // multi_nozzle_diameter_mode project key; that check is dropped here, as is the second clause that compared
+    // used filaments against a separate layer-grid nozzle. Edge has no such nozzle:
+    // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
+    // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
+    bool                uses_multiple_nozzle_diameters() const;
+    // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
+    // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
+    // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
+    // reference nozzle is collected from the object being planned, not from here.
+    void                used_printing_filaments(std::vector<unsigned int> &filaments) const;
     // On-demand evaluation vs filament_hot_bed_nozzles.json (calls extruders(true) once internally).
     void                filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,
                                                      bool& out_gesp,

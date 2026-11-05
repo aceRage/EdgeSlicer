@@ -1,6 +1,7 @@
 #include "AdaptiveLayerMerge.hpp"
 
 #include "ClipperUtils.hpp"
+#include "Layer.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
 
@@ -62,6 +63,33 @@ ExPolygons adaptive_printable_core(ExPolygons pieces, double nozzle_diameter)
     return adaptive_printable_pieces(std::move(core), nozzle_diameter);
 }
 
+// BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.cpp. The plan records which steps a region gives up
+// as an explicit suppressed footprint, because recovering that from the raw slices afterwards would also report
+// the hairline by which every step inside a band differs from the band's anchor contour, and those are not holes.
+ExPolygons adaptive_suppressed_orphan_area(const Layer &layer)
+{
+    Polygons suppressed;
+    Polygons extruded;
+    for (const LayerRegion *layerm : layer.regions()) {
+        if (layerm->adaptive_merge_patches.empty()) {
+            polygons_append(extruded, to_polygons(layerm->slices.surfaces));
+            continue;
+        }
+        for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches) {
+            // Only an orphan carries an explicit footprint. The whole-region marker of a band is left out: the
+            // region's material there lies under another extrusion, which is what stands on that step.
+            if (patch.group_top && patch.area().empty() && patch.has_suppressed_area())
+                polygons_append(suppressed, to_polygons(patch.suppressed_area()));
+            else
+                polygons_append(extruded, to_polygons(patch.area()));
+        }
+    }
+    if (suppressed.empty())
+        return {};
+    // A slab spanning this step may still stand where another region lost its orphan.
+    return extruded.empty() ? union_ex(suppressed) : diff_ex(union_ex(suppressed), union_ex(extruded));
+}
+
 bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const std::vector<unsigned int> &filament_ids)
 {
     double first = 0.;
@@ -82,11 +110,19 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
     if (nozzle_diameter <= EPSILON || min_nozzle_diameter <= EPSILON || base_layer_height <= EPSILON)
         return 1;
 
+    // A nozzle that IS the object's reference already prints the slicing grid: its band is one layer, always.
+    // Without this, the min-height growth below would inflate it to 2 whenever the base layer height sits under
+    // 0.2 x nozzle (0.4 at 0.07 gets 2), so the same object would merge on a mixed-diameter plate and not on a
+    // single-diameter one. The caller's reference is this object's wall nozzles; ratio 1 means no merge.
+    if (nozzle_diameter <= min_nozzle_diameter + EPSILON)
+        return 1;
+
     const AdaptiveLayerHeightRange range = adaptive_layer_height_range(nozzle_diameter);
-    // The layer stack is sliced for the smallest nozzle, so the diameter ratio is the number of layers a
-    // larger nozzle covers with one extrusion.
+    // The diameter ratio is how many of the user's base layers a larger nozzle covers with one extrusion.
+    // The stack itself is sliced at object_config.layer_height; min_nozzle_diameter is only this ratio's
+    // denominator, not a grid the layers sit on.
     size_t size = size_t(std::max(1., std::floor(nozzle_diameter / min_nozzle_diameter + 0.5)));
-    // A base layer height chosen well below what the smallest nozzle needs leaves the ratio too thin to
+    // A base layer height well below this nozzle's printable minimum leaves the ratio too thin to
     // extrude, so the band grows until the nozzle can lay it down in one go.
     while (double(size) * base_layer_height + EPSILON < range.min_height)
         ++size;
@@ -341,6 +377,8 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 {
     double smallest = 0.;
     for (unsigned int filament_id : filament_ids) {
+        // filament_ids are 0-based (Print::used_printing_filaments / PrintObject::object_extruders);
+        // nozzle_diameter_for_filament takes a 1-based config id.
         const double diameter = nozzle_diameter_for_filament(print_config, filament_id + 1);
         if (diameter > EPSILON && (smallest <= EPSILON || diameter < smallest))
             smallest = diameter;
@@ -351,6 +389,8 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id)
 {
     const AdaptiveLayerHeightRange window = adaptive_layer_height_range(nozzle_diameter_for_filament(print_config, filament_id));
+    // filament_id is 1-based. An unmapped mixed virtual id falls back to nozzle 0, so the
+    // failure mode is a silently wrong nozzle rather than a crash.
     const size_t extruder = physical_extruder_for_filament(print_config, filament_id);
     AdaptiveLayerHeightRange out = window;
     if (extruder < print_config.min_layer_height.values.size()) {
