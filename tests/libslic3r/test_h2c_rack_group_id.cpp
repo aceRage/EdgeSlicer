@@ -173,7 +173,7 @@ TEST_CASE("A rack of one kind of nozzle numbers exactly as before", "[H2CRackGro
         cfg.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.6, 0.6 };
         check_same_list(grouping_nozzle_list(cfg, nozzle_groups(cfg)), MultiNozzleUtils::build_nozzle_list(nozzle_groups(cfg)));
     }
-    SECTION("no rack text (the stock H2C and the H2D): build_nozzle_list itself")
+    SECTION("no project rack: the stock H2C's default rack, six of its own size (#854)")
     {
         DynamicPrintConfig cfg = h2c("");
         cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override")->values = {};
@@ -181,30 +181,68 @@ TEST_CASE("A rack of one kind of nozzle numbers exactly as before", "[H2CRackGro
         check_same_list(list, MultiNozzleUtils::build_nozzle_list(nozzle_groups(cfg)));
         CHECK(list.size() == 7);
     }
+    SECTION("no rack at all (an H2D: one nozzle per extruder): build_nozzle_list itself")
+    {
+        DynamicPrintConfig cfg = h2c("");
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override")->values = {};
+        cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1, 1 }));
+        const std::vector<NozzleInfo> list = grouping_nozzle_list(cfg, nozzle_groups(cfg));
+        check_same_list(list, MultiNozzleUtils::build_nozzle_list(nozzle_groups(cfg)));
+        CHECK(list.size() == 2);
+    }
 }
 
-TEST_CASE("An H3C's nine rack slots are numbered 0..8 in rack order", "[H2CRackGroupId][H3C]")
+namespace {
+// The H3C (#854): one extruder with a rack of nine, slot 8 (1-based) the 2.85 mm TPU nozzle.
+DynamicPrintConfig h3c()
 {
-    // The H3C: one extruder, a rack of nine. Slot 8 (1-based) holds the 2.85 mm TPU nozzle; this tree has no TPU285 type until
-    // #854 merges, so TPU High Flow stands in for it. Slot 9 is a 0.6 here so the order is visible in the sizes too.
     DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
     cfg.set_num_filaments(2);
     cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values = { 0.4 };
     cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 9 }));
-    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu_high_flow,0.6" };
-    const std::vector<NozzleInfo> list = grouping_nozzle_list(cfg, nozzle_groups(cfg));
-    REQUIRE(list.size() == 9);
-    for (size_t i = 0; i < list.size(); ++i) {
-        CAPTURE(i);
-        CHECK(list[i].group_id == int(i));
-        CHECK(list[i].extruder_id == 0);
-        CHECK(list[i].diameter == (i == 8 ? "0.6" : "0.4"));
-        CHECK(list[i].volume_type == (i == 7 ? nvtTPUHighFlow : nvtStandard));
+    return cfg;
+}
+} // namespace
+
+TEST_CASE("An H3C's nine rack slots are numbered 0..8 in rack order", "[H2CRackGroupId][H3C]")
+{
+    SECTION("the machine's default rack: TPU285 keeps slot id 7 (the size-sorted list made it 8)")
+    {
+        DynamicPrintConfig cfg = h3c();
+        cfg.option<ConfigOptionEnumsGeneric>("default_nozzle_volume_type", true)->values = { nvtStandard, nvtStandard, nvtStandard, nvtStandard, nvtStandard,
+                                                                                           nvtStandard, nvtStandard, nvtTPU285,   nvtStandard };
+        REQUIRE(default_rack_nozzle_text(cfg, 0) == "0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4");
+        const std::vector<NozzleInfo> list = grouping_nozzle_list(cfg, nozzle_groups(cfg));
+        REQUIRE(list.size() == 9);
+        for (size_t i = 0; i < list.size(); ++i) {
+            CAPTURE(i);
+            CHECK(list[i].group_id == int(i));
+            CHECK(list[i].extruder_id == 0);
+            CHECK(list[i].diameter == "0.4");
+            CHECK(list[i].volume_type == (i == 7 ? nvtTPU285 : nvtStandard));
+        }
+        const std::vector<NozzleInfo> sorted = MultiNozzleUtils::build_nozzle_list(nozzle_groups(cfg));
+        REQUIRE(sorted.size() == 9);
+        CHECK(sorted[8].volume_type == nvtTPU285);
+        PrintConfig print_config;
+        print_config.apply(cfg, true);
+        CHECK(rack_slot_nozzle_index(print_config, list, 0, 8) == 7);
+        CHECK(rack_slot_nozzle_index(print_config, list, 0, 9) == 8);
     }
-    PrintConfig print_config;
-    print_config.apply(cfg, true);
-    CHECK(rack_slot_nozzle_index(print_config, list, 0, 8) == 7);
-    CHECK(rack_slot_nozzle_index(print_config, list, 0, 9) == 8);
+    SECTION("a project rack of mixed sizes")
+    {
+        DynamicPrintConfig cfg = h3c();
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "0.4,0.6,0.4,0.2,0.4,0.4,0.4,0.4:tpu285,0.8" };
+        const std::vector<NozzleInfo>  list = grouping_nozzle_list(cfg, nozzle_groups(cfg));
+        const std::vector<std::string> sizes{ "0.4", "0.6", "0.4", "0.2", "0.4", "0.4", "0.4", "0.4", "0.8" };
+        REQUIRE(list.size() == 9);
+        for (size_t i = 0; i < list.size(); ++i) {
+            CAPTURE(i);
+            CHECK(list[i].group_id == int(i));
+            CHECK(list[i].diameter == sizes[i]);
+        }
+        CHECK(list[7].volume_type == nvtTPU285);
+    }
 }
 
 TEST_CASE("The V0 nozzle mapping request carries the physical slot ids", "[H2CRackGroupId][NozzleMapping]")
