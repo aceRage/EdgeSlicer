@@ -7,6 +7,7 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/PaintDepth.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/libslic3r.h"
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
@@ -329,4 +330,19 @@ TEST_CASE("PrintConfigDef::handle_legacy_composite: legacy zero max width maps t
     DynamicPrintConfig saved_walls;
     saved_walls.load_from_ini_string("paint_depth_mode = walls\nmmu_segmented_region_max_width = 0\n", ForwardCompatibilitySubstitutionRule::Disable);
     CHECK(saved_walls.opt_enum<PaintDepthMode>("paint_depth_mode") == pdmWalls);
+}
+
+// Orca #17265: the previous hardcoded filter was sqr(scale_(0.1f)) = 0.01 mm^2 and an automatic
+// opening radius. Production uses the double 0.01 / sqr(SCALING_FACTOR) (= 1e10 scaled units).
+// The old float conversion is ~3e-8 relative away (10000000298 vs 10000000000); 1e-6 abs is
+// tighter than that rounding. Gate G-code stayed identical on the default, which is the
+// evidence the double is the value in use.
+TEST_CASE("mmu_segmented_region_min_area / opening_threshold defaults match the previous hardcoded filters", "[paintdepth][MultiMaterialSegmentation]")
+{
+    const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
+    CHECK_THAT(defaults.opt_float("mmu_segmented_region_min_area"), WithinAbs(0.01, 1e-12));
+    CHECK_THAT(defaults.opt_float("mmu_segmented_region_opening_threshold"), WithinAbs(-1., 1e-12));
+    const double scaled_now = defaults.opt_float("mmu_segmented_region_min_area") / Slic3r::sqr(SCALING_FACTOR);
+    const double scaled_old = Slic3r::sqr(scale_(0.1f));
+    CHECK(std::abs(scaled_now - scaled_old) / scaled_old < 1e-7);
 }

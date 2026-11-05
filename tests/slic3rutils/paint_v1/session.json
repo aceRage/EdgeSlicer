@@ -81,6 +81,22 @@
         "type": "bool"
       },
       {
+        "key": "mmu_segmented_region_min_area",
+        "label": "Minimum area of a segmented region",
+        "min": 0.0,
+        "tooltip": "Painted regions (and the slices they are cut from) smaller than this area are dropped during multi-material segmentation, because they are too small to print. Lower the value to keep very small painted features. A value of 0 disables the filtering.",
+        "type": "float",
+        "unit": "mm²"
+      },
+      {
+        "key": "mmu_segmented_region_opening_threshold",
+        "label": "Opening radius of segmented regions",
+        "min": -1.0,
+        "tooltip": "Radius of the morphological opening that removes thin projections from painted top and bottom surfaces. A value of -1 derives it automatically from the wall line width. A value of 0 disables the opening, which keeps thin painted features.",
+        "type": "float",
+        "unit": "mm"
+      },
+      {
         "key": "mmu_segmented_region_interlocking_depth",
         "label": "Interlocking depth of a segmented region",
         "min": 0.0,
@@ -91,6 +107,8 @@
     ],
     "values": {
       "mmu_segmented_region_interlocking_depth": 0.1,
+      "mmu_segmented_region_min_area": 0.01,
+      "mmu_segmented_region_opening_threshold": -1.0,
       "paint_depth_mm": 1.2,
       "paint_depth_mode": "unlimited",
       "paint_depth_solid_interfaces": true,

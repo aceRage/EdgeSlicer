@@ -3937,6 +3937,8 @@ void TabPrint::build()
         // paint depth is bounded, same greying condition as paint_infill_override above
         // (see ConfigManipulation.cpp's update_print_fff_config).
         optgroup->append_single_option_line("paint_depth_solid_interfaces", "multimaterial_settings_advanced#paint-depth-solid-interfaces");
+        optgroup->append_single_option_line("mmu_segmented_region_min_area", "multimaterial_settings_advanced#minimum-area-of-segmented-region");
+        optgroup->append_single_option_line("mmu_segmented_region_opening_threshold", "multimaterial_settings_advanced#opening-radius-of-segmented-regions");
         optgroup->append_single_option_line("mmu_segmented_region_interlocking_depth", "multimaterial_settings_advanced#interlocking-depth-of-segmented-region");
         optgroup->append_single_option_line("interlocking_beam_width", "multimaterial_settings_advanced#interlocking-beam-width");
         optgroup->append_single_option_line("interlocking_orientation", "multimaterial_settings_advanced#interlocking-direction");
