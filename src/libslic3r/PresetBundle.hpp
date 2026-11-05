@@ -401,6 +401,11 @@ public:
         { return prints.has_defaults_only() && filaments.has_defaults_only() && printers.has_defaults_only(); }
 
     DynamicPrintConfig          full_config() const;
+    // Chip-scope fix (owner hand test 2026-11-04): full_config() with the per-nozzle values filled for a plate's own filament
+    // map (a manual grouping, the dual-nozzle confirm, the L / R pins) instead of the project's global one, which is the last
+    // sliced map and can be stale. The slicing config of a plate with such a map (BackgroundSlicingProcess::apply). An empty
+    // map or an SLA printer: full_config().
+    DynamicPrintConfig          full_config_for_filament_map(const std::vector<int> &filament_map) const;
     // full_config() with the some "useless" config removed.
     DynamicPrintConfig          full_config_secure() const;
 
@@ -856,7 +861,8 @@ private:
     /*ConfigSubstitutions         load_config_file_config_bundle(
         const std::string &path, const boost::property_tree::ptree &tree, ForwardCompatibilitySubstitutionRule compatibility_rule);*/
 
-    DynamicPrintConfig          full_fff_config() const;
+    // `filament_map`: see full_config_for_filament_map().
+    DynamicPrintConfig          full_fff_config(const std::vector<int> *filament_map = nullptr) const;
     DynamicPrintConfig          full_sla_config() const;
 
     // Orca: used for validation only

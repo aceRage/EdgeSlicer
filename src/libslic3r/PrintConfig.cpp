@@ -4728,6 +4728,18 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInts {});
     def->cli = ConfigOptionDef::nocli;
 
+    // Per-nozzle process chip-scope fix (2026-11-04): filled by fill_nozzle_process_slots() next to the per-filament arrays
+    // (nozzle_*_line_width, nozzle_region_values, nozzle_filament_process_slot). Per filament, the tool its entries were
+    // worked out for ("T1", "T2", "T2:0.6"). The plate's own filament map is applied after that fill, so Print::apply
+    // compares it with where each filament prints now and moves the entries of a filament that changed tool
+    // (realign_nozzle_filament_values). Internal.
+    def = this->add("nozzle_filament_tool", coStrings);
+    def->label = "Tool per filament";
+    def->tooltip = "The tool each filament's per-nozzle values were worked out for (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionStrings {});
+    def->cli = ConfigOptionDef::nocli;
+
     // Per-nozzle process P7 (NozzleOverride.hpp): the nozzle size each extruder really carries, set per project
     // (Prepare sidebar, Printer settings > Extruder N), one value per extruder; 0 = the printer preset's nozzle_diameter.
     def = this->add("nozzle_diameter_override", coFloats);

@@ -695,6 +695,21 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	assert(config.opt_enum<PrinterTechnology>("printer_technology") == m_print->technology());
 	// TODO: add partplate config
 	DynamicPrintConfig new_config = config;
+	// Chip-scope fix (owner hand test 2026-11-04, H2C mixed rack): the per-nozzle values of each filament (widths, region
+	// settings, rack slot process) were filled for the project's global filament map, the last sliced one. A plate with a map
+	// of its own (manual grouping, the dual-nozzle confirm, the L / R pins) prints filaments elsewhere: fill them for its map,
+	// so a filament the plate moves to the left 0.4 nozzle does not keep the right 0.8's widths. Only when per-nozzle values
+	// were filled (nozzle_filament_tool) and the maps differ.
+	if (m_print->technology() == ptFFF) {
+		const auto *plate_map  = m_current_plate->config()->option<ConfigOptionInts>("filament_map");
+		const auto *global_map = config.option<ConfigOptionInts>("filament_map");
+		const auto *tools      = config.option<ConfigOptionStrings>("nozzle_filament_tool");
+		if (plate_map != nullptr && !plate_map->values.empty() && tools != nullptr && !tools->values.empty() &&
+			(global_map == nullptr || global_map->values != plate_map->values)) {
+			BOOST_LOG_TRIVIAL(info) << "per-nozzle process: per-nozzle values filled for the plate's own filament map";
+			new_config = GUI::wxGetApp().preset_bundle->full_config_for_filament_map(plate_map->values);
+		}
+	}
 	new_config.apply(*m_current_plate->config());
 	// Your own costs (Costs window): filament prices and the machine rate replace filament_cost and
 	// time_cost here and only here, so the slice, its G-code and the statistics agree while presets, projects and every
