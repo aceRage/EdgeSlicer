@@ -195,6 +195,7 @@ add_executable(${_TEST_NAME}_tests
 	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
+    test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
