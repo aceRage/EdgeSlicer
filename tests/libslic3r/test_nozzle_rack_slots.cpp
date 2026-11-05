@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -879,4 +880,40 @@ TEST_CASE("H2C 0.4 with a 0.8 mounted and a 0.8/0.4/0.6 rack: each filament gets
     b.set_nozzle_diameter_override({ 0. });
     b.project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0. };
     b.set_num_filaments(3);
+}
+
+TEST_CASE("On Plate only the nozzle-size-bound keys are locked", "[NozzleRackSlots][ChipScope][PlateLock]")
+{
+    // Owner hand test 2026-11-04 (H2C, selector open, Plate): walls, seams, wipe, bridges, overhangs, ironing, infill and
+    // top / bottom patterns were all greyed: the Process tab locked every per-tool key (P8), region settings included.
+    for (const char *key : { "wall_loops", "sparse_infill_density", "sparse_infill_pattern", "top_surface_pattern", "bottom_surface_pattern",
+                             "bridge_flow", "internal_bridge_flow", "detect_overhang_wall", "extra_perimeters_on_overhangs", "ironing_type",
+                             "seam_gap", "wipe_speed", "role_based_wipe_speed", "wall_sequence", "hole_to_polyhole", "detect_thin_wall",
+                             "top_surface_flow_ratio", "bottom_surface_flow_ratio", "only_one_wall_top", "is_infill_first", "wall_direction",
+                             "staggered_inner_seams", "seam_prefer_part_joints", "wall_generator", "precise_z_height", "seam_position",
+                             "reduce_crossing_wall", "layer_height", "enable_support" }) {
+        INFO(key);
+        CHECK_FALSE(is_locked_on_plate(key));
+    }
+    // The cause: region settings count as per-tool keys (a tool's own process supplies them), and every per-tool key was locked.
+    CHECK(is_per_tool_process_option("wall_loops"));
+    CHECK(is_per_tool_process_option("sparse_infill_density"));
+    // Still locked: the line widths and the per-nozzle speed / acceleration / jerk slots.
+    for (const char *key : { "inner_wall_line_width", "outer_wall_line_width", "internal_solid_infill_line_width", "support_line_width",
+                             "outer_wall_speed", "line_width_nozzle_diameter", "process_nozzle_line_widths" }) {
+        INFO(key);
+        CHECK(is_locked_on_plate(key));
+    }
+    // Every locked key is a width or a per-nozzle slot key; the list goes into the PR.
+    const std::vector<std::string> &widths = nozzle_width_option_keys();
+    std::string                     locked;
+    std::set<std::string>           seen;
+    for (const std::string &key : Preset::print_options())
+        if (is_locked_on_plate(key) && seen.insert(key).second) {
+            INFO(key);
+            CHECK((is_per_nozzle_process_option(key) || std::find(widths.begin(), widths.end(), key) != widths.end() ||
+                   key == "line_width_nozzle_diameter" || key == "process_nozzle_line_widths"));
+            locked += (locked.empty() ? "" : ", ") + key;
+        }
+    WARN("Locked on Plate (" << seen.size() << "): " << locked);
 }

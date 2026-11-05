@@ -4355,13 +4355,16 @@ void TabPrint::apply_tool_field_states()
 {
     if (m_type != Preset::TYPE_PRINT || m_active_page == nullptr || m_preset_bundle == nullptr || m_tool_panel == nullptr)
         return;
-    // On Plate, with the selector open: the per-tool settings are each nozzle's, not the plate's; not editable here.
+    // On Plate, with the selector open: the settings bound to each nozzle's size (per-nozzle speeds, line widths) are each
+    // nozzle's, not the plate's; not editable here. Owner hand test 2026-11-04 (H2C): every per-tool key used to be greyed,
+    // region settings included (walls, seams, wipe, bridges, overhangs...), which locked most of Quality and Strength. Those
+    // are the Plate's again: what every tool that follows the plate prints with (is_locked_on_plate).
     const bool selector_open = m_tool_chips != nullptr && m_tool_chips->IsShown();
     if (m_preset_bundle->nozzle_tool_view() >= 0 || !selector_open || !m_tool_panel->IsShown())
         return;
     for (const ConfigOptionsGroupShp& group : m_active_page->m_optgroups)
         for (const auto& option : group->opt_map())
-            if (is_per_tool_process_option(option.second.first))
+            if (is_locked_on_plate(option.second.first))
                 toggle_option(option.second.first, false, option.second.second);
 }
 

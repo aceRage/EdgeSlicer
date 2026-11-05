@@ -1504,6 +1504,12 @@ bool is_plate_process_option(const std::string &key)
     return process.count(key) > 0;
 }
 
+bool is_locked_on_plate(const std::string &key)
+{
+    // The size-bound part of the per-tool keys; the region settings are the Plate's to edit for the tools that follow it.
+    return is_per_tool_process_option(key) && !is_nozzle_region_option(key);
+}
+
 std::vector<std::string> plate_process_option_keys()
 {
     std::vector<std::string> out;
