@@ -653,6 +653,19 @@ int OozePrevention::_get_temp(const GCode& gcodegen) const
                get_value_at(gcodegen.config(), gcodegen.config().nozzle_temperature, ConfigFlowDomain::Filament, filament_id);
 }
 
+// Bambu Studio 2.9.1 (GCode.cpp:451-473): the wipe before a tool change uses the prime tower's wipe speed
+// and distance when they are set. Bambu falls back to prime_tower_max_speed when prime_tower_wipe_speed
+// is 0; here 0 keeps the normal wipe speed, so presets without the key print as before.
+static double toolchange_wipe_speed(const GCode &gcodegen, bool toolchange, double wipe_speed)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_speed.value > 0. ? gcodegen.config().prime_tower_wipe_speed.value : wipe_speed;
+}
+
+static double toolchange_wipe_distance(const GCode &gcodegen, bool toolchange, double scaled_wipe_dist)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_distance.value > 0. ? scale_(gcodegen.config().prime_tower_wipe_distance.value) : scaled_wipe_dist;
+}
+
 // Orca:
 // Function to calculate the excess retraction length that should be retracted either before or after wiping
 // in order for the wipe operation to respect the filament retraction speed
@@ -691,10 +704,10 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
 
     // Calculate wipe speed
     double wipe_speed = config.role_based_wipe_speed ? writer.get_current_speed() / 60.0 : config.get_abs_value("wipe_speed");
-    wipe_speed        = std::max(wipe_speed, 10.0);
+    wipe_speed        = std::max(toolchange_wipe_speed(gcodegen, toolchange, wipe_speed), 10.0);
 
     // Process wipe path & calculate wipe path length
-    double   wipe_dist = scale_(config.wipe_distance.get_at(extruder_id));
+    double   wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(config.wipe_distance.get_at(extruder_id)));
     Polyline wipe_path = {last_pos};
     wipe_path.append(this->path.points.begin() + 1, this->path.points.end());
     double wipe_path_length = std::min(wipe_path.length(), wipe_dist);
@@ -736,6 +749,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
     double _wipe_speed = gcodegen.config().get_abs_value("wipe_speed"); // gcodegen.writer().config.travel_speed.values.front() * 0.8;
     if (gcodegen.config().role_based_wipe_speed)
         _wipe_speed = gcodegen.writer().get_current_speed() / 60.0;
+    _wipe_speed = toolchange_wipe_speed(gcodegen, toolchange, _wipe_speed);
     if (_wipe_speed < 10)
         _wipe_speed = 10;
 
@@ -745,7 +759,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
             amount of retraction. In other words, how far do we move in XY at wipe_speed
             for the time needed to consume retraction_length at retraction_speed?  */
         // BBS
-        double wipe_dist = scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id()));
+        double wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id())));
 
         /*  Take the stored wipe path and replace first point with the current actual position
             (they might be different, for example, in case of loop clipping).  */
@@ -1431,6 +1445,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
+    // Bambu Studio 2.9.1: the Type 1 tower sets its own M204 with prime_tower_acceleration, so the writer
+    // has to state the acceleration again after it (Bambu: gcodegen.reset_last_acceleration()).
+    if (gcodegen.config().prime_tower_acceleration.value > 0.)
+        gcodegen.writer().invalidate_acceleration();
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
     // towards the filament_sequence.json entry order.

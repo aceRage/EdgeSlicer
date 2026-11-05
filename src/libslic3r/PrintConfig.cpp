@@ -9391,6 +9391,44 @@ void PrintConfigDef::init_fff_params()
     def->min = 10;
     def->set_default_value(new ConfigOptionFloat(90.));
 
+    // Bambu Studio 2.9.1 prime tower options (PrintConfig.cpp:7119-7160) that the Type 1 tower
+    // (Bambu Lab printers) honours here. All default to 0 = the behaviour before they existed.
+    def           = this->add("prime_tower_acceleration", coFloat);
+    def->label    = L("Prime tower acceleration");
+    def->tooltip  = L("The acceleration used for prime tower extrusions, with travels inside the tower at the travel "
+                      "acceleration. Does not affect the first layer. 0 means the tower sets no acceleration of its own. "
+                      "Bambu Lab printers (Type 1 tower) only.");
+    def->sidetext = u8"mm/s²";	// milimeters per second per second, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_line_width", coFloat);
+    def->label    = L("Prime tower line width");
+    def->tooltip  = L("Line width of the prime tower walls, purge lines and brim. 0 means 1.25 times the nozzle diameter. "
+                      "Bambu Lab printers (Type 1 tower) only.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->max      = 5;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_wipe_speed", coFloat);
+    def->label    = L("Tool change wipe speed");
+    def->tooltip  = L("Speed of the wipe before a tool change, on the way to the prime tower. 0 means the normal wipe speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_wipe_distance", coFloat);
+    def->label    = L("Tool change wipe distance");
+    def->tooltip  = L("Length of the wipe before a tool change. 0 means the filament's wipe distance.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     def = this->add("wipe_tower_wall_type", coEnum);
     def->label = L("Wall type");
     def->tooltip = L("Wipe tower outer wall type.\n"

@@ -2556,6 +2556,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_cone_angle))
     ((ConfigOptionPercent,            wipe_tower_extra_spacing))
     ((ConfigOptionFloat,              wipe_tower_max_purge_speed))
+    // Bambu Studio 2.9.1 prime tower options honoured by the Type 1 tower (0 = off).
+    ((ConfigOptionFloat,              prime_tower_acceleration))
+    ((ConfigOptionFloat,              prime_tower_line_width))
+    ((ConfigOptionFloat,              prime_tower_wipe_speed))
+    ((ConfigOptionFloat,              prime_tower_wipe_distance))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))

@@ -1261,6 +1261,7 @@ static std::vector<std::string> s_Preset_print_options {
      "initial_layer_travel_speed", "exclude_object", "exclude_object_tolerance", "slow_down_layers", "infill_anchor", "infill_anchor_max","initial_layer_min_bead_width",
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
+     "prime_tower_acceleration", "prime_tower_line_width", "prime_tower_wipe_speed", "prime_tower_wipe_distance",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      "toolchange_ordering",

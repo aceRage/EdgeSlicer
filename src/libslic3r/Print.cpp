@@ -761,6 +761,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "seam_gap",
         "role_based_wipe_speed",
         "wipe_speed",
+        // Bambu Studio 2.9.1: the wipe before a tool change (Wipe::wipe).
+        "prime_tower_wipe_speed",
+        "prime_tower_wipe_distance",
         "use_relative_e_distances",
         "accel_to_decel_enable",
         "accel_to_decel_factor",
@@ -974,6 +977,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
+            || opt_key == "prime_tower_acceleration"
+            || opt_key == "prime_tower_line_width"
             || opt_key == "wipe_tower_wall_type"
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
@@ -7090,6 +7095,10 @@ void Print::_make_wipe_tower()
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
         // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
         wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
+        // Bambu Studio 2.9.1 prime_tower_acceleration: travels inside the tower go back to the travel
+        // acceleration (an object setting in this fork, read like the G-code writer does).
+        wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
+                                                        unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();

@@ -1188,6 +1188,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && supports_wipe_tower_2);
+    // Bambu Studio 2.9.1 options only the Type 1 tower honours; the tool change wipe applies to both.
+    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width"})
+      toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
+      toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
     // (Type 1) tower is always printed unrotated (Print::apply clears the angle), so the line stays
     // visible but greyed out there; its tooltip says why.
