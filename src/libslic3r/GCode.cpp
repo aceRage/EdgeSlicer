@@ -1529,7 +1529,11 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                                                          || tool_change_on_wipe_tower);
 
     const Point start_wipe_pos      = wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d);
-    const bool  travel_to_tower_now = should_travel_to_tower || gcodegen.m_need_change_layer_lift_z;
+    // The final purge (new_extruder_id == -1) is not a real tool change: need_toolchange(-1)
+    // is true, so !needs_toolchange cannot force this travel. finalize() already pre-travels,
+    // but the lift below is gated on z_hop_when_prime; with that flag off there is no lift.
+    const bool is_final_purge       = new_extruder_id < 0;
+    const bool  travel_to_tower_now = should_travel_to_tower || gcodegen.m_need_change_layer_lift_z || is_final_purge;
     if (travel_to_tower_now) {
         // FIXME: It would be better if the wipe tower set the force_travel flag for all toolchanges,
         // then we could simplify the condition and make it more readable.
@@ -1546,7 +1550,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             lift_type = gcodegen.to_lift_type(type);
         }
 
-        if (gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id())) {
+        if (is_final_purge || gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id())) {
             gcode += gcodegen.retract(false, false, lift_type);
         }
 
