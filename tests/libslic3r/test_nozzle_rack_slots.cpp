@@ -8,12 +8,15 @@
 
 #include "libslic3r/BambuDualNozzleSync.hpp"
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/NozzleProcess.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ToolSlots.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -21,6 +24,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -638,4 +642,275 @@ TEST_CASE("H2C/H2D side pins are per filament: pinning one never changes another
     CHECK(manual_filament_map_from_pins({ 2, 0, 0, 0 }, auto_map, 4) == std::vector<int>{ 2, 2, 2, 1 });
     // No grouping known: unpinned filaments on the left.
     CHECK(manual_filament_map_from_pins({ 0, 2 }, {}, 3) == std::vector<int>{ 1, 2, 1 });
+}
+
+// ---- Chip scope (owner hand test 2026-11-04, H2C 0.4 with a "0.8,0.4,0.4,0.4,0.4,0.6" rack, tests/h2c_mixedslice.3mf) ----------
+// The per-filament values were filled for the project's global filament map (the last sliced one, 1,2,2,2) while the plate's own
+// map (2,2,2,1) put filament 4 on the left 0.4: it kept the right 0.8's 0.82 mm walls, Print::validate refused it, and as the
+// global map is only updated by a slice that succeeds the project could never slice again.
+
+namespace {
+
+std::vector<double> widths_of(const DynamicPrintConfig &cfg, const char *key)
+{
+    std::vector<double> out;
+    if (const auto *opt = cfg.option<ConfigOptionFloatsOrPercents>(key))
+        for (const FloatOrPercent &w : opt->values)
+            out.push_back(w.value);
+    return out;
+}
+
+std::vector<std::string> strings_of(const DynamicPrintConfig &cfg, const char *key)
+{
+    const auto *opt = cfg.option<ConfigOptionStrings>(key);
+    return opt != nullptr ? opt->values : std::vector<std::string>();
+}
+
+// A two-extruder printer with a 0.4 left and a 0.8 right nozzle, mm widths of 0.42 on the plate, `filaments` filaments.
+DynamicPrintConfig left04_right08(size_t filaments, const std::vector<int> &map)
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_extruders(2);
+    cfg.set_num_filaments(unsigned(filaments));
+    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values                   = { 0.4, 0.8 };
+    cfg.option<ConfigOptionBool>("single_extruder_multi_material")->value       = false;
+    cfg.option<ConfigOptionBool>("enable_prime_tower")->value                   = false;
+    cfg.option<ConfigOptionFloats>("min_layer_height")->values                  = { 0.04, 0.04 };
+    cfg.option<ConfigOptionFloats>("max_layer_height")->values                  = { 0.3, 0.6 };
+    cfg.option<ConfigOptionFloat>("layer_height")->value                        = 0.2;
+    cfg.option<ConfigOptionFloat>("initial_layer_print_height")->value          = 0.2;
+    cfg.option<ConfigOptionString>("printer_variant", true)->value              = "0.4";
+    cfg.option<ConfigOptionInts>("filament_map", true)->values                  = map;
+    cfg.set_key_value("wall_loops", new ConfigOptionInt(2));
+    for (const char *key : { "line_width", "inner_wall_line_width", "outer_wall_line_width", "sparse_infill_line_width",
+                             "internal_solid_infill_line_width", "top_surface_line_width", "support_line_width", "initial_layer_line_width" })
+        cfg.set_key_value(key, new ConfigOptionFloatOrPercent(0.42, false));
+    return cfg;
+}
+
+// The right nozzle's own process: 0.82 mm lines and three walls.
+DynamicPrintConfig right08_process(const DynamicPrintConfig &plate)
+{
+    DynamicPrintConfig right = plate;
+    for (const char *key : { "line_width", "inner_wall_line_width", "outer_wall_line_width", "sparse_infill_line_width",
+                             "internal_solid_infill_line_width", "top_surface_line_width", "support_line_width", "initial_layer_line_width" })
+        right.set_key_value(key, new ConfigOptionFloatOrPercent(0.82, false));
+    right.set_key_value("wall_loops", new ConfigOptionInt(3));
+    return right;
+}
+
+} // namespace
+
+TEST_CASE("Per-filament values record their tool and follow the plate's filament map", "[NozzleRackSlots][ChipScope]")
+{
+    SECTION("a filament the plate moves takes the values of another filament on its new nozzle")
+    {
+        DynamicPrintConfig       cfg   = left04_right08(3, { 1, 2, 2 });
+        const DynamicPrintConfig right = right08_process(cfg);
+        REQUIRE(fill_nozzle_process_slots(cfg, { nullptr, &right }));
+        CHECK(strings_of(cfg, "nozzle_filament_tool") == std::vector<std::string>{ "T1", "T2", "T2" });
+        CHECK(widths_of(cfg, "nozzle_inner_wall_line_width") == std::vector<double>{ 0.42, 0.82, 0.82 });
+        // The plate's own map: filament 1 on the right, filament 3 on the left.
+        cfg.option<ConfigOptionInts>("filament_map")->values = { 2, 2, 1 };
+        REQUIRE(realign_nozzle_filament_values(cfg));
+        CHECK(strings_of(cfg, "nozzle_filament_tool") == std::vector<std::string>{ "T2", "T2", "T1" });
+        CHECK(widths_of(cfg, "nozzle_inner_wall_line_width") == std::vector<double>{ 0.82, 0.82, 0.42 });
+        CHECK(widths_of(cfg, "nozzle_outer_wall_line_width") == std::vector<double>{ 0.82, 0.82, 0.42 });
+        const std::vector<std::string> regions = strings_of(cfg, "nozzle_region_values");
+        REQUIRE(regions.size() == 3);
+        CHECK(has(regions[0], "wall_loops = 3"));
+        CHECK(has(regions[2], "wall_loops = 2"));
+        // Applying it again changes nothing (the GUI re-applies the same settings).
+        CHECK_FALSE(realign_nozzle_filament_values(cfg));
+        // The same map as the fill: nothing moves.
+        DynamicPrintConfig same = left04_right08(3, { 1, 2, 2 });
+        REQUIRE(fill_nozzle_process_slots(same, { nullptr, &right }));
+        CHECK_FALSE(realign_nozzle_filament_values(same));
+    }
+    SECTION("no other filament was on the new nozzle: the plate's width for that nozzle")
+    {
+        DynamicPrintConfig       cfg   = left04_right08(3, { 2, 2, 2 });
+        const DynamicPrintConfig right = right08_process(cfg);
+        REQUIRE(fill_nozzle_process_slots(cfg, { nullptr, &right }));
+        CHECK(widths_of(cfg, "nozzle_inner_wall_line_width") == std::vector<double>{ 0.82, 0.82, 0.82 });
+        cfg.option<ConfigOptionInts>("filament_map")->values = { 2, 2, 1 };
+        REQUIRE(realign_nozzle_filament_values(cfg));
+        CHECK(widths_of(cfg, "nozzle_inner_wall_line_width") == std::vector<double>{ 0.82, 0.82, 0.42 });
+        const std::vector<std::string> regions = strings_of(cfg, "nozzle_region_values");
+        REQUIRE(regions.size() == 3);
+        CHECK(has(regions[2], "wall_loops = 2"));
+        CHECK_FALSE(has(regions[2], "wall_loops = 3"));
+    }
+    SECTION("stale arrays from a project file go when no tool has a process of its own any more")
+    {
+        DynamicPrintConfig cfg = left04_right08(3, { 1, 2, 2 });
+        cfg.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.4, 0.4 };
+        cfg.set_key_value("nozzle_inner_wall_line_width", new ConfigOptionFloatsOrPercents({ { 0.42, false }, { 0.82, false }, { 0.82, false } }));
+        cfg.set_key_value("nozzle_region_values", new ConfigOptionStrings({ "wall_loops = 2", "wall_loops = 3", "wall_loops = 3" }));
+        cfg.set_key_value("nozzle_filament_tool", new ConfigOptionStrings({ "T1", "T2", "T2" }));
+        CHECK_FALSE(fill_nozzle_process_slots(cfg, { nullptr, nullptr }));
+        CHECK(widths_of(cfg, "nozzle_inner_wall_line_width").empty());
+        CHECK(strings_of(cfg, "nozzle_region_values").empty());
+        CHECK(strings_of(cfg, "nozzle_filament_tool").empty());
+        CHECK_FALSE(realign_nozzle_filament_values(cfg));
+    }
+}
+
+TEST_CASE("A filament the plate moves to the 0.4 nozzle validates with the 0.4's widths", "[NozzleRackSlots][ChipScope][Validate]")
+{
+    // Filled for the global map (filament 3 on the right 0.8), sliced with the plate's (filament 3 on the left 0.4). Three
+    // filaments on two nozzles: with as many nozzles as filaments the map is not read at all.
+    DynamicPrintConfig filled = left04_right08(3, { 1, 2, 2 });
+    filled.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0"));
+    const DynamicPrintConfig right = right08_process(filled);
+    REQUIRE(fill_nozzle_process_slots(filled, { nullptr, &right }));
+    filled.option<ConfigOptionInts>("filament_map")->values = { 1, 2, 1 };
+
+    auto validate_on_filament_3 = [](const DynamicPrintConfig &config, Print &print) {
+        Model        model;
+        ModelObject *object = model.add_object();
+        object->name        = "cube";
+        object->add_volume(make_cube(20., 20., 20.));
+        object->add_instance();
+        object->ensure_on_bed();
+        for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
+            object->config.set_key_value(key, new ConfigOptionInt(3));
+        print.set_status_silent();
+        print.apply(model, config);
+        print.apply(model, config);
+        return print.validate().string;
+    };
+    {
+        Print             print;
+        const std::string err = validate_on_filament_3(filled, print);
+        INFO(err);
+        CHECK(err.find("more than 2.0 x") == std::string::npos);
+        CHECK(err.find("too wide") == std::string::npos);
+        CHECK(widths_of(print.full_print_config(), "nozzle_inner_wall_line_width") == std::vector<double>{ 0.42, 0.82, 0.42 });
+    }
+    // Without the record (the values of an older fill) the widths stay where they were filled: the refusal the owner saw.
+    {
+        DynamicPrintConfig older = filled;
+        older.set_key_value("nozzle_filament_tool", new ConfigOptionStrings());
+        Print             print;
+        const std::string err = validate_on_filament_3(older, print);
+        INFO(err);
+        CHECK(err.find("more than 2.0 x") != std::string::npos);
+    }
+}
+
+TEST_CASE("H2C 0.4 with a 0.8 mounted and a 0.8/0.4/0.6 rack: each filament gets its own nozzle's process", "[NozzleRackSlots][ChipScope][PresetBundle]")
+{
+    // tests/h2c_mixedslice.3mf: left 0.4, right 0.8 (project size) with the rack 0.8,0.4,0.4,0.4,0.4,0.6, four filaments.
+    PresetBundle &b = h2c_bundle({});
+    b.set_num_filaments(4);
+    b.project_config.option<ConfigOptionInts>("filament_map", true)->values = { 1, 2, 2, 2 };
+    REQUIRE(b.set_nozzle_diameter_override({ 0.4, 0.8 }));
+    REQUIRE(b.set_rack_nozzle_override({ "", "0.8,0.4,0.4,0.4,0.4,0.6" }));
+    REQUIRE(b.effective_nozzle_diameters().size() == 2);
+    CHECK(b.effective_nozzle_diameters()[1] == Approx(0.8));
+    // Tools: Left, Right (its mounted 0.8), Right 0.4, Right 0.6.
+    REQUIRE(b.nozzle_tool_count() == 4);
+    CHECK(b.nozzle_tool_ref(2).id == "T2:0.4");
+    CHECK(b.nozzle_tool_ref(3).id == "T2:0.6");
+    const PresetBundle::NozzleToolProcess right = b.nozzle_tool_process_info(1);
+    REQUIRE(right.kind == PresetBundle::NozzleToolProcessKind::AutoPicked);
+    CHECK(has(right.name, "0.8 nozzle"));
+    const Preset *p08 = b.prints.find_preset(right.name, false);
+    REQUIRE(p08 != nullptr);
+    auto width_in = [](const DynamicPrintConfig &process, const char *key) {
+        const auto *w = process.option<ConfigOptionFloatOrPercent>(key);
+        return w != nullptr && w->value > 0. && !w->percent ? w->value : process.option<ConfigOptionFloatOrPercent>("line_width")->value;
+    };
+    const double w08   = width_in(p08->config, "inner_wall_line_width");
+    const double plate = width_in(b.prints.get_edited_preset().config, "inner_wall_line_width");
+    REQUIRE(w08 > 0.8);
+    REQUIRE(plate < 0.8);
+
+    SECTION("the plate's map decides which filaments the right nozzle's process reaches")
+    {
+        // The global map (the last sliced one): filament 4 on the right.
+        const DynamicPrintConfig global = b.full_config();
+        CHECK(widths_of(global, "nozzle_inner_wall_line_width") == std::vector<double>{ plate, w08, w08, w08 });
+        // The plate's map (2,2,2,1): filament 4 on the left 0.4 gets the plate's widths, filament 1 the 0.8's.
+        const DynamicPrintConfig exact = b.full_config_for_filament_map({ 2, 2, 2, 1 });
+        CHECK(widths_of(exact, "nozzle_inner_wall_line_width") == std::vector<double>{ w08, w08, w08, plate });
+        CHECK(strings_of(exact, "nozzle_filament_tool") == std::vector<std::string>{ "T2", "T2", "T2", "T1" });
+        // Print::apply's realignment of the global fill gives exactly the same values.
+        DynamicPrintConfig realigned = global;
+        realigned.option<ConfigOptionInts>("filament_map")->values = { 2, 2, 2, 1 };
+        REQUIRE(realign_nozzle_filament_values(realigned));
+        for (const auto &entry : nozzle_line_width_keys())
+            CHECK(widths_of(realigned, entry.first.c_str()) == widths_of(exact, entry.first.c_str()));
+        CHECK(strings_of(realigned, "nozzle_region_values") == strings_of(exact, "nozzle_region_values"));
+        // An empty map is the plain full config.
+        CHECK(b.full_config_for_filament_map({}).diff(global).empty());
+    }
+    SECTION("pinned to rack sizes, each filament prints with the process of its slot's size (chip scope per slot)")
+    {
+        // Filament 2 on the right's 0.4 slots, filament 3 on its 0.6.
+        b.project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0., 0.4, 0.6, 0. };
+        const PresetBundle::NozzleToolProcess r06 = b.nozzle_tool_process_info(3);
+        REQUIRE(r06.kind == PresetBundle::NozzleToolProcessKind::AutoPicked);
+        const Preset *p06 = b.prints.find_preset(r06.name, false);
+        REQUIRE(p06 != nullptr);
+        const double w06 = width_in(p06->config, "inner_wall_line_width");
+        CHECK(b.nozzle_tool_process_info(2).kind == PresetBundle::NozzleToolProcessKind::FollowsPlate);
+
+        const DynamicPrintConfig exact = b.full_config_for_filament_map({ 2, 2, 2, 1 });
+        CHECK(strings_of(exact, "nozzle_filament_tool") == std::vector<std::string>{ "T2", "T2:0.4", "T2:0.6", "T1" });
+        CHECK(widths_of(exact, "nozzle_inner_wall_line_width") == std::vector<double>{ w08, plate, w06, plate });
+        const std::vector<std::string> regions = strings_of(exact, "nozzle_region_values");
+        REQUIRE(regions.size() == 4);
+        CHECK(regions[1] == regions[3]); // both on a 0.4: the plate's
+        CHECK(regions[0] != regions[1]);
+
+        // Showing a tool on the Process tab (a chip click) changes neither the scope nor marks anything changed.
+        REQUIRE(b.begin_nozzle_tool_view(1));
+        CHECK(widths_of(b.full_config_for_filament_map({ 2, 2, 2, 1 }), "nozzle_inner_wall_line_width") ==
+              std::vector<double>{ w08, plate, w06, plate });
+        CHECK_FALSE(b.nozzle_tool_process_info(1).edited);
+        b.end_nozzle_tool_view();
+        REQUIRE(b.begin_nozzle_tool_view(0));
+        CHECK_FALSE(b.nozzle_tool_process_info(0).edited);
+        b.end_nozzle_tool_view();
+        CHECK(b.nozzle_process_edits_map().empty());
+        for (size_t tool = 0; tool < 4; ++tool)
+            CHECK_FALSE(b.nozzle_tool_process_info(tool).edited);
+        CHECK(widths_of(b.full_config_for_filament_map({ 2, 2, 2, 1 }), "nozzle_inner_wall_line_width") ==
+              std::vector<double>{ w08, plate, w06, plate });
+
+        // Moving filament 4 to the right (its pin; the plate's map follows): it prints with the mounted 0.8's process.
+        const DynamicPrintConfig moved = b.full_config_for_filament_map({ 2, 2, 2, 2 });
+        CHECK(widths_of(moved, "nozzle_inner_wall_line_width") == std::vector<double>{ w08, plate, w06, w08 });
+        b.project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter")->values = { 0. };
+    }
+    b.set_rack_nozzle_override({});
+    b.set_nozzle_diameter_override({ 0. });
+    b.project_config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0. };
+    b.set_num_filaments(3);
+}
+
+TEST_CASE("A nozzle chip is an override layered over the Plate", "[NozzleRackSlots][ChipScope][PlateLayer]")
+{
+    // Owner model 2026-11-04: Plate is the base layer, fully editable; a chip's changes replace the plate's value for that
+    // nozzle only. A tool that follows the plate prints the plate's process with its own changes on top.
+    DynamicPrintConfig plate = left04_right08(3, { 1, 2, 2 });
+    plate.set_key_value("sparse_infill_density", new ConfigOptionPercent(15));
+    DynamicPrintConfig own;
+    own.set_key_value("wall_loops", new ConfigOptionInt(4));
+    DynamicPrintConfig tool = nozzle_tool_process(plate, plate, &own);
+    CHECK(tool.opt_int("wall_loops") == 4);
+    CHECK(tool.option<ConfigOptionPercent>("sparse_infill_density")->value == Approx(15));
+    // A Plate edit of a setting the chip did not change reaches the chip; the chip's own change stays.
+    plate.set_key_value("sparse_infill_density", new ConfigOptionPercent(30));
+    plate.set_key_value("wall_loops", new ConfigOptionInt(3));
+    tool = nozzle_tool_process(plate, plate, &own);
+    CHECK(tool.option<ConfigOptionPercent>("sparse_infill_density")->value == Approx(30));
+    CHECK(tool.opt_int("wall_loops") == 4);
+    // Without changes (the reset path) the chip is the plate again.
+    CHECK(nozzle_tool_process(plate, plate, nullptr).opt_int("wall_loops") == 3);
+    // Region settings are both: editable on Plate and overridable per chip.
+    CHECK(is_per_tool_process_option("wall_loops"));
+    CHECK(is_per_tool_process_option("sparse_infill_density"));
 }

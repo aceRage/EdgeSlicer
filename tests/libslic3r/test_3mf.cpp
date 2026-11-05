@@ -18,6 +18,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -373,6 +374,141 @@ TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3
     REQUIRE(dst_config.option<ConfigOptionFloats>("wipe_tower_x") != nullptr);
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_x")->get_at(0) == Approx(120.25));
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
+}
+
+// A project or sliced-plate file whose name holds Chinese and accented characters (the default export
+// name is the project name). The exporter writes "<name>.tmp" and renames it into place; with
+// boost::filesystem narrow paths on Windows converted by the ANSI code page, that step failed and the
+// file vanished without a message. The path is UTF-8, as the application passes it.
+TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    // As the application does at startup (Snapmaker_Orca.cpp), so boost::filesystem paths are UTF-8.
+    boost::nowide::nowide_filesystem();
+    const std::string leaf     = u8"\u6CE3\u8840_\u00E9_test.3mf";
+    const std::string tmp_leaf = leaf + ".tmp";
+    const std::string test_dir = tmp_root.string();
+    const std::string test_file = test_dir + "/" + leaf;
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+    CHECK(store_params.error.empty());
+    CHECK(boost::filesystem::exists(test_file, ec));
+    CHECK_FALSE(boost::filesystem::exists(test_dir + "/" + tmp_leaf, ec));
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                         LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE(loaded);
+    CHECK(dst_model.objects.size() == 1);
+}
+
+// The reported failure: an auxiliary picture (Model Pictures / Profile Pictures) with a Chinese file
+// name, as WeChat names its images, made the whole export fail because the exporter handed the file to
+// miniz through the ANSI code page.
+TEST_CASE("A project 3MF packs and restores an auxiliary file with a non-ASCII name", "[3mf][Regression][Utf8Path]")
+{
+    boost::nowide::nowide_filesystem();
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    const std::string pic_leaf = u8"\u5FAE\u4FE1\u56FE\u7247_20261023_3.webp";
+    const std::string pic_dir  = src_model.get_auxiliary_file_temp_path() + "/Model Pictures";
+    boost::filesystem::create_directories(pic_dir);
+    const std::string pic_file = pic_dir + "/" + pic_leaf;
+    {
+        boost::nowide::ofstream out(pic_file, std::ios::binary);
+        out << "not really a webp, but bytes";
+    }
+    REQUIRE(boost::filesystem::exists(pic_file));
+
+    const std::string test_file = (tmp_root / "aux_utf8_project.3mf").string();
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    REQUIRE(loaded);
+    const std::string restored = dst_model.get_auxiliary_file_temp_path() + "/Model Pictures/" + pic_leaf;
+    CHECK(boost::filesystem::exists(restored));
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+}
+
+// A destination that cannot be written reports why instead of failing silently.
+TEST_CASE("A failed 3MF store reports the exporter's error text", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    StoreParams store_params;
+    store_params.path     = (tmp_root / "no_such_folder_utf8" / "x.3mf").string();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    CHECK_FALSE(store_bbs_3mf(store_params));
+    CHECK_FALSE(store_params.error.empty());
 }
 
 // Orca #16503: the exclude-object outline tolerance is an ordinary print setting, saved with the project.
@@ -734,6 +870,148 @@ SCENARIO("A sliced plate carries the multi-nozzle slice_info schema through a 3M
         }
         delete plate;
     }
+}
+
+// Owner report 2026-11-05: an H2C plate printed with the right rack's 0.8 and 0.6 showed "Nozzle Diameter: 0.4 | 0.4" in Bambu
+// Connect, because slice_info's nozzle_diameters was the printer preset's nozzle_diameter. Bambu Studio writes one value per
+// extruder, the size that extruder prints with; on a rack that is the nozzle the plate uses.
+namespace {
+std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> rack_group(const std::vector<int> &filament_nozzle,
+                                                                     const std::vector<std::pair<int, const char *>> &nozzles)
+{
+    std::vector<MultiNozzleUtils::NozzleInfo> list(nozzles.size());
+    for (size_t i = 0; i < nozzles.size(); ++i) {
+        list[i].extruder_id = nozzles[i].first;
+        list[i].diameter    = nozzles[i].second;
+        list[i].volume_type = nvtStandard;
+        list[i].group_id    = int(i);
+    }
+    std::vector<unsigned int> used;
+    for (size_t f = 0; f < filament_nozzle.size(); ++f)
+        used.push_back(unsigned(f));
+    return MultiNozzleUtils::LayeredNozzleGroupResult::create(filament_nozzle, list, used);
+}
+} // namespace
+
+TEST_CASE("slice_info nozzle_diameters: per extruder, the size the plate prints with", "[3mf][H2C][NozzleDiameters]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+
+    PlateData plate;
+    plate.nozzle_diameters = "0.4,0.4";
+    // No grouping (an unsliced plate): the extruders' own sizes.
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.4");
+    // The project's sizes (P7) win over the printer preset's.
+    plate.nozzle_diameters = "0.4,0.8";
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.8");
+    plate.nozzle_diameters.clear();
+    config.set_key_value("nozzle_diameter_override", new ConfigOptionFloats({ 0., 0.6 }));
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    config.set_key_value("nozzle_diameter_override", new ConfigOptionFloats({ 0. }));
+
+    // The owner's plate: two cubes on the right rack's 0.8 and 0.6, the left unused, the right's mounted 0.4 unused.
+    plate.nozzle_diameters    = "0.4,0.4";
+    plate.nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.8" }, { 1, "0.6" } });
+    REQUIRE(plate.nozzle_group_result);
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.8");
+    // tests/h2c_mixedslice.gcode.3mf prints the 0.6 first (nozzle_sequence [5,6]): the extruder's first nozzle in print order.
+    plate.nozzle_change_sequence = { 2, 1 };
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    plate.nozzle_change_sequence.clear();
+    // Left 0.4 for one cube, right rack 0.6 for the other.
+    plate.nozzle_group_result = rack_group({ 0, 2 }, { { 0, "0.4" }, { 1, "0.4" }, { 1, "0.6" } });
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.6");
+    // The right prints with its own 0.4 too: that is its size.
+    plate.nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.4" }, { 1, "0.6" } });
+    CHECK(slice_info_nozzle_diameters(plate, &config) == "0.4,0.4");
+}
+
+SCENARIO("A rack plate's nozzle_diameters survive a 3MF round trip", "[3mf][H2C][NozzleDiameters]")
+{
+    Model        src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name        = "h2c_rack_cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    for (const std::string &key : store_config.keys())
+        if (const ConfigOption *opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+            store_config.erase(key);
+            store_config.option(key, true);
+        }
+    store_config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+    store_config.set_key_value("filament_colour", new ConfigOptionStrings({ "#000000", "#FFFFFF" }));
+    store_config.set_key_value("filament_map", new ConfigOptionInts({ 2, 2 }));
+    store_config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values      = { 0, 0 };
+    store_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { 0, 0 };
+
+    PlateData *plate           = new PlateData();
+    plate->plate_index         = 0;
+    plate->is_sliced_valid     = true;
+    plate->printer_model_id    = "O1C2";
+    plate->nozzle_diameters    = "0.4,0.4";
+    plate->gcode_prediction    = "1000";
+    plate->gcode_weight        = "12.34";
+    plate->first_layer_time    = "42";
+    plate->filament_maps       = { 2, 2 };
+    plate->nozzle_group_result = rack_group({ 1, 2 }, { { 0, "0.4" }, { 1, "0.8" }, { 1, "0.6" } });
+    REQUIRE(plate->nozzle_group_result);
+    plate->objects_and_instances.emplace_back(0, 0);
+    for (int fid = 0; fid < 2; ++fid) {
+        FilamentInfo info;
+        info.id                 = fid;
+        info.type               = "PLA";
+        info.color              = fid == 0 ? "#000000" : "#FFFFFF";
+        info.filament_id        = "GFA00";
+        info.used_m             = 1.5f;
+        info.used_g             = 4.5f;
+        info.group_id           = { fid + 1 };
+        info.nozzle_diameter    = fid == 0 ? 0.8 : 0.6;
+        info.nozzle_volume_type = get_nozzle_volume_type_string(nvtStandard);
+        info.used_for_object    = true;
+        plate->slice_filaments_info.push_back(info);
+    }
+
+    const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_rack_nozzle_diameters.3mf";
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    StoreParams store_params;
+    store_params.path            = test_file.c_str();
+    store_params.model           = &src_model;
+    store_params.config          = &store_config;
+    store_params.plate_data_list = { plate };
+    store_params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    REQUIRE(plate_data.size() == 1);
+    // The right extruder prints with its rack's 0.8 first: "0.4,0.8", not the preset's "0.4,0.4".
+    CHECK(plate_data.front()->nozzle_diameters == "0.4,0.8");
+    // The per-filament sizes carry the rest.
+    REQUIRE(plate_data.front()->slice_filaments_info.size() == 2);
+    CHECK(plate_data.front()->slice_filaments_info[0].nozzle_diameter == Approx(0.8));
+    CHECK(plate_data.front()->slice_filaments_info[1].nozzle_diameter == Approx(0.6));
+    // The project settings keep the printer preset's nozzle_diameter (the project's sizes are its override key).
+    const auto *nd = dst_config.option<ConfigOptionFloats>("nozzle_diameter");
+    REQUIRE(nd != nullptr);
+    CHECK(nd->values == std::vector<double>{ 0.4, 0.4 });
+
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file);
+    delete plate;
 }
 
 // Deft: Metadata/model_settings.config's <object> block order came from a direct range-for over

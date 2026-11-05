@@ -55,10 +55,21 @@ std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
 //   it, and for each (extruder, source) that differs from its extruder's one slot per flow mode is added to the layout
 //   right after that extruder's slots; nozzle_filament_process_slot points the filament at it (process_config_idx).
 //   Without it the result is exactly P8's.
-// Returns false (config untouched but for an empty nozzle_filament_process_slot) when no extruder has a source or the
-// printer has fewer than two extruders.
+// Returns false (config untouched but for an empty nozzle_filament_process_slot, nozzle_filament_tool and per-filament width
+// and region arrays) when no extruder has a source or the printer has fewer than two extruders.
 bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
                                const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
+
+// Chip-scope fix (owner hand test 2026-11-04, H2C mixed rack): the per-filament arrays fill_nozzle_process_slots() writes
+// (nozzle_*_line_width, nozzle_region_values, nozzle_filament_process_slot) are worked out for the filament map the config
+// had then, and record per filament the tool they were for (nozzle_filament_tool). The GUI and the CLI apply the plate's own
+// map (a manual grouping, the dual-nozzle confirm) only afterwards, so a filament the plate puts on another nozzle kept the
+// widths of the old one (a 0.82 mm wall on the left 0.4 nozzle, refused by Print::validate; the project could never slice).
+// This moves each such filament's entries to its tool now: those of another filament worked out for that tool, else the
+// plate's widths for its nozzle (nozzle_width_for, scaled to its size), the plate's region values and its extruder's slots.
+// Returns whether an entry changed. Called by Print::apply() with the final config. Without sources the fill also empties the
+// per-filament arrays (a project file carries those of the fill it was saved with).
+bool realign_nozzle_filament_values(DynamicPrintConfig &config);
 
 // ---- Per-nozzle process P2: line widths per nozzle (design D8) ----
 //

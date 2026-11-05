@@ -1550,6 +1550,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Per-nozzle process P4: a filament's values for the nozzle it prints on (filament_nozzle_variants) become its
     // own values, so every reader and the G-code's config block see what is printed.
     resolve_filament_nozzle_variants(new_full_config);
+    // Chip-scope fix (2026-11-04): the per-filament per-nozzle values were filled for the filament map the settings had; the
+    // plate's own map (applied after that fill) may put a filament on another nozzle. Its values follow it. No-op otherwise.
+    realign_nozzle_filament_values(new_full_config);
     // Per-nozzle process P6: every line width for the nozzle that prints it (explicit per-nozzle widths, mm widths
     // scaled to the nozzle's size on a printer with mixed sizes). No-op with one nozzle size.
     resolve_nozzle_line_widths(new_full_config);
