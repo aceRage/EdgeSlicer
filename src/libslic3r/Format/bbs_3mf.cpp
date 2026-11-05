@@ -37,6 +37,7 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/stat.hpp>
 #include <thread>
 #include <chrono>
 #include <boost/spirit/include/karma.hpp>
@@ -7791,7 +7792,32 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         auto end = nocomp_exts + sizeof(nocomp_exts) / sizeof(nocomp_exts[0]);
         bool nocomp = std::find_if(nocomp_exts, end, [&path_in_zip](auto & ext) { return boost::algorithm::ends_with(path_in_zip, ext); }) != end;
 #if WRITE_ZIP_LANGUAGE_ENCODING
-        bool result = mz_zip_writer_add_file(&archive, path_in_zip.c_str(), encode_path(src_file_path.c_str()).c_str(), NULL, 0, nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL);
+        // Read the source through the wide-character API. mz_zip_writer_add_file() opens it with a narrow
+        // fopen(), so the path had to go through encode_path() to the ANSI code page, which turns
+        // characters outside it (Chinese file names under a Western code page) into '?' and fails.
+        bool result = false;
+        if (FILE *src = boost::nowide::fopen(src_file_path.c_str(), "rb")) {
+            boost::nowide::stat_t st;
+            MZ_TIME_T             modified = 0;
+            const MZ_TIME_T      *p_time   = nullptr;
+            if (boost::nowide::stat(src_file_path.c_str(), &st) == 0) {
+                modified = MZ_TIME_T(st.st_mtime);
+                p_time   = &modified;
+            }
+            // Mirrors mz_zip_writer_add_file(): size by seeking, then the data is read from the stream.
+#ifdef _WIN32
+            const bool sized = _fseeki64(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) _ftelli64(src) : -1;
+            if (size >= 0 && _fseeki64(src, 0, SEEK_SET) == 0)
+#else
+            const bool sized = fseeko(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) ftello(src) : -1;
+            if (size >= 0 && fseeko(src, 0, SEEK_SET) == 0)
+#endif
+                result = mz_zip_writer_add_cfile(&archive, path_in_zip.c_str(), src, (mz_uint64) size, p_time, NULL, 0,
+                                                 nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL, NULL, 0, NULL, 0);
+            fclose(src);
+        }
 #else
         std::string native_path = encode_path(path_in_zip.c_str());
         std::string extra = ZipUnicodePathExtraField::encode(path_in_zip, native_path);
