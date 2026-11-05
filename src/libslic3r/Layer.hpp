@@ -2,6 +2,7 @@
 #define slic3r_Layer_hpp_
 
 #include "libslic3r.h"
+#include "AdaptiveLayerMerge.hpp"
 #include "BoundingBox.hpp"
 #include "Flow.hpp"
 #include "SurfaceCollection.hpp"
@@ -59,6 +60,12 @@ public:
     SurfaceCollection           fill_surfaces;
     // BBS: Unspecified fill polygons, used for interecting when we don't want the infill/perimeter overlap
     ExPolygons                  fill_no_overlap_expolygons;
+
+    // Mixed-layer-height band merge (runtime only, recomputed by every prepare_infill(), never serialized):
+    // what this region gives up on this layer and, on the group top, what it extrudes instead.
+    // A region may hold several patches on one layer: disjoint group-top slabs after local Z-conflict
+    // clipping, swallowed-span marker copies of those slabs, and orphan-suppression records.
+    std::vector<AdaptiveMergePatch> adaptive_merge_patches;
 
     // collection of expolygons representing the bridged areas (thus not
     // needing support material)
@@ -226,6 +233,29 @@ public:
 
     // Is there any valid extrusion assigned to this LayerRegion?
     virtual bool            has_extrusions() const { for (auto layerm : m_regions) if (layerm->has_extrusions()) return true; return false; }
+
+    // Mixed-layer-height band merge: the Z span this layer actually deposits. Normally its own height, but a
+    // group top lays one bead covering the whole merged band, so its reach is the band's height.
+    virtual coordf_t        effective_print_height() const {
+        coordf_t height = this->height;
+        for (const LayerRegion *layerm : m_regions)
+            for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches)
+                if (patch.group_top && patch.merged_height > height)
+                    height = patch.merged_height;
+        return height;
+    }
+    // Mixed-layer-height band merge: true when this layer takes part in a merge and carries no extrusions of its
+    // own. What it would have printed moved up into the group top, so the empty Z span is not a printability gap
+    // and the layer above must not be reported as unsupported. A merged band that had nothing printable to begin
+    // with leaves the same empty span and gets the same answer.
+    bool                    is_adaptive_merged_out() const {
+        if (m_regions.empty() || this->has_extrusions())
+            return false;
+        for (const LayerRegion *layerm : m_regions)
+            if (! layerm->adaptive_merge_patches.empty())
+                return true;
+        return false;
+    }
 
     //BBS
     void simplify_wall_extrusion_path() { for (auto layerm : m_regions) layerm->simplify_wall_extrusion_entity();}
