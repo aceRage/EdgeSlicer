@@ -3193,6 +3193,13 @@ DynamicPrintConfig PresetBundle::full_config() const
         this->full_sla_config();
 }
 
+DynamicPrintConfig PresetBundle::full_config_for_filament_map(const std::vector<int> &filament_map) const
+{
+    if (filament_map.empty() || this->printers.get_edited_preset().printer_technology() != ptFFF)
+        return this->full_config();
+    return this->full_fff_config(&filament_map);
+}
+
 DynamicPrintConfig PresetBundle::full_config_secure() const
 {
     DynamicPrintConfig config = this->full_config();
@@ -4121,7 +4128,7 @@ void PresetBundle::nozzle_tool_view_before_save()
 
 void PresetBundle::nozzle_tool_view_after_save() { this->nozzle_tool_view_sync(); }
 
-DynamicPrintConfig PresetBundle::full_fff_config() const
+DynamicPrintConfig PresetBundle::full_fff_config(const std::vector<int> *filament_map) const
 {
     DynamicPrintConfig out;
     out.apply(FullPrintConfig::defaults());
@@ -4388,6 +4395,10 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
     // machines route filaments with filament_map); a project carried over to another printer drops it.
     if (!supports_filament_nozzle_assignment(out))
         out.set_key_value("filament_nozzle_assignment", new ConfigOptionInts());
+    // Chip-scope fix: a plate's own filament map, so each filament's per-nozzle values below are those of the nozzle the plate
+    // prints it on (the caller applies the plate's config afterwards, which sets the same map).
+    if (filament_map != nullptr && !filament_map->empty())
+        out.set_key_value("filament_map", new ConfigOptionInts(*filament_map));
     // Per-nozzle process P1: each extruder's chosen process into its slots of the process keys. Nothing
     // changes unless a nozzle has a process of its own.
     this->fill_nozzle_processes(out);

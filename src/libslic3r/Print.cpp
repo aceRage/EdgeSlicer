@@ -606,6 +606,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Per-nozzle process P9: likewise the rack slots' processes (their values are filled in) and the missing slots.
         "nozzle_slot_process_presets",
         "nozzle_slot_process_missing",
+        // Chip-scope fix: the tool record of the per-filament values (the values themselves invalidate what they change).
+        "nozzle_filament_tool",
         // Per-nozzle process P4: the per-nozzle filament values reach the slicer as the filament values they set
         // (resolve_filament_nozzle_variants), which invalidate what they change; the physical nozzle declaration
         // is a G-code line.

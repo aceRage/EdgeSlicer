@@ -12719,6 +12719,7 @@ struct Plater::priv
     // Flag indicating that the G-code export targets a removable device, therefore the show_action_buttons() needs to be called at any case when the background processing finishes.
     ExportingStatus             exporting_status { NOT_EXPORTING };
     std::string                 last_output_path;
+    std::string                 last_export_error; // the 3MF exporter's error text after a failed export_3mf()
     std::string                 last_output_dir_path;
     //BBS store machine_sn and 3mf_path for PrintJob
     PrintPrepareData            m_print_job_data;
@@ -21275,8 +21276,10 @@ int Plater::save_project(bool saveAs)
 
     //BBS export 3mf without gcode
     if (export_3mf(into_path(filename), SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::FullPathSources) < 0) {
-        MessageDialog(this, _L("Failed to save the project.\nPlease check whether the folder exists online or if other programs open the project file."),
-            _L("Save project"), wxOK | wxICON_WARNING).ShowModal();
+        wxString save_failed = _L("Failed to save the project.\nPlease check whether the folder exists online or if other programs open the project file.");
+        if (!p->last_export_error.empty())
+            save_failed += wxString(wxT("\n\n")) + from_u8(p->last_export_error);
+        MessageDialog(this, save_failed, _L("Save project"), wxOK | wxICON_WARNING).ShowModal();
         return wxID_CANCEL;
     }
 
@@ -24940,6 +24943,9 @@ void Plater::export_gcode_3mf(bool export_all)
         if (export_result < 0) {
             // No file was written (e.g. a post-processing script failed). Don't toast "export finished".
             p->exporting_status = ExportingStatus::NOT_EXPORTING;
+            // The exporter reports its own failure to the log only; tell the user too, with its text.
+            if (!p->last_export_error.empty())
+                show_error(this, _L("Failed to export the sliced file.") + wxString(wxT("\n")) + from_u8(p->last_export_error));
             return;
         }
         // Plate print history: a file was written. Recorded as an export, which never turns the plate icon green.
@@ -26076,6 +26082,9 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     }
 
     bool store_result = Slic3r::store_bbs_3mf(store_params);
+    p->last_export_error = store_result ? std::string() : store_params.error;
+    if (!store_result)
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": exporting " << path_u8 << " failed: " << store_params.error;
     // reset designed info
     if (!has_design_info)
         p->model.design_info = nullptr;
