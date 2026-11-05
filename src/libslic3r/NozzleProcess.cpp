@@ -332,8 +332,21 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
 {
     // P9: the per-filament internal key is rewritten on every fill (a stale one would point into an old layout).
     config.set_key_value("nozzle_filament_process_slot", new ConfigOptionInts());
-    if (!supports_nozzle_processes(config))
+    // Chip-scope fix: so are the tool record and, when nothing fills them below, the per-filament widths and region values: a
+    // project file carries the arrays of the fill it was saved with, which no longer apply when no tool has a process of its
+    // own now (the CLI reads them straight from the 3MF). Empty arrays are what a job without per-nozzle processes has.
+    config.set_key_value("nozzle_filament_tool", new ConfigOptionStrings());
+    auto clear_filament_arrays = [&config]() {
+        for (const auto &entry : nozzle_line_width_keys())
+            config.set_key_value(entry.first, new ConfigOptionFloatsOrPercents());
+        config.set_key_value("nozzle_initial_layer_line_width", new ConfigOptionFloatsOrPercents());
+        config.set_key_value("nozzle_line_width", new ConfigOptionFloatsOrPercents());
+        config.set_key_value("nozzle_region_values", new ConfigOptionStrings());
+    };
+    if (!supports_nozzle_processes(config)) {
+        clear_filament_arrays();
         return false;
+    }
     const size_t extruders = static_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"))->size();
     const auto  *filament_opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
     const size_t filaments    = filament_opt != nullptr ? filament_opt->size() : 0;
@@ -345,8 +358,10 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
     if (filament_sources != nullptr)
         for (const DynamicPrintConfig *src : *filament_sources)
             any_source |= src != nullptr;
-    if (!any_source)
+    if (!any_source) {
+        clear_filament_arrays();
         return false;
+    }
 
     const SlotLayout plate = SlotLayout::of(config);
     const bool       keep  = plate.extruder_count() == extruders;
@@ -534,7 +549,124 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
     // The slicer reads the extruder slots only when asked to; a per-nozzle process whose values equal the
     // plate's changes nothing, so it does not ask.
     config.set_key_value("process_extruder_values", new ConfigOptionBool(explicit_values || process_extruder_slots_differ(config)));
+    // Chip-scope fix: the tool each filament's entries above were worked out for, so Print::apply can tell when the plate's own
+    // filament map puts a filament on another nozzle (realign_nozzle_filament_values).
+    {
+        std::vector<std::string> tools(filaments);
+        for (size_t f = 0; f < filaments; ++f)
+            tools[f] = nozzle_filament_tool_id(config, unsigned(f + 1));
+        config.set_key_value("nozzle_filament_tool", new ConfigOptionStrings(std::move(tools)));
+    }
     return true;
+}
+
+bool realign_nozzle_filament_values(DynamicPrintConfig &config)
+{
+    auto        *recorded  = config.option<ConfigOptionStrings>("nozzle_filament_tool");
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    if (recorded == nullptr || count == 0 || recorded->values.size() != count)
+        return false;
+    const std::vector<std::string> was = recorded->values;
+    std::vector<std::string>       now(count);
+    bool                           moved = false;
+    for (size_t f = 0; f < count; ++f) {
+        now[f] = nozzle_filament_tool_id(config, unsigned(f + 1));
+        moved |= now[f] != was[f];
+    }
+    if (!moved)
+        return false;
+    // Per moved filament: another filament whose entries were worked out for the tool it prints on now (-1 = none).
+    std::vector<int> donor(count, -1);
+    for (size_t f = 0; f < count; ++f) {
+        if (now[f] == was[f])
+            continue;
+        for (size_t g = 0; g < count; ++g)
+            if (was[g] == now[f]) {
+                donor[f] = int(g);
+                break;
+            }
+    }
+    bool changed = false;
+    // Widths: the donor's, else the plate's width for the nozzle it prints on now (rules 2-4 of nozzle_width_for, as
+    // fill_nozzle_line_widths gives a filament on a nozzle without a process of its own).
+    std::vector<std::pair<std::string, std::string>> arrays = nozzle_line_width_keys();
+    arrays.emplace_back("nozzle_initial_layer_line_width", "initial_layer_line_width");
+    arrays.emplace_back("nozzle_line_width", "line_width");
+    for (const auto &[array_key, width_key] : arrays) {
+        auto *opt = config.option<ConfigOptionFloatsOrPercents>(array_key);
+        if (opt == nullptr || opt->values.size() != count)
+            continue;
+        const std::vector<FloatOrPercent> orig = opt->values;
+        for (size_t f = 0; f < count; ++f) {
+            if (now[f] == was[f])
+                continue;
+            const FloatOrPercent value = donor[f] >= 0 ? orig[size_t(donor[f])] :
+                                                         nozzle_width_for(config, width_key, int(nozzle_for_filament(config, unsigned(f + 1))) + 1,
+                                                                          nozzle_diameter_for_filament(config, unsigned(f + 1)))
+                                                             .value;
+            if (!(value == opt->values[f])) {
+                opt->values[f] = value;
+                changed        = true;
+            }
+        }
+    }
+    // Region values: the donor's, else the plate's values of the same keys.
+    if (auto *regions = config.option<ConfigOptionStrings>("nozzle_region_values"); regions != nullptr && regions->values.size() == count) {
+        const std::vector<std::string> orig = regions->values;
+        std::vector<std::string>       keys;
+        for (const std::string &entry : orig) {
+            if (entry.empty())
+                continue;
+            size_t start = 0;
+            while (start < entry.size()) {
+                size_t end = entry.find('\n', start);
+                if (end == std::string::npos)
+                    end = entry.size();
+                const std::string line = entry.substr(start, end - start);
+                if (const size_t eq = line.find(" = "); eq != std::string::npos)
+                    keys.push_back(line.substr(0, eq));
+                start = end + 1;
+            }
+            break;
+        }
+        std::string plate_text;
+        for (const std::string &key : keys)
+            if (const ConfigOption *value = config.option(key)) {
+                if (!plate_text.empty())
+                    plate_text += '\n';
+                plate_text += key + " = " + value->serialize();
+            }
+        for (size_t f = 0; f < count; ++f) {
+            if (now[f] == was[f])
+                continue;
+            std::string text = donor[f] >= 0 ? orig[size_t(donor[f])] : plate_text;
+            if (text != regions->values[f]) {
+                regions->values[f] = std::move(text);
+                changed            = true;
+            }
+        }
+    }
+    // A rack size group's own layout slot: the donor's (same extruder, same process), else the extruder's slots (-1).
+    if (auto *slots = config.option<ConfigOptionInts>("nozzle_filament_process_slot"); slots != nullptr && slots->values.size() == count) {
+        const std::vector<int> orig = slots->values;
+        for (size_t f = 0; f < count; ++f) {
+            if (now[f] == was[f])
+                continue;
+            const int slot = donor[f] >= 0 ? orig[size_t(donor[f])] : -1;
+            if (slot != slots->values[f]) {
+                slots->values[f] = slot;
+                changed          = true;
+            }
+        }
+    }
+    std::string log;
+    for (size_t f = 0; f < count; ++f)
+        if (now[f] != was[f])
+            log += " filament " + std::to_string(f + 1) + ": " + was[f] + " -> " + now[f] + (donor[f] >= 0 ? "" : " (plate widths)") + ";";
+    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process: the plate's filament map moved filaments to other nozzles, their per-nozzle values follow:" << log;
+    recorded->values = now;
+    return changed;
 }
 
 bool process_nozzles_splittable(const ConfigBase &process, size_t extruders)

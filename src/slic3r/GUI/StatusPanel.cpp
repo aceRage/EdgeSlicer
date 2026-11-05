@@ -2281,7 +2281,7 @@ void StatusPanel::show_error_message(MachineObject *obj, bool is_exist, wxString
             }
 
             // Which error and job the buttons are speaking for. This is set before the buttons
-            // are laid out, because update_title_style greys out the ones whose command needs a
+            // are laid out, because update_title_style hides the ones whose command needs a
             // job_id when the printer has not given us one.
             m_print_error_dlg->set_error_context(obj, obj ? obj->print_error : 0,
                                                  obj ? obj->job_id_ : std::string());

@@ -10089,7 +10089,8 @@ static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::s
         const auto *opt = cfg.option<ConfigOptionInts>(key);
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](int v) { return v <= 0; });
     }
-    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing")
+    // Chip-scope fix: the tool each filament's per-nozzle values were filled for is internal too.
+    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing" || key == "nozzle_filament_tool")
         return true;
     return false;
 }
