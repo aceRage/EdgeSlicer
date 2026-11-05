@@ -748,13 +748,15 @@ TEST_CASE("Per-filament values record their tool and follow the plate's filament
 
 TEST_CASE("A filament the plate moves to the 0.4 nozzle validates with the 0.4's widths", "[NozzleRackSlots][ChipScope][Validate]")
 {
-    // Filled for the global map (filament 2 on the right 0.8), sliced with the plate's (filament 2 on the left 0.4).
-    DynamicPrintConfig       filled = left04_right08(2, { 1, 2 });
-    const DynamicPrintConfig right  = right08_process(filled);
+    // Filled for the global map (filament 3 on the right 0.8), sliced with the plate's (filament 3 on the left 0.4). Three
+    // filaments on two nozzles: with as many nozzles as filaments the map is not read at all.
+    DynamicPrintConfig filled = left04_right08(3, { 1, 2, 2 });
+    filled.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0"));
+    const DynamicPrintConfig right = right08_process(filled);
     REQUIRE(fill_nozzle_process_slots(filled, { nullptr, &right }));
-    filled.option<ConfigOptionInts>("filament_map")->values = { 2, 1 };
+    filled.option<ConfigOptionInts>("filament_map")->values = { 1, 2, 1 };
 
-    auto validate_on_filament_2 = [](const DynamicPrintConfig &config, Print &print) {
+    auto validate_on_filament_3 = [](const DynamicPrintConfig &config, Print &print) {
         Model        model;
         ModelObject *object = model.add_object();
         object->name        = "cube";
@@ -762,7 +764,7 @@ TEST_CASE("A filament the plate moves to the 0.4 nozzle validates with the 0.4's
         object->add_instance();
         object->ensure_on_bed();
         for (const char *key : { "extruder", "wall_filament", "sparse_infill_filament", "solid_infill_filament" })
-            object->config.set_key_value(key, new ConfigOptionInt(2));
+            object->config.set_key_value(key, new ConfigOptionInt(3));
         print.set_status_silent();
         print.apply(model, config);
         print.apply(model, config);
@@ -770,18 +772,18 @@ TEST_CASE("A filament the plate moves to the 0.4 nozzle validates with the 0.4's
     };
     {
         Print             print;
-        const std::string err = validate_on_filament_2(filled, print);
+        const std::string err = validate_on_filament_3(filled, print);
         INFO(err);
         CHECK(err.find("more than 2.0 x") == std::string::npos);
         CHECK(err.find("too wide") == std::string::npos);
-        CHECK(widths_of(print.full_print_config(), "nozzle_inner_wall_line_width") == std::vector<double>{ 0.82, 0.42 });
+        CHECK(widths_of(print.full_print_config(), "nozzle_inner_wall_line_width") == std::vector<double>{ 0.42, 0.82, 0.42 });
     }
     // Without the record (the values of an older fill) the widths stay where they were filled: the refusal the owner saw.
     {
         DynamicPrintConfig older = filled;
         older.set_key_value("nozzle_filament_tool", new ConfigOptionStrings());
         Print             print;
-        const std::string err = validate_on_filament_2(older, print);
+        const std::string err = validate_on_filament_3(older, print);
         INFO(err);
         CHECK(err.find("more than 2.0 x") != std::string::npos);
     }
