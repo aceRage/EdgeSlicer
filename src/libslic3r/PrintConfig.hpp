@@ -1713,6 +1713,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
     ((ConfigOptionFloat,               support_ironing_spacing))
+    // Bambu Studio 2.9.1.
+    ((ConfigOptionFloat,               support_ironing_inset))
+    ((ConfigOptionFloat,               support_ironing_speed))
+    ((ConfigOptionFloat,               support_ironing_direction))
     // Ultra (over-support surfaces): over_support_surfaces / _flow / _speed used to live here.
     // Stage 5 of the support-sets plan moved them to PrintRegionConfig so a PART can carry them:
     // they describe the OBJECT's own bottom shell, not the support, and a part's own region is

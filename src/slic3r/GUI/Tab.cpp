@@ -3799,6 +3799,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_ironing_pattern", "support_settings_ironing#pattern");
         optgroup->append_single_option_line("support_ironing_flow", "support_settings_ironing#flow");
         optgroup->append_single_option_line("support_ironing_spacing", "support_settings_ironing#line-spacing");
+        // Bambu Studio 2.9.1 (Tab.cpp:3352-3356).
+        optgroup->append_single_option_line("support_ironing_speed", "support_settings_ironing");
+        optgroup->append_single_option_line("support_ironing_inset", "support_settings_ironing");
+        optgroup->append_single_option_line("support_ironing_direction", "support_settings_ironing");
 
         // Ultra (over-support surfaces): its own small group right under the support interface
         // settings, because that is what it is about - the object face that lands on the

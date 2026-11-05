@@ -8883,6 +8883,37 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
 
+    // Bambu Studio 2.9.1 (PrintConfig.cpp:6489-6516). Defaults keep what this fork printed before:
+    // Bambu's speed default is 20 mm/s, ours 0 = the ironing speed.
+    def           = this->add("support_ironing_inset", coFloat);
+    def->label    = L("Support ironing inset");
+    def->category = L("Support");
+    def->tooltip  = L("The distance to keep the support ironing lines from the edges of the ironed interface. 0 means no inset.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->max      = 100;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def           = this->add("support_ironing_speed", coFloat);
+    def->label    = L("Support ironing speed");
+    def->category = L("Support");
+    def->tooltip  = L("Print speed of the support ironing lines. 0 means the ironing speed.");
+    def->sidetext = L("mm/s");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def           = this->add("support_ironing_direction", coFloat);
+    def->label    = L("Support ironing direction");
+    def->category = L("Support");
+    def->tooltip  = L("Angle of the support ironing lines relative to the support interface lines.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min      = 0;
+    def->max      = 360;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     // Ultra (over-support surfaces). Category "Support" on purpose: that is what puts the three
     // keys on the process tab's Support page AND makes them join support_set_keys(), which is
     // derived from "every PrintObjectConfig key whose category is Support".

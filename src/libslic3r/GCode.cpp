@@ -10764,6 +10764,10 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
     // switches it off outright, so even a zero-length support path keeps the role speed.
     const auto speed_for_path = [this](double length, ExtrusionRole role) {
         const double default_speed = -1.0;
+        // Bambu Studio 2.9.1 (GCode.cpp:7750-7751): support ironing prints at support_ironing_speed;
+        // 0 (this fork's default) keeps the ironing speed.
+        if (role == erIroning)
+            return m_config.support_ironing_speed.value > 0. ? m_config.support_ironing_speed.value : default_speed;
         const double threshold     = this->process_flow_value(m_config.small_support_perimeter_threshold);
         if (!is_support(role) || threshold <= 0. || length > SMALL_PERIMETER_LENGTH(threshold))
             return default_speed;
