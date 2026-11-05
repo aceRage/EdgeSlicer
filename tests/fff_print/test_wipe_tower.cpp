@@ -1068,6 +1068,9 @@ TEST_CASE("The final purge travel lifts before moving even with z_hop_when_prime
         {"z_hop_when_prime", "0,0"},
         {"z_hop_types", "Normal Lift,Normal Lift"},
         {"z_hop", "0.4,0.4"},
+        // travel_to() and retract()'s "lift Z" comments are omitted unless this is on.
+        {"gcode_comments", "1"},
+        {"enable_filament_ramming", "1"},
     });
     Print print;
     Model model;
