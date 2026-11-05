@@ -10321,6 +10321,15 @@ std::string GCode::extrude_loop(
         enable_seam_slope      = seam_overhang < m_config.scarf_overhang_threshold.value * 0.01f * _line_width;
     }
 
+    // Bambu Studio 2.9.1 (GCode.cpp:6709-6712): the walls of a circle under the auto circle compensation
+    // print at the filament's compensation speed and, with apply_scarf_seam_on_circles, with a scarf seam,
+    // unless the loop overhangs. Edge: the scarf is decided before the seam gap clip (Bambu clips first)
+    // and, like every scarf here, not on the first layer or in spiral vase mode.
+    const bool circle_compensation = loop.circle_compensation &&
+        std::none_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &p) { return p.role() == erOverhangPerimeter; });
+    if (circle_compensation && m_config.apply_scarf_seam_on_circles.value && !m_config.spiral_mode && layer_id() > 0)
+        enable_seam_slope = true;
+
     // clip the path to avoid the extruder to get exactly on the first point of the loop;
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
     // we discard it in that case
@@ -10446,9 +10455,16 @@ std::string GCode::extrude_loop(
         m_multi_flow_segment_path_average_mm3_per_mm = weighted_sum_mm3_per_mm / total_multipath_length;
     // Orca: end of multipath average mm3_per_mm value calculation
 
+    // Bambu Studio 2.9.1: "; Slow Down Start" / "; Slow Down End" keep the cooling slowdown off these walls.
+    const char *circle_start = circle_compensation ? "; Slow Down Start\n" : "";
+    const char *circle_end   = circle_compensation ? "; Slow Down End\n" : "";
+    m_circle_compensation_speed = circle_compensation ? m_config.circle_compensation_speed.get_at(m_writer.extruder()->id()) : -1.;
+
     if (!enable_seam_slope) {
         for (ExtrusionPaths::iterator path = paths.begin(); path != paths.end(); ++path) {
+            gcode += circle_start;
             gcode += this->_extrude(*path, description, speed_for_path(*path));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10484,7 +10500,9 @@ std::string GCode::extrude_loop(
 
         // Then extrude it
         for (const auto& p : new_loop.get_all_paths()) {
+            gcode += circle_start;
             gcode += this->_extrude(*p, description, speed_for_path(*p));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10500,6 +10518,8 @@ std::string GCode::extrude_loop(
             paths.insert(paths.end(), new_loop.ends.begin(), new_loop.ends.end());
         }
     }
+
+    m_circle_compensation_speed = -1.;
 
     // Orca: share the post-extrusion nozzle position between wipe_inward and wipe_on_loops.
     const bool is_ccw = loop.is_counter_clockwise();
@@ -11127,8 +11147,28 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // key those callers actually read rather than leaving the warning with no setting at all.
     if (speed != -1 && (path.role() == erSkirt || path.role() == erBrim))
         speed_setting = "support_speed";
+    // Bambu Studio 2.9.1 (GCode.cpp:7704-7722, 7795-7800): the walls of a compensated circle use the
+    // filament's circle_compensation_speed as their role speed; a caller's small perimeter speed still
+    // caps it.
+    const bool circle_wall = m_circle_compensation_speed > 0. && (path.role() == erPerimeter || path.role() == erExternalPerimeter);
+    if (circle_wall && speed > EPSILON && speed < m_circle_compensation_speed)
+        speed_setting = "small_perimeter_speed";
+    else if (circle_wall && speed > EPSILON) {
+        speed         = m_circle_compensation_speed;
+        speed_setting = "circle_compensation_speed";
+    }
     if (speed == -1) {
-        if (path.role() == erPerimeter) {
+        if (circle_wall) {
+            speed_setting = "circle_compensation_speed";
+            speed         = m_circle_compensation_speed;
+            if (sloped) {
+                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
+                if (scarf < speed) {
+                    speed         = scarf;
+                    speed_setting = "scarf_joint_speed";
+                }
+            }
+        } else if (path.role() == erPerimeter) {
             speed_setting = "inner_wall_speed";
             speed = this->process_flow_value(m_config.inner_wall_speed);
             if (sloped) {

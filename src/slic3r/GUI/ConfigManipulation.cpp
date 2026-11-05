@@ -427,6 +427,18 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:410-417): the auto circle compensation replaces the fixed
+    // X-Y hole / contour compensation, so switching it on clears them.
+    if (config->has("enable_circle_compensation") && config->opt_bool("enable_circle_compensation") &&
+        (config->opt_float("xy_hole_compensation") != 0. || config->opt_float("xy_contour_compensation") != 0.)) {
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist    = true;
+        new_conf.set_key_value("xy_contour_compensation", new ConfigOptionFloat(0));
+        new_conf.set_key_value("xy_hole_compensation", new ConfigOptionFloat(0));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
     if (config->option<ConfigOptionFloat>("elefant_foot_compensation")->value > 1)
     {
         const wxString msg_text = _(L("Too large elephant foot compensation is unreasonable.\n"
@@ -1330,6 +1342,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
+
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1169-1172).
+    if (config->has("enable_circle_compensation")) {
+        const bool circle_compensation = config->opt_bool("enable_circle_compensation");
+        toggle_field("xy_hole_compensation", !circle_compensation);
+        toggle_field("xy_contour_compensation", !circle_compensation);
+        toggle_line("circle_compensation_manual_offset", circle_compensation);
+        toggle_line("apply_scarf_seam_on_circles", circle_compensation);
+    }
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
     toggle_line("unsupported_wall_last", has_detect_overhang_wall);

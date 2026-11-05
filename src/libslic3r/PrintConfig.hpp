@@ -1719,6 +1719,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     // where the fork already puts such a value. See the block in PrintRegionConfig below.
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
+    // Bambu Studio 2.9.1: auto circle contour-hole compensation (coefficients are per filament, PrintConfig).
+    ((ConfigOptionBool,                enable_circle_compensation))
+    ((ConfigOptionFloat,               circle_compensation_manual_offset))
+    ((ConfigOptionBool,                apply_scarf_seam_on_circles))
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
@@ -2565,6 +2569,19 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               filament_tower_interface_print_temp))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_length))
+    // Bambu Studio 2.9.1: auto circle compensation coefficients, one value per filament.
+    ((ConfigOptionFloats,             circle_compensation_speed))
+    ((ConfigOptionFloats,             diameter_limit))
+    ((ConfigOptionFloats,             counter_coef_1))
+    ((ConfigOptionFloats,             counter_coef_2))
+    ((ConfigOptionFloats,             counter_coef_3))
+    ((ConfigOptionFloats,             hole_coef_1))
+    ((ConfigOptionFloats,             hole_coef_2))
+    ((ConfigOptionFloats,             hole_coef_3))
+    ((ConfigOptionFloats,             counter_limit_min))
+    ((ConfigOptionFloats,             counter_limit_max))
+    ((ConfigOptionFloats,             hole_limit_min))
+    ((ConfigOptionFloats,             hole_limit_max))
     ((ConfigOptionInt,                wipe_tower_filament))
     ((ConfigOptionFloats,             wiping_volumes_extruders))
     ((ConfigOptionInts,       idle_temperature))

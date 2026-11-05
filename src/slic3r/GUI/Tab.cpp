@@ -3469,6 +3469,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("enable_arc_fitting", "quality_settings_precision#arc-fitting");
         optgroup->append_single_option_line("xy_hole_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("xy_contour_compensation", "quality_settings_precision#x-y-compensation");
+        // Bambu Studio 2.9.1 auto circle compensation (Tab.cpp:3149-3150), next to the fixed X-Y compensation it replaces.
+        optgroup->append_single_option_line("enable_circle_compensation", "quality_settings_precision#x-y-compensation");
+        optgroup->append_single_option_line("circle_compensation_manual_offset", "quality_settings_precision#x-y-compensation");
+        optgroup->append_single_option_line("apply_scarf_seam_on_circles", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_layers_density", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");

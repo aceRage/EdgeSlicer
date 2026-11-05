@@ -1435,6 +1435,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_top_z_distance"
             || opt_key == "support_bottom_z_distance"
             || opt_key == "xy_hole_compensation"
+            || opt_key == "enable_circle_compensation"
+            || opt_key == "circle_compensation_manual_offset"
             || opt_key == "xy_contour_compensation"
             //BBS: [Arthur] the following params affect bottomBridge surface type detection
             || opt_key == "support_type"
@@ -1782,7 +1784,10 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "spiral_starting_flow_ratio"
             || opt_key == "spiral_finishing_flow_ratio"
             // Edge: read by GCode::process_layer only.
-            || opt_key == "min_layer_time_pause") {
+            || opt_key == "min_layer_time_pause"
+            // Bambu Studio 2.9.1 (PrintObject.cpp:1594): read by GCode::extrude_loop / extrude_support only.
+            || opt_key == "apply_scarf_seam_on_circles"
+            || opt_key == "support_ironing_speed") {
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else if (
                opt_key == "flush_into_infill"
