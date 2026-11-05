@@ -10120,11 +10120,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 add_vector(stream, nozzle_volume_types);
                 stream << "\"/>\n";
 
-                // BBS reads the diameters straight off the printer config; plate_data carries the
-                // same string (set by both the CLI and the GUI export path) as a fallback.
-                std::string nozzle_diameters_str = plate_data->nozzle_diameters;
-                if (auto* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter")))
-                    nozzle_diameters_str = nozzle_diameter_option->serialize();
+                // BBS reads the diameters straight off the printer config, which on Bambu's machines is the size each
+                // extruder prints with. Here that is the plate's: the project's sizes (P7, set by both the CLI and the GUI
+                // export path) and the rack nozzle the plate uses (P9). The printer preset's nozzle_diameter is only the
+                // fallback (owner report 2026-11-05: "0.4 | 0.4" in Bambu Connect for a 0.8 + 0.6 plate).
+                const std::string nozzle_diameters_str = slice_info_nozzle_diameters(*plate_data, &config);
 
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
@@ -11033,6 +11033,45 @@ bool load_gcode_3mf_from_stream(std::istream &data, DynamicPrintConfig *config, 
     bool res = importer.load_gcode_3mf_from_stream(data, *model, *plate_data_list, *config, *file_version);
     importer.log_errors();
     return res;
+}
+
+std::string slice_info_nozzle_diameters(const PlateData &plate, const DynamicPrintConfig *config)
+{
+    // Each extruder's own size: the plate's string (the project's sizes), else the config's effective sizes.
+    std::vector<double> sizes;
+    if (!plate.nozzle_diameters.empty()) {
+        ConfigOptionFloats parsed;
+        if (parsed.deserialize(plate.nozzle_diameters))
+            sizes = parsed.values;
+    }
+    if (config != nullptr) {
+        const std::vector<double> effective = effective_nozzle_diameters(*config);
+        if (sizes.empty())
+            sizes = effective;
+        // One value per extruder.
+        for (size_t e = sizes.size(); e < effective.size(); ++e)
+            sizes.push_back(effective[e]);
+    }
+    // The nozzles the plate's grouping uses: an extruder that never prints with its own size reports the first one it uses.
+    if (plate.nozzle_group_result) {
+        for (size_t e = 0; e < sizes.size(); ++e) {
+            std::vector<MultiNozzleUtils::NozzleInfo> used = plate.nozzle_group_result->get_used_nozzles_in_extruder(int(e));
+            std::vector<double>                       used_sizes;
+            std::sort(used.begin(), used.end(), [](const auto &a, const auto &b) { return a.group_id < b.group_id; });
+            for (const MultiNozzleUtils::NozzleInfo &nozzle : used) {
+                const double d = string_to_double_decimal_point(nozzle.diameter); // locale-independent
+                if (d > 0.)
+                    used_sizes.push_back(d);
+            }
+            if (used_sizes.empty() ||
+                std::any_of(used_sizes.begin(), used_sizes.end(), [&](double d) { return std::abs(d - sizes[e]) < 0.001; }))
+                continue;
+            sizes[e] = used_sizes.front();
+        }
+    }
+    if (sizes.empty())
+        return plate.nozzle_diameters;
+    return ConfigOptionFloats(sizes).serialize();
 }
 
 bool store_bbs_3mf(StoreParams& store_params)
