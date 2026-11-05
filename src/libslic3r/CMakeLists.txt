@@ -106,6 +106,7 @@ set(lisbslic3r_sources
     PushFit.hpp
     TacJoint.cpp
     TacJoint.hpp
+    TacJointBoolean.hpp
     ImageFill.hpp
     RealisticRenderSettings.cpp
     RealisticRenderSettings.hpp

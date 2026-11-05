@@ -7,7 +7,7 @@ the application embeds the meshes and needs no external files at runtime.
 ## Usage
 
 1. Select an object and open the Cut tool (`C`).
-2. Choose a planar cut (Flat, Curved or Draw surface) and open Add connectors / Edit connectors.
+2. Choose a cut (Flat, Curved or Draw surface) and open Add connectors / Edit connectors.
 3. Select **TAC Joint** and place it on the cut face.
 4. Adjust the parameters, confirm the connectors, and perform the cut.
 
