@@ -302,3 +302,39 @@ TEST_CASE("A changed AMS inventory takes back the grouping steps", "[FilamentGro
         CHECK(print.get_extruder_filament_info()[0][0].opt_serialize("filament_colour") == "#FF0000");
     }
 }
+
+// ---- #17074: grouping follows the printer's loaded filaments -----------------------------------
+// Edge already runs BambuStudio's grouping engine (calc_match_mode_cost, calc_one_change_budget, the
+// no-machine-filament early return in select_best_group_for_ams); these pin that it honours the loaded
+// filaments. Upstream's master-extruder-preference wrapper does not exist in Edge, so its cases are not here.
+
+TEST_CASE("Filament-saving grouping puts a filament on the extruder the printer has it loaded in", "[FilamentGroup][ToolOrdering]")
+{
+    Model model;
+    add_cube(model);
+    Print print;
+    print.is_BBL_printer() = true;
+    // Only the first (non-master) extruder holds the printed PLA.
+    apply_with_filament_info(print, model, master_second_extruder_config(1, {"#F98C36"}),
+                             {{make_tray("#F98C36", "PLA", "A1"), make_tray("#BCBCBC", "PETG", "A2")}, {make_tray("#F95D73", "PETG", "Ext")}});
+    auto result = ToolOrdering::get_recommended_filament_maps(&print, {{0}, {0}, {0}}, FilamentMapMode::fmmAutoForFlush, {{}, {}}, {{}, {}}, {});
+    CHECK(result.get_extruder_id(0) == 0);
+}
+
+TEST_CASE("Convenience-mode grouping puts a filament where the printer holds its sub-type", "[FilamentGroup][ToolOrdering][H2C]")
+{
+    // Both extruders hold white PLA; only the second one's is the project filament's sub-type. One nozzle
+    // on the second extruder runs the two-extruder match; six run the multi-nozzle one.
+    const int          second_extruder_nozzles = GENERATE(1, 6);
+    DynamicPrintConfig config                  = master_second_extruder_config(second_extruder_nozzles, {"#FFFFFF"});
+    config.option<ConfigOptionStrings>("filament_ids", true)->values = {"GFA00"};
+    Model model;
+    add_cube(model);
+    Print print;
+    print.is_BBL_printer() = true;
+    apply_with_filament_info(print, model, config,
+                             {{make_tray("#FFFFFF", "PLA", "A1", false, "GFL99")}, {make_tray("#FFFFFF", "PLA", "A1", false, "GFA00")}});
+    auto result = ToolOrdering::get_recommended_filament_maps(&print, {{0}, {0}, {0}}, FilamentMapMode::fmmAutoForMatch, {{}, {}}, {{}, {}}, {});
+    INFO("Nozzles on the second extruder: " << second_extruder_nozzles);
+    CHECK(result.get_extruder_id(0) == 1);
+}
