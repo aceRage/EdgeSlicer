@@ -275,6 +275,17 @@ std::vector<int> find_optimal_physical_assignment(
 std::vector<NozzleInfo> build_nozzle_list(std::vector<NozzleGroupInfo> info);
 std::vector<NozzleInfo> build_nozzle_list(double diameter, const std::vector<int>& filament_nozzle_map,
                                           const std::vector<int>& filament_volume_map, const std::vector<int>& filament_map);
+// One physical nozzle slot of an extruder (build_nozzle_list_from_extruder_nozzles).
+struct SlotNozzle
+{
+    std::string      diameter;
+    NozzleVolumeType volume_type{nvtStandard};
+};
+// Bambu Studio 2.9.x build_nozzle_list_from_extruder_nozzles (MultiNozzleUtils.cpp:32-94): every extruder's nozzles in
+// physical slot order, extruder 0's first, numbered across extruders, so group_id == index == the global physical slot
+// (H2C: left 0, right rack slots 1..6; H3C: 0..8). Nothing is reordered by size or type: a slice_info <filament group_id>
+// names the slot the printer checks the hotend of.
+std::vector<NozzleInfo> build_nozzle_list_from_extruder_nozzles(const std::vector<std::vector<SlotNozzle>>& extruder_nozzles);
 // 从gcode.3mf中加载nozzle info需要处理前后兼容性
 std::vector<NozzleInfo> load_nozzle_infos_with_compatibility(
     const std::vector<NozzleInfo>& nozzle_infos,
