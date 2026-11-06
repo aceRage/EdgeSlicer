@@ -2601,3 +2601,40 @@ TEST_CASE("Spiral vase mode warns about a height range that overrides infill, wa
     check("wall_loops");
     check("top_shell_layers");
 }
+
+// Orca #17095: the background thread drops its own export when an in-place edit of the file fails. The print's
+// cancel callback stops that thread and waits for it, so the invalidation must not call it.
+TEST_CASE("An export the background thread invalidates is written again without re-slicing", "[Print][PlateName]")
+{
+    // Declared before the print, whose destructor calls the cancel callback too.
+    bool cancel_called = false;
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model);
+    print.set_status_silent();
+    print.set_cancel_callback([&cancel_called]() { cancel_called = true; });
+
+    const boost::filesystem::path out = scratch_path(".gcode");
+    print.process();
+    print.export_gcode(out.string(), nullptr, nullptr);
+    REQUIRE(print.finished());
+    // What a post-processing script that failed half way leaves in the file.
+    {
+        boost::nowide::ofstream half(out.string(), std::ios::app);
+        half << "; half edited\n";
+    }
+
+    print.invalidate_gcode_export_from_worker();
+    CHECK_FALSE(print.finished());
+    CHECK_FALSE(cancel_called);
+    CHECK(print.objects().front()->is_step_done(posSlice));
+
+    print.process();
+    print.export_gcode(out.string(), nullptr, nullptr);
+    CHECK(print.finished());
+    boost::nowide::ifstream in(out.string());
+    const std::string gcode((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    boost::nowide::remove(out.string().c_str());
+    CHECK(gcode.find("; half edited") == std::string::npos);
+}
