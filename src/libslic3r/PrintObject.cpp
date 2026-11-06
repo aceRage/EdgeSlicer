@@ -6314,13 +6314,17 @@ void PrintObject::compute_adaptive_merge_groups()
         return;
 
     // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
-    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it.
+    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that
+    // leaves a single band height on this grid is widened (adaptive_ladder_height_range), or the ladder of an
+    // odd run comes back empty and the region loses every layer above the first.
     std::vector<unsigned int> used_filaments;
     this->print()->used_printing_filaments(used_filaments);
     std::vector<AdaptiveLayerHeightRange> region_ranges(region_count);
     for (size_t region_id = 0; region_id < region_count; ++ region_id)
-        region_ranges[region_id] = adaptive_layer_height_range_for_nozzle(
-            print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments);
+        region_ranges[region_id] = adaptive_ladder_height_range(
+            adaptive_layer_height_range_for_nozzle(
+                print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments),
+            region_nozzles[region_id], min_nozzle, m_slicing_params.layer_height);
 
     // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
     // pass has already aligned painted ownership to each band's anchor contour.

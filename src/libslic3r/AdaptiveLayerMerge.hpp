@@ -209,6 +209,16 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
                                                                 unsigned int                     filament_id,
                                                                 const std::vector<unsigned int> &used_filament_ids);
 
+// The window a merging nozzle's ladder is actually cut in. The per-nozzle clamp above is kept when it holds two
+// consecutive band heights on the base grid (k and k + 1 layers), which is what lets any long enough run be cut.
+// A clamp that holds one only - a 0.8 with min_layer_height 0.24 at 0.2 layers takes 0.4 slabs and nothing else -
+// cannot cut an odd run, and the ladder would come back empty: every layer of the region above the first would be
+// suppressed. Then the ceiling is relaxed to the nozzle diameter (the 1.0D ceiling orphan absorption already
+// allows, keeping the configured minimum), and if that still does not tile, Bambu's plain diameter window is used.
+// A clamp under which the nozzle does not merge at all (band size 1) is returned unchanged.
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height);
+
 // Test accessor for PrintObject::compute_adaptive_merge_groups(). The planner runs from PrintObject::make_perimeters()
 // since step 3; this lets a unit test re-run it on a sliced object without the perimeter step.
 struct AdaptiveMergePlanAccess
