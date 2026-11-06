@@ -11469,13 +11469,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         }
 
         if (slowdown_curled) {
+            // Orca #17144: the fully unsupported entry is the bridge speed for bridge infill, as in the branch
+            // without the curled slowdown; every other role keeps the 4/4 overhang speed there.
+            const FloatOrPercent fully_unsupported_speed = path.role() == erBridgeInfill ?
+                FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true} :
+                ((oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true});
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
                  (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
                  (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
                  (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
                  (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
-                 (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true}});
+                 fully_unsupported_speed});
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold,
