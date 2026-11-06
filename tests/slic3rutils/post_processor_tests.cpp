@@ -1,6 +1,9 @@
 // Orca #17095: a post-processing script or plugin that fails fails the export or upload, not the slice,
 // so the plate stays valid and Slice / Print can be retried.
 
+// GUI_App.hpp first: it brings in the Windows headers that the boost::asio parts of the GUI headers need.
+#include "slic3r/GUI/GUI_App.hpp"
+
 #include <catch2/catch.hpp>
 
 #include <exception>
