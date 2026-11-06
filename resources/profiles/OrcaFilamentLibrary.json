@@ -1,6 +1,6 @@
 {
     "name": "OrcaFilamentLibrary",
-    "version": "02.04.00.24",
+    "version": "02.04.00.25",
     "force_update": "0",
     "description": "Orca Filament Library",
     "filament_list": [
@@ -121,6 +121,10 @@
             "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG @base.json"
         },
         {
+            "name": "3D-Fuel Pro PCTG ESD @base",
+            "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG ESD @base.json"
+        },
+        {
             "name": "3D-Fuel Pro PCTG Matte @base",
             "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG Matte @base.json"
         },
@@ -139,10 +143,6 @@
         {
             "name": "Generic PCTG @System",
             "sub_path": "filament/Generic PCTG @System.json"
-        },
-        {
-            "name": "Pro PCTG ESD @base",
-            "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG-ESD @base.json"
         },
         {
             "name": "Generic PE @System",
@@ -2073,6 +2073,10 @@
             "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG @System.json"
         },
         {
+            "name": "3D-Fuel Pro PCTG ESD @System",
+            "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG ESD @System.json"
+        },
+        {
             "name": "3D-Fuel Pro PCTG Matte @System",
             "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG Matte @System.json"
         },
@@ -2115,10 +2119,6 @@
         {
             "name": "COEX PCTG PRIME @System",
             "sub_path": "filament/COEX/COEX PCTG PRIME @System.json"
-        },
-        {
-            "name": "Pro PCTG ESD @System",
-            "sub_path": "filament/3D-Fuel/3D-Fuel Pro PCTG-ESD @System.json"
         },
         {
             "name": "BETA PETG @BBL A1",
