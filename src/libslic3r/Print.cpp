@@ -772,6 +772,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "wipe_on_loops",
         "wipe_inward",
         "wipe_inward_distance",
+        "retract_after_outer_wall",
         "gcode_comments",
         "gcode_label_objects", 
         "exclude_object",

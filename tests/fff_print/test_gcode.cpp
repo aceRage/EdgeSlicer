@@ -12,6 +12,9 @@
 
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -1022,8 +1025,97 @@ TEST_CASE("Z hop follows the lift settings of the filament printing", "[GCode][R
     if (filament == 1) {
         CHECK(first < 0.2 + EPSILON);
         CHECK(last > 1.);
-    } else if (key == "filament_retract_lift_above")
+    }     else if (key == "filament_retract_lift_above")
         CHECK(first > 1. - EPSILON);
     else
         CHECK(last < 0.2 + EPSILON);
+}
+
+// Orca #16982: a travel shorter than retraction_minimum_travel still retracts after an outer wall
+// when retract_after_outer_wall is on (the default). Inner-outer-inner puts that short travel
+// between the outer wall and the next inner wall.
+TEST_CASE("Retract after outer wall retracts on a travel shorter than the threshold", "[GCode][Retraction]")
+{
+    const bool enabled = GENERATE(false, true);
+    CAPTURE(enabled);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "gcode_flavor", "marlin2" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "wall_loops", "3" },
+        { "wall_sequence", "inner-outer-inner wall" },
+        { "top_shell_layers", "0" },
+        { "bottom_shell_layers", "0" },
+        { "sparse_infill_density", "0%" },
+        { "retraction_length", "0.8" },
+        { "retraction_minimum_travel", "5" },
+        { "retract_when_changing_layer", "0" },
+        { "wipe", "0" },
+        { "z_hop", "0" },
+        { "gcode_comments", "1" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+        { "retract_after_outer_wall", enabled ? "1" : "0" },
+    });
+    const std::string output = slice({ make_cube(10., 10., 1.) }, config);
+
+    const std::string &role_tag = GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role);
+    ExtrusionRole role = erNone;
+    bool after_outer_wall = false;
+    double retraction = 0.;
+    size_t transitions = 0;
+    GCodeReader parser;
+    parser.apply_config(config);
+    parser.parse_buffer(output, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.comment().find(role_tag) == 0)
+            role = ExtrusionEntity::string_to_role(line.comment().substr(role_tag.size()));
+        if (line.extruding(self) && line.dist_XY(self) > EPSILON) {
+            if (role == erExternalPerimeter) {
+                after_outer_wall = true;
+                retraction = 0.;
+            } else if (after_outer_wall) {
+                REQUIRE(role == erPerimeter);
+                ++transitions;
+                CHECK_THAT(retraction, Catch::Matchers::WithinAbs(enabled ? 0.8 : 0., 0.00005));
+                after_outer_wall = false;
+            }
+        } else if (after_outer_wall && line.retracting(self)) {
+            retraction -= line.dist_E(self);
+        }
+    });
+    // The 1 mm cube has five 0.2 mm layers, each with one outer wall followed by an inner wall.
+    REQUIRE(transitions == 5);
+}
+
+TEST_CASE("Retract after outer wall is on by default", "[GCode][Retraction]")
+{
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.opt_bool("retract_after_outer_wall"));
+}
+
+TEST_CASE("Retract after outer wall only invalidates G-code export", "[GCode][Retraction]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "retract_after_outer_wall", "0" },
+        { "machine_start_gcode", "" },
+        { "machine_end_gcode", "" },
+    });
+    Print print;
+    Model model;
+    init_print({ make_cube(10., 10., 1.) }, print, model, config);
+    gcode(print);
+    REQUIRE(print.objects().front()->is_step_done(posPerimeters));
+    REQUIRE(print.is_step_done(psGCodeExport));
+
+    DynamicPrintConfig changed = config;
+    changed.set_deserialize_strict({{ "retract_after_outer_wall", "1" }});
+    print.apply(model, changed);
+
+    CHECK(print.objects().front()->is_step_done(posPerimeters));
+    CHECK(print.objects().front()->is_step_done(posInfill));
+    CHECK_FALSE(print.is_step_done(psGCodeExport));
 }
