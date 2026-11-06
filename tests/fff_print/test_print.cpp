@@ -2564,3 +2564,40 @@ TEST_CASE("Plate name reaches the G-code once G-code export is invalidated", "[P
     CHECK(regenerated.find("; Plate Second") != std::string::npos);
     CHECK(regenerated.find("; Plate First") == std::string::npos);
 }
+
+// Orca #17240: the GUI resets infill, walls and top shells in the global config only, so a height range
+// can still override them; Print::validate() warns about the object instead of printing a broken vase.
+TEST_CASE("Spiral vase mode warns about a height range that overrides infill, walls or top shells", "[Print][SpiralVase]")
+{
+    struct Case { const char *opt_key; };
+    const auto check = [](const std::string &opt_key) {
+        DynamicPrintConfig range;
+        if (opt_key.empty())
+            range.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 25. }));
+        else if (opt_key == "sparse_infill_density")
+            range.set_key_value(opt_key, new ConfigOptionPercent(13.));
+        else if (opt_key == "wall_loops")
+            range.set_key_value(opt_key, new ConfigOptionInt(2));
+        else
+            range.set_key_value(opt_key, new ConfigOptionInt(3));
+        Print print;
+        Model model;
+        init_vase_with_height_range(print, model, two_filament_config(false, false), range);
+        std::vector<StringObjectException> warnings;
+        INFO(opt_key);
+        REQUIRE(print.validate(&warnings).string.empty());
+        const PrintObject *object = print.objects().front();
+        const auto         warning = std::find_if(warnings.begin(), warnings.end(),
+                                                  [object](const StringObjectException &w) { return w.object == object && w.string.find("Spiral vase mode needs") != std::string::npos; });
+        if (opt_key.empty()) {
+            CHECK(warning == warnings.end());
+        } else {
+            REQUIRE(warning != warnings.end());
+            CHECK(warning->opt_key == opt_key);
+        }
+    };
+    check("");
+    check("sparse_infill_density");
+    check("wall_loops");
+    check("top_shell_layers");
+}
