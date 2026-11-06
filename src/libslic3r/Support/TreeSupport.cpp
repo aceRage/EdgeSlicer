@@ -3529,7 +3529,8 @@ void TreeSupport::drop_nodes()
                 }
                 const ExPolygons& next_collision = get_collision(0, obj_layer_nr_next);
                 plan.next_vertex   = next_layer_vertex;
-                plan.to_buildplate = !is_inside_ex(m_ts_data->m_layer_outlines[obj_layer_nr_next], next_layer_vertex);
+                // Orca #17060: the collision area includes the XY clearance; a node inside it cannot reach the plate.
+                plan.to_buildplate = !is_inside_ex(next_collision, next_layer_vertex);
                 // don't increase radius if next node will collide partially with the object (STUDIO-7883)
                 plan.dist_to_outer = unscale_((projection_onto(next_collision, next_layer_vertex) - node.position).cast<double>().norm());
                 }
