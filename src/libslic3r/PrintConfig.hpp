@@ -2371,7 +2371,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
     ((ConfigOptionStrings,             nozzle_filament_tool))
     // H3C fix: per filament, the layer height of the process chosen for its nozzle, 0 = none (internal, NozzleProcess.hpp).
-    ((ConfigOptionFloats,              nozzle_layer_height))
+    ((ConfigOptionFloatsOrPercents,    nozzle_layer_height))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))

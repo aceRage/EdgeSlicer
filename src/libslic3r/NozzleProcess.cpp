@@ -357,7 +357,7 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("nozzle_initial_layer_line_width", new ConfigOptionFloatsOrPercents());
         config.set_key_value("nozzle_line_width", new ConfigOptionFloatsOrPercents());
         config.set_key_value("nozzle_region_values", new ConfigOptionStrings());
-        config.set_key_value("nozzle_layer_height", new ConfigOptionFloats());
+        config.set_key_value("nozzle_layer_height", new ConfigOptionFloatsOrPercents());
     };
     if (!supports_nozzle_processes(config)) {
         clear_filament_arrays();
@@ -679,13 +679,13 @@ bool realign_nozzle_filament_values(DynamicPrintConfig &config)
         }
     }
     // The chosen process's layer height: the donor's, else none (0: the slab height follows the nozzle size).
-    if (auto *heights = config.option<ConfigOptionFloats>("nozzle_layer_height"); heights != nullptr && heights->values.size() == count) {
-        const std::vector<double> orig = heights->values;
+    if (auto *heights = config.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height"); heights != nullptr && heights->values.size() == count) {
+        const std::vector<FloatOrPercent> orig = heights->values;
         for (size_t f = 0; f < count; ++f) {
             if (now[f] == was[f])
                 continue;
-            const double height = donor[f] >= 0 ? orig[size_t(donor[f])] : 0.;
-            if (height != heights->values[f]) {
+            const FloatOrPercent height = donor[f] >= 0 ? orig[size_t(donor[f])] : FloatOrPercent{ 0., false };
+            if (!(height == heights->values[f])) {
                 heights->values[f] = height;
                 changed            = true;
             }
@@ -1619,7 +1619,7 @@ void set_nozzle_tool_layer_height(DynamicPrintConfig &tool, const ConfigBase &ch
     const auto  *plate = tool.option<ConfigOptionFloat>("layer_height");
     const double h     = own != nullptr ? own->value : 0.;
     if (h > EPSILON && (plate == nullptr || std::abs(h - plate->value) > EPSILON))
-        tool.set_key_value("nozzle_layer_height", new ConfigOptionFloats(std::vector<double>{ h }));
+        tool.set_key_value("nozzle_layer_height", new ConfigOptionFloatsOrPercents(std::vector<FloatOrPercent>{ FloatOrPercent{ h, false } }));
     else
         tool.erase("nozzle_layer_height");
 }
@@ -1631,31 +1631,31 @@ bool fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<con
     const size_t count     = filaments != nullptr ? filaments->size() : 0;
     if (filament_sources != nullptr && filament_sources->size() != count)
         filament_sources = nullptr;
-    std::vector<double> heights(count, 0.);
+    std::vector<FloatOrPercent> heights(count, FloatOrPercent{ 0., false });
     bool                any = false;
     for (size_t f = 0; f < count; ++f) {
         const size_t              e   = nozzle_for_filament(config, unsigned(f + 1));
         const DynamicPrintConfig *src = filament_sources != nullptr ? (*filament_sources)[f] : e < sources.size() ? sources[e] : nullptr;
         if (src == nullptr)
             continue;
-        if (const auto *own = src->option<ConfigOptionFloats>("nozzle_layer_height"); own != nullptr && !own->values.empty() &&
-                                                                                     own->values.front() > EPSILON) {
-            heights[f] = own->values.front();
+        if (const auto *own = src->option<ConfigOptionFloatsOrPercents>("nozzle_layer_height"); own != nullptr && !own->values.empty() &&
+                                                                                     own->values.front().value > EPSILON) {
+            heights[f] = FloatOrPercent{ own->values.front().value, false };
             any        = true;
         }
     }
     if (!any)
         heights.clear();
-    config.set_key_value("nozzle_layer_height", new ConfigOptionFloats(heights));
+    config.set_key_value("nozzle_layer_height", new ConfigOptionFloatsOrPercents(heights));
     return any;
 }
 
 double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id)
 {
-    const auto *heights = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_layer_height"));
+    const auto *heights = dynamic_cast<const ConfigOptionFloatsOrPercents *>(config.option("nozzle_layer_height"));
     if (heights == nullptr || filament_id < 1 || filament_id > heights->values.size())
         return 0.;
-    return std::max(0., heights->values[filament_id - 1]);
+    return std::max(0., heights->values[filament_id - 1].value);
 }
 
 size_t nozzle_process_band_size(double target_height, size_t ratio_band_size, double base_layer_height, double min_height, double max_height)

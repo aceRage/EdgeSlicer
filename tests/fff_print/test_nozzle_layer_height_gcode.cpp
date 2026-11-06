@@ -58,6 +58,7 @@ DynamicPrintConfig h3c_rack(const char *layer)
         { "sparse_infill_density", "15%" },
         { "outer_wall_speed", "60" },
     });
+    config.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 9 })); // the H3C's nine-slot rack
     config.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.4,0.8" };
     config.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0., 0.8 };
     return config;
@@ -176,9 +177,11 @@ TEST_CASE("H3C-like single-extruder rack: the 0.8 rack nozzle is a tool with a p
     CHECK_FALSE(supports_filament_nozzle_assignment(plate));
 
     const DynamicPrintConfig config = filled(plate, 0.1, 0.4);
-    const auto              *heights = config.option<ConfigOptionFloats>("nozzle_layer_height");
+    const auto              *heights = config.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height");
     REQUIRE(heights != nullptr);
-    CHECK(heights->values == std::vector<double>{ 0., 0.4 });
+    REQUIRE(heights->values.size() == 2);
+    CHECK(heights->values[0].value == 0.);
+    CHECK(heights->values[1].value == Approx(0.4));
     CHECK(nozzle_layer_height_for_filament(config, 1) == 0.);
     CHECK(nozzle_layer_height_for_filament(config, 2) == Approx(0.4));
     // Each filament reads its own nozzle's process: the 0.4's speed on filament 1, the 0.8's on filament 2.
@@ -232,7 +235,7 @@ TEST_CASE("Without per-nozzle processes the H3C-like rack plate slices as before
     const DynamicPrintConfig plate = h3c_rack("0.2");
     DynamicPrintConfig       plain = plate;
     CHECK_FALSE(fill_nozzle_process_slots(plain, { nullptr }, nullptr));
-    CHECK(plain.option<ConfigOptionFloats>("nozzle_layer_height")->values.empty());
+    CHECK(plain.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values.empty());
     const Sliced s = slice(plain);
     CHECK(s.fine == std::set<double>{ 0.2 });
     CHECK(s.coarse.count(0.4) == 1); // the size ratio: two 0.2 layers per 0.8 slab

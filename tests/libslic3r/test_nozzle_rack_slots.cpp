@@ -959,8 +959,9 @@ TEST_CASE("A chosen process's layer height in whole plate layers, held to the no
     DynamicPrintConfig tool = nozzle_tool_process(plate, chosen, nullptr);
     CHECK(tool.opt_float("layer_height") == Approx(0.2)); // the plate's grid, as before
     set_nozzle_tool_layer_height(tool, chosen);
-    REQUIRE(tool.option<ConfigOptionFloats>("nozzle_layer_height") != nullptr);
-    CHECK(tool.option<ConfigOptionFloats>("nozzle_layer_height")->values == std::vector<double>{ 0.4 });
+    REQUIRE(tool.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height") != nullptr);
+    REQUIRE(tool.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values.size() == 1);
+    CHECK(tool.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values[0].value == Approx(0.4));
     // It makes the tool differ from the plate even when nothing else does.
     CHECK(nozzle_process_diff(tool, plate).has("nozzle_layer_height"));
     set_nozzle_tool_layer_height(tool, plate);
@@ -1000,7 +1001,7 @@ TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chose
         CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0 });
         CHECK_FALSE(supports_nozzle_processes(b.printer_config_with_project_sizes()));
         const DynamicPrintConfig full = b.full_config();
-        CHECK(full.option<ConfigOptionFloats>("nozzle_layer_height")->values.empty());
+        CHECK(full.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values.empty());
         CHECK(full.option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
     }
     SECTION("rack 0.4 / 0.6 / 0.8: T1, T1 0.6, T1 0.8, each size picked its system process; the badges stay rack pins")
@@ -1032,7 +1033,7 @@ TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chose
         CHECK(slots->values[2] >= 0);
         CHECK(slots->values[1] != slots->values[2]);
         // Picked processes leave the slab height to the size rule.
-        CHECK(full.option<ConfigOptionFloats>("nozzle_layer_height")->values.empty());
+        CHECK(full.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height")->values.empty());
         CHECK(full.option<ConfigOptionInts>("nozzle_process_missing")->values.empty());
         CHECK(full.option<ConfigOptionStrings>("nozzle_slot_process_missing")->values.empty());
 
@@ -1041,11 +1042,11 @@ TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chose
         CHECK(b.nozzle_tool_process_info(2).kind == Kind::Chosen);
         full = b.full_config();
         CHECK(full.opt_float("layer_height") == Approx(0.2)); // the plate's grid
-        const auto *heights = full.option<ConfigOptionFloats>("nozzle_layer_height");
+        const auto *heights = full.option<ConfigOptionFloatsOrPercents>("nozzle_layer_height");
         REQUIRE(heights->values.size() == 3);
-        CHECK(heights->values[0] == 0.);
-        CHECK(heights->values[1] == 0.);
-        CHECK(heights->values[2] == Approx(0.4));
+        CHECK(heights->values[0].value == 0.);
+        CHECK(heights->values[1].value == 0.);
+        CHECK(heights->values[2].value == Approx(0.4));
         // The same while that tool is shown on the Process tab.
         REQUIRE(b.begin_nozzle_tool_view(2));
         CHECK(b.prints.get_selected_preset_name() == "0.40mm Standard @BBL H3C 0.8 nozzle");
