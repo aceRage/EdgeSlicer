@@ -1225,7 +1225,16 @@ public:
     // empty and the grouper treats every filament as reachable on every nozzle. Setters exist so a later
     // input-population pass can fill them without touching the grouping code.
     const std::vector<std::vector<DynamicPrintConfig>>& get_extruder_filament_info() const { return m_extruder_filament_info; }
-    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& v) { m_extruder_filament_info = v; }
+    // Two-phase (upstream Orca #17195): the setter only stashes the payload; the next apply() installs it and
+    // invalidates the grouping steps when the loaded filaments actually changed.
+    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& filament_info)
+    {
+        m_pending_extruder_filament_info = filament_info;
+        m_extruder_filament_info_pending = true;
+    }
+    // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
+    // a pending payload there, the way apply() would. True when the grouping steps were taken back.
+    bool install_pending_extruder_filament_info();
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1424,6 +1433,10 @@ public:
     //BBS: export gcode from previous gcode file from 3mf
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
+    // For the background thread that exported the G-code, when a step that then edits the file in place
+    // (post-processing scripts or plugins) failed and may have left it half edited: the next run exports
+    // the G-code again instead of reusing it.
+    void invalidate_gcode_export_from_worker() { this->invalidate_step_from_worker(psGCodeExport); }
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
     // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
     // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on
@@ -1540,6 +1553,11 @@ private:
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
+    // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
+    std::vector<std::vector<DynamicPrintConfig>>            m_pending_extruder_filament_info;
+    bool                                                    m_extruder_filament_info_pending { false };
+    // Installs the pending payload; the state mutex must be held. True when a grouping step was taken back.
+    bool                                                    install_pending_extruder_filament_info_unguarded();
     std::unordered_map<int, std::unordered_map<int, double>> m_filament_print_time;
     std::vector<std::set<int>>                             m_geometric_unprintable_filaments;
     // Ultra (Phase 10): AMS-aware grouping inputs kept out of the print config (see accessors).

@@ -4592,6 +4592,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         m_filament_change_sequence.emplace_back(initial_extruder_id);
         m_nozzle_change_sequence.emplace_back(first_nozzle ? first_nozzle->group_id : 0);
         file.write_format(";VT%d H%d\n", int(initial_extruder_id), initial_nozzle_id);
+        // Once per plate: a two-extruder rack machine (H2C) that must swap between rack hotends of different diameters.
+        // Only a warning, so a firmware that allows it later (and the H3C) is not blocked.
+        if (rack_group_mixes_nozzle_diameters(print.config(), *group_result)) {
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          L("This plate uses two nozzle diameters on the same extruder rack. H2C firmware currently refuses to change nozzle diameter during a print. Split the plate by nozzle diameter or print the objects separately."),
+                                          PrintStateBase::SlicingRackMixedDiameter);
+        }
     }
 
     // flush FanMover buffer to avoid modifying the start gcode if it's manual.
@@ -4694,8 +4701,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         CalibPressureAdvanceLine pa_test(this);
 
+        // Orca #16882: cap the speed by the volumetric speed of the filament the test prints with, selected above.
+        const Extruder *pa_filament = m_writer.extruder();
         auto fast_speed = CalibPressureAdvance::find_optimal_PA_speed(print.full_print_config(), pa_test.line_width(),
-                                                                      pa_test.height_layer());
+                                                                      pa_test.height_layer(), pa_filament ? int(pa_filament->id()) : 0);
         auto slow_speed = std::max(10.0, fast_speed / 10.0);
         if (fast_speed < slow_speed + 5)
             fast_speed = slow_speed + 5;

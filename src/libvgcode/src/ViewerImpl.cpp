@@ -2289,8 +2289,11 @@ void ViewerImpl::update_color_ranges()
         // ORCA: only extrusions of the roles shown in the Line Type legend set the ranges
         const bool shown_extrusion = counts_for_color_ranges(v, m_settings);
         if (shown_extrusion) {
-            m_height_range.update(round_to_bin(v.height));
-            m_width_range.update(round_to_bin(v.width));
+            // EDGE: not custom G-code, whose height the processor guesses from Z (the start G-code's load line)
+            if (counts_for_height_width_ranges(v, m_settings)) {
+                m_height_range.update(round_to_bin(v.height));
+                m_width_range.update(round_to_bin(v.width));
+            }
             m_volumetric_rate_range.update(round_to_bin(v.volumetric_rate()));
             m_actual_volumetric_rate_range.update(round_to_bin(v.actual_volumetric_rate()));
             m_fan_speed_range.update(round_to_bin(v.fan_speed));

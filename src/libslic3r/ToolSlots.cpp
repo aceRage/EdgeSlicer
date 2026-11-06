@@ -2,6 +2,7 @@
 
 #include "ToolSlots.hpp"
 
+#include "LocalesUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "NozzleOverride.hpp"
 #include "Preset.hpp"
@@ -83,9 +84,10 @@ bool parse_positive_number(const std::string &text, double &out)
 {
     if (text.empty())
         return false;
-    char        *end   = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || *end != '\0' || !(value > 0.) || !std::isfinite(value))
+    // Nozzle diameters are written with a decimal point; strtod reads "0.4" as 0 under a comma locale.
+    size_t       used  = 0;
+    const double value = string_to_double_decimal_point(text, &used);
+    if (used != text.size() || !(value > 0.) || !std::isfinite(value))
         return false;
     out = value;
     return true;
@@ -616,6 +618,28 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
         }
     }
     return {};
+}
+
+bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group)
+{
+    if (config.nozzle_diameter.values.size() != 2)
+        return false;
+    for (int extruder = 0; extruder < 2; ++extruder) {
+        if (!extruder_has_nozzle_rack(config, size_t(extruder)))
+            continue;
+        // get_used_nozzles_in_extruder(extruder) covers every layer's mapping, for the filaments the plate uses.
+        std::vector<double> diameters;
+        for (const MultiNozzleUtils::NozzleInfo &nozzle : group.get_used_nozzles_in_extruder(extruder)) {
+            double d = 0.;
+            if (!parse_positive_number(nozzle.diameter, d))
+                continue;
+            if (std::none_of(diameters.begin(), diameters.end(), [d](double o) { return same_nozzle_diameter(o, d); }))
+                diameters.push_back(d);
+        }
+        if (diameters.size() >= 2)
+            return true;
+    }
+    return false;
 }
 
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)

@@ -2368,6 +2368,18 @@ void PresetBundle::load_installed_filaments(AppConfig &config)
         preset.set_visible_from_appconfig(config);
 }
 
+void PresetBundle::load_installed_prints(const AppConfig &config)
+{
+    for (Preset &preset : prints)
+        preset.set_visible_from_appconfig(config);
+}
+
+void PresetBundle::refresh_enabled_presets(AppConfig &config)
+{
+    this->load_installed_filaments(config);
+    this->load_installed_prints(config);
+}
+
 void PresetBundle::load_installed_sla_materials(AppConfig &config)
 {
     if (! config.has_section(AppConfig::SECTION_MATERIALS)) {
@@ -2505,6 +2517,8 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Update visibility of filament and sla material presets
     this->load_installed_filaments(config);
     this->load_installed_sla_materials(config);
+    // Process presets the user hid in the Process manager.
+    this->load_installed_prints(config);
 
     auto is_default_printer_selection = [](const std::string &name) {
         return name.empty() || name == "Default Printer";
