@@ -10179,13 +10179,10 @@ RealisticRenderSettings GLCanvas3D::_render_settings() const
 
 bool GLCanvas3D::_is_realistic_view_enabled() const
 {
-    if (!_render_settings().realistic)
-        return false;
-    // Edge: Orca switches the realistic view off in the app config while the seam, support or fuzzy
-    // skin painting gizmo is open and back on when it closes. Here it is just not applied then, so
-    // the setting is never rewritten behind the user's back (nor left off by a crash mid-gizmo).
-    const GLGizmosManager::EType gizmo = m_gizmos.get_current_type();
-    return gizmo != GLGizmosManager::Seam && gizmo != GLGizmosManager::FdmSupports && gizmo != GLGizmosManager::FuzzySkin;
+    // Orca #17317: the realistic view stays on while the seam, support or fuzzy skin painting gizmo
+    // is open. (Orca used to switch it off in the app config for the duration; Edge only skipped it
+    // in this check, so the setting was never rewritten. Neither is done any more.)
+    return _render_settings().realistic;
 }
 
 bool GLCanvas3D::_is_realistic_shadows_enabled() const
