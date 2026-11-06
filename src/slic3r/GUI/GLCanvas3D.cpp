@@ -10458,13 +10458,31 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
 
             // Showcase S5: during a layer build-up only what is laid casts a shadow.
             GLShaderProgram* caster = shader;
+            bool             caster_clipped = false;
             if (render_settings.has_clip_top()) {
                 if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
                     caster = clip;
             }
+            // Orca #16942: clipped as _render_objects() clips the volumes, so a part cut away by
+            // the cut gizmo (or outside the SLA z range) casts no shadow.
+            if (caster == shader) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("flat_clip"); clip != nullptr) {
+                    caster         = clip;
+                    caster_clipped = true;
+                }
+            }
             caster->start_using();
             caster->set_uniform("projection_matrix", Transform3d(light_proj));
-            if (caster != shader)
+            if (caster_clipped) {
+                GLGizmoBase* current_gizmo = m_gizmos.get_current();
+                const ClippingPlane clipping_plane = (!current_gizmo || current_gizmo->apply_clipping_plane()) ? m_gizmos.get_clipping_plane() :
+                                                                                                                 ClippingPlane::ClipsNothing();
+                caster->set_uniform("clipping_plane", clipping_plane.get_data());
+                if (m_use_clipping_planes)
+                    caster->set_uniform("z_range", std::array<float, 2>{ float(-m_clipping_planes[0].get_data()[3]), float(m_clipping_planes[1].get_data()[3]) });
+                else
+                    caster->set_uniform("z_range", std::array<float, 2>{ -FLT_MAX, FLT_MAX });
+            } else if (caster != shader)
                 caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
@@ -10472,7 +10490,8 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
                 caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
                 if (caster != shader) {
                     caster->set_uniform("volume_world_matrix", volume->world_matrix());
-                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                    if (!caster_clipped)
+                        caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
                 }
                 volume->model.render();
             }
