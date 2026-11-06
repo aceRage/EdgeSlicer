@@ -82,6 +82,7 @@ add_executable(${_TEST_NAME}_tests
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
 	test_filament_inventory.cpp
+	test_nozzle_locale.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
 	test_cut_retraction_range.cpp

@@ -1,5 +1,6 @@
 #include "BambuNozzleMappingRequest.hpp"
 #include "BambuExtruderMap.hpp"
+#include "LocalesUtils.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -23,9 +24,9 @@ std::string diameter_str(const std::string &d)
 {
     if (d.empty())
         return d;
-    char *end = nullptr;
-    const double v = std::strtod(d.c_str(), &end);
-    if (end == d.c_str())
+    size_t       used = 0;
+    const double v    = string_to_double_decimal_point(d, &used); // the printer's "0.4", in any UI locale
+    if (used == 0)
         return d;
     return diameter_str(v);
 }
