@@ -336,7 +336,12 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
 
     g.layer_id              = (int)this->layer()->id();
     g.ext_perimeter_flow    = this->flow(frExternalPerimeter, flow_height);
-    g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
+    // A merged overhang wall is the only extrusion filling its slab's Z span, so it needs the merged height like the
+    // regular walls (BambuStudio v02.09.01.70 LayerRegion.cpp:194-198). Unmerged walls keep the bridge flow, whose
+    // non-thick branch is sized for the physical layer height.
+    g.overhang_flow         = flow_height > this->layer()->height + EPSILON ?
+        this->flow(frPerimeter, flow_height).with_flow_ratio(region_config.bridge_flow.value) :
+        this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill, flow_height);
 
     // Cumulative sum of polygons over all the regions, less what the lower layer could not print.

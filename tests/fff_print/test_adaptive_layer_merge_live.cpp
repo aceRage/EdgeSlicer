@@ -26,6 +26,7 @@
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
+using Catch::Matchers::WithinAbs;
 
 namespace {
 
@@ -85,11 +86,14 @@ const PrintObject *object_named(const Print &print, const std::string &name)
     return nullptr;
 }
 
-// Heights of every extrusion path of a layer (walls, gap fill and infill). Bridges are left out: they print with the
-// bridging flow (a thick bridge is as tall as its nozzle), whatever the layer or slab height.
+// Heights of every extrusion path of a layer (walls, overhang walls, gap fill and infill). Bridge infill is left out:
+// it prints with the bridging flow (a thick bridge is as tall as its nozzle), whatever the layer or slab height.
+// Overhang walls are kept: on a slab they must carry the slab's height like every other wall.
+bool is_bridge_infill(ExtrusionRole role) { return role == erBridgeInfill || role == erInternalBridgeInfill; }
+
 void add_height(const ExtrusionPath &path, std::set<double> &out)
 {
-    if (! is_bridge(path.role()))
+    if (! is_bridge_infill(path.role()))
         out.insert(std::round(path.height * 1000.) / 1000.);
 }
 
@@ -170,8 +174,8 @@ std::vector<GcodeLayer> parse_layers(const std::string &gcode)
             continue;
         }
         if (std::regex_search(line, m, type_re)) {
-            // Bridges and overhang walls print with the bridging flow, not the layer or slab height.
-            bridge = m[1].str().find("ridge") != std::string::npos || m[1].str().find("verhang") != std::string::npos;
+            // Bridge infill prints with the bridging flow, not the layer or slab height. Overhang walls are checked.
+            bridge = m[1].str() == "Bridge" || m[1].str() == "Internal Bridge";
             continue;
         }
         if (std::regex_search(line, m, tool_re)) {
@@ -253,12 +257,12 @@ void check_mixed_plate(const DynamicPrintConfig &config, double cube, const Expe
         CHECK(top->top_idx == idx);
         CHECK(top->bottom_idx >= 1);
         CHECK(layer->has_extrusions());
-        CHECK(layer->effective_print_height() == Approx(top->merged_height));
+        CHECK_THAT(layer->effective_print_height(), WithinAbs(top->merged_height, 1e-9));
         // Every path of the slab is laid at the slab's height.
         CHECK(layer_heights_of(*layer) == std::set<double>{ std::round(top->merged_height * 1000.) / 1000. });
         if (top->top_idx - top->bottom_idx + 1 == expect.per_slab) {
             ++full_slabs;
-            CHECK(top->merged_height == Approx(expect.slab));
+            CHECK_THAT(top->merged_height, WithinAbs(expect.slab, 1e-6));
         }
     }
     // N fine layers per coarse slab, apart from at most a short tail at the top.
@@ -316,7 +320,7 @@ TEST_CASE("Adaptive layer merge live: an H2D-like 0.2 L / 0.4 R plate stacks two
 
 TEST_CASE("Adaptive layer merge live: a configured max layer height keeps the coarse nozzle on the base grid", "[AdaptiveLayerMergeLive]")
 {
-    // The 0.8's own ceiling of 0.3 rules out a 0.4 slab: the clamp (F9) leaves it printing every layer.
+    // The 0.8's own ceiling of 0.3 rules out a 0.4 slab: the per-nozzle clamp leaves it printing every layer.
     DynamicPrintConfig config = two_nozzles("0.4,0.8", "0.2", "0.08,0.16", "0.28,0.3");
     Model model;
     add_cubes(model, 6.);
@@ -360,4 +364,102 @@ TEST_CASE("Adaptive layer merge live: a single-diameter plate plans nothing and 
         for (const auto &kv : l.heights)
             CHECK(kv.second.size() == 1);
     }
+}
+
+TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the slab height, the face's bottom on the fine grid", "[AdaptiveLayerMergeLive]")
+{
+    // tests/data/overhang.obj (6.3 mm tall, overhang faces about 2.1, 3.0 and 3.8 mm up) on the 0.8, a cube on the 0.4.
+    // At a 0.2 base the 2.1 mm face starts on layer 10, the top of the slab [9, 10]: its bottom keeps the physical
+    // height. The faces starting on a swallowed step are lifted onto their slab top as bridges or internal solid.
+    Model source = Model::read_from_file(std::string(TEST_DATA_DIR) + "/overhang.obj");
+    REQUIRE(! source.objects.empty());
+    Model model;
+    ModelObject *coarse_object = model.add_object(*source.objects.front());
+    coarse_object->name        = "overhang";
+    coarse_object->clear_instances();
+    coarse_object->add_instance();
+    coarse_object->center_around_origin();
+    coarse_object->instances.front()->set_offset(Vec3d(130., 100., 0.));
+    coarse_object->ensure_on_bed();
+    coarse_object->volumes.front()->config.set("extruder", 2);
+    ModelObject *fine_object = model.add_object();
+    fine_object->name        = "cube-1";
+    fine_object->add_volume(TriangleMesh(its_make_cube(8., 8., 8.)));
+    fine_object->add_instance()->set_offset(Vec3d(60., 100., 0.));
+    fine_object->ensure_on_bed();
+    fine_object->volumes.front()->config.set("extruder", 1);
+
+    Print print;
+    print.apply(model, h3c_like_04_08());
+    print.validate();
+    print.set_status_silent();
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(! gcode.empty());
+    const PrintObject *coarse = object_named(print, "overhang");
+    REQUIRE(coarse != nullptr);
+    REQUIRE(coarse->layer_count() > 20);
+
+    bool saw_overhang_wall_on_slab = false;
+    bool saw_own_bottom_on_slab    = false;
+    for (size_t idx = 1; idx < coarse->layer_count(); ++idx) {
+        const Layer *layer = coarse->layers()[idx];
+        CAPTURE(idx);
+        const AdaptiveMergePatch *top = group_top_patch(*layer);
+        if (top == nullptr) {
+            bool has_patches = false;
+            for (const LayerRegion *layerm : layer->regions())
+                has_patches |= ! layerm->adaptive_merge_patches.empty();
+            if (! has_patches)
+                continue; // a step the planner left on the fine grid prints as sliced
+            // Swallowed: no extrusions and no fill left to print.
+            CHECK_FALSE(layer->has_extrusions());
+            for (const LayerRegion *layerm : layer->regions())
+                CHECK(layerm->fill_surfaces.empty());
+            continue;
+        }
+        const bool slab = top->merged_height > layer->height + EPSILON;
+        // Every wall (overhang walls included), gap fill and non-bridge infill is laid at the slab height.
+        CHECK(layer_heights_of(*layer) == std::set<double>{ std::round(top->merged_height * 1000.) / 1000. });
+        for (const LayerRegion *layerm : layer->regions()) {
+            for (const ExtrusionEntity *e : layerm->perimeters.entities) {
+                std::vector<const ExtrusionPath *> paths;
+                std::vector<const ExtrusionEntity *> stack { e };
+                while (! stack.empty()) {
+                    const ExtrusionEntity *cur = stack.back();
+                    stack.pop_back();
+                    if (const auto *c = dynamic_cast<const ExtrusionEntityCollection *>(cur))
+                        for (const ExtrusionEntity *child : c->entities)
+                            stack.push_back(child);
+                    else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(cur))
+                        for (const ExtrusionPath &p : loop->paths)
+                            paths.push_back(&p);
+                    else if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(cur))
+                        for (const ExtrusionPath &p : multi->paths)
+                            paths.push_back(&p);
+                    else if (const auto *path = dynamic_cast<const ExtrusionPath *>(cur))
+                        paths.push_back(path);
+                }
+                for (const ExtrusionPath *path : paths)
+                    if (path->role() == erOverhangPerimeter && slab) {
+                        saw_overhang_wall_on_slab = true;
+                        CHECK_THAT(path->height, WithinAbs(top->merged_height, 1e-4));
+                    }
+            }
+            // The slab top's own bottom faces stay unmerged (no merged thickness); everything else in the slab
+            // carries the slab's height.
+            for (const Surface &surface : layerm->fill_surfaces.surfaces) {
+                if (surface.surface_type == stInternalVoid)
+                    continue;
+                if (surface.is_bottom()) {
+                    saw_own_bottom_on_slab |= slab;
+                    CHECK(surface.thickness < 0.);
+                } else {
+                    CHECK_THAT(surface.thickness, WithinAbs(top->merged_height, 1e-9));
+                }
+            }
+        }
+    }
+    CHECK(saw_overhang_wall_on_slab);
+    CHECK(saw_own_bottom_on_slab);
 }

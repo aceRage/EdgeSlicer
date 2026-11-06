@@ -6054,13 +6054,14 @@ void PrintObject::combine_infill()
 // Every group-top patch [bottom_idx, top_idx] of a region extrudes the fill of its whole Z span once, on the group top,
 // at the merged height. Surface types were detected on the fine grid, so each step's requirement is lifted:
 //   1. the group top's own top surfaces stay top;
-//   2. bridges and bottoms anywhere in the span keep their type (and bridge angle) - the merged bead rests where the
-//      lowest step of the span rests;
-//   3. every other non-sparse surface in the span becomes solid on the group top (a top surface of a lower step
-//      turns internal solid, since the span continues above it);
+//   2. bridges anywhere in the span keep their type (and bridge angle) - the merged bead rests where the lowest
+//      step of the span rests;
+//   3. every other non-sparse surface in the span becomes solid on the group top (a top or bottom surface of a
+//      lower step turns internal solid, since the span continues past it);
 //   4. the rest keeps the group top's own surface (sparse infill).
 // All of it is clipped to the group top's own fill area inside the patch, since the walls of the group top were
-// generated on that contour. The layers below the group top extrude nothing of the region: a region whose layer
+// generated on that contour. The group top's own bottom surfaces are not merged: they print at the physical layer
+// height where the face is, as in Bambu (they are not part of a first band, which Edge never plans). The layers below the group top extrude nothing of the region: a region whose layer
 // holds no extruding group top loses its whole fill (its walls were dropped in Layer::make_perimeters()).
 //
 // Edge deviations from Bambu, deliberate:
@@ -6094,11 +6095,19 @@ void PrintObject::combine_adaptive_infill()
                 if (! patch.group_top || patch.area().empty() || patch.top_idx != layer_idx ||
                     patch.bottom_idx > patch.top_idx)
                     continue;
+                // The group top's own bottoms (an overhang face starting on this step) stay on the fine grid at the
+                // physical layer height, where the face really is: they are left out of the merged area and keep
+                // their surface (BambuStudio v02.09.01.70 PrintObject.cpp:5386-5392, the "blocked" bottoms).
                 Polygons own_fill;
-                for (const Surface &surface : layerm->fill_surfaces.surfaces)
-                    if (surface.surface_type != stInternalVoid)
-                        polygons_append(own_fill, to_polygons(surface.expolygon));
-                const ExPolygons fill_area = intersection_ex(union_ex(own_fill), patch.area());
+                Polygons own_bottom;
+                for (const Surface &surface : layerm->fill_surfaces.surfaces) {
+                    if (surface.surface_type == stInternalVoid)
+                        continue;
+                    polygons_append(surface.is_bottom() ? own_bottom : own_fill, to_polygons(surface.expolygon));
+                }
+                ExPolygons fill_area = intersection_ex(union_ex(own_fill), patch.area());
+                if (! own_bottom.empty())
+                    fill_area = diff_ex(fill_area, own_bottom);
                 if (fill_area.empty())
                     continue;
 
@@ -6118,16 +6127,17 @@ void PrintObject::combine_adaptive_infill()
                 for (const Surface &surface : layerm->fill_surfaces.surfaces)
                     if (surface.surface_type == stTop)
                         claim(surface, stTop, surface.expolygon);
-                // 2. Bridges and bottoms of the span, lowest step first.
+                // 2. Bridges of the span, lowest step first (BambuStudio collect_span_bridges()).
                 for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
                     for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
-                        if (surface.is_bridge() || surface.is_bottom())
+                        if (surface.is_bridge())
                             claim(surface, surface.surface_type, surface.expolygon);
-                // 3. Every other non-sparse requirement of the span. A lower step's top turns internal solid.
+                // 3. Every other non-sparse requirement of the span. A lower step's top or (non-bridge) bottom turns
+                //    internal solid: the span continues past it, so it is no face of the slab.
                 for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
                     for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
                         if (surface.surface_type != stInternal && surface.surface_type != stInternalVoid)
-                            claim(surface, surface.surface_type == stTop ? stInternalSolid : surface.surface_type,
+                            claim(surface, surface.surface_type == stTop || surface.is_bottom() ? stInternalSolid : surface.surface_type,
                                   surface.expolygon);
                 // 4. The rest of the group top as it was typed.
                 for (const Surface &surface : layerm->fill_surfaces.surfaces)
@@ -6138,7 +6148,7 @@ void PrintObject::combine_adaptive_infill()
                     surface.thickness        = patch.merged_height;
                     surface.thickness_layers = (unsigned short) (patch.top_idx - patch.bottom_idx + 1);
                 }
-                replacements.push_back({ layer_idx, region_id, patch.area(), std::move(out) });
+                replacements.push_back({ layer_idx, region_id, std::move(fill_area), std::move(out) });
             }
         }
     }
@@ -6201,7 +6211,7 @@ void PrintObject::combine_adaptive_infill()
 //   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
 //     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
 //     count (Bambu's get_at() pitfall).
-//   * Each region's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle() (F9/F15): the
+//   * Each region's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle(): the
 //     nozzle that prints the band, the tightest limits where used filaments share it, never values.front().
 //   * The first object layer is never merged. Every merged ladder starts on layer 1, and layer 0 prints as
 //     sliced. Bambu anchors the first band on the bed and then needs per-filament first-layer temperatures,
@@ -6293,7 +6303,7 @@ void PrintObject::compute_adaptive_merge_groups()
     if (min_nozzle <= EPSILON)
         return;
 
-    // Per-nozzle clamp (F9/F15): every region's window is the one of the nozzle that prints its walls, narrowed by
+    // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
     // that nozzle's configured min/max layer height, tightest over the used filaments sharing it.
     std::vector<unsigned int> used_filaments;
     this->print()->used_printing_filaments(used_filaments);
