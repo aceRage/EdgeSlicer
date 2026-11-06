@@ -371,3 +371,69 @@ SCENARIO("A stored 3MF's slice_info names the rack slots", "[H2CRackGroupId][3mf
     boost::filesystem::remove(test_file);
     delete plate;
 }
+
+namespace {
+// A plate's grouping on `cfg`: filaments 2 and 3 (1-based) pinned to `pin2` and `pin3` (0 = no pin), both starting on the extruder-1 nozzle 1.
+PrintConfig mixed_warning_config(DynamicPrintConfig &cfg, double pin2, double pin3)
+{
+    cfg.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values = { 0., pin2, pin3 };
+    PrintConfig print_config;
+    print_config.apply(cfg, true);
+    return print_config;
+}
+
+std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> pinned_group(const PrintConfig &print_config, const DynamicPrintConfig &cfg)
+{
+    const std::vector<NozzleInfo>   list = grouping_nozzle_list(print_config, nozzle_groups(cfg));
+    const std::vector<unsigned int> used{ 1, 2 };
+    std::vector<int>                map{ 0, 1, 1 };
+    pin_rack_nozzle_diameters(print_config, list, used, map);
+    return MultiNozzleUtils::LayeredNozzleGroupResult::create(map, list, used);
+}
+} // namespace
+
+TEST_CASE("The mixed rack diameter warning", "[H2CRackGroupId][MixedDiameterWarning]")
+{
+    SECTION("an H2C plate on the 0.8 and the 0.6 of one rack warns")
+    {
+        DynamicPrintConfig cfg   = h2c(OWNER_RACK);
+        const PrintConfig  pc    = mixed_warning_config(cfg, 0.8, 0.6);
+        const auto         group = pinned_group(pc, cfg);
+        REQUIRE(group);
+        CHECK(rack_group_mixes_nozzle_diameters(pc, *group));
+    }
+    SECTION("an H2C plate on one rack diameter does not warn")
+    {
+        DynamicPrintConfig cfg   = h2c(OWNER_RACK);
+        const PrintConfig  pc    = mixed_warning_config(cfg, 0.4, 0.4);
+        const auto         group = pinned_group(pc, cfg);
+        REQUIRE(group);
+        CHECK_FALSE(rack_group_mixes_nozzle_diameters(pc, *group));
+    }
+    SECTION("an H2C plate on the 0.8 only does not warn, though the rack holds other sizes")
+    {
+        DynamicPrintConfig cfg   = h2c(OWNER_RACK);
+        const PrintConfig  pc    = mixed_warning_config(cfg, 0.8, 0.8);
+        const auto         group = pinned_group(pc, cfg);
+        REQUIRE(group);
+        CHECK_FALSE(rack_group_mixes_nozzle_diameters(pc, *group));
+    }
+    SECTION("an H3C single-extruder rack with mixed sizes does not warn")
+    {
+        DynamicPrintConfig cfg = h3c();
+        cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = { "0.4,0.6,0.4,0.2,0.4,0.4,0.4,0.4:tpu285,0.8" };
+        cfg.set_num_filaments(3);
+        cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = false;
+        cfg.option<ConfigOptionInts>("filament_map", true)->values                  = { 1, 1, 1 };
+        const PrintConfig pc = mixed_warning_config(cfg, 0.8, 0.6);
+        const auto        group = pinned_group(pc, cfg);
+        REQUIRE(group);
+        // The two filaments really sit on two diameters of the one extruder's rack.
+        const auto a = group->get_first_nozzle_for_filament(1);
+        const auto c = group->get_first_nozzle_for_filament(2);
+        REQUIRE(a);
+        REQUIRE(c);
+        CHECK(a->diameter != c->diameter);
+        CHECK_FALSE(rack_group_mixes_nozzle_diameters(pc, *group));
+    }
+}

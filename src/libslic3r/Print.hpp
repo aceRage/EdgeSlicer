@@ -735,7 +735,7 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
-    // Test-only entry point to compute_adaptive_merge_groups(), which has no production caller in this PR.
+    // Test entry point to compute_adaptive_merge_groups(), so a unit test can re-plan a sliced object.
     friend struct AdaptiveMergePlanAccess;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
@@ -761,9 +761,12 @@ private:
     void make_perimeters();
     // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
     // Decides which layers each wall region keeps and records the decision in
-    // LayerRegion::adaptive_merge_patches. It mutates LayerRegion::slices, so it is only safe to call from the
-    // perimeter step; until the extrusion half lands it has no production caller and G-code is unchanged.
+    // LayerRegion::adaptive_merge_patches. It may mutate LayerRegion::slices, so it is only safe to call from the
+    // perimeter step, which calls it on every mixed-diameter plate before generating walls.
     void compute_adaptive_merge_groups();
+    // The fill half of the merge: lifts each merge span's fill onto its group top at the merged height and drops
+    // the swallowed steps' fill. Runs at the end of prepare_infill(), before combine_infill().
+    void combine_adaptive_infill();
     void prepare_infill();
     void infill();
     void ironing();
@@ -1417,6 +1420,10 @@ public:
     //BBS: export gcode from previous gcode file from 3mf
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
+    // For the background thread that exported the G-code, when a step that then edits the file in place
+    // (post-processing scripts or plugins) failed and may have left it half edited: the next run exports
+    // the G-code again instead of reusing it.
+    void invalidate_gcode_export_from_worker() { this->invalidate_step_from_worker(psGCodeExport); }
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
     // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
     // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on

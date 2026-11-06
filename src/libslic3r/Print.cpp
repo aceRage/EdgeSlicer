@@ -1572,9 +1572,12 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
             });
 
-        auto by_object_index = [&](size_t l, size_t r) {
-            return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
-        };
+        // Every instance of an object shares its object_index, so order by place in the list instead,
+        // which tells instances apart and keeps copies of one object in their list order.
+        std::vector<size_t> list_position(n);
+        for (size_t k = 0; k < n; ++k)
+            list_position[fallback_order[k]] = k;
+        auto by_list_position = [&list_position](size_t l, size_t r) { return list_position[l] < list_position[r]; };
 
         // Mirrors the vertical-clearance check below: only the part of the potentially-too-tall
         // instance that reaches above the rod can be hit, so that Y extent (shrunk by the same
@@ -1625,13 +1628,13 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
             }
 
             if (!infeasible) {
-                // Kahn's algorithm; ties are broken by original object_index so the result is
+                // Kahn's algorithm; ties are broken by place in the list so the result is
                 // the minimal perturbation of the incoming order, not an arbitrary one.
                 std::vector<size_t> ready;
                 for (size_t i = 0; i < n; ++i)
                     if (i != last_idx && indegree[i] == 0)
                         ready.push_back(i);
-                std::sort(ready.begin(), ready.end(), by_object_index);
+                std::sort(ready.begin(), ready.end(), by_list_position);
 
                 std::vector<size_t> order;
                 order.reserve(n);
@@ -1641,7 +1644,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     order.push_back(cur);
                     for (size_t nxt : adj[cur]) {
                         if (--indegree[nxt] == 0) {
-                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_object_index);
+                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_list_position);
                             ready.insert(pos, nxt);
                         }
                     }
@@ -2720,6 +2723,25 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject *object : m_objects)
             if (object->object_extruders().size() > 1)
                 return {L("The spiral vase mode does not work when an object contains more than one materials."), object, "spiral_mode"};
+        // Orca #17240: enabling spiral vase mode in the GUI resets these keys in the global config only, so an
+        // object, part or height range can still override them. Layers with infill or more than one wall are
+        // printed without spiralizing.
+        for (const PrintObject *object : m_objects) {
+            for (size_t region_id = 0; region_id < object->num_printing_regions(); ++region_id) {
+                const PrintRegionConfig &cfg = object->printing_region(region_id).config();
+                const char *opt_key = cfg.sparse_infill_density.value > 0. ? "sparse_infill_density" :
+                                      cfg.wall_loops.value > 1             ? "wall_loops" :
+                                      cfg.top_shell_layers.value > 0       ? "top_shell_layers" : nullptr;
+                if (opt_key != nullptr) {
+                    // TRN %1% is the object name.
+                    warn(Slic3r::format(_u8L("Spiral vase mode needs no sparse infill, one wall loop and no top shell layers, "
+                                             "but the object %1% uses other values, so it will not print as a continuous spiral."),
+                                        object->model_object()->name),
+                         opt_key, object);
+                    break;
+                }
+            }
+        }
     }
 
     // Cache of layer height profiles for checking:
@@ -5769,6 +5791,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     //add the print_object share check logic
     auto is_print_object_the_same = [this](const PrintObject* object1, const PrintObject* object2) -> bool{
         if (object1->trafo().matrix() != object2->trafo().matrix())
+            return false;
+        // Layers are stored relative to center_offset(), which comes from the first instance of each ModelObject, so it
+        // can differ between objects with the same trafo. Sharing the layers would then print the object in the wrong place.
+        if (object1->center_offset() != object2->center_offset())
             return false;
         const ModelObject* model_obj1 = object1->model_object();
         const ModelObject* model_obj2 = object2->model_object();

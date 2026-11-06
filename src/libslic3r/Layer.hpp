@@ -96,7 +96,12 @@ public:
     void    slices_to_fill_surfaces_clipped();
     void    prepare_fill_surfaces();
     //BBS
-    void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap);
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 LayerRegion::make_perimeters): a merge group top passes
+    // the merged band height in merged_height (> 0) so the walls and gap fill are sized for the whole band,
+    // clear_extrusions = false to add a second patch's walls to the first's, and lower_slices_override for the
+    // layer under the band (overhangs are judged against what the band rests on, not the swallowed step below).
+    void    make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap,
+                            double merged_height = 0., bool clear_extrusions = true, const ExPolygons *lower_slices_override = nullptr);
     // Bambu Studio 2.9.1 (LayerRegion.cpp:69): offset the circular contours and holes of `slices` by the
     // wall filament's circle compensation coefficients and flag the ones below its diameter limit.
     // manual_offset is scaled.
