@@ -1,5 +1,6 @@
 
 #include "CutUtils.hpp"
+#include "ImageFill.hpp"
 #include "Geometry.hpp"
 #include "libslic3r.h"
 #include "Model.hpp"
@@ -480,7 +481,18 @@ static void apply_tolerance(ModelVolume* vol)
     }
 }
 
-static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART)
+// ImageMap phase 5c: what process_volume_cut() and its curved / drawn siblings do to a volume's
+// mesh before slicing it (into the cut's own frame), so add_cut_volume() can tell the volume's
+// image fill where its picture went.
+static Transform3d cut_pre_transform(const Transform3d& cut_matrix, const Transform3d& instance_matrix, const ModelVolume* volume)
+{
+    const Transformation cut_transformation = Transformation(cut_matrix);
+    const Transform3d invert_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1 * cut_transformation.get_offset());
+    return invert_cut_matrix * instance_matrix * volume->get_matrix();
+}
+
+static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelVolume* src_volume, const Transform3d& cut_matrix, const std::string& suffix = {}, ModelVolumeType type = ModelVolumeType::MODEL_PART,
+                           const Transform3d* pre_transform = nullptr)
 {
     if (mesh.empty())
         return;
@@ -496,6 +508,12 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     assert(vol->config.id() != src_volume->config.id());
     vol->set_material(src_volume->material_id(), *src_volume->material());
     vol->cut_info = src_volume->cut_info;
+    // ImageMap phase 5c: the half's mesh is the source mesh carried into the cut's frame
+    // (pre_transform), back out of it (cut_matrix), and re-centred by add_volume() - which moved it
+    // by -offset. An image fill on the source keeps sampling the picture where it was.
+    if (pre_transform != nullptr)
+        image_fill_rebase_volume(*vol, src_volume->mesh().its,
+                                 translation_transform(-1 * vol->get_offset()) * cut_matrix * *pre_transform);
 }
 
 // PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
@@ -617,7 +635,15 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
 {
     const TacJointParams& params = volume->cut_info.tac_joint;
     const Transform3d     frame  = Transformation(volume->get_matrix()).get_matrix_no_scaling_factor();
-    if (attributes.has(ModelObjectCutAttribute::CreateDowels)) {
+    if (params.attachment != TacJointAttachment::Separate) {
+        const bool   top  = params.attachment == TacJointAttachment::Upper;
+        ModelObject* half = top ? upper : lower;
+        const bool   keep = attributes.has(top ? ModelObjectCutAttribute::KeepUpper : ModelObjectCutAttribute::KeepLower);
+        if (keep && half) {
+            TriangleMesh pin_mesh(tac_joint_connector_mesh(params));
+            add_cut_volume(pin_mesh, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::MODEL_PART);
+        }
+    } else if (attributes.has(ModelObjectCutAttribute::CreateDowels)) {
         TriangleMesh pin_mesh(tac_joint_connector_mesh(params));
         // Lay the long axis on the bed and put the broad reference face down.
         Transform3d print_pose = rotation_transform(Vec3d(0.5 * PI, 0., 0.));
@@ -642,9 +668,8 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
     // coincident with the cut face. Its outer depth and reference fit stay unchanged.
     constexpr float mouth_overlap = 0.02f;
     auto            add_socket    = [&](ModelObject* half, bool top) {
-        if (!half)
+        if (!half || params.attachment == (top ? TacJointAttachment::Upper : TacJointAttachment::Lower))
             return;
-        indexed_triangle_set clipped;
         if (full_sockets) {
             // A curved or drawn cut: the cut face is not the connector's own plane, so a socket
             // clipped at that plane would leave a sliver of each half inside the connector. The
@@ -654,11 +679,24 @@ static void process_tac_joint_cut(ModelVolume*                  volume,
             add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
             return;
         }
+        // cut_mesh() can triangulate the reference profile's cap with overlapping
+        // triangles. Those sockets look closed but fail the Boolean self-intersection
+        // check. Intersect the original solid with a box instead of rebuilding its cap.
+        const TriangleMesh source(cutter);
+        const auto         bounds = source.bounding_box();
+        Vec3d              lo     = bounds.min - Vec3d::Ones();
+        Vec3d              hi     = bounds.max + Vec3d::Ones();
         if (top)
-            cut_mesh(cutter, float(face_hi) - mouth_overlap, &clipped, nullptr);
+            lo.z() = face_hi - mouth_overlap;
         else
-            cut_mesh(cutter, float(face_lo) + mouth_overlap, nullptr, &clipped);
-        TriangleMesh hole(std::move(clipped));
+            hi.z() = face_lo + mouth_overlap;
+        const Vec3d  size = hi - lo;
+        TriangleMesh clip(its_make_cube(size.x(), size.y(), size.z()));
+        clip.translate(lo.cast<float>());
+        std::vector<TriangleMesh> pieces;
+        if (!MeshBoolean::mfd::make_boolean(source, clip, pieces, "INTERSECTION") || pieces.size() != 1 || pieces.front().empty())
+            throw std::invalid_argument(L("Unable to create a valid TAC Joint socket."));
+        TriangleMesh hole(std::move(pieces.front()));
         add_cut_volume(hole, half, volume, frame, top ? "_A" : "_B", ModelVolumeType::NEGATIVE_VOLUME);
     };
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
@@ -800,6 +838,7 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
                             ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
                             double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
@@ -807,19 +846,19 @@ static void process_solid_part_cut(ModelVolume* volume, const Transform3d& insta
     // Add required cut parts to the objects
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 static void reset_instance_transformation(ModelObject* object, size_t src_instance_idx, 
@@ -1421,6 +1460,14 @@ static bool is_unprocessed_rigid_connector(const ModelVolume* v)
     return !v->is_model_part() && v->cut_info.is_connector && !v->cut_info.is_processed && !v->cut_info.is_flexi_joint();
 }
 
+static void validate_tac_attachment(const TacJointParams& params, ModelObjectCutAttributes attributes)
+{
+    // A negative volume affects every positive part in its object, so the opposite
+    // socket would also eat the attached pin when both halves share an object.
+    if (params.attachment != TacJointAttachment::Separate && attributes.has(ModelObjectCutAttribute::KeepAsParts))
+        throw std::invalid_argument(L("An attached TAC Joint requires A and B to be separate objects. Disable Keep as parts."));
+}
+
 // Checks every unprocessed connector of `mo` (flexi joints take their own path) against the cut
 // surface, BEFORE anything is cloned, so a refusal leaves no partial cut behind:
 //   - off the surface, or standing where the surface strays more than
@@ -1429,8 +1476,11 @@ static bool is_unprocessed_rigid_connector(const ModelVolume* v)
 //     surface, so its plug / hole / pin halves land in the halves they are meant for;
 //   - a TAC Joint: its fit and engagement validated at the faces it really gets.
 // `inverse_cut_matrix` takes the connector volumes (and the halves) into the cut plane's frame.
-static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const CutSurfaceProbe& probe, const Transform3d& inverse_cut_matrix,
-                                                         const CutSolidTest& object)
+static NonPlanarConnectors prepare_non_planar_connectors(ModelObject*             mo,
+                                                         const CutSurfaceProbe&   probe,
+                                                         const Transform3d&       inverse_cut_matrix,
+                                                         const CutSolidTest&      object,
+                                                         ModelObjectCutAttributes attributes)
 {
     NonPlanarConnectors out;
     for (ModelVolume* volume : mo->volumes) {
@@ -1465,6 +1515,7 @@ static NonPlanarConnectors prepare_non_planar_connectors(ModelObject* mo, const 
                                           "spot, use a smaller connector, or flatten the surface there."));
         }
         if (volume->cut_info.is_tac_joint()) {
+            validate_tac_attachment(volume->cut_info.tac_joint, attributes);
             const auto validation = tac_joint_validate(volume->cut_info.tac_joint, fit.face_lo, fit.face_hi);
             if (!validation.valid)
                 throw std::invalid_argument(validation.message);
@@ -1542,23 +1593,24 @@ static void process_solid_part_curved_cut(ModelVolume* volume, const Transform3d
                                           ModelObject* upper, ModelObject* lower, double thickness = 0.0,
                                           CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_curved_cut(volume, instance_matrix, cut_matrix, attributes, sheet, upper_mesh, lower_mesh, thickness, offset);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
@@ -1601,7 +1653,7 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         const Transformation cut_trafo = Transformation(m_cut_matrix);
         const Transform3d    to_plane  = cut_trafo.get_rotation_matrix().inverse() * translation_transform(-1. * cut_trafo.get_offset());
         connector_faces = prepare_non_planar_connectors(mo, CutSurfaceProbe::curved(sheet, std::max(0.0, thickness), offset), to_plane,
-                                                        CutSolidTest(object_in_plane(mo, m_instance, to_plane)));
+                                                        CutSolidTest(object_in_plane(mo, m_instance, to_plane)), m_attributes);
     }
 
     // Before the loop below resets every part's painting.
@@ -1733,23 +1785,24 @@ static void process_solid_part_draw_cut(ModelVolume* volume, const Transform3d& 
                                         ModelObjectCutAttributes attributes, const DrawCutStroke& stroke,
                                         const DrawCutParams& params, ModelObject* upper, ModelObject* lower)
 {
+    const Transform3d pre = cut_pre_transform(cut_matrix, instance_matrix, volume);
     TriangleMesh upper_mesh, lower_mesh;
     process_volume_draw_cut(volume, instance_matrix, cut_matrix, attributes, stroke, params, upper_mesh, lower_mesh);
 
     if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", ModelVolumeType::MODEL_PART, &pre);
         if (!lower_mesh.empty()) {
-            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B", ModelVolumeType::MODEL_PART, &pre);
             upper->volumes.back()->cut_info.is_from_upper = false;
         }
         return;
     }
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
-        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
-        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix, {}, ModelVolumeType::MODEL_PART, &pre);
 }
 
 const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke, const DrawCutParams& params)
@@ -1798,7 +1851,7 @@ const ModelObjectPtrs& Cut::perform_with_draw_stroke(const DrawCutStroke& stroke
         const CutSurfaceProbe probe     = CutSurfaceProbe::drawn(stroke, params, solid);
         if (!probe.valid())
             throw std::invalid_argument(L("A connector is not on the cut surface. Place it on the surface again."));
-        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane, CutSolidTest(std::move(solid)));
+        connector_faces = prepare_non_planar_connectors(mo, probe, to_plane, CutSolidTest(std::move(solid)), m_attributes);
     }
 
     // Before the loop below resets every part's painting.
@@ -1889,6 +1942,7 @@ const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOff
         for (const auto* volume : m_model.objects.front()->volumes) {
             if (!volume->cut_info.is_tac_joint() || volume->cut_info.is_processed)
                 continue;
+            validate_tac_attachment(volume->cut_info.tac_joint, m_attributes);
             const auto validation = tac_joint_validate(volume->cut_info.tac_joint, tac_face_lo, tac_face_hi);
             if (!validation.valid)
                 throw std::invalid_argument(validation.message);

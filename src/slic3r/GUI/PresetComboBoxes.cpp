@@ -1169,6 +1169,8 @@ PlaterPresetComboBox::~PlaterPresetComboBox()
 {
     if (edit_btn)
         edit_btn->Destroy();
+    if (tool_btn)
+        tool_btn->Destroy();
 
     // BBS.
     if (clr_picker)

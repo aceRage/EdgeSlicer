@@ -46,6 +46,15 @@ protected:
     std::unordered_map<std::string, bool>   m_cloud_hms_refreshing; // a refresh thread is already out for this series
     mutable std::mutex m_hms_mutex;
 
+    // Every table of one language, folded into code -> first non-empty description, for the
+    // cross-model fallback (find_in_other_tables). Built once per language on the first miss.
+    struct CrossIndex
+    {
+        std::unordered_map<std::string, std::string> hms;   // device_hms, 16-digit codes
+        std::unordered_map<std::string, std::string> error; // device_error, 8-digit print_error codes
+    };
+    std::unordered_map<std::string, CrossIndex> m_cross_index; // key -> language; guarded by m_hms_mutex
+
     // The two override overlays, and the mtime each was read at so an edit is noticed.
     json               m_user_overrides;
     json               m_shipped_overrides;
@@ -130,6 +139,15 @@ public:
 
     static std::string user_override_path();
     static std::string shipped_override_path();
+
+    // The last resort before "see the printer screen": the code's description from any other
+    // model's table of the same language (then English). Bambu's print_error and HMS codes are
+    // shared across models, but each model's table carries text for only some of them - the A1's
+    // own table, shipped and live, has 05024007 with an empty description while the H2D's says
+    // "Failed to start a new task: filament loading/unloading not completed." Reads the shipped
+    // and downloaded tables (resources/hms and <datadir>/hms), never the network. Empty when no
+    // table has text for the code. `code` is upper-case hex, 8 or 16 digits.
+    wxString    find_in_other_tables(const std::string& code, const std::string& lang_code);
 
 public:
     static std::string hms_language_code();

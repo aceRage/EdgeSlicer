@@ -12,6 +12,7 @@
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/FanMover.hpp"
 #include "GCode/LayerTimeSpeedSmoothingFilter.hpp"
+#include "GCode/MinLayerTimePause.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -448,6 +449,9 @@ private:
         const size_t                     single_object_idx = size_t(-1),
         // BBS
         const bool                       prime_extruder = false);
+    // Edge (min_layer_time_pause): the park-and-return block that ends a layer whose pause target is `target`
+    // seconds (see GCode/MinLayerTimePause.hpp), or empty when there is nowhere to park.
+    std::string min_layer_time_pause_block(const Print &print, const std::vector<LayerToPrint> &layers, size_t single_object_idx, double target);
     // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
     // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
     // and export G-code into file.
@@ -507,6 +511,9 @@ private:
     // as calculated and stored in the m_multi_segment_path_average_mm3_per_mm value
     double          m_multi_flow_segment_path_average_mm3_per_mm = 0;
     bool            m_multi_flow_segment_path_pa_set = false;
+    // Bambu Studio 2.9.1 (GCode::_extrude use_seperate_speed): while extrude_loop() prints the walls of a
+    // circle under the auto circle compensation, the filament's circle_compensation_speed; else <= 0.
+    double          m_circle_compensation_speed = -1.;
     // Adaptive PA last set flow to enable issuing of PA change commands when adaptive PA for overhangs
     // is enabled
     double          m_last_mm3_mm = 0;
@@ -600,6 +607,15 @@ private:
     // filament options of m_config change during an export).
     ResolvedFilamentFlow                m_filament_flow;
     DynamicConfig                       m_calib_config;
+    // Calib_Temp_Retract_Grid only: the writer's retraction_length is mutated per column
+    // and restored at the end of the print so a later toolchange uses the preset.
+    bool                                m_temp_retract_saved_retract { false };
+    ConfigOptionFloats                  m_temp_retract_original;
+    int                                 m_temp_retract_last_band { -1 };
+    std::string                         apply_temp_retract_grid_layer(const Print &print, double print_z);
+    std::string                         apply_temp_retract_grid_object(const Print &print, const PrintObject &object);
+    std::string                         reset_temp_retract_grid_first_layer(const Print &print);
+    std::string                         restore_temp_retract_grid_retraction(const Print &print);
     // scaled G-code resolution
     double                              m_scaled_resolution;
     GCodeWriter                         m_writer;
@@ -709,6 +725,8 @@ private:
     bool                                m_last_pos_defined;
 
     std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
+    // Edge (min_layer_time_pause): park candidates' obstacles, built on the first pause of an export.
+    std::unique_ptr<MinLayerTimePause::Sites>      m_min_layer_pause_sites;
     // After CoolingBuffer / before FanMover. Null when mode is Off (streaming, no extra buffer).
     std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
     std::unique_ptr<SpiralVase>                    m_spiral_vase;
@@ -845,13 +863,21 @@ private:
     std::string _extrude(const ExtrusionPath &path, const std::string &path_description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
 
+    // The acceleration of first-layer travels: Bambu Studio 2.9.1's initial_layer_travel_acceleration when it is set
+    // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
+    // keeps the initial layer acceleration). Defined after process_flow_value.
+    double first_layer_travel_acceleration_override() const;
+
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>
     auto process_flow_value(const VectorOption &opt) const -> decltype(opt.get_at(0))
     {
         // The slot is resolved once per export (m_filament_flow.process_config_idx); the same
         // slot get_value_at(m_config, opt, ConfigFlowDomain::Process, id) picks.
-        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
+        // Per-nozzle process P1: an option of the extruder-slot layout's length reads the filament's
+        // extruder slot when process_extruder_values is set (process_config_idx).
+        return opt.get_at(m_filament_flow.process_config_idx_for(m_config, opt.values.size(),
+                                                                 m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0));
     }
 
     void print_machine_envelope(GCodeOutputStream &file, Print &print);

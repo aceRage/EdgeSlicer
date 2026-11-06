@@ -2007,7 +2007,8 @@ std::string MachineObject::command_error_ignore_key(const std::string& dev_id, i
 // thread and a wxWindow may not be made there. The weak token is what makes that safe: a
 // MachineObject destroyed between the reply and the callback (the printer went away, the user
 // switched devices) drops the token, and the callback returns without touching `this`.
-void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json, const std::string& command)
+void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json, const std::string& command,
+                                               const std::string& job_id)
 {
     if (command_err <= 0) return;
 
@@ -2034,7 +2035,7 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
     // An empty name is a caller that does not know which command it was; that keeps the old set.
     const bool print_action = command.empty() || GUI::is_print_action_command(command);
 
-    GUI::wxGetApp().CallAfter([this, command_err, action_json, print_action, token = std::weak_ptr<int>(m_token)] {
+    GUI::wxGetApp().CallAfter([this, command_err, action_json, print_action, job_id, token = std::weak_ptr<int>(m_token)] {
         if (token.expired()) return;
 
         GUI::HMSQuery* q = GUI::wxGetApp().get_hms_query();
@@ -2067,9 +2068,11 @@ void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::
             m_command_error_dlg = new GUI::PrintErrorDialog(nullptr, wxID_ANY, _L("Error"));
         GUI::PrintErrorDialog* dlg = m_command_error_dlg;
 
-        // A refused command has no job to resume, so no job_id is passed: the dialog greys the
-        // buttons that carry one rather than sending something firmware would drop.
-        dlg->set_error_context(this, command_err, std::string());
+        // Only the job the refusal itself names, never the printer's current job_id_: a refused
+        // new job (05024007, "filament loading/unloading not completed") has no job of its own,
+        // and Stop with whatever the printer was holding would act on a different print. With no
+        // job named, the dialog hides the buttons that carry one and says why in a tooltip.
+        dlg->set_error_context(this, command_err, job_id);
         // ...and set_error_context clears any previous blob, so the new one goes on after it.
         if (!action_json.is_null()) dlg->set_action_json(action_json);
         dlg->set_suppress_handler([this, token = std::weak_ptr<int>(m_token)](int c) {
@@ -3295,6 +3298,22 @@ static bool payload_needs_signature(const std::string& json_str)
     return false;
 }
 
+std::string MachineObject::print_command_blocker(const std::string& command) const
+{
+    // The same two refusals publish_json applies, asked before a button is drawn rather than
+    // after it is pressed. A status-only printer is sent nothing but status requests; a secured
+    // one drops every unsigned control command. Neither depends on LAN versus cloud.
+    json probe;
+    probe["print"]["command"] = command;
+    const std::string payload = probe.dump();
+    if (const AppConfig* cfg = Slic3r::GUI::wxGetApp().app_config;
+        cfg != nullptr && BambuConnectStatus::is_status_only(*cfg, dev_id) && !BambuConnectStatus::status_only_allows(payload))
+        return "status_only";
+    if (is_secured_mode() && payload_needs_signature(payload))
+        return "secured";
+    return std::string();
+}
+
 int MachineObject::publish_json(std::string json_str, int qos, int flag)
 {
     // A status-only printer (bound to a Bambu account, printing through Bambu Connect) is sent the
@@ -4058,7 +4077,8 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         note_unsigned_refusal(reply_cmd, reply_err);
                     } else if (GUI::accept_command_refusal(jj, m_sent_commands, GUI::SentCommandTracker::Clock::now(),
                                                     command_err, action_json, refused_command)) {
-                        add_command_error_code_dlg(command_err, action_json, refused_command);
+                        const std::string refused_job = jj.contains("job_id") && jj["job_id"].is_string() ? jj["job_id"].get<std::string>() : std::string();
+                        add_command_error_code_dlg(command_err, action_json, refused_command, refused_job);
                     } else if (!refused_command.empty() && !GUI::is_status_or_info_command(refused_command)) {
                         // Somebody else's refusal (another slicer, the printer's screen, a previous
                         // session). Logged so it can be told apart from ours, never shown.
@@ -6480,6 +6500,7 @@ void MachineObject::parse_new_info(json print)
                     switch ((char) std::toupper((unsigned char) type[1])) {
                     case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
                     case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
+                    case 'T': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPU285; break; // BBS 2.9.1 T_FLOW
                     case 'E': nozzle_obj.volume_exact = NozzleVolumeType::nvtE3DHighFlow; break;
                     default: nozzle_obj.volume_exact = NozzleVolumeType::nvtStandard; break;
                     }

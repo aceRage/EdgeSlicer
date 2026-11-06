@@ -6,6 +6,7 @@
 #include "GCodeWriter.hpp"
 #include "PrintConfig.hpp"
 #include "BoundingBox.hpp"
+#include "TriangleMesh.hpp"
 
 namespace Slic3r {
 
@@ -24,7 +25,11 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Cornering
+    Calib_Cornering,
+    Calib_Ironing_Flow,
+    // Combined temperature × retraction stringing grid. Appended after Calib_Cornering so
+    // #819's ironing-flow mode (ironing flow takes the slot before it).
+    Calib_Temp_Retract_Grid
 };
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
@@ -47,8 +52,119 @@ struct Calib_Params
     // 0.4 mm / 0.2 mm reference model is printed as-is. (Edge: our temperature tower has no nozzle scaling.)
     bool nozzle_based_resize = true;
 
-    CalibMode mode;
+    // Calib_Temp_Retract_Grid: one retraction per column (object named SG_col_NN). Empty means
+    // build the schedule from retract_start / retract_end / retract_step.
+    std::vector<double> retract_lengths;
+    double              retract_start = 0.2;
+    double              retract_end   = 1.6;
+    double              retract_step  = 0.2;
+    // Temperature band height in mm. start / end / step are the temperature schedule.
+    double band_height = 8.0;
+    // 0 = derive from (start, end, step).
+    int  band_count            = 0;
+    bool wait_for_temperature  = true;  // M109 at each band change. Lance: default ON.
+    bool print_labels          = false; // Raised value labels. PR A core support; dialog is PR B.
+    // Concave fillet where each pillar meets its base plate (owner: the towers snapped at the joint).
+    // Radius is clamped to stringing_grid_max_fillet_radius() so the foot stays on the plate.
+    bool   fillet_base         = true;
+    double fillet_radius       = 3.0;
+    // Owner: keep the user's z-hop by default (no z-hop can itself reduce stringing, and a hop-free
+    // nozzle knocks tall towers over more easily). True sets z_hop and filament_z_hop to 0 for the test.
+    bool   disable_z_hop       = false;
+
+    CalibMode mode { CalibMode::Calib_None }; // Review F8
 };
+
+// Geometry constants for the temperature × retraction stringing grid.
+static constexpr double      stringing_grid_pillar_xy        = 4.0;
+static constexpr double      stringing_grid_pillar_gap       = 20.0; // centre-to-centre of a pair, along Y
+static constexpr double      stringing_grid_column_pitch     = 12.0;
+static constexpr double      stringing_grid_base_x           = 10.0;
+static constexpr double      stringing_grid_base_y           = 30.0;
+static constexpr double      stringing_grid_base_height      = 1.0;
+static constexpr double      stringing_grid_notch_depth      = 0.4;
+static constexpr double      stringing_grid_label_height     = 0.6;  // emboss height above the host face (3 layers at 0.2)
+static constexpr double      stringing_grid_label_embed      = 0.2;  // how far a label reaches into its host, so it fuses
+static constexpr double      stringing_grid_label_glyph_height = 5.0; // 7-segment digit height
+static constexpr double      stringing_grid_label_glyph_width  = 3.0; // 7-segment digit width
+static constexpr double      stringing_grid_label_stroke     = 1.0;  // segment width: about two 0.45 mm lines
+// Label tower (temperature per band, digits upright on its front face, y = 0).
+static constexpr double      stringing_grid_label_tower_x    = 10.5;
+static constexpr double      stringing_grid_label_tower_y    = 6.0;
+static constexpr double      stringing_grid_bed_margin       = 15.0;
+static constexpr double      stringing_grid_prime_tower_size = 35.0;
+static constexpr const char *stringing_grid_column_prefix    = "SG_col_";
+static constexpr const char *stringing_grid_label_name       = "SG_label";
+
+int                  stringing_grid_band_count(const Calib_Params &params);
+std::vector<double>  stringing_grid_retract_schedule(const Calib_Params &params);
+int                  stringing_grid_column_count(const Calib_Params &params);
+int                  stringing_grid_max_columns(double bed_width);
+bool                 stringing_grid_columns_fit(int columns, double bed_width);
+double               stringing_grid_bed_width(const ConfigBase &printer_config);
+bool                 stringing_grid_params_valid(const Calib_Params &params, double bed_width, std::string *error = nullptr);
+std::string          stringing_grid_column_name(int column);
+int                  stringing_grid_column_from_name(const std::string &name);
+int                  temp_retract_band_index(const Calib_Params &params, double z);
+// F11: band Z is measured from the object's first printed layer bottom (after raft).
+// first_printed_layer_bottom is object.layers().front()->bottom_z() after slicing.
+// Stringing-grid dialog defaults (Lance 2026-11-01): bands built outward from the filament's
+// other-layers temperature within its range, at most 10 bands; 230/205 when the inputs are invalid.
+// Also sets 8 mm bands, retraction 0.2-1.6 mm by 0.2, labels off, wait on.
+// F14 (Lance): no band above min(range_high, printer_max_nozzle_temp, 350); printer max <= 0 means unknown.
+// F17 (Lance): no band below range_low. When fewer than 2 bands fit, start = end = the clipped center
+// (or the cap when the cap is below range_low) and the function returns true: the dialog shows a note asking
+// for a temperature range, and stringing_grid_params_valid blocks OK until the range is valid.
+// Returns false otherwise, including the 230/205 fallback for missing or invalid values.
+bool                 stringing_grid_default_params(Calib_Params &params, double center, double range_low, double range_high,
+                                                   double step = 5., double printer_max_nozzle_temp = 0.);
+// Same, reading nozzle_temperature / nozzle_temperature_range_low / _high (first value) from a filament
+// preset's config. The dialog passes the preset of filament slot 1, which the grid prints with.
+bool                 stringing_grid_default_params_from_filament(Calib_Params &params, const ConfigBase &filament_config,
+                                                                 double step = 5., double printer_max_nozzle_temp = 0.);
+double               temp_retract_relative_z(double print_z, double first_printed_layer_bottom);
+double               temp_for_z(const Calib_Params &params, double z);
+double               retract_for_column(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_column_mesh(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_label_tower_mesh(const Calib_Params &params);
+// The raised labels on their own, in the coordinates of their host mesh (column base / label tower).
+// Column: retraction value on the base top between the two pillars. Band: that band's temperature,
+// upright on the label tower's front face (y = 0), centred in the band.
+TriangleMesh         make_stringing_grid_column_label_mesh(const Calib_Params &params, int column);
+TriangleMesh         make_stringing_grid_band_label_mesh(const Calib_Params &params, int band);
+// Label text: "0.2" ... "9.8", whole lengths of 10 mm and more without the ".0" so they fit the base.
+std::string          stringing_grid_retract_label(double length);
+// Largest pillar fillet that keeps the foot on the base plate (the pillar is 3 mm from the plate's edges).
+double               stringing_grid_max_fillet_radius();
+// The fillet radius make_stringing_grid_column_mesh uses: 0 when off, else clamped to (0, max].
+double               stringing_grid_fillet_radius(const Calib_Params &params);
+// One watertight concave fillet ("foot") around a pillar centred at (cx, cy): a square loft from the
+// pillar size plus radius at the base top (reaching stringing_grid_label_embed into the plate) up to the
+// pillar size at radius above the plate, following a quarter circle. It overlaps the pillar and the plate,
+// so the three slice as one solid. Empty for radius <= 0.
+TriangleMesh         make_stringing_grid_pillar_fillet_mesh(double cx, double cy, double radius);
+void                 make_stringing_grid(Model &model, const Calib_Params &params);
+
+// Persisted name for Calib_Temp_Retract_Grid. Never serialize CalibMode as an int (F12).
+static constexpr const char *calib_temp_retract_grid_mode_name = "temp_retract_grid_calib_mode";
+
+// The slicer settings the stringing grid needs, and nothing else (owner: keep the user's retraction setup):
+//   print_sequence = by layer        columns in a fixed order every layer
+//   enable_prime_tower = false       single toolhead v1, and the bed fit leaves no room for it
+//   wipe_inward = false              no inward wipe hiding the strings (the G-code also forces it)
+//   raft_layers = 0                  band Z is relative to the object's first printed layer (F11)
+//   enable_support = false           nothing to support; support would add travels between pillars
+//   reduce_crossing_wall = false     the travel must cross the gap between the pillars, not detour
+//   use_firmware_retraction = false  each column's length is written as G1 E (G10 has no length)
+// With disable_z_hop also z_hop and filament_z_hop = 0. z_hop_types, retract_lift_above/below, wipe,
+// retract_when_changing_layer, retraction_minimum_travel, restart extra and resonance avoidance are left
+// as the user has them. Wipe still retracts each column's length: the wipe reads the extruder's
+// retraction_length, which the per-column hook sets.
+void apply_stringing_grid_slicer_config(DynamicPrintConfig &print_config,
+                                        DynamicPrintConfig &filament_config,
+                                        DynamicPrintConfig &printer_config,
+                                        int                 filament_idx,
+                                        bool                disable_z_hop = false);
 
 // Orca #14759: number of printed layers per speed block in the VFA tower. The base model has 5 mm blocks designed
 // for a 0.2 mm layer height (0.4 mm nozzle), i.e. 25 layers per block.
@@ -430,5 +546,15 @@ private:
     const double m_glyph_padding_horizontal{1};
     const double m_glyph_padding_vertical{1};
 };
+
+// Flow step between the ironing flow calibration marks: 1, 2, 5, 10 or 20 %, the first that keeps them at least
+// 10 mm apart, or 0 if none does.
+double ironing_flow_calib_mark_step(double min_flow, double max_flow, double length);
+
+// Ironing flow calibration plate: two ironed bands (front ramps left-to-right, rear ramps the other
+// way so bed tilt can be compared) with the marks and their flows in front, and the filament name
+// in front of the marks. Extra solid height is chosen by the caller through base_z / ruler_z / top_z.
+indexed_triangle_set ironing_flow_calib_mesh(double min_flow, double max_flow, double length, const std::string &name,
+                                             double nozzle_diameter, double base_z, double ruler_z, double top_z);
 
 } // namespace Slic3r

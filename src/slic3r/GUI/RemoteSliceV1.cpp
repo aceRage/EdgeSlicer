@@ -32,9 +32,11 @@ const std::vector<std::string>& pair_features()
     // slice_preview_v2: PR E - colour by, options, from and hide on the preview, legend, layer times;
     // slice_plates_edit / slice_objects_edit / slice_project_save: PR G - plates add, delete, rename and
     // bed type; objects delete and duplicate; project/save.
+    // slice_prime_tower: the layout's prime_tower and POST /plates/{i}/prime_tower (move it).
     static const std::vector<std::string> f = { "slice_v1", "slice_result", "slice_cancel", "slice_send_preview", "slice_preview_live",
                                                 "slice_arrange", "slice_orient", "slice_undo", "slice_filament_settings",
-                                                "slice_preview_v2", "slice_plates_edit", "slice_objects_edit", "slice_project_save" };
+                                                "slice_preview_v2", "slice_plates_edit", "slice_objects_edit", "slice_project_save",
+                                                "slice_prime_tower" };
     return f;
 }
 
@@ -723,6 +725,43 @@ Refusal object_duplicate_check(int obj, int objects, int inst, int instances, in
     if (count < 1 || count > DUPLICATE_MAX) return { 400, "count must be between 1 and " + std::to_string(DUPLICATE_MAX) };
     if (obj < 0 || obj >= objects) return { 404, "no such object" };
     if (inst < 0 || inst >= instances) return { 404, "no such instance" };
+    return {};
+}
+
+bool plate_has_prime_tower(bool enabled, bool smooth_timelapse, int filament_count, bool by_object,
+                           int printable_instances, bool has_objects, double footprint_depth)
+{
+    if (!enabled || !(smooth_timelapse || filament_count > 1)) return false;
+    if (by_object && printable_instances != 1) return false;
+    return has_objects && footprint_depth > 0.;
+}
+
+nlohmann::json prime_tower_json(const PrimeTower& tower)
+{
+    nlohmann::json j;
+    j["x"]        = round2(tower.x);
+    j["y"]        = round2(tower.y);
+    j["width"]    = round2(tower.width);
+    j["depth"]    = round2(tower.depth);
+    j["brim"]     = round2(tower.brim);
+    j["rotation"] = round2(tower.rotation);
+    j["footprint"] = nlohmann::json::array();
+    for (const auto& pt : tower.footprint)
+        j["footprint"].push_back({ round2(pt.first), round2(pt.second) });
+    j["overlaps"] = tower.overlaps;
+    return j;
+}
+
+Refusal prime_tower_move_check(int plate, int plates, bool has_x, bool has_y, double x, double y,
+                               bool has_tower, bool locked, bool slicing)
+{
+    if (!has_x || !has_y || !std::isfinite(x) || !std::isfinite(y)) return { 400, "x and y are required" };
+    // Far past any bed: a client bug, not a drag (the PC would clamp it, but say so instead).
+    if (std::abs(x) > 1.e5 || std::abs(y) > 1.e5) return { 400, "x and y must be on the bed" };
+    if (slicing) return { 409, "slicing in progress" };
+    if (plate < 0 || plate >= plates) return { 404, "no such plate" };
+    if (!has_tower) return { 404, "this plate has no prime tower" };
+    if (locked) return { 409, "plate is locked" };
     return {};
 }
 

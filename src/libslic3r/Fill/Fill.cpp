@@ -1,10 +1,13 @@
 #include <assert.h>
 #include <stdio.h>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <memory>
 
 #include <boost/log/trivial.hpp>
 
+#include "../BoundingBox.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Geometry.hpp"
 #include "../ImageFill.hpp"
@@ -15,6 +18,7 @@
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../Surface.hpp"
+#include "../calib.hpp"
 
 #include "ExtrusionEntity.hpp"
 #include "Fill.hpp"
@@ -1050,10 +1054,18 @@ struct ImageRowContext
     Vec3f                            facet_normal_mesh { 0.f, 0.f, 1.f };
     float                            min_run_len_mm = 0.4f;
     float                            sample_spacing_mm = 0.4f;
+    // Phase 5a: the part's own filament (physical, 1-based, resolved for this layer) and whether
+    // the projection lands on an upward face at all (the faces rule - a wrap or a flat X/Y/-Z
+    // picture does not). A surface the image does not land on, or a path it gives no colour,
+    // prints with base_filament instead of the row's per-layer cycle colour.
+    int                              base_filament = 0;
+    std::array<float, 3>             base_color{0.f, 0.f, 0.f};
+    bool                             lands_on_top = true;
 };
 
 bool image_row_context_for_region(const PrintObject &object, const PrintRegion &region,
-                                  float flow_width_mm, ImageRowContext &ctx)
+                                  float flow_width_mm, ImageRowContext &ctx,
+                                  int layer_index, float print_z, float layer_height)
 {
     const PrintRegionConfig &region_config = region.config();
     const Print *print = object.print();
@@ -1098,8 +1110,19 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegion &
 
     // Same box image_fill_compute() itself computes (ImageFill.cpp) - from the raw mesh, so a
     // point that lands in a facet's own plane samples exactly where Phase 2's facet painting did.
-    for (const Vec3f &v : mv->mesh().its.vertices)
-        ctx.mesh_box.merge(v.cast<double>());
+    // Phase 5c: the box and frame the picture was laid over, when the part's own params record
+    // them (they follow the part through a cut); otherwise the mesh's own box, as before.
+    ImageFillParams placed = ctx.params;
+    {
+        ImageFillParams vp;
+        if (image_fill_params_of(*mv, vp) && vp.has_box) {
+            placed.has_box   = true;
+            placed.box       = vp.box;
+            placed.has_frame = vp.has_frame;
+            placed.frame     = vp.frame;
+        }
+    }
+    ctx.mesh_box = image_fill_projection_box(placed, mv->mesh().its);
     if (!ctx.mesh_box.defined)
         return false;
 
@@ -1110,9 +1133,18 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegion &
     // slicing composes them (see PrintObject.cpp's slice_mesh_slabs() calls: trafo_centered() *
     // mv->get_matrix()). A volume moved/rotated/scaled independently of its object is now sampled
     // in the right place instead of silently falling back to the un-split resolve() cycle.
-    ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
+    ctx.mesh_from_print = image_fill_projection_frame(placed) * (object.trafo_centered() * mv->get_matrix()).inverse();
     const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
     ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? Vec3f(up_mesh.normalized()) : Vec3f(0.f, 0.f, 1.f);
+
+    // Phase 5a: the part's own filament, and whether the picture faces up at all. The faces rule
+    // needs a point for a wrap (which way is "away from the axis"); the box centre's top is as
+    // good as any, since an upward normal is perpendicular to every radial direction anyway.
+    ctx.base_filament = int(image_row_base_filament(object, region, layer_index, print_z, layer_height));
+    if (size_t(ctx.base_filament) <= filament_colours.size())
+        ctx.base_color = MixedFilamentManager::hex_to_srgb01(filament_colours[size_t(ctx.base_filament) - 1]);
+    const Vec3f box_top(float(ctx.mesh_box.center().x()), float(ctx.mesh_box.center().y()), float(ctx.mesh_box.max.z()));
+    ctx.lands_on_top = image_fill_face_is_painted(ctx.params, ctx.mesh_box, ctx.facet_normal_mesh, box_top);
 
     ctx.row = mf;
     // Resolution is bounded by extrusion width, not by an arbitrary constant: a run shorter than
@@ -1215,7 +1247,8 @@ std::vector<ExtrusionPath *> split_extrusion_path_by_runs(const ExtrusionPath &s
 // Returns the replacement top-level entities for `eec`'s slot in layerm->fills.entities - always
 // at least one (falls back to `eec` itself, untouched, when nothing could be split).
 std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const ImageAssetStore &assets, const ImageRowContext &ctx,
-                                                                       double print_z, ExtrusionEntityCollection *eec)
+                                                                       double print_z, ExtrusionEntityCollection *eec,
+                                                                       ExtrusionRole role = erTopSolidInfill)
 {
     std::vector<ExtrusionEntityCollection *> out;
     bool split_any = false;
@@ -1226,7 +1259,20 @@ std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const Ima
         // ExtrusionPath in the same collection, and gap fill deliberately follows wall_filament
         // (see fill_filament_source()'s own comment in PrintRegion.cpp) rather than
         // solid_infill_filament - overriding it here would fight that fix.
-        ExtrusionPath *path = (path_candidate != nullptr && path_candidate->role() == erTopSolidInfill) ? path_candidate : nullptr;
+        // Phase 5a: `role` is erTopSolidInfill, or a bottom surface role when the picture lands on
+        // the part's underside (a box projection's -Z face, or a flat projection from below).
+        ExtrusionPath *path = (path_candidate != nullptr && path_candidate->role() == role) ? path_candidate : nullptr;
+        // Phase 5a: the picture does not face up (a wrap, or a flat projection along X, Y or -Z):
+        // the whole top surface prints with the part's own filament - tagged, so it does not fall
+        // back to the row's per-layer cycle colour, which would be a different filament each layer.
+        if (!ctx.lands_on_top && ctx.base_filament > 0 && child->role() == role) {
+            auto *solo = new ExtrusionEntityCollection();
+            solo->no_sort = eec->no_sort;
+            solo->entities.push_back(child->clone());
+            solo->image_row_extruder_1based = unsigned(ctx.base_filament);
+            out.push_back(solo);
+            continue;
+        }
         // Step 5, item 3: a Concentric-family (or other Arachne-driven) top surface pattern never
         // produces a plain ExtrusionPath here - it is an ExtrusionMultiPath/ExtrusionLoop instead,
         // so path_candidate is null even though this child's own role IS erTopSolidInfill. That
@@ -1246,7 +1292,7 @@ std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const Ima
         // A top-surface Concentric LOOP is cut open by this, the same way a wall loop is: there
         // is no such thing as a partially-coloured closed loop. That is the intended trade - the
         // alternative is the phase 3 behaviour, i.e. no dither on those patterns at all.
-        if (path_candidate == nullptr && child->role() == erTopSolidInfill) {
+        if (path_candidate == nullptr && child->role() == role) {
             ImageRowWallContext wall_like;
             wall_like.params            = ctx.params;
             wall_like.candidate_ids     = ctx.candidate_ids;
@@ -1259,6 +1305,10 @@ std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const Ima
             // image_row_runs_for_path() uses, so a Box projection picks the top face rather
             // than a side face computed from the path's own tangent.
             wall_like.fixed_normal_mesh = ctx.facet_normal_mesh;
+            wall_like.up_mesh           = ctx.facet_normal_mesh;
+            wall_like.base_filament     = ctx.base_filament;
+            wall_like.base_color        = ctx.base_color;
+            wall_like.surfaces          = IMAGE_FILL_SURFACE_TOP;
             std::vector<std::unique_ptr<ExtrusionEntityCollection>> split =
                 image_row_split_wall_entity(assets, wall_like, *child, print_z);
             if (!split.empty()) {
@@ -1283,6 +1333,10 @@ std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const Ima
             solo->entities.push_back(child->clone());
             if (path != nullptr && runs.size() == 1)
                 solo->image_row_extruder_1based = unsigned(runs.front().filament_id);
+            else if (path != nullptr && runs.empty() && ctx.base_filament > 0)
+                // Phase 5a: the projection gave this line no colour anywhere - the part's own
+                // filament, not the row's cycle colour.
+                solo->image_row_extruder_1based = unsigned(ctx.base_filament);
             out.push_back(solo);
             continue;
         }
@@ -1410,9 +1464,6 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 } else if (surface.is_solid()) {
                     if (surface.is_top()) {
                         params.extrusion_role = erTopSolidInfill;
-                        // Phase 3 (image row): see this field's own comment above - 0 for every
-                        // print that does not use the feature.
-                        params.image_row_filament_id = int(image_row_configured_virtual_id(*layer.object(), region_config));
                     } else if (surface.is_bottom_over_support()) {
                         // Ultra (over-support surfaces): a bottom shell in geometry - the pattern,
                         // the density and the flow above all came from the bottom-surface branch -
@@ -1425,6 +1476,14 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.extrusion_role = erSolidInfill;
                     }
                 }
+                // Phase 3 (image row): see this field's own comment above - 0 for every print that
+                // does not use the feature. Phase 5a keys EVERY solid role, not only the top: a
+                // region whose solid infill names an image row prints its bottom surface through
+                // the image (when the picture lands there) and its internal solid infill and
+                // bridges with the part's own filament, so those must not be merged with another
+                // region's either.
+                if (is_solid_infill(params.extrusion_role))
+                    params.image_row_filament_id = int(image_row_configured_virtual_id(*layer.object(), region_config));
                 // Orca: forced fill order applies only to top/bottom surfaces filled with a
                 // center-based pattern; everything else stays at Default to keep batching together.
                 params.fill_order = SurfaceFillOrder::Default;
@@ -1544,7 +1603,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 				//get locked region param
 				if (params.pattern == ipLockedZag){
 					const PrintObject *object = layerm.layer()->object();
-					auto nozzle_diameter = float(object->print()->config().nozzle_diameter.get_at(effective_extruder - 1));
+					auto nozzle_diameter = float(nozzle_diameter_for_filament(object->print()->config(), unsigned(effective_extruder)));
 					Flow skin_flow = params.bridge ? params.flow : Flow::new_from_config_width(extrusion_role, region_config.skin_infill_line_width, nozzle_diameter, float((surface.thickness == -1) ? layer.height : surface.thickness));
 					//add skin flow
 					append_flow_param(lock_param.skin_flow_params, skin_flow, surface.expolygon);
@@ -2006,10 +2065,28 @@ void Layer::make_fills(const FillAdaptive::Octrees* adaptive_fill_octrees, const
 		// (the overwhelming common case: any print not using the feature) means the loop below
 		// runs exactly as it did before this phase, byte for byte.
 		ImageRowContext image_row_ctx;
-		const bool image_row_ctx_ok = surface_fill.params.extrusion_role == erTopSolidInfill &&
-		                              surface_fill.params.image_row_filament_id != 0 &&
+		const bool image_row_ctx_ok = surface_fill.params.image_row_filament_id != 0 &&
 		                              image_row_context_for_region(*this->object(), layerm->region(),
-		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
+		                                                           float(surface_fill.params.flow.width()), image_row_ctx,
+		                                                           int(this->id()), float(this->print_z), float(this->height));
+		// Phase 5a: which role the image is sampled along. A top surface faces up (phase 3); a
+		// bottom surface faces down, so the same split runs with the "down" normal and only when
+		// the picture lands there; every other solid role (internal solid infill, bridges) is not
+		// a visible face and prints with the part's own filament (erNone below).
+		ExtrusionRole image_row_split_role = erNone;
+		if (image_row_ctx_ok) {
+			const ExtrusionRole r = surface_fill.params.extrusion_role;
+			if (r == erTopSolidInfill) {
+				image_row_split_role = r;
+			} else if (r == erBottomSurface || r == erBottomSurfaceOverSupport) {
+				image_row_split_role            = r;
+				image_row_ctx.facet_normal_mesh = -image_row_ctx.facet_normal_mesh;
+				const Vec3f box_bottom(float(image_row_ctx.mesh_box.center().x()), float(image_row_ctx.mesh_box.center().y()),
+				                       float(image_row_ctx.mesh_box.min.z()));
+				image_row_ctx.lands_on_top = image_fill_face_is_painted(image_row_ctx.params, image_row_ctx.mesh_box,
+				                                                        image_row_ctx.facet_normal_mesh, box_bottom);
+			}
+		}
 
 		for (ExPolygon& expoly : surface_fill.expolygons) {
 
@@ -2074,9 +2151,18 @@ void Layer::make_fills(const FillAdaptive::Octrees* adaptive_fill_octrees, const
 						region_fill_entities.push_back(ee);
 						continue;
 					}
+					if (image_row_split_role == erNone) {
+						// Phase 5a: internal solid infill and bridges of an image-row region print
+						// with the part's own filament instead of the row's per-layer cycle
+						// colour (a different filament every layer, and a tool change for each).
+						if (image_row_ctx.base_filament > 0)
+							eec->image_row_extruder_1based = unsigned(image_row_ctx.base_filament);
+						region_fill_entities.push_back(eec);
+						continue;
+					}
 					std::vector<ExtrusionEntityCollection *> replaced =
 						split_top_infill_by_image_row(this->object()->model_object()->get_model()->image_assets,
-						                              image_row_ctx, this->print_z, eec);
+						                              image_row_ctx, this->print_z, eec, image_row_split_role);
 					for (ExtrusionEntityCollection *r : replaced)
 						region_fill_entities.push_back(r);
 				}
@@ -2246,6 +2332,45 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(const FillAdapti
     return sparse_infill_polylines;
 }
 
+// Ironing flow calibration: the flow grows linearly from calib.start % at x_start to calib.end % at x_end,
+// and stays constant before and after. reverse_ramp flips the interpolation (rear band, bed-tilt check).
+static void extrusion_entities_append_calib_ironing_paths(ExtrusionEntitiesPtr &dst, const Polylines &polylines, const Calib_Params &calib,
+    coord_t x_start, coord_t x_end, double height_per_percent, double nozzle_dmr, bool reverse_ramp)
+{
+    const double max_piece_x = scale_(0.5);
+    for (const Polyline &polyline : polylines) {
+        if (! polyline.is_valid())
+            continue;
+        Polyline piece;
+        double   piece_percent = 0.;
+        auto append_piece = [&]() {
+            const double height = height_per_percent * piece_percent;
+            const float  width  = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(height));
+            extrusion_entities_append_paths(dst, Polylines{ std::move(piece) }, erIroning, nozzle_dmr * height, width, float(height));
+            piece.points.clear();
+        };
+        for (size_t i = 1; i < polyline.points.size(); ++ i) {
+            const Vec2d a        = polyline.points[i - 1].cast<double>();
+            const Vec2d b        = polyline.points[i].cast<double>();
+            const int   n_pieces = std::max(1, int(std::ceil(std::abs(b.x() - a.x()) / max_piece_x)));
+            for (int k = 0; k < n_pieces; ++ k) {
+                const Point  p0(Vec2d(a + (b - a) * (double(k) / n_pieces)));
+                const Point  p1(Vec2d(a + (b - a) * (double(k + 1) / n_pieces)));
+                const double t       = std::clamp((0.5 * double(p0.x() + p1.x()) - x_start) / double(x_end - x_start), 0., 1.);
+                const double percent = calib.start + (calib.end - calib.start) * (reverse_ramp ? 1. - t : t);
+                if (piece.points.empty() || percent != piece_percent) {
+                    if (! piece.points.empty())
+                        append_piece();
+                    piece.points.push_back(p0);
+                    piece_percent = percent;
+                }
+                piece.points.push_back(p1);
+            }
+        }
+        append_piece();
+    }
+}
+
 // Create ironing extrusions over top surfaces.
 void Layer::make_ironing()
 {
@@ -2328,6 +2453,13 @@ void Layer::make_ironing()
 
 	std::vector<IroningParams> by_extruder;
     double default_layer_height = this->object()->config().layer_height;
+
+    // Ironing flow calibration, from 5 mm after the left edge to 5 mm before the right edge.
+    // Only this mode takes the new path; normal prints keep the filament_ironing_flow override below.
+    const Calib_Params &calib              = this->object()->print()->calib_params();
+    const bool          calib_ironing_flow = calib.mode == CalibMode::Calib_Ironing_Flow;
+    const coord_t       calib_x_start      = this->object()->bounding_box().min.x() + coord_t(scale_(5.));
+    const coord_t       calib_x_end        = this->object()->bounding_box().max.x() - coord_t(scale_(5.));
 
 	for (LayerRegion *layerm : m_regions)
 		if (! layerm->slices.empty()) {
@@ -2417,7 +2549,7 @@ void Layer::make_ironing()
 
 		// Create the ironing extrusions for regions <i, j)
 		ExPolygons ironing_areas;
-		double nozzle_dmr = this->object()->print()->config().nozzle_diameter.get_at(ironing_params.extruder - 1);
+		double nozzle_dmr = nozzle_diameter_for_filament(this->object()->print()->config(), unsigned(ironing_params.extruder));
 		if (ironing_params.just_infill) {
 			//TODO just_infill is currently not used.
 			// Just infill.
@@ -2487,8 +2619,21 @@ void Layer::make_ironing()
 		double  extrusion_height = ironing_params.height * f->spacing / nozzle_dmr;
 		float  extrusion_width  = Flow::rounded_rectangle_extrusion_width_from_spacing(float(nozzle_dmr), float(extrusion_height));
 		double flow_mm3_per_mm = nozzle_dmr * extrusion_height;
+        // Calibration ramp is a percent of layer height, not of filament_ironing_flow (the labels are absolute %).
+        double calib_height_per_percent = default_layer_height * 0.01 * f->spacing / nozzle_dmr;
+        // Two disjoint ironed tops (the front/rear bands): reverse the rear ramp so bed tilt can be compared.
+        // The rear band is found by Y position alone, so any other ironed top in a Calib_Ironing_Flow print
+        // behind the frontmost one would also be reversed; the calibration model is the only object expected.
+        const bool calib_has_mirror = calib_ironing_flow && ironing_areas.size() >= 2;
+        coord_t    calib_front_y    = 0;
+        if (calib_has_mirror) {
+            calib_front_y = get_extents(ironing_areas.front()).center().y();
+            for (const ExPolygon &area : ironing_areas)
+                calib_front_y = std::min(calib_front_y, get_extents(area).center().y());
+        }
         Surface surface_fill(stTop, ExPolygon());
         for (ExPolygon &expoly : ironing_areas) {
+            const bool reverse_ramp = calib_has_mirror && get_extents(expoly).center().y() > calib_front_y;
 			surface_fill.expolygon = std::move(expoly);
 			Polylines polylines;
 			try {
@@ -2501,6 +2646,16 @@ void Layer::make_ironing()
 		        ironing_params.layerm->fills.entities.push_back(eec = new ExtrusionEntityCollection());
 		        // Don't sort the ironing infill lines as they are monotonicly ordered.
 				eec->no_sort = true;
+				if (calib_ironing_flow) {
+					// Iron from left to right.
+					for (Polyline &polyline : polylines)
+						if (polyline.first_point().x() > polyline.last_point().x())
+							polyline.reverse();
+					std::sort(polylines.begin(), polylines.end(),
+						[](const Polyline &a, const Polyline &b) { return get_extents(a).min.x() < get_extents(b).min.x(); });
+					extrusion_entities_append_calib_ironing_paths(eec->entities, polylines, calib, calib_x_start, calib_x_end,
+						calib_height_per_percent, nozzle_dmr, reverse_ramp);
+				} else
 		        extrusion_entities_append_paths(
 		            eec->entities, std::move(polylines),
 		            erIroning,
@@ -2518,7 +2673,8 @@ void Layer::make_ironing()
 		        // image at least as finely as the surface under it, never more coarsely.
 		        ImageRowWallContext iron_ctx;
 		        if (image_row_wall_iron_context(*this->object(), ironing_params.layerm->region(),
-		                                        extrusion_width, iron_ctx)) {
+		                                        extrusion_width, iron_ctx, int(this->id()),
+		                                        float(this->print_z), float(this->height))) {
 		            std::vector<ExtrusionEntityCollection *> replacement;
 		            for (ExtrusionEntity *child : eec->entities) {
 		                std::vector<std::unique_ptr<ExtrusionEntityCollection>> split =

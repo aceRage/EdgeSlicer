@@ -112,6 +112,25 @@ std::string format_action_ids(const std::vector<int>& ids)
     return out;
 }
 
+PrintErrorButtonLayout layout_print_error_buttons(const std::vector<int>& buttons, const std::string& job_id, bool can_send)
+{
+    PrintErrorButtonLayout out;
+    const bool have_job_id = !job_id.empty();
+    for (int id : buttons) {
+        if (print_error_action_needs_job_id(id) && (!have_job_id || !can_send)) {
+            out.hidden.push_back(id);
+            // No job outranks the connection: with no job there is nothing to stop on any link.
+            out.why = have_job_id ? PrintErrorButtonLayout::Why::CannotSend : PrintErrorButtonLayout::Why::NoJobId;
+            continue;
+        }
+        out.shown.push_back(id);
+    }
+    const bool has_pressable = std::any_of(out.shown.begin(), out.shown.end(),
+                                           [](int id) { return id != PrintErrorAction::REMOVE_CLOSE_BTN; });
+    if (!has_pressable) out.shown.insert(out.shown.begin(), PrintErrorAction::OK_BUTTON);
+    return out;
+}
+
 // ---- the remote surface ----
 
 namespace {

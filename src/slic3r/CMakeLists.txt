@@ -158,12 +158,16 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
     GUI/FlowTypeHelper.hpp
+    GUI/ExtruderSettingsDialog.cpp
+    GUI/ExtruderSettingsDialog.hpp
     GUI/FlowVariantEdit.cpp
     GUI/FlowVariantEdit.hpp
     GUI/HighFlowCompat.cpp
     GUI/HighFlowCompat.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp
+    GUI/ZipCleanup.cpp
+    GUI/ZipCleanup.hpp
     GUI/filamentsync/FilamentColorMapBox.cpp
     GUI/filamentsync/FilamentColorMapBox.hpp
     GUI/filamentsync/FilamentColorMapBoxGroup.cpp
@@ -300,6 +304,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
     GUI/Showcase/ShowcaseHdriDialog.cpp
@@ -581,6 +586,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
     GUI/RemoteSend.hpp
+    GUI/RemotePaintV1.cpp
+    GUI/RemotePaintV1.hpp
     GUI/RemoteSliceV1.cpp
     GUI/RemoteSliceV1.hpp
     GUI/BambuSendMapping.cpp
@@ -645,6 +652,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrintHostDevicesDialog.hpp
     GUI/CostsDialog.cpp
     GUI/CostsDialog.hpp
+    GUI/FilamentNozzleValuesDialog.cpp
+    GUI/FilamentNozzleValuesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -896,6 +905,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/ScrolledWindow.hpp
     GUI/Widgets/SegmentedToggle.cpp
     GUI/Widgets/SegmentedToggle.hpp
+    GUI/Widgets/NozzleStrip.cpp
+    GUI/Widgets/NozzleStrip.hpp
     GUI/Widgets/SideButton.cpp
     GUI/Widgets/SideButton.hpp
     GUI/Widgets/SideMenuPopup.cpp
@@ -1318,6 +1329,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Showcase/ShowcaseViewVideo.cpp            # file-local helpers (seconds_text, spin_lights) with common names
     GUI/Showcase/ShowcaseViewPath.cpp             # file-local helpers (showcase_read_text, showcase_box)
     GUI/Showcase/ShowcaseHdriDialog.cpp           # file-local hdri_* helpers; Http (curl) next to wx headers
+    GUI/Showcase/ShowcaseBlenderExport.cpp        # file-local sbx_* helpers; wx image streams next to GL headers
     GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
     GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
     GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
@@ -1327,6 +1339,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/FirewallCheckDialog.cpp                   # Windows shell headers; ::CheckBox vs GUI::CheckBox (Field.hpp)
     GUI/BambuSetupNoticeDialog.cpp                # ::CheckBox vs GUI::CheckBox (Field.hpp)
     Utils/WinFirewall.cpp                         # windows.h + netfw.h (COM) ahead of neighbours' headers
+    GUI/ZipCleanup.cpp                            # <windows.h> for the background thread priority
     GUI/wxMediaCtrl2.cpp                          # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
     GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)

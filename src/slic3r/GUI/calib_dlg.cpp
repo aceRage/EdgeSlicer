@@ -1,6 +1,7 @@
 #include "calib_dlg.hpp"
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
+#include "format.hpp"
 #include "I18N.hpp"
 #include <wx/dcgraph.h>
 #include "MainFrame.hpp"
@@ -8,6 +9,9 @@
 #include <string>
 #include <vector>
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "FlowTypeHelper.hpp"
 #include <algorithm>
@@ -978,6 +982,300 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 }
 
+// TempRetract_Calibration_Dlg
+// Combined temperature × retraction stringing grid (single toolhead, v1).
+//
+
+TempRetract_Calibration_Dlg::TempRetract_Calibration_Dlg(wxWindow *parent, wxWindowID id, Plater *plater)
+    : DPIDialog(parent, id, _L("Stringing (temp × retraction)"), wxDefaultPosition, parent->FromDIP(wxSize(-1, 280)), wxDEFAULT_DIALOG_STYLE)
+    , m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE);
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    Calib_Params defaults;
+    const bool   needs_range = filament_default_params(defaults);
+    const unsigned long start_temp = (unsigned long) defaults.start;
+    const unsigned long end_temp   = (unsigned long) defaults.end;
+
+    wxBoxSizer *v_sizer = new wxBoxSizer(wxVERTICAL);
+    SetSizer(v_sizer);
+
+    wxString start_temp_str    = _L("Start temp: ");
+    wxString end_temp_str      = _L("End temp: ");
+    wxString temp_step_str     = _L("Temp step: ");
+    wxString band_height_str   = _L("Band height: ");
+    wxString retract_start_str = _L("Retraction min: ");
+    wxString retract_end_str   = _L("Retraction max: ");
+    wxString retract_step_str  = _L("Retraction step: ");
+    wxString fillet_radius_str = _L("Fillet radius: ");
+    int      text_max          = GetTextMax(this, std::vector<wxString>{start_temp_str, end_temp_str, temp_step_str, band_height_str,
+                                                                       retract_start_str, retract_end_str, retract_step_str,
+                                                                       fillet_radius_str});
+
+    auto st_size = FromDIP(wxSize(text_max, -1));
+    auto ti_size = FromDIP(wxSize(120, -1));
+
+    LabeledStaticBox *stb            = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer *settings_sizer = new wxStaticBoxSizer(stb, wxVERTICAL);
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto add_row = [&](const wxString &label, TextInput *&ti, const wxString &value, const wxString &unit) {
+        auto row  = new wxBoxSizer(wxHORIZONTAL);
+        auto text = new wxStaticText(this, wxID_ANY, label, wxDefaultPosition, st_size, wxALIGN_LEFT);
+        ti        = new TextInput(this, value, unit, "", wxDefaultPosition, ti_size);
+        ti->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+        row->Add(text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(ti, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        settings_sizer->Add(row, 0, wxLEFT, FromDIP(3));
+    };
+
+    add_row(start_temp_str, m_tiStartTemp, std::to_string(start_temp), wxString::FromUTF8("\u2103"));
+    add_row(end_temp_str, m_tiEndTemp, std::to_string(end_temp), wxString::FromUTF8("\u2103"));
+    add_row(temp_step_str, m_tiTempStep, wxString::FromDouble(5), wxString::FromUTF8("\u2103"));
+    add_row(band_height_str, m_tiBandHeight, wxString::FromDouble(8), "mm");
+    add_row(retract_start_str, m_tiRetractStart, wxString::FromDouble(0.2), "mm");
+    add_row(retract_end_str, m_tiRetractEnd, wxString::FromDouble(1.6), "mm");
+    add_row(retract_step_str, m_tiRetractStep, wxString::FromDouble(0.2), "mm");
+
+    auto labels_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbLabels        = new CheckBox(this);
+    m_cbLabels->SetValue(false);
+    auto labels_text = new wxStaticText(this, wxID_ANY, _L("Raised labels"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbLabels->SetToolTip(_L("Emboss retraction values on each base and temperatures on a label tower. Off by default: the values are in the G-code comments."));
+    labels_text->SetToolTip(m_cbLabels->GetToolTipText());
+    labels_sizer->Add(m_cbLabels, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    labels_sizer->Add(labels_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(labels_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
+    auto wait_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbWaitTemp    = new CheckBox(this);
+    m_cbWaitTemp->SetValue(true);
+    auto wait_text = new wxStaticText(this, wxID_ANY, _L("Wait for temperature at each band (M109)"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbWaitTemp->SetToolTip(_L("Use M109 (wait) at each temperature band. Off writes M104 and keeps printing while the hotend settles."));
+    wait_text->SetToolTip(m_cbWaitTemp->GetToolTipText());
+    wait_sizer->Add(m_cbWaitTemp, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    wait_sizer->Add(wait_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(wait_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
+    // Owner: keep the user's z-hop unless asked (no z-hop can itself reduce stringing and makes the towers
+    // easier to knock over). Unticked = "Keep my z-hop".
+    auto zhop_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbNoZHop      = new CheckBox(this);
+    m_cbNoZHop->SetValue(false);
+    auto zhop_text = new wxStaticText(this, wxID_ANY, _L("Disable z-hop for this test"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbNoZHop->SetToolTip(_L("Off (default): keep your z-hop and lift settings. On: z-hop 0 for this test only."));
+    zhop_text->SetToolTip(m_cbNoZHop->GetToolTipText());
+    zhop_sizer->Add(m_cbNoZHop, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    zhop_sizer->Add(zhop_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(zhop_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+
+    // Owner (real print): the towers snapped at the plate. Concave fillet foot under every pillar.
+    auto fillet_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_cbFillet        = new CheckBox(this);
+    m_cbFillet->SetValue(true);
+    auto fillet_text = new wxStaticText(this, wxID_ANY, _L("Fillet tower base"), wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_cbFillet->SetToolTip(_L("Add a concave fillet where each tower meets its base plate, so tall towers do not snap off at the joint."));
+    fillet_text->SetToolTip(m_cbFillet->GetToolTipText());
+    fillet_sizer->Add(m_cbFillet, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    fillet_sizer->Add(fillet_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(fillet_sizer, 0, wxLEFT | wxTOP, FromDIP(3));
+    add_row(fillet_radius_str, m_tiFilletRadius, wxString::FromDouble(stringing_grid_max_fillet_radius()), "mm");
+    m_tiFilletRadius->SetToolTip(wxString::Format(_L("0.5 to %.1f mm: the largest radius keeps the fillet on the base plate."),
+                                                  stringing_grid_max_fillet_radius()));
+
+    settings_sizer->AddSpacer(FromDIP(5));
+    m_stSummary = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_stSummary->SetForegroundColour(wxColour(128, 128, 128));
+    settings_sizer->Add(m_stSummary, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+    // F17: shown when the filament range holds fewer than 2 bands, so the dialog opens on one temperature.
+    m_stRangeNote = new wxStaticText(this, wxID_ANY,
+                                     _L("The filament's temperature range fits only one band. Set a start and end temperature range to test."),
+                                     wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    m_stRangeNote->SetForegroundColour(wxColour(230, 92, 92));
+    m_stRangeNote->Wrap(FromDIP(360));
+    m_stRangeNote->Show(needs_range);
+    settings_sizer->Add(m_stRangeNote, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto note = new wxStaticText(this, wxID_ANY,
+                                 _L("Single toolhead. Layer 1 keeps the first-layer temperature; band 0 starts at layer 2. Raft is disabled."),
+                                 wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    note->SetForegroundColour(wxColour(128, 128, 128));
+    note->Wrap(FromDIP(360));
+    v_sizer->Add(note, 0, wxLEFT | wxRIGHT, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &TempRetract_Calibration_Dlg::on_start, this);
+
+    auto on_edit = [this](wxFocusEvent &e) {
+        this->update_summary();
+        e.Skip();
+    };
+    for (TextInput *ti : {m_tiStartTemp, m_tiEndTemp, m_tiTempStep, m_tiBandHeight, m_tiRetractStart, m_tiRetractEnd, m_tiRetractStep,
+                          m_tiFilletRadius})
+        ti->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, on_edit);
+    m_cbFillet->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) {
+        m_tiFilletRadius->Enable(m_cbFillet->GetValue());
+        update_summary();
+        e.Skip();
+    });
+    // Skip(): handlers bound later run first, and CheckBox's own wxEVT_TOGGLEBUTTON handler (bound in its
+    // constructor) is what swaps the checked/unchecked bitmap. Without Skip() it never ran, so both boxes
+    // looked locked (owner hand test).
+    m_cbLabels->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
+    m_cbWaitTemp->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
+    m_cbNoZHop->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) { update_summary(); e.Skip(); });
+
+    wxGetApp().UpdateDlgDarkUI(this);
+    update_summary();
+    Layout();
+    Fit();
+}
+
+TempRetract_Calibration_Dlg::~TempRetract_Calibration_Dlg() {}
+
+const DynamicPrintConfig *TempRetract_Calibration_Dlg::slot1_filament_config()
+{
+    // The grid prints with filament slot 1 (Plater::calib_temp_retraction puts every column on extruder 1).
+    // The Filament tab's edited preset is the slot the tab is editing, which can be another slot, so
+    // reading it showed the defaults of whatever filament was selected last (owner hand test: PLA
+    // defaults with PETG in slot 1). Use the edited copy only when it is slot 1's preset, so unsaved
+    // edits to slot 1 still count.
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return nullptr;
+    const Preset &edited = bundle->filaments.get_edited_preset();
+    if (bundle->filament_presets.empty())
+        return &edited.config;
+    const std::string &slot1 = bundle->filament_presets.front();
+    if (edited.name == slot1)
+        return &edited.config;
+    if (const Preset *preset = bundle->filaments.find_preset(slot1, false))
+        return &preset->config;
+    return &edited.config;
+}
+
+bool TempRetract_Calibration_Dlg::filament_default_params(Calib_Params &params)
+{
+    // F14: the printer preset has no max nozzle temperature option (PrintConfig defines none), so the
+    // cap is the filament's nozzle_temperature_range_high and 350 C. Pass the printer max here if one is added.
+    const double printer_max_nozzle_temp = 0.;
+    if (const DynamicPrintConfig *fc = slot1_filament_config())
+        return stringing_grid_default_params_from_filament(params, *fc, 5., printer_max_nozzle_temp);
+    return stringing_grid_default_params(params, 0., 0., 0., 5., printer_max_nozzle_temp);
+}
+
+void TempRetract_Calibration_Dlg::reset_to_defaults()
+{
+    Calib_Params p;
+    const bool   needs_range = filament_default_params(p);
+    m_stRangeNote->Show(needs_range);
+    m_tiStartTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.start)));
+    m_tiEndTemp->GetTextCtrl()->SetValue(wxString::Format("%d", int(p.end)));
+    m_tiTempStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.step));
+    m_tiBandHeight->GetTextCtrl()->SetValue(wxString::FromDouble(p.band_height));
+    m_tiRetractStart->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_start));
+    m_tiRetractEnd->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_end));
+    m_tiRetractStep->GetTextCtrl()->SetValue(wxString::FromDouble(p.retract_step));
+    m_cbLabels->SetValue(p.print_labels);
+    m_cbWaitTemp->SetValue(p.wait_for_temperature);
+    m_cbNoZHop->SetValue(p.disable_z_hop);
+    m_cbFillet->SetValue(p.fillet_base);
+    m_tiFilletRadius->GetTextCtrl()->SetValue(wxString::FromDouble(p.fillet_radius));
+    m_tiFilletRadius->Enable(p.fillet_base);
+    Layout();
+}
+
+int TempRetract_Calibration_Dlg::ShowModal()
+{
+    // F8: the dialog is cached by MainFrame; re-seed the defaults and re-validate against the
+    // current printer (bed width) and filament every time it opens.
+    reset_to_defaults();
+    update_summary();
+    Layout();
+    Fit();
+    return DPIDialog::ShowModal();
+}
+
+double TempRetract_Calibration_Dlg::bed_width() const
+{
+    if (const auto *bundle = wxGetApp().preset_bundle)
+        return stringing_grid_bed_width(bundle->printers.get_edited_preset().config);
+    return 270.;
+}
+
+bool TempRetract_Calibration_Dlg::read_params(Calib_Params &params, wxString *error) const
+{
+    bool ok = m_tiStartTemp->GetTextCtrl()->GetValue().ToDouble(&params.start);
+    ok      = ok && m_tiEndTemp->GetTextCtrl()->GetValue().ToDouble(&params.end);
+    ok      = ok && m_tiTempStep->GetTextCtrl()->GetValue().ToDouble(&params.step);
+    ok      = ok && m_tiBandHeight->GetTextCtrl()->GetValue().ToDouble(&params.band_height);
+    ok      = ok && m_tiRetractStart->GetTextCtrl()->GetValue().ToDouble(&params.retract_start);
+    ok      = ok && m_tiRetractEnd->GetTextCtrl()->GetValue().ToDouble(&params.retract_end);
+    ok      = ok && m_tiRetractStep->GetTextCtrl()->GetValue().ToDouble(&params.retract_step);
+    params.fillet_base = m_cbFillet->GetValue();
+    if (params.fillet_base) // the radius only matters (and is only checked) with the fillet on
+        ok = ok && m_tiFilletRadius->GetTextCtrl()->GetValue().ToDouble(&params.fillet_radius);
+    if (!ok) {
+        if (error)
+            *error = _L("Please input valid numbers.");
+        return false;
+    }
+    params.band_count           = 0;
+    params.retract_lengths.clear();
+    params.print_labels         = m_cbLabels->GetValue();
+    params.wait_for_temperature = m_cbWaitTemp->GetValue();
+    params.disable_z_hop        = m_cbNoZHop->GetValue();
+    params.mode                 = CalibMode::Calib_Temp_Retract_Grid;
+    std::string err;
+    if (!stringing_grid_params_valid(params, bed_width(), &err)) {
+        if (error)
+            *error = wxString::FromUTF8(err.c_str());
+        return false;
+    }
+    return true;
+}
+
+void TempRetract_Calibration_Dlg::update_summary()
+{
+    Calib_Params params;
+    wxString     err;
+    if (!read_params(params, &err)) {
+        m_stSummary->SetLabel(err);
+        Layout();
+        return;
+    }
+    const int cols  = stringing_grid_column_count(params);
+    const int bands = stringing_grid_band_count(params);
+    m_stSummary->SetLabel(wxString::Format(_L("%d columns × %d bands of %.0f mm  (max %d columns on this bed)"), cols, bands,
+                                           params.band_height, std::min(17, stringing_grid_max_columns(bed_width()))));
+    Layout();
+}
+
+void TempRetract_Calibration_Dlg::on_start(wxCommandEvent &event)
+{
+    wxString err;
+    if (!read_params(m_params, &err)) {
+        MessageDialog msg_dlg(nullptr, err, wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    m_plater->calib_temp_retraction(m_params);
+    EndModal(wxID_OK);
+}
+
+void TempRetract_Calibration_Dlg::on_dpi_changed(const wxRect &suggested_rect)
+{
+    this->Refresh();
+    Fit();
+}
+
 // Input_Shaping_Freq_Test_Dlg
 //
 
@@ -1565,6 +1863,144 @@ void Cornering_Test_Dlg::on_start(wxCommandEvent& event) {
 void Cornering_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
     this->Refresh();
     Fit();
+}
+
+// IroningFlow_Test_Dlg
+//
+
+IroningFlow_Test_Dlg::IroningFlow_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
+    : DPIDialog(parent, id, _L("Ironing flow test"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE);
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    wxBoxSizer* v_sizer = new wxBoxSizer(wxVERTICAL);
+    SetSizer(v_sizer);
+
+    wxString start_str  = _L("Minimum ironing flow: ");
+    wxString end_str    = _L("Maximum ironing flow: ");
+    wxString length_str = _L("Length: ");
+    int text_max = GetTextMax(this, std::vector<wxString>{start_str, end_str, length_str});
+
+    auto st_size = wxSize(text_max, -1);
+    auto ti_size = FromDIP(wxSize(120, -1));
+
+    LabeledStaticBox* stb = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer* settings_sizer = new wxStaticBoxSizer(stb, wxVERTICAL);
+
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto start_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto start_text = new wxStaticText(this, wxID_ANY, start_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiStart = new TextInput(this, std::to_string(0), _L("%"), "", wxDefaultPosition, ti_size);
+    m_tiStart->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    start_sizer->Add(start_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    start_sizer->Add(m_tiStart , 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(start_sizer, 0, wxLEFT, FromDIP(3));
+
+    auto end_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto end_text = new wxStaticText(this, wxID_ANY, end_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiEnd = new TextInput(this, std::to_string(70), _L("%"), "", wxDefaultPosition, ti_size);
+    m_tiEnd->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    end_sizer->Add(end_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    end_sizer->Add(m_tiEnd , 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(end_sizer, 0, wxLEFT, FromDIP(3));
+
+    auto length_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto length_text = new wxStaticText(this, wxID_ANY, length_str, wxDefaultPosition, st_size, wxALIGN_LEFT);
+    m_tiLength = new TextInput(this, std::to_string(140), _L("mm"), "", wxDefaultPosition, ti_size);
+    m_tiLength->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+    length_sizer->Add(length_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    length_sizer->Add(m_tiLength , 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+    settings_sizer->Add(length_sizer, 0, wxLEFT, FromDIP(3));
+
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto note_text = new wxStaticText(this, wxID_ANY,
+        _L("The front band irons from the minimum flow on the left to the maximum on the right. A second band "
+           "behind it ramps the other way so you can tell ironing flow from bed tilt: if the best-looking region "
+           "is at the same flow % on both bands, trust that value. If they disagree, level the bed and reprint.\n\n"
+           "The plate sits on extra solid layers so small bed height errors are less likely to show on the "
+           "ironed surface. Run this after flow-ratio calibration. Check the result in reflected light: the "
+           "optimum hides the surface lines without roughness from overextrusion. Lower values look matte; "
+           "higher ones look glossier."),
+        wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
+    note_text->SetForegroundColour(wxColour(128, 128, 128));
+    note_text->Wrap(FromDIP(360));
+    settings_sizer->Add(note_text, 0, wxALL, FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &IroningFlow_Test_Dlg::on_start, this);
+
+    wxGetApp().UpdateDlgDarkUI(this);
+
+    Layout();
+    Fit();
+}
+
+IroningFlow_Test_Dlg::~IroningFlow_Test_Dlg()
+{
+}
+
+void IroningFlow_Test_Dlg::on_start(wxCommandEvent& event) {
+    bool read_double = false;
+    read_double = m_tiStart->GetTextCtrl()->GetValue().ToDouble(&m_params.start);
+    read_double = read_double && m_tiEnd->GetTextCtrl()->GetValue().ToDouble(&m_params.end);
+    // step holds the length of the ironed band
+    read_double = read_double && m_tiLength->GetTextCtrl()->GetValue().ToDouble(&m_params.step);
+
+    if (!read_double || m_params.start < 0 || m_params.end <= m_params.start || m_params.end > 100 || m_params.step < 10) {
+        MessageDialog msg_dlg(this, _L("Please input valid values:\n0 <= minimum < maximum <= 100\nlength >= 10 mm"), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    if (ironing_flow_calib_mark_step(m_params.start, m_params.end, m_params.step) == 0.) {
+        // TRN: %1% is the minimum length of the ironed band, in mm.
+        MessageDialog msg_dlg(this, format_wxstr(_L("Marks every 20%% would be less than 10 mm apart: use a length of at least %1% mm."),
+                                                 int(std::ceil((m_params.end - m_params.start) / 2.))),
+                              wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    // The band plus 5 mm at each end. In Y: two 15 mm bands and a 4 mm valley, then in front of them the
+    // scale (2 mm marks, 1 mm gap, labels up to 15 mm long), a 1 mm gap, the dividing line (nozzle wide,
+    // at least 0.5 mm) and the 7 mm name strip, as built by ironing_flow_calib_mesh().
+    const double       length     = m_params.step + 10.;
+    const double       line_width = std::max(0.5, wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0));
+    const double       depth      = 15. + 4. + 15. + (2. + 1. + 15.) + 1. + line_width + 7.;
+    const BoundingBoxf bed    = get_extents(wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionPoints>("printable_area")->values);
+    if (length > bed.size().x() - 10.) {
+        // TRN: The placeholders are the length of the ironed band, the length of the whole test and the longest band that fits, in mm.
+        MessageDialog msg_dlg(this, format_wxstr(_L("A band %1% mm long makes a test %2% mm long, which does not fit on the bed. Use at most %3% mm."),
+                                                 int(m_params.step), int(length), int(bed.size().x() - 20.)),
+                              wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    if (depth > bed.size().y() - 10.) {
+        MessageDialog msg_dlg(this, _L("The two-band ironing flow test does not fit on the bed in Y. Use a printer with a deeper bed."),
+                              wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+
+    m_params.mode = CalibMode::Calib_Ironing_Flow;
+    m_plater->calib_ironing_flow(m_params);
+    EndModal(wxID_OK);
+}
+
+void IroningFlow_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
+    m_tiStart->Rescale();
+    m_tiEnd->Rescale();
+    m_tiLength->Rescale();
+    GetSizer()->SetSizeHints(this);
+    Refresh();
 }
 
 }} // namespace Slic3r::GUI

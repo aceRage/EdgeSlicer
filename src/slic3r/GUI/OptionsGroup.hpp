@@ -105,6 +105,9 @@ private:
     std::vector<widget_t>	m_extra_widgets;//! {std::vector<widget_t>()};
 };
 
+// Whether a line is a legend line (its first option is a legend); false for a line with no option (a widget-only row).
+bool line_is_legend(const Line& line);
+
 using column_t = std::function<wxWindow*(wxWindow* parent, const Line&)>;
 
 using t_optionfield_map = std::map<t_config_option_key, t_field>;

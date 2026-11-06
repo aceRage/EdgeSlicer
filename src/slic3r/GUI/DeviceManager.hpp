@@ -848,8 +848,10 @@ public:
     // Don't-remind buttons on every surface. Mirrors Bambu Studio's method of the same name.
     // `command` is the refused command's name: only a refused print action (project_file, pause,
     // resume, stop, ...) is offered Stop / Resume Printing; anything else gets OK.
+    // `job_id` is the job the refusal names, when the reply carries one; Stop / Resume are only
+    // offered for a job the printer itself named.
     void add_command_error_code_dlg(int command_err, const nlohmann::json& action_json = nlohmann::json(),
-                                    const std::string& command = std::string());
+                                    const std::string& command = std::string(), const std::string& job_id = std::string());
 
     // What this slicer has published to the printer and is still waiting on an answer for,
     // sequence id -> command name. A reply only counts as a refusal when it answers one of these;
@@ -1084,6 +1086,11 @@ public:
     // until the first report that carries "fun"; unknown is never treated as secured. When no report
     // has carried the bit, a printer's own "mqtt message verify failed" answer stands in for it.
     bool is_secured_mode() const;
+    // Why a print-control command ("stop", "resume", ...) cannot be sent to this printer right now:
+    // "status_only" (a Bambu Connect printer EdgeSlicer only reads), "secured" (Developer Mode off,
+    // unsigned commands rejected), or "" when it can - over LAN or cloud alike. The error dialog asks
+    // this to hide a button whose command would be dropped instead of showing one that does nothing.
+    std::string print_command_blocker(const std::string& command) const;
     void update_secured_mode_from_fun(const std::string& fun);
     // A reply to a command was the printer refusing it as unsigned (err_code 84033543..84033548 /
     // "mqtt message verify failed"). Shows the Developer Mode message once per printer per session.

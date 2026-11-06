@@ -29,6 +29,8 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
+#include "libslic3r/ZipWorkDir.hpp"
+#include "ZipCleanup.hpp"
 
 #include "Tab.hpp"
 #include "ProgressStatusBar.hpp"
@@ -1184,6 +1186,9 @@ void MainFrame::shutdown(bool isRecreate)
     // The Layerling tab's local server and any download in progress.
     if (m_layerling)
         m_layerling->shutdown();
+    // The ZIP work-folder clean-up thread (cancelled between files, so this is quick).
+    if (!isRecreate)
+        ZipCleanup::shutdown();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)
@@ -1955,7 +1960,8 @@ bool MainFrame::can_save_as() const
 
 void MainFrame::save_project()
 {
-    save_project_as(m_plater->get_project_filename(".3mf"));
+    if (m_plater)
+        m_plater->save_project(false);
 }
 
 bool MainFrame::save_project_as(const wxString& filename)
@@ -3802,6 +3808,15 @@ void MainFrame::init_menubar_as_editor()
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Temperature × retraction stringing grid
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Max Volumetric Speed
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Max flowrate"), _L("Max flowrate"),
         [this](wxCommandEvent&) {
@@ -3848,6 +3863,15 @@ void MainFrame::init_menubar_as_editor()
             if (!m_vfa_test_dlg)
                 m_vfa_test_dlg = new VFA_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
             m_vfa_test_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Ironing flow
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Ironing flow"), _L("Ironing flow calibration"),
+        [this](wxCommandEvent&) {
+            auto dlg = new IroningFlow_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            dlg->ShowModal();
+            dlg->Destroy();
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
@@ -3927,6 +3951,15 @@ void MainFrame::init_menubar_as_editor()
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Temperature × retraction stringing grid
+    append_menu_item(calib_menu, wxID_ANY, _L("Stringing (temp × retraction)"), _L("Combined temperature and retraction stringing grid"),
+        [this](wxCommandEvent&) {
+            if (!m_temp_retract_calib_dlg)
+                m_temp_retract_calib_dlg = new TempRetract_Calibration_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_temp_retract_calib_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Max Volumetric Speed
     append_menu_item(calib_menu, wxID_ANY, _L("Max flowrate"), _L("Max flowrate"),
         [this](wxCommandEvent&) {
@@ -3973,6 +4006,15 @@ void MainFrame::init_menubar_as_editor()
             if (!m_vfa_test_dlg)
                 m_vfa_test_dlg = new VFA_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
             m_vfa_test_dlg->ShowModal();
+        }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Ironing flow
+    append_menu_item(calib_menu, wxID_ANY, _L("Ironing flow"), _L("Ironing flow calibration"),
+        [this](wxCommandEvent&) {
+            auto dlg = new IroningFlow_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            dlg->ShowModal();
+            dlg->Destroy();
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
     // help
@@ -4690,6 +4732,10 @@ void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
 {
+    // Extracted ZIP copies live in the zip working folder and may be auto-cleaned (PR C); keep
+    // them out of recent files until PR D records `archive.zip|entry` instead.
+    if (ZipWorkDir::is_inside_work_dir(into_path(filename)))
+        return;
     if (wxFileExists(filename))
     {
         m_recent_projects.AddFileToHistory(filename);

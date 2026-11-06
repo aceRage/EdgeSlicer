@@ -11,6 +11,8 @@
 
 namespace Slic3r {
 
+enum class TacJointAttachment : int { Separate = 0, Upper = 1, Lower = 2 };
+
 struct TacJointParams
 {
     float scale         = 1.f;
@@ -18,15 +20,16 @@ struct TacJointParams
     float end_clearance = .30f;
     float offset        = 0.f;
     int   version       = 1;
+    TacJointAttachment attachment    = TacJointAttachment::Separate;
 
     bool operator==(const TacJointParams& other) const
     {
         return scale == other.scale && clearance == other.clearance && end_clearance == other.end_clearance && offset == other.offset &&
-               version == other.version;
+               version == other.version && attachment == other.attachment;
     }
     bool operator!=(const TacJointParams& other) const { return !(*this == other); }
 
-    template<class Archive> void serialize(Archive& archive) { archive(scale, clearance, end_clearance, offset, version); }
+    template<class Archive> void serialize(Archive& archive) { archive(scale, clearance, end_clearance, offset, version, attachment); }
 };
 
 struct TacJointValidation

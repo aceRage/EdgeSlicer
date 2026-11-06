@@ -8094,7 +8094,7 @@ void GLGizmoCut3D::sync_tac_joint_params(CutConnectors& connectors, unsigned fie
     for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
         if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint) {
             CutConnector& c = connectors[idx];
-            if (fields == 0x0f)
+            if (fields == 0x1f)
                 c.tac_joint = m_tac_joint;
             else {
                 if (fields & 0x01)
@@ -8105,6 +8105,8 @@ void GLGizmoCut3D::sync_tac_joint_params(CutConnectors& connectors, unsigned fie
                     c.tac_joint.end_clearance = m_tac_joint.end_clearance;
                 if (fields & 0x08)
                     c.tac_joint.offset = m_tac_joint.offset;
+                if (fields & 0x10)
+                    c.tac_joint.attachment = m_tac_joint.attachment;
             }
             // These two legacy fields are only conservative overlap extents. TAC meshes
             // are already in millimetres and never receive the generic connector scale.
@@ -8153,6 +8155,14 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
 
     bool     changed        = false;
     unsigned changed_fields = 0;
+    const std::vector<std::string> placements{_u8L("On build plate"), _u8L("Attached to A"), _u8L("Attached to B")};
+    int                            attachment = int(m_tac_joint.attachment);
+    if (render_combo(_u8L("Placement"), placements, attachment, m_label_width, m_editing_window_width) &&
+        attachment != int(m_tac_joint.attachment)) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("TAC Joint: placement"), UndoRedo::SnapshotType::GizmoAction);
+        m_tac_joint.attachment = TacJointAttachment(attachment);
+        changed_fields |= 0x10;
+    }
     float    size_percent   = 100.f * m_tac_joint.scale;
     if (input(_L("Size (%)"), size_percent, 10.f, 1000.f, "%.1f %%", _L("Scale the connector. Clearances remain in millimetres."), 0.5f)) {
         m_tac_joint.scale = size_percent * 0.01f;
@@ -8189,7 +8199,7 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
     if (m_imgui->button(_L("Reset TAC Joint"))) {
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Reset TAC Joint"), UndoRedo::SnapshotType::GizmoAction);
         m_tac_joint       = TacJointParams{};
-        changed_fields    = 0x0f;
+        changed_fields    = 0x1f;
         m_connector_angle = 0.f;
         for (size_t idx = 0; idx < connectors.size() && idx < m_selected.size(); ++idx)
             if (m_selected[idx] && connectors[idx].attribs.type == CutConnectorType::TacJoint)
@@ -8209,7 +8219,11 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
     const TacJointValidation validation = tac_joint_validate(m_tac_joint, face_lo, face_hi);
     if (!validation.valid)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(validation.message));
-    m_imgui->text(_L("The connector is printed as a separate object. The blue outline shows its matching cutter."));
+    if (m_tac_joint.attachment == TacJointAttachment::Separate)
+        m_imgui->text(_L("The connector is printed as a separate object. The blue outline shows its matching cutter."));
+    else
+        m_imgui->text(_L("The connector belongs to the selected half. Only the opposite half gets a socket. Use Mesh Boolean after cutting "
+                         "to merge the connector into the body."));
     ImGui::PopTextWrapPos();
 }
 

@@ -185,3 +185,22 @@ TEST_CASE("TAC Joint attributes roundtrip and reject malformed versions", "[TACJ
     attributes.clear();
     REQUIRE(tac_joint_from_attributes(get) == TacJointParams{});
 }
+
+TEST_CASE("TAC attachment metadata preserves ownership and rejects unsupported values", "[TACJoint][TACAttachment]")
+{
+    const double owner = GENERATE(0., 1., 2.);
+    const auto   p     = tac_joint_from_attributes([owner](const std::string& name) -> std::optional<double> {
+        return name == "tac_joint_attachment" ? std::optional<double>(owner) : std::nullopt;
+    });
+    REQUIRE(tac_joint_validate(p).valid);
+    const auto                          pairs = tac_joint_attributes(p);
+    const std::map<std::string, double> attributes(pairs.begin(), pairs.end());
+    REQUIRE(attributes.count("tac_joint_attachment") == 1);
+    REQUIRE(attributes.at("tac_joint_attachment") == owner);
+    for (const double invalid : {-1., 3., 1.5, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        const auto bad = tac_joint_from_attributes([invalid](const std::string& name) -> std::optional<double> {
+            return name == "tac_joint_attachment" ? std::optional<double>(invalid) : std::nullopt;
+        });
+        REQUIRE_FALSE(tac_joint_validate(bad).valid);
+    }
+}

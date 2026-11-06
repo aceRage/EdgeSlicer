@@ -1,6 +1,12 @@
 #include "BlenderLauncher.hpp"
 
+#include <cctype>
+
 #include <boost/log/trivial.hpp>
+
+#include <wx/arrstr.h>
+#include <wx/string.h>
+#include <wx/utils.h>
 
 namespace Slic3r {
 namespace BlenderLauncher {
@@ -115,6 +121,65 @@ std::vector<std::string> edit_session_args(const std::vector<std::string> &blend
 }
 
 // -------------------------------------------------------------------------------------------
+// Showcase "Open in Blender"
+// -------------------------------------------------------------------------------------------
+
+bool showcase_version_supported(int major, int minor)
+{
+    return major > SHOWCASE_MIN_MAJOR || (major == SHOWCASE_MIN_MAJOR && minor >= SHOWCASE_MIN_MINOR);
+}
+
+bool parse_version_output(const std::string &text, int &major, int &minor)
+{
+    // The first line that starts with "Blender " followed by a version.
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        const size_t start = line.find_first_not_of(" \t");
+        if (start != std::string::npos && line.compare(start, 8, "Blender ") == 0) {
+            const std::string rest = line.substr(start + 8);
+            size_t i  = 0;
+            int    ma = 0, mi = 0;
+            while (i < rest.size() && std::isdigit((unsigned char) rest[i]))
+                ma = ma * 10 + (rest[i++] - '0');
+            if (i > 0 && i + 1 < rest.size() && rest[i] == '.' && std::isdigit((unsigned char) rest[i + 1])) {
+                ++i;
+                while (i < rest.size() && std::isdigit((unsigned char) rest[i]))
+                    mi = mi * 10 + (rest[i++] - '0');
+                major = ma;
+                minor = mi;
+                return true;
+            }
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+bool version_from_install_path(const std::string &exe, int &major, int &minor)
+{
+    return parse_install_dir_version(file_name(parent_dir(exe)), major, minor);
+}
+
+std::vector<std::string> showcase_session_args(const std::vector<std::string> &blender_command, const std::string &launch_script,
+                                               const std::string &package)
+{
+    std::vector<std::string> argv = blender_command;
+    argv.insert(argv.end(), { "--python", launch_script, "--", "--package", package });
+    return argv;
+}
+
+std::vector<std::string> install_addon_args(const std::vector<std::string> &blender_command, const std::string &addon_zip)
+{
+    std::vector<std::string> argv = blender_command;
+    argv.insert(argv.end(), { "--command", "extension", "install-file", "-r", "user_default", "-e", addon_zip });
+    return argv;
+}
+
+// -------------------------------------------------------------------------------------------
 // Platform adapters
 // -------------------------------------------------------------------------------------------
 
@@ -137,6 +202,54 @@ std::vector<std::string> find_blender(const std::string &custom_path)
 }
 
 bool launch(const std::vector<std::string> &argv) { return ExternalEditor::launch(argv, "BlenderLauncher"); }
+
+bool run_and_wait(const std::vector<std::string> &argv, std::string &output, int &exit_code)
+{
+    output.clear();
+    exit_code = -1;
+    if (argv.empty())
+        return false;
+    // One command line with every argument quoted (paths with spaces); wxExecute splits it back the
+    // same way on every platform and collects what the program prints.
+    wxString command;
+    for (const std::string &arg : argv) {
+        if (!command.empty())
+            command += " ";
+        wxString a = wxString::FromUTF8(arg.c_str());
+        a.Replace("\"", "\\\"");
+        command += "\"" + a + "\"";
+    }
+    wxArrayString out, err;
+    const long code = ::wxExecute(command, out, err, wxEXEC_SYNC | wxEXEC_HIDE_CONSOLE | wxEXEC_NODISABLE);
+    for (const wxString &line : out)
+        output += std::string(line.ToUTF8().data()) + "\n";
+    for (const wxString &line : err)
+        output += std::string(line.ToUTF8().data()) + "\n";
+    if (code < 0) {
+        BOOST_LOG_TRIVIAL(error) << "BlenderLauncher: could not run \"" << argv.front() << "\"";
+        return false;
+    }
+    exit_code = int(code);
+    return true;
+}
+
+bool blender_version(const std::vector<std::string> &command, int &major, int &minor)
+{
+    if (command.empty())
+        return false;
+    if (command.size() == 1 && version_from_install_path(command.front(), major, minor))
+        return true;
+    std::vector<std::string> argv = command;
+    argv.push_back("--version");
+    std::string output;
+    int         code = 0;
+    if (!run_and_wait(argv, output, code))
+        return false;
+    const bool ok = parse_version_output(output, major, minor);
+    BOOST_LOG_TRIVIAL(info) << "BlenderLauncher: " << command.front() << " is "
+                            << (ok ? "Blender " + std::to_string(major) + "." + std::to_string(minor) : std::string("of an unknown version"));
+    return ok;
+}
 
 } // namespace BlenderLauncher
 } // namespace Slic3r

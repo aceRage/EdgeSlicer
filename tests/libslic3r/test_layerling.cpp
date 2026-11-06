@@ -476,3 +476,363 @@ TEST_CASE("Layerling: SHA-256 of a stream", "[Layerling]")
     Sha256 e;
     CHECK(e.hex_digest() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 }
+
+// ---- phase 2 and 3: the source, design links, Edit in Layerling, MCP ------------------------------
+
+TEST_CASE("Layerling: custom addresses are checked and reduced to an origin", "[Layerling]")
+{
+    struct Good
+    {
+        const char *in;
+        const char *url;
+        bool        dropped;
+    };
+    for (const Good &g : std::vector<Good>{
+             {"layerling.com", "http://layerling.com/", false},
+             {"https://layerling.com", "https://layerling.com/", false},
+             {"https://layerling.com/", "https://layerling.com/", false},
+             {"  http://127.0.0.1:3000  ", "http://127.0.0.1:3000/", false},
+             {"HTTPS://Layerling.com:443/app?x=1#y", "https://layerling.com/", true},
+             {"nas.local:3000", "http://nas.local:3000/", false},
+             {"localhost:3000/", "http://localhost:3000/", false},
+             {"192.168.1.5:8080/editor", "http://192.168.1.5:8080/", true},
+             {"http://[::1]:3000", "http://[::1]:3000/", false},
+             {"https://nas.example.org:8443/?editor=1", "https://nas.example.org:8443/", true},
+         }) {
+        const CustomUrl u = normalize_custom_url(g.in);
+        INFO(g.in);
+        CHECK(u.ok);
+        CHECK(u.url == g.url);
+        CHECK(u.path_dropped == g.dropped);
+        CHECK(u.error.empty());
+    }
+    for (const char *bad : {"", "   ", "ftp://nas/", "file:///C:/layerling/index.html", "javascript:alert(1)", "mailto:a@b.c", "data:text/html,x",
+                            "http://user:pw@nas:3000/", "https://layerling.com@evil.example/", "http://nas 1:3000", "http://", "http://:3000",
+                            "http://nas:99999/", "ws://nas:3000/", "about:blank", "http://nas\\x/"}) {
+        INFO(bad);
+        const CustomUrl u = normalize_custom_url(bad);
+        CHECK_FALSE(u.ok);
+        CHECK(u.url.empty());
+        CHECK_FALSE(u.error.empty());
+    }
+}
+
+TEST_CASE("Layerling: which Layerling the tab shows", "[Layerling]")
+{
+    CHECK(select_source("", "") == Source::BuiltIn);
+    // Phase 1's hidden setting: a base URL alone means the user's own Layerling.
+    CHECK(select_source("", "https://layerling.com/") == Source::Custom);
+    CHECK(select_source("builtin", "https://layerling.com/") == Source::BuiltIn); // the address is kept for later
+    CHECK(select_source("custom", "http://nas.local:3000/") == Source::Custom);
+    CHECK(select_source(" Custom ", "http://nas.local:3000/") == Source::Custom);
+    CHECK(select_source("custom", "") == Source::BuiltIn);
+    CHECK(select_source("custom", "ftp://nas/") == Source::BuiltIn);
+    CHECK(select_source("custom", "javascript:alert(1)") == Source::BuiltIn);
+    CHECK(select_source(source_key(Source::Custom), "https://layerling.com/") == Source::Custom);
+    CHECK(select_source(source_key(Source::BuiltIn), "https://layerling.com/") == Source::BuiltIn);
+    CHECK(std::string(source_key(Source::Custom)) == "custom");
+    CHECK(std::string(source_key(Source::BuiltIn)) == "builtin");
+    // The Get page's layerling.com choice is a usable custom address as it is.
+    CHECK(normalize_custom_url(LAYERLING_COM_URL).url == LAYERLING_COM_URL);
+    CHECK(select_source("custom", LAYERLING_COM_URL) == Source::Custom);
+}
+
+TEST_CASE("Layerling: looking for a Layerling on this computer stays on this computer", "[Layerling]")
+{
+    const std::vector<std::string> c = local_candidates();
+    REQUIRE_FALSE(c.empty());
+    CHECK(c.front() == "http://127.0.0.1:3000/"); // Docker image and dev server (README)
+    for (const std::string &url : c) {
+        INFO(url);
+        CHECK(is_local_bridge_origin(origin_of(url)));
+        CHECK(normalize_custom_url(url).url == url);
+    }
+}
+
+TEST_CASE("Layerling: is this address a Layerling", "[Layerling]")
+{
+    std::string v;
+    CHECK(parse_version_json(R"({"version":"1.131.1","build":"d328a042210e35cb","highlights":[]})", v));
+    CHECK(v == "1.131.1");
+    CHECK(parse_version_json(R"({"version":"v1.132.0"})", v));
+    CHECK(v == "1.132.0");
+    CHECK_FALSE(parse_version_json(R"({"version":"../../x"})", v));
+    CHECK_FALSE(parse_version_json(R"({"build":"x"})", v));
+    CHECK_FALSE(parse_version_json("<!doctype html>", v));
+    CHECK_FALSE(parse_version_json(R"(["1.0"])", v));
+
+    // The static export publishes version.json.
+    ProbeResult r = classify_probe(200, R"({"version":"1.131.1","build":"x"})", 0, "");
+    CHECK(r.ok);
+    CHECK(r.version == "1.131.1");
+    // A server build (Docker, npm run start) has none: its start page names layerling and loads Next.js.
+    const std::string page = "<!DOCTYPE html><html><head><title>layerling</title><script src=\"/_next/static/chunks/main.js\"></script>";
+    r = classify_probe(404, "", 200, page);
+    CHECK(r.ok);
+    CHECK(r.version.empty());
+    // A 200 that is some other site's 404 page is not taken for version.json.
+    r = classify_probe(200, "<html>not found</html>", 200, page);
+    CHECK(r.ok);
+    CHECK(r.version.empty());
+    r = classify_probe(404, "", 200, "<html><title>My NAS</title></html>");
+    CHECK_FALSE(r.ok);
+    CHECK_FALSE(r.error.empty());
+    r = classify_probe(0, "", 0, "");
+    CHECK_FALSE(r.ok);
+    CHECK(r.error == "no answer from this address");
+    r = classify_probe(404, "", 502, "");
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("502") != std::string::npos);
+}
+
+TEST_CASE("Layerling: design links", "[Layerling]")
+{
+    DesignLink l;
+    l.origin  = "http://127.0.0.1:23456";
+    l.project = "project-6f1c2a3e-1b2c-4d5e-8f90-0123456789ab";
+    l.name    = "Box & lid = 2 \xC3\xA4"; // UTF-8 kept
+    REQUIRE(l.valid());
+    const std::string text = serialize_link(l);
+    CHECK(text.rfind("v=1&origin=", 0) == 0);
+    CHECK(text.find(' ') == std::string::npos);
+    DesignLink back;
+    REQUIRE(parse_link(text, back));
+    CHECK(back.origin == l.origin);
+    CHECK(back.project == l.project);
+    CHECK(back.name == l.name);
+    // Another origin's storage holds other designs: the origin is part of the link.
+    l.origin = "https://layerling.com";
+    REQUIRE(parse_link(serialize_link(l), back));
+    CHECK(back.origin == "https://layerling.com");
+
+    // Invalid links are neither written nor read.
+    DesignLink bad = l;
+    bad.origin     = "https://layerling.com/"; // not an origin (a path)
+    CHECK(serialize_link(bad).empty());
+    bad         = l;
+    bad.project = "../etc";
+    CHECK(serialize_link(bad).empty());
+    bad.project = "";
+    CHECK_FALSE(bad.valid());
+    for (const char *t : {"", "garbage", "v=2&origin=https%3A%2F%2Flayerling.com&project=p", "origin=https%3A%2F%2Flayerling.com&project=p",
+                          "v=1&origin=javascript%3Aalert(1)&project=p", "v=1&origin=https%3A%2F%2Flayerling.com&project=a%2Fb",
+                          "v=1&origin=https%3A%2F%2Flayerling.com"}) {
+        INFO(t);
+        CHECK_FALSE(parse_link(t, back));
+        CHECK(back.project.empty());
+    }
+
+    CHECK(is_safe_project_id("project-1"));
+    CHECK(is_safe_project_id("abc_DEF.9"));
+    CHECK_FALSE(is_safe_project_id(""));
+    CHECK_FALSE(is_safe_project_id(".."));
+    CHECK_FALSE(is_safe_project_id("a/b"));
+    CHECK_FALSE(is_safe_project_id("a b"));
+    CHECK_FALSE(is_safe_project_id(std::string(129, 'a')));
+}
+
+TEST_CASE("Layerling: the design an editor page shows", "[Layerling]")
+{
+    // Layerling 1.131.1 shows "/?editor=1&project=<id>" while a design is open.
+    CHECK(project_from_page_url("http://127.0.0.1:23456/?editor=1&project=project-abc") == "project-abc");
+    CHECK(project_from_page_url("https://layerling.com/?project=p1&editor=1") == "p1");
+    CHECK(project_from_page_url("http://nas.local:3000/?editor=1&project=p1#view") == "p1");
+    CHECK(project_from_page_url("http://nas.local:3000/?editor=1") == "");          // a new, unsaved design
+    CHECK(project_from_page_url("http://nas.local:3000/?project=p1") == "");        // not the editor
+    CHECK(project_from_page_url("http://nas.local:3000/") == "");                   // the start page
+    CHECK(project_from_page_url("http://nas.local:3000/?editor=1&project=a%2Fb") == ""); // not a safe id
+    CHECK(project_from_page_url("javascript:x?editor=1&project=p1") == "");
+    CHECK(project_from_page_url("about:blank") == "");
+
+    CHECK(editor_url("http://127.0.0.1:23456/", "project-abc") == "http://127.0.0.1:23456/?editor=1&project=project-abc");
+    CHECK(editor_url("https://layerling.com", "") == "https://layerling.com/?editor=1");
+    CHECK(editor_url("https://layerling.com/some/page?x=1", "p1") == "https://layerling.com/?editor=1&project=p1");
+    CHECK(editor_url("https://layerling.com/", "a b").empty());
+    CHECK(editor_url("ftp://nas/", "p1").empty());
+    // The round trip: the URL the tab opens names the same design again.
+    CHECK(project_from_page_url(editor_url("https://nas.example.org:8443/", "project-1")) == "project-1");
+}
+
+TEST_CASE("Layerling: what Edit in Layerling sends", "[Layerling]")
+{
+    EditSource s;
+    CHECK(choose_edit_format(s) == EditFormat::Stl);
+    s.colours = 1;
+    CHECK(choose_edit_format(s) == EditFormat::Stl);
+    s.colours = 2;
+    CHECK(choose_edit_format(s) == EditFormat::ThreeMF);
+    s.all_exact = true;
+    CHECK(choose_edit_format(s) == EditFormat::Step); // exact geometry beats colours (STEP carries colours too)
+    s.linked_here = true;
+    CHECK(choose_edit_format(s) == EditFormat::OpenLinked);
+    CHECK(std::string(edit_format_extension(EditFormat::Step)) == ".step");
+    CHECK(std::string(edit_format_extension(EditFormat::ThreeMF)) == ".3mf");
+    CHECK(std::string(edit_format_extension(EditFormat::Stl)) == ".stl");
+    CHECK(std::string(edit_format_extension(EditFormat::OpenLinked)).empty());
+    // Every format is one Layerling imports and Send to Plate takes back.
+    for (EditFormat f : {EditFormat::Step, EditFormat::ThreeMF, EditFormat::Stl})
+        CHECK(classify_export(std::string("part") + edit_format_extension(f)) == ExportKind::Model);
+
+    CHECK(strip_model_extension("Benchy.stl") == "Benchy");
+    CHECK(strip_model_extension("Box.STEP") == "Box");
+    CHECK(strip_model_extension("v1.2 bracket.3mf") == "v1.2 bracket");
+    CHECK(strip_model_extension("v1.2 bracket") == "v1.2 bracket");
+    CHECK(strip_model_extension(".stl") == ".stl");
+}
+
+TEST_CASE("Layerling: the coloured 3MF for Layerling reads back with its colours", "[Layerling]")
+{
+    TempDir                   tmp;
+    std::vector<ColouredMesh> bodies(2);
+    bodies[0].name      = "Base <1> & \"top\"";
+    bodies[0].colour    = "#ff8000";
+    bodies[0].vertices  = {0, 0, 0, 10, 0, 0, 0, 10, 0, 0, 0, 10};
+    bodies[0].triangles = {0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3};
+    bodies[1]           = bodies[0];
+    bodies[1].name      = "Lid";
+    bodies[1].colour    = "not a colour";
+    const fs::path file = tmp.path / "edit.3mf";
+    std::string    err;
+    REQUIRE(write_colour_3mf(file, bodies, &err));
+    std::vector<BodyColour> back;
+    REQUIRE(read_3mf_body_colours(file, back, &err));
+    REQUIRE(back.size() == 2);
+    CHECK(back[0].colour == "#FF8000");
+    CHECK(back[0].name == bodies[0].name);
+    CHECK(back[1].colour == "#808080"); // no usable colour: grey
+    CHECK(back[1].name == "Lid");
+
+    // A 3MF is a zip whose model names the core namespace and millimetres.
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, file.string()));
+    CHECK(mz_zip_reader_locate_file(&zip, "[Content_Types].xml", nullptr, 0) >= 0);
+    CHECK(mz_zip_reader_locate_file(&zip, "_rels/.rels", nullptr, 0) >= 0);
+    CHECK(mz_zip_reader_locate_file(&zip, "3D/3dmodel.model", nullptr, 0) >= 0);
+    close_zip_reader(&zip);
+
+    std::vector<ColouredMesh> broken(1, bodies[0]);
+    broken[0].triangles = {0, 1, 9};
+    CHECK_FALSE(write_colour_3mf(tmp.path / "broken.3mf", broken, &err));
+    CHECK_FALSE(err.empty());
+    CHECK_FALSE(write_colour_3mf(tmp.path / "none.3mf", {}, &err));
+}
+
+TEST_CASE("Layerling: handing a file to Layerling's own import", "[Layerling]")
+{
+    CHECK(base64_encode("") == "");
+    CHECK(base64_encode("f") == "Zg==");
+    CHECK(base64_encode("fo") == "Zm8=");
+    CHECK(base64_encode("foo") == "Zm9v");
+    CHECK(base64_encode("foobar") == "Zm9vYmFy");
+    CHECK(base64_encode(std::string("\0\xff\xfe", 3)) == "AP/+");
+
+    CHECK(js_string_literal("a\"b\\c") == "\"a\\\"b\\\\c\"");
+    CHECK(js_string_literal("</script>") == "\"\\u003c/script\\u003e\"");
+    CHECK(js_string_literal(std::string("a\nb\x01", 4)) == "\"a\\nb\\u0001\"");
+    CHECK(js_string_literal("\xE2\x80\xA8") == "\"\\u2028\"");
+    CHECK(js_string_literal("Gr\xC3\xBC\xC3\x9F" "e") == "\"Gr\xC3\xBC\xC3\x9F" "e\""); // other UTF-8 as it is
+
+    const std::string probe = import_probe_script();
+    CHECK(probe.find(SCRIPT_READY) != std::string::npos);
+    CHECK(probe.find(SCRIPT_WAIT) != std::string::npos);
+    // The start page's import input (Layerling 1.131.1): several files, accept with .lyl and .3mf.
+    CHECK(probe.find("input[type=file][multiple]") != std::string::npos);
+    CHECK(probe.find("'.lyl'") != std::string::npos);
+    CHECK(probe.find("'.3mf'") != std::string::npos);
+
+    const std::string name   = "Box \"1\".stl";
+    const std::string script = import_file_script(name, "solid x");
+    CHECK(script.find(js_string_literal(name)) != std::string::npos);
+    CHECK(script.find(js_string_literal(base64_encode("solid x"))) != std::string::npos);
+    CHECK(script.find("new DataTransfer()") != std::string::npos);
+    CHECK(script.find("input.files=dt.files") != std::string::npos);
+    CHECK(script.find("new Event('change',{bubbles:true})") != std::string::npos);
+    CHECK(script.find(SCRIPT_OK) != std::string::npos);
+    CHECK(script.find(SCRIPT_NO_INPUT) != std::string::npos);
+    // One expression, so the web view hands its value back.
+    CHECK(script.rfind("(function(){", 0) == 0);
+    CHECK(script.substr(script.size() - 4) == "})()");
+    // Nothing of the page is changed for good, and the page gets no way to call the app.
+    CHECK(script.find("postMessage") == std::string::npos);
+    CHECK(script.find("window.edgeslicer") == std::string::npos);
+    CHECK(MAX_HANDOVER_BYTES >= std::uint64_t(16) * 1024 * 1024);
+}
+
+TEST_CASE("Layerling: the update banner's release link", "[Layerling]")
+{
+    // What Layerling 1.132.1's banner links to: GitHub's html_url of the latest release.
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1") == "1.132.1");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/1.133.0") == "1.133.0");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1/") == "1.132.1");
+    CHECK(release_link_version("https://github.com/henmedia/layerling/releases/tag/v1.132.1?x=1#notes") == "1.132.1");
+    CHECK(release_link_version("HTTPS://GITHUB.COM/henmedia/layerling/releases/tag/v2.0.0") == "2.0.0");
+    // Not the update link: the footer's release notes, other repositories and hosts, http, odd tags.
+    for (const char *other : {"https://github.com/henmedia/layerling/releases", "https://github.com/henmedia/layerling/releases/",
+                              "https://github.com/henmedia/layerling/releases/latest", "https://github.com/henmedia/layerling",
+                              "https://github.com/other/layerling/releases/tag/v1.132.1",
+                              "https://github.com.evil.example/henmedia/layerling/releases/tag/v1.132.1",
+                              "http://github.com/henmedia/layerling/releases/tag/v1.132.1",
+                              "https://github.com/henmedia/layerling/releases/tag/v1.132.1/assets",
+                              "https://github.com/henmedia/layerling/releases/tag/..%2F..", "https://github.com/henmedia/layerling/releases/tag/",
+                              "https://github.com/henmedia/layerling/releases/tag/nightly", "https://layerling.com/"}) {
+        INFO(other);
+        CHECK(release_link_version(other).empty());
+    }
+}
+
+TEST_CASE("Layerling: the MCP setup text", "[Layerling]")
+{
+    CHECK(is_local_bridge_origin("http://127.0.0.1:3000"));
+    CHECK(is_local_bridge_origin("http://localhost:3000"));
+    CHECK(is_local_bridge_origin("http://[::1]:3000"));
+    CHECK(is_local_bridge_origin("http://layerling.localhost:3000"));
+    CHECK_FALSE(is_local_bridge_origin("http://nas.local:3000"));
+    CHECK_FALSE(is_local_bridge_origin("https://layerling.com"));
+    CHECK_FALSE(is_local_bridge_origin("http://127.0.0.1.evil.example"));
+    CHECK_FALSE(is_local_bridge_origin(""));
+
+    CHECK(mcp_bridge_from_status(200) == McpBridge::Open);
+    CHECK(mcp_bridge_from_status(401) == McpBridge::NeedsToken);
+    CHECK(mcp_bridge_from_status(403) == McpBridge::NeedsToken);
+    CHECK(mcp_bridge_from_status(404) == McpBridge::Off);
+    CHECK(mcp_bridge_from_status(0) == McpBridge::Unknown);
+    CHECK(mcp_bridge_from_status(500) == McpBridge::Unknown);
+    CHECK_FALSE(mcp_needs_token("http://127.0.0.1:3000", McpBridge::Open));
+    CHECK(mcp_needs_token("http://127.0.0.1:3000", McpBridge::NeedsToken)); // a local Docker with remote use on
+    CHECK(mcp_needs_token("http://nas.local:3000", McpBridge::Unknown));
+
+    CHECK(mcp_script_in_checkout("C:\\Users\\me\\layerling\\") == "C:/Users/me/layerling/scripts/layerling-mcp-server.mjs");
+    CHECK(mcp_script_in_checkout("/home/me/layerling") == "/home/me/layerling/scripts/layerling-mcp-server.mjs");
+    CHECK(mcp_script_in_checkout("  ").empty());
+
+    // Claude Desktop / Claude Code / Gemini: the README's example plus LAYERLING_URL.
+    const std::string local = mcp_config_text(McpClient::Json, "http://127.0.0.1:3000", "C:\\src\\layerling\\scripts\\layerling-mcp-server.mjs", false);
+    CHECK(local == "{\n"
+                   "  \"mcpServers\": {\n"
+                   "    \"layerling\": {\n"
+                   "      \"command\": \"node\",\n"
+                   "      \"args\": [\"C:/src/layerling/scripts/layerling-mcp-server.mjs\"],\n"
+                   "      \"env\": {\n"
+                   "        \"LAYERLING_URL\": \"http://127.0.0.1:3000\"\n"
+                   "      }\n"
+                   "    }\n"
+                   "  }\n"
+                   "}\n");
+    const std::string remote = mcp_config_text(McpClient::Json, "http://nas.local:3000/", "", true);
+    CHECK(remote.find(std::string("\"") + MCP_SCRIPT_PLACEHOLDER + "\"") != std::string::npos);
+    CHECK(remote.find("\"LAYERLING_URL\": \"http://nas.local:3000\",\n") != std::string::npos);
+    CHECK(remote.find(std::string("\"LAYERLING_MCP_TOKEN\": \"") + MCP_TOKEN_PLACEHOLDER + "\"") != std::string::npos);
+    // Codex: config.toml, the README's block plus the environment.
+    const std::string codex = mcp_config_text(McpClient::Codex, "https://nas.example.org:8443", "/opt/layerling/scripts/layerling-mcp-server.mjs", true);
+    CHECK(codex == "[mcp_servers.layerling]\n"
+                   "command = \"node\"\n"
+                   "args = [\"/opt/layerling/scripts/layerling-mcp-server.mjs\"]\n"
+                   "startup_timeout_sec = 20\n"
+                   "\n"
+                   "[mcp_servers.layerling.env]\n"
+                   "LAYERLING_URL = \"https://nas.example.org:8443\"\n"
+                   "LAYERLING_MCP_TOKEN = \"<the LAYERLING_MCP_TOKEN set on the server>\"\n");
+    // No address: the dev server's.
+    CHECK(mcp_config_text(McpClient::Codex, "", "", false).find("LAYERLING_URL = \"http://127.0.0.1:3000\"") != std::string::npos);
+}

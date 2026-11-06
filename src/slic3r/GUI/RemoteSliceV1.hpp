@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include <map>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -31,8 +32,11 @@ const std::vector<std::string>& pair_features();
 // 5: PR F, filament settings (settings/filament and its revert / save, presets/filament_remove);
 // 6: PR E, preview v2 (colour by, options, from, hidden features, /preview/legend, /preview/layers);
 // 7: PR G, plates, objects and save (plates/add, plates/{i}/delete|rename|bed_type, objects/delete,
-// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type).
-constexpr int INSTANCE_API_VERSION = 7;
+// objects/duplicate, project/save; /plates adds project_dirty, bed_types and each plate's bed_type);
+// 8: paint_v1 (H1), tablet paint sessions read side (paint/objects, paint/sessions, a session's
+// state, mesh and painting; RemotePaintV1.hpp); 9: paint_v1 apply (H2, paint/sessions/{id}/apply, the
+// hub's spooled /i/<pid>/paint/{id}/apply).
+constexpr int INSTANCE_API_VERSION = 9;
 
 // One filament slot of the project, as the sidebar shows it.
 struct SlotInfo
@@ -347,6 +351,34 @@ Refusal object_duplicate_check(int obj, int objects, int inst, int instances, in
 // config value ("Textured PEI Plate"). bed_type_from_id is the reverse, -1 for an unknown id.
 std::string bed_type_id(int bed_type);
 int         bed_type_from_id(const std::string& id);
+
+// ---- prime tower (feature "slice_prime_tower") ----
+// Whether a plate prints a prime tower, the rule the 3D view uses before it draws one
+// (GLCanvas3D::reload_scene): the tower is on, with smooth timelapse or more than one filament; a plate
+// printed by object only gets one with exactly one printable instance; an empty plate has none; and
+// the size estimate must give the tower a depth (the estimate is also what decides it).
+bool plate_has_prime_tower(bool enabled, bool smooth_timelapse, int filament_count, bool by_object,
+                           int printable_instances, bool has_objects, double footprint_depth);
+
+// One plate's prime tower as GET /plates/{i}/layout and POST /plates/{i}/prime_tower answer it, in
+// the layout's frame (world mm): its anchor (x, y: the body's front left corner, what the PC stores
+// per plate as wipe_tower_x / wipe_tower_y plus the plate's origin), body width and depth, brim (the
+// width the estimate reserves around the body, a stabilisation cone's bulge included), rotation in
+// degrees about the anchor, the footprint (brim included, turned) and whether that footprint meets
+// an object's outline grown by its brim and the slicer's tower margin.
+struct PrimeTower
+{
+    double x { 0. }, y { 0. };
+    double width { 0. }, depth { 0. }, brim { 0. }, rotation { 0. };
+    std::vector<std::pair<double, double>> footprint;
+    bool overlaps { false };
+};
+nlohmann::json prime_tower_json(const PrimeTower& tower);
+
+// POST /plates/{i}/prime_tower form x=&y= (both, world mm, the anchor as the layout gives it).
+// `has_x` / `has_y` say whether each was sent as a number.
+Refusal prime_tower_move_check(int plate, int plates, bool has_x, bool has_y, double x, double y,
+                               bool has_tower, bool locked, bool slicing);
 
 } // namespace SliceV1
 } // namespace GUI
