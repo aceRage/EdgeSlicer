@@ -914,3 +914,148 @@ TEST_CASE("A nozzle chip is an override layered over the Plate", "[NozzleRackSlo
     CHECK(is_per_tool_process_option("wall_loops"));
     CHECK(is_per_tool_process_option("sparse_infill_density"));
 }
+
+// ---- H3C (owner report 2026-11-06): one extruder, a nine-slot rack of mixed sizes ----------------------------------------
+
+TEST_CASE("A single extruder with a rack of mixed sizes takes a process per size; one size adds nothing", "[NozzleProcess][NozzleRackSlots][H3C]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_filaments(2);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter", true)->values             = { 0.4 };
+    cfg.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 9 }));
+    CHECK_FALSE(supports_nozzle_processes(cfg)); // the default rack: nine of the mounted size
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.4,0.4" };
+    CHECK_FALSE(supports_nozzle_processes(cfg));
+    cfg.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.6,0.8,0.4" };
+    CHECK(supports_nozzle_processes(cfg));
+    CHECK_FALSE(supports_filament_nozzle_assignment(cfg));
+    const std::vector<NozzleToolEntry> entries = nozzle_tool_entries(cfg);
+    REQUIRE(entries.size() == 3);
+    CHECK(nozzle_tool_entry_id(entries[0]) == "T1");
+    CHECK(nozzle_tool_entry_id(entries[1]) == "T1:0.6");
+    CHECK(nozzle_tool_entry_id(entries[2]) == "T1:0.8");
+    // No rack (a printer with one nozzle and an AMS): nothing changes.
+    cfg.set_key_value("extruder_max_nozzle_count", new ConfigOptionIntsNullable({ 1 }));
+    CHECK_FALSE(supports_nozzle_processes(cfg));
+}
+
+TEST_CASE("A chosen process's layer height in whole plate layers, held to the nozzle's window", "[NozzleProcess][H3C][LayerHeight]")
+{
+    // No chosen height: the size rule's band.
+    CHECK(nozzle_process_band_size(0., 2, 0.2, 0.16, 0.56) == 2);
+    // 0.4 on a 0.2 plate: 2; 0.3 on 0.1: 3; 0.24 on 0.2: 1 (every layer).
+    CHECK(nozzle_process_band_size(0.4, 2, 0.2, 0.16, 0.56) == 2);
+    CHECK(nozzle_process_band_size(0.3, 2, 0.1, 0.16, 0.56) == 3);
+    CHECK(nozzle_process_band_size(0.24, 2, 0.2, 0.16, 0.56) == 1);
+    // Above the window: held to it (0.8 on 0.2 -> 0.4); a band that rounds below the window's floor grows into it.
+    CHECK(nozzle_process_band_size(0.8, 2, 0.2, 0.16, 0.56) == 2);
+    CHECK(nozzle_process_band_size(0.15, 2, 0.05, 0.16, 0.56) == 4);
+
+    DynamicPrintConfig plate = DynamicPrintConfig::full_print_config();
+    plate.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    DynamicPrintConfig chosen = plate;
+    chosen.set_key_value("layer_height", new ConfigOptionFloat(0.4));
+    DynamicPrintConfig tool = nozzle_tool_process(plate, chosen, nullptr);
+    CHECK(tool.opt_float("layer_height") == Approx(0.2)); // the plate's grid, as before
+    set_nozzle_tool_layer_height(tool, chosen);
+    REQUIRE(tool.option<ConfigOptionFloats>("nozzle_layer_height") != nullptr);
+    CHECK(tool.option<ConfigOptionFloats>("nozzle_layer_height")->values == std::vector<double>{ 0.4 });
+    // It makes the tool differ from the plate even when nothing else does.
+    CHECK(nozzle_process_diff(tool, plate).has("nozzle_layer_height"));
+    set_nozzle_tool_layer_height(tool, plate);
+    CHECK_FALSE(tool.has("nozzle_layer_height"));
+    CHECK(nozzle_process_diff(tool, plate).empty());
+}
+
+namespace {
+
+PresetBundle &h3c_bundle(const std::vector<std::string> &rack_override)
+{
+    PresetBundle &b = bbl_bundle();
+    b.end_nozzle_tool_view();
+    REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+    REQUIRE(b.prints.select_preset_by_name("0.20mm Standard @BBL H3C", true));
+    b.update_compatible(PresetSelectCompatibleType::Never);
+    if (b.filament_presets.size() != 3)
+        b.set_num_filaments(3);
+    b.project_config.option<ConfigOptionInts>("filament_map", true)->values = { 1, 1, 1 };
+    b.project_config.option<ConfigOptionStrings>("nozzle_process_presets", true)->values.clear();
+    b.project_config.option<ConfigOptionStrings>("nozzle_process_edits", true)->values.clear();
+    b.project_config.option<ConfigOptionStrings>("nozzle_slot_process_presets", true)->values.clear();
+    b.project_config.option<ConfigOptionInts>("filament_rack_nozzle_slot", true)->values = { 0 };
+    b.set_nozzle_diameter_override({ 0. });
+    b.set_rack_nozzle_override(rack_override);
+    return b;
+}
+
+} // namespace
+
+TEST_CASE("H3C: the rack's 0.6 and 0.8 are tools with their own process; a chosen one sets the 0.8's layer height", "[NozzleProcess][NozzleRackSlots][H3C][PresetBundle]")
+{
+    using Kind = PresetBundle::NozzleToolProcessKind;
+    SECTION("the stock rack (nine 0.4): no per-nozzle tools, nothing reaches the slicing config")
+    {
+        PresetBundle &b = h3c_bundle({});
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0 });
+        CHECK_FALSE(supports_nozzle_processes(b.printer_config_with_project_sizes()));
+        const DynamicPrintConfig full = b.full_config();
+        CHECK(full.option<ConfigOptionFloats>("nozzle_layer_height")->values.empty());
+        CHECK(full.option<ConfigOptionInts>("nozzle_filament_process_slot")->values.empty());
+    }
+    SECTION("rack 0.4 / 0.6 / 0.8: T1, T1 0.6, T1 0.8, each size picked its system process; the badges stay rack pins")
+    {
+        PresetBundle &b = h3c_bundle({ "0.4,0.4,0.6,0.8" });
+        CHECK(supports_nozzle_processes(b.printer_config_with_project_sizes()));
+        CHECK_FALSE(b.filament_nozzle_assignment_supported());
+        CHECK(b.nozzle_selector_tools() == std::vector<size_t>{ 0, 1, 2 });
+        CHECK(b.nozzle_tool_ref(1).id == "T1:0.6");
+        CHECK(b.nozzle_tool_ref(2).id == "T1:0.8");
+        CHECK(b.nozzle_tool_process_info(0).kind == Kind::FollowsPlate);
+        const PresetBundle::NozzleToolProcess p06 = b.nozzle_tool_process_info(1);
+        const PresetBundle::NozzleToolProcess p08 = b.nozzle_tool_process_info(2);
+        CHECK(p06.kind == Kind::AutoPicked);
+        CHECK(has(p06.name, "H3C 0.6 nozzle"));
+        CHECK(p08.kind == Kind::AutoPicked);
+        CHECK(has(p08.name, "H3C 0.8 nozzle"));
+
+        // Filament 2 on slot 3 (0.6), filament 3 on slot 4 (0.8): each prints its size's process.
+        REQUIRE(b.set_filament_rack_slot(1, 3));
+        REQUIRE(b.set_filament_rack_slot(2, 4));
+        DynamicPrintConfig full = b.full_config();
+        CHECK(nozzle_diameter_for_filament(full, 2) == Approx(0.6));
+        CHECK(nozzle_diameter_for_filament(full, 3) == Approx(0.8));
+        const auto *slots = full.option<ConfigOptionInts>("nozzle_filament_process_slot");
+        REQUIRE(slots->values.size() == 3);
+        CHECK(slots->values[0] == -1);
+        CHECK(slots->values[1] >= 0);
+        CHECK(slots->values[2] >= 0);
+        CHECK(slots->values[1] != slots->values[2]);
+        // Picked processes leave the slab height to the size rule.
+        CHECK(full.option<ConfigOptionFloats>("nozzle_layer_height")->values.empty());
+        CHECK(full.option<ConfigOptionInts>("nozzle_process_missing")->values.empty());
+        CHECK(full.option<ConfigOptionStrings>("nozzle_slot_process_missing")->values.empty());
+
+        // The owner's hand test: choose the 0.40 mm process for the 0.8 nozzle.
+        REQUIRE(b.set_nozzle_process(2, "0.40mm Standard @BBL H3C 0.8 nozzle"));
+        CHECK(b.nozzle_tool_process_info(2).kind == Kind::Chosen);
+        full = b.full_config();
+        CHECK(full.opt_float("layer_height") == Approx(0.2)); // the plate's grid
+        const auto *heights = full.option<ConfigOptionFloats>("nozzle_layer_height");
+        REQUIRE(heights->values.size() == 3);
+        CHECK(heights->values[0] == 0.);
+        CHECK(heights->values[1] == 0.);
+        CHECK(heights->values[2] == Approx(0.4));
+        // The same while that tool is shown on the Process tab.
+        REQUIRE(b.begin_nozzle_tool_view(2));
+        CHECK(b.prints.get_selected_preset_name() == "0.40mm Standard @BBL H3C 0.8 nozzle");
+        full = b.full_config();
+        CHECK(nozzle_layer_height_for_filament(full, 3) == Approx(0.4));
+        b.end_nozzle_tool_view();
+
+        b.set_nozzle_process(2, "");
+        b.set_filament_rack_slot(1, 0);
+        b.set_filament_rack_slot(2, 0);
+        b.set_rack_nozzle_override({});
+    }
+}

@@ -6384,7 +6384,13 @@ void PrintObject::compute_adaptive_merge_groups()
         if (nozzle <= EPSILON)
             continue;
         const AdaptiveLayerHeightRange range = region_ranges[region_id];
-        const size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
+        size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
+        // H3C fix (2026-11-06): a process chosen for this coarser nozzle sets its slab height (its own layer height in whole
+        // base layers, in the same window) instead of the size ratio. The finest nozzle keeps printing the plate's layer height.
+        if (nozzle > min_nozzle + EPSILON)
+            band_size = nozzle_process_band_size(
+                nozzle_layer_height_for_filament(print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                band_size, m_slicing_params.layer_height, range.min_height, range.max_height);
 
         std::vector<unsigned char> has_material(layer_count, 0);
         for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)

@@ -43,7 +43,8 @@ std::vector<std::string> nozzle_process_preset_names(const ConfigBase &config)
 
 bool has_nozzle_process_presets(const ConfigBase &config) { return !nozzle_process_preset_names(config).empty(); }
 
-bool supports_nozzle_processes(const ConfigBase &printer_config)
+// Two or more physical extruders, not one nozzle fed by several filaments: a process per extruder (P1-P8).
+static bool has_several_process_extruders(const ConfigBase &printer_config)
 {
     const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
     if (nozzles == nullptr || nozzles->size() < 2)
@@ -52,9 +53,22 @@ bool supports_nozzle_processes(const ConfigBase &printer_config)
     return semm == nullptr || !semm->value;
 }
 
+bool supports_nozzle_processes(const ConfigBase &printer_config)
+{
+    if (has_several_process_extruders(printer_config))
+        return true;
+    // H3C (owner report 2026-11-06): one extruder whose nozzle rack holds nozzles of more than one size. Each other size of the
+    // rack is a tool of its own (P9 size tools, "T1:0.8"), as the H2C's right rack sizes are, so filaments pinned to the 0.6 /
+    // 0.8 rack nozzles print with a process made for that size. single_extruder_multi_material (set on the H3C: one nozzle at a
+    // time, fed from the AMS) does not rule it out, the rack still holds several nozzles. A rack of one size adds nothing.
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
+    return nozzles != nullptr && nozzles->size() == 1 && !nozzle_slot_tools(printer_config).empty();
+}
+
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config)
 {
-    if (!supports_nozzle_processes(printer_config))
+    // A filament -> tool assignment needs tools to assign to: an H3C's rack sizes are chosen per filament with the rack pins.
+    if (!has_several_process_extruders(printer_config))
         return false;
     int extruder_count = 0;
     return !printer_config.support_different_extruders(extruder_count);
@@ -342,6 +356,7 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
         config.set_key_value("nozzle_initial_layer_line_width", new ConfigOptionFloatsOrPercents());
         config.set_key_value("nozzle_line_width", new ConfigOptionFloatsOrPercents());
         config.set_key_value("nozzle_region_values", new ConfigOptionStrings());
+        config.set_key_value("nozzle_layer_height", new ConfigOptionFloats());
     };
     if (!supports_nozzle_processes(config)) {
         clear_filament_arrays();
@@ -509,6 +524,8 @@ bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<con
     fill_nozzle_line_widths(config, sources, filament_sources != nullptr ? &per_filament : nullptr);
     // Per-nozzle process P8: and every other region setting of it (walls, infill, top / bottom, ironing...).
     fill_nozzle_region_values(config, sources, filament_sources != nullptr ? &per_filament : nullptr);
+    // H3C fix (2026-11-06): and the layer height a chosen process asks for (the coarse nozzles' slabs on a mixed-diameter plate).
+    fill_nozzle_layer_heights(config, sources, filament_sources != nullptr ? &per_filament : nullptr);
 
     if (!keep || extra) {
         std::vector<int>         new_ids;
@@ -657,6 +674,19 @@ bool realign_nozzle_filament_values(DynamicPrintConfig &config)
             if (slot != slots->values[f]) {
                 slots->values[f] = slot;
                 changed          = true;
+            }
+        }
+    }
+    // The chosen process's layer height: the donor's, else none (0: the slab height follows the nozzle size).
+    if (auto *heights = config.option<ConfigOptionFloats>("nozzle_layer_height"); heights != nullptr && heights->values.size() == count) {
+        const std::vector<double> orig = heights->values;
+        for (size_t f = 0; f < count; ++f) {
+            if (now[f] == was[f])
+                continue;
+            const double height = donor[f] >= 0 ? orig[size_t(donor[f])] : 0.;
+            if (height != heights->values[f]) {
+                heights->values[f] = height;
+                changed            = true;
             }
         }
     }
@@ -1556,7 +1586,9 @@ DynamicPrintConfig nozzle_process_diff(const DynamicPrintConfig &edited, const D
 {
     DynamicPrintConfig out;
     for (const std::string &key : edited.keys()) {
-        if (!is_per_tool_process_option(key))
+        // nozzle_layer_height: the layer height of the tool's chosen process (set_nozzle_tool_layer_height), so a chosen process
+        // that differs from the plate's only in its layer height still makes the tool print with its own process.
+        if (!is_per_tool_process_option(key) && key != "nozzle_layer_height")
             continue;
         const ConfigOption *a = edited.option(key);
         const ConfigOption *b = base.option(key);
@@ -1578,6 +1610,67 @@ DynamicPrintConfig nozzle_tool_process(const DynamicPrintConfig &plate, const Dy
         if (is_plate_process_option(key))
             out.set_key_value(key, plate.option(key)->clone());
     return out;
+}
+
+void set_nozzle_tool_layer_height(DynamicPrintConfig &tool, const ConfigBase &chosen)
+{
+    const auto  *own   = dynamic_cast<const ConfigOptionFloat *>(chosen.option("layer_height"));
+    const auto  *plate = tool.option<ConfigOptionFloat>("layer_height");
+    const double h     = own != nullptr ? own->value : 0.;
+    if (h > EPSILON && (plate == nullptr || std::abs(h - plate->value) > EPSILON))
+        tool.set_key_value("nozzle_layer_height", new ConfigOptionFloats(std::vector<double>{ h }));
+    else
+        tool.erase("nozzle_layer_height");
+}
+
+bool fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                               const std::vector<const DynamicPrintConfig *> *filament_sources)
+{
+    const auto  *filaments = dynamic_cast<const ConfigOptionVectorBase *>(config.option("filament_diameter"));
+    const size_t count     = filaments != nullptr ? filaments->size() : 0;
+    if (filament_sources != nullptr && filament_sources->size() != count)
+        filament_sources = nullptr;
+    std::vector<double> heights(count, 0.);
+    bool                any = false;
+    for (size_t f = 0; f < count; ++f) {
+        const size_t              e   = nozzle_for_filament(config, unsigned(f + 1));
+        const DynamicPrintConfig *src = filament_sources != nullptr ? (*filament_sources)[f] : e < sources.size() ? sources[e] : nullptr;
+        if (src == nullptr)
+            continue;
+        if (const auto *own = src->option<ConfigOptionFloats>("nozzle_layer_height"); own != nullptr && !own->values.empty() &&
+                                                                                     own->values.front() > EPSILON) {
+            heights[f] = own->values.front();
+            any        = true;
+        }
+    }
+    if (!any)
+        heights.clear();
+    config.set_key_value("nozzle_layer_height", new ConfigOptionFloats(heights));
+    return any;
+}
+
+double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id)
+{
+    const auto *heights = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_layer_height"));
+    if (heights == nullptr || filament_id < 1 || filament_id > heights->values.size())
+        return 0.;
+    return std::max(0., heights->values[filament_id - 1]);
+}
+
+size_t nozzle_process_band_size(double target_height, size_t ratio_band_size, double base_layer_height, double min_height, double max_height)
+{
+    if (!(target_height > EPSILON) || !(base_layer_height > EPSILON))
+        return ratio_band_size;
+    // The process's layer height in whole base layers (0.4 on a 0.2 plate: 2; 0.24: 1, the nozzle prints every layer).
+    size_t size = size_t(std::max(1., std::floor(target_height / base_layer_height + 0.5)));
+    if (size < 2)
+        return 1;
+    // As adaptive_layer_band_size(): a slab the nozzle cannot lay down is grown into, then held to, its window.
+    while (double(size) * base_layer_height + EPSILON < min_height)
+        ++size;
+    while (size > 1 && double(size) * base_layer_height > max_height + EPSILON)
+        --size;
+    return double(size) * base_layer_height + EPSILON < min_height ? 1 : size;
 }
 
 namespace {

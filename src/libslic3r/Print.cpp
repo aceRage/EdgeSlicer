@@ -1046,6 +1046,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
                opt_key == "initial_layer_line_width"
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
             || opt_key == "nozzle_line_width" // per-nozzle process P6
+            || opt_key == "nozzle_layer_height" // H3C fix: a chosen process's layer height sizes the coarse nozzles' slabs
             || opt_key == "min_layer_height"
             || opt_key == "max_layer_height"
             //|| opt_key == "resolution"
@@ -3048,7 +3049,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // knows which of the two to change.
         // Per-nozzle process P8 (owner design E): on a printer with several nozzles a width error names the tool and its size,
         // and its jump link ("key@T2") opens that tool's process.
-        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2;
+        // H3C: a single extruder whose rack holds several sizes names its size tools ("T1 0.8") too.
+        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2 || supports_nozzle_processes(m_config);
         // P9: a filament on a rack slot names the slot ("Right slot 3") and jumps to it ("key@T2.3").
         auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_filament_tool_name(m_config, std::max(filament_id, 1u)); };
         auto tool_opt_key = [this, several_nozzles](const char *opt_key, unsigned int filament_id) {
