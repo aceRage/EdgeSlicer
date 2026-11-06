@@ -511,6 +511,38 @@ bool rack_nozzle_groups(const ConfigBase &config, size_t extruder, std::vector<s
     return true;
 }
 
+std::vector<MultiNozzleUtils::NozzleInfo> grouping_nozzle_list(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleGroupInfo> &nozzle_groups)
+{
+    using namespace MultiNozzleUtils;
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    if (std::all_of(racks.begin(), racks.end(), [](const std::vector<RackNozzle> &rack) { return rack.empty(); }))
+        return build_nozzle_list(nozzle_groups);
+    // Owner report 2026-11-05 (tests/h2c_mixedslice.gcode.3mf): on a rack of L 0.4, R1-R4 0.4, R5 0.8, R6 0.6 the sorted list numbered
+    // the 0.6 as 5 and the 0.8 as 6, the H2C checked group 5 against its slot-5 hotend (a 0.8) and refused the job ("replace the
+    // hotend in slot 5"). Bambu Studio 2.9.x numbers by physical slot.
+    size_t extruders = racks.size();
+    for (const NozzleGroupInfo &group : nozzle_groups)
+        extruders = std::max(extruders, size_t(std::max(0, group.extruder_id)) + 1);
+    std::vector<std::vector<SlotNozzle>> slots(extruders);
+    for (size_t e = 0; e < extruders; ++e) {
+        if (e < racks.size() && !racks[e].empty()) {
+            for (const RackNozzle &nozzle : racks[e])
+                slots[e].push_back({ format_diameter_to_str(nozzle.diameter), nozzle.volume_type });
+            continue;
+        }
+        // An extruder without a rack: its nozzles as build_nozzle_list numbers them (its groups sorted).
+        std::vector<NozzleGroupInfo> own;
+        for (const NozzleGroupInfo &group : nozzle_groups)
+            if (group.extruder_id == int(e))
+                own.push_back(group);
+        std::sort(own.begin(), own.end());
+        for (const NozzleGroupInfo &group : own)
+            for (int i = 0; i < group.nozzle_count; ++i)
+                slots[e].push_back({ group.diameter, group.volume_type });
+    }
+    return build_nozzle_list_from_extruder_nozzles(slots);
+}
+
 int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list,
                               const std::vector<unsigned int> &used_filaments, std::vector<int> &filament_nozzle_map)
 {
@@ -793,7 +825,22 @@ int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozz
     const std::vector<RackNozzle> &rack = racks[extruder];
     const RackNozzle              &want = rack[size_t(slot - 1)];
     auto same_kind = [&want](double d, NozzleVolumeType v) { return same_nozzle_diameter(d, want.diameter) && v == want.volume_type; };
-    // build_nozzle_groups makes one group per kind of rack nozzle and build_nozzle_list lists each group's nozzles together, so
+    // A list in physical slot order (grouping_nozzle_list): the extruder's nozzles are its rack, entry by entry.
+    std::vector<int> own;
+    for (size_t n = 0; n < nozzle_list.size(); ++n)
+        if (nozzle_list[n].extruder_id == int(extruder))
+            own.push_back(int(n));
+    if (own.size() == rack.size()) {
+        bool physical = true;
+        for (size_t k = 0; k < rack.size() && physical; ++k) {
+            double d = 0.;
+            physical = parse_positive_number(nozzle_list[size_t(own[k])].diameter, d) && same_nozzle_diameter(d, rack[k].diameter) &&
+                       nozzle_list[size_t(own[k])].volume_type == rack[k].volume_type;
+        }
+        if (physical)
+            return own[size_t(slot - 1)];
+    }
+    // A list sorted by kind (build_nozzle_list): build_nozzle_groups makes one group per kind of rack nozzle and build_nozzle_list lists each group's nozzles together, so
     // the n-th rack nozzle of a kind is the n-th nozzle of that kind in the list.
     int ordinal = 0;
     for (size_t k = 0; k + 1 < size_t(slot); ++k)
