@@ -2514,6 +2514,69 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
     CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
 }
 
+// Bambu #12861: identical objects share sliced layers only when their layers sit in the same place.
+// Layers are stored relative to PrintObject::center_offset(), which follows the first instance of each
+// ModelObject. Two copies of one mesh can then get PrintObjects with the same trafo but a different
+// center_offset; sharing the layers between them printed one copy in the wrong place.
+TEST_CASE("Print: shared layers need the same center offset, not only the same trafo", "[Print][SharedObject][Regression]")
+{
+    Model model;
+    // A right-triangle prism: not point-symmetric, so the centre of its XY bounding box is not the image of the
+    // original box centre once it is rotated about Z by an angle other than a multiple of 90 degrees.
+    // (A cube would pass either way: rotating its box centre gives the box centre of the rotated cube.)
+    indexed_triangle_set prism;
+    prism.vertices = { {0.f, 0.f, 0.f}, {30.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}, {30.f, 0.f, 10.f}, {0.f, 10.f, 10.f} };
+    prism.indices  = { {0, 2, 1}, {3, 4, 5}, {0, 1, 4}, {0, 4, 3}, {1, 2, 5}, {1, 5, 4}, {2, 0, 3}, {2, 3, 5} };
+    ModelObject *a = model.add_object();
+    a->name        = "A";
+    // Model::add_object(const ModelObject&) gives the copies an "extruder" key; give A the same one, or no object shares.
+    a->config.set_key_value("extruder", new ConfigOptionInt(1));
+    a->add_volume(TriangleMesh(prism));
+    a->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    a->ensure_on_bed();
+
+    // B is a copy of A (same mesh, volumes and settings) whose first instance is turned by 30 degrees.
+    // Its second, unrotated instance gets a PrintObject with A's trafo but a rotated center_offset.
+    ModelObject *b = model.add_object(*a);
+    b->name        = "B";
+    b->instances.front()->set_offset(Vec3d(100., 40., 0.));
+    b->instances.front()->set_rotation(Vec3d(0., 0., PI / 6.));
+    b->add_instance()->set_offset(Vec3d(40., 100., 0.));
+    b->ensure_on_bed();
+
+    // C is a plain copy of A elsewhere on the bed: same trafo and same center_offset, so it must still share.
+    ModelObject *c = model.add_object(*a);
+    c->name        = "C";
+    c->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    c->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Print print;
+    for (ModelObject *obj : model.objects)
+        print.auto_assign_extruders(obj);
+    print.apply(model, config);
+    print.process();
+
+    bool same_trafo_other_offset = false;
+    for (const PrintObject *o1 : print.objects())
+        for (const PrintObject *o2 : print.objects())
+            if (o1 != o2 && o1->trafo().matrix() == o2->trafo().matrix() && o1->center_offset() != o2->center_offset())
+                same_trafo_other_offset = true;
+    // Without such a pair this test would not exercise the fix.
+    REQUIRE(same_trafo_other_offset);
+
+    size_t num_shared = 0;
+    for (const PrintObject *obj : print.objects()) {
+        if (const PrintObject *shared = obj->get_shared_object()) {
+            ++num_shared;
+            CAPTURE(obj->model_object()->name, shared->model_object()->name);
+            CHECK(obj->center_offset() == shared->center_offset());
+        }
+    }
+    // Layer sharing itself must still happen (C with A), otherwise the check above proves nothing.
+    REQUIRE(num_shared >= 1);
+}
+
 namespace {
 
 // Orca #17000. The slicing parameters of an object printed with one filament, on a printer whose first
