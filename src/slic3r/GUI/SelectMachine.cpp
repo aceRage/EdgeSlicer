@@ -34,6 +34,7 @@
 #include <wx/dcgraph.h>
 #include <wx/mstream.h>
 #include <miniz.h>
+#include <boost/lexical_cast.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <set>
@@ -1387,7 +1388,8 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
             if (nozzle.diameter.empty())
                 continue;
             try {
-                nozzle_info["dia"] = std::stod(nozzle.diameter);
+                // Upstream Orca #17079: std::stod reads "0.4" as 0 under a decimal-comma UI language.
+                nozzle_info["dia"] = boost::lexical_cast<double>(nozzle.diameter);
             } catch (...) {
                 continue;
             }

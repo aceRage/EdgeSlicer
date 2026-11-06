@@ -4,6 +4,7 @@
 #include "NozzleOverride.hpp"
 
 #include "I18N.hpp"
+#include "LocalesUtils.hpp"
 #include "PrintConfig.hpp"
 #include "Preset.hpp"
 #include "ToolSlots.hpp"
@@ -1089,7 +1090,7 @@ double line_width_reference_diameter(const ConfigBase &config)
         if (start != std::string::npos) {
             const size_t end = v.find_first_not_of("0123456789.", start);
             try {
-                const double d = std::stod(v.substr(start, end == std::string::npos ? std::string::npos : end - start));
+                const double d = string_to_double_decimal_point(v.substr(start, end == std::string::npos ? std::string::npos : end - start));
                 if (d > 0.05 && d < 3.)
                     return d;
             } catch (...) {
@@ -1305,9 +1306,9 @@ bool parse_nozzle_size_group_id(const std::string &id, size_t &extruder, double 
     if (e < 0)
         return false;
     const std::string word = id.substr(colon + 1);
-    char             *end  = nullptr;
-    const double      d    = std::strtod(word.c_str(), &end);
-    if (end == word.c_str() || *end != '\0' || !(d > 0.) || d > 3.)
+    size_t            used = 0;
+    const double      d    = string_to_double_decimal_point(word, &used); // "0.4" in any UI locale
+    if (used == 0 || used != word.size() || !(d > 0.) || d > 3.)
         return false;
     extruder = size_t(e);
     diameter = d;

@@ -7,6 +7,7 @@
 #include "GLToolbar.hpp"
 #include "Event.hpp"
 #include "I18N.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "MainFrame.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
@@ -72,9 +73,9 @@ bool machine_matches_preset(MachineObject *obj)
 
 static std::string diameter_string(float d)
 {
-    char buf[16];
-    std::snprintf(buf, sizeof buf, "%.2f", d);
-    std::string s(buf);
+    // A decimal point in any UI language: the result is the printer's nozzle diameter that NozzleOverride and the
+    // nozzle mapping parse back (upstream Orca #17079); snprintf gave "0,40" under German.
+    std::string s = float_to_string_decimal_point(double(d), 2);
     while (!s.empty() && s.back() == '0') s.pop_back();
     if (!s.empty() && s.back() == '.') s.pop_back();
     return s;
