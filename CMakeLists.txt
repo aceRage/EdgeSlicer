@@ -278,6 +278,10 @@ endif ()
 
 # Proposal for C++ unit tests and sandboxes
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
+# Phase 0 Python-plugin port-map spike. OFF by default: the slicer binary, libslic3r, and G-code
+# are unchanged. When ON, builds a standalone probe and Catch2 tests under src/slic3r/plugin/spike
+# that do not link the slicer. Do not use this to start Phase 1 (embedded CPython).
+option(EDGE_PYTHON_PLUGINS_SPIKE "Build the Phase 0 Python-plugin port-map spike (no slicer linkage)" OFF)
 # Ultra: the QuadriFlow-backed quad remesher ("Quad remesh...", Phase 2 of the remesh
 # spec). Optional because QuadriFlow is a new native dependency and CI on macOS/Linux
 # has not been through a deps build with it yet; when the package is missing the whole
@@ -1050,6 +1054,10 @@ endif ()
 
 if(SLIC3R_BUILD_SANDBOXES)
     add_subdirectory(sandboxes)
+endif()
+
+if(EDGE_PYTHON_PLUGINS_SPIKE)
+    add_subdirectory(src/slic3r/plugin/spike)
 endif()
 
 if(BUILD_TESTS)
