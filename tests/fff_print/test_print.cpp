@@ -2751,6 +2751,116 @@ TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVas
     CHECK(error.string.find("more than one materials") != std::string::npos);
 }
 
+// Orca #16900: a finished export is reused, so a renamed plate needs the export step invalidated.
+TEST_CASE("Plate name reaches the G-code once G-code export is invalidated", "[Print][PlateName]")
+{
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, {{"machine_start_gcode", "; Plate {plate_name}"}});
+    print.set_status_silent();
+
+    const auto export_and_read = [&print]() {
+        print.process();
+        const boost::filesystem::path out = scratch_path(".gcode");
+        print.export_gcode(out.string(), nullptr, nullptr);
+        boost::nowide::ifstream in(out.string());
+        std::string gcode((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        boost::nowide::remove(out.string().c_str());
+        return gcode;
+    };
+
+    print.set_plate_name("First");
+    CHECK(export_and_read().find("; Plate First") != std::string::npos);
+    REQUIRE(print.finished());
+
+    // Renaming alone keeps the old export.
+    print.set_plate_name("Second");
+    CHECK(print.finished());
+
+    // Invalidating the export step re-emits the name without re-slicing.
+    print.set_gcode_file_invalidated();
+    CHECK_FALSE(print.finished());
+    CHECK(print.objects().front()->is_step_done(posSlice));
+    const std::string regenerated = export_and_read();
+    CHECK(regenerated.find("; Plate Second") != std::string::npos);
+    CHECK(regenerated.find("; Plate First") == std::string::npos);
+}
+
+// Orca #17240: the GUI resets infill, walls and top shells in the global config only, so a height range
+// can still override them; Print::validate() warns about the object instead of printing a broken vase.
+TEST_CASE("Spiral vase mode warns about a height range that overrides infill, walls or top shells", "[Print][SpiralVase]")
+{
+    struct Case { const char *opt_key; };
+    const auto check = [](const std::string &opt_key) {
+        DynamicPrintConfig range;
+        if (opt_key.empty())
+            range.set_key_value("outer_wall_speed", new ConfigOptionFloats({ 25. }));
+        else if (opt_key == "sparse_infill_density")
+            range.set_key_value(opt_key, new ConfigOptionPercent(13.));
+        else if (opt_key == "wall_loops")
+            range.set_key_value(opt_key, new ConfigOptionInt(2));
+        else
+            range.set_key_value(opt_key, new ConfigOptionInt(3));
+        Print print;
+        Model model;
+        init_vase_with_height_range(print, model, two_filament_config(false, false), range);
+        std::vector<StringObjectException> warnings;
+        INFO(opt_key);
+        REQUIRE(print.validate(&warnings).string.empty());
+        const PrintObject *object = print.objects().front();
+        const auto         warning = std::find_if(warnings.begin(), warnings.end(),
+                                                  [object](const StringObjectException &w) { return w.object == object && w.string.find("Spiral vase mode needs") != std::string::npos; });
+        if (opt_key.empty()) {
+            CHECK(warning == warnings.end());
+        } else {
+            REQUIRE(warning != warnings.end());
+            CHECK(warning->opt_key == opt_key);
+        }
+    };
+    check("");
+    check("sparse_infill_density");
+    check("wall_loops");
+    check("top_shell_layers");
+}
+
+// Orca #17095: the background thread drops its own export when an in-place edit of the file fails. The print's
+// cancel callback stops that thread and waits for it, so the invalidation must not call it.
+TEST_CASE("An export the background thread invalidates is written again without re-slicing", "[Print][PlateName]")
+{
+    // Declared before the print, whose destructor calls the cancel callback too.
+    bool cancel_called = false;
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model);
+    print.set_status_silent();
+    print.set_cancel_callback([&cancel_called]() { cancel_called = true; });
+
+    const boost::filesystem::path out = scratch_path(".gcode");
+    print.process();
+    print.export_gcode(out.string(), nullptr, nullptr);
+    REQUIRE(print.finished());
+    // What a post-processing script that failed half way leaves in the file.
+    {
+        boost::nowide::ofstream half(out.string(), std::ios::app);
+        half << "; half edited\n";
+    }
+
+    print.invalidate_gcode_export_from_worker();
+    CHECK_FALSE(print.finished());
+    CHECK_FALSE(cancel_called);
+    CHECK(print.objects().front()->is_step_done(posSlice));
+
+    print.process();
+    print.export_gcode(out.string(), nullptr, nullptr);
+    CHECK(print.finished());
+    boost::nowide::ifstream in(out.string());
+    const std::string gcode((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    boost::nowide::remove(out.string().c_str());
+    CHECK(gcode.find("; half edited") == std::string::npos);
+}
+
 TEST_CASE("Sequential printing keeps copies of one object in their list order", "[Print]")
 {
     // Every copy of an object shares its object index, so ordering by that alone leaves the copies to

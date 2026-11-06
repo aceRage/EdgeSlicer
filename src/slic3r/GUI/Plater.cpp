@@ -4870,6 +4870,13 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
             tool_btn->PopupMenu(&menu);
             return;
         }
+        // A single extruder with a nozzle rack (H3C): Auto / size / slot.
+        if (bundle != nullptr && filament_single_rack_supported()) {
+            wxMenu menu;
+            append_filament_rack_menu(&menu, size_t(filament_idx));
+            tool_btn->PopupMenu(&menu);
+            return;
+        }
         if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
             return;
         const std::vector<size_t> tools = bundle->filament_nozzles();
@@ -4903,6 +4910,56 @@ bool Sidebar::filament_sides_supported() const
     const DynamicPrintConfig &printer = bundle->printers.get_edited_preset().config;
     const auto               *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
     return nozzles != nullptr && nozzles->values.size() == 2 && is_bambu_grouping_machine(printer, 2);
+}
+
+bool Sidebar::filament_single_rack_supported() const
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || bundle->filament_nozzle_assignment_supported())
+        return false;
+    const DynamicPrintConfig sized   = bundle->printer_config_with_project_sizes();
+    const auto              *nozzles = sized.option<ConfigOptionFloats>("nozzle_diameter");
+    // One extruder whose rack holds two or more nozzles. The H2D / H2C / X2D (two extruders) keep their Left / Right badge.
+    return nozzles != nullptr && nozzles->values.size() == 1 && rack_slot_count(sized, 0) >= 2;
+}
+
+void Sidebar::append_filament_rack_menu(wxMenu *menu, size_t filament)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !filament_single_rack_supported())
+        return;
+    const DynamicPrintConfig sized = bundle->printer_config_with_project_sizes();
+    const auto               racks = extruder_rack_nozzles(sized);
+    if (racks.empty())
+        return;
+    const int    slot   = bundle->filament_rack_slot_choice(filament);
+    const double pinned = filament_rack_pin(bundle->project_config, unsigned(filament + 1));
+    const auto   add    = [menu](const wxString &label, bool checked, std::function<void()> action) {
+        const int id = wxWindow::NewControlId();
+        menu->AppendCheckItem(id, label);
+        menu->Check(id, checked);
+        menu->Bind(wxEVT_MENU, [action](wxCommandEvent &) { wxGetApp().CallAfter(action); }, id);
+    };
+    add(_L("Auto"), slot <= 0 && !(pinned > 0.), [this, filament]() {
+        set_filament_rack_pin(filament, 0.);
+        set_filament_rack_slot(filament, 0);
+        update_filament_tool_buttons();
+    });
+    const std::vector<double> sizes = filament_rack_pin_choices(bundle->full_config(), unsigned(filament + 1));
+    for (double d : sizes)
+        add(from_u8(format_nozzle_diameter_word(d)) + " mm", slot <= 0 && same_nozzle_diameter(pinned, d), [this, filament, d]() {
+            set_filament_rack_pin(filament, d); // the size (clears a slot pin)
+            update_filament_tool_buttons();
+        });
+    const std::vector<RackNozzle> &rack = racks.front();
+    for (size_t k = 1; k <= rack.size(); ++k) {
+        const wxString label = wxString::Format(_L("Slot %d"), int(k)) + "  " + from_u8(format_nozzle_diameter_word(rack[k - 1].diameter)) +
+                               " mm  " + from_u8(nozzle_flow_short(rack[k - 1].volume_type));
+        add(label, slot == int(k), [this, filament, k]() {
+            set_filament_rack_slot(filament, int(k));
+            update_filament_tool_buttons();
+        });
+    }
 }
 
 int Sidebar::filament_side(size_t filament) const
@@ -5100,6 +5157,7 @@ void Sidebar::update_filament_tool_buttons()
     // Toolchangers that take an assignment (U1 class, no AMS); Bambu's grouping machines route filaments themselves.
     const bool                supported = bundle->filament_nozzle_assignment_supported();
     const bool                sides     = !supported && filament_sides_supported(); // P9: H2D / H2C / X2D: L / R badge
+    const bool                rack_only = !supported && !sides && filament_single_rack_supported(); // H3C: Auto / slot badge
     const std::vector<size_t> tools     = supported ? bundle->filament_nozzles() : std::vector<size_t>();
     const std::vector<double> sizes     = bundle->effective_nozzle_diameters();
     bool                      changed   = false;
@@ -5120,6 +5178,22 @@ void Sidebar::update_filament_tool_buttons()
                 btn->SetLabel(label);
             btn->SetToolTip(wxString::Format(_L("Filament %d prints on: %s"), int(f + 1),
                                              size_t(current) < choices.size() ? choices[size_t(current)].label : _L("Auto")));
+            if (!btn->IsShown()) {
+                btn->Show(true);
+                changed = true;
+            }
+            continue;
+        }
+        if (rack_only && f < bundle->filament_presets.size()) {
+            const int    slot  = bundle->filament_rack_slot_choice(f);
+            const double size  = filament_rack_pin(bundle->project_config, unsigned(f + 1));
+            wxString     label = slot > 0 ? wxString::Format("S%d", slot) : size > 0. ? from_u8(format_nozzle_diameter_word(size)) : wxString("A");
+            wxString     what  = slot > 0 ? wxString::Format(_L("rack slot %d"), slot) :
+                                 size > 0. ? wxString::Format(_L("a %s mm rack nozzle"), from_u8(format_nozzle_diameter_word(size))) : _L("Auto");
+            label += wxString::FromUTF8(" \xE2\x96\xBE"); // a small caret: the badge opens a list
+            if (btn->GetLabel() != label)
+                btn->SetLabel(label);
+            btn->SetToolTip(wxString::Format(_L("Filament %d prints on: %s"), int(f + 1), what));
             if (!btn->IsShown()) {
                 btn->Show(true);
                 changed = true;
@@ -18720,8 +18794,12 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
 
     //BBS: set the current plater's slice result to valid
-    if (!this->background_process.empty())
-        this->background_process.get_current_plate()->update_slice_result_valid_state(evt.success());
+    // A failed export or upload keeps a complete FFF slice valid, so Print and Export can be run again.
+    if (!this->background_process.empty()) {
+        const bool slice_valid = evt.success() ||
+                                 (evt.export_failed() && printer_technology == ptFFF && this->background_process.finished());
+        this->background_process.get_current_plate()->update_slice_result_valid_state(slice_valid);
+    }
 
     // A successful slice confirms the current printer and print profile as the user's working setup.
     if (evt.success()) {
@@ -20060,8 +20138,11 @@ bool Plater::priv::has_assemble_view() const
 bool Plater::priv::can_scale_to_print_volume() const
 {
     const BuildVolume_Type type = this->bed.build_volume().type();
+    const Selection& selection = get_selection();
+    // Selection::scale_to_fit_print_volume() does nothing for a selection of parts, so don't offer it
     return !sidebar->obj_list()->has_selected_cut_object()
-        && !view3D->get_canvas3d()->get_selection().is_empty()
+        && !selection.is_empty()
+        && selection.get_mode() != Selection::Volume
         && (type == BuildVolume_Type::Rectangle || type == BuildVolume_Type::Circle);
 }
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
@@ -29786,7 +29867,7 @@ void Plater::open_platesettings_dialog(wxCommandEvent& evt) {
     dlg.set_plate_name(from_u8(curr_plate->get_plate_name()));
 
     dlg.ShowModal();
-    curr_plate->set_plate_name(dlg.get_plate_name().ToUTF8().data());
+    rename_plate(p->partplate_list.get_curr_plate_index(), dlg.get_plate_name().ToUTF8().data());
 }
 
 //BBS: select Plate by hover_id
@@ -29958,7 +30039,7 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
             int result=dlg.ShowModal();
             if (result == wxID_YES) {
                 wxString dlg_plate_name = dlg.get_plate_name();
-                curr_plate->set_plate_name(dlg_plate_name.ToUTF8().data());
+                rename_plate(p->partplate_list.get_curr_plate_index(), dlg_plate_name.ToUTF8().data());
             }
         } else {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "can not select plate %1%" << plate_index;
@@ -30362,6 +30443,28 @@ bool Plater::can_delete_all() const { return p->can_delete_all(); }
 bool Plater::can_add_model() const { return !is_background_process_slicing(); }
 bool Plater::can_add_plate() const { return !is_background_process_slicing() && p->can_add_plate(); }
 bool Plater::can_delete_plate() const { return p->can_delete_plate(); }
+
+void Plater::rename_plate(int plate_index, const std::string& name)
+{
+    PartPlate* plate = p->partplate_list.get_plate(plate_index);
+    if (plate == nullptr || plate->get_plate_name() == name)
+        return;
+
+    take_snapshot(_u8L("Rename Plate"));
+    const bool was_valid = plate->is_slice_result_valid();
+    plate->set_plate_name(name);
+
+    // The rename invalidated a G-code export that uses {plate_name}: refresh the current plate.
+    if (was_valid && !plate->is_slice_result_valid() && plate_index == p->partplate_list.get_curr_plate_index()) {
+        p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, true);
+        // Start one re-export: auto-reslice would cancel a background run started here.
+        if (p->background_processing_enabled())
+            p->restart_background_process(priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
+        else
+            p->schedule_auto_reslice_if_needed();
+    }
+}
+
 bool Plater::can_increase_instances() const { return p->can_increase_instances(); }
 bool Plater::can_decrease_instances() const { return p->can_decrease_instances(); }
 bool Plater::can_set_instance_to_object() const { return p->can_set_instance_to_object(); }
