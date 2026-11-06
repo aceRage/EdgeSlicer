@@ -6,6 +6,7 @@
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -2094,6 +2095,57 @@ TEST_CASE("Filament shrinkage compensation counts the wipe tower filament next t
     CHECK(std::any_of(warnings.begin(), warnings.end(), [](const StringObjectException &w) {
         return w.string.find("Filament shrinkage will not be used") != std::string::npos;
     }));
+}
+
+// Orca #17232: validate() numbers the instances through sort_object_instances_by_model_order(print, true). Copies of
+// one object used to share one order key, and print.objects() does not list them in list order: every second copy
+// is rotated here, which splits them into separate PrintObjects. The G-code export prints in the order those numbers
+// assign. Upstream's test_data init_print() takes an instance count; ours does not, so the copies are added here.
+TEST_CASE("By-layer As object list keeps copies of one object in their list order", "[Print]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "print_order",    "as_obj_list" },
+        { "skirt_loops",    0 },
+    });
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n")); // validate() relative-E reset
+
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "copies.stl";
+    object->add_volume(make_cube(5, 5, 2));
+    for (size_t k = 0; k < 200; ++k) {
+        ModelInstance *instance = object->add_instance();
+        instance->set_offset(Vec3d(10. + 12. * double(k % 15), 10. + 12. * double(k / 15), 0.));
+        if (k % 2 != 0)
+            instance->set_rotation(Vec3d(0., 0., PI / 2));
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.objects().size() > 1);
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+
+    // validate() numbered the instances it ordered; copies must be numbered in list order.
+    const ModelInstancePtrs &copies = print.model().objects.front()->instances;
+    for (size_t k = 0; k < copies.size(); ++k) {
+        CAPTURE(k);
+        REQUIRE(copies[k]->arrange_order == int(k + 1));
+    }
+
+    // The As object list path of the G-code export orders the instances from those numbers.
+    const std::vector<const PrintInstance *> ordered = sort_object_instances_by_model_order(print);
+    REQUIRE(ordered.size() == copies.size());
+    for (size_t k = 0; k < copies.size(); ++k) {
+        CAPTURE(k);
+        REQUIRE(ordered[k]->model_instance == copies[k]);
+    }
 }
 
 // ---------------------------------------------------------------------------
