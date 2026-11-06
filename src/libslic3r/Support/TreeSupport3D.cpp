@@ -20,6 +20,7 @@
 #include "Polyline.hpp"
 #include "MutablePolygon.hpp"
 #include "SupportCommon.hpp"
+#include "SupportMergePlan.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TreeSupport.hpp"
 #include "I18N.hpp"
@@ -3783,7 +3784,18 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
 
         // Produce the support G-code.
         SupportGeneratorLayersPtr raft_layers = generate_raft_base(print_object, support_params, print_object.slicing_parameters(), top_contacts, interface_layers, base_interface_layers, intermediate_layers, layer_storage);
+
+        // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 TreeSupport3D.cpp:5051-5066):
+        // the organic tree is grown on a fixed layer grid, so this post-pass is the only place its Z ladder can still
+        // be coarsened. The tips were placed with the tree's own top gap. A no-op on every single-diameter plate and
+        // on an object with support groups.
+        SupportMergeResult support_merge;
+        merge_support_layers_multi_diameter(print_object, support_params, print_object.slicing_parameters(), raft_layers,
+            bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers, support_merge,
+            double(config.z_distance_top_layers) * unscaled<double>(config.layer_height), ! group_claims.empty());
+
         SupportGeneratorLayersPtr layers_sorted = generate_support_layers(print_object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+        apply_support_merge_result(print_object, support_merge);
 
         // BBS: This is a hack to avoid the support being generated outside the bed area. See #4769.
         tbb::parallel_for_each(layers_sorted.begin(), layers_sorted.end(), [&](SupportGeneratorLayer *layer) {

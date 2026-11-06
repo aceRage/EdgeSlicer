@@ -382,6 +382,31 @@ public:
     // for tree supports
     ExPolygons base_areas;
 
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 Layer.hpp:340-368): what the
+    // support merge plan (SupportMergePlan.cpp) decided for this layer. All of them stay 0 on every plate that
+    // prints through a single nozzle diameter, and on every layer the plan did not touch.
+    // 1-based filament this layer's support base was planned for while support_filament is 0 ("don't care"). Set only
+    // where the base was merged into a slab thicker than the object layers: that slab can no longer be extruded by an
+    // arbitrary nozzle. The areas facing the object keep their own height and are never pinned through this.
+    int                          planned_filament_id { 0 };
+    // Nozzle diameter of planned_filament_id. The support flows resolve their nozzle from support_filament, which is
+    // 0 here, so the toolpath generator has to be told which nozzle actually extrudes this base.
+    double                       planned_nozzle_diameter { 0. };
+    // Contact/interface counterpart. Set even on an unmerged thin layer when support_interface_filament is "don't
+    // care", so the exporter cannot pick a nozzle that is unable to print that layer height.
+    int                          planned_interface_filament_id { 0 };
+    double                       planned_interface_nozzle_diameter { 0. };
+    // Height of the merged base / interface slab when it differs from this layer's height: a layer whose print_z a
+    // fine interface shares takes the smallest height of the two (generate_support_layers), and a classic tree layer
+    // keeps base, roof and floor on one SupportLayer while only the base is folded. 0 = the layer height.
+    double                       base_slab_height { 0. };
+    double                       interface_slab_height { 0. };
+
+    // A merged slab covers the empty Z under it, like a merge group top of the object (Layer::effective_print_height).
+    coordf_t                    effective_print_height() const override {
+        return std::max({ Layer::effective_print_height(), coordf_t(base_slab_height), coordf_t(interface_slab_height) });
+    }
+
     // Edge (support highlight, phase 6): everything a classic tree support layer covers - base,
     // roof, the layer under the roof and floor (the protected areas below). Read only.
     ExPolygons tree_support_areas() const

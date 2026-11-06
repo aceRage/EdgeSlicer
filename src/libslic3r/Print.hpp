@@ -1315,6 +1315,10 @@ public:
     // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
     // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
     bool                uses_multiple_nozzle_diameters() const;
+    // The band reference nozzle compute_adaptive_merge_groups() sizes every band against: the smallest nozzle
+    // printing any object's gated walls on this plate. The support merge plan (SupportMergePlan.cpp) asks for it so
+    // its ladders are the ones the walls stack on. 0 when nothing resolves. Defined in PrintObject.cpp.
+    double              adaptive_merge_reference_nozzle() const;
     // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
     // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
     // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
