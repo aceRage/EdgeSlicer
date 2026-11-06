@@ -1347,21 +1347,19 @@ TEST_CASE("Wipe-tower travel does not lift when z_hop is off", "[GCodeWriter][Li
         {"gcode_comments",   "1"},
     });
     const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
-    if (bbl) {
-        const auto approaches = type1_tower_approaches(gcode);
-        UNSCOPED_INFO("type1 approaches=" << approaches.size());
-        if (!approaches.empty())
-            UNSCOPED_INFO(approaches.front().window);
-        REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
-        REQUIRE_FALSE(approaches.empty());
-        for (const auto &approach : approaches) {
-            UNSCOPED_INFO(approach.line);
-            CHECK(approach.window.find("lift Z") == std::string::npos);
-            CHECK(count_travels_after_descent(approach.window) == 0);
-        }
-    } else {
-        UNSCOPED_INFO(gcode.substr(0, 1200));
-        REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    // Type2 only writes "Travel to a Wipe Tower" when travel_to_tower_now is true
+    // and travel_to() emits a G1. With z_hop off that call is often a no-op (see PR).
+    // Both planners still put the approach immediately before "; CP TOOLCHANGE START".
+    const auto approaches = type1_tower_approaches(gcode);
+    UNSCOPED_INFO("approaches=" << approaches.size() << " bbl=" << bbl);
+    if (!approaches.empty())
+        UNSCOPED_INFO(approaches.front().window);
+    REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
+    REQUIRE_FALSE(approaches.empty());
+    for (const auto &approach : approaches) {
+        UNSCOPED_INFO(approach.line);
+        CHECK(approach.window.find("lift Z") == std::string::npos);
+        CHECK(count_travels_after_descent(approach.window) == 0);
     }
     // z_hop 0 must not invent a hop before the tower travel. Combined XYZ layer-change
     // descents without a lift are unchanged (those are not this PR).
