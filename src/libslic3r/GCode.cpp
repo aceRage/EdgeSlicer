@@ -2444,8 +2444,14 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
             // Mixed nozzle diameters (BambuStudio v02.09.01.70 GCode.cpp:1703-1730): a merge group top lays one bead
             // over its whole band, so the steps below it carry no extrusions on purpose. effective_print_height() is
             // the band's height there and the plain layer height everywhere else.
+            // A merged support slab (AdaptiveLayerMerge step 4) covers its own span the same way, also where it shares
+            // its print_z with an object layer, which layer() would answer for.
+            double effective_height = layer_to_print.layer()->effective_print_height();
+            if (layer_to_print.support_layer != nullptr &&
+                (layer_to_print.support_layer->base_slab_height > EPSILON || layer_to_print.support_layer->interface_slab_height > EPSILON))
+                effective_height = std::max(effective_height, layer_to_print.support_layer->effective_print_height());
             double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) +
-                                     layer_to_print.layer()->effective_print_height() + std::max(0., extra_gap);
+                                     effective_height + std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
             // A gap made only of merged-out steps is covered by the merged extrusion above it, even where the group
@@ -8191,6 +8197,26 @@ LayerResult GCode::process_layer(const Print& print,
                     }
                     if (interface_dontcare || support_layer.chameleon_residual_all_roles) {
                         interface_extruder = pinned;
+                        interface_dontcare = false;
+                    }
+                }
+
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 GCode.cpp:5281-5288): a
+                // "don't care" support slab the merge plan made thicker than the object layers, or a contact/interface
+                // layer it planned, can only be extruded by the nozzle it was planned for. 0 on every single-diameter
+                // plate. ToolOrdering::collect_extruders() schedules the same filament, and flush into support leaves
+                // such a layer alone, so the wiping override above never fires for it.
+                if (object.config().support_filament.value == 0 && support_layer.planned_filament_id > 0) {
+                    const unsigned int planned = resolve_mixed_filament_0based(support_layer.planned_filament_id);
+                    if (planned != (unsigned int) -1) {
+                        support_extruder = planned;
+                        support_dontcare = false;
+                    }
+                }
+                if (object.config().support_interface_filament.value == 0 && support_layer.planned_interface_filament_id > 0) {
+                    const unsigned int planned = resolve_mixed_filament_0based(support_layer.planned_interface_filament_id);
+                    if (planned != (unsigned int) -1) {
+                        interface_extruder = planned;
                         interface_dontcare = false;
                     }
                 }
