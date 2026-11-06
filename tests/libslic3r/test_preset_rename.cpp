@@ -49,6 +49,7 @@ struct TestFilaments : public PresetCollection
         parent->is_system  = true;
         parent->is_visible = true;
         parent->alias      = "System PLA";
+        parent->filament_id = "GFSYS1";
         this->update_map_alias_to_profile_name();
     }
     void load_user(const fs::path &dir)
@@ -184,14 +185,17 @@ TEST_CASE("rename_user_preset keeps the collection sorted and the selection on i
     TestFilaments filaments;
     filaments.load_user(temp.root);
 
+    // An attached user preset takes its parent's filament_id; whatever it is, a rename keeps it.
+    const std::string family_id = filaments.find_preset("My PLA @BBL X1C", false)->filament_id;
+    CHECK(family_id == "GFSYS1");
     REQUIRE(filaments.select_preset_by_name("Zebra", true));
     // Another preset moves past the selected one in the sorted list.
     REQUIRE(filaments.rename_user_preset("My PLA @BBL X1C", "Zz PLA @BBL X1C"));
     CHECK(filaments.get_selected_preset_name() == "Zebra");
     CHECK(filaments.get_edited_preset().name == "Zebra");
     for (const Preset &p : filaments.get_presets())
-        CHECK(filaments.find_preset(p.name, false) == &p); // findable by the sorted lookup
-    CHECK(filaments.find_preset("Zz PLA @BBL X1C", false)->filament_id == "Pmy1");
+        CHECK(filaments.find_preset(p.name, false, true) == &p); // findable by the sorted lookup (real: not the edited copy)
+    CHECK(filaments.find_preset("Zz PLA @BBL X1C", false)->filament_id == family_id);
     CHECK(filaments.find_preset("Zz PLA @BBL X1C", false)->inherits() == "System PLA @BBL X1C");
 
     // The selected preset itself: the selection and the edited copy follow, edits kept.
@@ -284,10 +288,11 @@ TEST_CASE("plan_preset_rename: a filament family keeps each printer part", "[Pre
     CHECK(whole.renames[0].second == "New Root");
 
     // Carried out: both files renamed, filament_id kept.
+    const std::string family_id = filaments.find_preset("My PLA @BBL X1C", false)->filament_id;
     for (const auto &[from, to] : all.renames)
         REQUIRE(filaments.rename_user_preset(from, to));
-    CHECK(filaments.find_preset("Our PLA @BBL X1C", false)->filament_id == "Pmy1");
-    CHECK(filaments.find_preset("Our PLA @BBL P1S", false)->filament_id == "Pmy1");
+    CHECK(filaments.find_preset("Our PLA @BBL X1C", false)->filament_id == family_id);
+    CHECK(filaments.find_preset("Our PLA @BBL P1S", false)->filament_id == family_id);
     CHECK(filaments.find_preset("My PLA @BBL X1C", false) == nullptr);
 }
 
