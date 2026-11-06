@@ -3,10 +3,10 @@
 // invalidates the grouping). Catch2 v2.
 #include <catch2/catch.hpp>
 
-#include "libslic3r/FilamentGroupUtils.hpp"
-#include "libslic3r/GCode/ToolOrdering.hpp"
-#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/FilamentGroup.hpp"
+#include "libslic3r/FilamentGroupUtils.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -85,13 +85,6 @@ DynamicPrintConfig master_second_extruder_config(int second_extruder_nozzles, co
 void add_cube(Model &model)
 {
     model.add_object("cube", "", make_cube(20., 20., 20.))->add_instance();
-}
-
-// The AMS inventory rides the next Print::apply(), so it is set before the apply.
-void apply_with_filament_info(Print &print, const Model &model, const DynamicPrintConfig &config, const AmsPayload &filament_info)
-{
-    print.set_extruder_filament_info(filament_info);
-    print.apply(model, config);
 }
 
 } // namespace
@@ -305,36 +298,63 @@ TEST_CASE("A changed AMS inventory takes back the grouping steps", "[FilamentGro
 
 // ---- #17074: grouping follows the printer's loaded filaments -----------------------------------
 // Edge already runs BambuStudio's grouping engine (calc_match_mode_cost, calc_one_change_budget, the
-// no-machine-filament early return in select_best_group_for_ams); these pin that it honours the loaded
-// filaments. Upstream's master-extruder-preference wrapper does not exist in Edge, so its cases are not here.
+// no-machine-filament early return in select_best_group_for_ams); these pin that its AMS match honours the
+// loaded filaments. Upstream's master-extruder-preference wrapper does not exist in Edge, so its cases are
+// not here; ToolOrdering::get_recommended_filament_maps is private here, so the engine is called directly.
 
-TEST_CASE("Filament-saving grouping puts a filament on the extruder the printer has it loaded in", "[FilamentGroup][ToolOrdering]")
+namespace {
+MultiNozzleUtils::NozzleInfo nozzle_on(int extruder_id)
 {
-    Model model;
-    add_cube(model);
-    Print print;
-    print.is_BBL_printer() = true;
-    // Only the first (non-master) extruder holds the printed PLA.
-    apply_with_filament_info(print, model, master_second_extruder_config(1, {"#F98C36"}),
-                             {{make_tray("#F98C36", "PLA", "A1"), make_tray("#BCBCBC", "PETG", "A2")}, {make_tray("#F95D73", "PETG", "Ext")}});
-    auto result = ToolOrdering::get_recommended_filament_maps(&print, {{0}, {0}, {0}}, FilamentMapMode::fmmAutoForFlush, {{}, {}}, {{}, {}}, {});
-    CHECK(result.get_extruder_id(0) == 0);
+    MultiNozzleUtils::NozzleInfo n;
+    n.diameter    = "0.4";
+    n.volume_type = NozzleVolumeType::nvtStandard;
+    n.extruder_id = extruder_id;
+    n.group_id    = extruder_id;
+    return n;
 }
 
-TEST_CASE("Convenience-mode grouping puts a filament where the printer holds its sub-type", "[FilamentGroup][ToolOrdering][H2C]")
+FilamentGroupUtils::FilamentInfo pla(const std::string &colour)
 {
-    // Both extruders hold white PLA; only the second one's is the project filament's sub-type. One nozzle
-    // on the second extruder runs the two-extruder match; six run the multi-nozzle one.
-    const int          second_extruder_nozzles = GENERATE(1, 6);
-    DynamicPrintConfig config                  = master_second_extruder_config(second_extruder_nozzles, {"#FFFFFF"});
-    config.option<ConfigOptionStrings>("filament_ids", true)->values = {"GFA00"};
-    Model model;
-    add_cube(model);
-    Print print;
-    print.is_BBL_printer() = true;
-    apply_with_filament_info(print, model, config,
-                             {{make_tray("#FFFFFF", "PLA", "A1", false, "GFL99")}, {make_tray("#FFFFFF", "PLA", "A1", false, "GFA00")}});
-    auto result = ToolOrdering::get_recommended_filament_maps(&print, {{0}, {0}, {0}}, FilamentMapMode::fmmAutoForMatch, {{}, {}}, {{}, {}}, {});
-    INFO("Nozzles on the second extruder: " << second_extruder_nozzles);
-    CHECK(result.get_extruder_id(0) == 1);
+    FilamentGroupUtils::FilamentInfo f;
+    f.color      = FilamentGroupUtils::Color(colour);
+    f.type       = "PLA";
+    f.is_support = false;
+    f.usage_type = FilamentUsageType::ModelOnly;
+    return f;
+}
+
+FilamentGroupUtils::MachineFilamentInfo loaded(const std::string &colour, const std::string &type, int extruder_id)
+{
+    FilamentGroupUtils::MachineFilamentInfo m;
+    m.color       = FilamentGroupUtils::Color(colour);
+    m.type        = type;
+    m.is_support  = false;
+    m.usage_type  = FilamentUsageType::ModelOnly;
+    m.extruder_id = extruder_id;
+    m.is_extended = false;
+    return m;
+}
+} // namespace
+
+TEST_CASE("The AMS match picks the grouping that puts a filament where the printer has it loaded", "[FilamentGroup][AmsInventory]")
+{
+    const std::vector<MultiNozzleUtils::NozzleInfo> nozzles = {nozzle_on(0), nozzle_on(1)};
+    const std::vector<unsigned int>                 used    = {0};
+    const std::vector<FilamentGroupUtils::FilamentInfo> info = {pla("#F98C36")};
+    // Candidate 0 puts the filament on the second extruder, candidate 1 on the first.
+    const std::vector<std::vector<int>> candidates = {{1}, {0}};
+    // Only the first extruder holds the orange PLA.
+    const std::vector<std::vector<FilamentGroupUtils::MachineFilamentInfo>> machine = {
+        {loaded("#F98C36", "PLA", 0), loaded("#BCBCBC", "PETG", 0)}, {loaded("#F95D73", "PETG", 1)}};
+    CHECK(select_best_group_for_ams(candidates, nozzles, used, info, machine) == std::vector<int>{0});
+}
+
+TEST_CASE("With no filament reported by the printer the AMS match keeps the first candidate", "[FilamentGroup][AmsInventory]")
+{
+    const std::vector<MultiNozzleUtils::NozzleInfo> nozzles = {nozzle_on(0), nozzle_on(1)};
+    const std::vector<unsigned int>                 used    = {0, 1};
+    const std::vector<FilamentGroupUtils::FilamentInfo> info = {pla("#FFFFFF"), pla("#000000")};
+    const std::vector<std::vector<int>> candidates = {{1, 1}, {0, 1}, {0, 0}};
+    CHECK(select_best_group_for_ams(candidates, nozzles, used, info, {}) == std::vector<int>{1, 1});
+    CHECK(select_best_group_for_ams(candidates, nozzles, used, info, {{}, {}}) == std::vector<int>{1, 1});
 }
