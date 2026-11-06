@@ -81,6 +81,8 @@ add_executable(${_TEST_NAME}_tests
 	test_default_bed_type.cpp
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
+	test_filament_inventory.cpp
+	test_nozzle_locale.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
 	test_cut_retraction_range.cpp
@@ -155,6 +157,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_extra_extruders.cpp
 	test_preset_detached_children.cpp
 	test_u1_tag_filament_match.cpp
 	test_preset_user_load_prefetch.cpp
@@ -166,6 +169,7 @@ add_executable(${_TEST_NAME}_tests
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
 	test_process_preset_export.cpp
+	test_preset_manager_model.cpp
 	test_project_preset_switch.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp

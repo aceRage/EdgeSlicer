@@ -592,6 +592,8 @@ set(lisbslic3r_sources
     FilamentPresetExport.hpp
     ProcessPresetExport.cpp
     ProcessPresetExport.hpp
+    PresetManagerModel.cpp
+    PresetManagerModel.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp

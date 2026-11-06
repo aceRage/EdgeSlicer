@@ -3,6 +3,7 @@
 #include "ClipperUtils.hpp"
 #include "Config.hpp"
 #include "I18N.hpp"
+#include "LocalesUtils.hpp"
 #include "format.hpp"
 
 #include "GCode/Thumbnails.hpp"
@@ -693,9 +694,9 @@ std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 
 std::string format_diameter_to_str(double diameter)
 {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.2f", diameter);
-    std::string s(buf);
+    // Always a decimal point: snprintf follows the UI locale ("0,40" under German), and the result is a key
+    // the nozzle grouping, the rack mapping and the 3MF read back as "0.4" (upstream Orca #17079).
+    std::string s = float_to_string_decimal_point(diameter, 2);
     // Trim trailing zeros (and a dangling dot) so 0.40 -> "0.4", matching nozzle_diameter strings.
     if (s.find('.') != std::string::npos) {
         size_t last = s.find_last_not_of('0');

@@ -1,6 +1,8 @@
 #include "PostProcessor.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/PrintBase.hpp"
 #include "libslic3r/format.hpp"
 #include "libslic3r/I18N.hpp"
 
@@ -14,6 +16,7 @@
 
 // BBS
 #include <iostream>
+#include <new>
 #include <fstream>
 
 #ifdef WIN32
@@ -235,7 +238,7 @@ void gcode_add_line_number(const std::string& path, const DynamicPrintConfig& co
 // output_name is the final name of the G-code on SD card or when uploaded to PrusaLink or OctoPrint.
 // If uploading to PrusaLink or OctoPrint, then the file will be renamed to output_name first on the target host.
 // The post-processing script may change the output_name.
-bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config)
+static bool run_post_process_scripts_impl(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config)
 {
     const auto *post_process = config.opt<ConfigOptionStrings>("post_process");
     if (// likely running in SLA mode
@@ -374,6 +377,26 @@ bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::
 
     src_path = std::move(path);
     return true;
+}
+
+// Orca #17095: post-processing works on G-code that is already generated, so whatever fails in it (a script or
+// plugin, starting the shell, the file work around them) fails the export or upload, not the slice. It is
+// reported as an ExportError, which does not invalidate the plater, so the user can retry (see
+// SlicingProcessCompletedEvent::invalidate_plater()). A cancel, a fatal error and running out of memory keep
+// their own handling.
+bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::string &host, std::string &output_name, const DynamicPrintConfig &config)
+{
+    try {
+        return run_post_process_scripts_impl(src_path, make_copy, host, output_name, config);
+    } catch (const CanceledException &) {
+        throw;
+    } catch (const HardCrash &) {
+        throw;
+    } catch (const std::bad_alloc &) {
+        throw;
+    } catch (const std::exception &ex) {
+        throw ExportError(ex.what());
+    }
 }
 
 bool should_post_process_packed_gcode(bool with_gcode, bool skip_static, PrinterTechnology tech, bool is_bbl_printer)
