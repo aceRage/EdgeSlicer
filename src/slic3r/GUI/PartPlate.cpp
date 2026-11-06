@@ -6450,6 +6450,10 @@ void PartPlateList::print() const
 	return;
 }
 
+// ODR-used by boost::format in load_from_3mf_structure(); in-class
+// initialization of a static const integral is not a definition.
+const unsigned int PartPlateList::MAX_PLATES_COUNT;
+
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_cali_texture = false;
 
