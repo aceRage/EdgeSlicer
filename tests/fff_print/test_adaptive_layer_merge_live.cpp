@@ -451,9 +451,14 @@ TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the sla
             for (const Surface &surface : layerm->fill_surfaces.surfaces) {
                 if (surface.surface_type == stInternalVoid)
                     continue;
-                if (surface.is_bottom()) {
+                if (surface.is_bottom() && surface.thickness < 0.) {
+                    // The slab top's own bottom face: unmerged.
                     saw_own_bottom_on_slab |= slab;
-                    CHECK(surface.thickness < 0.);
+                } else if (surface.is_bottom()) {
+                    // A bridge lifted from a swallowed step keeps its type at the slab height; a non-bridge bottom of a
+                    // swallowed step would have turned internal solid.
+                    CHECK(surface.is_bridge());
+                    CHECK_THAT(surface.thickness, WithinAbs(top->merged_height, 1e-9));
                 } else {
                     CHECK_THAT(surface.thickness, WithinAbs(top->merged_height, 1e-9));
                 }
