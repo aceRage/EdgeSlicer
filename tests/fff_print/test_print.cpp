@@ -2362,21 +2362,26 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
 TEST_CASE("Print: shared layers need the same center offset, not only the same trafo", "[Print][SharedObject][Regression]")
 {
     Model model;
-    // make_cube() spans 0..20, so its centre is off the origin and moves when rotated about Z.
+    // A right-triangle prism: not point-symmetric, so the centre of its XY bounding box is not the image of the
+    // original box centre once it is rotated about Z by an angle other than a multiple of 90 degrees.
+    // (A cube would pass either way: rotating its box centre gives the box centre of the rotated cube.)
+    indexed_triangle_set prism;
+    prism.vertices = { {0.f, 0.f, 0.f}, {30.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}, {30.f, 0.f, 10.f}, {0.f, 10.f, 10.f} };
+    prism.indices  = { {0, 2, 1}, {3, 4, 5}, {0, 1, 4}, {0, 4, 3}, {1, 2, 5}, {1, 5, 4}, {2, 0, 3}, {2, 3, 5} };
     ModelObject *a = model.add_object();
     a->name        = "A";
     // Model::add_object(const ModelObject&) gives the copies an "extruder" key; give A the same one, or no object shares.
     a->config.set_key_value("extruder", new ConfigOptionInt(1));
-    a->add_volume(make_cube(20.0, 20.0, 20.0));
+    a->add_volume(TriangleMesh(prism));
     a->add_instance()->set_offset(Vec3d(40., 40., 0.));
     a->ensure_on_bed();
 
-    // B is a copy of A (same mesh, volumes and settings) whose first instance is turned by 90 degrees.
+    // B is a copy of A (same mesh, volumes and settings) whose first instance is turned by 30 degrees.
     // Its second, unrotated instance gets a PrintObject with A's trafo but a rotated center_offset.
     ModelObject *b = model.add_object(*a);
     b->name        = "B";
     b->instances.front()->set_offset(Vec3d(100., 40., 0.));
-    b->instances.front()->set_rotation(Vec3d(0., 0., 0.5 * PI));
+    b->instances.front()->set_rotation(Vec3d(0., 0., PI / 6.));
     b->add_instance()->set_offset(Vec3d(40., 100., 0.));
     b->ensure_on_bed();
 
