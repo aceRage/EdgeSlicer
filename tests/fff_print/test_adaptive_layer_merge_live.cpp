@@ -366,21 +366,19 @@ TEST_CASE("Adaptive layer merge live: a single-diameter plate plans nothing and 
     }
 }
 
-TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the slab height, the face's bottom on the fine grid", "[AdaptiveLayerMergeLive]")
+struct OverhangSeen
 {
-    // tests/data/overhang.obj (6.3 mm tall, overhang faces about 2.1, 3.0 and 3.8 mm up) on the 0.8, a cube on the 0.4.
-    // At a 0.2 base the 2.1 mm face starts on layer 10, the top of the slab [9, 10]: its bottom keeps the physical
-    // height. The faces starting on a swallowed step are lifted onto their slab top as bridges or internal solid.
-    Model source = Model::read_from_file(std::string(TEST_DATA_DIR) + "/overhang.obj");
-    REQUIRE(! source.objects.empty());
-    Model model;
-    ModelObject *coarse_object = model.add_object(*source.objects.front());
-    coarse_object->name        = "overhang";
-    coarse_object->clear_instances();
-    coarse_object->add_instance();
-    coarse_object->center_around_origin();
-    coarse_object->instances.front()->set_offset(Vec3d(130., 100., 0.));
-    coarse_object->ensure_on_bed();
+    bool overhang_wall_on_slab { false };
+    bool own_bottom_on_slab { false };
+    bool lifted_bridge_on_slab { false };
+};
+
+// Slices `coarse_object` (put on filament 2, the 0.8) next to an 8 mm cube on filament 1 (the 0.4) and checks every
+// slab of the coarse object: overhang walls at the slab height, the slab top's own bottom faces unmerged, bridges
+// lifted from swallowed steps at the slab height, swallowed steps without extrusions or fill.
+OverhangSeen check_overhang_slabs(Model &model, ModelObject *coarse_object)
+{
+    coarse_object->name = "overhang";
     coarse_object->volumes.front()->config.set("extruder", 2);
     ModelObject *fine_object = model.add_object();
     fine_object->name        = "cube-1";
@@ -389,6 +387,7 @@ TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the sla
     fine_object->ensure_on_bed();
     fine_object->volumes.front()->config.set("extruder", 1);
 
+    OverhangSeen seen;
     Print print;
     print.apply(model, h3c_like_04_08());
     print.validate();
@@ -398,10 +397,8 @@ TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the sla
     REQUIRE(! gcode.empty());
     const PrintObject *coarse = object_named(print, "overhang");
     REQUIRE(coarse != nullptr);
-    REQUIRE(coarse->layer_count() > 20);
+    REQUIRE(coarse->layer_count() > 10);
 
-    bool saw_overhang_wall_on_slab = false;
-    bool saw_own_bottom_on_slab    = false;
     for (size_t idx = 1; idx < coarse->layer_count(); ++idx) {
         const Layer *layer = coarse->layers()[idx];
         CAPTURE(idx);
@@ -442,7 +439,7 @@ TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the sla
                 }
                 for (const ExtrusionPath *path : paths)
                     if (path->role() == erOverhangPerimeter && slab) {
-                        saw_overhang_wall_on_slab = true;
+                        seen.overhang_wall_on_slab = true;
                         CHECK_THAT(path->height, WithinAbs(top->merged_height, 1e-4));
                     }
             }
@@ -453,18 +450,59 @@ TEST_CASE("Adaptive layer merge live: overhangs on a 0.8 slab - walls at the sla
                     continue;
                 if (surface.is_bottom() && surface.thickness < 0.) {
                     // The slab top's own bottom face: unmerged.
-                    saw_own_bottom_on_slab |= slab;
+                    seen.own_bottom_on_slab |= slab;
                 } else if (surface.is_bottom()) {
                     // A bridge lifted from a swallowed step keeps its type at the slab height; a non-bridge bottom of a
                     // swallowed step would have turned internal solid.
                     CHECK(surface.is_bridge());
                     CHECK_THAT(surface.thickness, WithinAbs(top->merged_height, 1e-9));
+                    seen.lifted_bridge_on_slab = true;
                 } else {
                     CHECK_THAT(surface.thickness, WithinAbs(top->merged_height, 1e-9));
                 }
             }
         }
     }
-    CHECK(saw_overhang_wall_on_slab);
-    CHECK(saw_own_bottom_on_slab);
+    return seen;
+}
+
+TEST_CASE("Adaptive layer merge live: overhang.obj on the 0.8 - overhang walls at the slab height", "[AdaptiveLayerMergeLive]")
+{
+    // tests/data/overhang.obj on the 0.8, a cube on the 0.4.
+    Model source = Model::read_from_file(std::string(TEST_DATA_DIR) + "/overhang.obj");
+    REQUIRE(! source.objects.empty());
+    Model model;
+    ModelObject *coarse_object = model.add_object(*source.objects.front());
+    coarse_object->clear_instances();
+    coarse_object->add_instance();
+    coarse_object->center_around_origin();
+    coarse_object->instances.front()->set_offset(Vec3d(130., 100., 0.));
+    coarse_object->ensure_on_bed();
+    const OverhangSeen seen = check_overhang_slabs(model, coarse_object);
+    CHECK(seen.overhang_wall_on_slab);
+}
+
+TEST_CASE("Adaptive layer merge live: a face starting on a slab top keeps its bottom on the fine grid", "[AdaptiveLayerMergeLive]")
+{
+    // A 4 mm pillar up to z 2, a 10 mm plate from 2 to 3, a 16 mm plate from 3 to 4, on the 0.8 at a 0.2 base. The
+    // ladder starts on layer 1 in slabs of 2, so slab tops are the even layers. The z 2 face first shows on layer 10
+    // (slice z 2.1), a slab top: its bottom stays unmerged. The z 3 face first shows on layer 15, the swallowed step of
+    // [15, 16]: its bridge is lifted onto layer 16 at the slab height.
+    TriangleMesh stepped(its_make_cube(4., 4., 2.));
+    stepped.translate(6.f, 6.f, 0.f);
+    TriangleMesh mid(its_make_cube(10., 10., 1.));
+    mid.translate(3.f, 3.f, 2.f);
+    stepped.merge(mid);
+    TriangleMesh wide(its_make_cube(16., 16., 1.));
+    wide.translate(0.f, 0.f, 3.f);
+    stepped.merge(wide);
+    Model model;
+    ModelObject *coarse_object = model.add_object();
+    coarse_object->add_volume(std::move(stepped));
+    coarse_object->add_instance()->set_offset(Vec3d(130., 100., 0.));
+    coarse_object->ensure_on_bed();
+    const OverhangSeen seen = check_overhang_slabs(model, coarse_object);
+    CHECK(seen.overhang_wall_on_slab);
+    CHECK(seen.own_bottom_on_slab);
+    CHECK(seen.lifted_bridge_on_slab);
 }
