@@ -15,9 +15,8 @@ using nlohmann::json;
 
 std::string diameter_str(double d)
 {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%.2f", (float) d);
-    return buf;
+    // Sent to the printer: a decimal point in any UI language (snprintf gave "0,40" under German).
+    return float_to_string_decimal_point(double(float(d)), 2);
 }
 
 std::string diameter_str(const std::string &d)
