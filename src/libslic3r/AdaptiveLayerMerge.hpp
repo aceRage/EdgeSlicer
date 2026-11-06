@@ -4,8 +4,8 @@
 // Mixed-layer-height band planner, ported from BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.{hpp,cpp}
 // (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Since step 3 the planner
 // runs from PrintObject::make_perimeters() on plates whose used filaments print through more than one nozzle
-// diameter; Layer::make_perimeters() and PrintObject::combine_adaptive_infill() consume the patches. Supports
-// (step 4) and the Bambu 3MF keys (step 5) still ignore them.
+// diameter; Layer::make_perimeters() and PrintObject::combine_adaptive_infill() consume the patches. Since step 4
+// the supports follow the same ladders (Support/SupportMergePlan.cpp). The Bambu 3MF keys (step 5) still ignore them.
 
 #include "ExPolygon.hpp"
 
@@ -146,6 +146,16 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
 // as 5 + 3 (a full band from the base, then the short tail as its own band; Bambu's upstream comment says 4 + 4,
 // which the code does not do). Returns an empty plan when band_size is 1, i.e. when this nozzle merges nothing.
 std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops = {});
+
+// Edge: one nozzle's fixed ladder over a whole object layer stack, the way the live planner builds it. Layer 0 is
+// never merged (it prints as sliced), so the bands are cut from layer 1 up and the returned indices refer to the
+// full stack. compute_adaptive_merge_groups() and the support merge plan both go through this, which is what keeps
+// a support slab on a band top the walls of the same nozzle use.
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
     const std::vector<double>      &layer_heights,
     size_t                          band_size,
     const AdaptiveLayerHeightRange &height_range,
