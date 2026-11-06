@@ -175,6 +175,10 @@ TEST_CASE("A filament pinned to a smaller rack nozzle slices at that nozzle's wi
         { "internal_solid_infill_line_width", "100%" },
         { "top_surface_line_width", "100%" },
         { "initial_layer_line_width", "0" },
+        // Mixed nozzle diameters (adaptive layer merge, step 3): once filament 2 sits on the 0.2, the 0.4 would
+        // stack 0.2 mm slabs over the 0.2's 0.1 mm layers and print different beads. Capping the 0.4's layer
+        // height at the base keeps it on the grid, so this test still sees only what the rack pin changes.
+        { "max_layer_height", "0.1,0.1" },
         // The brim and skirt take one width for the whole print.
         { "brim_type", "no_brim" },
         { "skirt_loops", "0" },

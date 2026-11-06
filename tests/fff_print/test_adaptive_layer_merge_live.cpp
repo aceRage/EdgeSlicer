@@ -85,20 +85,27 @@ const PrintObject *object_named(const Print &print, const std::string &name)
     return nullptr;
 }
 
-// Heights of every extrusion path of a layer (walls, gap fill and infill).
+// Heights of every extrusion path of a layer (walls, gap fill and infill). Bridges are left out: they print with the
+// bridging flow (a thick bridge is as tall as its nozzle), whatever the layer or slab height.
+void add_height(const ExtrusionPath &path, std::set<double> &out)
+{
+    if (! is_bridge(path.role()))
+        out.insert(std::round(path.height * 1000.) / 1000.);
+}
+
 void collect_heights(const ExtrusionEntity &entity, std::set<double> &out)
 {
     if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity)) {
         for (const ExtrusionEntity *child : collection->entities)
             collect_heights(*child, out);
     } else if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity)) {
-        out.insert(std::round(path->height * 1000.) / 1000.);
+        add_height(*path, out);
     } else if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(&entity)) {
         for (const ExtrusionPath &p : multi->paths)
-            out.insert(std::round(p.height * 1000.) / 1000.);
+            add_height(p, out);
     } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity)) {
         for (const ExtrusionPath &p : loop->paths)
-            out.insert(std::round(p.height * 1000.) / 1000.);
+            add_height(p, out);
     }
 }
 
@@ -139,10 +146,12 @@ std::vector<GcodeLayer> parse_layers(const std::string &gcode)
     std::string             line;
     int                     tool   = 0;
     double                  height = 0.;
+    bool                    bridge = false;
     static const std::regex tool_re(R"(^T([0-9]+)\b)");
     static const std::regex z_re(R"(^;Z:([0-9.]+))");
     static const std::regex height_re(R"(^;HEIGHT:([0-9.]+))");
     static const std::regex e_re(R"(\bE[0-9.]+)");
+    static const std::regex type_re(R"(^;TYPE:(.*)$)");
     while (std::getline(in, line)) {
         if (! line.empty() && line.back() == '\r')
             line.pop_back();
@@ -160,6 +169,11 @@ std::vector<GcodeLayer> parse_layers(const std::string &gcode)
             height = std::stod(m[1].str());
             continue;
         }
+        if (std::regex_search(line, m, type_re)) {
+            // Bridges and overhang walls print with the bridging flow, not the layer or slab height.
+            bridge = m[1].str().find("ridge") != std::string::npos || m[1].str().find("verhang") != std::string::npos;
+            continue;
+        }
         if (std::regex_search(line, m, tool_re)) {
             tool = std::stoi(m[1].str());
             continue;
@@ -167,7 +181,8 @@ std::vector<GcodeLayer> parse_layers(const std::string &gcode)
         if (! out.empty() && line.compare(0, 2, "G1") == 0 && std::regex_search(line, e_re) &&
             line.find(" X") != std::string::npos) {
             out.back().tools.insert(tool);
-            out.back().heights[tool].insert(std::round(height * 1000.) / 1000.);
+            if (! bridge)
+                out.back().heights[tool].insert(std::round(height * 1000.) / 1000.);
         }
     }
     return out;
