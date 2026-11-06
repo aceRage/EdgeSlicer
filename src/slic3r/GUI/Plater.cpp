@@ -12719,6 +12719,7 @@ struct Plater::priv
     // Flag indicating that the G-code export targets a removable device, therefore the show_action_buttons() needs to be called at any case when the background processing finishes.
     ExportingStatus             exporting_status { NOT_EXPORTING };
     std::string                 last_output_path;
+    std::string                 last_export_error; // the 3MF exporter's error text after a failed export_3mf()
     std::string                 last_output_dir_path;
     //BBS store machine_sn and 3mf_path for PrintJob
     PrintPrepareData            m_print_job_data;
@@ -14033,6 +14034,26 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (imported_physical_filaments == 0)
                         imported_physical_filaments = imported_float_count("nozzle_diameter");
 
+                    // Orca #17040: a 3MF with a missing or empty project_settings.config has nothing to load as
+                    // project config. Fall back to geometry only here, before the extruder block below, so the
+                    // objects get filaments and their settings are reset as for any other geometry-only import.
+                    if (load_config && config_loaded.empty()) {
+                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__
+                                                << boost::format(" 3MF project config missing or empty, importing geometry only: %1%") % path.string();
+                        load_config = false;
+                        if (!load_model) {
+                            // Config-only import with nothing to import: stop here so no plate, preset or thumbnail state
+                            // from this file is applied (review F5). This is the only popup for this file: the Prusa
+                            // "not supported" notice further down is never reached (review F4).
+                            show_info(q, _L("The 3MF file has no project settings that EdgeSlicer can import."), _L("Load 3mf"));
+                            release_PlateData_list(plate_data);
+                            for (Preset *preset : project_presets)
+                                delete preset;
+                            project_presets.clear();
+                            q->skip_thumbnail_invalid = false;
+                            return empty_result;
+                        }
+                    }
                     // 1. add extruder for prusa model if the number of existing extruders is not enough
                     // 2. add extruder for BBS or Other model if only import geometry
                     if (en_3mf_file_type == En3mfType::From_Prusa || (load_model && !load_config && !keep_object_settings)) {
@@ -14199,9 +14220,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     // }
                     // Orca: check if the project is created with EdgeSlicer 2.2.0-alpha and use the sparse infill rotation template for non-safe infill patterns
                     else if (false) {
-                        if (!config_loaded.opt_string("sparse_infill_rotate_template").empty()) {
+                        if (const auto *rotate_template = config_loaded.option<ConfigOptionString>("sparse_infill_rotate_template"); rotate_template != nullptr && !rotate_template->value.empty()) {
                             const auto _sparse_infill_pattern =
-                                config_loaded.option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value;
+                                config_loaded.option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern") != nullptr ?
+                                    config_loaded.option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value :
+                                    FullPrintConfig::defaults().sparse_infill_pattern.value;
                             bool is_safe_to_rotate = _sparse_infill_pattern == ipRectilinear || _sparse_infill_pattern == ipLine ||
                                                      _sparse_infill_pattern == ipZigZag || _sparse_infill_pattern == ipCrossZag ||
                                                      _sparse_infill_pattern == ipLockedZag;
@@ -21275,8 +21298,10 @@ int Plater::save_project(bool saveAs)
 
     //BBS export 3mf without gcode
     if (export_3mf(into_path(filename), SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::FullPathSources) < 0) {
-        MessageDialog(this, _L("Failed to save the project.\nPlease check whether the folder exists online or if other programs open the project file."),
-            _L("Save project"), wxOK | wxICON_WARNING).ShowModal();
+        wxString save_failed = _L("Failed to save the project.\nPlease check whether the folder exists online or if other programs open the project file.");
+        if (!p->last_export_error.empty())
+            save_failed += wxString(wxT("\n\n")) + from_u8(p->last_export_error);
+        MessageDialog(this, save_failed, _L("Save project"), wxOK | wxICON_WARNING).ShowModal();
         return wxID_CANCEL;
     }
 
@@ -24940,6 +24965,9 @@ void Plater::export_gcode_3mf(bool export_all)
         if (export_result < 0) {
             // No file was written (e.g. a post-processing script failed). Don't toast "export finished".
             p->exporting_status = ExportingStatus::NOT_EXPORTING;
+            // The exporter reports its own failure to the log only; tell the user too, with its text.
+            if (!p->last_export_error.empty())
+                show_error(this, _L("Failed to export the sliced file.") + wxString(wxT("\n")) + from_u8(p->last_export_error));
             return;
         }
         // Plate print history: a file was written. Recorded as an export, which never turns the plate icon green.
@@ -26076,6 +26104,9 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     }
 
     bool store_result = Slic3r::store_bbs_3mf(store_params);
+    p->last_export_error = store_result ? std::string() : store_params.error;
+    if (!store_result)
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": exporting " << path_u8 << " failed: " << store_params.error;
     // reset designed info
     if (!has_design_info)
         p->model.design_info = nullptr;

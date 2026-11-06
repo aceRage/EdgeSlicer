@@ -73,6 +73,9 @@ struct SupportParameters {
         this->ironing_flow = support_material_interface_flow.with_height(support_material_interface_flow.height() * 0.01 * object_config.support_ironing_flow.value);
         this->ironing_spacing = float(std::max(IRONING_SPACING_MIN, object_config.support_ironing_spacing.value));
         this->ironing_pattern = object_config.support_ironing_pattern;
+        // Bambu Studio 2.9.1 (SupportParameters.hpp:185, 187).
+        this->ironing_inset     = float(std::max(0., object_config.support_ironing_inset.value));
+        this->ironing_direction = float(object_config.support_ironing_direction.value * M_PI / 180.);
 
         // Calculate a minimum support layer height as a minimum over all extruders, but not smaller than 10um.
         this->support_layer_height_min = scaled<coord_t>(0.01);
@@ -373,6 +376,10 @@ struct SupportParameters {
     Flow          ironing_flow; // Flow at the interface ironing.
     InfillPattern ironing_pattern;
     float         ironing_spacing;
+    // Bambu Studio 2.9.1: the ironed area is shrunk by ironing_inset (mm); ironing_direction (radians)
+    // turns the ironing lines away from the interface lines.
+    float         ironing_inset     = 0.f;
+    float         ironing_direction = 0.f;
 };
 
 } // namespace Slic3r

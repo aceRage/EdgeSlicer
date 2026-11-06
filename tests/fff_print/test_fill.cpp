@@ -1561,6 +1561,56 @@ TEST_CASE("Spiral inset fill closes the gaps with variable width walls", "[Fill]
 
 // The top/bottom surface fill order (OrcaSlicer #14179, OD2): Default and Outward run the spiral from the
 // centre to the edge, Inward from the edge to the centre.
+TEST_CASE("Spiral inset fill prints the open walls at the centre end of the spiral", "[Fill][SpiralInset][Regression]")
+{
+    // Orca #17223. Arachne leaves the middle of this ellipse as an open wall. Printed after an outward spiral, which
+    // ends at the edge, it sent the nozzle back across the surface to the centre.
+    const double    spacing = 0.45;
+    Slic3r::Polygon ellipse;
+    for (int i = 0; i < 90; ++i) {
+        const double angle = 2.0 * PI * i / 90.0;
+        ellipse.points.emplace_back(Slic3r::Point::new_scale(10 * std::cos(angle), 5 * std::sin(angle)));
+    }
+    const Slic3r::SurfaceFillOrder order = GENERATE(Slic3r::SurfaceFillOrder::Default, Slic3r::SurfaceFillOrder::Inward);
+    CAPTURE(int(order));
+
+    Slic3r::PrintConfig       print_config;
+    Slic3r::PrintObjectConfig object_config;
+    const Slic3r::Surface     surface(Slic3r::stTop, Slic3r::ExPolygon(ellipse));
+    auto fill = [&](Slic3r::ExtrusionRole role) {
+        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("spiralinset"));
+        filler->spacing             = spacing;
+        filler->overlap             = 0.5 * spacing;
+        filler->print_config        = &print_config;
+        filler->print_object_config = &object_config;
+
+        Slic3r::FillParams params;
+        params.density        = 1.f;
+        params.dont_adjust    = false;
+        params.layer_height   = 0.2;
+        params.use_arachne    = true;
+        params.extrusion_role = role;
+        params.fill_order     = order;
+        return filler->fill_surface_arachne(&surface, params);
+    };
+
+    const Slic3r::ThickPolylines paths = fill(Slic3r::erTopSolidInfill);
+    REQUIRE(paths.size() > 1);
+    // The spiral goes last when it runs outwards and first when it runs inwards.
+    const auto spiral = std::max_element(paths.begin(), paths.end(), [](const Slic3r::ThickPolyline &a, const Slic3r::ThickPolyline &b) {
+        return a.length() < b.length();
+    });
+    CHECK(spiral == (order == Slic3r::SurfaceFillOrder::Inward ? paths.begin() : paths.end() - 1));
+
+    // Internal solid infill gets the same walls rather than fixed width loops, which leave gaps.
+    const Slic3r::ThickPolylines solid = fill(Slic3r::erSolidInfill);
+    REQUIRE(solid.size() == paths.size());
+    for (size_t i = 0; i < paths.size(); ++i) {
+        CHECK(solid[i].points == paths[i].points);
+        CHECK(solid[i].width == paths[i].width);
+    }
+}
+
 TEST_CASE("Spiral inset fill runs outward from the centre", "[Fill][SpiralInset]")
 {
     const Slic3r::SurfaceFillOrder order = GENERATE(Slic3r::SurfaceFillOrder::Default, Slic3r::SurfaceFillOrder::Outward);
@@ -1641,11 +1691,12 @@ TEST_CASE("Spiral inset fill at a sparse density stays inside and fills less", "
     CHECK(sparse_length > 0.1 * solid_length);
 }
 
-TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne walls", "[Fill][SpiralInset][Regression]")
+TEST_CASE("Spiral inset internal solid infill gets the same Arachne walls as a top surface", "[Fill][SpiralInset][Regression]")
 {
-    // OrcaSlicer #15705: Arachne's standalone thin walls could become an extra centre plug after the
-    // spiral had finished, so internal solid infill keeps the fixed width loops. Top and bottom
-    // surfaces still get the variable width walls.
+    // OrcaSlicer #15705 gave internal solid infill fixed width loops, because Arachne's standalone thin walls
+    // could become an extra centre plug after the spiral had finished. Orca #17223 prints those walls at the
+    // centre end of the spiral instead and gives internal solid infill the variable width walls again: the
+    // fixed width loops left gaps. This used to assert the #15705 behaviour.
     const double      spacing = 0.45;
     Slic3r::ExPolygon ring    = spiral_rectangle(0, 0, 24, 24);
     Slic3r::Polygon   hole;
@@ -1674,13 +1725,7 @@ TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne wall
         return std::make_pair(std::move(out), filler->spacing);
     };
 
-    const auto internal = fill(Slic3r::erSolidInfill);
-    REQUIRE(!internal.first.empty());
-    for (const Slic3r::ThickPolyline &path : internal.first)
-        for (const coordf_t w : path.width)
-            CHECK(w == Approx(scaled<coord_t>(internal.second)).margin(1.));
-
-    // A top surface on the same shape still varies its widths.
+    // A top surface varies its widths.
     const auto top = fill(Slic3r::erTopSolidInfill);
     REQUIRE(!top.first.empty());
     coordf_t min_w = std::numeric_limits<coordf_t>::max(), max_w = 0;
@@ -1690,6 +1735,14 @@ TEST_CASE("Spiral inset internal solid infill uses plain loops, not Arachne wall
             max_w = std::max(max_w, w);
         }
     CHECK(max_w - min_w > scale_(0.01));
+
+    // Internal solid infill on the same shape gets the same walls.
+    const auto internal = fill(Slic3r::erSolidInfill);
+    REQUIRE(internal.first.size() == top.first.size());
+    for (size_t i = 0; i < top.first.size(); ++i) {
+        CHECK(internal.first[i].points == top.first[i].points);
+        CHECK(internal.first[i].width == top.first[i].width);
+    }
 }
 
 // OrcaSlicer #13379: the optional "Z-buckling bias" gyroid. Our FillGyroid is our own grid-anchored
@@ -2899,4 +2952,54 @@ TEST_CASE("Gap fill inserted into an ordered fill prints a near-duplicate closed
     CHECK(lines_in_order == line_starts);
     for (ExtrusionEntity *ee : entities)
         delete ee;
+}
+
+// Orca #17223: counts the gap fills of the fills that keep their order, and those printed before an extrusion of the fill they touch.
+static std::pair<size_t, size_t> gap_fills_and_those_before_an_extrusion_they_touch(const Print &print)
+{
+    size_t gap_fills = 0, before = 0;
+    for (const Layer *layer : print.objects().front()->layers())
+        for (const LayerRegion *region : layer->regions())
+            for (const ExtrusionEntity *entity : region->fills.entities) {
+                auto *fill = dynamic_cast<const ExtrusionEntityCollection *>(entity);
+                if (fill == nullptr || ! fill->no_sort)
+                    continue;
+                for (size_t i = 0; i < fill->entities.size(); ++ i) {
+                    if (fill->entities[i]->role() != erGapFill)
+                        continue;
+                    ++ gap_fills;
+                    const Polygons gap = fill->entities[i]->polygons_covered_by_width(float(scale_(0.05)));
+                    before += std::any_of(fill->entities.begin() + i + 1, fill->entities.end(), [&gap](const ExtrusionEntity *ee) {
+                        return ee->role() != erGapFill && ! intersection(gap, ee->polygons_covered_by_width()).empty();
+                    });
+                }
+            }
+    return { gap_fills, before };
+}
+
+TEST_CASE("Gap fill of a fill that keeps its order prints after the extrusions it touches", "[Fill][GapFill]")
+{
+    using Slic3r::Test::TestMesh;
+    const auto [pattern_key, pattern, target] = GENERATE(table<const char *, const char *, const char *>({
+        { "internal_solid_infill_pattern", "spiralinset", "everywhere" },
+        { "top_surface_pattern", "concentric", "topbottom" },
+        { "top_surface_pattern", "monotonic", "topbottom" },
+        { "top_surface_pattern", "monotonicline", "topbottom" },
+    }));
+    // The slanted legs of the V and the hole of the cube leave gap fill next to the lines of each pattern.
+    const TestMesh mesh = GENERATE(TestMesh::V, TestMesh::cube_with_hole);
+    auto config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{pattern_key, pattern},
+                                   {"gap_fill_target", target},
+                                   {"filter_out_gap_fill", 0},
+                                   {"layer_height", 0.2},
+                                   {"initial_layer_print_height", 0.2}});
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    print.process();
+    const auto [gap_fills, before] = gap_fills_and_those_before_an_extrusion_they_touch(print);
+    INFO(pattern << " on " << Slic3r::Test::mesh_names.at(mesh));
+    REQUIRE(gap_fills > 0);
+    CHECK(before == 0);
 }

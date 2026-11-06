@@ -2732,7 +2732,9 @@ void generate_support_toolpaths(
                 f->layer_id        = support_layer.id();
                 f->z               = support_layer.print_z;
                 f->overlap         = 0;
-                f->angle           = angle;
+                // Bambu Studio 2.9.1 (SupportCommon.cpp:2833) sets the raw support_ironing_direction value as
+                // the angle; here it turns the lines from the interface direction, as its tooltip describes.
+                f->angle           = angle + params.ironing_direction;
                 f->spacing         = params.ironing_spacing;
                 f->link_max_length = (coord_t) scale_(3. * f->spacing);
 
@@ -2746,6 +2748,9 @@ void generate_support_toolpaths(
                         polys_to_iron = diff_ex(polys_to_iron, upper_layer->support_islands);
                     }
                 }
+                // Bambu Studio 2.9.1 (SupportCommon.cpp:2848-2849).
+                if (params.ironing_inset > EPSILON)
+                    polys_to_iron = union_ex(offset(polys_to_iron, -float(scale_(params.ironing_inset))));
 
                 fill_expolygons_generate_paths(
                     // Destination

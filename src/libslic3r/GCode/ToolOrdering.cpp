@@ -1694,6 +1694,8 @@ FilamentGroupContext build_filament_group_context(
             info.usage_type = filament_usage_types[idx];
         else
             info.usage_type = filament_usage_types.empty() ? FilamentUsageType::ModelOnly : filament_usage_types.front();
+        if (idx < print_config.filament_diameter.size())
+            info.diameter = float(print_config.filament_diameter.get_at(idx));
         context.model_info.filament_info.emplace_back(std::move(info));
     }
 
@@ -1733,7 +1735,8 @@ FilamentGroupContext build_filament_group_context(
     } else
         context.group_info.filament_volume_map = std::vector<int>(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
 
-    context.nozzle_info.nozzle_list = build_nozzle_list(nozzle_groups);
+    // A rack machine's nozzles numbered by physical slot (Bambu Studio 2.9.x): the ids reach slice_info and the printer.
+    context.nozzle_info.nozzle_list = grouping_nozzle_list(print_config, nozzle_groups);
     context.nozzle_info.extruder_nozzle_list = build_extruder_nozzle_list(context.nozzle_info.nozzle_list);
 
     if (context.nozzle_info.nozzle_list.empty())

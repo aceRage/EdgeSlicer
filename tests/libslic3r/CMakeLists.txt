@@ -135,6 +135,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_override.cpp
 	test_nozzle_tool_process.cpp
 	test_nozzle_rack_slots.cpp
+	test_h2c_rack_group_id.cpp
 	test_nozzle_strip_model.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
@@ -195,9 +196,12 @@ add_executable(${_TEST_NAME}_tests
 	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
+    test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
+    test_bbl_h3c.cpp
+    test_bs29_keys_import.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp

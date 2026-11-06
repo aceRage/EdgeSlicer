@@ -5583,6 +5583,9 @@ void PrintObject::slice_volumes()
                             }
                         }
 	                }
+	                // Bambu Studio 2.9.1 (PrintObjectSlice.cpp:2386): offset circular contours and holes.
+	                if (this->config().enable_circle_compensation)
+	                    layer->apply_auto_circle_compensation();
 	                // Merge all regions' slices to get islands, chain them by a shortest path.
 	                layer->make_slices();
 	            }

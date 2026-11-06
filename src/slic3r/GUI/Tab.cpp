@@ -3469,6 +3469,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("enable_arc_fitting", "quality_settings_precision#arc-fitting");
         optgroup->append_single_option_line("xy_hole_compensation", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("xy_contour_compensation", "quality_settings_precision#x-y-compensation");
+        // Bambu Studio 2.9.1 auto circle compensation (Tab.cpp:3149-3150), next to the fixed X-Y compensation it replaces.
+        optgroup->append_single_option_line("enable_circle_compensation", "quality_settings_precision#x-y-compensation");
+        optgroup->append_single_option_line("circle_compensation_manual_offset", "quality_settings_precision#x-y-compensation");
+        optgroup->append_single_option_line("apply_scarf_seam_on_circles", "quality_settings_precision#x-y-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_layers_density", "quality_settings_precision#elephant-foot-compensation");
         optgroup->append_single_option_line("elefant_foot_compensation_layers", "quality_settings_precision#elephant-foot-compensation");
@@ -3712,6 +3716,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("internal_solid_infill_acceleration", "speed_settings_acceleration#internal-solid-infill");
         optgroup->append_single_option_line("initial_layer_acceleration", "speed_settings_acceleration#initial-layer");
         optgroup->append_single_option_line("first_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
+        optgroup->append_single_option_line("initial_layer_travel_acceleration", "speed_settings_acceleration#first-layer-travel");
         optgroup->append_single_option_line("top_surface_acceleration", "speed_settings_acceleration#top-surface");
         optgroup->append_single_option_line("travel_acceleration", "speed_settings_acceleration#travel");
         optgroup->append_single_option_line("accel_to_decel_enable", "speed_settings_acceleration");
@@ -3794,6 +3799,10 @@ void TabPrint::build()
         optgroup->append_single_option_line("support_ironing_pattern", "support_settings_ironing#pattern");
         optgroup->append_single_option_line("support_ironing_flow", "support_settings_ironing#flow");
         optgroup->append_single_option_line("support_ironing_spacing", "support_settings_ironing#line-spacing");
+        // Bambu Studio 2.9.1 (Tab.cpp:3352-3356).
+        optgroup->append_single_option_line("support_ironing_speed", "support_settings_ironing");
+        optgroup->append_single_option_line("support_ironing_inset", "support_settings_ironing");
+        optgroup->append_single_option_line("support_ironing_direction", "support_settings_ironing");
 
         // Ultra (over-support surfaces): its own small group right under the support interface
         // settings, because that is what it is about - the object face that lands on the
@@ -3879,6 +3888,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_extra_spacing", "multimaterial_settings_prime_tower#wipe-tower-purge-lines-spacing");
         optgroup->append_single_option_line("wipe_tower_extra_flow", "multimaterial_settings_prime_tower#extra-flow-for-purge");
         optgroup->append_single_option_line("wipe_tower_max_purge_speed", "multimaterial_settings_prime_tower#maximum-wipe-tower-print-speed");
+        // Bambu Studio 2.9.1 (Tab.cpp:3415-3419).
+        optgroup->append_single_option_line("prime_tower_acceleration", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_line_width", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_wipe_speed", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("prime_tower_wipe_distance", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("wipe_tower_wall_type", "multimaterial_settings_prime_tower#wall-type");
         optgroup->append_single_option_line("wipe_tower_cone_angle", "multimaterial_settings_prime_tower#stabilization-cone-apex-angle");
         optgroup->append_single_option_line("wipe_tower_extra_rib_length", "multimaterial_settings_prime_tower#extra-rib-length");
@@ -5918,6 +5932,7 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_z_offset");
         //BBS
         optgroup->append_single_option_line("temperature_vitrification");
+        optgroup->append_single_option_line("fins_extrude_safe_temp");
         // filament_is_high_temperature is controlled by preset data, not user-facing
         optgroup->append_single_option_line("idle_temperature");
         // BBS: Bambu Studio shows its wipe-tower cooling (a Develop-mode option) in this group, next to

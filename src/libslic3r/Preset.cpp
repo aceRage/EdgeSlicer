@@ -1210,7 +1210,7 @@ static std::vector<std::string> s_Preset_print_options {
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
     "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling",
-    "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing",
+    "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing", "support_ironing_inset", "support_ironing_speed", "support_ironing_direction",
     "over_support_surfaces", "over_support_flow", "over_support_speed",
     "max_travel_detour_distance",
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence", "fuzzy_skin_ripples_per_layer", "fuzzy_skin_ripple_offset", "fuzzy_skin_layers_between_ripple_offset",
@@ -1233,7 +1233,7 @@ static std::vector<std::string> s_Preset_print_options {
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "enable_circle_compensation", "circle_compensation_manual_offset", "apply_scarf_seam_on_circles", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
     "wipe_tower_no_sparse_layers", "wipe_tower_sparse_layers_combination", "compatible_printers", "compatible_printers_condition", "inherits",
     "flush_into_infill", "flush_into_objects", "flush_into_support",
@@ -1251,7 +1251,7 @@ static std::vector<std::string> s_Preset_print_options {
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "process_change_extrusion_role_gcode", "min_length_factor", "wall_maximum_resolution", "wall_maximum_deviation",
-     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
+     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","initial_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","first_layer_travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",
      "role_based_wipe_speed", "wipe_speed", "accel_to_decel_enable", "accel_to_decel_factor", "wipe_on_loops", "wipe_inward", "wipe_inward_distance", "wipe_before_external_loop",
@@ -1261,6 +1261,7 @@ static std::vector<std::string> s_Preset_print_options {
      "initial_layer_travel_speed", "exclude_object", "exclude_object_tolerance", "slow_down_layers", "infill_anchor", "infill_anchor_max","initial_layer_min_bead_width",
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
+     "prime_tower_acceleration", "prime_tower_line_width", "prime_tower_wipe_speed", "prime_tower_wipe_distance",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      "toolchange_ordering",
@@ -1296,7 +1297,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
@@ -1325,6 +1326,9 @@ static std::vector<std::string> s_Preset_filament_options {
     "long_retractions_when_ec", "retraction_distances_when_ec",
     "filament_tower_ironing_area",
     "filament_tower_interface_print_temp", "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length",
+    // Bambu Studio 2.9.1: auto circle compensation coefficients.
+    "circle_compensation_speed", "counter_coef_1", "counter_coef_2", "counter_coef_3", "hole_coef_1", "hole_coef_2", "hole_coef_3",
+    "counter_limit_min", "counter_limit_max", "hole_limit_min", "hole_limit_max", "diameter_limit",
     // Ultra (H2C rack): the nozzle-change pre-cool target. The BBL H2C filament profiles in
     // this tree already carry it; without it here the loader drops it off the preset.
     "filament_pre_cooling_temperature_nc",

@@ -5,6 +5,9 @@
     "from": "system",
     "filament_id": "GFA09",
     "instantiation": "false",
+    "fins_extrude_safe_temp": [
+        "57"
+    ],
     "filament_cost": [
         "28.99"
     ],

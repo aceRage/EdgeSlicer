@@ -74,6 +74,7 @@ struct PrintSettingsCarry
 {
     std::string         from_preset;      // print preset name before the switch; empty = nothing to carry
     std::string         from_printer;     // printer preset name before the switch
+    std::string         from_printer_model; // its printer_model ("Bambu Lab H2C"); empty = unknown (treated as the same model)
     std::string         origin_preset;    // preset the carried values originally came from (A in A -> B -> C)
     DynamicPrintConfig  config;           // the edited (possibly modified) print config before the switch
     std::vector<double> nozzle_diameters; // nozzle_diameter of the (edited) printer before the switch
@@ -83,6 +84,11 @@ struct PrintSettingsCarry
 bool print_carry_is_printer_coupled(const std::string &key);
 // Key scales with the nozzle diameter (line widths, layer heights, Z gaps).
 bool print_carry_is_nozzle_geometry(const std::string &key);
+// Owner decision 2026-11-05 (#854): accelerations and travel speed / jerk belong to the printer model. Every key ending
+// in "_acceleration" (per-variant arrays and initial_layer_travel_acceleration included), travel_speed, travel_speed_z,
+// initial_layer_travel_speed, travel_jerk and first_layer_travel_jerk keep the matched profile's value when the printer
+// model changes; within one model (another nozzle size) they still carry.
+bool print_carry_is_motion_key(const std::string &key);
 // Every nozzle of both printers has the same diameter (within 1e-6). Empty lists never match.
 bool print_carry_same_nozzle_size(const std::vector<double> &old_nozzles, const std::vector<double> &new_nozzles);
 // Apply src onto dst following the rules above. Returns the keys whose value in dst changed.
@@ -91,7 +97,8 @@ bool print_carry_same_nozzle_size(const std::vector<double> &old_nozzles, const 
 // the reason why the matched profile's value was kept.
 std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const DynamicPrintConfig &src, bool same_nozzle_size,
                                               const DynamicPrintConfig *printer = nullptr,
-                                              std::map<std::string, std::string> *kept = nullptr);
+                                              std::map<std::string, std::string> *kept = nullptr,
+                                              bool same_printer_model = true);
 
 // Auto-enable newly added printer variants of a filament the user already ticked on (see the
 // comment above PresetBundle::load_installed_filaments's use of this). Pulled out as a small pure

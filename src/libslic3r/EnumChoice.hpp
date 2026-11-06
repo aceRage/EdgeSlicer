@@ -29,7 +29,8 @@ inline bool enum_choice_maps_by_key(const std::string &opt_key)
         // Locked Zag per-band patterns: a subset that starts with "default" (ipCount).
         opt_key == "locked_skin_infill_pattern" || opt_key == "locked_skeleton_infill_pattern" ||
         opt_key == "support_style" || opt_key == "curr_bed_type" ||
-        // NozzleVolumeType skips 4: "E3D High Flow" is value 5 at row 4.
+        // NozzleVolumeType rows follow Bambu's menu order (Hybrid at row 2 is value 2, TPU High Flow at row 3 is 3,
+        // TPU285 is 4, E3D High Flow 5); map by key so a reordered or shorter list never shifts a stored value.
         opt_key == "nozzle_volume_type" || opt_key == "default_nozzle_volume_type" || opt_key == "extruder_nozzle_volume_type" ||
         // GCodeFlavor keeps its numbering (it is stored by key in files, but the C++ values are not renumbered);
         // the menu lists the supported flavors with Repetier after RepRapFirmware.

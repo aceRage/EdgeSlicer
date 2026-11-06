@@ -653,6 +653,19 @@ int OozePrevention::_get_temp(const GCode& gcodegen) const
                get_value_at(gcodegen.config(), gcodegen.config().nozzle_temperature, ConfigFlowDomain::Filament, filament_id);
 }
 
+// Bambu Studio 2.9.1 (GCode.cpp:451-473): the wipe before a tool change uses the prime tower's wipe speed
+// and distance when they are set. Bambu falls back to prime_tower_max_speed when prime_tower_wipe_speed
+// is 0; here 0 keeps the normal wipe speed, so presets without the key print as before.
+static double toolchange_wipe_speed(const GCode &gcodegen, bool toolchange, double wipe_speed)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_speed.value > 0. ? gcodegen.config().prime_tower_wipe_speed.value : wipe_speed;
+}
+
+static double toolchange_wipe_distance(const GCode &gcodegen, bool toolchange, double scaled_wipe_dist)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_distance.value > 0. ? scale_(gcodegen.config().prime_tower_wipe_distance.value) : scaled_wipe_dist;
+}
+
 // Orca:
 // Function to calculate the excess retraction length that should be retracted either before or after wiping
 // in order for the wipe operation to respect the filament retraction speed
@@ -691,10 +704,10 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
 
     // Calculate wipe speed
     double wipe_speed = config.role_based_wipe_speed ? writer.get_current_speed() / 60.0 : config.get_abs_value("wipe_speed");
-    wipe_speed        = std::max(wipe_speed, 10.0);
+    wipe_speed        = std::max(toolchange_wipe_speed(gcodegen, toolchange, wipe_speed), 10.0);
 
     // Process wipe path & calculate wipe path length
-    double   wipe_dist = scale_(config.wipe_distance.get_at(extruder_id));
+    double   wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(config.wipe_distance.get_at(extruder_id)));
     Polyline wipe_path = {last_pos};
     wipe_path.append(this->path.points.begin() + 1, this->path.points.end());
     double wipe_path_length = std::min(wipe_path.length(), wipe_dist);
@@ -736,6 +749,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
     double _wipe_speed = gcodegen.config().get_abs_value("wipe_speed"); // gcodegen.writer().config.travel_speed.values.front() * 0.8;
     if (gcodegen.config().role_based_wipe_speed)
         _wipe_speed = gcodegen.writer().get_current_speed() / 60.0;
+    _wipe_speed = toolchange_wipe_speed(gcodegen, toolchange, _wipe_speed);
     if (_wipe_speed < 10)
         _wipe_speed = 10;
 
@@ -745,7 +759,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
             amount of retraction. In other words, how far do we move in XY at wipe_speed
             for the time needed to consume retraction_length at retraction_speed?  */
         // BBS
-        double wipe_dist = scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id()));
+        double wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id())));
 
         /*  Take the stored wipe path and replace first point with the current actual position
             (they might be different, for example, in case of loop clipping).  */
@@ -1432,6 +1446,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
+    // Bambu Studio 2.9.1: the Type 1 tower sets its own M204 with prime_tower_acceleration, so the writer
+    // has to state the acceleration again after it (Bambu: gcodegen.reset_last_acceleration()).
+    if (gcodegen.config().prime_tower_acceleration.value > 0.)
+        gcodegen.writer().invalidate_acceleration();
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
     // towards the filament_sequence.json entry order.
@@ -3262,32 +3280,32 @@ static inline std::vector<const PrintInstance*> sort_object_instances_by_max_z(c
 }
 #endif
 
-// Produce a vector of PrintObjects in the order of their respective ModelObjects in print.model().
+// Produce a vector of PrintInstances in the order of their ModelInstances in the object and instance lists of print.model().
 // BBS: add sort logic for seq-print
 std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order)
 {
-    auto find_object_index = [](const Model& model, const ModelObject* obj) {
-        for (int index = 0; index < model.objects.size(); index++) {
-            if (model.objects[index] == obj)
-                return index;
-        }
-        return -1;
-    };
+    if (init_order) {
+        // Orca #17232: number by position in the model's object and instance lists. Copies of one object can be
+        // split into separate PrintObjects, one per distinct transformation, and print.objects() orders those by
+        // transformation, so its order is not the list order. Keying every copy on its object's index made them
+        // tie, and the ties came out grouped by PrintObject.
+        int order = 0;
+        for (const ModelObject* model_object : print.model().objects)
+            for (ModelInstance* model_instance : model_object->instances)
+                model_instance->arrange_order = ++order;
+    }
 
     // Build up map from ModelInstance* to PrintInstance*
     std::vector<std::pair<const ModelInstance*, const PrintInstance*>> model_instance_to_print_instance;
     model_instance_to_print_instance.reserve(print.num_object_instances());
     for (const PrintObject* print_object : print.objects())
-        for (const PrintInstance& print_instance : print_object->instances()) {
-            if (init_order)
-                const_cast<ModelInstance*>(print_instance.model_instance)->arrange_order = find_object_index(print.model(),
-                                                                                                             print_object->model_object());
+        for (const PrintInstance& print_instance : print_object->instances())
             model_instance_to_print_instance.emplace_back(print_instance.model_instance, &print_instance);
-        }
     std::sort(model_instance_to_print_instance.begin(), model_instance_to_print_instance.end(),
               [](auto& l, auto& r) { return l.first->arrange_order < r.first->arrange_order; });
     if (init_order) {
-        // Re-assign the arrange_order so each instance has a unique order number
+        // Re-assign the arrange_order so each instance of this print has a unique order number. The
+        // numbering above covers the whole model, including the instances of the other plates.
         for (int k = 0; k < model_instance_to_print_instance.size(); k++) {
             const_cast<ModelInstance*>(model_instance_to_print_instance[k].first)->arrange_order = k + 1;
         }
@@ -3295,16 +3313,8 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
 
     std::vector<const PrintInstance*> instances;
     instances.reserve(model_instance_to_print_instance.size());
-    for (const ModelObject* model_object : print.model().objects)
-        for (const ModelInstance* model_instance : model_object->instances) {
-            auto it = std::lower_bound(model_instance_to_print_instance.begin(), model_instance_to_print_instance.end(),
-                                       std::make_pair(model_instance, nullptr),
-                                       [](auto& l, auto& r) { return l.first->arrange_order < r.first->arrange_order; });
-            if (it != model_instance_to_print_instance.end() && it->first == model_instance)
-                instances.emplace_back(it->second);
-        }
-    std::sort(instances.begin(), instances.end(),
-              [](auto& l, auto& r) { return l->model_instance->arrange_order < r->model_instance->arrange_order; });
+    for (const auto& model_instance_print_instance : model_instance_to_print_instance)
+        instances.emplace_back(model_instance_print_instance.second);
     return instances;
 }
 
@@ -4119,6 +4129,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             // result, so single-nozzle machines are unaffected.
             int shim_nozzle_id = 0;
             int shim_physical_extruder = 0;
+            int shim_no_support_nozzle_id = 0;
             auto group_result_g = print.get_layered_nozzle_group_result();
             if (group_result_g && has_nozzle_rack(m_config)) {
                 auto diams = get_nozzle_diameters_by_nozzle_id(group_result_g.get());
@@ -4130,14 +4141,28 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     if (first->extruder_id >= 0 && first->extruder_id < int(m_config.physical_extruder_map.size()))
                         shim_physical_extruder = m_config.physical_extruder_map.get_at(first->extruder_id);
                 }
+                // BBS 2.9.1 (H3C start G-code): initial_no_support_nozzle_id = logical nozzle (group id) of the
+                // first non-support filament, the index into nozzle_diameter_at_nozzle_id.
+                if (initial_non_support_extruder_id != (unsigned int) -1)
+                    if (auto first_ns = group_result_g->get_first_nozzle_for_filament(int(initial_non_support_extruder_id)))
+                        shim_no_support_nozzle_id = std::max(0, first_ns->group_id);
             } else {
                 this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionInts(nozzle_vts));
             }
             this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diams));
+            // BBS 2.9.1 initial_layer_travel_acceleration (H3C change_filament_gcode: M204 S[...] on the first layer)
+            // is a per-variant vector; the template reads it as a scalar, so publish the value travel_to() uses on the
+            // first layer (no override: the initial layer acceleration).
+            {
+                const double fl_travel   = this->first_layer_travel_acceleration_override();
+                const double fl_accel    = fl_travel > 0 ? fl_travel : double(this->process_flow_value(m_config.initial_layer_acceleration));
+                this->placeholder_parser().set("initial_layer_travel_acceleration", new ConfigOptionFloat(std::floor(fl_accel + 0.5)));
+            }
 
             this->placeholder_parser().set("current_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("next_nozzle_id",                 new ConfigOptionInt(shim_nozzle_id));
             this->placeholder_parser().set("initial_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("initial_no_support_nozzle_id",   new ConfigOptionInt(shim_no_support_nozzle_id));
             this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));
@@ -4841,6 +4866,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // BBS: mark the start of the machine end G-code for the idle-nozzle pre-cooling (BambuStudio GCode.cpp:3356).
     if (m_pre_cooling_markers)
         file.write_format(";%s\n", PreCooling::MachineEndGCodeStartMarker);
+    else if (is_bbl_printers)
+        // EDGE: the other Bambu printers get no marker, so their G-code stays as it was, but their machine end
+        // G-code waits are just as post-print. The H3C's air filtration is M400 S180 twice: six minutes on every
+        // print's estimate (a 20 mm cube read 14m40s). Tell the processor directly; the file is written through it.
+        m_processor.start_machine_end_gcode();
 
     // Process filament-specific gcode in extruder order.
     {
@@ -7563,7 +7593,7 @@ LayerResult GCode::process_layer(const Print& print,
         // Snapmaker #937 / #980: reset the travel acceleration and jerk at the second layer when a first-layer travel
         // override was in effect, resolved the same way as in travel_to(). With the default 0 nothing is written here.
         if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0 &&
-            m_config.first_layer_travel_acceleration.get_abs_value(this->process_flow_value(m_config.travel_acceleration)) > 0) {
+            this->first_layer_travel_acceleration_override() > 0) {
             gcode += m_writer.set_travel_acceleration((unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5));
         }
         if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0 &&
@@ -10308,6 +10338,15 @@ std::string GCode::extrude_loop(
         enable_seam_slope      = seam_overhang < m_config.scarf_overhang_threshold.value * 0.01f * _line_width;
     }
 
+    // Bambu Studio 2.9.1 (GCode.cpp:6709-6712): the walls of a circle under the auto circle compensation
+    // print at the filament's compensation speed and, with apply_scarf_seam_on_circles, with a scarf seam,
+    // unless the loop overhangs. Edge: the scarf is decided before the seam gap clip (Bambu clips first)
+    // and, like every scarf here, not on the first layer or in spiral vase mode.
+    const bool circle_compensation = loop.circle_compensation &&
+        std::none_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &p) { return p.role() == erOverhangPerimeter; });
+    if (circle_compensation && m_config.apply_scarf_seam_on_circles.value && !m_config.spiral_mode && layer_id() > 0)
+        enable_seam_slope = true;
+
     // clip the path to avoid the extruder to get exactly on the first point of the loop;
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
     // we discard it in that case
@@ -10433,9 +10472,16 @@ std::string GCode::extrude_loop(
         m_multi_flow_segment_path_average_mm3_per_mm = weighted_sum_mm3_per_mm / total_multipath_length;
     // Orca: end of multipath average mm3_per_mm value calculation
 
+    // Bambu Studio 2.9.1: "; Slow Down Start" / "; Slow Down End" keep the cooling slowdown off these walls.
+    const char *circle_start = circle_compensation ? "; Slow Down Start\n" : "";
+    const char *circle_end   = circle_compensation ? "; Slow Down End\n" : "";
+    m_circle_compensation_speed = circle_compensation ? m_config.circle_compensation_speed.get_at(m_writer.extruder()->id()) : -1.;
+
     if (!enable_seam_slope) {
         for (ExtrusionPaths::iterator path = paths.begin(); path != paths.end(); ++path) {
+            gcode += circle_start;
             gcode += this->_extrude(*path, description, speed_for_path(*path));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10471,7 +10517,9 @@ std::string GCode::extrude_loop(
 
         // Then extrude it
         for (const auto& p : new_loop.get_all_paths()) {
+            gcode += circle_start;
             gcode += this->_extrude(*p, description, speed_for_path(*p));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10487,6 +10535,8 @@ std::string GCode::extrude_loop(
             paths.insert(paths.end(), new_loop.ends.begin(), new_loop.ends.end());
         }
     }
+
+    m_circle_compensation_speed = -1.;
 
     // Orca: share the post-extrusion nozzle position between wipe_inward and wipe_on_loops.
     const bool is_ccw = loop.is_counter_clockwise();
@@ -10731,6 +10781,10 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
     // switches it off outright, so even a zero-length support path keeps the role speed.
     const auto speed_for_path = [this](double length, ExtrusionRole role) {
         const double default_speed = -1.0;
+        // Bambu Studio 2.9.1 (GCode.cpp:7750-7751): support ironing prints at support_ironing_speed;
+        // 0 (this fork's default) keeps the ironing speed.
+        if (role == erIroning)
+            return m_config.support_ironing_speed.value > 0. ? m_config.support_ironing_speed.value : default_speed;
         const double threshold     = this->process_flow_value(m_config.small_support_perimeter_threshold);
         if (!is_support(role) || threshold <= 0. || length > SMALL_PERIMETER_LENGTH(threshold))
             return default_speed;
@@ -11114,8 +11168,28 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // key those callers actually read rather than leaving the warning with no setting at all.
     if (speed != -1 && (path.role() == erSkirt || path.role() == erBrim))
         speed_setting = "support_speed";
+    // Bambu Studio 2.9.1 (GCode.cpp:7704-7722, 7795-7800): the walls of a compensated circle use the
+    // filament's circle_compensation_speed as their role speed; a caller's small perimeter speed still
+    // caps it.
+    const bool circle_wall = m_circle_compensation_speed > 0. && (path.role() == erPerimeter || path.role() == erExternalPerimeter);
+    if (circle_wall && speed > EPSILON && speed < m_circle_compensation_speed)
+        speed_setting = "small_perimeter_speed";
+    else if (circle_wall && speed > EPSILON) {
+        speed         = m_circle_compensation_speed;
+        speed_setting = "circle_compensation_speed";
+    }
     if (speed == -1) {
-        if (path.role() == erPerimeter) {
+        if (circle_wall) {
+            speed_setting = "circle_compensation_speed";
+            speed         = m_circle_compensation_speed;
+            if (sloped) {
+                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
+                if (scarf < speed) {
+                    speed         = scarf;
+                    speed_setting = "scarf_joint_speed";
+                }
+            }
+        } else if (path.role() == erPerimeter) {
             speed_setting = "inner_wall_speed";
             speed = this->process_flow_value(m_config.inner_wall_speed);
             if (sloped) {
@@ -11388,13 +11462,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         }
 
         if (slowdown_curled) {
+            // Orca #17144: the fully unsupported entry is the bridge speed for bridge infill, as in the branch
+            // without the curled slowdown; every other role keeps the 4/4 overhang speed there.
+            const FloatOrPercent fully_unsupported_speed = path.role() == erBridgeInfill ?
+                FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true} :
+                ((oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true});
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
                  (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
                  (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
                  (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
                  (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
-                 (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true}});
+                 fully_unsupported_speed});
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold,
@@ -12138,6 +12217,14 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 }
 
 // This method accepts &point in print coordinates.
+double GCode::first_layer_travel_acceleration_override() const
+{
+    const double bambu = this->process_flow_value(m_config.initial_layer_travel_acceleration);
+    if (bambu > 0)
+        return bambu;
+    return m_config.first_layer_travel_acceleration.get_abs_value(this->process_flow_value(m_config.travel_acceleration));
+}
+
 std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z /* = DBL_MAX*/)
 {
     /*  Define the travel move as a line between current position and the taget point.
@@ -12161,8 +12248,8 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         // Snapmaker #937 / #980: a first-layer travel acceleration / jerk overrides the initial layer value for
         // travels. A percentage resolves over the effective (flow-variant) travel value, the one written on later
         // layers, not over the raw first entry. 0 (the default) keeps the initial layer value, as before.
-        const double first_layer_travel_accel = m_config.first_layer_travel_acceleration.get_abs_value(
-            this->process_flow_value(m_config.travel_acceleration));
+        // Bambu Studio 2.9.1's initial_layer_travel_acceleration (H2D/H2C/H3C processes: 6000) wins when set.
+        const double first_layer_travel_accel = this->first_layer_travel_acceleration_override();
         const double first_layer_accel = first_layer_travel_accel > 0 ? first_layer_travel_accel :
                                                                         double(this->process_flow_value(m_config.initial_layer_acceleration));
         if (this->process_flow_value(m_config.default_acceleration) > 0 && first_layer_accel > 0) {

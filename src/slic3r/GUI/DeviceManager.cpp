@@ -6500,6 +6500,7 @@ void MachineObject::parse_new_info(json print)
                     switch ((char) std::toupper((unsigned char) type[1])) {
                     case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
                     case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
+                    case 'T': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPU285; break; // BBS 2.9.1 T_FLOW
                     case 'E': nozzle_obj.volume_exact = NozzleVolumeType::nvtE3DHighFlow; break;
                     default: nozzle_obj.volume_exact = NozzleVolumeType::nvtStandard; break;
                     }

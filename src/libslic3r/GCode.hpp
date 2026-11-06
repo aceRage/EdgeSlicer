@@ -511,6 +511,9 @@ private:
     // as calculated and stored in the m_multi_segment_path_average_mm3_per_mm value
     double          m_multi_flow_segment_path_average_mm3_per_mm = 0;
     bool            m_multi_flow_segment_path_pa_set = false;
+    // Bambu Studio 2.9.1 (GCode::_extrude use_seperate_speed): while extrude_loop() prints the walls of a
+    // circle under the auto circle compensation, the filament's circle_compensation_speed; else <= 0.
+    double          m_circle_compensation_speed = -1.;
     // Adaptive PA last set flow to enable issuing of PA change commands when adaptive PA for overhangs
     // is enabled
     double          m_last_mm3_mm = 0;
@@ -859,6 +862,11 @@ private:
 
     std::string _extrude(const ExtrusionPath &path, const std::string &path_description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
+
+    // The acceleration of first-layer travels: Bambu Studio 2.9.1's initial_layer_travel_acceleration when it is set
+    // (> 0), else Orca's first_layer_travel_acceleration (absolute or % of the travel acceleration), else 0 (the caller
+    // keeps the initial layer acceleration). Defined after process_flow_value.
+    double first_layer_travel_acceleration_override() const;
 
     // Snapmaker: flow variant — read a process-domain vector option
     template<typename VectorOption>

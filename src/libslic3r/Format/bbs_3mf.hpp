@@ -281,6 +281,8 @@ struct StoreParams
     // embedded printer presets (CostOverrides::strip_prices()).
     // Project saves never set it.
     bool strip_filament_prices = false;
+    // Output: the exporter's error text when store_bbs_3mf() returns false.
+    std::string error;
 
     StoreParams() {}
 };
