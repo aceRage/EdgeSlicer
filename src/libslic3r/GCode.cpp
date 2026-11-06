@@ -2378,6 +2378,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     size_t              idx_object_layer     = 0;
     size_t              idx_support_layer    = 0;
     const LayerToPrint* last_extrusion_layer = nullptr;
+    size_t              last_extrusion_layer_idx = 0;
     while (idx_object_layer < object.layers().size() || idx_support_layer < object.support_layers().size()) {
         LayerToPrint layer_to_print;
         double       print_z_min = std::numeric_limits<double>::max();
@@ -2439,17 +2440,36 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
                 extra_gap = std::max(extra_gap, object.config().raft_contact_distance.value);
             }
-            double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) + layer_to_print.layer()->height +
-                                     std::max(0., extra_gap);
+            // Mixed nozzle diameters (BambuStudio v02.09.01.70 GCode.cpp:1703-1730): a merge group top lays one bead
+            // over its whole band, so the steps below it carry no extrusions on purpose. effective_print_height() is
+            // the band's height there and the plain layer height everywhere else.
+            double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) +
+                                     layer_to_print.layer()->effective_print_height() + std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON)
+            // A gap made only of merged-out steps is covered by the merged extrusion above it, even where the group
+            // top prints something shorter than the band (a bridge keeps its own height).
+            bool merged_out_in_between = false;
+            if (last_extrusion_layer != nullptr && last_extrusion_layer_idx + 2 <= layers_to_print.size() - 1) {
+                merged_out_in_between = true;
+                for (size_t idx = last_extrusion_layer_idx + 1; idx + 1 < layers_to_print.size(); ++idx) {
+                    const Layer *in_between = layers_to_print[idx].object_layer;
+                    if (in_between == nullptr || ! in_between->is_adaptive_merged_out()) {
+                        merged_out_in_between = false;
+                        break;
+                    }
+                }
+            }
+
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between)
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
         // Remember last layer with extrusions.
-        if (has_extrusions)
-            last_extrusion_layer = &layers_to_print.back();
+        if (has_extrusions) {
+            last_extrusion_layer     = &layers_to_print.back();
+            last_extrusion_layer_idx = layers_to_print.size() - 1;
+        }
     }
 
     if (!warning_ranges.empty()) {

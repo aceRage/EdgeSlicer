@@ -395,6 +395,12 @@ void PrintObject::make_perimeters()
         BOOST_LOG_TRIVIAL(debug) << "Generating extra perimeters for region " << region_id << " in parallel - end";
     }
 
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 PrintObject.cpp:578-580): decide the layer-merge groups
+    // before the walls are generated, since walls and infill share the grouping. A plate whose used filaments
+    // print through a single nozzle diameter returns at the gate and leaves every region without patches.
+    this->compute_adaptive_merge_groups();
+    m_print->throw_if_canceled();
+
     // Ultra (over-support walls): the per-layer "there is support under here" region the wall
     // classifier needs, built once here and dropped again below. When the feature is off this
     // leaves m_over_support_below empty, LayerRegion::make_perimeters hands the generator a null
@@ -612,6 +618,12 @@ void PrintObject::prepare_infill()
     // the following step needs to be done before combination because it may need
     // to remove only half of the combined infill
     this->bridge_over_infill();
+    m_print->throw_if_canceled();
+
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 PrintObject.cpp:1042-1044): move the fill of every merge
+    // span onto its group-top layer before the regular "infill every N layers" combination, which then leaves
+    // the merged regions alone.
+    this->combine_adaptive_infill();
     m_print->throw_if_canceled();
 
     // combine fill surfaces to honor the "infill every N layers" option
@@ -5916,6 +5928,12 @@ void PrintObject::combine_infill()
         const bool enable_combine_infill = region.config().infill_combination.value;
         if (enable_combine_infill == false || region.config().sparse_infill_density == 0.)
             continue;
+        // A region merged into mixed-nozzle slabs already prints its fill once per slab
+        // (combine_adaptive_infill()); combining it again would stack two thickness plans.
+        if (std::any_of(m_layers.begin(), m_layers.end(), [region_id](const Layer *layer) {
+                return ! layer->get_region(int(region_id))->adaptive_merge_patches.empty();
+            }))
+            continue;
 
         // Support internal solid infill when sparse_infill_density is 100%
         const bool          use_solid_infill = fabs(region.config().sparse_infill_density.value - 100.) < EPSILON;
@@ -6030,6 +6048,133 @@ void PrintObject::combine_infill()
     }
 }
 
+// Mixed nozzle diameters, the fill half of a merge. After BambuStudio v02.09.01.70 PrintObject::combine_adaptive_infill()
+// (PrintObject.cpp:5004-5700), reduced to the wall-nozzle case: a region's fill follows its wall patches.
+//
+// Every group-top patch [bottom_idx, top_idx] of a region extrudes the fill of its whole Z span once, on the group top,
+// at the merged height. Surface types were detected on the fine grid, so each step's requirement is lifted:
+//   1. the group top's own top surfaces stay top;
+//   2. bridges and bottoms anywhere in the span keep their type (and bridge angle) - the merged bead rests where the
+//      lowest step of the span rests;
+//   3. every other non-sparse surface in the span becomes solid on the group top (a top surface of a lower step
+//      turns internal solid, since the span continues above it);
+//   4. the rest keeps the group top's own surface (sparse infill).
+// All of it is clipped to the group top's own fill area inside the patch, since the walls of the group top were
+// generated on that contour. The layers below the group top extrude nothing of the region: a region whose layer
+// holds no extruding group top loses its whole fill (its walls were dropped in Layer::make_perimeters()).
+//
+// Edge deviations from Bambu, deliberate:
+//   * Fill printed by a different nozzle than the walls (sparse_infill_filament / solid_infill_filament on another
+//     diameter) is not planned on its own ladder; it follows the wall patches. Bambu plans it separately.
+//   * Swallowed fill is removed rather than turned into stInternalVoid: Fill.cpp turns the corners between printing
+//     surfaces and void surfaces into base-height solid "extensions", which would put thin coarse-nozzle solid
+//     back into the swallowed footprint.
+//   * Bambu's top re-detection against the next slab's footprint and its fill repair passes are not ported.
+void PrintObject::combine_adaptive_infill()
+{
+    if (! this->print()->uses_multiple_nozzle_diameters())
+        return;
+
+    const size_t region_count = this->num_printing_regions();
+    const size_t layer_count  = m_layers.size();
+
+    struct Replacement {
+        size_t     layer_idx;
+        size_t     region_id;
+        ExPolygons area;
+        Surfaces   surfaces;
+    };
+    std::vector<Replacement> replacements;
+
+    for (size_t region_id = 0; region_id < region_count; ++ region_id) {
+        for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx) {
+            m_print->throw_if_canceled();
+            const LayerRegion *layerm = m_layers[layer_idx]->get_region(int(region_id));
+            for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches) {
+                if (! patch.group_top || patch.area().empty() || patch.top_idx != layer_idx ||
+                    patch.bottom_idx > patch.top_idx)
+                    continue;
+                Polygons own_fill;
+                for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                    if (surface.surface_type != stInternalVoid)
+                        polygons_append(own_fill, to_polygons(surface.expolygon));
+                const ExPolygons fill_area = intersection_ex(union_ex(own_fill), patch.area());
+                if (fill_area.empty())
+                    continue;
+
+                Surfaces out;
+                Polygons claimed;
+                auto claim = [&out, &claimed, &fill_area](const Surface &templ, SurfaceType type, const ExPolygon &expolygon) {
+                    ExPolygons area = intersection_ex(ExPolygons{ expolygon }, fill_area);
+                    if (! claimed.empty())
+                        area = diff_ex(area, claimed);
+                    for (ExPolygon &piece : area) {
+                        polygons_append(claimed, to_polygons(piece));
+                        out.emplace_back(templ, std::move(piece));
+                        out.back().surface_type = type;
+                    }
+                };
+                // 1. The group top's own top surfaces.
+                for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                    if (surface.surface_type == stTop)
+                        claim(surface, stTop, surface.expolygon);
+                // 2. Bridges and bottoms of the span, lowest step first.
+                for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
+                    for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
+                        if (surface.is_bridge() || surface.is_bottom())
+                            claim(surface, surface.surface_type, surface.expolygon);
+                // 3. Every other non-sparse requirement of the span. A lower step's top turns internal solid.
+                for (size_t idx = patch.bottom_idx; idx <= patch.top_idx; ++ idx)
+                    for (const Surface &surface : m_layers[idx]->get_region(int(region_id))->fill_surfaces.surfaces)
+                        if (surface.surface_type != stInternal && surface.surface_type != stInternalVoid)
+                            claim(surface, surface.surface_type == stTop ? stInternalSolid : surface.surface_type,
+                                  surface.expolygon);
+                // 4. The rest of the group top as it was typed.
+                for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                    if (surface.surface_type != stInternalVoid)
+                        claim(surface, surface.surface_type, surface.expolygon);
+
+                for (Surface &surface : out) {
+                    surface.thickness        = patch.merged_height;
+                    surface.thickness_layers = (unsigned short) (patch.top_idx - patch.bottom_idx + 1);
+                }
+                replacements.push_back({ layer_idx, region_id, patch.area(), std::move(out) });
+            }
+        }
+    }
+
+    // Drop what the swallowed steps would have extruded. Everything above was read before anything was written.
+    for (Layer *layer : m_layers)
+        for (LayerRegion *layerm : layer->regions()) {
+            if (layerm->adaptive_merge_patches.empty())
+                continue;
+            Polygons extruded;
+            for (const AdaptiveMergePatch &patch : layerm->adaptive_merge_patches)
+                if (patch.group_top && ! patch.area().empty())
+                    polygons_append(extruded, to_polygons(patch.area()));
+            if (extruded.empty()) {
+                layerm->fill_surfaces.clear();
+                continue;
+            }
+            const ExPolygons keep = union_ex(extruded);
+            Surfaces kept;
+            for (const Surface &surface : layerm->fill_surfaces.surfaces)
+                for (ExPolygon &piece : intersection_ex(ExPolygons{ surface.expolygon }, keep))
+                    kept.emplace_back(surface, std::move(piece));
+            layerm->fill_surfaces.set(std::move(kept));
+        }
+
+    for (Replacement &replacement : replacements) {
+        LayerRegion *layerm = m_layers[replacement.layer_idx]->get_region(int(replacement.region_id));
+        Surfaces kept;
+        for (const Surface &surface : layerm->fill_surfaces.surfaces)
+            for (ExPolygon &piece : diff_ex(ExPolygons{ surface.expolygon }, replacement.area))
+                kept.emplace_back(surface, std::move(piece));
+        append(kept, std::move(replacement.surfaces));
+        layerm->fill_surfaces.set(std::move(kept));
+    }
+}
+
 // Decide which layers each wall region keeps. A larger nozzle keeps one contour out of every band and
 // drops the ones below it. Bands are a per-diameter ladder shared by every region of this object that
 // uses the same diameter, so two such regions never straddle each other's band boundaries. The stack
@@ -6044,16 +6189,24 @@ void PrintObject::combine_infill()
 // Edge differences, all deliberate:
 //   * The gate is Print::uses_multiple_nozzle_diameters(), which in Edge is pure mixed-diameter detection
 //     (no multi_nozzle_diameter_mode key, no UI toggle - Lance's decision).
-//   * The band reference is adaptive_band_reference_nozzle() over THIS object's used WALL filaments
-//     (object_wall_filament_ids()), not object_extruders() (which also collects infill) and not the
-//     plate-wide used_printing_filaments(). A finer infill-only nozzle, or a wall_filament on a region
-//     whose walls are off, must not size this object's walls. Edge has no separate grid nozzle, so the
-//     "some filament uses a nozzle larger than D" clause cannot trigger: D is the smallest nonzero
-//     diameter over the same object-local wall list the bands are sized from.
+//   * The band reference is adaptive_band_reference_nozzle() over the plate's used WALL filaments
+//     (plate_wall_filament_ids(): every object's gated wall filaments), not object_extruders() (which also
+//     collects infill) and not used_printing_filaments() (which also collects supports). A finer infill-only
+//     or support-only nozzle, or a wall_filament on a region whose walls are off, must not size any walls.
+//     Step 3 widened this from the object's own walls to the plate's: Bambu measures every object against one
+//     plate-wide grid nozzle, and an object printed entirely by the 0.8 next to a 0.4 object has to stack its
+//     slabs against the 0.4's layers; with an object-local reference it would be its own reference and never
+//     merge. Edge has no separate grid nozzle, so the "some filament uses a nozzle larger than D" clause cannot
+//     trigger: D is the smallest nonzero diameter over the same wall list the bands are sized from.
 //   * Nozzle lookups go through Edge's nozzle_diameter_for_filament(), which honors filament_nozzle_assignment,
 //     nozzle_diameter_override and rack slots and never falls back to extruder 0 for a slot past the nozzle
 //     count (Bambu's get_at() pitfall).
-//   * It has NO production caller in this PR, so G-code is unchanged; see the declaration in Print.hpp.
+//   * Each region's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle() (F9/F15): the
+//     nozzle that prints the band, the tightest limits where used filaments share it, never values.front().
+//   * The first object layer is never merged. Every merged ladder starts on layer 1, and layer 0 prints as
+//     sliced. Bambu anchors the first band on the bed and then needs per-filament first-layer temperatures,
+//     bed temperature, brim, skirt and the empty-first-layer check to follow a bed contact printed one or more
+//     layers up; none of that exists here, so the bed contact stays a plain first layer.
 //
 // Id conventions, per the F3 precedent of PR #850: the filament ids in here are 1-based when handed to
 // nozzle_diameter_for_filament() (Edge-wide convention) and 0-based everywhere else.
@@ -6079,6 +6232,16 @@ static std::vector<unsigned int> object_wall_filament_ids(const PrintObject &obj
                 ids.emplace_back((unsigned int) config.outer_wall_filament.value - 1);
         }
     }
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
+// The gated wall filaments of every object on the plate (0-based), the band reference list.
+static std::vector<unsigned int> plate_wall_filament_ids(const Print &print)
+{
+    std::vector<unsigned int> ids;
+    for (const PrintObject *object : print.objects())
+        append(ids, object_wall_filament_ids(*object));
     sort_remove_duplicates(ids);
     return ids;
 }
@@ -6122,14 +6285,22 @@ void PrintObject::compute_adaptive_merge_groups()
         const unsigned int filament = (unsigned int) config.wall_filament.value;
         region_nozzles[region_id] = nozzle_diameter_for_filament(print_config, filament);
     }
-    // Band reference is this object's wall nozzles only, matching Bambu. Infill-only nozzles
-    // deliberately do not size the walls: a 0.2 infill next to 0.4 walls must not coarsen those
-    // walls. object_extruders() is left untouched for its other callers; wall_filament /
-    // outer_wall_filament are 1-based and converted to 0-based here because
+    // Band reference is the plate's wall nozzles only. Infill-only nozzles deliberately do not size the
+    // walls: a 0.2 infill next to 0.4 walls must not coarsen those walls. wall_filament /
+    // outer_wall_filament are 1-based and converted to 0-based by object_wall_filament_ids() because
     // adaptive_band_reference_nozzle() adds 1 to reach the config id.
-    const double min_nozzle = adaptive_band_reference_nozzle(print_config, object_wall_filament_ids(*this));
+    const double min_nozzle = adaptive_band_reference_nozzle(print_config, plate_wall_filament_ids(*this->print()));
     if (min_nozzle <= EPSILON)
         return;
+
+    // Per-nozzle clamp (F9/F15): every region's window is the one of the nozzle that prints its walls, narrowed by
+    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it.
+    std::vector<unsigned int> used_filaments;
+    this->print()->used_printing_filaments(used_filaments);
+    std::vector<AdaptiveLayerHeightRange> region_ranges(region_count);
+    for (size_t region_id = 0; region_id < region_count; ++ region_id)
+        region_ranges[region_id] = adaptive_layer_height_range_for_nozzle(
+            print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments);
 
     // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
     // pass has already aligned painted ownership to each band's anchor contour.
@@ -6202,8 +6373,8 @@ void PrintObject::compute_adaptive_merge_groups()
         const double nozzle = region_nozzles[region_id];
         if (nozzle <= EPSILON)
             continue;
-        const AdaptiveLayerHeightRange range = adaptive_layer_height_range(nozzle);
-        const size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height);
+        const AdaptiveLayerHeightRange range = region_ranges[region_id];
+        const size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
 
         std::vector<unsigned char> has_material(layer_count, 0);
         for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
@@ -6222,11 +6393,21 @@ void PrintObject::compute_adaptive_merge_groups()
         }
 
         // One diameter owns one ladder. Region/colour start layers do not create a new phase.
-        const std::vector<AdaptiveLayerBand> bands =
-            build_adaptive_layer_bands(layer_heights, band_size, range, band_tops);
+        // Edge: the ladder starts on layer 1; layer 0 is the bed contact and prints as sliced (a fixed-grid
+        // event below), so no band is anchored at the object base and Bambu's first-band path never runs.
+        std::vector<AdaptiveLayerBand> bands =
+            build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
+                                       band_size, range, band_tops);
+        for (AdaptiveLayerBand &band : bands) {
+            ++ band.bottom_idx;
+            ++ band.top_idx;
+        }
 
         std::vector<AdaptiveLayerBand> live_bands;
         std::vector<unsigned char>     covered(layer_count, 0);
+        covered[0] = 1;
+        if (has_material[0])
+            events.push_back({ region_id, nozzle, range, { 0, 0, layer_heights[0] }, 0, false });
         for (const AdaptiveLayerBand &band : bands) {
             AdaptiveLayerBand live = band;
             // The first band is a snapshot of the object base and keeps its grid top whatever it holds.

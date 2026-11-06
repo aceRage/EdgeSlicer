@@ -287,9 +287,59 @@ void Layer::make_perimeters()
 
     // keep track of regions whose perimeters we have already generated
     std::vector<unsigned char> done(m_regions.size(), false);
-    
+
+    // Mixed nozzle diameters (BambuStudio v02.09.01.70 Layer.cpp:256-344): a region inside a merge band is extruded
+    // on the group top only, at the height of the whole band, on the contour the band retained. The steps below it
+    // are dropped, not merged into it. A region carrying patches never shares a perimeter pass: a shared pass can
+    // honour the merge plan of its front region only.
+    const auto make_merged_perimeters = [this](LayerRegion *lm) {
+        lm->fill_surfaces.surfaces.clear();
+        lm->fill_no_overlap_expolygons.clear();
+        bool generated = false;
+        for (const AdaptiveMergePatch &patch : lm->adaptive_merge_patches) {
+            if (! patch.group_top || patch.area().empty())
+                continue;
+            SurfaceCollection core_slices;
+            for (const Surface &surface : lm->slices.surfaces)
+                for (ExPolygon &piece : intersection_ex(ExPolygons{ surface.expolygon }, patch.area()))
+                    core_slices.surfaces.emplace_back(surface, std::move(piece));
+            if (core_slices.surfaces.empty())
+                continue;
+            // The band rests on the layer below its lowest step. A suppressed orphan there is sliced but not
+            // extruded, so the walls over it overhang.
+            ExPolygons        lower_storage;
+            const ExPolygons *lower_slices = nullptr;
+            if (patch.bottom_idx > 0 && patch.bottom_idx <= this->object()->layer_count()) {
+                const Layer     *lower   = this->object()->get_layer(int(patch.bottom_idx - 1));
+                const ExPolygons dropped = adaptive_suppressed_orphan_area(*lower);
+                if (dropped.empty())
+                    lower_slices = &lower->lslices;
+                else {
+                    lower_storage = diff_ex(lower->lslices, dropped);
+                    lower_slices  = &lower_storage;
+                }
+            }
+            lm->make_perimeters(core_slices, { lm }, &lm->fill_surfaces, &lm->fill_no_overlap_expolygons,
+                                patch.merged_height, ! generated, lower_slices);
+            generated = true;
+        }
+        if (! generated) {
+            // Swallowed by a group top above, so nothing is extruded here. The fill surfaces still go through
+            // shell discovery (a solid step inside the band must reach combine_adaptive_infill()), so the pass
+            // runs and its extrusions are thrown away.
+            lm->make_perimeters(lm->slices, { lm }, &lm->fill_surfaces, &lm->fill_no_overlap_expolygons);
+            lm->perimeters.clear();
+            lm->thin_fills.clear();
+        }
+        lm->fills.clear();
+        lm->fill_expolygons = to_expolygons(lm->fill_surfaces.surfaces);
+    };
+
     for (LayerRegionPtrs::iterator layerm = m_regions.begin(); layerm != m_regions.end(); ++ layerm) 
-    	if ((*layerm)->slices.empty()) {
+    	if (! (*layerm)->adaptive_merge_patches.empty()) {
+            done[layerm - m_regions.begin()] = true;
+            make_merged_perimeters(*layerm);
+        } else if ((*layerm)->slices.empty()) {
  			(*layerm)->perimeters.clear();
  			(*layerm)->fills.clear();
  			(*layerm)->thin_fills.clear();
@@ -305,7 +355,7 @@ void Layer::make_perimeters()
 	        LayerRegionPtrs layerms;
 	        layerms.push_back(*layerm);
 	        for (LayerRegionPtrs::const_iterator it = layerm + 1; it != m_regions.end(); ++it)
-	            if (! (*it)->slices.empty()) {
+	            if (! (*it)->slices.empty() && (*it)->adaptive_merge_patches.empty()) {
 		            LayerRegion* other_layerm = *it;
 		            const PrintRegion &other_region = other_layerm->region();
                     if (is_perimeter_compatible(this_region, other_region))
