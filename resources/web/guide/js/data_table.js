@@ -45,6 +45,11 @@
 //   onAction(act, r, e)  a click on an element with data-act="..." inside a row
 //   onRowKey(e, r)       a key on the focused row the engine did not use (return true when handled)
 //   onFocusRow(r)        the focused row changed (r may be null)
+//   onDblClick(r, e)     a double-click on a row (not on its checkbox)
+//   pinned(r)            truthy: the row's element is kept while it scrolls out of view (an inline
+//                        edit in it keeps its field, value and focus); setRows() still rebuilds it
+// Keys typed in a text field inside a row (an inline edit) are the field's: the body does not move
+// the focus or call onRowKey for them, and only the row's own checkbox changes its tick.
 //   setRows(list, {keepScroll: true}), repaintRow(r), focusRow(r), focusedRow(), toggleRow(r, on)
 // Every column but the last can be resized by dragging the right edge of its header (double-click
 // an edge: back to the default widths). Until a column is dragged the layout is cfg.cols[].w.
@@ -345,6 +350,7 @@ var DataTable = (function () {
 			el.body.addEventListener('change', onBodyChange);
 			el.body.addEventListener('keydown', onBodyKey);
 			el.body.addEventListener('mouseover', onBodyOver);
+			if (cfg.onDblClick) el.body.addEventListener('dblclick', onBodyDblClick);
 			grid.appendChild(el.body);
 			el.empty = h('div', 'pt-empty', X('none_match'));
 			el.empty.style.display = 'none';
@@ -463,7 +469,10 @@ var DataTable = (function () {
 			var want = {};
 			for (var p = first; p <= last; p++) want[view[p].id] = p;
 			for (var id in rendered) {
-				if (rendered.hasOwnProperty(id) && !want.hasOwnProperty(id)) { rendered[id].remove(); delete rendered[id]; }
+				if (rendered.hasOwnProperty(id) && !want.hasOwnProperty(id)) {
+					if (cfg.pinned && rows[+id] && cfg.pinned(rows[+id])) continue;
+					rendered[id].remove(); delete rendered[id];
+				}
 			}
 			for (var q = first; q <= last; q++) {
 				var r = view[q];
@@ -497,9 +506,19 @@ var DataTable = (function () {
 			setChecked(r, !r.checked);
 			changed();
 		}
+		function onBodyDblClick(e) {
+			if (e.target.tagName === 'INPUT') return;
+			var node = rowOf(e.target);
+			if (node) cfg.onDblClick(rows[+node.dataset.id], e);
+		}
+		function isTextField(t) {
+			return !!t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'));
+		}
 		function onBodyChange(e) {
 			var node = rowOf(e.target);
 			if (!node) return;
+			// Only the row's own select checkbox ticks it (not a box inside a row's inline edit).
+			if (e.target.parentNode !== node.firstChild) return;
 			var r = rows[+node.dataset.id];
 			if (lockOf(r)) { e.target.checked = r.checked; return; }
 			if (FOCUS_MODE) setFocus(r, false);
@@ -534,6 +553,7 @@ var DataTable = (function () {
 			else td.removeAttribute('title');
 		}
 		function onBodyKey(e) {
+			if (isTextField(e.target)) return;
 			var nav = e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End' ||
 				(FOCUS_MODE && (e.key === 'PageDown' || e.key === 'PageUp'));
 			var node = rowOf(e.target);

@@ -8,22 +8,31 @@
 //                     filters, sort, scroll and focused row: rows are identified by key)
 //     row: {key, fav, name, members[], vendor, type, source: System|User, filament_id, version,
 //           printers[], all, nozzles[], nozzle_t, nozzle_lo, nozzle_hi, bed_t, lh, tier, inherits,
-//           mtime, enabled, lock: ''|'user'|'in_use', in_use, star, can_rename, can_delete}
+//           mtime, enabled, lock: ''|'user'|'in_use', in_use, star, can_rename, can_delete,
+//           base, suffix, family[]}   (base + suffix = name: a filament's " @printer" part is the
+//           suffix; family = the user presets renamed with it by default, itself included)
 //   pm_enabled_state  {rows: [{key, enabled, lock}]}   after an Enabled change was applied
 //   pm_stars          {favs: [...]}                     the favourite keys (a star changed anywhere)
 //   pm_escape         {}                                 Esc pressed outside the page
+//   pm_name_check     {id, name, level: ok|warn|invalid, message}   the answer to pm_check_name
+//   pm_rename_result  {id, ok, message, new_key}       then a fresh pm_rows
+//   pm_delete_result  {id, ok, message}                then a fresh pm_rows (when deleted)
 // Page -> slicer (window.wx.postMessage, JSON with command + sequence_id):
 //   pm_ready                   asks for the rows
 //   pm_enabled {changes: [{key, on}]}   the Enabled ticks, 250 ms after the last one (All / Clear all:
 //                              one batch). Everything applies at once; there is no Confirm.
 //   pm_star {key}              toggles a favourite (key = the row's fav)
-//   pm_create, pm_edit {filament_id}    filaments: Create new / Edit printers... (close the dialog)
+//   pm_create, pm_edit {filament_id}    filaments: Create new / Edit printers... (dialogs over this one)
+//   pm_check_name {id, name, scope}     while renaming, 150 ms after the last key (scope: family|one)
+//   pm_rename {id, name, scope}         Enter (or Tab) in the rename field
+//   pm_delete {id}             Delete / the row's delete button (the slicer asks to confirm)
 //   pm_close                   Close, or Esc with nothing open
 //
-// Keys on the focused row: Space = Enabled, F or * = star, arrows / Home / End / PageUp / PageDown
-// move. F2 and Delete (Return and Backspace on macOS) say why they do nothing yet (phase 2: rename,
-// delete). Ctrl+F: the search box. Esc: closes a filter popover, else cancels an edit (phase 2), else
-// closes the dialog.
+// Keys on the focused row: Space = Enabled, F or * = star, F2 = rename, Delete = delete (Return and
+// Backspace / Cmd+Backspace on macOS), arrows / Home / End / PageUp / PageDown move; a double-click
+// renames too. System rows say why they cannot be renamed or deleted. In the rename field: Enter
+// renames, Esc cancels, Tab renames and moves on to the next row's name. Ctrl+F: the search box.
+// Esc: closes a filter popover, else cancels a rename, else closes the dialog.
 var PresetManager = (function () {
 	'use strict';
 
@@ -39,7 +48,14 @@ var PresetManager = (function () {
 	var pending = {};          // key -> wanted Enabled state, not sent yet
 	var timer = null;
 	var statusTimer = null;
-	var editing = null;        // phase 2: the row whose name is being edited
+	var CHECK_MS = 150;
+	var PENCIL = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M11.3 1.6a1.5 1.5 0 0 1 2.1 0l1 1a1.5 1.5 0 0 1 0 2.1L5.8 13.3 2 14l.7-3.8z"/></svg>';
+	var TRASH = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 1h4l.5 1H14v1.5H2V2h3.5zM3 5h10l-.8 9.2a1 1 0 0 1-1 .8H4.8a1 1 0 0 1-1-.8z"/></svg>';
+	// The rename in progress: {key, value, original, scope: 'family'|'one', level: ok|warn|invalid|pending,
+	// message, busy (sent, waiting for the answer), next (Tab: the row to rename after this one)}.
+	var editing = null;
+	var checkTimer = null;
+	var afterRows = null;      // {focus: key, edit: key} once the next pm_rows has arrived
 
 	function send(cmd, extra) {
 		var m = { sequence_id: Math.round(new Date() / 1000), command: cmd };
@@ -69,12 +85,14 @@ var PresetManager = (function () {
 		if (r.printers.length === 1) return r.printers[0];
 		return T('pm_printer_more', '{first} +{n}', { first: r.printers[0], n: r.printers.length - 1 });
 	}
-	function status(text) {
+	// sticky: stays until the next status (a rename field's message), otherwise gone after 4 s.
+	function status(text, sticky) {
 		var s = document.getElementById('PmStatus');
 		if (!s) return;
 		s.textContent = text || '';
 		if (statusTimer) clearTimeout(statusTimer);
-		if (text) statusTimer = setTimeout(function () { s.textContent = ''; }, 4000);
+		statusTimer = null;
+		if (text && !sticky) statusTimer = setTimeout(function () { s.textContent = ''; }, 4000);
 	}
 
 	// ---- columns ----
@@ -108,6 +126,7 @@ var PresetManager = (function () {
 		} };
 	var COL_NAME = { key: 'name', tid: 'pm_name', label: 'Name', w: 'minmax(180px, 3fr)', kind: 'text', filter: 'text',
 		node: function (r) {
+			if (editing && editing.key === r.key) return editorNode(r);
 			var s = h('span', 'pm-name' + (r.in_use ? ' inuse' : ''), r.name);
 			var t = r.name;
 			if (r.members.length > 1 || (r.members.length === 1 && r.members[0] !== r.name)) t += '\n' + r.members.join('\n');
@@ -146,6 +165,25 @@ var PresetManager = (function () {
 				title: r.mtime === null && r.version ? T('pm_bundle_version', 'Vendor bundle {v}', { v: r.version }) : undefined };
 		} };
 
+	// Rename / delete buttons on user rows (the mouse path of F2 / Delete).
+	var COL_ACTIONS = { key: 'actions', tid: 'pm_actions', label: 'Actions', w: '80px', kind: 'none', cls: 'actions',
+		node: function (r) {
+			var box = h('span', 'pm-actions');
+			if (!r.can_rename && !r.can_delete) return box;
+			[['rename', PENCIL, 'pm_rename_tip', 'Rename {name}', r.can_rename], ['delete', TRASH, 'pm_delete_tip', 'Delete {name}', r.can_delete]].forEach(function (a) {
+				if (!a[4]) return;
+				var b = h('button', 'pm-act pm-act-' + a[0]);
+				b.type = 'button';
+				b.dataset.act = a[0];
+				b.tabIndex = -1;
+				b.innerHTML = a[1];
+				b.title = T(a[2], a[3], { name: r.name });
+				b.setAttribute('aria-label', b.title);
+				box.appendChild(b);
+			});
+			return box;
+		} };
+
 	var cols, tx, selects;
 	selects = [{ key: 'printers', tid: 'pm_printer', label: 'Printer', allTid: 'pm_all_printers', all: 'All printers', nTid: 'pm_n_printers', n: '{n} printers' }];
 	if (KIND === 'filament') {
@@ -158,7 +196,7 @@ var PresetManager = (function () {
 			{ key: 'bed_t', tid: 'pm_bed_t', label: 'Bed °C', w: '84px', kind: 'num', filter: 'range', cls: 'num', step: '5',
 				tipTid: 'pm_bed_t_tip', tip: 'Bed temperature for the current plate type', fmt: fmtTemp,
 				cell: function (r) { return { text: fmtTemp(r.bed_t), na: r.bed_t === null }; } },
-			COL_MTIME];
+			COL_MTIME, COL_ACTIONS];
 		tx = {
 			search: ['pm_search_filament', 'Search name, vendor, type or printer'],
 			grid: ['pm_title_filament', 'Filament manager'],
@@ -180,7 +218,7 @@ var PresetManager = (function () {
 				tipTid: 'pm_layer_tip', tip: 'mm', fmt: fmtLayer,
 				cell: function (r) { return { text: fmtLayer(r.lh), na: r.lh === null }; } },
 			textCol('tier', 'pm_tier', 'Quality / parent', 'minmax(140px, 1.2fr)'),
-			COL_SOURCE, COL_MTIME];
+			COL_SOURCE, COL_MTIME, COL_ACTIONS];
 		tx = {
 			search: ['pm_search_process', 'Search name, printer or quality'],
 			grid: ['pm_title_process', 'Process manager'],
@@ -210,14 +248,24 @@ var PresetManager = (function () {
 		rowKey: function (r) { return r.key; },
 		locked: function (r) { return r.lock ? (lockText(r) || true) : false; },
 		onSelectionChange: onTicks,
-		onAction: function (act, r) { if (act === 'star') star(r); },
+		onAction: function (act, r) {
+			if (act === 'star') star(r);
+			else if (act === 'rename') startEdit(r);
+			else if (act === 'delete') requestDelete(r);
+		},
+		onDblClick: function (r, e) {
+			// not on a button (the star, the row buttons) or in the rename field
+			if (e.target && e.target.closest && e.target.closest('[data-act]')) return;
+			startEdit(r);
+		},
+		pinned: function (r) { return !!(editing && editing.key === r.key); },
 		onRowKey: onRowKey,
 		onFocusRow: updateButtons,
 		toolbar: function (bar) {
 			if (KIND !== 'filament') return;
 			var create = h('div', 'SmallBtn', T('pm_create', 'Create new'));
 			create.id = 'PmCreate';
-			create.title = T('pm_create_tip', 'Create a new filament preset (closes this dialog)');
+			create.title = T('pm_create_tip', 'Create a new filament preset');
 			editBtn = h('div', 'SmallBtn', T('pm_edit', 'Edit printers…'));
 			editBtn.id = 'PmEdit';
 			[create, editBtn].forEach(function (b) {
@@ -240,7 +288,7 @@ var PresetManager = (function () {
 		editBtn.classList.toggle('disabled', !ok);
 		editBtn.setAttribute('aria-disabled', ok ? 'false' : 'true');
 		editBtn.style.opacity = ok ? '' : '0.5';
-		editBtn.title = ok ? T('pm_edit_tip', 'Edit the printers of this filament (closes this dialog)') : T('pm_edit_none', 'Select one of your own filaments first');
+		editBtn.title = ok ? T('pm_edit_tip', 'Edit the printers of this filament') : T('pm_edit_none', 'Select one of your own filaments first');
 	}
 	function editFocused() {
 		var r = table.focusedRow();
@@ -301,29 +349,221 @@ var PresetManager = (function () {
 	function onRowKey(e, r) {
 		var t = e.target && e.target.tagName;
 		if ((t === 'BUTTON' || t === 'INPUT') && (e.key === ' ' || e.key === 'Enter')) return false;
+		// macOS: Backspace and Cmd+Backspace delete (Finder).
+		if (IS_MAC && e.key === 'Backspace' && !e.ctrlKey && !e.altKey) { requestDelete(r); return true; }
 		if (e.ctrlKey || e.metaKey || e.altKey) return false;
 		if (e.key === ' ' || e.key === 'Spacebar') {
 			if (!table.toggleRow(r)) status(lockText(r));
 			return true;
 		}
 		if (e.key === 'f' || e.key === 'F' || e.key === '*') { star(r); return true; }
-		if (e.key === 'F2' || (IS_MAC && e.key === 'Enter')) {
-			status(r.source === 'System' ? T('pm_no_rename_system', 'System presets cannot be renamed') : T('pm_no_rename_yet', 'Renaming presets here comes in a later version'));
-			return true;
-		}
-		if (e.key === 'Delete' || (IS_MAC && e.key === 'Backspace')) {
-			status(r.source === 'System' ? T('pm_no_delete_system', 'System presets cannot be deleted') : T('pm_no_delete_yet', 'Deleting presets here comes in a later version'));
-			return true;
-		}
+		// macOS: Return renames (Finder; F2 needs Fn there).
+		if (e.key === 'F2' || (IS_MAC && e.key === 'Enter')) { startEdit(r); return true; }
+		if (e.key === 'Delete') { requestDelete(r); return true; }
 		return false;
 	}
 
-	// Esc: a filter popover first, then an edit (phase 2), then the dialog. Returns what it did.
+	// Esc: a filter popover first, then a rename in progress, then the dialog. Returns what it did.
 	function escape() {
 		if (table.closePopover()) return 'popover';
-		if (editing) { editing = null; return 'edit'; }
+		if (editing) { cancelEdit(); return 'edit'; }
 		close();
 		return 'close';
+	}
+
+	// ---- rename (user presets) ----
+	// The field holds the part before " @" of a filament variant (the printer part stays, grey, after
+	// it); a process name is edited whole. The slicer checks every name (pm_check_name) with the Save
+	// preset dialog's rules; an invalid name keeps Enter from renaming.
+	function rowInView(key, step) {
+		var view = table._state().view;
+		for (var i = 0; i < view.length; i++) {
+			if (view[i].key !== key) continue;
+			var n = view[i + step];
+			return n ? n.key : null;
+		}
+		return null;
+	}
+	function startEdit(r) {
+		if (!r) return;
+		if (!r.can_rename) { status(T('pm_no_rename_system', 'System presets cannot be renamed')); return; }
+		if (editing && editing.key === r.key) { focusEditor(false); return; }
+		if (editing) cancelEdit();
+		var value = r.suffix ? r.base : r.name;
+		editing = { key: r.key, value: value, original: value, scope: 'family', level: 'ok', message: '', busy: false, next: null, focused: true };
+		table.focusRow(r);
+		table.repaintRow(r);
+		focusEditor(true);
+	}
+	function editorInput() { return document.querySelector('.pm-edit-input'); }
+	function focusEditor(select) {
+		var i = editorInput();
+		if (!i) return;
+		i.focus();
+		if (select) i.select();
+	}
+	function editorNode(r) {
+		var box = h('span', 'pm-edit');
+		box.dataset.act = 'edit'; // a click in it is the field's: it does not move the row focus
+		var input = h('input', 'pm-edit-input');
+		input.type = 'text';
+		input.value = editing.value;
+		input.spellcheck = false;
+		input.setAttribute('aria-label', T('pm_rename_field', 'New name for {name}', { name: r.name }));
+		input.classList.toggle('invalid', editing.level === 'invalid');
+		input.classList.toggle('warn', editing.level === 'warn');
+		if (editing.message) input.title = editing.message;
+		input.readOnly = editing.busy;
+		input.addEventListener('input', function () { onEditInput(r, input.value); });
+		input.addEventListener('keydown', function (e) { onEditKey(e, r); });
+		input.addEventListener('focus', function () { if (editing) editing.focused = true; });
+		box.appendChild(input);
+		if (r.suffix) box.appendChild(h('span', 'pm-edit-suffix', r.suffix));
+		if (r.suffix && r.family.length > 1) {
+			var lbl = h('label', 'pm-edit-scope');
+			var cb = h('input');
+			cb.type = 'checkbox';
+			cb.className = 'pm-edit-one';
+			cb.checked = editing.scope === 'one';
+			cb.addEventListener('change', function () {
+				if (!editing) return;
+				editing.scope = cb.checked ? 'one' : 'family';
+				scheduleCheck(r);
+				focusEditor(false);
+			});
+			lbl.appendChild(cb);
+			lbl.appendChild(document.createTextNode(T('pm_only_printer', 'Only this printer')));
+			lbl.title = T('pm_family_tip', 'Renames all {n} printer variants of this filament', { n: r.family.length });
+			box.appendChild(lbl);
+		}
+		// Rebuilt (rows re-sent, a repaint) while the caret was in the field: keep it there.
+		setTimeout(function () {
+			if (editing && editing.key === r.key && editing.focused && input.isConnected && document.activeElement !== input) input.focus();
+		}, 0);
+		return box;
+	}
+	function paintEditor() {
+		var i = editorInput();
+		if (!i || !editing) return;
+		i.classList.toggle('invalid', editing.level === 'invalid');
+		i.classList.toggle('warn', editing.level === 'warn');
+		i.title = editing.message || '';
+		i.readOnly = editing.busy;
+		status(editing.message, true);
+	}
+	function onEditInput(r, value) {
+		if (!editing) return;
+		editing.value = value;
+		if (r.suffix && value.indexOf('@') >= 0) {
+			editing.level = 'invalid';
+			editing.message = T('pm_at_invalid', 'The printer part is kept; type the name without “@”');
+		} else if (!value.length) {
+			editing.level = 'invalid';
+			editing.message = T('pm_rename_empty', 'The name is not allowed to be empty.');
+		} else {
+			editing.level = 'pending';
+			editing.message = '';
+		}
+		paintEditor();
+		if (editing.level === 'pending') scheduleCheck(r);
+	}
+	function scheduleCheck(r) {
+		if (checkTimer) clearTimeout(checkTimer);
+		checkTimer = setTimeout(function () {
+			checkTimer = null;
+			if (!editing || editing.key !== r.key) return;
+			if (!editing.value.length || (r.suffix && editing.value.indexOf('@') >= 0)) return; // invalid here already
+			send('pm_check_name', { id: r.key, name: editing.value, scope: editing.scope });
+		}, CHECK_MS);
+	}
+	function nameCheck(m) {
+		if (!editing || !m || m.id !== editing.key || m.name !== editing.value) return; // a stale answer
+		editing.level = m.level === 'invalid' ? 'invalid' : m.level === 'warn' ? 'warn' : 'ok';
+		editing.message = typeof m.message === 'string' ? m.message : '';
+		paintEditor();
+	}
+	function onEditKey(e, r) {
+		if (e.key === 'Escape') {
+			e.preventDefault();
+			e.stopPropagation();
+			cancelEdit();
+			return;
+		}
+		if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+			e.preventDefault();
+			e.stopPropagation();
+			commitEdit(r, e.key === 'Tab');
+		}
+	}
+	function commitEdit(r, thenNext) {
+		if (!editing || editing.busy) return;
+		if (editing.level === 'invalid') { status(editing.message, true); return; }
+		var nextKey = thenNext ? rowInView(r.key, 1) : null;
+		if (editing.value === editing.original) {
+			cancelEdit();
+			if (nextKey && byKey[nextKey]) { table.focusRow(byKey[nextKey]); startEdit(byKey[nextKey]); }
+			return;
+		}
+		if (checkTimer) { clearTimeout(checkTimer); checkTimer = null; }
+		editing.busy = true;
+		editing.next = nextKey;
+		paintEditor();
+		send('pm_rename', { id: r.key, name: editing.value, scope: editing.scope });
+	}
+	function cancelEdit() {
+		if (!editing) return;
+		var r = byKey[editing.key];
+		editing = null;
+		if (checkTimer) { clearTimeout(checkTimer); checkTimer = null; }
+		status('');
+		if (r) {
+			table.repaintRow(r);
+			table.focusRow(r);
+		}
+	}
+	function renameResult(m) {
+		if (!editing || !m || m.id !== editing.key) return;
+		if (m.ok) {
+			var next = editing.next;
+			editing = null;
+			status(m.message || T('pm_renamed', 'Renamed'));
+			var newKey = typeof m.new_key === 'string' && m.new_key ? m.new_key : m.id;
+			if (newKey === m.id && byKey[m.id]) {
+				// Nothing changed: no rows follow.
+				table.repaintRow(byKey[m.id]);
+				table.focusRow(byKey[m.id]);
+				if (next && byKey[next]) { table.focusRow(byKey[next]); startEdit(byKey[next]); }
+				return;
+			}
+			afterRows = { focus: newKey, edit: next };
+			return;
+		}
+		editing.busy = false;
+		editing.message = typeof m.message === 'string' ? m.message : '';
+		editing.level = editing.message ? 'invalid' : 'ok'; // no message: cancelled in the slicer, keep editing
+		paintEditor();
+		focusEditor(false);
+	}
+
+	// ---- delete (user presets): the slicer asks first, naming what uses the preset ----
+	function requestDelete(r) {
+		if (!r) return;
+		if (!r.can_delete) { status(T('pm_no_delete_system', 'System presets cannot be deleted')); return; }
+		if (editing) cancelEdit();
+		// Afterwards the focus moves to the next row in view (the previous one at the end).
+		afterRows = { focus: rowInView(r.key, 1) || rowInView(r.key, -1), edit: null, deleting: r.key };
+		send('pm_delete', { id: r.key });
+	}
+	function deleteResult(m) {
+		if (!m) return;
+		if (m.ok) {
+			if (afterRows && afterRows.deleting === m.id) afterRows.deleting = null; // the rows that follow move the focus
+			status(T('pm_deleted', 'Deleted'));
+			return;
+		}
+		if (afterRows && afterRows.deleting === m.id) afterRows = null;
+		if (m.message) status(m.message);
+		if (byKey[m.id]) table.focusRow(byKey[m.id]);
 	}
 	function close() {
 		flush();
@@ -350,7 +590,8 @@ var PresetManager = (function () {
 				inherits: typeof o.inherits === 'string' ? o.inherits : '',
 				mtime: (num(o.mtime) !== null && o.mtime > 0) ? o.mtime : null,
 				enabled: !!o.enabled, lock: typeof o.lock === 'string' ? o.lock : '', in_use: !!o.in_use, star: !!o.star,
-				can_rename: !!o.can_rename, can_delete: !!o.can_delete
+				can_rename: !!o.can_rename, can_delete: !!o.can_delete,
+				base: typeof o.base === 'string' ? o.base : o.name, suffix: typeof o.suffix === 'string' ? o.suffix : '', family: strs(o.family)
 			};
 			r.checked = pending.hasOwnProperty(r.key) ? pending[r.key] : r.enabled;
 			r.hay = [r.name, r.vendor, r.type, r.tier, r.printers.join('\u0000'), r.members.join('\u0000')].join('\u0000').toLowerCase();
@@ -372,6 +613,15 @@ var PresetManager = (function () {
 				table.recompute(false);
 			}
 		}
+		// A rename whose row is gone (renamed or deleted elsewhere) ends.
+		if (editing && !byKey[editing.key]) { editing = null; status(''); }
+		// After a rename / delete: the renamed row, or the next one, takes the focus.
+		if (afterRows && !afterRows.deleting) {
+			var after = afterRows;
+			afterRows = null;
+			if (after.focus && byKey[after.focus]) table.focusRow(byKey[after.focus]);
+			if (after.edit && byKey[after.edit]) { table.focusRow(byKey[after.edit]); startEdit(byKey[after.edit]); }
+		}
 		updateButtons();
 	}
 
@@ -379,6 +629,10 @@ var PresetManager = (function () {
 		table.init(root);
 		var note = document.getElementById('PmNote');
 		if (note) note.textContent = T('pm_note', 'Changes are saved at once.');
+		// A click outside the rename field: a later rebuild of the row does not pull the caret back.
+		document.addEventListener('mousedown', function (e) {
+			if (editing && !(e.target && e.target.closest && e.target.closest('.pm-edit'))) editing.focused = false;
+		}, true);
 		var closeBtn = document.getElementById('CloseBtn');
 		if (closeBtn) {
 			closeBtn.textContent = T('pm_close', 'Close');
@@ -394,6 +648,10 @@ var PresetManager = (function () {
 		enabledState: enabledState,
 		stars: stars,
 		escape: escape,
+		nameCheck: nameCheck,
+		renameResult: renameResult,
+		deleteResult: deleteResult,
+		editing: function () { return editing; },
 		flush: flush,
 		table: table,
 		pending: function () { return pending; },
@@ -418,6 +676,9 @@ function HandleStudio(pVal)
 	else if (cmd === 'pm_enabled_state') PresetManager.enabledState(pVal['rows']);
 	else if (cmd === 'pm_stars') PresetManager.stars(pVal['favs']);
 	else if (cmd === 'pm_escape') PresetManager.escape();
+	else if (cmd === 'pm_name_check') PresetManager.nameCheck(pVal);
+	else if (cmd === 'pm_rename_result') PresetManager.renameResult(pVal);
+	else if (cmd === 'pm_delete_result') PresetManager.deleteResult(pVal);
 }
 
 document.addEventListener('keydown', function (e) {

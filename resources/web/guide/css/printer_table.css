@@ -24,6 +24,8 @@
 	--pt-locked-fg: #9A9AA0;
 	--pt-focus-ring: #009688;
 	--pt-focus-bg: #E6F4F2;
+	/* the preset managers' rename field: a name that cannot be used */
+	--pt-error: #D93025;
 }
 
 body.pt-page {

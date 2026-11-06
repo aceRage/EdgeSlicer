@@ -15,11 +15,16 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
 
+#include "CreatePresetsDialog.hpp"
 #include "FavoriteFilamentsUI.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
+#include "MainFrame.hpp"
+#include "MsgDialog.hpp"
+#include "ParamsDialog.hpp"
 #include "Plater.hpp"
+#include "SavePresetDialog.hpp"
 #include "Tab.hpp"
 #include "WebGuideDialog.hpp"
 #include "Widgets/StateColor.hpp"
@@ -281,20 +286,297 @@ void PresetManagerDialog::on_message(wxWebViewEvent &evt)
                 CallAfter([this, changes] { apply_enabled(changes); });
             }
         } else if (cmd == "pm_create") {
+            // Child dialogs open from a CallAfter, never inside the script-message callback.
             if (m_kind == PresetManagerKind::Filament)
-                close_with(Then::CreateFilament);
+                CallAfter([this] { create_filament(); });
         } else if (cmd == "pm_edit") {
             if (m_kind == PresetManagerKind::Filament && j.contains("filament_id") && j["filament_id"].is_string()) {
-                m_edit_filament_id = j["filament_id"].get<std::string>();
-                if (!m_edit_filament_id.empty())
-                    close_with(Then::EditFilament);
+                const std::string filament_id = j["filament_id"].get<std::string>();
+                if (!filament_id.empty())
+                    CallAfter([this, filament_id] { edit_filament(filament_id); });
             }
+        } else if (cmd == "pm_check_name") {
+            const std::string key  = j.value("id", std::string());
+            const std::string name = j.value("name", std::string());
+            const bool        all  = j.value("scope", std::string("family")) != "one";
+            CallAfter([this, key, name, all] { check_name(key, name, all); });
+        } else if (cmd == "pm_rename") {
+            const std::string key  = j.value("id", std::string());
+            const std::string name = j.value("name", std::string());
+            const bool        all  = j.value("scope", std::string("family")) != "one";
+            CallAfter([this, key, name, all] { rename(key, name, all); });
+        } else if (cmd == "pm_delete") {
+            const std::string key = j.value("id", std::string());
+            CallAfter([this, key] { delete_row(key); });
         } else if (cmd == "pm_close") {
             close_with(Then::Nothing);
         }
     } catch (const std::exception &ex) {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": bad message from the preset manager page: " << ex.what();
     }
+}
+
+void PresetManagerDialog::reload_rows()
+{
+    build_model();
+    send_rows();
+}
+
+void PresetManagerDialog::refresh_app_presets()
+{
+    // What the plater does after the filament editors (Plater::priv::on_create_filament / on_modify_filament).
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->update_side_preset_ui();
+    if (wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->update_ui_from_settings();
+    wxGetApp().sidebar().update_all_preset_comboboxes();
+    if (Tab *tab = wxGetApp().get_tab(m_kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT))
+        tab->update_tab_ui();
+    wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
+}
+
+// ---- child dialogs: over the manager, which stays open and lists the result ----
+
+void PresetManagerDialog::create_filament()
+{
+    if (m_busy || m_closing)
+        return;
+    m_busy = true;
+    int res = wxID_CANCEL;
+    {
+        CreateFilamentPresetDialog dlg(this);
+        res = dlg.ShowModal();
+    }
+    if (res == wxID_OK) {
+        refresh_app_presets();
+        CreatePresetSuccessfulDialog success_dlg(this, SuccessType::FILAMENT);
+        success_dlg.ShowModal();
+    }
+    m_busy = false;
+    reload_rows();
+}
+
+void PresetManagerDialog::edit_filament(const std::string &filament_id)
+{
+    if (m_busy || m_closing)
+        return;
+    m_busy = true;
+    Filamentinformation info;
+    info.filament_id = filament_id;
+    int                     res = wxID_CANCEL;
+    std::shared_ptr<Preset> need_edit_preset;
+    {
+        EditFilamentPresetDialog dlg(this, &info);
+        res              = dlg.ShowModal();
+        need_edit_preset = dlg.get_need_edit_preset();
+    }
+    refresh_app_presets();
+    m_busy = false;
+    if (res == wxID_EDIT && need_edit_preset) {
+        // "Edit" on one of its presets: the settings window needs the manager out of the way.
+        m_edit_preset_name = need_edit_preset->name;
+        m_edit_filament_id = filament_id;
+        close_with(Then::EditPresetSettings);
+        return;
+    }
+    reload_rows();
+}
+
+// ---- rename / delete of user presets ----
+
+PresetCollection &PresetManagerDialog::collection()
+{
+    PresetBundle &bundle = *wxGetApp().preset_bundle;
+    return m_kind == PresetManagerKind::Filament ? static_cast<PresetCollection &>(bundle.filaments) : static_cast<PresetCollection &>(bundle.prints);
+}
+
+const PresetManagerRow *PresetManagerDialog::user_row(const std::string &key) const
+{
+    auto it = m_row_index.find(key);
+    if (it == m_row_index.end())
+        return nullptr;
+    const PresetManagerRow &row = m_model.rows[it->second];
+    return row.is_system || row.members.empty() ? nullptr : &row;
+}
+
+PresetRenamePlan PresetManagerDialog::plan_rename(const PresetManagerRow &row, const std::string &typed, bool whole_family)
+{
+    return plan_preset_rename(collection(), row.members.front(), typed,
+                              m_kind == PresetManagerKind::Filament && whole_family ? row.family : std::vector<std::string>());
+}
+
+static const char *pm_level_name(PresetNameCheck::Level level)
+{
+    return level == PresetNameCheck::Level::Invalid ? "invalid" : level == PresetNameCheck::Level::Warning ? "warn" : "ok";
+}
+
+void PresetManagerDialog::check_name(const std::string &key, const std::string &typed, bool whole_family)
+{
+    nlohmann::json r = {{"id", key}, {"name", typed}};
+    if (const PresetManagerRow *row = user_row(key); row == nullptr) {
+        r["level"]   = "invalid";
+        r["message"] = into_u8(_L("System presets cannot be renamed."));
+    } else {
+        const PresetRenamePlan plan = plan_rename(*row, typed, whole_family);
+        r["level"]   = pm_level_name(plan.check.level);
+        r["message"] = into_u8(preset_name_check_message(plan.check, plan.checked_name));
+        r["count"]   = plan.renames.size();
+    }
+    send("pm_name_check", std::move(r));
+}
+
+void PresetManagerDialog::rename(const std::string &key, const std::string &typed, bool whole_family)
+{
+    auto result = [this, &key](bool ok, const wxString &message, const std::string &new_key) {
+        send("pm_rename_result", {{"id", key}, {"ok", ok}, {"message", into_u8(message)}, {"new_key", new_key}});
+    };
+    if (m_busy || m_closing)
+        return result(false, wxString(), std::string());
+    const PresetManagerRow *row = user_row(key);
+    if (row == nullptr)
+        return result(false, _L("System presets cannot be renamed."), std::string());
+    const std::string      row_name = row->members.front();
+    const PresetRenamePlan plan     = plan_rename(*row, typed, whole_family);
+    if (!plan.check.ok())
+        return result(false, preset_name_check_message(plan.check, plan.checked_name), std::string());
+    if (plan.renames.empty())
+        return result(true, wxString(), key);
+
+    PresetCollection  &presets = collection();
+    const Preset::Type type    = m_kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT;
+    // A preset with unsaved edits is saved or discarded on its settings tab first.
+    const std::string edited = presets.get_edited_preset().name;
+    for (const auto &[from, to] : plan.renames) {
+        if (from == edited && presets.current_is_dirty()) {
+            m_busy = true;
+            MessageDialog(this,
+                          wxString::Format(_L("\"%s\" has unsaved changes. Save or discard them in its settings first, then rename it."), from_u8(from)),
+                          _L("Rename preset"), wxOK | wxICON_WARNING)
+                .ShowModal();
+            m_busy = false;
+            return result(false, _L("Save or discard the unsaved changes first."), std::string());
+        }
+    }
+
+    const FavoriteFilamentsUI::Kind fav_kind = pm_fav_kind(m_kind);
+    std::string                     new_key  = key;
+    wxString                        error;
+    for (const auto &[from, to] : plan.renames) {
+        std::string why;
+        if (!presets.rename_user_preset(from, to, &why)) {
+            error = wxString::Format(_L("Could not rename \"%s\": %s"), from_u8(from), from_u8(why));
+            break;
+        }
+        // Filament slots (filaments) / the per-nozzle processes (processes) of the project, the combos.
+        wxGetApp().sidebar().update_presets_from_to(type, from, to);
+        // A user preset's favourite key is its full name.
+        FavoriteFilamentsUI::rename_key(from, to, fav_kind);
+        if (from == row_name)
+            new_key = "u|" + to;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Preset manager (" << pm_kind_name(m_kind) << "): renamed " << plan.renames.size() << " preset(s) from " << row_name
+                            << (error.empty() ? "" : " (stopped by an error)");
+    refresh_app_presets();
+    if (wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->update_project_dirty_from_presets();
+
+    wxString note;
+    if (error.empty() && wxGetApp().app_config->get_bool("sync_bambu_user_presets"))
+        note = _L("Renamed. A preset copied from Bambu Studio can come back under its old name the next time presets are copied.");
+    result(error.empty(), error.empty() ? note : error, new_key);
+    reload_rows();
+}
+
+void PresetManagerDialog::delete_row(const std::string &key)
+{
+    auto result = [this, &key](bool ok, const wxString &message) {
+        send("pm_delete_result", {{"id", key}, {"ok", ok}, {"message", into_u8(message)}});
+    };
+    if (m_busy || m_closing)
+        return result(false, wxString());
+    const PresetManagerRow *row = user_row(key);
+    if (row == nullptr)
+        return result(false, _L("System presets cannot be deleted."));
+    const std::string  name    = row->members.front();
+    PresetCollection  &presets = collection();
+    PresetBundle      &bundle  = *wxGetApp().preset_bundle;
+    const Preset::Type type    = m_kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT;
+    const Preset      *preset  = presets.find_preset(name, false);
+    if (preset == nullptr || !preset->is_user())
+        return result(false, _L("This preset cannot be deleted."));
+
+    // A preset other presets inherit is refused, as the settings tab does.
+    const std::vector<std::string> children = presets.user_presets_inheriting(name);
+    if (!children.empty()) {
+        wxString msg = _L("Presets inherited by other presets cannot be deleted!");
+        msg += "\n";
+        msg += _L_PLURAL("The following presets inherit this preset.", "The following preset inherits this preset.", children.size());
+        for (const std::string &child : children)
+            msg += "\n - " + from_u8(child);
+        m_busy = true;
+        MessageDialog(this, msg, _L("Delete Preset"), wxOK | wxICON_ERROR).ShowModal();
+        m_busy = false;
+        return result(false, wxString());
+    }
+
+    // "Used by...": what moves when it goes.
+    const PresetBundle::PresetUsage usage = bundle.preset_usage(type, name);
+    wxString msg = wxString::Format(_L("Delete the preset \"%s\"?"), from_u8(name));
+    if (usage.in_use()) {
+        wxString used;
+        for (size_t slot : usage.filament_slots)
+            used += "\n - " + wxString::Format(_L("Filament slot %d of this project"), int(slot + 1));
+        if (usage.selected)
+            used += "\n - " + (type == Preset::TYPE_FILAMENT ? _L("The filament shown in the filament settings") : _L("The plate's process"));
+        for (size_t e : usage.nozzles)
+            used += "\n - " + wxString::Format(_L("The process of nozzle %d"), int(e + 1));
+        for (const std::string &id : usage.nozzle_slots)
+            used += "\n - " + wxString::Format(_L("The process of rack slot %s"), from_u8(id));
+        msg += "\n\n" + _L("Used by:") + used + "\n\n" +
+               (type == Preset::TYPE_FILAMENT ? _L("They switch to the next visible filament preset.") :
+                                                _L("The plate switches to the next visible process preset; a nozzle goes back to the plate's process."));
+    }
+    if (type == Preset::TYPE_FILAMENT && presets.get_preset_base(*preset) == preset)
+        msg += "\n\n" + _L("If the preset corresponds to a filament currently in use on your printer, please reset the filament information for that slot.");
+    if (wxGetApp().app_config->get_bool("sync_bambu_user_presets"))
+        msg += "\n\n" + _L("A preset copied from Bambu Studio comes back the next time presets are copied from there.");
+    m_busy           = true;
+    const int answer = MessageDialog(this, msg, _L("Delete Preset"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal();
+    m_busy           = false;
+    if (answer != wxID_YES)
+        return result(false, wxString());
+
+    bool deleted = false;
+    if (usage.selected) {
+        // The selected preset goes through its settings tab, which picks the next visible preset.
+        if (Tab *tab = wxGetApp().get_tab(type))
+            tab->delete_preset(true);
+        deleted = presets.find_preset(name, false) == nullptr;
+    } else {
+        std::string next_selected = presets.get_selected_preset_name();
+        deleted = delete_user_preset_by_name(type, name, next_selected);
+    }
+    if (!deleted)
+        return result(false, _L("The preset was not deleted."));
+
+    const std::string next = presets.get_selected_preset_name();
+    if (type == Preset::TYPE_FILAMENT) {
+        // EditFilamentPresetDialog's repair: a slot naming a preset that is gone takes the selected one.
+        for (std::string &slot : bundle.filament_presets)
+            if (presets.find_preset(slot, false) == nullptr)
+                slot = next;
+        wxGetApp().sidebar().update_presets_from_to(type, name, next);
+    } else {
+        // The per-nozzle choices that named it: back to the plate's process.
+        wxGetApp().sidebar().update_presets_from_to(type, name, std::string());
+    }
+    FavoriteFilamentsUI::remove_key(name, pm_fav_kind(m_kind));
+    BOOST_LOG_TRIVIAL(info) << "Preset manager (" << pm_kind_name(m_kind) << "): deleted a user preset" << (usage.in_use() ? " that was in use" : "");
+    refresh_app_presets();
+    if (wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->update_project_dirty_from_presets();
+    result(true, wxString());
+    reload_rows();
 }
 
 }} // namespace Slic3r::GUI

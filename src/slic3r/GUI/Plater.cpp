@@ -4626,6 +4626,21 @@ void Sidebar::update_presets_from_to(Slic3r::Preset::Type preset_type, std::stri
             p->combos_filament[i]->update();
         break;
     }
+    case Preset::TYPE_PRINT:
+    {
+        // A process preset renamed (the preset managers): the plate's process follows in the collection
+        // itself (PresetCollection::rename_user_preset); the per-nozzle choices name it here. An empty
+        // `to` (deleted) clears them: that nozzle falls back to the plate's process.
+        if (preset_bundle.repoint_preset_references(Preset::TYPE_PRINT, from, to)) {
+            // As choosing a nozzle's process on the Process tab does (Tab::on_nozzle_process_chosen).
+            DynamicPrintConfig full = preset_bundle.full_config();
+            if (wxGetApp().mainframe)
+                wxGetApp().mainframe->on_config_changed(&full);
+            wxGetApp().plater()->update_project_dirty_from_presets();
+        }
+        update_presets(Preset::TYPE_PRINT);
+        break;
+    }
 
     default: break;
     }

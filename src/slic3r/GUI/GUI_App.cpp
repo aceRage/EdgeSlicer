@@ -9492,14 +9492,14 @@ bool GUI_App::run_preset_manager(PresetManagerKind kind)
         app_config->has_section(AppConfig::SECTION_FILAMENTS) ? app_config->get_section(AppConfig::SECTION_FILAMENTS) : std::map<std::string, std::string>();
 
     PresetManagerDialog::Then then = PresetManagerDialog::Then::Nothing;
-    std::string               edit_filament_id;
+    std::string               edit_preset_name;
     {
         PresetManagerDialog dlg(mainframe, kind);
         if (!dlg.ok())
             return false;
         dlg.ShowModal();
         then             = dlg.then();
-        edit_filament_id = dlg.edit_filament_id();
+        edit_preset_name = dlg.edit_preset_name();
     }
 
     bool reloaded = false;
@@ -9529,12 +9529,19 @@ bool GUI_App::run_preset_manager(PresetManagerKind kind)
         app_config->save();
     }
 
-    if (then == PresetManagerDialog::Then::CreateFilament) {
-        wxQueueEvent(plater(), new SimpleEvent(EVT_CREATE_FILAMENT));
-    } else if (then == PresetManagerDialog::Then::EditFilament) {
-        Filamentinformation *filament_info = new Filamentinformation();
-        filament_info->filament_id         = edit_filament_id;
-        wxQueueEvent(plater(), new SimpleEvent(EVT_MODIFY_FILAMENT, filament_info));
+    // "Create new" and "Edit printers..." ran over the manager. "Edit" on one of a filament's presets
+    // (Edit printers...) closed it to open that preset's settings, as Plater::priv::on_modify_filament
+    // does; the settings window goes back to Edit printers... when it closes (set_editing_filament_id).
+    if (then == PresetManagerDialog::Then::EditPresetSettings && !edit_preset_name.empty()) {
+        if (Tab *tab = get_tab(Preset::Type::TYPE_FILAMENT)) {
+            params_dialog()->Popup();
+            tab->restore_last_select_item();
+            tab->set_just_edit(true);
+            tab->select_preset(edit_preset_name);
+            const Preset *edited = preset_bundle->filaments.find_preset(edit_preset_name, false);
+            if (edited != nullptr && !edited->is_compatible)
+                tab->select_preset(edit_preset_name);
+        }
     }
     return reloaded;
 }

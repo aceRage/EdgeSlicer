@@ -109,4 +109,5 @@ input[type=checkbox]:checked{
 	--pt-locked-fg: #7C7C83;
 	--pt-focus-ring: #26A69A;
 	--pt-focus-bg: #2F4744;
+	--pt-error: #F28B82;
 }

@@ -404,7 +404,9 @@ public:
 	                        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep);
 	//void		save_preset(std::string name = std::string(), bool detach = false);
 
-	void		delete_preset();
+	// confirmed: the caller asked the user already (the preset managers' "Used by..." prompt); presets
+	// other presets inherit are still refused.
+	void		delete_preset(bool confirmed = false);
 	void		toggle_show_hide_incompatible();
 	void		update_show_hide_incompatible_button();
 	void		update_ui_from_settings();
@@ -937,6 +939,13 @@ public:
 	void		clear_pages() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptSLA; }
 };
+
+// Deletes a user preset that is not the selected one of its collection (the selected one goes through
+// Tab::delete_preset): cloud sync flag, discards edits when it was the edited one, removes its files.
+// When it is the selected preset, selected_preset_name becomes the next visible preset for the caller
+// to select. Filament and process presets (moved out of CreatePresetsDialog.cpp, where the filament
+// editor uses it). Returns false when it was not deleted.
+bool delete_user_preset_by_name(Preset::Type type, std::string delete_preset_name, std::string &selected_preset_name);
 
 } // GUI
 } // Slic3r
