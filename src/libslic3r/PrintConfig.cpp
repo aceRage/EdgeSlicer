@@ -8895,6 +8895,37 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.1));
 
+    // Bambu Studio 2.9.1 (PrintConfig.cpp:6489-6516). Defaults keep what this fork printed before:
+    // Bambu's speed default is 20 mm/s, ours 0 = the ironing speed.
+    def           = this->add("support_ironing_inset", coFloat);
+    def->label    = L("Support ironing inset");
+    def->category = L("Support");
+    def->tooltip  = L("The distance to keep the support ironing lines from the edges of the ironed interface. 0 means no inset.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->max      = 100;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def           = this->add("support_ironing_speed", coFloat);
+    def->label    = L("Support ironing speed");
+    def->category = L("Support");
+    def->tooltip  = L("Print speed of the support ironing lines. 0 means the ironing speed.");
+    def->sidetext = L("mm/s");
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def           = this->add("support_ironing_direction", coFloat);
+    def->label    = L("Support ironing direction");
+    def->category = L("Support");
+    def->tooltip  = L("Angle of the support ironing lines relative to the support interface lines.");
+    def->sidetext = u8"°";	// degrees, don't need translation
+    def->min      = 0;
+    def->max      = 360;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     // Ultra (over-support surfaces). Category "Support" on purpose: that is what puts the three
     // keys on the process tab's Support page AND makes them join support_set_keys(), which is
     // derived from "every PrintObjectConfig key whose category is Support".
@@ -9372,6 +9403,44 @@ void PrintConfigDef::init_fff_params()
     def->min = 10;
     def->set_default_value(new ConfigOptionFloat(90.));
 
+    // Bambu Studio 2.9.1 prime tower options (PrintConfig.cpp:7119-7160) that the Type 1 tower
+    // (Bambu Lab printers) honours here. All default to 0 = the behaviour before they existed.
+    def           = this->add("prime_tower_acceleration", coFloat);
+    def->label    = L("Prime tower acceleration");
+    def->tooltip  = L("The acceleration used for prime tower extrusions, with travels inside the tower at the travel "
+                      "acceleration. Does not affect the first layer. 0 means the tower sets no acceleration of its own. "
+                      "Bambu Lab printers (Type 1 tower) only.");
+    def->sidetext = u8"mm/s²";	// milimeters per second per second, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_line_width", coFloat);
+    def->label    = L("Prime tower line width");
+    def->tooltip  = L("Line width of the prime tower walls, purge lines and brim. 0 means 1.25 times the nozzle diameter. "
+                      "Bambu Lab printers (Type 1 tower) only.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->max      = 5;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_wipe_speed", coFloat);
+    def->label    = L("Tool change wipe speed");
+    def->tooltip  = L("Speed of the wipe before a tool change, on the way to the prime tower. 0 means the normal wipe speed.");
+    def->sidetext = "mm/s";	// milimeters per second, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def           = this->add("prime_tower_wipe_distance", coFloat);
+    def->label    = L("Tool change wipe distance");
+    def->tooltip  = L("Length of the wipe before a tool change. 0 means the filament's wipe distance.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min      = 0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     def = this->add("wipe_tower_wall_type", coEnum);
     def->label = L("Wall type");
     def->tooltip = L("Wipe tower outer wall type.\n"
@@ -9639,6 +9708,126 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
+
+    // Bambu Studio 2.9.1 (PrintConfig.cpp:6923-7012): coefficient-based compensation of circular
+    // holes and contours. Separate from the fixed X-Y hole / contour compensation above and from
+    // the polyhole conversion below; the per-filament coefficients live with the filament.
+    def = this->add("enable_circle_compensation", coBool);
+    def->label = L("Auto circle contour-hole compensation");
+    def->category = L("Quality");
+    def->tooltip = L("Bambu Studio's automatic size compensation for circular holes and circular contours. Each circle "
+                     "is offset by an amount computed from its diameter and the wall filament's compensation coefficients, "
+                     "and circles below the filament's diameter limit (50 mm by default) print their walls at the filament's "
+                     "compensation speed. This is separate from the fixed X-Y hole and contour compensation, which are "
+                     "switched off while this is on, and from polyhole conversion. Bambu Lab ships coefficients for PLA Basic, "
+                     "PLA CF, PET CF, PETG CF and PETG HF; other filaments use the defaults.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("circle_compensation_manual_offset", coFloat);
+    def->label = L("Circle compensation offset");
+    def->category = L("Quality");
+    def->tooltip = L("Extra offset added to the auto circle compensation, half of it on each side of the circle wall: "
+                     "positive values make compensated holes larger and contours smaller (a looser fit), "
+                     "negative values the opposite. The same arithmetic as Bambu Studio, so its projects print the same sizes.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("apply_scarf_seam_on_circles", coBool);
+    def->label = L("Scarf seam on compensated circles");
+    def->category = L("Quality");
+    def->tooltip = L("Print the walls of circles compensated by the auto circle compensation with a scarf seam, "
+                     "for better dimensional accuracy.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    // Per filament. Offset of a circle of diameter d with the compensation speed v (mm, mm/s):
+    // contour: counter_coef_1 * v + counter_coef_2 * d + counter_coef_3, clamped to the contour limits,
+    // positive grows the contour; hole: hole_coef_1 * v + hole_coef_2 * d + hole_coef_3, clamped to the
+    // hole limits, positive grows the hole (Bambu: "the printed hole shrinks by this much").
+    def = this->add("circle_compensation_speed", coFloats);
+    def->label = L("Circle compensation speed");
+    def->tooltip = L("Wall speed of circles compensated by the auto circle compensation; the compensation "
+                     "coefficients were measured at this speed.");
+    def->sidetext = L("mm/s");
+    def->min = 0;
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{200});
+
+    def = this->add("counter_coef_1", coFloats);
+    def->label = L("Contour coefficient 1");
+    def->tooltip = L("Auto circle compensation: contour offset per mm/s of the compensation speed.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0});
+
+    def = this->add("counter_coef_2", coFloats);
+    def->label = L("Contour coefficient 2");
+    def->tooltip = L("Auto circle compensation: contour offset per mm of circle diameter.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0.025});
+
+    def = this->add("counter_coef_3", coFloats);
+    def->label = L("Contour coefficient 3");
+    def->tooltip = L("Auto circle compensation: constant contour offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{-0.11});
+
+    def = this->add("hole_coef_1", coFloats);
+    def->label = L("Hole coefficient 1");
+    def->tooltip = L("Auto circle compensation: hole offset per mm/s of the compensation speed.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0});
+
+    def = this->add("hole_coef_2", coFloats);
+    def->label = L("Hole coefficient 2");
+    def->tooltip = L("Auto circle compensation: hole offset per mm of circle diameter.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{-0.025});
+
+    def = this->add("hole_coef_3", coFloats);
+    def->label = L("Hole coefficient 3");
+    def->tooltip = L("Auto circle compensation: constant hole offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0.28});
+
+    def = this->add("counter_limit_min", coFloats);
+    def->label = L("Contour limit min");
+    def->tooltip = L("Auto circle compensation: smallest contour offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{-0.04});
+
+    def = this->add("counter_limit_max", coFloats);
+    def->label = L("Contour limit max");
+    def->tooltip = L("Auto circle compensation: largest contour offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0.05});
+
+    def = this->add("hole_limit_min", coFloats);
+    def->label = L("Hole limit min");
+    def->tooltip = L("Auto circle compensation: smallest hole offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0.08});
+
+    def = this->add("hole_limit_max", coFloats);
+    def->label = L("Hole limit max");
+    def->tooltip = L("Auto circle compensation: largest hole offset.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{0.25});
+
+    def = this->add("diameter_limit", coFloats);
+    def->label = L("Diameter limit");
+    def->tooltip = L("Auto circle compensation: circles at least this large are still offset, but their walls keep "
+                     "the normal speed and seam.");
+    def->sidetext = "mm";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats{50});
 
     def = this->add("hole_to_polyhole", coBool);
     def->label = L("Convert holes to polyholes");

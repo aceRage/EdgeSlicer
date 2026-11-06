@@ -204,6 +204,70 @@ void LayerRegion::slices_to_fill_surfaces_clipped()
     }
 }
 
+// Bambu Studio 2.9.1 (LayerRegion.cpp:17-125): auto circle contour-hole compensation.
+// A contour or hole counts as a circle when all its vertices lie within 0.5 mm of the same distance from
+// its centroid and the variance of those distances is small. Its offset is a linear model of the
+// compensation speed and the circle diameter, clamped to the filament's limits; the manual offset takes
+// another half of its value off. Circles below the diameter limit are flagged so their walls print at
+// the compensation speed (PerimeterGenerator, GCode::extrude_loop).
+void LayerRegion::auto_circle_compensation(SurfaceCollection &slices, const PrintConfig &print_config, float manual_offset)
+{
+    static const double max_deviation = scale_(0.5);
+    static const double max_variance  = 5 * scale_(0.01) * scale_(0.01);
+
+    // Filaments are 1 based. Bambu reads wall_filament; ours may be 0 for "the object's filament".
+    int wall_filament = this->region().config().wall_filament.value;
+    if (wall_filament <= 0)
+        wall_filament = int(this->extruder(frExternalPerimeter));
+    const size_t idx = size_t(std::max(0, wall_filament - 1));
+
+    const double limited_speed           = print_config.circle_compensation_speed.get_at(idx);
+    const double counter_speed_coef      = print_config.counter_coef_1.get_at(idx);
+    const double counter_diameter_coef   = print_config.counter_coef_2.get_at(idx);
+    const double counter_compensate_coef = scale_(print_config.counter_coef_3.get_at(idx));
+    const double hole_speed_coef         = print_config.hole_coef_1.get_at(idx);
+    const double hole_diameter_coef      = print_config.hole_coef_2.get_at(idx);
+    const double hole_compensate_coef    = scale_(print_config.hole_coef_3.get_at(idx));
+    const double counter_limit_min_value = scale_(print_config.counter_limit_min.get_at(idx));
+    const double counter_limit_max_value = scale_(print_config.counter_limit_max.get_at(idx));
+    const double hole_limit_min_value    = scale_(print_config.hole_limit_min.get_at(idx));
+    const double hole_limit_max_value    = scale_(print_config.hole_limit_max.get_at(idx));
+    const double diameter_limit_value    = scale_(print_config.diameter_limit.get_at(idx));
+
+    for (Surface &surface : slices.surfaces) {
+        Point  center;
+        double diameter = 0;
+        if (surface.expolygon.contour.is_approx_circle(max_deviation, max_variance, center, diameter)) {
+            double offset_value = scale_(counter_speed_coef * limited_speed) + counter_diameter_coef * diameter + counter_compensate_coef;
+            offset_value        = std::clamp(offset_value, std::min(counter_limit_min_value, counter_limit_max_value), counter_limit_max_value);
+            offset_value -= manual_offset / 2;
+            Polygons offseted_polys = offset(surface.expolygon.contour, float(offset_value));
+            if (offseted_polys.size() == 1) {
+                surface.expolygon.contour = offseted_polys.front();
+                if (diameter < diameter_limit_value)
+                    surface.counter_circle_compensation = true;
+            }
+        }
+        for (size_t i = 0; i < surface.expolygon.holes.size(); ++i) {
+            Polygon &hole = surface.expolygon.holes[i];
+            if (hole.is_approx_circle(max_deviation, max_variance, center, diameter)) {
+                double offset_value = scale_(hole_speed_coef * limited_speed) + hole_diameter_coef * diameter + hole_compensate_coef;
+                offset_value        = std::clamp(offset_value, std::min(hole_limit_min_value, hole_limit_max_value), hole_limit_max_value);
+                // A positive value is how much the printed hole shrinks, so the hole is opened up by it
+                // (offset() of a clockwise hole grows it for a negative delta).
+                offset_value = -offset_value;
+                offset_value -= manual_offset / 2;
+                Polygons offseted_polys = offset(hole, float(offset_value));
+                if (offseted_polys.size() == 1) {
+                    hole = offseted_polys.front();
+                    if (diameter < diameter_limit_value)
+                        surface.holes_circle_compensation.push_back(int(i));
+                }
+            }
+        }
+    }
+}
+
 void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap)
 {
     this->perimeters.clear();

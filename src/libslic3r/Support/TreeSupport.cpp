@@ -1876,9 +1876,14 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                         f->layer_id        = ts_layer->id();
                         f->z               = ts_layer->print_z;
                         f->overlap         = 0;
-                        f->angle           = Geometry::deg2rad(object_config.support_angle.value + 90.);
+                        f->angle           = Geometry::deg2rad(object_config.support_angle.value + 90.) + par.ironing_direction;
                         f->spacing         = par.ironing_spacing;
                         f->link_max_length = (coord_t) scale_(3. * f->spacing);
+                        // Bambu Studio 2.9.1 support_ironing_inset (SupportCommon.cpp:2848-2849).
+                        if (par.ironing_inset > EPSILON)
+                            pieces = union_ex(offset(pieces, -float(scale_(par.ironing_inset))));
+                        if (pieces.empty())
+                            return;
                         FillParams iron_params;
                         iron_params.density     = 1.f;
                         iron_params.dont_adjust = true;
