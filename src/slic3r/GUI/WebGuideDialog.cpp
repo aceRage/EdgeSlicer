@@ -251,6 +251,8 @@ wxString GuideFrame::SetStartPage(GuidePage startpage, bool load)
         else
             TargetUrl = guide_url + "?target=21";
     } else if (startpage == BBL_FILAMENT_ONLY) {
+        // Not reached from the app any more: "Add/Remove filaments" opens the Filament manager
+        // (PresetManagerDialog) and guide/23 is gone. Kept for WebPresetDialog's copy of the enum.
         SetTitle("");
         TargetUrl = guide_url + "?target=23";
     } else if (startpage == BBL_MODELS_ONLY) {
@@ -945,33 +947,49 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
     }
 
     //update the app_config
-    app_config->set_section(AppConfig::SECTION_FILAMENTS, supplemented_filaments);
     app_config->set_vendors(m_appconfig_new);
+    // The filament half (shared with the Filament manager): [filaments], the reload, the active filament.
+    apply_enabled_filaments(*app_config, *preset_bundle, supplemented_filaments,
+                            check_unsaved_preset_changes ? FilamentsReload::Full : FilamentsReload::None,
+                            {preferred_model, preferred_variant, first_added_filament, std::string()});
 
-    if (check_unsaved_preset_changes)
-        preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::Enable,
-                                    {preferred_model, preferred_variant, first_added_filament, std::string()});
+    return true;
+}
+
+void apply_enabled_filaments(AppConfig &app_config, PresetBundle &bundle, const std::map<std::string, std::string> &enabled,
+                             FilamentsReload reload, const PresetBundle::PresetPreferences &preferences, bool keep_shown_active)
+{
+    app_config.set_section(AppConfig::SECTION_FILAMENTS, enabled);
+
+    if (reload == FilamentsReload::Full)
+        bundle.load_presets(app_config, ForwardCompatibilitySubstitutionRule::Enable, preferences);
+    else if (reload == FilamentsReload::Visibility)
+        bundle.refresh_enabled_presets(app_config);
 
     // If the active filament is not in the wizard-selected filaments, switch to the first
     // compatible wizard-selected filament. This handles the first-run case where load_presets
     // falls back to "Generic PLA" even though the user selected a different filament.
-    bool active_filament_selected = supplemented_filaments.empty()
-        || supplemented_filaments.count(preset_bundle->filament_presets.front()) > 0;
+    bool active_filament_selected = enabled.empty() || bundle.filament_presets.empty()
+        || enabled.count(bundle.filament_presets.front()) > 0;
+    // The Filament manager keeps an active filament that is still shown (a user preset is always shown).
+    if (!active_filament_selected && keep_shown_active) {
+        const Preset *active = bundle.filaments.find_preset(bundle.filament_presets.front());
+        if (active != nullptr && active->is_visible)
+            active_filament_selected = true;
+    }
     if (!active_filament_selected) {
-        for (const auto& [filament_name, _] : supplemented_filaments) {
-            const Preset* preset = preset_bundle->filaments.find_preset(filament_name);
+        for (const auto& [filament_name, _] : enabled) {
+            const Preset* preset = bundle.filaments.find_preset(filament_name);
             if (preset && preset->is_visible && preset->is_compatible) {
-                preset_bundle->filaments.select_preset_by_name(filament_name, true);
-                preset_bundle->filament_presets.front() = preset_bundle->filaments.get_selected_preset_name();
+                bundle.filaments.select_preset_by_name(filament_name, true);
+                bundle.filament_presets.front() = bundle.filaments.get_selected_preset_name();
                 break;
             }
         }
     }
 
     // Update the selections from the compatibilty.
-    preset_bundle->export_selections(*app_config);
-
-    return true;
+    bundle.export_selections(app_config);
 }
 
 bool GuideFrame::run()

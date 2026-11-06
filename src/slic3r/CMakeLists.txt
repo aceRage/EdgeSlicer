@@ -1171,6 +1171,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LayerlingBrowserGtk.cpp
     GUI/LayerlingServer.cpp
     GUI/LayerlingServer.hpp
+    GUI/PresetManagerDialog.cpp
+    GUI/PresetManagerDialog.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)

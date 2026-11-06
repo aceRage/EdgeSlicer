@@ -3371,7 +3371,7 @@ Sidebar::Sidebar(Plater *parent)
     //bSizer39->Add(FromDIP(10), 0, 0, 0, 0 );
 
     ScalableButton* set_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "settings");
-    set_btn->SetToolTip(_L("Set filaments to use"));
+    set_btn->SetToolTip(_L("Manage filament presets"));
     set_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
         p->editing_filament = -1;
         // wxGetApp().params_dialog()->Popup();
@@ -3477,7 +3477,7 @@ Sidebar::Sidebar(Plater *parent)
     // wide "Color Mixing Match" button crowds it out; users look for it here, in
     // the row that owns the filament slots, so it is repeated on this row too.
     ScalableButton* add_type_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "settings");
-    add_type_btn->SetToolTip(_L("Set filaments to use"));
+    add_type_btn->SetToolTip(_L("Manage filament presets"));
     add_type_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
         p->editing_filament = -1;
         wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_FILAMENTS);

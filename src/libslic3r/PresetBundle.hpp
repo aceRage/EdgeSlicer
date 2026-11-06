@@ -616,6 +616,14 @@ public:
     // currently defined in the vendor profile. Called from load_installed_printers; exposed for rare direct use.
     void                        install_missing_variants_for_enabled_models(AppConfig &config);
 
+    // Set the is_visible flag of the system process presets from the app config: hidden when listed in
+    // AppConfig::SECTION_HIDDEN_PROCESSES (the Process manager's "Enabled" column), shown otherwise.
+    void                        load_installed_prints(const AppConfig &config);
+    // The preset managers apply an "Enabled" change at once: the filament and process visibility is read
+    // again from the app config ([filaments], the hidden process presets) without reloading anything from
+    // disk, so unsaved edits stay. Selections are not changed.
+    void                        refresh_enabled_presets(AppConfig &config);
+
     const std::string&          get_preset_name_by_alias(const Preset::Type& preset_type, const std::string& alias) const;
 
     const int                   get_required_hrc_by_filament_type(const std::string& filament_type) const;
