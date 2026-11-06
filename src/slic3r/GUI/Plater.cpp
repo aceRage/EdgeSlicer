@@ -4870,6 +4870,13 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
             tool_btn->PopupMenu(&menu);
             return;
         }
+        // A single extruder with a nozzle rack (H3C): Auto / size / slot.
+        if (bundle != nullptr && filament_single_rack_supported()) {
+            wxMenu menu;
+            append_filament_rack_menu(&menu, size_t(filament_idx));
+            tool_btn->PopupMenu(&menu);
+            return;
+        }
         if (bundle == nullptr || !bundle->filament_nozzle_assignment_supported())
             return;
         const std::vector<size_t> tools = bundle->filament_nozzles();
@@ -4903,6 +4910,56 @@ bool Sidebar::filament_sides_supported() const
     const DynamicPrintConfig &printer = bundle->printers.get_edited_preset().config;
     const auto               *nozzles = printer.option<ConfigOptionFloats>("nozzle_diameter");
     return nozzles != nullptr && nozzles->values.size() == 2 && is_bambu_grouping_machine(printer, 2);
+}
+
+bool Sidebar::filament_single_rack_supported() const
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || bundle->filament_nozzle_assignment_supported())
+        return false;
+    const DynamicPrintConfig sized   = bundle->printer_config_with_project_sizes();
+    const auto              *nozzles = sized.option<ConfigOptionFloats>("nozzle_diameter");
+    // One extruder whose rack holds two or more nozzles. The H2D / H2C / X2D (two extruders) keep their Left / Right badge.
+    return nozzles != nullptr && nozzles->values.size() == 1 && rack_slot_count(sized, 0) >= 2;
+}
+
+void Sidebar::append_filament_rack_menu(wxMenu *menu, size_t filament)
+{
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !filament_single_rack_supported())
+        return;
+    const DynamicPrintConfig sized = bundle->printer_config_with_project_sizes();
+    const auto               racks = extruder_rack_nozzles(sized);
+    if (racks.empty())
+        return;
+    const int    slot   = bundle->filament_rack_slot_choice(filament);
+    const double pinned = filament_rack_pin(bundle->project_config, unsigned(filament + 1));
+    const auto   add    = [menu](const wxString &label, bool checked, std::function<void()> action) {
+        const int id = wxWindow::NewControlId();
+        menu->AppendCheckItem(id, label);
+        menu->Check(id, checked);
+        menu->Bind(wxEVT_MENU, [action](wxCommandEvent &) { wxGetApp().CallAfter(action); }, id);
+    };
+    add(_L("Auto"), slot <= 0 && !(pinned > 0.), [this, filament]() {
+        set_filament_rack_pin(filament, 0.);
+        set_filament_rack_slot(filament, 0);
+        update_filament_tool_buttons();
+    });
+    const std::vector<double> sizes = filament_rack_pin_choices(bundle->full_config(), unsigned(filament + 1));
+    for (double d : sizes)
+        add(from_u8(format_nozzle_diameter_word(d)) + " mm", slot <= 0 && same_nozzle_diameter(pinned, d), [this, filament, d]() {
+            set_filament_rack_pin(filament, d); // the size (clears a slot pin)
+            update_filament_tool_buttons();
+        });
+    const std::vector<RackNozzle> &rack = racks.front();
+    for (size_t k = 1; k <= rack.size(); ++k) {
+        const wxString label = wxString::Format(_L("Slot %d"), int(k)) + "  " + from_u8(format_nozzle_diameter_word(rack[k - 1].diameter)) +
+                               " mm  " + from_u8(nozzle_flow_short(rack[k - 1].volume_type));
+        add(label, slot == int(k), [this, filament, k]() {
+            set_filament_rack_slot(filament, int(k));
+            update_filament_tool_buttons();
+        });
+    }
 }
 
 int Sidebar::filament_side(size_t filament) const
@@ -5100,6 +5157,7 @@ void Sidebar::update_filament_tool_buttons()
     // Toolchangers that take an assignment (U1 class, no AMS); Bambu's grouping machines route filaments themselves.
     const bool                supported = bundle->filament_nozzle_assignment_supported();
     const bool                sides     = !supported && filament_sides_supported(); // P9: H2D / H2C / X2D: L / R badge
+    const bool                rack_only = !supported && !sides && filament_single_rack_supported(); // H3C: Auto / slot badge
     const std::vector<size_t> tools     = supported ? bundle->filament_nozzles() : std::vector<size_t>();
     const std::vector<double> sizes     = bundle->effective_nozzle_diameters();
     bool                      changed   = false;
@@ -5120,6 +5178,22 @@ void Sidebar::update_filament_tool_buttons()
                 btn->SetLabel(label);
             btn->SetToolTip(wxString::Format(_L("Filament %d prints on: %s"), int(f + 1),
                                              size_t(current) < choices.size() ? choices[size_t(current)].label : _L("Auto")));
+            if (!btn->IsShown()) {
+                btn->Show(true);
+                changed = true;
+            }
+            continue;
+        }
+        if (rack_only && f < bundle->filament_presets.size()) {
+            const int    slot  = bundle->filament_rack_slot_choice(f);
+            const double size  = filament_rack_pin(bundle->project_config, unsigned(f + 1));
+            wxString     label = slot > 0 ? wxString::Format("S%d", slot) : size > 0. ? from_u8(format_nozzle_diameter_word(size)) : wxString("A");
+            wxString     what  = slot > 0 ? wxString::Format(_L("rack slot %d"), slot) :
+                                 size > 0. ? wxString::Format(_L("a %s mm rack nozzle"), from_u8(format_nozzle_diameter_word(size))) : _L("Auto");
+            label += wxString::FromUTF8(" \xE2\x96\xBE"); // a small caret: the badge opens a list
+            if (btn->GetLabel() != label)
+                btn->SetLabel(label);
+            btn->SetToolTip(wxString::Format(_L("Filament %d prints on: %s"), int(f + 1), what));
             if (!btn->IsShown()) {
                 btn->Show(true);
                 changed = true;
