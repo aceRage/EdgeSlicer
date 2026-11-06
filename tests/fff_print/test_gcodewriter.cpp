@@ -1148,48 +1148,59 @@ DynamicPrintConfig wipe_tower_lift_config()
         {"enable_arc_fitting",         "0"},
         {"retract_lift_below",         "0,0"},
         {"retract_when_changing_layer", "1,1"},
-        // Type1 only writes "Travel to a Wipe Tower" from append_tcr when
-        // is_finish_first. Sparse finish layers need this off.
-        {"wipe_tower_no_sparse_layers", "0"},
-        // Type2 skips the travel unless ramming, SEMM, force_travel, or this.
         {"tool_change_on_wipe_tower",  "1"},
         {"single_extruder_multi_material_priming", "0"},
         {"change_filament_gcode",      ""},
     });
     // Export copies print.config().gcode_comments into GCodeWriter::full_gcode_comment.
-    // The travel comment "Travel to a Wipe Tower" is omitted unless this is on (#881).
+    // Type2's "Travel to a Wipe Tower" is omitted unless this is on (#881).
     config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     return config;
 }
 
-size_t count_substr(const std::string &s, const std::string &needle)
+bool is_xy_travel_line(const std::string &line)
 {
-    size_t n = 0;
-    for (size_t pos = s.find(needle); pos != std::string::npos; pos = s.find(needle, pos + needle.size()))
-        ++n;
-    return n;
+    if (line.compare(0, 2, "G0") != 0 && line.compare(0, 2, "G1") != 0)
+        return false;
+    if (line.find('E') != std::string::npos)
+        return false;
+    return line.find('X') != std::string::npos || line.find('Y') != std::string::npos;
 }
 
-// On failure, show what the slice actually wrote around the tower instead of a bare npos.
-void info_wipe_tower_slice(const Print &print, const std::string &gcode)
+// Type1 never writes "Travel to a Wipe Tower" on a real toolchange (only is_finish_first
+// tcrs). The approach onto the tower is the last G0/G1 XY travel before each
+// "; CP TOOLCHANGE START", which is what existing BBL tests walk.
+struct Type1TowerApproach {
+    std::string line;
+    std::string window;
+};
+
+std::vector<Type1TowerApproach> type1_tower_approaches(const std::string &gcode)
 {
-    size_t tcrs = 0, finish_first = 0;
-    for (const auto &layer : print.wipe_tower_data().tool_changes) {
-        tcrs += layer.size();
-        for (const auto &tcr : layer)
-            if (tcr.is_finish_first)
-                ++finish_first;
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(gcode);
+        for (std::string line; std::getline(in, line);)
+            lines.push_back(line);
     }
-    INFO("gcode_comments=" << print.config().gcode_comments.value << " has_wipe_tower=" << print.has_wipe_tower()
-                           << " tool_change_layers=" << print.wipe_tower_data().tool_changes.size() << " tcrs=" << tcrs
-                           << " is_finish_first=" << finish_first << " CP TOOLCHANGE=" << count_substr(gcode, "CP TOOLCHANGE")
-                           << " Travel to a Wipe Tower=" << count_substr(gcode, "Travel to a Wipe Tower")
-                           << " T1=" << count_substr(gcode, "\nT1"));
-    const size_t mark = gcode.find("CP TOOLCHANGE") != std::string::npos ? gcode.find("CP TOOLCHANGE") :
-                        gcode.find("Wipe") != std::string::npos          ? gcode.find("Wipe") :
-                                                                           0;
-    const size_t from = mark > 400 ? mark - 400 : 0;
-    INFO("excerpt:\n" << gcode.substr(from, 800));
+    std::vector<Type1TowerApproach> out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("; CP TOOLCHANGE START") == std::string::npos)
+            continue;
+        size_t travel = i;
+        while (travel > 0 && !is_xy_travel_line(lines[travel - 1]))
+            --travel;
+        if (travel == 0)
+            continue;
+        --travel;
+        Type1TowerApproach a;
+        a.line = lines[travel];
+        const size_t from = travel > 30 ? travel - 30 : 0;
+        for (size_t k = from; k < i; ++k)
+            a.window += lines[k] + "\n";
+        out.push_back(std::move(a));
+    }
+    return out;
 }
 
 std::string slice_two_cube_wipe_tower(DynamicPrintConfig config, bool bbl)
@@ -1203,21 +1214,13 @@ std::string slice_two_cube_wipe_tower(DynamicPrintConfig config, bool bbl)
     first->add_instance()->set_offset(Vec3d(80., 40., 0.));
     first->ensure_on_bed();
     first->volumes.front()->config.set("extruder", 1);
-    // Type1 append_tcr writes "Travel to a Wipe Tower" only when tcr.is_finish_first.
-    // generate() merge_tcr of a real toolchange + finish keeps that flag false, so two
-    // equal-height cubes never emit the comment (test_printgcode.cpp already uses
-    // CP TOOLCHANGE for BBL). A shorter second cube leaves sparse finish layers after
-    // it ends; those tcrs keep is_finish_first and take the travel path. Type2 still
-    // travels on the toolchanges below. Matches #881's two-object apply, with the
-    // vendor flag set before apply.
     ModelObject *second = model.add_object();
     second->name        = "cube-b.stl";
-    TriangleMesh short_cube = mesh(TestMesh::cube_20x20x20);
-    short_cube.scale(Vec3f(1.f, 1.f, 0.5f));
-    second->add_volume(std::move(short_cube));
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
     second->add_instance()->set_offset(Vec3d(120., 40., 0.));
     second->ensure_on_bed();
     second->volumes.front()->config.set("extruder", 2);
+    // #881: vendor flag before apply, apply twice so two filaments stick.
     print.is_BBL_printer() = bbl;
     print.apply(model, config);
     print.apply(model, config);
@@ -1225,7 +1228,6 @@ std::string slice_two_cube_wipe_tower(DynamicPrintConfig config, bool bbl)
     REQUIRE(print.config().gcode_comments.value);
     REQUIRE(print.has_wipe_tower());
     const std::string out = gcode(print);
-    info_wipe_tower_slice(print, out);
     REQUIRE_FALSE(print.wipe_tower_data().tool_changes.empty());
     return out;
 }
@@ -1313,11 +1315,23 @@ TEST_CASE("A lifted nozzle reaches its target height only after the travel back 
     config.option<ConfigOptionEnumsGeneric>("z_hop_types")->values = {lift, lift};
 
     const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
-    // Type1's toolchange gcode moves to the tower itself; append_tcr only adds this
-    // comment on is_finish_first. Type2 writes it on every should_travel_to_tower approach.
-    if (bbl)
-        REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
-    REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    if (bbl) {
+        // Type1 only writes "Travel to a Wipe Tower" for is_finish_first tcrs. The
+        // real toolchange approach is the last XY travel before each start marker.
+        const auto approaches = type1_tower_approaches(gcode);
+        UNSCOPED_INFO("type1 approaches=" << approaches.size());
+        if (!approaches.empty())
+            UNSCOPED_INFO(approaches.front().window);
+        REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
+        REQUIRE_FALSE(approaches.empty());
+        for (const auto &approach : approaches) {
+            UNSCOPED_INFO(approach.line);
+            CHECK(count_descending_travels(approach.window) == 0);
+        }
+    } else {
+        UNSCOPED_INFO(gcode.substr(0, 1200));
+        REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    }
     CHECK(count_descending_travels(gcode) == 0);
 }
 
@@ -1333,9 +1347,22 @@ TEST_CASE("Wipe-tower travel does not lift when z_hop is off", "[GCodeWriter][Li
         {"gcode_comments",   "1"},
     });
     const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
-    if (bbl)
-        REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
-    REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    if (bbl) {
+        const auto approaches = type1_tower_approaches(gcode);
+        UNSCOPED_INFO("type1 approaches=" << approaches.size());
+        if (!approaches.empty())
+            UNSCOPED_INFO(approaches.front().window);
+        REQUIRE(gcode.find("; CP TOOLCHANGE START") != std::string::npos);
+        REQUIRE_FALSE(approaches.empty());
+        for (const auto &approach : approaches) {
+            UNSCOPED_INFO(approach.line);
+            CHECK(approach.window.find("lift Z") == std::string::npos);
+            CHECK(count_travels_after_descent(approach.window) == 0);
+        }
+    } else {
+        UNSCOPED_INFO(gcode.substr(0, 1200));
+        REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    }
     // z_hop 0 must not invent a hop before the tower travel. Combined XYZ layer-change
     // descents without a lift are unchanged (those are not this PR).
     CHECK(gcode.find("lift Z") == std::string::npos);
