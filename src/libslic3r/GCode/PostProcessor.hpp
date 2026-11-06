@@ -12,7 +12,8 @@ namespace Slic3r {
 // Run post processing script / scripts if defined.
 // Returns true if a post-processing script was executed.
 // Returns false if no post-processing script was defined.
-// Throws an exception on error.
+// A failure of the scripts, or of the file work around them, throws Slic3r::ExportError: it fails this export or
+// upload, not the slice. A cancel, a fatal error and running out of memory keep their own exceptions.
 // host is one of "File", "PrusaLink", "Repetier", "SL1Host", "OctoPrint", "FlashAir", "Duet", "AstroBox" ...
 // If make_copy, then a temp file will be created for src_path by adding a ".pp" suffix and src_path will be updated.
 // In that case the caller is responsible to delete the temp file created.
