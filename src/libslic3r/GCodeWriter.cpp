@@ -990,6 +990,10 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     }
     // A lifted nozzle that has to end lower travels at the lifted height and descends at the
     // target, so it never sinks while crossing the print. (OrcaSlicer #16933)
+    // Ordinary retract-on-layer-change never reaches this: lift() only sets m_to_lift, and the
+    // pending-lift branch above already hops and travels at hop height. This split is for an
+    // already-applied hop (m_lifted) that force_z or a below-layer target would otherwise
+    // cancel into one combined XYZ move.
     const bool descend_after_xy = m_lifted > EPSILON && point(2) < m_pos(2) - EPSILON && this->is_current_position_clear() &&
         (to_2d(point) - to_2d(m_pos)).norm() > EPSILON;
     /*  In all the other cases, we move to the target Z and cancel the lift: in a single XYZ move,

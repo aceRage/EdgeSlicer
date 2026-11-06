@@ -1144,17 +1144,20 @@ DynamicPrintConfig wipe_tower_lift_config()
         {"layer_height",               0.3},
         {"initial_layer_print_height", 0.3},
         {"gcode_flavor",               "klipper"},
-        {"gcode_comments",             "1"},
         {"enable_filament_ramming",    "1"},
         {"enable_arc_fitting",         "0"},
         {"retract_lift_below",         "0,0"},
         {"retract_when_changing_layer", "1,1"},
     });
+    // Export copies print.config().gcode_comments into GCodeWriter::full_gcode_comment.
+    // The travel comment "Travel to a Wipe Tower" is omitted unless this is on (#881).
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     return config;
 }
 
-std::string slice_two_cube_wipe_tower(const DynamicPrintConfig &config, bool bbl)
+std::string slice_two_cube_wipe_tower(DynamicPrintConfig config, bool bbl)
 {
+    config.set_key_value("gcode_comments", new ConfigOptionBool(true));
     Print print;
     Model model;
     ModelObject *first = model.add_object();
@@ -1172,6 +1175,7 @@ std::string slice_two_cube_wipe_tower(const DynamicPrintConfig &config, bool bbl
     print.is_BBL_printer() = bbl;
     print.apply(model, config);
     print.set_status_silent();
+    REQUIRE(print.config().gcode_comments.value);
     REQUIRE(print.has_wipe_tower());
     return gcode(print);
 }
@@ -1209,14 +1213,37 @@ TEST_CASE("A travel that is not lifted still combines XY and Z when z_hop is off
     GCodeWriter writer;
     setup_z_speed_writer(writer, 100., 0., 0., false, 0.);
     writer.set_current_position_clear(true);
-    writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
-    const std::string gcode = writer.travel_to_xyz(Vec3d(40.0, 40.0, 4.0), "", true);
+    // GCodeReader starts at (0,0,0). The first move plants it at Z=5 so the second
+    // line (G1 X40 Y40 Z4) is seen as a descent, not a climb from the origin.
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    const std::string descent = writer.travel_to_xyz(Vec3d(40.0, 40.0, 4.0), "", true);
+    gcode += descent;
     INFO(gcode);
     // No hop, so the force_z descent stays one XYZ move. The #16933 split is only for a lifted nozzle.
-    CHECK(count_g1(gcode) == 1);
+    REQUIRE(descent.find("G1 X40 Y40 Z4") != std::string::npos);
+    CHECK(count_g1(descent) == 1);
     CHECK(count_descending_travels(gcode) == 1);
     CHECK_THAT(writer.get_position().z(), WithinAbs(4.0, EPSILON));
     CHECK(writer.get_zhop() == 0.);
+}
+
+TEST_CASE("A pending lazy lift travels at hop height without the already-lifted split", "[GCodeWriter][LiftTravel]")
+{
+    // Ordinary retract-on-layer-change calls lift() without spiral_vase, which only sets
+    // m_to_lift. travel_to_xyz then takes the pending-lift branch (hop, then XY at hop
+    // height) and never reaches descend_after_xy. Real plates with z_hop on therefore
+    // already printed lift-then-travel before #16933, so their G-code matches main.
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 12., 0., false, 0.4);
+    writer.set_current_position_clear(true);
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    CHECK(writer.lift(LiftType::NormalLift).empty());
+    CHECK(writer.get_zhop() == 0.);
+    gcode += writer.travel_to_xyz(Vec3d(40.0, 40.0, 5.0), "", true);
+    INFO(gcode);
+    CHECK(count_descending_travels(gcode) == 0);
+    CHECK(writer.get_zhop() > EPSILON);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(5.4, EPSILON));
 }
 
 TEST_CASE("A lifted nozzle reaches its target height only after the travel back to the print", "[GCodeWriter][LiftTravel][WipeTower]")
@@ -1231,10 +1258,15 @@ TEST_CASE("A lifted nozzle reaches its target height only after the travel back 
         {"z_hop",            "0.4,0.4"},
         {"z_hop_when_prime", "1,1"},
         {"wipe_tower_type",  bbl ? "type1" : "type2"},
+        {"gcode_comments",   "1"},
     });
     config.option<ConfigOptionEnumsGeneric>("z_hop_types")->values = {lift, lift};
 
     const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    // Type1 only writes this comment on is_finish_first; Type2 writes it on every tower approach.
+    // Both planners mark the toolchange. Comments must be on or the travel string is omitted.
+    if (bbl)
+        REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
     REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
     CHECK(count_descending_travels(gcode) == 0);
 }
@@ -1248,8 +1280,11 @@ TEST_CASE("Wipe-tower travel does not lift when z_hop is off", "[GCodeWriter][Li
         {"z_hop",            "0,0"},
         {"z_hop_when_prime", "0,0"},
         {"wipe_tower_type",  bbl ? "type1" : "type2"},
+        {"gcode_comments",   "1"},
     });
     const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    if (bbl)
+        REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
     REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
     // z_hop 0 must not invent a hop before the tower travel. Combined XYZ layer-change
     // descents without a lift are unchanged (those are not this PR).
