@@ -17,6 +17,7 @@
 #include "Widgets/SwitchButton.hpp"
 #include "Widgets/Button.hpp"
 #include "GUI_Factories.hpp"
+#include "libslic3r/PresetManagerModel.hpp"
 
 
 namespace Slic3r {
@@ -237,6 +238,13 @@ ParamsPanel::ParamsPanel( wxWindow* parent, wxWindowID id, const wxPoint& pos, c
         m_compare_btn->SetToolTip(_L("Compare presets"));
         m_compare_btn->Bind(wxEVT_BUTTON, ([this](wxCommandEvent e) { wxGetApp().mainframe->diff_dialog().show(); }));
 
+        // The process row's "manage the list" gear, like the printer and Filaments rows' gears.
+        m_manage_btn = new ScalableButton(m_top_panel, wxID_ANY, "settings", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true);
+        m_manage_btn->SetToolTip(_L("Manage process presets"));
+        m_manage_btn->Bind(wxEVT_BUTTON, [](wxCommandEvent &) {
+            wxGetApp().CallAfter([]() { wxGetApp().run_preset_manager(PresetManagerKind::Process); });
+        });
+
         m_setting_btn = new ScalableButton(m_top_panel, wxID_ANY, "table", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true);
         m_setting_btn->SetToolTip(_L("View all object's settings"));
         m_setting_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { wxGetApp().plater()->PopupObjectTable(-1, -1, {0, 0}); });
@@ -379,6 +387,8 @@ void ParamsPanel::create_layout()
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         m_mode_sizer->Add(m_mode_view, 0, wxALIGN_CENTER);
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::ElementSpacing() * 6)); // ORCA using spacer prevents shaky mode_view when tips_arrow highlighting mode_region instead using AddStretchSpacer
+        m_mode_sizer->Add(m_manage_btn, 0, wxALIGN_CENTER);
+        m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
         m_mode_sizer->Add(m_setting_btn, 0, wxALIGN_CENTER);
         m_mode_sizer->AddSpacer(FromDIP(SidebarProps::IconSpacing()));
         m_mode_sizer->Add(m_compare_btn, 0, wxALIGN_CENTER);
@@ -666,6 +676,7 @@ void ParamsPanel::msw_rescale()
 {
     if (m_process_icon) m_process_icon->msw_rescale();
     if (m_setting_btn) m_setting_btn->msw_rescale();
+    if (m_manage_btn) m_manage_btn->msw_rescale();
     if (m_search_btn) m_search_btn->msw_rescale();
     if (m_compare_btn) m_compare_btn->msw_rescale();
     if (m_tips_arrow) m_tips_arrow->msw_rescale();

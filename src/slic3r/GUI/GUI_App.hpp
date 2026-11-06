@@ -80,6 +80,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+enum class PresetManagerKind; // libslic3r/PresetManagerModel.hpp
 
 namespace GUI{
 
@@ -997,6 +998,9 @@ public:
     void            open_web_page_localized(const std::string &http_address);
     bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
+    // The Filament manager (the Filaments row gear, "Add/Remove filaments") or the Process manager (the
+    // process row gear). Returns true when the presets were reloaded on the way out.
+    bool            run_preset_manager(PresetManagerKind kind);
     void            show_desktop_integration_dialog();
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG
