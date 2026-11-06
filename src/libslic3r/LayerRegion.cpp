@@ -268,10 +268,15 @@ void LayerRegion::auto_circle_compensation(SurfaceCollection &slices, const Prin
     }
 }
 
-void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap)
+void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRegionPtrs &compatible_regions, SurfaceCollection* fill_surfaces, ExPolygons* fill_no_overlap,
+                                  double merged_height, bool clear_extrusions, const ExPolygons *lower_slices_override)
 {
-    this->perimeters.clear();
-    this->thin_fills.clear();
+    if (clear_extrusions) {
+        this->perimeters.clear();
+        this->thin_fills.clear();
+    }
+    // Mixed nozzle diameters: the height every wall, gap fill and solid flow of this pass is sized for.
+    const double flow_height = merged_height > EPSILON ? merged_height : this->layer()->height;
 
     const PrintConfig       &print_config  = this->layer()->object()->print()->config();
     const PrintRegionConfig &region_config = this->region().config();
@@ -298,9 +303,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         // input:
         &slices,
         &compatible_regions,
-        this->layer()->height,
+        flow_height,
         this->layer()->slice_z,
-        this->flow(frPerimeter),
+        this->flow(frPerimeter, flow_height),
         &perimeter_config,
         &this->layer()->object()->config(),
         &print_config,
@@ -330,13 +335,21 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         g.upper_slices_same_region = &this->layer()->upper_layer->get_region(region_id)->slices;
 
     g.layer_id              = (int)this->layer()->id();
-    g.ext_perimeter_flow    = this->flow(frExternalPerimeter);
-    g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
-    g.solid_infill_flow     = this->flow(frSolidInfill);
+    g.ext_perimeter_flow    = this->flow(frExternalPerimeter, flow_height);
+    // A merged overhang wall is the only extrusion filling its slab's Z span, so it needs the merged height like the
+    // regular walls (BambuStudio v02.09.01.70 LayerRegion.cpp:194-198). Unmerged walls keep the bridge flow, whose
+    // non-thick branch is sized for the physical layer height.
+    g.overhang_flow         = flow_height > this->layer()->height + EPSILON ?
+        this->flow(frPerimeter, flow_height).with_flow_ratio(region_config.bridge_flow.value) :
+        this->bridging_flow(frPerimeter, object_config.thick_bridges);
+    g.solid_infill_flow     = this->flow(frSolidInfill, flow_height);
 
     // Cumulative sum of polygons over all the regions, less what the lower layer could not print.
     ExPolygons lower_slices;
-    if (this->layer()->lower_layer != nullptr) {
+    if (lower_slices_override != nullptr) {
+        lower_slices   = g.printable_slices(*lower_slices_override);
+        g.lower_slices = &lower_slices;
+    } else if (this->layer()->lower_layer != nullptr) {
         lower_slices   = g.printable_slices(this->layer()->lower_layer->lslices);
         g.lower_slices = &lower_slices;
     }
