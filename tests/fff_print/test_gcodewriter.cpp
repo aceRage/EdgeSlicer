@@ -8,13 +8,16 @@
 #include <string>
 #include <vector>
 
+#include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "test_data.hpp"
 
 using namespace Slic3r;
+using namespace Slic3r::Test;
 using Catch::Matchers::WithinAbs;
 
 SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWriter]") {
@@ -1060,4 +1063,228 @@ TEST_CASE("A spiral lift at a layer change keeps its path and caps only its Z co
         CHECK(arc->v.at('F') > 20. * 60. * 5.);
         CHECK(arc->v.at('F') < 500. * 60.);
     }
+}
+
+// OrcaSlicer #16933: a lifted nozzle travels at the hop height and descends only at the destination.
+namespace {
+
+// Counts the travels (no E) that move in X or Y while lowering Z: each drags the nozzle down over the print.
+int count_descending_travels(const std::string &gcode)
+{
+    int         descending_travels = 0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&descending_travels](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.travel() && line.dist_Z(self) < -EPSILON && (line.dist_X(self) != 0.f || line.dist_Y(self) != 0.f)) {
+            UNSCOPED_INFO(line.raw());
+            ++descending_travels;
+        }
+    });
+    return descending_travels;
+}
+
+// Counts the travels made after the nozzle came straight down, before it printed or rose again:
+// the nozzle dropped from its lift short of the destination and crosses the print low. Moves before
+// the first extrusion come down from the start G-code and are not counted.
+int count_travels_after_descent(const std::string &gcode)
+{
+    int         travels   = 0;
+    bool        printed   = false;
+    bool        descended = false;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&travels, &printed, &descended](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (!line.cmd_is("G0") && !line.cmd_is("G1") && !line.cmd_is("G2") && !line.cmd_is("G3"))
+            return;
+        const bool xy = line.dist_X(self) != 0.f || line.dist_Y(self) != 0.f;
+        if (line.has(E) || line.dist_Z(self) > EPSILON) {
+            printed |= xy && line.extruding(self);
+            descended = false;
+        } else if (xy) {
+            if (descended) {
+                UNSCOPED_INFO(line.raw());
+                ++travels;
+            }
+            descended = false;
+        } else if (line.dist_Z(self) < -EPSILON) {
+            descended = printed;
+        }
+    });
+    return travels;
+}
+
+int count_g1(const std::string &gcode)
+{
+    int         n = 0;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&n](GCodeReader &, const GCodeReader::GCodeLine &line) {
+        if (line.cmd_is("G0") || line.cmd_is("G1"))
+            ++n;
+    });
+    return n;
+}
+
+DynamicPrintConfig wipe_tower_lift_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values      = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values      = {15.};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+        {"machine_end_gcode",          ""},
+        {"wipe_tower_wall_type",       "rectangle"},
+        {"layer_height",               0.3},
+        {"initial_layer_print_height", 0.3},
+        {"gcode_flavor",               "klipper"},
+        {"gcode_comments",             "1"},
+        {"enable_filament_ramming",    "1"},
+        {"enable_arc_fitting",         "0"},
+        {"retract_lift_below",         "0,0"},
+        {"retract_when_changing_layer", "1,1"},
+    });
+    return config;
+}
+
+std::string slice_two_cube_wipe_tower(const DynamicPrintConfig &config, bool bbl)
+{
+    Print print;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = bbl;
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.has_wipe_tower());
+    return gcode(print);
+}
+
+} // namespace
+
+TEST_CASE("A lifted travel that ends lower descends only at its destination", "[GCodeWriter][LiftTravel]")
+{
+    // Forced: a layer change. Not forced: a destination below the layer, like a scarf seam start.
+    const bool force_z = GENERATE(false, true);
+    CAPTURE(force_z);
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 12., 0., false, 0.4);
+    writer.set_current_position_clear(true);
+
+    std::string gcode = writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    gcode += writer.lift(LiftType::NormalLift, true);
+    gcode += writer.travel_to_xyz(Vec3d(30.0, 30.0, 5.0));
+    REQUIRE_THAT(writer.get_position().z(), WithinAbs(5.4, EPSILON));
+
+    const double target_z = force_z ? 5.0 : 4.9;
+    gcode += writer.travel_to_xyz(Vec3d(40.0, 40.0, target_z), "", force_z);
+    INFO(gcode);
+    CHECK(count_descending_travels(gcode) == 0);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(target_z, EPSILON));
+
+    // Already above the destination, the descent is a single move.
+    writer.lift(LiftType::NormalLift, true);
+    writer.travel_to_xyz(Vec3d(50.0, 50.0, target_z));
+    CHECK(count_g1(writer.travel_to_xyz(Vec3d(50.0, 50.0, target_z), "", true)) == 1);
+}
+
+TEST_CASE("A travel that is not lifted still combines XY and Z when z_hop is off", "[GCodeWriter][LiftTravel]")
+{
+    GCodeWriter writer;
+    setup_z_speed_writer(writer, 100., 0., 0., false, 0.);
+    writer.set_current_position_clear(true);
+    writer.travel_to_xyz(Vec3d(20.0, 20.0, 5.0));
+    const std::string gcode = writer.travel_to_xyz(Vec3d(40.0, 40.0, 4.0), "", true);
+    INFO(gcode);
+    // No hop, so the force_z descent stays one XYZ move. The #16933 split is only for a lifted nozzle.
+    CHECK(count_g1(gcode) == 1);
+    CHECK(count_descending_travels(gcode) == 1);
+    CHECK_THAT(writer.get_position().z(), WithinAbs(4.0, EPSILON));
+    CHECK(writer.get_zhop() == 0.);
+}
+
+TEST_CASE("A lifted nozzle reaches its target height only after the travel back to the print", "[GCodeWriter][LiftTravel][WipeTower]")
+{
+    // Two filaments on one nozzle with a prime tower: after each tool change the nozzle is
+    // lifted at the tower and travels back to the object. Type1 is the Bambu planner.
+    const int  lift = GENERATE(int(zhtNormal), int(zhtSlope), int(zhtSpiral), int(zhtAuto));
+    const bool bbl  = GENERATE(true, false);
+    CAPTURE(lift, bbl);
+    DynamicPrintConfig config = wipe_tower_lift_config();
+    config.set_deserialize_strict({
+        {"z_hop",            "0.4,0.4"},
+        {"z_hop_when_prime", "1,1"},
+        {"wipe_tower_type",  bbl ? "type1" : "type2"},
+    });
+    config.option<ConfigOptionEnumsGeneric>("z_hop_types")->values = {lift, lift};
+
+    const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    CHECK(count_descending_travels(gcode) == 0);
+}
+
+TEST_CASE("Wipe-tower travel does not lift when z_hop is off", "[GCodeWriter][LiftTravel][WipeTower]")
+{
+    const bool bbl = GENERATE(true, false);
+    CAPTURE(bbl);
+    DynamicPrintConfig config = wipe_tower_lift_config();
+    config.set_deserialize_strict({
+        {"z_hop",            "0,0"},
+        {"z_hop_when_prime", "0,0"},
+        {"wipe_tower_type",  bbl ? "type1" : "type2"},
+    });
+    const std::string gcode = slice_two_cube_wipe_tower(config, bbl);
+    REQUIRE(gcode.find("Travel to a Wipe Tower") != std::string::npos);
+    // z_hop 0 must not invent a hop before the tower travel. Combined XYZ layer-change
+    // descents without a lift are unchanged (those are not this PR).
+    CHECK(gcode.find("lift Z") == std::string::npos);
+    CHECK(count_travels_after_descent(gcode) == 0);
+}
+
+TEST_CASE("A lifted nozzle keeps its height over a detour around a concave part", "[GCodeWriter][LiftTravel]")
+{
+    // A layer-change lift plus avoid-crossing detours the travel to the next layer's start
+    // around the notch of the L. The nozzle must stay up over every waypoint.
+    const int lift = GENERATE(int(zhtNormal), int(zhtSlope), int(zhtSpiral));
+    CAPTURE(lift);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"z_hop",                       "0.4"},
+        {"retract_lift_below",          "0"},
+        {"retract_when_changing_layer", "1"},
+        {"reduce_crossing_wall",        1},
+        {"seam_position",               "random"},
+        {"enable_arc_fitting",          "0"},
+        {"skirt_loops",                 0},
+        {"brim_type",                   "no_brim"},
+        {"gcode_comments",              "1"},
+        {"machine_start_gcode",         ""},
+        {"machine_end_gcode",           ""},
+    });
+    config.option<ConfigOptionEnumsGeneric>("z_hop_types", true)->values = {lift};
+    Print print;
+    Model model;
+    init_print({TestMesh::L}, print, model, config);
+    print.is_BBL_printer() = true;
+    print.apply(model, config);
+
+    const std::string out = gcode(print);
+    CHECK(count_descending_travels(out) == 0);
+    CHECK(count_travels_after_descent(out) == 0);
 }
