@@ -142,6 +142,7 @@ src/slic3r/GUI/wxMediaCtrl2.cpp
 src/slic3r/GUI/WebUserLoginDialog.cpp
 src/slic3r/GUI/WebSMUserLoginDialog.cpp
 src/slic3r/GUI/WebGuideDialog.cpp
+src/slic3r/GUI/PresetManagerDialog.cpp
 src/slic3r/GUI/KBShortcutsDialog.hpp
 src/slic3r/GUI/KBShortcutsDialog.cpp
 src/slic3r/GUI/ReleaseNote.cpp

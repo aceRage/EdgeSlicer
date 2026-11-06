@@ -160,6 +160,7 @@
 
 //BBS: DailyTip and UserGuide Dialog
 #include "WebGuideDialog.hpp"
+#include "PresetManagerDialog.hpp"
 #include "ReleaseNote.hpp"
 #include "PrivacyUpdateDialog.hpp"
 #include "ModelMall.hpp"
@@ -5600,20 +5601,8 @@ void GUI_App::ShowUserLogin(bool show)
 
 
 void GUI_App::ShowOnlyFilament() {
-    // BBS:Show NewUser Guide
-    try {
-        bool       res = false;
-        GuideFrame GuideDlg(this);
-        GuideDlg.SetStartPage(GuideFrame::GuidePage::BBL_FILAMENT_ONLY);
-        res = GuideDlg.run();
-        if (res) {
-            load_current_presets();
-
-            // BBS: remove SLA related message
-        }
-    } catch (std::exception &) {
-        // wxMessageBox(e.what(), "", MB_OK);
-    }
+    // The Filament manager replaced the guide's filament-only page.
+    run_preset_manager(PresetManagerKind::Filament);
 }
 
 
@@ -9493,9 +9482,71 @@ bool GUI_App::may_switch_to_SLA_preset(const wxString& caption)
     return true;
 }
 
+bool GUI_App::run_preset_manager(PresetManagerKind kind)
+{
+    wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
+
+    // load_presets() (below) reads the selections back from the app config.
+    preset_bundle->export_selections(*app_config);
+    const std::map<std::string, std::string> enabled_before =
+        app_config->has_section(AppConfig::SECTION_FILAMENTS) ? app_config->get_section(AppConfig::SECTION_FILAMENTS) : std::map<std::string, std::string>();
+
+    PresetManagerDialog::Then then = PresetManagerDialog::Then::Nothing;
+    std::string               edit_filament_id;
+    {
+        PresetManagerDialog dlg(mainframe, kind);
+        if (!dlg.ok())
+            return false;
+        dlg.ShowModal();
+        then             = dlg.then();
+        edit_filament_id = dlg.edit_filament_id();
+    }
+
+    bool reloaded = false;
+    if (kind == PresetManagerKind::Filament) {
+        const std::map<std::string, std::string> enabled_now =
+            app_config->has_section(AppConfig::SECTION_FILAMENTS) ? app_config->get_section(AppConfig::SECTION_FILAMENTS) : std::map<std::string, std::string>();
+        // The ticks were applied while the dialog was open (visibility only). One full reload now, the way
+        // the guide's Confirm did it, with its single unsaved-changes prompt.
+        if (enabled_now != enabled_before) {
+            bool keep_changes = false;
+            if (check_and_keep_current_preset_changes(_L("Filaments changed"), _L("The enabled filaments changed and the presets are reloaded."),
+                                                      ActionButtons::KEEP | ActionButtons::SAVE, &keep_changes)) {
+                apply_enabled_filaments(*app_config, *preset_bundle, enabled_now, FilamentsReload::Full, {}, true);
+                if (keep_changes)
+                    apply_keeped_preset_modifications();
+                load_current_presets();
+                sidebar().update_nozzle_settings();
+                update_publish_status();
+                mainframe->refresh_plugin_tips();
+                m_fltviews.reload_all();
+                reloaded = true;
+            }
+            app_config->save();
+        }
+    } else {
+        // Hidden process presets were applied at once; keep them on disk too.
+        app_config->save();
+    }
+
+    if (then == PresetManagerDialog::Then::CreateFilament) {
+        wxQueueEvent(plater(), new SimpleEvent(EVT_CREATE_FILAMENT));
+    } else if (then == PresetManagerDialog::Then::EditFilament) {
+        Filamentinformation *filament_info = new Filamentinformation();
+        filament_info->filament_id         = edit_filament_id;
+        wxQueueEvent(plater(), new SimpleEvent(EVT_MODIFY_FILAMENT, filament_info));
+    }
+    return reloaded;
+}
+
 bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page)
 {
     wxCHECK_MSG(mainframe != nullptr, false, "Internal error: Main frame not created / null");
+
+    // "Add/Remove filaments" (the Filaments row gears, the item at the end of the filament combos) opens
+    // the Filament manager; the setup wizard keeps the guide's own filament page.
+    if (start_page == ConfigWizard::SP_FILAMENTS)
+        return run_preset_manager(PresetManagerKind::Filament);
 
     std::string strFinish = wxGetApp().app_config->get("firstguide", "finish");
     long        pStyle    = wxCAPTION | wxCLOSE_BOX | wxSYSTEM_MENU;

@@ -1083,6 +1083,21 @@ void Preset::set_visible_from_appconfig(const AppConfig &app_config)
 	    	for (auto it = this->renamed_from.begin(); ! is_visible && it != this->renamed_from.end(); ++ it)
 	    		is_visible = has(*it);
 	    }
+    } else if (type == TYPE_PRINT) {
+        // The Process manager's "Enabled" column: a system process preset is shown unless the user hid it
+        // (by its name, or a name it was renamed from). Only instantiable system presets are in the
+        // collection, so every other one starts visible.
+        is_visible = true;
+        if (app_config.has_section(AppConfig::SECTION_HIDDEN_PROCESSES)) {
+            const std::map<std::string, std::string> &hidden = app_config.get_section(AppConfig::SECTION_HIDDEN_PROCESSES);
+            auto has = [&hidden](const std::string &name) {
+                auto it = hidden.find(name);
+                return it != hidden.end() && !it->second.empty() && it->second != "false";
+            };
+            is_visible = !has(this->name);
+            for (auto it = this->renamed_from.begin(); is_visible && it != this->renamed_from.end(); ++it)
+                is_visible = !has(*it);
+        }
     }
     //BBS: add config related log
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": name %1%, is_visible set to %2%")%name % is_visible;

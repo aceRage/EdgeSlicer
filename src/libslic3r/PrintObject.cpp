@@ -6266,6 +6266,11 @@ static std::vector<unsigned int> plate_wall_filament_ids(const Print &print)
     return ids;
 }
 
+double Print::adaptive_merge_reference_nozzle() const
+{
+    return adaptive_band_reference_nozzle(m_config, plate_wall_filament_ids(*this));
+}
+
 void PrintObject::compute_adaptive_merge_groups()
 {
     for (Layer *layer : m_layers)
@@ -6421,13 +6426,9 @@ void PrintObject::compute_adaptive_merge_groups()
         // One diameter owns one ladder. Region/colour start layers do not create a new phase.
         // Edge: the ladder starts on layer 1; layer 0 is the bed contact and prints as sliced (a fixed-grid
         // event below), so no band is anchored at the object base and Bambu's first-band path never runs.
-        std::vector<AdaptiveLayerBand> bands =
-            build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
-                                       band_size, range, band_tops);
-        for (AdaptiveLayerBand &band : bands) {
-            ++ band.bottom_idx;
-            ++ band.top_idx;
-        }
+        // The support merge plan (SupportMergePlan.cpp) builds its fixed ladders through the same helper, so a
+        // support slab only ever ends on a band top the walls of that nozzle use.
+        std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_ladder(layer_heights, band_size, range, band_tops);
 
         std::vector<AdaptiveLayerBand> live_bands;
         std::vector<unsigned char>     covered(layer_count, 0);

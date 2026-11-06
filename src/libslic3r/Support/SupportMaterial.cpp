@@ -6,6 +6,7 @@
 #include "SupportMaterial.hpp"
 #include "SupportOverhangDetect.hpp"
 #include "SupportCommon.hpp"
+#include "SupportMergePlan.hpp"
 #include "Geometry.hpp"
 #include "Point.hpp"
 #include "MutablePolygon.hpp"
@@ -578,6 +579,15 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     }
 */
 
+    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 SupportMaterial.cpp:516-526):
+    // merge the support areas into slabs a coarse nozzle can extrude. This has to run before
+    // generate_support_layers() installs them, because that is where the Z ladder is frozen. A no-op on every
+    // single-diameter plate and on an object with support groups.
+    SupportMergeResult support_merge;
+    merge_support_layers_multi_diameter(object, m_support_params, m_slicing_params, raft_layers,
+        bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers,
+        support_merge, -1., ! m_group_claims.empty());
+
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating layers";
 
 // For debugging purposes, one may want to show only some of the support extrusions.
@@ -591,6 +601,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     SupportGeneratorLayersPtr layers_sorted =
 #endif // SLIC3R_DEBUG
     generate_support_layers(object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
+    apply_support_merge_result(object, support_merge);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Generating tool paths";
 

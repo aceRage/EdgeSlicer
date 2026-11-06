@@ -300,6 +300,26 @@ std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
     return bands;
 }
 
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops)
+{
+    if (layer_heights.size() < 2)
+        return {};
+    // band_tops is handed through as the step-3 planner did (it is relative to the cut stack); it is always
+    // empty on the live path, see compute_adaptive_merge_groups().
+    std::vector<AdaptiveLayerBand> bands =
+        build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
+                                   band_size, height_range, band_tops);
+    for (AdaptiveLayerBand &band : bands) {
+        ++ band.bottom_idx;
+        ++ band.top_idx;
+    }
+    return bands;
+}
+
 bool pull_adaptive_band_top_to_material(
     AdaptiveLayerBand                &band,
     const std::vector<double>        &layer_heights,

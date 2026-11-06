@@ -1,0 +1,59 @@
+/* The Filament manager and the Process manager. The table styles (and the star, locked and focused
+   row tokens) are in ../css/printer_table.css; ../css/dark.css redefines the tokens when dark. */
+
+body.pm-page {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	box-sizing: border-box;
+	padding: 10px 0 0 0;
+	background-color: var(--pt-bg);
+}
+
+body.pm-page #PtRoot {
+	padding: 0 16px;
+}
+
+#PmFooter {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	height: 56px;
+	padding: 0 16px;
+	font-size: 12px;
+	color: var(--pt-muted);
+}
+
+#PmFooter .pm-spacer {
+	flex: 1 1 auto;
+}
+
+#PmStatus {
+	color: var(--pt-fg);
+}
+
+#PmStatus:empty {
+	display: none;
+}
+
+#CloseBtn {
+	padding: 6px 28px;
+}
+
+.pm-name.inuse {
+	font-weight: 600;
+}
+
+.pm-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	display: block;
+}
+
+.pt-td.star {
+	justify-content: center;
+	display: flex;
+	padding: 0;
+}

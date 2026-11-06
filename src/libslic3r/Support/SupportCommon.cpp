@@ -2464,8 +2464,18 @@ void generate_support_toolpaths(
                     //FIXME Bottom interfaces are extruded with the briding flow. Some bridging layers have its height slightly reduced, therefore
                     // the bridging flow does not quite apply. Reduce the flow to area of an ellipse? (A = pi * a * b)
                     auto *filler = raft_contact ? filler_raft_contact : filler_interface.get();
+                    // Mixed nozzle diameters (AdaptiveLayerMerge step 4): the nozzle the support merge plan picked for
+                    // this layer's contact/interface. 0 on every single-diameter plate, which keeps the flows below.
+                    const double planned_interface_nozzle = raft_contact ? 0. : support_layer.planned_interface_nozzle_diameter;
+                    const Flow   planned_interface_flow   = planned_interface_nozzle > EPSILON ?
+                        (interface_as_base ?
+                            support_params.support_material_flow_for_nozzle(planned_interface_nozzle, float(layer_ex.layer->height)) :
+                            support_params.support_material_interface_flow_for_nozzle(planned_interface_nozzle, float(layer_ex.layer->height))) :
+                        Flow();
                     auto interface_flow = layer_ex.layer->bridging ?
-                        Flow::bridging_flow(layer_ex.layer->height, support_params.support_material_bottom_interface_flow.nozzle_diameter()) :
+                        Flow::bridging_flow(layer_ex.layer->height, planned_interface_nozzle > EPSILON ? planned_interface_nozzle :
+                                                                    support_params.support_material_bottom_interface_flow.nozzle_diameter()) :
+                        planned_interface_nozzle > EPSILON ? planned_interface_flow :
                         (raft_contact ? &support_params.raft_interface_flow :
                          interface_as_base ? &support_params.support_material_flow : &support_params.support_material_interface_flow)
                             ->with_height(float(layer_ex.layer->height));
@@ -2481,6 +2491,7 @@ void generate_support_toolpaths(
                         interface_as_base ? support_params.support_density :
                         bottom_interface ? support_params.bottom_interface_density : support_params.top_interface_density;
                     filler->spacing = raft_contact ? support_params.raft_interface_flow.spacing() :
+                        planned_interface_nozzle > EPSILON ? planned_interface_flow.spacing() :
                         interface_as_base ? support_params.support_material_flow.spacing() : support_params.support_material_interface_flow.spacing();
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     fill_expolygons_generate_paths(
@@ -2521,7 +2532,11 @@ void generate_support_toolpaths(
                 // At K == 1 params_g IS support_params and this is the code that was here before.
                 const SupportParameters &params_g = (group_mode && size_t(layer_ex.layer->support_group) < num_groups) ?
                     *(*groups)[layer_ex.layer->support_group].params : support_params;
-                Flow interface_flow = params_g.support_material_flow.with_height(float(layer_ex.layer->height));
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4): the transition prints with the support body
+                // filament, so it follows the nozzle the base was pinned to. Never set with support groups.
+                Flow interface_flow = support_layer.planned_nozzle_diameter > EPSILON ?
+                    params_g.support_material_flow_for_nozzle(support_layer.planned_nozzle_diameter, float(layer_ex.layer->height)) :
+                    params_g.support_material_flow.with_height(float(layer_ex.layer->height));
                 // ORCA #14678: the base interface follows the top interface density unless only bottom interfaces exist.
                 const double base_interface_density_g = params_g.num_top_interface_layers > 0 || params_g.num_bottom_interface_layers == 0 ?
                     params_g.top_interface_density : params_g.bottom_interface_density;
@@ -2592,8 +2607,14 @@ void generate_support_toolpaths(
                 // We don't use $base_flow->spacing because we need a constant spacing
                 // value that guarantees that all layers are correctly aligned.
                 assert(! base_layer.layer->bridging);
-                auto flow = support_params.support_material_flow.with_height(float(base_layer.layer->height));
-                filler->spacing = support_params.support_material_flow.spacing();
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4): a merged slab is extruded by the filament the
+                // support merge plan reserved for it, so its line width follows that nozzle instead of the
+                // support_filament default. planned_nozzle_diameter is 0 on every single-diameter plate.
+                const Flow base_flow_src = support_layer.planned_nozzle_diameter > EPSILON ?
+                    support_params.support_material_flow_for_nozzle(support_layer.planned_nozzle_diameter, float(support_params.support_material_flow.height())) :
+                    support_params.support_material_flow;
+                auto flow = base_flow_src.with_height(float(base_layer.layer->height));
+                filler->spacing = base_flow_src.spacing();
                 filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
                 float density = float(support_params.support_density);
                 bool  sheath  = support_params.with_sheath;

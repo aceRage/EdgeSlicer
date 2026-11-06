@@ -592,6 +592,8 @@ set(lisbslic3r_sources
     FilamentPresetExport.hpp
     ProcessPresetExport.cpp
     ProcessPresetExport.hpp
+    PresetManagerModel.cpp
+    PresetManagerModel.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp
@@ -684,6 +686,8 @@ set(lisbslic3r_sources
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportMergePlan.cpp
+    Support/SupportMergePlan.hpp
     Support/SupportOverhangDetect.cpp
     Support/SupportOverhangDetect.hpp
     Support/SupportOverhangHighlight.cpp
