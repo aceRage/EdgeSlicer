@@ -1,6 +1,6 @@
 {
     "name": "OrcaFilamentLibrary",
-    "version": "02.04.00.22",
+    "version": "02.04.00.23",
     "force_update": "0",
     "description": "Orca Filament Library",
     "filament_list": [
@@ -1201,8 +1201,8 @@
             "sub_path": "filament/addnorth/BBL/Generic ABS @BBL base.json"
         },
         {
-            "name": "Printalot ABS @base",
-            "sub_path": "filament/Printalot/Printalot ABS @base.json"
+            "name": "PrintaLot ABS @base",
+            "sub_path": "filament/Printalot/PrintaLot ABS @base.json"
         },
         {
             "name": "BETA ASA @base",
@@ -1669,6 +1669,10 @@
             "sub_path": "filament/Polymaker/Polymaker PLA Pro @base.json"
         },
         {
+            "name": "PrintaLot PLA @base",
+            "sub_path": "filament/Printalot/PrintaLot PLA @base.json"
+        },
+        {
             "name": "eSUN PLA-Basic @base",
             "sub_path": "filament/eSUN/eSUN PLA-Basic @base.json"
         },
@@ -1825,8 +1829,8 @@
             "sub_path": "filament/addnorth/BBL/addnorth ABS rABS.json"
         },
         {
-            "name": "Printalot ABS @System",
-            "sub_path": "filament/Printalot/Printalot ABS @System.json"
+            "name": "PrintaLot ABS @System",
+            "sub_path": "filament/Printalot/PrintaLot ABS @System.json"
         },
         {
             "name": "BETA ASA @BBL A1 0.4 nozzle",
@@ -3447,6 +3451,102 @@
         {
             "name": "Polymaker PLA Pro @System",
             "sub_path": "filament/Polymaker/Polymaker PLA Pro @System.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A1",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A1.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A1 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A1 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A1M",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A1M.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A1M 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A1M 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A2L",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A2L.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL A2L 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL A2L 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2C",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2C.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2C 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2C 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2C 0.4 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2D",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2D.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2D 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2D 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2DP",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2DP.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2DP 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2DP 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2S",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2S.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL H2S 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL H2S 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL P1P",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL P1P.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL P1P 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL P1P 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL P2S",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL P2S.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL P2S 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL P2S 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL X1C",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL X1C.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL X1C 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL X1C 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL X2D",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL X2D.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL X2D 0.2 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL X2D 0.2 nozzle.json"
+        },
+        {
+            "name": "PrintaLot PLA @BBL X2D 0.4 nozzle",
+            "sub_path": "filament/Printalot/BBL/PrintaLot PLA @BBL X2D 0.4 nozzle.json"
         },
         {
             "name": "eSUN PLA-Basic @System",
