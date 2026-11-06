@@ -2528,3 +2528,39 @@ TEST_CASE("Spiral vase still refuses an Edge mixed filament", "[Print][SpiralVas
     CHECK(error.opt_key == "spiral_mode");
     CHECK(error.string.find("more than one materials") != std::string::npos);
 }
+
+// Orca #16900: a finished export is reused, so a renamed plate needs the export step invalidated.
+TEST_CASE("Plate name reaches the G-code once G-code export is invalidated", "[Print][PlateName]")
+{
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20}, print, model, {{"machine_start_gcode", "; Plate {plate_name}"}});
+    print.set_status_silent();
+
+    const auto export_and_read = [&print]() {
+        print.process();
+        const boost::filesystem::path out = scratch_path(".gcode");
+        print.export_gcode(out.string(), nullptr, nullptr);
+        boost::nowide::ifstream in(out.string());
+        std::string gcode((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        boost::nowide::remove(out.string().c_str());
+        return gcode;
+    };
+
+    print.set_plate_name("First");
+    CHECK(export_and_read().find("; Plate First") != std::string::npos);
+    REQUIRE(print.finished());
+
+    // Renaming alone keeps the old export.
+    print.set_plate_name("Second");
+    CHECK(print.finished());
+
+    // Invalidating the export step re-emits the name without re-slicing.
+    print.set_gcode_file_invalidated();
+    CHECK_FALSE(print.finished());
+    CHECK(print.objects().front()->is_step_done(posSlice));
+    const std::string regenerated = export_and_read();
+    CHECK(regenerated.find("; Plate Second") != std::string::npos);
+    CHECK(regenerated.find("; Plate First") == std::string::npos);
+}
