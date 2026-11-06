@@ -157,6 +157,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_extra_extruders.cpp
 	test_preset_detached_children.cpp
 	test_u1_tag_filament_match.cpp
 	test_preset_user_load_prefetch.cpp
