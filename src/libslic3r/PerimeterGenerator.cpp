@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cassert>
+#include <functional>
 #include <unordered_set>
 #include <thread>
 #include "libslic3r/AABBTreeLines.hpp"
@@ -44,9 +45,11 @@ public:
     unsigned short                      depth;
     // Children contour, may be both CCW and CW oriented (outer contours or holes).
     std::vector<PerimeterGeneratorLoop> children;
+    // Bambu Studio 2.9.1: a wall of a circle offset by the auto circle compensation (Surface flags).
+    bool                                need_circle_compensation = false;
     
-    PerimeterGeneratorLoop(const Polygon &polygon, unsigned short depth, bool is_contour, bool is_small_width_perimeter = false) :
-        polygon(polygon), is_contour(is_contour), is_smaller_width_perimeter(is_small_width_perimeter), depth(depth) {}
+    PerimeterGeneratorLoop(const Polygon &polygon, unsigned short depth, bool is_contour, bool is_small_width_perimeter = false, bool need_circle_compensation_ = false) :
+        polygon(polygon), is_contour(is_contour), is_smaller_width_perimeter(is_small_width_perimeter), depth(depth), need_circle_compensation(need_circle_compensation_) {}
     // External perimeter. It may be CCW or CW oriented (outer contour or hole contour).
     bool is_external() const { return this->depth == 0; }
     // An island, which may have holes, but it does not have another internal island.
@@ -348,7 +351,10 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             }
         }
 
-        coll.append(ExtrusionLoop(std::move(paths), loop_role));
+        ExtrusionLoop extrusion_loop(std::move(paths), loop_role);
+        // Bambu Studio 2.9.1 (PerimeterGenerator.cpp:296).
+        extrusion_loop.circle_compensation = loop.need_circle_compensation;
+        coll.append(std::move(extrusion_loop));
     }
     
     // Append thin walls to the nearest-neighbor search (only for first iteration)
@@ -513,6 +519,42 @@ struct PerimeterGeneratorArachneExtrusion
     // Indicates if closed ExtrusionLine is a contour or a hole. Used it only when ExtrusionLine is a closed loop.
     bool is_contour = false;
 };
+
+// Bambu Studio 2.9.1 flags Arachne walls through the skeletal trapezoidation (WallToolPaths::
+// EnableHoleCompensation, ExtrusionJunction flags). Edge adaptation: the closed walls are matched to the
+// compensated contour and holes of the surface by centroid instead, as the classic generator does, with a
+// looser tolerance for the variable-width lines. Contour walls follow the contour flag, hole walls a
+// compensated hole with the same centre.
+static void flag_arachne_circle_compensation(ExtrusionEntityCollection &coll, const Surface &surface, bool contour_ok)
+{
+    const bool contour_flag = contour_ok && surface.counter_circle_compensation;
+    std::vector<Point> hole_centers;
+    for (int hole_idx : surface.holes_circle_compensation)
+        if (hole_idx >= 0 && size_t(hole_idx) < surface.expolygon.holes.size())
+            hole_centers.emplace_back(surface.expolygon.holes[hole_idx].centroid());
+    if (!contour_flag && hole_centers.empty())
+        return;
+    const Point  contour_center = surface.expolygon.contour.centroid();
+    const double tolerance      = scale_(0.05);
+    std::function<void(ExtrusionEntityCollection &)> visit = [&](ExtrusionEntityCollection &c_coll) {
+        for (ExtrusionEntity *ee : c_coll.entities) {
+            if (auto *sub = dynamic_cast<ExtrusionEntityCollection *>(ee)) {
+                visit(*sub);
+                continue;
+            }
+            auto *loop = dynamic_cast<ExtrusionLoop *>(ee);
+            if (loop == nullptr || loop->paths.empty())
+                continue;
+            const Point c = loop->polygon().centroid();
+            if (loop->loop_role() & elrHole)
+                loop->circle_compensation = std::any_of(hole_centers.begin(), hole_centers.end(),
+                                                        [&c, tolerance](const Point &h) { return (h - c).cast<double>().norm() < tolerance; });
+            else
+                loop->circle_compensation = contour_flag && (contour_center - c).cast<double>().norm() < tolerance;
+        }
+    };
+    visit(coll);
+}
 
 static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& perimeter_generator, std::vector<PerimeterGeneratorArachneExtrusion>& pg_extrusions,
     bool &steep_overhang_contour, bool &steep_overhang_hole)
@@ -1031,7 +1073,7 @@ void PerimeterGenerator::split_top_surfaces(const ExPolygons &orig_polygons, ExP
     // get the real top surface
     ExPolygons grown_lower_slices;
     ExPolygons bridge_checker;
-    auto nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+    auto nozzle_diameter = nozzle_diameter_for_filament(*this->print_config, unsigned(this->config->wall_filament.value));
     // Check whether surface be bridge or not
     if (this->lower_slices != NULL) {
         // BBS: get the Polygons below the polygon this layer
@@ -1645,7 +1687,7 @@ void PerimeterGenerator::process_classic()
         // We consider overhang any part where the entire nozzle diameter is not supported by the
         // lower layer, so we take lower slices and offset them by half the nozzle diameter used
         // in the current layer
-        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+        double nozzle_diameter = nozzle_diameter_for_filament(*this->print_config, unsigned(this->config->wall_filament.value));
         m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(+nozzle_diameter / 2)));
     }
     
@@ -1710,6 +1752,20 @@ void PerimeterGenerator::process_classic()
             loop_number = 0;
 
         ExPolygons last        = union_ex(surface.expolygon.simplify_p(surface_simplify_resolution));
+        // Bambu Studio 2.9.1 (PerimeterGenerator.cpp:941-960): which walls go round a compensated circle.
+        // Holes are matched by centroid, as the onion shells keep a circle's centre.
+        bool               counter_circle_compensation = surface.counter_circle_compensation && last.size() == 1;
+        std::vector<Point> compensation_holes_centers;
+        for (int hole_idx : surface.holes_circle_compensation)
+            if (hole_idx >= 0 && size_t(hole_idx) < surface.expolygon.holes.size())
+                compensation_holes_centers.emplace_back(surface.expolygon.holes[hole_idx].centroid());
+        auto is_compensation_hole = [&compensation_holes_centers](const Polygon &hole) {
+            if (compensation_holes_centers.empty())
+                return false;
+            const Point c = hole.centroid();
+            return std::any_of(compensation_holes_centers.begin(), compensation_holes_centers.end(),
+                               [&c](const Point &item) { return (item - c).cast<double>().norm() < 1000.; });
+        };
         ExPolygons gaps;
         ExPolygons top_fills;
         ExPolygons fill_clip;
@@ -1832,23 +1888,23 @@ void PerimeterGenerator::process_classic()
                         // outer contour may overlap with itself.
                         //FIXME evaluate the overlaps, annotate each point with an overlap depth,
                         // compensate for the depth of intersection.
-                        contours[i].emplace_back(expolygon.contour, i, true);
+                        contours[i].emplace_back(expolygon.contour, i, true, false, counter_circle_compensation);
 
                         if (!expolygon.holes.empty()) {
                             holes[i].reserve(holes[i].size() + expolygon.holes.size());
                             for (const Polygon& hole : expolygon.holes)
-                                holes[i].emplace_back(hole, i, false);
+                                holes[i].emplace_back(hole, i, false, false, is_compensation_hole(hole));
                         }
                     }
 
                     //BBS: save perimeter loop which use smaller width
                     if (i == 0) {
                         for (const ExPolygon& expolygon : offsets_with_smaller_width) {
-                            contours[i].emplace_back(PerimeterGeneratorLoop(expolygon.contour, i, true, true));
+                            contours[i].emplace_back(PerimeterGeneratorLoop(expolygon.contour, i, true, true, counter_circle_compensation));
                             if (!expolygon.holes.empty()) {
                                 holes[i].reserve(holes[i].size() + expolygon.holes.size());
                                 for (const Polygon& hole : expolygon.holes)
-                                    holes[i].emplace_back(PerimeterGeneratorLoop(hole, i, false, true));
+                                    holes[i].emplace_back(PerimeterGeneratorLoop(hole, i, false, true, is_compensation_hole(hole)));
                             }
                         }
                     }
@@ -2715,7 +2771,7 @@ void PerimeterGenerator::process_arachne()
         // We consider overhang any part where the entire nozzle diameter is not supported by the
         // lower layer, so we take lower slices and offset them by half the nozzle diameter used
         // in the current layer
-        double nozzle_diameter = this->print_config->nozzle_diameter.get_at(this->config->wall_filament - 1);
+        double nozzle_diameter = nozzle_diameter_for_filament(*this->print_config, unsigned(this->config->wall_filament.value));
         m_lower_slices_polygons = offset(*this->lower_slices, float(scale_(+nozzle_diameter / 2)));
     }
 
@@ -3143,6 +3199,8 @@ void PerimeterGenerator::process_arachne()
                                     this->config->overhang_reverse_internal_only && wall_direction == WallDirection::Auto);
             }
             defer_unsupported_loops(*this, extrusion_coll);
+            if (surface.counter_circle_compensation || !surface.holes_circle_compensation.empty())
+                flag_arachne_circle_compensation(extrusion_coll, surface, last.size() == 1);
             this->loops->append(extrusion_coll);
         }
 
@@ -3243,7 +3301,7 @@ bool brim_puts_outer_walls_first(BrimType brim_type, double brim_width)
 
 std::vector<Polygons> PerimeterGenerator::generate_lower_polygons_series(float width)
 {
-    float nozzle_diameter = print_config->nozzle_diameter.get_at(config->wall_filament - 1);
+    float nozzle_diameter = nozzle_diameter_for_filament(*print_config, unsigned(config->wall_filament.value));
     float start_offset = -0.5 * width;
     float end_offset = 0.5 * nozzle_diameter;
 

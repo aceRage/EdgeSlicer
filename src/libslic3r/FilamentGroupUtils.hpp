@@ -34,6 +34,7 @@ namespace Slic3r
             std::string type;
             bool is_support;
             FilamentUsageType usage_type;
+            float diameter{0.f}; // BBS 2.9.1: the filament diameter (mm); 0 = unknown
         };
 
         struct MachineFilamentInfo: public FilamentInfo {

@@ -2,6 +2,7 @@
 #include "../Exception.hpp"
 #include "BambuExport.hpp"
 #include "../Model.hpp"
+#include "../NozzleOverride.hpp"
 #include "../MixedFilament.hpp"
 #include "../Preset.hpp"
 #include "../CostOverrides.hpp"
@@ -36,6 +37,9 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/stat.hpp>
+#include <thread>
+#include <chrono>
 #include <boost/spirit/include/karma.hpp>
 #include <boost/spirit/include/qi_int.hpp>
 #include <boost/log/trivial.hpp>
@@ -906,6 +910,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 #define L(s) (s)
 #define _(s) Slic3r::I18N::translate(s)
 
+    // Move a just-written file into place. Right after a file is closed, a virus scanner, the search
+    // indexer or a cloud-sync client (Downloads, OneDrive) can hold it for a moment and the rename
+    // fails with a sharing violation. Retry briefly on that, and always log the error code so a
+    // failure that remains can be diagnosed.
+    static void rename_into_place(const std::string &from, const std::string &to, boost::system::error_code &ec)
+    {
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            boost::filesystem::rename(from, to, ec);
+            if (!ec)
+                return;
+            BOOST_LOG_TRIVIAL(error) << "3MF rename to final name failed (attempt " << (attempt + 1) << " of 4), error "
+                                     << ec.value() << " (" << ec.category().name() << "): " << ec.message();
+            if (attempt < 3)
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
     // Base class with error messages management
     class _BBS_3MF_Base
     {
@@ -917,6 +938,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void clear_errors() { m_errors.clear(); }
 
     public:
+        std::string joined_errors() const
+        {
+            boost::unique_lock l(mutex);
+            std::string out;
+            for (const std::string &error : m_errors)
+                out += (out.empty() ? "" : "; ") + error;
+            return out;
+        }
         void log_errors()
         {
             for (const std::string& error : m_errors)
@@ -2439,6 +2468,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //BBS: add module name
                     else if (metadata.key == "module")
                         model_object->module_name = metadata.value;
+                    // EdgeSlicer: the Layerling design the object came from (LayerlingPanel)
+                    else if (metadata.key == "layerling_design")
+                        model_object->layerling_design = metadata.value;
                     else
                         model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
                 }
@@ -7177,9 +7209,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                           store_params.proFn,
             store_params.calibration_thumbnail_data, store_params.id_bboxes, store_params.project, store_params.export_plate_idx);
         if (result) {
-            boost::filesystem::rename(filename + ".tmp", filename, ec);
+            rename_into_place(filename + ".tmp", filename, ec);
             if (ec) {
-                add_error("Failed to rename file: " + ec.message());
+                add_error("Failed to move the finished file to " + filename + ": " + ec.message());
                 boost::filesystem::remove(filename + ".tmp", ec);
                 return false;
             }
@@ -7249,7 +7281,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         mz_zip_writer_finalize_archive(&archive);
         lock.close();
-        boost::filesystem::rename(filepath_tmp, filepath, ec);
+        rename_into_place(filepath_tmp, filepath, ec);
         return true;
     }
 
@@ -7760,7 +7792,32 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         auto end = nocomp_exts + sizeof(nocomp_exts) / sizeof(nocomp_exts[0]);
         bool nocomp = std::find_if(nocomp_exts, end, [&path_in_zip](auto & ext) { return boost::algorithm::ends_with(path_in_zip, ext); }) != end;
 #if WRITE_ZIP_LANGUAGE_ENCODING
-        bool result = mz_zip_writer_add_file(&archive, path_in_zip.c_str(), encode_path(src_file_path.c_str()).c_str(), NULL, 0, nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL);
+        // Read the source through the wide-character API. mz_zip_writer_add_file() opens it with a narrow
+        // fopen(), so the path had to go through encode_path() to the ANSI code page, which turns
+        // characters outside it (Chinese file names under a Western code page) into '?' and fails.
+        bool result = false;
+        if (FILE *src = boost::nowide::fopen(src_file_path.c_str(), "rb")) {
+            boost::nowide::stat_t st;
+            MZ_TIME_T             modified = 0;
+            const MZ_TIME_T      *p_time   = nullptr;
+            if (boost::nowide::stat(src_file_path.c_str(), &st) == 0) {
+                modified = MZ_TIME_T(st.st_mtime);
+                p_time   = &modified;
+            }
+            // Mirrors mz_zip_writer_add_file(): size by seeking, then the data is read from the stream.
+#ifdef _WIN32
+            const bool sized = _fseeki64(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) _ftelli64(src) : -1;
+            if (size >= 0 && _fseeki64(src, 0, SEEK_SET) == 0)
+#else
+            const bool sized = fseeko(src, 0, SEEK_END) == 0;
+            const long long size = sized ? (long long) ftello(src) : -1;
+            if (size >= 0 && fseeko(src, 0, SEEK_SET) == 0)
+#endif
+                result = mz_zip_writer_add_cfile(&archive, path_in_zip.c_str(), src, (mz_uint64) size, p_time, NULL, 0,
+                                                 nocomp ? MZ_NO_COMPRESSION : MZ_DEFAULT_LEVEL, NULL, 0, NULL, 0);
+            fclose(src);
+        }
 #else
         std::string native_path = encode_path(path_in_zip.c_str());
         std::string extra = ZipUnicodePathExtraField::encode(path_in_zip, native_path);
@@ -9300,6 +9357,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 if (!obj->module_name.empty())
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
 
+                // EdgeSlicer: the Layerling design the object came from; not in a Bambu-compatible export
+                if (!obj->layerling_design.empty() && !m_bambu_compat)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"layerling_design\" " << VALUE_ATTR << "=\""
+                           << xml_escape(obj->layerling_design) << "\"/>\n";
+
                 // stores object's config data
                 if (m_bambu_compat) {
                     for (const auto &kv : BambuExport::convert(obj->config.get(), m_bambu_ctx, BambuExport::Scope::Object, m_bambu_report, "object " + obj->name))
@@ -10026,8 +10088,18 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
         return true;
     }
 
-    bool _BBS_3MF_Exporter::_add_slice_info_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config)
+    bool _BBS_3MF_Exporter::_add_slice_info_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& project_config)
     {
+        // Per-nozzle process P7: slice_info declares the nozzle sizes the job was sliced for. The project config keeps the
+        // printer preset's nozzle_diameter plus nozzle_diameter_override (so the preset reloads unmodified); the printer
+        // has to read the sizes each extruder really carries.
+        DynamicPrintConfig overridden_config;
+        const bool         nozzle_override = has_nozzle_diameter_override(project_config);
+        if (nozzle_override) {
+            overridden_config = project_config;
+            apply_nozzle_diameter_override(overridden_config);
+        }
+        const DynamicPrintConfig &config = nozzle_override ? overridden_config : project_config;
         std::stringstream stream;
         // Store mesh transformation in full precision, as the volumes are stored transformed and they need to be transformed back
         // when loaded as accurately as possible.
@@ -10101,11 +10173,11 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
                 add_vector(stream, nozzle_volume_types);
                 stream << "\"/>\n";
 
-                // BBS reads the diameters straight off the printer config; plate_data carries the
-                // same string (set by both the CLI and the GUI export path) as a fallback.
-                std::string nozzle_diameters_str = plate_data->nozzle_diameters;
-                if (auto* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter")))
-                    nozzle_diameters_str = nozzle_diameter_option->serialize();
+                // BBS reads the diameters straight off the printer config, which on Bambu's machines is the size each
+                // extruder prints with. Here that is the plate's: the project's sizes (P7, set by both the CLI and the GUI
+                // export path) and the rack nozzle the plate uses (P9). The printer preset's nozzle_diameter is only the
+                // fallback (owner report 2026-11-05: "0.4 | 0.4" in Bambu Connect for a 0.8 + 0.6 plate).
+                const std::string nozzle_diameters_str = slice_info_nozzle_diameters(*plate_data, &config);
 
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
@@ -11016,6 +11088,54 @@ bool load_gcode_3mf_from_stream(std::istream &data, DynamicPrintConfig *config, 
     return res;
 }
 
+std::string slice_info_nozzle_diameters(const PlateData &plate, const DynamicPrintConfig *config)
+{
+    // Each extruder's own size: the plate's string (the project's sizes), else the config's effective sizes.
+    std::vector<double> sizes;
+    if (!plate.nozzle_diameters.empty()) {
+        ConfigOptionFloats parsed;
+        if (parsed.deserialize(plate.nozzle_diameters))
+            sizes = parsed.values;
+    }
+    if (config != nullptr) {
+        const std::vector<double> effective = effective_nozzle_diameters(*config);
+        if (sizes.empty())
+            sizes = effective;
+        // One value per extruder.
+        for (size_t e = sizes.size(); e < effective.size(); ++e)
+            sizes.push_back(effective[e]);
+    }
+    // The nozzles the plate's grouping uses: an extruder that never prints with its own size reports the first one it uses.
+    if (plate.nozzle_group_result) {
+        for (size_t e = 0; e < sizes.size(); ++e) {
+            std::vector<MultiNozzleUtils::NozzleInfo> used = plate.nozzle_group_result->get_used_nozzles_in_extruder(int(e));
+            std::vector<double>                       used_sizes;
+            // The order the plate prints them in (nozzle_change_sequence) when known, else by nozzle id.
+            auto print_order = [&plate](const MultiNozzleUtils::NozzleInfo &n) {
+                const auto &seq = plate.nozzle_change_sequence;
+                const auto  it  = std::find(seq.begin(), seq.end(), unsigned(std::max(n.group_id, 0)));
+                return it == seq.end() ? seq.size() : size_t(it - seq.begin());
+            };
+            std::sort(used.begin(), used.end(), [&](const auto &a, const auto &b) {
+                const size_t oa = print_order(a), ob = print_order(b);
+                return oa != ob ? oa < ob : a.group_id < b.group_id;
+            });
+            for (const MultiNozzleUtils::NozzleInfo &nozzle : used) {
+                const double d = string_to_double_decimal_point(nozzle.diameter); // locale-independent
+                if (d > 0.)
+                    used_sizes.push_back(d);
+            }
+            if (used_sizes.empty() ||
+                std::any_of(used_sizes.begin(), used_sizes.end(), [&](double d) { return std::abs(d - sizes[e]) < 0.001; }))
+                continue;
+            sizes[e] = used_sizes.front();
+        }
+    }
+    if (sizes.empty())
+        return plate.nozzle_diameters;
+    return ConfigOptionFloats(sizes).serialize();
+}
+
 bool store_bbs_3mf(StoreParams& store_params)
 {
     // All export should use "C" locales for number formatting.
@@ -11045,8 +11165,10 @@ bool store_bbs_3mf(StoreParams& store_params)
 
     _BBS_3MF_Exporter exporter;
     bool res = exporter.save_model_to_file(store_params);
-    if (!res)
+    if (!res) {
         exporter.log_errors();
+        store_params.error = exporter.joined_errors();
+    }
 
     store_params.config          = caller_config;
     store_params.project_presets = caller_presets;

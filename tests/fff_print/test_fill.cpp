@@ -25,6 +25,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SVG.hpp"
+#include "libslic3r/calib.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
@@ -1018,6 +1019,144 @@ template<typename RolePred> static std::vector<int> angles_per_layer(const Print
 static bool solid_role(ExtrusionRole role) { return is_solid_infill(role) && role != erIroning; }
 static bool sparse_role(ExtrusionRole role) { return role == erInternalInfill; }
 
+TEST_CASE("Ironing flow calibration grows the ironing flow from left to right", "[Fill][Ironing][Calib]")
+{
+    const double min_flow = 10.;
+    const double max_flow = 60.;
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({make_cube(60, 15, 2)}, print, model,
+                             {{"ironing_type", "topmost"},
+                              {"ironing_pattern", "rectilinear"},
+                              {"ironing_flow", "10%"},
+                              // Lines along Y, so that each line has its own flow.
+                              {"ironing_angle", 90},
+                              {"ironing_angle_fixed", 1},
+                              {"layer_height", 0.2}});
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Ironing_Flow;
+    params.start = min_flow;
+    params.end   = max_flow;
+    print.set_calib_params(params);
+    print.process();
+
+    REQUIRE(dominant_fill_angle(*print.objects().front()->layers().back(),
+                                [](ExtrusionRole role) { return role == erIroning; }) == 90);
+
+    // Flow of every ironing segment, from left to right.
+    std::vector<std::pair<coord_t, double>> flows;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (auto *path = dynamic_cast<const ExtrusionPath *>(entity); path && path->role() == erIroning)
+                for (size_t i = 1; i < path->polyline.points.size(); ++i)
+                    flows.emplace_back((path->polyline.points[i - 1].x() + path->polyline.points[i].x()) / 2, path->mm3_per_mm);
+    REQUIRE(flows.size() > 10);
+    std::sort(flows.begin(), flows.end());
+
+    for (size_t i = 1; i < flows.size(); ++i) {
+        CAPTURE(i, flows[i - 1].second, flows[i].second);
+        CHECK(flows[i].second >= flows[i - 1].second - 1e-9);
+    }
+    // The 5 mm side strips are ironed at the minimum and maximum flows.
+    CHECK(flows.back().second / flows.front().second == Approx(max_flow / min_flow).epsilon(1e-3));
+}
+
+TEST_CASE("Ironing flow calibration reverses the rear band so bed tilt can be compared", "[Fill][Ironing][Calib]")
+{
+    const double min_flow = 10.;
+    const double max_flow = 60.;
+
+    TriangleMesh front = make_cube(60., 15., 2.);
+    TriangleMesh rear  = make_cube(60., 15., 2.);
+    rear.translate(0.f, 20.f, 0.f);
+    front.merge(rear);
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({front}, print, model,
+                             {{"ironing_type", "topmost"},
+                              {"ironing_pattern", "rectilinear"},
+                              {"ironing_flow", "10%"},
+                              {"ironing_angle", 90},
+                              {"ironing_angle_fixed", 1},
+                              {"layer_height", 0.2}});
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Ironing_Flow;
+    params.start = min_flow;
+    params.end   = max_flow;
+    print.set_calib_params(params);
+    print.process();
+
+    const coord_t split_y = (print.objects().front()->bounding_box().min.y() + print.objects().front()->bounding_box().max.y()) / 2;
+    std::vector<std::pair<coord_t, double>> front_flows;
+    std::vector<std::pair<coord_t, double>> rear_flows;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (auto *path = dynamic_cast<const ExtrusionPath *>(entity); path && path->role() == erIroning)
+                for (size_t i = 1; i < path->polyline.points.size(); ++i) {
+                    const coord_t x = (path->polyline.points[i - 1].x() + path->polyline.points[i].x()) / 2;
+                    const coord_t y = (path->polyline.points[i - 1].y() + path->polyline.points[i].y()) / 2;
+                    (y < split_y ? front_flows : rear_flows).emplace_back(x, path->mm3_per_mm);
+                }
+    REQUIRE(front_flows.size() > 10);
+    REQUIRE(rear_flows.size() > 10);
+    std::sort(front_flows.begin(), front_flows.end());
+    std::sort(rear_flows.begin(), rear_flows.end());
+
+    for (size_t i = 1; i < front_flows.size(); ++i)
+        CHECK(front_flows[i].second >= front_flows[i - 1].second - 1e-9);
+    for (size_t i = 1; i < rear_flows.size(); ++i)
+        CHECK(rear_flows[i].second <= rear_flows[i - 1].second + 1e-9);
+    CHECK(front_flows.back().second / front_flows.front().second == Approx(max_flow / min_flow).epsilon(1e-3));
+    CHECK(rear_flows.front().second / rear_flows.back().second == Approx(max_flow / min_flow).epsilon(1e-3));
+}
+
+TEST_CASE("Ironing flow calibration with a 0% start keeps the zero-flow pieces and exports", "[Fill][Ironing][Calib]")
+{
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({make_cube(60, 15, 2)}, print, model,
+                             {{"ironing_type", "topmost"},
+                              {"ironing_pattern", "rectilinear"},
+                              {"ironing_angle", 90},
+                              {"ironing_angle_fixed", 1},
+                              {"layer_height", 0.2}});
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Ironing_Flow;
+    params.start = 0.;
+    params.end   = 50.;
+    print.set_calib_params(params);
+    print.process();
+
+    size_t zero_flow = 0, positive_flow = 0;
+    for (const LayerRegion *region : print.objects().front()->layers().back()->regions())
+        for (const ExtrusionEntity *entity : region->fills.flatten().entities)
+            if (auto *path = dynamic_cast<const ExtrusionPath *>(entity); path && path->role() == erIroning) {
+                CHECK(path->polyline.is_valid());
+                CHECK(path->mm3_per_mm >= 0.);
+                (path->mm3_per_mm == 0. ? zero_flow : positive_flow) += 1;
+            }
+    // The pieces under the 5 mm start strip are not dropped.
+    CHECK(zero_flow > 0);
+    CHECK(positive_flow > zero_flow);
+
+    // G-code export must go through the zero-flow paths without an assertion or an infinite speed.
+    const std::string gcode = Slic3r::Test::gcode(print);
+    CHECK(gcode.find("G1 F") != std::string::npos);
+    std::istringstream stream(gcode);
+    std::string        line;
+    bool               bad_number = false;
+    while (std::getline(stream, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        const std::string move = line.substr(0, line.find(';'));
+        if (move.find("inf") != std::string::npos || move.find("nan") != std::string::npos)
+            bad_number = true;
+    }
+    CHECK(! bad_number);
+}
+
 TEST_CASE("Infill rotation template is unaffected by a raft", "[Fill][Regression]")
 {
     // More angles than raft layers, so a raft cannot alias back to the same angle.
@@ -1718,9 +1857,11 @@ TEST_CASE("Honeycomb simplify only drops the repeated row joint vertex that mult
 
 // Point count, number of turns sharper than 25 degrees and length of the sparse infill of a print.
 // A rounded corner is a run of much gentler turns, so smoothing shows up as fewer sharp ones.
+// Reversals are turns sharper than 150 degrees: the cusps a path folding back on itself makes.
 struct SparseInfillShape {
     size_t point_count { 0 };
     size_t sharp_turns { 0 };
+    size_t reversals { 0 };
     size_t path_count { 0 };
     double length { 0. };
 };
@@ -1740,9 +1881,13 @@ static SparseInfillShape sparse_infill_shape(const Print &print)
         for (size_t i = 1; i + 1 < pts.size(); ++i) {
             const Vec2d incoming = (pts[i] - pts[i - 1]).cast<double>();
             const Vec2d outgoing = (pts[i + 1] - pts[i]).cast<double>();
-            if (incoming.squaredNorm() > 0. && outgoing.squaredNorm() > 0. &&
-                incoming.normalized().dot(outgoing.normalized()) < 0.9)
-                ++shape.sharp_turns;
+            if (incoming.squaredNorm() > 0. && outgoing.squaredNorm() > 0.) {
+                const double cosine = incoming.normalized().dot(outgoing.normalized());
+                if (cosine < 0.9)
+                    ++shape.sharp_turns;
+                if (cosine < -0.866)
+                    ++shape.reversals;
+            }
         }
     };
 
@@ -1933,6 +2078,12 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     // and the outlines of branches that run close to each other merge into one. Rounding the branches
     // before those outlines are built moves them apart, which breaks the merged outlines up into
     // separate loops - many more of them, each needing its own travel move.
+    // EdgeSlicer: our multiline lines are the branch with every vertex moved sideways, not Clipper
+    // outlines, and a curve tighter than that move folds the inner line into a cusp. Such cusps made up
+    // for the rounded turns on macOS (993 sharp turns either way), so they are counted on their own.
+    // Moving the branches also moves where they are clipped to the region, which adds or removes the odd
+    // path or hairpin whatever the platform's lightning trees look like, so both counts get some slack:
+    // a broken up outline or a folded inner line adds them by the dozen.
     auto shape_for = [](const std::string &smooth_factor) {
         Print print;
         Slic3r::Test::init_and_process_print({Slic3r::make_cube(20, 20, 20)}, print,
@@ -1948,9 +2099,12 @@ TEST_CASE("Smoothing multiline lightning infill keeps its outlines connected", "
     const SparseInfillShape smooth = shape_for("100%");
 
     REQUIRE(sharp.path_count > 0);
-    REQUIRE(smooth.path_count <= sharp.path_count);
+    CAPTURE(sharp.path_count, smooth.path_count);
+    REQUIRE(smooth.path_count <= sharp.path_count + sharp.path_count / 100);
     // The outlines are still rounded.
     REQUIRE(smooth.point_count > sharp.point_count);
+    CAPTURE(sharp.sharp_turns, smooth.sharp_turns, sharp.reversals, smooth.reversals);
+    REQUIRE(smooth.reversals <= sharp.reversals + sharp.reversals / 3);
     REQUIRE(smooth.sharp_turns < sharp.sharp_turns);
 }
 

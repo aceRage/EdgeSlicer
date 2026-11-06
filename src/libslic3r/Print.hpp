@@ -218,6 +218,10 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
                                                   const DynamicPrintConfig *layer_range_config,
                                                   const ModelVolume        &volume,
                                                   size_t                    num_extruders);
+// The volume's own config sets a filament (extruder, wall, sparse or solid infill filament > 0).
+bool model_volume_sets_filament(const ModelVolume &volume);
+// A modifier with "Override paint" on that sets a filament: inside it its filament wins over colour painting.
+bool model_volume_overrides_paint(const ModelVolume &volume);
 
 template<typename T>
 class ConstVectorOfPtrsAdaptor {
@@ -378,6 +382,16 @@ private:
     // ref_cnt could only be modified by the main thread, thus it does not need to be atomic.
     size_t                                      m_ref_cnt{ 0 };
 };
+
+// How colour painting shadows a modifier's filament. Pure so the selection logic can be tested.
+//  region_is_alias: the modifier overrides nothing (its region is its parent's own).
+//  sets_filament: the modifier carries an explicit filament/extruder.
+//  filament_differs: its region's filament differs from the parent region's.
+//  overlaps_painted: the part it overlaps carries colour painting.
+//  overrides_paint: "Override paint" is on (and the modifier sets a filament), so paint does not shadow it.
+enum class ModifierPaintNote { None, SameFilamentPainted, FilamentOverriddenByPaint };
+ModifierPaintNote classify_modifier_paint_note(bool region_is_alias, bool sets_filament, bool filament_differs, bool overlaps_painted,
+                                               bool overrides_paint = false);
 
 class PrintObject : public PrintObjectBaseWithState<Print, PrintObjectStep, posCount>
 {
@@ -627,6 +641,17 @@ public:
     // folds into wall_filament/sparse_infill_filament/solid_infill_filament, which makes the
     // region config differ and gives the modifier a region of its own.
     std::vector<std::string>    modifiers_without_overrides() const;
+    // Modifiers whose filament is shadowed by colour painting (names, ModelObject::volumes order).
+    //  same_filament_painted: filament-only modifier, same filament as its parent, parent painted -
+    //    a subset of modifiers_without_overrides(); the caller reports it instead of the plain notice.
+    //  filament_overridden: modifier with a different filament overlapping a painted volume.
+    // Painted areas are applied after modifiers (apply_mm_segmentation) and replace the filament.
+    struct ModifierPaintNotes
+    {
+        std::vector<std::string> same_filament_painted;
+        std::vector<std::string> filament_overridden;
+    };
+    ModifierPaintNotes          modifier_paint_notes() const;
     // Modifiers that got no region in ANY layer range - no part's extruded bounding box intersects
     // them - so their geometry never reaches the slice at all.
     std::vector<std::string>    modifiers_without_parent() const;
@@ -710,6 +735,8 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
+    // Test-only entry point to compute_adaptive_merge_groups(), which has no production caller in this PR.
+    friend struct AdaptiveMergePlanAccess;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
@@ -732,6 +759,11 @@ public:
 
 private:
     void make_perimeters();
+    // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
+    // Decides which layers each wall region keeps and records the decision in
+    // LayerRegion::adaptive_merge_patches. It mutates LayerRegion::slices, so it is only safe to call from the
+    // perimeter step; until the extrusion half lands it has no production caller and G-code is unchanged.
+    void compute_adaptive_merge_groups();
     void prepare_infill();
     void infill();
     void ironing();
@@ -1263,6 +1295,19 @@ public:
     std::vector<unsigned int> object_extruders() const;
     std::vector<unsigned int> support_material_extruders() const;
     std::vector<unsigned int> extruders(bool conside_custom_gcode = false) const;
+    // Mixed-layer-height band merge. True when the plate prints with more than one nozzle diameter, and from
+    // then on the band merge is automatic: there is deliberately no config flag and no UI toggle (Lance's
+    // decision), so this detection is the only gate. BambuStudio's version also checked its
+    // multi_nozzle_diameter_mode project key; that check is dropped here, as is the second clause that compared
+    // used filaments against a separate layer-grid nozzle. Edge has no such nozzle:
+    // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
+    // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
+    bool                uses_multiple_nozzle_diameters() const;
+    // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
+    // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
+    // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
+    // reference nozzle is collected from the object being planned, not from here.
+    void                used_printing_filaments(std::vector<unsigned int> &filaments) const;
     // On-demand evaluation vs filament_hot_bed_nozzles.json (calls extruders(true) once internally).
     void                filament_rule_mismatch_flags(NozzleFilamentRuleMismatch& out_nozzle_mismatch,
                                                      bool& out_gesp,

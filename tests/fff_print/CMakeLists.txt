@@ -10,6 +10,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode.cpp
 	test_cooling.cpp
 	test_mass_limited_acceleration.cpp
+	test_min_layer_time_pause.cpp
 	test_cost_breakdown.cpp
 	test_cost_overrides_slice.cpp
 	test_multicolour_visual_only.cpp
@@ -21,8 +22,11 @@ add_executable(${_TEST_NAME}_tests
 	test_gcodewriter.cpp
 	test_input_shaping.cpp
 	test_calib_gcode.cpp
+	test_temp_retract_grid.cpp
 	test_image_row_preview.cpp
 	test_image_row_walls.cpp
+	test_image_row_p5a.cpp
+	test_image_row_p5b.cpp
 	test_model.cpp
 	test_print.cpp
 	test_custom_gcode_placeholders.cpp
@@ -31,6 +35,14 @@ add_executable(${_TEST_NAME}_tests
 	test_small_print_options.cpp
 	test_locked_zag_width_validation.cpp
 	test_printgcode.cpp
+	test_nozzle_process_gcode.cpp
+	test_tool_slots_gcode.cpp
+	test_nozzle_widths_gcode.cpp
+	test_nozzle_override_gcode.cpp
+	test_nozzle_tool_process_gcode.cpp
+	test_nozzle_rack_slots_gcode.cpp
+	test_mixed_width_tower.cpp
+	test_bs29_keys.cpp
 	test_printobject.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp

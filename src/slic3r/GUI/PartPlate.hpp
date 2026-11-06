@@ -197,9 +197,6 @@ private:
 
     void init();
     bool valid_instance(int obj_id, int instance_id) const;
-    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
-    // by its brim and the tower margin, in plate coordinates.
-    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     void generate_print_polygon(ExPolygon &print_polygon);
     void generate_exclude_polygon(ExPolygon &exclude_polygon);
     void generate_logo_polygon(ExPolygon &logo_polygon);
@@ -395,6 +392,10 @@ public:
     // printable outline (cut to the part every nozzle reaches on a dual-nozzle printer), `margin` mm inside it.
     // Zero on a bed that fills its bounding box: the drag's bounding-box clamp already covers those.
     Vec2d wipe_tower_move_onto_bed(const BoundingBoxf &tower_world, double margin) const;
+    // Orca #16728: what a re-placed tower keeps clear of: each printable instance's convex hull, grown
+    // by its brim and the tower margin, in plate coordinates. Public for the phone's plate layout
+    // (RemoteAccess, slice_prime_tower), which marks a tower that meets them.
+    Polygons wipe_tower_obstacles(const DynamicPrintConfig &config) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
     // expand_mixed_slots = false keeps mixed filament slots as slots instead of their components.

@@ -2,7 +2,12 @@
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/CurvedCut.hpp>
 #include <libslic3r/Geometry.hpp>
+#include <libslic3r/CSGMesh/ModelToCSGMesh.hpp>
+#include <libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp>
 #include <libslic3r/TacJoint.hpp>
+#include <libslic3r/TacJointBoolean.hpp>
+#include <libslic3r/Format/STL.hpp>
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 
@@ -44,6 +49,104 @@ ModelObjectCutAttributes tac_attrs()
 }
 } // namespace
 
+TEST_CASE("TAC Joint sockets can be baked by Mesh Boolean and STL export", "[TACJoint][TACJointCut][TACJointBoolean]")
+{
+    Model model;
+    auto* object       = tac_cube(model);
+    auto  c            = tac_connector();
+    c.tac_joint.offset = GENERATE(0.f, 1.25f, -.8f);
+    c.tac_joint.scale  = GENERATE(.5f, 1.f, 2.f);
+    c.z_angle          = GENERATE(0.f, .7f);
+    const double kerf  = GENERATE(0., .4);
+    CAPTURE(c.tac_joint.offset, c.tac_joint.scale, c.z_angle, kerf);
+    // The source cutter and both generated sockets must pass the same CGAL
+    // preflight used by the object's Mesh Boolean action and STL export.
+    REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(TriangleMesh(tac_joint_cutter_mesh(c.tac_joint))));
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(), tac_attrs());
+    const auto& result = cut.perform_with_plane(kerf);
+    REQUIRE(result.size() == 3);
+    for (size_t half = 0; half < 2; ++half) {
+        CAPTURE(half);
+        std::vector<csg::CSGPart> parts;
+        csg::model_to_csgmesh(*result[half], Transform3d::Identity(), std::back_inserter(parts), csg::mpartsPositive | csg::mpartsNegative);
+        const auto status = csg::check_csgmesh_booleans(range(parts));
+        CAPTURE(std::get<1>(status));
+        REQUIRE(std::get<0>(status) == csg::BooleanFailReason::OK);
+        for (bool manual_boolean : {true, false}) {
+            CAPTURE(manual_boolean);
+            if (!manual_boolean) {
+                parts.clear();
+                csg::model_to_csgmesh(*result[half], Transform3d::Identity(), std::back_inserter(parts),
+                                      csg::mpartsPositive | csg::mpartsNegative | csg::mpartsDoSplits);
+                REQUIRE(std::get<0>(csg::check_csgmesh_booleans(range(parts))) == csg::BooleanFailReason::OK);
+            }
+            // Both actions share the robust TAC backend after their usual preflight.
+            REQUIRE(has_tac_joint_volumes(*result[half]));
+            TriangleMesh mesh = bake_tac_joint_object(*result[half]);
+            REQUIRE_FALSE(mesh.empty());
+            REQUIRE(its_num_open_edges(mesh.its) == 0);
+            REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(mesh));
+            // Each 30 x 30 half loses material to its socket, not only to the kerf.
+            REQUIRE(mesh.volume() < 30. * 30. * (15. - .5 * kerf) - 1.);
+            REQUIRE(mesh.volume() > 30. * 30. * (15. - .5 * kerf) - 300. * std::pow(c.tac_joint.scale, 3));
+            const auto file = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("tac-boolean-%%%%-%%%%.stl");
+            REQUIRE(store_stl(file.string().c_str(), &mesh, true));
+            Model      imported;
+            const bool loaded = load_stl(file.string().c_str(), &imported);
+            boost::filesystem::remove(file);
+            REQUIRE(loaded);
+            REQUIRE(imported.objects.size() == 1);
+            auto restored = imported.objects.front()->raw_mesh();
+            REQUIRE(its_num_open_edges(restored.its) == 0);
+            // STL import caches ADMesh's float volume estimate. Compare the actual
+            // triangles with the same double-precision calculation on both sides.
+            REQUIRE(its_mass_properties(restored.its).volume == Approx(its_mass_properties(mesh.its).volume).epsilon(1e-6));
+        }
+    }
+}
+
+TEST_CASE("An attached TAC Joint belongs to one half and leaves only the opposite socket", "[TACJoint][TACJointCut][TACAttachment]")
+{
+    const int owner = GENERATE(1, 2);
+    CAPTURE(owner);
+    Model model;
+    auto* object       = tac_cube(model);
+    auto  c            = tac_connector();
+    c.tac_joint        = tac_joint_from_attributes([owner](const std::string& name) -> std::optional<double> {
+        return name == "tac_joint_attachment" ? std::optional<double>(owner) : std::nullopt;
+    });
+    c.tac_joint.offset = GENERATE(0.f, 1.25f, -.8f);
+    c.z_angle          = GENERATE(0.f, .7f);
+    const double kerf  = GENERATE(0., .4);
+    CAPTURE(c.tac_joint.offset, c.z_angle, kerf);
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(), tac_attrs());
+    const auto& result = cut.perform_with_plane(kerf);
+    REQUIRE(result.size() == 2);
+    REQUIRE(tac_hole(*result[owner - 1]) == nullptr);
+    REQUIRE(tac_hole(*result[2 - owner]) != nullptr);
+    size_t attached = 0;
+    for (const auto* v : result[owner - 1]->volumes)
+        if (v->is_model_part() && v->cut_info.is_tac_joint()) {
+            ++attached;
+            const auto box = tac_box(*v);
+            REQUIRE(box.min.z() == Approx(-5.5 + c.tac_joint.offset).margin(1e-4));
+            REQUIRE(box.max.z() == Approx(5.5 + c.tac_joint.offset).margin(1e-4));
+        }
+    REQUIRE(attached == 1);
+    // Manual Mesh Boolean must produce one continuous body with an integral pin.
+    std::vector<csg::CSGPart> parts;
+    csg::model_to_csgmesh(*result[owner - 1], Transform3d::Identity(), std::back_inserter(parts), csg::mpartsPositive | csg::mpartsNegative);
+    REQUIRE(std::get<0>(csg::check_csgmesh_booleans(range(parts))) == csg::BooleanFailReason::OK);
+    TriangleMesh mesh = bake_tac_joint_object(*result[owner - 1]);
+    REQUIRE(its_num_open_edges(mesh.its) == 0);
+    REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(mesh));
+    REQUIRE(mesh.split().size() == 1);
+    REQUIRE(mesh.volume() > 30. * 30. * (15. - .5 * kerf) + 1.);
+    REQUIRE(mesh.volume() < 30. * 30. * (15. - .5 * kerf) + 300.);
+}
+
 TEST_CASE("TAC Joint planar cut retains both reference sockets and a printable connector", "[TACJoint][TACJointCut]")
 {
     Model      model;
@@ -72,6 +175,50 @@ TEST_CASE("TAC Joint planar cut retains both reference sockets and a printable c
     REQUIRE(box.min.z() == Approx(0.).margin(1e-4));
     REQUIRE(box.size().z() == Approx(3.34).margin(1e-3));
     REQUIRE(box.max.x() > 15.);
+    // The separate printable pin also takes the TAC STL path. A union of its
+    // single positive volume must preserve the reference geometry.
+    const auto baked_pin = bake_tac_joint_object(*pin);
+    REQUIRE(its_num_open_edges(baked_pin.its) == 0);
+    REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(baked_pin));
+    REQUIRE(its_mass_properties(baked_pin.its).volume == Approx(its_mass_properties(pin->raw_mesh().its).volume).epsilon(1e-6));
+}
+
+TEST_CASE("Attached TAC ownership follows retained halves even without CreateDowels", "[TACJoint][TACAttachment]")
+{
+    const auto attachment = GENERATE(TacJointAttachment::Upper, TacJointAttachment::Lower);
+    const bool keep_upper = GENERATE(true, false);
+    Model      model;
+    auto*      object      = tac_cube(model);
+    auto       c           = tac_connector();
+    c.tac_joint.attachment = attachment;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut cut(object, 0, Transform3d::Identity(), keep_upper ? ModelObjectCutAttribute::KeepUpper : ModelObjectCutAttribute::KeepLower);
+    const auto& result = cut.perform_with_plane();
+    REQUIRE(result.size() == 1);
+    const bool owns = keep_upper == (attachment == TacJointAttachment::Upper);
+    REQUIRE((tac_hole(*result.front()) == nullptr) == owns);
+    size_t pins = 0;
+    for (const auto* v : result.front()->volumes)
+        pins += v->is_model_part() && v->cut_info.is_tac_joint();
+    REQUIRE(pins == (owns ? 1 : 0));
+}
+
+TEST_CASE("An attached TAC refuses object-wide sockets from KeepAsParts", "[TACJoint][TACAttachment]")
+{
+    const auto attachment = GENERATE(TacJointAttachment::Upper, TacJointAttachment::Lower);
+    Model      model;
+    auto*      object      = tac_cube(model);
+    auto       c           = tac_connector();
+    c.tac_joint.attachment = attachment;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut cut(object, 0, Transform3d::Identity(), tac_attrs() | ModelObjectCutAttribute::KeepAsParts);
+    REQUIRE_THROWS_AS(cut.perform_with_plane(), std::invalid_argument);
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(40.);
+    REQUIRE_THROWS_AS(cut.perform_with_curved_sheet(sheet), std::invalid_argument);
+    REQUIRE(object->volumes.size() == 2);
+    Cut retry(object, 0, Transform3d::Identity(), tac_attrs());
+    REQUIRE(retry.perform_with_plane().size() == 2);
 }
 
 TEST_CASE("TAC Joint rotation offset and kerf preserve the assembled connector pose", "[TACJoint][TACJointCut]")
@@ -152,22 +299,63 @@ TEST_CASE("TAC Joint on a tilted plane survives print placement and source assem
     c.pos                   = plane * Vec3d(2., 1., 0.);
     c.z_angle               = .7f;
     c.tac_joint.offset      = -.8f;
+    c.tac_joint.attachment  = GENERATE(TacJointAttachment::Separate, TacJointAttachment::Upper, TacJointAttachment::Lower);
     auto*      placed       = add_tac_joint_volume(object, c, "TAC Joint");
     const auto expected     = TriangleMesh(tac_joint_connector_mesh(c.tac_joint))
                               .transformed_bounding_box(assembly * instance.get_matrix_no_offset().inverse() * placed->get_matrix());
     Cut         cut(object, 0, plane, tac_attrs() | ModelObjectCutAttribute::PlaceOnCutUpper | ModelObjectCutAttribute::FlipLower);
     const auto& result = cut.perform_with_plane(.4);
-    REQUIRE(result.size() == 3);
-    REQUIRE(tac_hole(*result[0]) != nullptr);
-    REQUIRE(tac_hole(*result[1]) != nullptr);
-    const auto* pin    = result[2];
-    const auto  actual = tac_box(*pin->volumes[0], pin->instances[0]->get_assemble_transformation().get_matrix());
+    const bool  separate = c.tac_joint.attachment == TacJointAttachment::Separate;
+    REQUIRE(result.size() == (separate ? 3 : 2));
+    const auto*        pin        = result[separate ? 2 : (c.tac_joint.attachment == TacJointAttachment::Upper ? 0 : 1)];
+    const ModelVolume* pin_volume = nullptr;
+    for (const auto* v : pin->volumes)
+        if (v->is_model_part() && v->cut_info.is_tac_joint())
+            pin_volume = v;
+    REQUIRE(pin_volume != nullptr);
+    const auto actual = tac_box(*pin_volume, pin->instances[0]->get_assemble_transformation().get_matrix());
     REQUIRE((actual.min - expected.min).norm() < 1e-4);
     REQUIRE((actual.max - expected.max).norm() < 1e-4);
-    const auto local_upper = tac_box(*tac_hole(*result[0]), plane.inverse());
-    const auto local_lower = tac_box(*tac_hole(*result[1]), plane.inverse());
-    REQUIRE(local_upper.min.z() == Approx(.18).margin(1e-4));
-    REQUIRE(local_lower.max.z() == Approx(-.18).margin(1e-4));
+    if (c.tac_joint.attachment != TacJointAttachment::Upper) {
+        REQUIRE(tac_hole(*result[0]) != nullptr);
+        REQUIRE(tac_box(*tac_hole(*result[0]), plane.inverse()).min.z() == Approx(.18).margin(1e-4));
+    }
+    if (c.tac_joint.attachment != TacJointAttachment::Lower) {
+        REQUIRE(tac_hole(*result[1]) != nullptr);
+        REQUIRE(tac_box(*tac_hole(*result[1]), plane.inverse()).max.z() == Approx(-.18).margin(1e-4));
+    }
+}
+
+TEST_CASE("TAC placement is independent for several connectors in one cut", "[TACJoint][TACAttachment]")
+{
+    Model model;
+    auto* object = tac_cube(model);
+    for (int mode = 0; mode < 3; ++mode) {
+        auto c                 = tac_connector();
+        c.pos                  = Vec3d(8. * (mode - 1), 0., 0.);
+        c.z_angle              = .3f * mode;
+        c.tac_joint.attachment = TacJointAttachment(mode);
+        add_tac_joint_volume(object, c, "TAC Joint-" + std::to_string(mode));
+    }
+    Cut         cut(object, 0, Transform3d::Identity(), tac_attrs());
+    const auto& result = cut.perform_with_plane();
+    REQUIRE(result.size() == 3);
+    for (size_t half = 0; half < 2; ++half) {
+        size_t holes = 0, pins = 0;
+        for (const auto* v : result[half]->volumes) {
+            holes += v->is_negative_volume();
+            pins += v->is_model_part() && v->cut_info.is_tac_joint();
+        }
+        REQUIRE(holes == 2);
+        REQUIRE(pins == 1);
+        std::vector<csg::CSGPart> parts;
+        csg::model_to_csgmesh(*result[half], Transform3d::Identity(), std::back_inserter(parts), csg::mpartsPositive | csg::mpartsNegative);
+        REQUIRE(std::get<0>(csg::check_csgmesh_booleans(range(parts))) == csg::BooleanFailReason::OK);
+        auto mesh = bake_tac_joint_object(*result[half]);
+        REQUIRE(its_num_open_edges(mesh.its) == 0);
+        REQUIRE(mesh.split().size() == 1);
+        REQUIRE(mesh.volume() < 13499.);
+    }
 }
 
 // TAC Joint on a curved sheet, the way the Pin works there (2026-10-31; more in test_cut_connector_surface.cpp).

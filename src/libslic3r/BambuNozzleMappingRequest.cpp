@@ -37,6 +37,7 @@ static std::string flow_string(NozzleVolumeType v)
     case nvtStandard:    return "Standard";
     case nvtHighFlow:    return "High Flow";
     case nvtTPUHighFlow: return "TPU High Flow";
+    case nvtTPU285:      return "TPU285";
     case nvtE3DHighFlow: return "E3D High Flow";
     default:             return "Standard";
     }

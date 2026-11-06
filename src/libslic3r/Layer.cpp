@@ -112,22 +112,61 @@ static inline bool layer_needs_raw_backup(const Layer *layer)
     return true;
 }
 
+// Bambu Studio 2.9.1 (Layer.cpp:39).
+void Layer::apply_auto_circle_compensation()
+{
+    const PrintObject *obj = this->object();
+    for (LayerRegion *layerm : m_regions)
+        layerm->auto_circle_compensation(layerm->slices, obj->print()->config(), float(scale_(obj->config().circle_compensation_manual_offset.value)));
+}
+
+// Bambu Studio 2.9.1 (Layer.cpp:84-127): the circle compensation flags go with the raw slices.
+// Bambu never advances its surface index on restore, so every surface got the first one's flags;
+// here each surface gets its own.
+static void backup_circle_compensation(LayerRegion *layerm)
+{
+    layerm->raw_counter_circle_compensation.clear();
+    layerm->raw_holes_circle_compensation.clear();
+    for (const Surface &surface : layerm->slices.surfaces) {
+        layerm->raw_counter_circle_compensation.push_back(surface.counter_circle_compensation);
+        layerm->raw_holes_circle_compensation.push_back(surface.holes_circle_compensation);
+    }
+}
+
+static void restore_circle_compensation(LayerRegion *layerm)
+{
+    size_t surface_idx = 0;
+    for (Surface &surface : layerm->slices.surfaces) {
+        if (surface_idx < layerm->raw_counter_circle_compensation.size() && surface_idx < layerm->raw_holes_circle_compensation.size()) {
+            surface.counter_circle_compensation = layerm->raw_counter_circle_compensation[surface_idx];
+            surface.holes_circle_compensation   = layerm->raw_holes_circle_compensation[surface_idx];
+        }
+        ++surface_idx;
+    }
+}
+
 void Layer::backup_untyped_slices()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             layerm->raw_slices = to_expolygons(layerm->slices.surfaces);
+            backup_circle_compensation(layerm);
+        }
     } else {
         assert(m_regions.size() == 1);
         m_regions.front()->raw_slices.clear();
+        m_regions.front()->raw_counter_circle_compensation.clear();
+        m_regions.front()->raw_holes_circle_compensation.clear();
     }
 }
 
 void Layer::restore_untyped_slices()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             layerm->slices.set(layerm->raw_slices, stInternal);
+            restore_circle_compensation(layerm);
+        }
     } else {
         assert(m_regions.size() == 1);
         m_regions.front()->slices.set(this->lslices, stInternal);
@@ -141,10 +180,12 @@ void Layer::restore_untyped_slices()
 void Layer::restore_untyped_slices_no_extra_perimeters()
 {
     if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
+        for (LayerRegion *layerm : m_regions) {
             //BBS: remove extra_perimeters. Always false
         	//if (! layerm->region().config().extra_perimeters.value)
             	layerm->slices.set(layerm->raw_slices, stInternal);
+            restore_circle_compensation(layerm);
+        }
     } else {
     	assert(m_regions.size() == 1);
     	LayerRegion *layerm = m_regions.front();

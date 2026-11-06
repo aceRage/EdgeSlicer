@@ -3,6 +3,8 @@
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/NozzleOverride.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
@@ -1255,6 +1257,7 @@ std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type)
     case NozzleVolumeType::nvtStandard:    return "standard_flow";
     case NozzleVolumeType::nvtHighFlow:    return "high_flow";
     case NozzleVolumeType::nvtTPUHighFlow: return "tpu_high_flow";
+    case NozzleVolumeType::nvtTPU285:      return "tpu285_flow";
     case NozzleVolumeType::nvtE3DHighFlow: return "e3d_high_flow";
     case NozzleVolumeType::nvtHybrid:      return "hybrid_flow";
     default:                               return "standard_flow";
@@ -1292,7 +1295,8 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
     if (opt_nozzle_volume_type)
         for (size_t i = 0; i < opt_nozzle_volume_type->size(); ++i)
             volume_types.push_back(opt_nozzle_volume_type->get_at(i));
-    nozzles_info = BambuSendMapping::nozzles_info(opt_nozzle_diameters->values, volume_types);
+    // Per-nozzle process P7: the sizes this project gives the nozzles, which the job was sliced for.
+    nozzles_info = BambuSendMapping::nozzles_info(preset_bundle->effective_nozzle_diameters(), volume_types);
     return true;
 }
 
@@ -1420,7 +1424,7 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
             for (const auto& nz : group_result->get_nozzles_for_filament(fila.id))
                 in.filament_nozzles.push_back({ fila.id, nz.extruder_id, nz.group_id, nz.diameter, nz.volume_type });
     in.physical_extruder_map = printer_physical_extruder_map();
-    in.preset_diameters      = opt_nozzle_diameters->values;
+    in.preset_diameters      = preset_bundle->effective_nozzle_diameters(); // P7: the project's nozzle sizes
     if (auto* nvt = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
         for (int v : nvt->values)
             in.preset_volumes.push_back(NozzleVolumeType(v));
@@ -2020,6 +2024,9 @@ bool SelectMachineDialog::is_same_nozzle_diameters(float &tag_nozzle_diameter, f
     {
         return false;
     }
+    // Per-nozzle process P7: compare the sizes the job was sliced for (the project's), not the printer preset's.
+    ConfigOptionFloats effective_diameters(preset_bundle->effective_nozzle_diameters());
+    opt_nozzle_diameters = &effective_diameters;
 
     const std::vector<Extder>& extders = obj_->m_extder_data.extders;
     if (extders.empty())
@@ -2283,7 +2290,47 @@ void SelectMachineDialog::on_ok_btn(wxCommandEvent &event)
     {
         float nozzle_diameter = 0;
         float printer_nozzle_diameter = 0;
-        if (!is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
+        // Per-nozzle process P7: a printer with a nozzle rack (H2C) swaps nozzles itself, so the mounted nozzle being
+        // another size is no mismatch - a size the printer has on none of the extruder's nozzles is, and refuses the
+        // send, as a slice for a size its rack lacks is refused (P4).
+        const bool rack_printer = obj_->has_nozzle_rack();
+        if (rack_printer) {
+            const std::vector<double> sliced = wxGetApp().preset_bundle->effective_nozzle_diameters();
+            std::vector<size_t>       used;
+            for (int e : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (e >= 1)
+                    used.push_back(size_t(e - 1));
+            const auto missing = rack_nozzle_size_mismatches(sliced, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()), used);
+            if (!missing.empty()) {
+                has_slice_warnings = true;
+                is_printing_block  = true;
+                confirm_text.push_back(ConfirmBeforeSendInfo(
+                    wxString::Format(_L("This job was sliced for nozzle sizes the printer does not have on that extruder: %s. "
+                                        "Change the nozzle sizes in the Prepare sidebar (or sync them from the printer) and slice again."),
+                                     from_u8(describe_nozzle_size_mismatches(missing))),
+                    ConfirmBeforeSendInfo::InfoLevel::Warning));
+            }
+            // Per-nozzle process P9: the rack slots the job prints with, named, against the nozzles the printer reports (read from
+            // the device state the Device page holds; nothing is requested). A slot whose size the rack lacks, or more pinned slots
+            // of a size than the rack has nozzles of it, refuses the send.
+            const DynamicPrintConfig  full = wxGetApp().preset_bundle->full_config();
+            std::vector<unsigned int> used_filaments;
+            for (int f : wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_used_extruders())
+                if (f >= 1)
+                    used_filaments.push_back(unsigned(f - 1));
+            const std::vector<RackSlotUse> uses = rack_slots_in_use(full, used_filaments);
+            if (!uses.empty()) {
+                const std::vector<std::string> problems =
+                    rack_slot_send_problems(full, uses, reported_available_nozzle_sizes(DualNozzle::printer_state(obj_), sliced.size()));
+                for (const std::string &problem : problems) {
+                    BOOST_LOG_TRIVIAL(warning) << "per-nozzle process P9: send refused: " << problem;
+                    has_slice_warnings = true;
+                    is_printing_block  = true;
+                    confirm_text.push_back(ConfirmBeforeSendInfo(from_u8(problem), ConfirmBeforeSendInfo::InfoLevel::Warning));
+                }
+            }
+        }
+        if (!rack_printer && !is_same_nozzle_diameters(nozzle_diameter, printer_nozzle_diameter))
         {
             has_slice_warnings = true;
             // is_printing_block  = true;  # Removed to allow nozzle overrides (to support non-standard nozzles)

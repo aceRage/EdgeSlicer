@@ -28,6 +28,7 @@
 #include <wx/timer.h>
 
 namespace Slic3r { namespace Showcase { class EncoderWorker; class VideoJob; struct VideoFrame; } }
+namespace Slic3r { namespace Showcase { struct PackageInput; } }
 
 class wxGLCanvas;
 class wxBoxSizer;
@@ -272,6 +273,13 @@ private:
     void                     video_finish(bool cancelled);
     void                     video_cancel();
     bool                     video_busy() const { return m_video.job != nullptr; }
+
+    // --- Realism phase 4: the Blender package (ShowcaseBlenderExport.cpp) ---------------------------
+    void                     on_blender_menu(wxWindow *anchor);
+    void                     on_export_blender(bool open_in_blender);
+    void                     on_install_blender_addon();
+    bool                     gather_blender_package(Showcase::PackageInput &in, bool toolpaths, int detail, bool internals, bool video,
+                                                    std::string &error);
 
     // --- S5: path files, the timeline, the build-up and the toolpath source (ShowcaseViewPath.cpp) ---
     void                     on_import_path();

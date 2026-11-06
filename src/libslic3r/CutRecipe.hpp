@@ -137,7 +137,9 @@ class ModelObject;
 //       the halves load, "Edit cut" is not offered.
 //  7  TAC Joint = 6: versioned reference geometry and independent absolute clearances.
 //     Older readers must refuse the recipe rather than re-cutting TAC as a Plug.
-static constexpr int CutRecipeVersion = 7;
+//  8  TAC Joint attachment to A/B. Older readers must not re-cut an attached
+//     connector as a separate pin. Saved result meshes remain readable.
+static constexpr int CutRecipeVersion = 8;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.

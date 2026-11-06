@@ -316,6 +316,15 @@ public:
     // Rib wall: shift of the whole output (Bambu Studio's rib_offset), set before the initial position.
     WipeTowerWriter&            set_origin_offset(const Vec2f &offset) { m_origin_offset = offset; return *this; }
     WipeTowerWriter&            set_arc_fitting(bool enable) { m_enable_arc_fitting = enable; return *this; }
+    // Bambu Studio 2.9.1 prime_tower_acceleration (WipeTower.cpp:1943-1950, 855-858, 934-937): an M204
+    // before the first extrusion after a travel and before the first travel after an extrusion. 0 for
+    // print_accel (the default) writes none, as before.
+    WipeTowerWriter&            set_accelerations(unsigned int print_accel, unsigned int travel_accel)
+    {
+        m_print_accel  = print_accel;
+        m_travel_accel = travel_accel;
+        return *this;
+    }
 
 	WipeTowerWriter&				 set_z(float z) 
 		{ m_current_z = z; return *this; }
@@ -401,6 +410,7 @@ public:
 			m_extrusions.emplace_back(WipeTower::Extrusion(rot, width, m_current_tool));
 		}
 
+        m_gcode += acceleration_for(e);
 		m_gcode += "G1";
         if (std::abs(rot.x() - rotated_current_pos.x()) > (float)EPSILON)
 			m_gcode += set_format_X(rot.x());
@@ -471,6 +481,7 @@ public:
             m_extrusions.emplace_back(WipeTower::Extrusion(rot, width, m_current_tool));
         }
 
+        m_gcode += acceleration_for(e);
         m_gcode += arc.direction == ArcDirection::Arc_Dir_CCW ? "G3" : "G2";
         const Vec2f center_offset = this->rotate(unscaled<float>(arc.center)) - rotated_current_pos;
         m_gcode += set_format_X(rot.x());
@@ -894,6 +905,22 @@ private:
     bool          m_enable_arc_fitting = false;
     Vec2f         m_origin_offset = Vec2f::Zero();
     const std::vector<WipeTower::FilamentParameters>& m_filpar;
+    unsigned int  m_print_accel       = 0;
+    unsigned int  m_travel_accel      = 0;
+    unsigned int  m_last_acceleration = 0;
+
+    // Bambu Studio set_acceleration_impl() (WipeTower.cpp:1532), M204 S for the flavours the Type 1 tower
+    // serves; nothing while the prime tower acceleration is off.
+    std::string   acceleration_for(float e)
+    {
+        if (m_print_accel == 0)
+            return std::string();
+        const unsigned int acceleration = e == 0.f ? m_travel_accel : m_print_accel;
+        if (acceleration == 0 || acceleration == m_last_acceleration)
+            return std::string();
+        m_last_acceleration = acceleration;
+        return "M204 S" + std::to_string(acceleration) + "\n";
+    }
 
 	std::string   set_format_X(float x)
     {
@@ -1087,11 +1114,11 @@ Vec2f WipeTower::move_box_inside_polygon(const BoundingBox &box, const Polygons 
 static const double wrapping_wipe_tower_depth = 10;
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
 
-float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2)
+float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2, float line_width)
 {
     if (brim_width <= 0.f)
         return brim_width;
-    const float spacing = nozzle_diameter * 1.25f - first_layer_height * float(1. - M_PI_4); // Width_To_Nozzle_Ratio
+    const float spacing = (line_width > 0.f ? line_width : nozzle_diameter * 1.25f) - first_layer_height * float(1. - M_PI_4); // Width_To_Nozzle_Ratio
     if (spacing <= EPSILON)
         return brim_width;
     const int loops_num = int((brim_width + spacing / 2.f) / spacing);
@@ -1119,11 +1146,11 @@ float WipeTower::nozzle_change_perimeter_width(float nozzle_diameter)
     return it != nozzle_diameter_to_nozzle_change_width.end() ? it->second : 2.f * nozzle_diameter * 1.25f;
 }
 
-float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing)
+float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width)
 {
     if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)
         return 0.f;
-    const float pw         = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float pw         = tower_line_width > 0.f ? tower_line_width : nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
     const float ncpw       = nozzle_change_perimeter_width(nozzle_diameter);
     const float line_width = width - 2.f * pw;
     if (line_width <= EPSILON)
@@ -1175,13 +1202,13 @@ float WipeTower::rib_footprint_side(float width, float depth, float rib_width, f
     return std::max(width, depth) + 2.f * per_side;
 }
 
-float WipeTower::estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height)
+float WipeTower::estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height, float line_width)
 {
     if (purges.empty() || width < EPSILON || layer_height < EPSILON || nozzle_diameter < EPSILON)
         return 0.f;
-    const float pw     = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
-    const float square = align_ceil(std::sqrt(estimate_tower_blocks_depth(purges, width, layer_height, nozzle_diameter, extra_spacing) * width), pw);
-    const float depth  = estimate_tower_blocks_depth(purges, square, layer_height, nozzle_diameter, extra_spacing);
+    const float pw     = line_width > 0.f ? line_width : nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float square = align_ceil(std::sqrt(estimate_tower_blocks_depth(purges, width, layer_height, nozzle_diameter, extra_spacing, line_width) * width), pw);
+    const float depth  = estimate_tower_blocks_depth(purges, square, layer_height, nozzle_diameter, extra_spacing, line_width);
     return rib_footprint_side(square, depth, rib_width, extra_rib_length, max_height);
 }
 
@@ -1380,6 +1407,12 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_used_fillet        = config.wipe_tower_fillet_wall.value;
     m_max_speed          = float(config.wipe_tower_max_purge_speed.value) * 60.f;
     m_enable_arc_fitting = config.enable_arc_fitting.value && std::abs(m_wipe_tower_rotation_angle) < EPSILON;
+    m_tower_line_width = float(std::max(0., config.prime_tower_line_width.value));
+    // Bambu Studio 2.9.1 (WipeTower.cpp:1942-1960): prime tower extrusions at prime_tower_acceleration,
+    // travels inside the tower at the travel acceleration.
+    // The travel acceleration is an object setting here: Print hands it over (set_travel_acceleration).
+    if (config.prime_tower_acceleration.value > 0.)
+        m_tower_acceleration = (unsigned int) std::floor(config.prime_tower_acceleration.value + 0.5);
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -1452,8 +1485,10 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
 #endif
 
     m_filpar[idx].filament_area = float((M_PI/4.f) * pow(config.filament_diameter.get_at(idx), 2)); // all extruders are assumed to have the same filament diameter at this point
-    float nozzle_diameter = float(config.nozzle_diameter.get_at(idx));
-    m_filpar[idx].nozzle_diameter = nozzle_diameter; // to be used in future with (non-single) multiextruder MM
+    // Mixed nozzle diameters (per-nozzle P2): the nozzle this filament prints through (filament_map on an
+    // H2D / H2C), not the extruder with the filament's index.
+    float nozzle_diameter = float(nozzle_diameter_for_filament(config, unsigned(idx) + 1));
+    m_filpar[idx].nozzle_diameter = nozzle_diameter;
     m_filpar[idx].max_layer_height = filament_max_layer_height(config, idx);
 
     float max_vol_speed = float(get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, idx));
@@ -1481,7 +1516,18 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].reheat_extruder      = m_filpar[idx].physical_extruder >= 0 ? m_filpar[idx].physical_extruder :
                                          config.physical_extruder_map.values.empty() ? 0 : std::max(0, config.physical_extruder_map.values.front());
 
-    m_perimeter_width = nozzle_diameter * Width_To_Nozzle_Ratio; // all extruders are now assumed to have the same diameter
+    // Structure width (Edge, per-nozzle P2): one width for the footprint, the wall, the brim and the sparse
+    // fill, so the tower stays one rectangle whatever tool prints it. The forced wipe tower filament's
+    // nozzle when there is one, else the smallest nozzle registered (the wall is printed by whichever tool
+    // changes in, and the smallest width is safe for every tool). Each tool's purge uses
+    // tool_line_width(). With uniform nozzles this is the value every set_extruder() call wrote before.
+    {
+        const float tool_pw = m_tower_line_width > 0.f ? m_tower_line_width : nozzle_diameter * Width_To_Nozzle_Ratio;
+        const bool  forced  = config.wipe_tower_filament > 0;
+        const bool  is_wall = forced && idx == size_t(config.wipe_tower_filament - 1);
+        if (idx == 0 || is_wall || (!forced && tool_pw < m_perimeter_width))
+            m_perimeter_width = tool_pw;
+    }
     // BBS: remove useless config
 #if 0
     if (m_semm) {
@@ -1551,6 +1597,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
 		.set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift + (tool!=(unsigned int)(-1) && (m_current_shape == SHAPE_REVERSED) ? m_layer_info->depth - m_layer_info->toolchanges_depth(): 0.f))
 		.append(";--------------------\n"
 				"; CP TOOLCHANGE START\n")
@@ -1884,13 +1931,22 @@ void WipeTower::toolchange_Wipe(
 	const box_coordinates  &cleaning_box,
 	float wipe_length)
 {
+    // Mixed nozzle diameters (Edge, per-nozzle P2): the purge is laid by the tool just loaded
+    // (m_current_tool), at its own width and flow; the row pitch follows it, and plan_toolchange() reserves
+    // the depth with the same width. The box edges and the wall overlap stay on the structure width.
+    const float tool_pw    = tool_line_width(m_current_tool);
+    const float tool_flow  = tool_extrusion_flow(m_current_tool);
+    const bool  tool_width = tool_pw != m_perimeter_width;
+
 	// Increase flow on first layer, slow down print.
-    writer.set_extrusion_flow(m_extrusion_flow * (is_first_layer() ? 1.15f : 1.f))
+    writer.set_extrusion_flow(tool_flow * (is_first_layer() ? 1.15f : 1.f))
 		  .append("; CP TOOLCHANGE WIPE\n");
 
     // BBS: add the note for gcode-check, when the flow changed, the width should follow the change
     if (is_first_layer()) {
-        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(1.15 * m_perimeter_width) + "\n");
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(1.15 * tool_pw) + "\n");
+    } else if (tool_width) {
+        writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(tool_pw) + "\n");
     }
 
 	const float& xl = cleaning_box.ld.x();
@@ -1901,7 +1957,7 @@ void WipeTower::toolchange_Wipe(
     // wipe until the end of the assigned area.
 
     float x_to_wipe = wipe_length;
-    float dy = m_layer_info->extra_spacing * m_perimeter_width;
+    float dy = m_layer_info->extra_spacing * tool_pw;
 
     // Bambu Studio's toolchange_wipe_new() (WipeTower.cpp:4034) caps the purge at prime_tower_max_speed.
     const float max_wipe_speed = std::min(4800.f, m_max_speed);
@@ -1938,7 +1994,7 @@ void WipeTower::toolchange_Wipe(
 
         // BBS: check the bridging area and use the bridge flow
         if (need_change_flow || need_thick_bridge_flow(writer.y())) {
-            writer.set_extrusion_flow(extrusion_flow(0.2));
+            writer.set_extrusion_flow(tool_extrusion_flow(m_current_tool, 0.2));
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(0.2) + "\n");
             need_change_flow = true;
         }
@@ -1950,7 +2006,7 @@ void WipeTower::toolchange_Wipe(
 
         // BBS: recover the flow in non-bridging area
         if (need_change_flow) {
-            writer.set_extrusion_flow(m_extrusion_flow);
+            writer.set_extrusion_flow(tool_flow);
             writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) + analyzer_tag_value(m_layer_height) + "\n");
         }
 
@@ -1984,7 +2040,7 @@ void WipeTower::toolchange_Wipe(
 
     writer.set_extrusion_flow(m_extrusion_flow); // Reset the extrusion flow.
     // BBS: add the note for gcode-check when the flow changed
-    if (is_first_layer()) {
+    if (is_first_layer() || tool_width) {
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width) + analyzer_tag_value(m_perimeter_width) + "\n");
     }
 }
@@ -2026,6 +2082,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 		.set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
@@ -2270,9 +2327,11 @@ void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned in
 
     m_plan.back().tool_changes.push_back(WipeTowerInfo::ToolChange(old_tool, new_tool, depth, ramming_depth, first_wipe_line, wipe_volume));
 #else
-    float length_to_extrude = volume_to_length(wipe_volume, m_perimeter_width, layer_height_par);
+    // Mixed nozzle diameters (Edge, per-nozzle P2): new_tool purges at its own width (toolchange_Wipe()).
+    const float new_pw = tool_line_width(new_tool);
+    float length_to_extrude = volume_to_length(wipe_volume, new_pw, layer_height_par);
 
-    depth += std::ceil(length_to_extrude / width) * m_perimeter_width;
+    depth += std::ceil(length_to_extrude / width) * new_pw;
     //depth *= m_extra_spacing;
 
     m_plan.back().tool_changes.push_back(WipeTowerInfo::ToolChange(old_tool, new_tool, depth, 0.f, 0.f, wipe_volume, length_to_extrude, purge_volume));
@@ -2299,7 +2358,8 @@ void WipeTower::make_rib_tower_square()
     const float line_len = m_wipe_tower_width - 2 * m_perimeter_width;
     for (auto &info : m_plan)
         for (auto &toolchange : info.tool_changes)
-            toolchange.required_depth = std::ceil(volume_to_length(toolchange.wipe_volume, m_perimeter_width, info.height) / line_len) * m_perimeter_width;
+            toolchange.required_depth = std::ceil(volume_to_length(toolchange.wipe_volume, tool_line_width(toolchange.new_tool), info.height) / line_len) *
+                                        tool_line_width(toolchange.new_tool);
 }
 
 // Orca #15841: a folded layer is generated like any other but thrown away by the emitter, so its
@@ -2379,14 +2439,15 @@ void WipeTower::plan_tower()
                 // apply solid fill for the first layer
                 info.extra_spacing = 1.f;
                 for (auto& toolchange : info.tool_changes) {
-                    float x_to_wipe = volume_to_length(toolchange.wipe_volume, m_perimeter_width, info.height);
+                    const float new_pw = tool_line_width(toolchange.new_tool); // Edge, per-nozzle P2
+                    float x_to_wipe = volume_to_length(toolchange.wipe_volume, new_pw, info.height);
                     float line_len = m_wipe_tower_width - 2 * m_perimeter_width;
                     float x_to_wipe_new = x_to_wipe * m_extra_spacing;
                     x_to_wipe_new = std::floor(x_to_wipe_new / line_len) * line_len;
                     x_to_wipe_new = std::max(x_to_wipe_new, x_to_wipe);
 
                     int line_count = std::ceil((x_to_wipe_new - WT_EPSILON) / line_len);
-                    toolchange.required_depth = line_count * m_perimeter_width;
+                    toolchange.required_depth = line_count * new_pw;
                     toolchange.wipe_volume = x_to_wipe_new / x_to_wipe * toolchange.wipe_volume;
                     toolchange.wipe_length = x_to_wipe_new;
                 }
@@ -2395,7 +2456,7 @@ void WipeTower::plan_tower()
                 info.extra_spacing = m_extra_spacing;
                 for (auto& toolchange : info.tool_changes) {
                     toolchange.required_depth *= m_extra_spacing;
-                    toolchange.wipe_length = volume_to_length(toolchange.wipe_volume, m_perimeter_width, info.height);
+                    toolchange.wipe_length = volume_to_length(toolchange.wipe_volume, tool_line_width(toolchange.new_tool), info.height);
                 }
             }
         }
@@ -2490,12 +2551,15 @@ void WipeTower::save_on_last_wipe()
 
             if (i == idx) {
                 float width = m_wipe_tower_width - 3*m_perimeter_width; // width we draw into
-                float length_to_save = finish_layer().total_extrusion_length_in_plane();
+                // Edge, per-nozzle P2: the finish layer is structure width, the purge new_tool's own width;
+                // the saved finish-layer length is converted to new_tool's line (x 1 with uniform nozzles).
+                const float new_pw = tool_line_width(toolchange.new_tool);
+                float length_to_save = finish_layer().total_extrusion_length_in_plane() * (m_perimeter_width / new_pw);
                 float length_to_wipe = volume_to_length(toolchange.wipe_volume,
-                                      m_perimeter_width, m_layer_info->height)  - toolchange.first_wipe_line - length_to_save;
+                                      new_pw, m_layer_info->height)  - toolchange.first_wipe_line - length_to_save;
 
                 length_to_wipe = std::max(length_to_wipe,0.f);
-                float depth_to_wipe = m_perimeter_width * (std::floor(length_to_wipe/width) + ( length_to_wipe > 0.f ? 1.f : 0.f ) ) * m_extra_spacing;
+                float depth_to_wipe = new_pw * (std::floor(length_to_wipe/width) + ( length_to_wipe > 0.f ? 1.f : 0.f ) ) * m_extra_spacing;
 
                 toolchange.required_depth = toolchange.ramming_depth + depth_to_wipe;
             }
@@ -2678,6 +2742,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
         .set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     // Slow down on the 1st layer.

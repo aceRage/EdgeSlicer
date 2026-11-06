@@ -8,6 +8,9 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/NozzleProcess.hpp"
+#include "Plater.hpp"
+#include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "FlowVariantEdit.hpp"
@@ -248,14 +251,21 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
 }
 
 // Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
-// smallest minimum and its largest maximum.
+// smallest minimum and its largest maximum. Per-nozzle process P2 (D9): with mixed nozzle sizes, by the limits of
+// the smallest nozzle the current plate prints with (layer_height_limits_for_nozzles).
 void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
 {
-    const DynamicPrintConfig& printer_config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    const std::vector<double>& min_limits = printer_config.option<ConfigOptionFloats>("min_layer_height")->values;
-    const std::vector<double>& max_limits = printer_config.option<ConfigOptionFloats>("max_layer_height")->values;
-    min_layer_height = *std::min_element(min_limits.begin(), min_limits.end());
-    max_layer_height = *std::max_element(max_limits.begin(), max_limits.end());
+    PresetBundle*             bundle         = GUI::wxGetApp().preset_bundle;
+    const DynamicPrintConfig& printer_config = bundle->printers.get_edited_preset().config;
+    std::vector<size_t>       used_nozzles;
+    if (Plater* plater = GUI::wxGetApp().plater(); plater != nullptr && has_mixed_nozzle_diameters(printer_config)) {
+        const std::vector<size_t> filament_nozzles = bundle->filament_nozzles();
+        if (PartPlate* plate = plater->get_partplate_list().get_curr_plate())
+            for (int filament : plate->get_extruders())
+                if (filament >= 1 && size_t(filament) <= filament_nozzles.size())
+                    used_nozzles.push_back(filament_nozzles[size_t(filament - 1)]);
+    }
+    layer_height_limits_for_nozzles(printer_config, used_nozzles, min_layer_height, max_layer_height);
 }
 
 ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
@@ -413,6 +423,18 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = true;
         dialog.ShowModal();
         new_conf.set_key_value("xy_contour_compensation", new ConfigOptionFloat(0));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:410-417): the auto circle compensation replaces the fixed
+    // X-Y hole / contour compensation, so switching it on clears them.
+    if (config->has("enable_circle_compensation") && config->opt_bool("enable_circle_compensation") &&
+        (config->opt_float("xy_hole_compensation") != 0. || config->opt_float("xy_contour_compensation") != 0.)) {
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist    = true;
+        new_conf.set_key_value("xy_contour_compensation", new ConfigOptionFloat(0));
+        new_conf.set_key_value("xy_hole_compensation", new ConfigOptionFloat(0));
         apply(config, &new_conf);
         is_msg_dlg_already_exist = false;
     }
@@ -1077,7 +1099,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool can_ironing_support = have_raft || (have_support_material && config->opt_int("support_interface_top_layers") > 0);
     toggle_field("support_ironing", can_ironing_support);
     bool has_support_ironing = can_ironing_support && config->opt_bool("support_ironing");
-    for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing" })
+    for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing",
+                    "support_ironing_inset", "support_ironing_speed", "support_ironing_direction" })
         toggle_line(el, has_support_ironing);
     // Orca: Force solid support interface when using support ironing
     toggle_field("support_interface_spacing", have_support_material && have_support_interface && !has_support_ironing);
@@ -1165,6 +1188,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && supports_wipe_tower_2);
+    // Bambu Studio 2.9.1 options only the Type 1 tower honours; the tool change wipe applies to both.
+    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width"})
+      toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
+      toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
     // (Type 1) tower is always printed unrotated (Print::apply clears the angle), so the line stays
     // visible but greyed out there; its tooltip says why.
@@ -1240,6 +1268,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line("layer_time_speed_slowdown_scope", ltssm_slow_down);
     }
 
+    // Edge: the custom pause position only for Custom X/Y.
+    if (config->has("min_layer_time_pause_park")) {
+        const bool custom_park = config->opt_enum<MinLayerTimePausePark>("min_layer_time_pause_park") == mltpCustom;
+        toggle_line("min_layer_time_pause_park_x", custom_park);
+        toggle_line("min_layer_time_pause_park_y", custom_park);
+    }
+
     toggle_line("flush_into_objects", !is_global_config);
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
@@ -1313,6 +1348,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
+
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1169-1172).
+    if (config->has("enable_circle_compensation")) {
+        const bool circle_compensation = config->opt_bool("enable_circle_compensation");
+        toggle_field("xy_hole_compensation", !circle_compensation);
+        toggle_field("xy_contour_compensation", !circle_compensation);
+        toggle_line("circle_compensation_manual_offset", circle_compensation);
+        toggle_line("apply_scarf_seam_on_circles", circle_compensation);
+    }
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
     toggle_line("unsupported_wall_last", has_detect_overhang_wall);

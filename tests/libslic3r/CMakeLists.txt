@@ -15,6 +15,9 @@ add_executable(${_TEST_NAME}_tests
 	test_untrusted_input.cpp
 	test_post_process_packed_gcode.cpp
 	test_zip_entry_path.cpp
+	test_zip_cleaner.cpp
+	test_zip_extract.cpp
+	test_zip_open.cpp
 	test_custom_models.cpp
 	test_model_browser_rules.cpp
 	test_layerling.cpp
@@ -26,6 +29,7 @@ add_executable(${_TEST_NAME}_tests
 	test_device_info_json.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_lightning.cpp
 	test_arachne_walls.cpp
 	test_skirt_distance.cpp
 	test_ams_lookup.cpp
@@ -36,6 +40,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
 	test_paint_penetration.cpp
+	test_paint_wire.cpp
 	test_paint_remap.cpp
 	test_spread_paint.cpp
 	test_airbrush.cpp
@@ -55,6 +60,8 @@ add_executable(${_TEST_NAME}_tests
 	test_image_fill.cpp
 	test_image_row_transform.cpp
 	test_image_row_dialog.cpp
+	test_obj_texture_p5d.cpp
+	test_image_fill_p5c.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
@@ -118,7 +125,18 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_cli_preset_slots.cpp
+	test_cli_output.cpp
 	test_mixed_nozzle.cpp
+	test_nozzle_process.cpp
+	test_tool_slots.cpp
+	test_nozzle_editing.cpp
+	test_nozzle_widths.cpp
+	test_nozzle_override.cpp
+	test_nozzle_tool_process.cpp
+	test_nozzle_rack_slots.cpp
+	test_h2c_rack_group_id.cpp
+	test_nozzle_strip_model.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
@@ -142,6 +160,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_user_load_prefetch.cpp
 	test_filament_remap.cpp
 	test_calib_settings.cpp
+	test_calib.cpp
 	test_preset_printer_type.cpp
 	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
@@ -165,6 +184,8 @@ add_executable(${_TEST_NAME}_tests
 	test_mesh_round.cpp
 	test_quad_remesh.cpp
 	test_meshboolean.cpp
+	test_adaptive_layer_merge.cpp
+	test_adaptive_region_merge.cpp
 	test_lay_on_face.cpp
 	test_marchingsquares.cpp
 	test_timeutils.cpp
@@ -178,6 +199,8 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
+    test_bbl_h3c.cpp
+    test_bs29_keys_import.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
@@ -198,6 +221,7 @@ add_executable(${_TEST_NAME}_tests
     test_showcase_lens.cpp
     test_showcase_skin.cpp
     test_showcase_realism.cpp
+    test_showcase_blender.cpp
     test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
