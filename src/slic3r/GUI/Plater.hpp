@@ -172,6 +172,10 @@ public:
     // Per-nozzle process P9: Left / Right per filament on Bambu's two-extruder machines (the plate's manual filament map), the
     // "Print on" menu (Auto / Left / Right and the rack's nozzles by size) and pinning a rack size.
     bool filament_sides_supported() const;
+    // A single-extruder machine with a nozzle rack (Bambu H3C: nine slots): the filament badge shows Auto or the pinned slot, and
+    // its list offers Auto, the rack's sizes and each slot (the same pins as the filament menu's "Rack nozzle size" / "Rack slot").
+    bool filament_single_rack_supported() const;
+    void append_filament_rack_menu(wxMenu *menu, size_t filament);
     int  filament_side(size_t filament) const; // 0 = auto, 1 = left, 2 = right
     void set_filament_side(size_t filament, int side);
     void set_filament_rack_size(size_t filament, size_t extruder, double diameter);
