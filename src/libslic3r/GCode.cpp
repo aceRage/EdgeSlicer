@@ -653,6 +653,19 @@ int OozePrevention::_get_temp(const GCode& gcodegen) const
                get_value_at(gcodegen.config(), gcodegen.config().nozzle_temperature, ConfigFlowDomain::Filament, filament_id);
 }
 
+// Bambu Studio 2.9.1 (GCode.cpp:451-473): the wipe before a tool change uses the prime tower's wipe speed
+// and distance when they are set. Bambu falls back to prime_tower_max_speed when prime_tower_wipe_speed
+// is 0; here 0 keeps the normal wipe speed, so presets without the key print as before.
+static double toolchange_wipe_speed(const GCode &gcodegen, bool toolchange, double wipe_speed)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_speed.value > 0. ? gcodegen.config().prime_tower_wipe_speed.value : wipe_speed;
+}
+
+static double toolchange_wipe_distance(const GCode &gcodegen, bool toolchange, double scaled_wipe_dist)
+{
+    return toolchange && gcodegen.config().prime_tower_wipe_distance.value > 0. ? scale_(gcodegen.config().prime_tower_wipe_distance.value) : scaled_wipe_dist;
+}
+
 // Orca:
 // Function to calculate the excess retraction length that should be retracted either before or after wiping
 // in order for the wipe operation to respect the filament retraction speed
@@ -691,10 +704,10 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
 
     // Calculate wipe speed
     double wipe_speed = config.role_based_wipe_speed ? writer.get_current_speed() / 60.0 : config.get_abs_value("wipe_speed");
-    wipe_speed        = std::max(wipe_speed, 10.0);
+    wipe_speed        = std::max(toolchange_wipe_speed(gcodegen, toolchange, wipe_speed), 10.0);
 
     // Process wipe path & calculate wipe path length
-    double   wipe_dist = scale_(config.wipe_distance.get_at(extruder_id));
+    double   wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(config.wipe_distance.get_at(extruder_id)));
     Polyline wipe_path = {last_pos};
     wipe_path.append(this->path.points.begin() + 1, this->path.points.end());
     double wipe_path_length = std::min(wipe_path.length(), wipe_dist);
@@ -736,6 +749,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
     double _wipe_speed = gcodegen.config().get_abs_value("wipe_speed"); // gcodegen.writer().config.travel_speed.values.front() * 0.8;
     if (gcodegen.config().role_based_wipe_speed)
         _wipe_speed = gcodegen.writer().get_current_speed() / 60.0;
+    _wipe_speed = toolchange_wipe_speed(gcodegen, toolchange, _wipe_speed);
     if (_wipe_speed < 10)
         _wipe_speed = 10;
 
@@ -745,7 +759,7 @@ std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_
             amount of retraction. In other words, how far do we move in XY at wipe_speed
             for the time needed to consume retraction_length at retraction_speed?  */
         // BBS
-        double wipe_dist = scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id()));
+        double wipe_dist = toolchange_wipe_distance(gcodegen, toolchange, scale_(gcodegen.config().wipe_distance.get_at(gcodegen.writer().extruder()->id())));
 
         /*  Take the stored wipe path and replace first point with the current actual position
             (they might be different, for example, in case of loop clipping).  */
@@ -1431,6 +1445,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
+    // Bambu Studio 2.9.1: the Type 1 tower sets its own M204 with prime_tower_acceleration, so the writer
+    // has to state the acceleration again after it (Bambu: gcodegen.reset_last_acceleration()).
+    if (gcodegen.config().prime_tower_acceleration.value > 0.)
+        gcodegen.writer().invalidate_acceleration();
     // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
     // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
     // towards the filament_sequence.json entry order.
@@ -10327,6 +10345,15 @@ std::string GCode::extrude_loop(
         enable_seam_slope      = seam_overhang < m_config.scarf_overhang_threshold.value * 0.01f * _line_width;
     }
 
+    // Bambu Studio 2.9.1 (GCode.cpp:6709-6712): the walls of a circle under the auto circle compensation
+    // print at the filament's compensation speed and, with apply_scarf_seam_on_circles, with a scarf seam,
+    // unless the loop overhangs. Edge: the scarf is decided before the seam gap clip (Bambu clips first)
+    // and, like every scarf here, not on the first layer or in spiral vase mode.
+    const bool circle_compensation = loop.circle_compensation &&
+        std::none_of(loop.paths.begin(), loop.paths.end(), [](const ExtrusionPath &p) { return p.role() == erOverhangPerimeter; });
+    if (circle_compensation && m_config.apply_scarf_seam_on_circles.value && !m_config.spiral_mode && layer_id() > 0)
+        enable_seam_slope = true;
+
     // clip the path to avoid the extruder to get exactly on the first point of the loop;
     // if polyline was shorter than the clipping distance we'd get a null polyline, so
     // we discard it in that case
@@ -10452,9 +10479,16 @@ std::string GCode::extrude_loop(
         m_multi_flow_segment_path_average_mm3_per_mm = weighted_sum_mm3_per_mm / total_multipath_length;
     // Orca: end of multipath average mm3_per_mm value calculation
 
+    // Bambu Studio 2.9.1: "; Slow Down Start" / "; Slow Down End" keep the cooling slowdown off these walls.
+    const char *circle_start = circle_compensation ? "; Slow Down Start\n" : "";
+    const char *circle_end   = circle_compensation ? "; Slow Down End\n" : "";
+    m_circle_compensation_speed = circle_compensation ? m_config.circle_compensation_speed.get_at(m_writer.extruder()->id()) : -1.;
+
     if (!enable_seam_slope) {
         for (ExtrusionPaths::iterator path = paths.begin(); path != paths.end(); ++path) {
+            gcode += circle_start;
             gcode += this->_extrude(*path, description, speed_for_path(*path));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10490,7 +10524,9 @@ std::string GCode::extrude_loop(
 
         // Then extrude it
         for (const auto& p : new_loop.get_all_paths()) {
+            gcode += circle_start;
             gcode += this->_extrude(*p, description, speed_for_path(*p));
+            gcode += circle_end;
             // Orca: Adaptive PA - dont adapt PA after the first pultipath extrusion is completed
             // as we have already set the PA value to the average flow over the totality of the path
             // in the first extrude move
@@ -10506,6 +10542,8 @@ std::string GCode::extrude_loop(
             paths.insert(paths.end(), new_loop.ends.begin(), new_loop.ends.end());
         }
     }
+
+    m_circle_compensation_speed = -1.;
 
     // Orca: share the post-extrusion nozzle position between wipe_inward and wipe_on_loops.
     const bool is_ccw = loop.is_counter_clockwise();
@@ -10750,6 +10788,10 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
     // switches it off outright, so even a zero-length support path keeps the role speed.
     const auto speed_for_path = [this](double length, ExtrusionRole role) {
         const double default_speed = -1.0;
+        // Bambu Studio 2.9.1 (GCode.cpp:7750-7751): support ironing prints at support_ironing_speed;
+        // 0 (this fork's default) keeps the ironing speed.
+        if (role == erIroning)
+            return m_config.support_ironing_speed.value > 0. ? m_config.support_ironing_speed.value : default_speed;
         const double threshold     = this->process_flow_value(m_config.small_support_perimeter_threshold);
         if (!is_support(role) || threshold <= 0. || length > SMALL_PERIMETER_LENGTH(threshold))
             return default_speed;
@@ -11133,8 +11175,28 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // key those callers actually read rather than leaving the warning with no setting at all.
     if (speed != -1 && (path.role() == erSkirt || path.role() == erBrim))
         speed_setting = "support_speed";
+    // Bambu Studio 2.9.1 (GCode.cpp:7704-7722, 7795-7800): the walls of a compensated circle use the
+    // filament's circle_compensation_speed as their role speed; a caller's small perimeter speed still
+    // caps it.
+    const bool circle_wall = m_circle_compensation_speed > 0. && (path.role() == erPerimeter || path.role() == erExternalPerimeter);
+    if (circle_wall && speed > EPSILON && speed < m_circle_compensation_speed)
+        speed_setting = "small_perimeter_speed";
+    else if (circle_wall && speed > EPSILON) {
+        speed         = m_circle_compensation_speed;
+        speed_setting = "circle_compensation_speed";
+    }
     if (speed == -1) {
-        if (path.role() == erPerimeter) {
+        if (circle_wall) {
+            speed_setting = "circle_compensation_speed";
+            speed         = m_circle_compensation_speed;
+            if (sloped) {
+                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
+                if (scarf < speed) {
+                    speed         = scarf;
+                    speed_setting = "scarf_joint_speed";
+                }
+            }
+        } else if (path.role() == erPerimeter) {
             speed_setting = "inner_wall_speed";
             speed = this->process_flow_value(m_config.inner_wall_speed);
             if (sloped) {

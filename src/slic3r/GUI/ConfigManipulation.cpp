@@ -427,6 +427,18 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:410-417): the auto circle compensation replaces the fixed
+    // X-Y hole / contour compensation, so switching it on clears them.
+    if (config->has("enable_circle_compensation") && config->opt_bool("enable_circle_compensation") &&
+        (config->opt_float("xy_hole_compensation") != 0. || config->opt_float("xy_contour_compensation") != 0.)) {
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist    = true;
+        new_conf.set_key_value("xy_contour_compensation", new ConfigOptionFloat(0));
+        new_conf.set_key_value("xy_hole_compensation", new ConfigOptionFloat(0));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
     if (config->option<ConfigOptionFloat>("elefant_foot_compensation")->value > 1)
     {
         const wxString msg_text = _(L("Too large elephant foot compensation is unreasonable.\n"
@@ -1087,7 +1099,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     bool can_ironing_support = have_raft || (have_support_material && config->opt_int("support_interface_top_layers") > 0);
     toggle_field("support_ironing", can_ironing_support);
     bool has_support_ironing = can_ironing_support && config->opt_bool("support_ironing");
-    for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing" })
+    for (auto el : {"support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing",
+                    "support_ironing_inset", "support_ironing_speed", "support_ironing_direction" })
         toggle_line(el, has_support_ironing);
     // Orca: Force solid support interface when using support ironing
     toggle_field("support_interface_spacing", have_support_material && have_support_interface && !has_support_ironing);
@@ -1175,6 +1188,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
       toggle_line(el, have_prime_tower);
     for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && supports_wipe_tower_2);
+    // Bambu Studio 2.9.1 options only the Type 1 tower honours; the tool change wipe applies to both.
+    for (auto el : {"prime_tower_acceleration", "prime_tower_line_width"})
+      toggle_line(el, have_prime_tower && !supports_wipe_tower_2);
+    for (auto el : {"prime_tower_wipe_speed", "prime_tower_wipe_distance"})
+      toggle_line(el, have_prime_tower);
     // Rotation is a WipeTower2 feature (Orca shows it only for that generator). The Bambu Lab
     // (Type 1) tower is always printed unrotated (Print::apply clears the angle), so the line stays
     // visible but greyed out there; its tooltip says why.
@@ -1330,6 +1348,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     for (auto el : { "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "hole_to_polyhole_max_edges" })
         toggle_line(el, config->opt_bool("hole_to_polyhole"));
+
+    // Bambu Studio 2.9.1 (ConfigManipulation.cpp:1169-1172).
+    if (config->has("enable_circle_compensation")) {
+        const bool circle_compensation = config->opt_bool("enable_circle_compensation");
+        toggle_field("xy_hole_compensation", !circle_compensation);
+        toggle_field("xy_contour_compensation", !circle_compensation);
+        toggle_line("circle_compensation_manual_offset", circle_compensation);
+        toggle_line("apply_scarf_seam_on_circles", circle_compensation);
+    }
 
     bool has_detect_overhang_wall = config->opt_bool("detect_overhang_wall");
     toggle_line("unsupported_wall_last", has_detect_overhang_wall);
