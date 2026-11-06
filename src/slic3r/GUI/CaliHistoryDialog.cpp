@@ -611,6 +611,7 @@ NewCalibrationHistoryDialog::NewCalibrationHistoryDialog(wxWindow *parent, const
 
     Label *  preset_name_title = new Label(top_panel, _L("Filament"));
     m_comboBox_filament = new ::ComboBox(top_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, NEW_HISTORY_DIALOG_INPUT_SIZE, 0, nullptr, wxCB_READONLY);
+    m_comboBox_filament->EnableTypeToFilter();
 
     wxArrayString filament_items = get_all_filaments(obj);
     // The rows keep their plain names (the stars are icons), so GetValue() still finds the filament.
