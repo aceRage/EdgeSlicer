@@ -4904,12 +4904,22 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
         return result;
 
     const int filament_count = int(m_print->config().filament_diameter.size());
+    const MixedFilamentManager &mixed = m_print->mixed_filament_manager();
     auto add = [&](std::set<int> &into, int filament_1based) {
-        if (filament_1based > 0 && filament_1based <= filament_count)
+        if (filament_1based > 0 && filament_1based <= filament_count) {
             into.insert(filament_1based - 1);
+        } else if (filament_1based > filament_count) {
+            // A mixed filament prints with its physical components (upstream Orca #16947, for Edge's
+            // virtual mixed slots above the real count): those are what cannot leave the nozzle's reach.
+            std::vector<int> ids{ filament_1based };
+            mixed.expand_virtual_extruder_ids(ids, size_t(filament_count));
+            for (int id : ids)
+                if (id > 0 && id <= filament_count)
+                    into.insert(id - 1);
+        }
     };
-    // The filaments a region prints with, the same ones Bambu inspects (mixed-filament virtual slots above
-    // the real count are dropped by `add`).
+    // The filaments a region prints with, the same ones Bambu inspects; a mixed filament's virtual slot
+    // stands for its components.
     struct RegionFilaments { int wall; int outer_wall; int solid; int sparse; };
     auto region_filaments = [](const LayerRegion *layerm) {
         const PrintRegionConfig &c = layerm->region().config();
