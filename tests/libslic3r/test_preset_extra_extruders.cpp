@@ -57,7 +57,7 @@ void add_parent(PresetCollection &printers)
     parent->is_visible = true;
 }
 
-const Preset &parent_of(const PresetCollection &printers)
+const Preset &parent_of(PresetCollection &printers)
 {
     const Preset *parent = printers.find_preset("Parent Printer", false, true);
     REQUIRE(parent != nullptr);
@@ -76,7 +76,7 @@ DynamicPrintConfig five_extruder_child(const Preset &parent)
     return config;
 }
 
-void check_child(const PresetCollection &printers)
+void check_child(PresetCollection &printers)
 {
     const Preset *child = printers.find_preset("User Printer", false, true);
     REQUIRE(child != nullptr);
