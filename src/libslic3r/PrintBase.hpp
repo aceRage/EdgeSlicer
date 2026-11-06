@@ -133,7 +133,10 @@ public:
         SlicingModifierSameFilamentPainted,
         // A modifier with a different filament overlapping colour-painted volumes: the painted areas
         // win where they overlap. Appended; own id.
-        SlicingModifierOverriddenByPaint
+        SlicingModifierOverriddenByPaint,
+        // H2C (two-extruder rack): the plate's nozzle grouping uses two or more nozzle diameters on one extruder's rack,
+        // which the firmware refuses to swap mid-print. Raised during export_gcode; appended, own id.
+        SlicingRackMixedDiameter
     };
 
     typedef size_t TimeStamp;

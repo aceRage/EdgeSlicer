@@ -4554,6 +4554,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         m_filament_change_sequence.emplace_back(initial_extruder_id);
         m_nozzle_change_sequence.emplace_back(first_nozzle ? first_nozzle->group_id : 0);
         file.write_format(";VT%d H%d\n", int(initial_extruder_id), initial_nozzle_id);
+        // Once per plate: a two-extruder rack machine (H2C) that must swap between rack hotends of different diameters.
+        // Only a warning, so a firmware that allows it later (and the H3C) is not blocked.
+        if (rack_group_mixes_nozzle_diameters(print.config(), *group_result)) {
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          L("This plate uses two nozzle diameters on the same extruder rack. H2C firmware currently refuses to change nozzle diameter during a print. Split the plate by nozzle diameter or print the objects separately."),
+                                          PrintStateBase::SlicingRackMixedDiameter);
+        }
     }
 
     // flush FanMover buffer to avoid modifying the start gcode if it's manual.
