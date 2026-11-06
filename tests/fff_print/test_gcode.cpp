@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <cstdio>
 #include <regex>
 #include <vector>
 #include <algorithm>
@@ -889,4 +890,140 @@ TEST_CASE("The highest temperature bed policy ignores filaments that start above
     CHECK(bed_temps.front() == 65);
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
     CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
+}
+
+// change_filament_gcode receives the flush both as a total, flush_length, and split into chunks of
+// about 135 mm³, flush_length_1..4. Profiles purge the chunks, so a flush too small to round up to
+// one chunk must still land in flush_length_1 instead of being dropped.
+// Edge: no multifilament_config / slice_with_object_overrides harness; two cubes plus a re-apply,
+// same as the by-object header case in this file. The type1 tower path also clamps purge volume to
+// 100 mm³, so 30/50 mm³ only fail on the by-object path without the fix.
+TEST_CASE("The flush chunks add up to the whole flush, however small", "[GCode][MultiFilament]")
+{
+    const std::string path   = GENERATE(as<std::string>{}, "direct", "type1");
+    const double      volume = GENERATE(30., 50., 100., 300., 1000.);
+    CAPTURE(path, volume);
+
+    const std::string flush = "0," + std::to_string(volume) + "," + std::to_string(volume) + ",0";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#00FF00"};
+    config.set_deserialize_strict({
+        { "change_filament_gcode", "; FLUSH {flush_length} {flush_length_1} {flush_length_2} {flush_length_3} {flush_length_4}\n" },
+        { "flush_volumes_matrix",  flush },
+        { "flush_multiplier",      1 },
+        { "skirt_loops",           0 },
+        { "brim_type",             "no_brim" },
+        { "layer_change_gcode",    "G92 E0\n" },
+        { "enable_support",        0 },
+    });
+    if (path == "direct")
+        config.set_deserialize_strict({ { "print_sequence", "by object" }, { "enable_prime_tower", false } });
+    else
+        config.set_deserialize_strict({
+            { "enable_prime_tower", true },
+            { "wipe_tower_type",    "type1" },
+            { "prime_tower_width",  35 },
+            { "wipe_tower_x",       15 },
+            { "wipe_tower_y",       15 },
+        });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[0]->config.set("extruder", 1);
+    model.objects[1]->config.set("extruder", 2);
+    print.apply(model, config);
+
+    const std::string gcode = Test::gcode(print);
+
+    size_t flushes = 0;
+    std::istringstream lines(gcode);
+    for (std::string line; std::getline(lines, line);) {
+        double total, chunks[4];
+        if (std::sscanf(line.c_str(), "; FLUSH %lf %lf %lf %lf %lf", &total, &chunks[0], &chunks[1], &chunks[2], &chunks[3]) != 5 || total <= 0.)
+            continue;
+        ++flushes;
+        CAPTURE(line);
+        CHECK(chunks[0] > 0.);
+        CHECK_THAT(chunks[0] + chunks[1] + chunks[2] + chunks[3], Catch::Matchers::WithinRel(total, 1e-3));
+    }
+    CHECK(flushes > 0);
+}
+
+// Orca #16965: on one nozzle with several filaments, the lift limits come from the filament printing. Edge already
+// read them that way (EXTRUDER_CONFIG and GCodeWriter::lift() index by the filament), so this guards the behaviour.
+TEST_CASE("Z hop follows the lift settings of the filament printing", "[GCode][Retraction]")
+{
+    // One nozzle, two filaments. Filament 2 overrides one lift setting; filament 1 keeps the printer's default,
+    // which lifts on every layer.
+    const auto key_value = GENERATE(table<std::string, std::string>({
+        {"filament_retract_lift_above", "nil,1"},             // only lift Z above 1 mm
+        {"filament_retract_lift_enforce", "nil,Bottom Only"}, // only lift on the first layer
+    }));
+    const std::string &key   = std::get<0>(key_value);
+    const std::string &value = std::get<1>(key_value);
+    const int filament = GENERATE(1, 2);
+    CAPTURE(key, filament);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    config.set_deserialize_strict({
+        {"z_hop",                      "0.6"},
+        {key,                          value},
+        {"layer_height",               "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"machine_start_gcode",        ""},
+    });
+
+    Print print;
+    Model model;
+    // Two objects, so every layer travels between them with a retraction.
+    init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    for (ModelObject *object : model.objects)
+        object->config.set("extruder", filament);
+    print.apply(model, config);
+
+    // The heights of the layers with a move that lifts Z above the layer.
+    std::set<double>   lift_layers;
+    double             layer_z = 0.;
+    std::istringstream lines(Test::gcode(print));
+    std::string        line;
+    const std::regex   z_word(R"(\bZ([-0-9.]+))");
+    while (std::getline(lines, line)) {
+        if (line.rfind(";Z:", 0) == 0) {
+            layer_z = std::stod(line.substr(3));
+            continue;
+        }
+        if (layer_z <= 0. || (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0))
+            continue;
+        const std::string move = line.substr(0, line.find(';'));
+        std::smatch       match;
+        if (std::regex_search(move, match, z_word) && std::stod(match[1]) > layer_z + 0.3)
+            lift_layers.insert(layer_z);
+    }
+
+    REQUIRE_FALSE(lift_layers.empty());
+    const double first = *lift_layers.begin();
+    const double last  = *lift_layers.rbegin();
+    if (filament == 1) {
+        CHECK(first < 0.2 + EPSILON);
+        CHECK(last > 1.);
+    } else if (key == "filament_retract_lift_above")
+        CHECK(first > 1. - EPSILON);
+    else
+        CHECK(last < 0.2 + EPSILON);
 }

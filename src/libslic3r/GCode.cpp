@@ -1263,7 +1263,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
             config.set_key_value("flush_length", new ConfigOptionFloat(purge_length));
 
-            int   flush_count = std::min(g_max_flush_count, (int) std::round(purge_volume / g_purge_volume_one_time));
+            // At least one chunk, or a flush under half a chunk is dropped from flush_length_1..4.
+            int   flush_count = std::clamp((int) std::round(purge_volume / g_purge_volume_one_time), 1, g_max_flush_count);
             float flush_unit  = purge_length / flush_count;
             int   flush_idx   = 0;
             for (; flush_idx < flush_count; flush_idx++) {
@@ -2378,6 +2379,7 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
     size_t              idx_object_layer     = 0;
     size_t              idx_support_layer    = 0;
     const LayerToPrint* last_extrusion_layer = nullptr;
+    size_t              last_extrusion_layer_idx = 0;
     while (idx_object_layer < object.layers().size() || idx_support_layer < object.support_layers().size()) {
         LayerToPrint layer_to_print;
         double       print_z_min = std::numeric_limits<double>::max();
@@ -2439,17 +2441,36 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
                 }
                 extra_gap = std::max(extra_gap, object.config().raft_contact_distance.value);
             }
-            double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) + layer_to_print.layer()->height +
-                                     std::max(0., extra_gap);
+            // Mixed nozzle diameters (BambuStudio v02.09.01.70 GCode.cpp:1703-1730): a merge group top lays one bead
+            // over its whole band, so the steps below it carry no extrusions on purpose. effective_print_height() is
+            // the band's height there and the plain layer height everywhere else.
+            double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) +
+                                     layer_to_print.layer()->effective_print_height() + std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
-            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON)
+            // A gap made only of merged-out steps is covered by the merged extrusion above it, even where the group
+            // top prints something shorter than the band (a bridge keeps its own height).
+            bool merged_out_in_between = false;
+            if (last_extrusion_layer != nullptr && last_extrusion_layer_idx + 2 <= layers_to_print.size() - 1) {
+                merged_out_in_between = true;
+                for (size_t idx = last_extrusion_layer_idx + 1; idx + 1 < layers_to_print.size(); ++idx) {
+                    const Layer *in_between = layers_to_print[idx].object_layer;
+                    if (in_between == nullptr || ! in_between->is_adaptive_merged_out()) {
+                        merged_out_in_between = false;
+                        break;
+                    }
+                }
+            }
+
+            if (has_extrusions && layer_to_print.print_z() > maximal_print_z + 2. * EPSILON && ! merged_out_in_between)
                 warning_ranges.emplace_back(
                     std::make_pair((last_extrusion_layer ? last_extrusion_layer->print_z() : 0.), layers_to_print.back().print_z()));
         }
         // Remember last layer with extrusions.
-        if (has_extrusions)
-            last_extrusion_layer = &layers_to_print.back();
+        if (has_extrusions) {
+            last_extrusion_layer     = &layers_to_print.back();
+            last_extrusion_layer_idx = layers_to_print.size() - 1;
+        }
     }
 
     if (!warning_ranges.empty()) {
@@ -3279,32 +3300,32 @@ static inline std::vector<const PrintInstance*> sort_object_instances_by_max_z(c
 }
 #endif
 
-// Produce a vector of PrintObjects in the order of their respective ModelObjects in print.model().
+// Produce a vector of PrintInstances in the order of their ModelInstances in the object and instance lists of print.model().
 // BBS: add sort logic for seq-print
 std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order)
 {
-    auto find_object_index = [](const Model& model, const ModelObject* obj) {
-        for (int index = 0; index < model.objects.size(); index++) {
-            if (model.objects[index] == obj)
-                return index;
-        }
-        return -1;
-    };
+    if (init_order) {
+        // Orca #17232: number by position in the model's object and instance lists. Copies of one object can be
+        // split into separate PrintObjects, one per distinct transformation, and print.objects() orders those by
+        // transformation, so its order is not the list order. Keying every copy on its object's index made them
+        // tie, and the ties came out grouped by PrintObject.
+        int order = 0;
+        for (const ModelObject* model_object : print.model().objects)
+            for (ModelInstance* model_instance : model_object->instances)
+                model_instance->arrange_order = ++order;
+    }
 
     // Build up map from ModelInstance* to PrintInstance*
     std::vector<std::pair<const ModelInstance*, const PrintInstance*>> model_instance_to_print_instance;
     model_instance_to_print_instance.reserve(print.num_object_instances());
     for (const PrintObject* print_object : print.objects())
-        for (const PrintInstance& print_instance : print_object->instances()) {
-            if (init_order)
-                const_cast<ModelInstance*>(print_instance.model_instance)->arrange_order = find_object_index(print.model(),
-                                                                                                             print_object->model_object());
+        for (const PrintInstance& print_instance : print_object->instances())
             model_instance_to_print_instance.emplace_back(print_instance.model_instance, &print_instance);
-        }
     std::sort(model_instance_to_print_instance.begin(), model_instance_to_print_instance.end(),
               [](auto& l, auto& r) { return l.first->arrange_order < r.first->arrange_order; });
     if (init_order) {
-        // Re-assign the arrange_order so each instance has a unique order number
+        // Re-assign the arrange_order so each instance of this print has a unique order number. The
+        // numbering above covers the whole model, including the instances of the other plates.
         for (int k = 0; k < model_instance_to_print_instance.size(); k++) {
             const_cast<ModelInstance*>(model_instance_to_print_instance[k].first)->arrange_order = k + 1;
         }
@@ -3312,16 +3333,8 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
 
     std::vector<const PrintInstance*> instances;
     instances.reserve(model_instance_to_print_instance.size());
-    for (const ModelObject* model_object : print.model().objects)
-        for (const ModelInstance* model_instance : model_object->instances) {
-            auto it = std::lower_bound(model_instance_to_print_instance.begin(), model_instance_to_print_instance.end(),
-                                       std::make_pair(model_instance, nullptr),
-                                       [](auto& l, auto& r) { return l.first->arrange_order < r.first->arrange_order; });
-            if (it != model_instance_to_print_instance.end() && it->first == model_instance)
-                instances.emplace_back(it->second);
-        }
-    std::sort(instances.begin(), instances.end(),
-              [](auto& l, auto& r) { return l->model_instance->arrange_order < r->model_instance->arrange_order; });
+    for (const auto& model_instance_print_instance : model_instance_to_print_instance)
+        instances.emplace_back(model_instance_print_instance.second);
     return instances;
 }
 
@@ -11471,13 +11484,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         }
 
         if (slowdown_curled) {
+            // Orca #17144: the fully unsupported entry is the bridge speed for bridge infill, as in the branch
+            // without the curled slowdown; every other role keeps the 4/4 overhang speed there.
+            const FloatOrPercent fully_unsupported_speed = path.role() == erBridgeInfill ?
+                FloatOrPercent{this->process_flow_value(m_config.bridge_speed) * 100 / ref_speed, true} :
+                ((oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true});
             ConfigOptionFloatsOrPercents dynamic_overhang_speeds(
                 {FloatOrPercent{100, true},
                  (oh1_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh1_abs * 100 / ref_speed, true},
                  (oh2_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh2_abs * 100 / ref_speed, true},
                  (oh3_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh3_abs * 100 / ref_speed, true},
                  (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true},
-                 (oh4_abs < 0.5) ? FloatOrPercent{100, true} : FloatOrPercent{oh4_abs * 100 / ref_speed, true}});
+                 fully_unsupported_speed});
 
             new_points = m_extrusion_quality_estimator.estimate_extrusion_quality(path, overhang_overlap_levels, dynamic_overhang_speeds,
                                                                                   ref_speed, speed, slowdown_curled, fan_overlap_threshold,
@@ -13039,7 +13057,8 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
 
     dyn_config.set_key_value("flush_length", new ConfigOptionFloat(wipe_length));
 
-    int   flush_count = std::min(g_max_flush_count, (int) std::round(wipe_volume / g_purge_volume_one_time));
+    // At least one chunk, or a flush under half a chunk is dropped from flush_length_1..4.
+    int   flush_count = std::clamp((int) std::round(wipe_volume / g_purge_volume_one_time), 1, g_max_flush_count);
     float flush_unit  = wipe_length / flush_count;
     int   flush_idx   = 0;
     for (; flush_idx < flush_count; flush_idx++) {

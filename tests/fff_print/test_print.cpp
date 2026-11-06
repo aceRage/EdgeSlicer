@@ -6,6 +6,7 @@
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -2096,6 +2097,164 @@ TEST_CASE("Filament shrinkage compensation counts the wipe tower filament next t
     }));
 }
 
+// Orca #17232: validate() numbers the instances through sort_object_instances_by_model_order(print, true). Copies of
+// one object used to share one order key, and print.objects() does not list them in list order: every second copy
+// is rotated here, which splits them into separate PrintObjects. The G-code export prints in the order those numbers
+// assign. Upstream's test_data init_print() takes an instance count; ours does not, so the copies are added here.
+TEST_CASE("By-layer As object list keeps copies of one object in their list order", "[Print]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence", "by layer" },
+        { "print_order",    "as_obj_list" },
+        { "skirt_loops",    0 },
+    });
+    config.set_key_value("layer_change_gcode", new ConfigOptionString("G92 E0\n")); // validate() relative-E reset
+
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "copies.stl";
+    object->add_volume(make_cube(5, 5, 2));
+    for (size_t k = 0; k < 200; ++k) {
+        ModelInstance *instance = object->add_instance();
+        instance->set_offset(Vec3d(10. + 12. * double(k % 15), 10. + 12. * double(k / 15), 0.));
+        if (k % 2 != 0)
+            instance->set_rotation(Vec3d(0., 0., PI / 2));
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.objects().size() > 1);
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+
+    // validate() numbered the instances it ordered; copies must be numbered in list order.
+    const ModelInstancePtrs &copies = print.model().objects.front()->instances;
+    for (size_t k = 0; k < copies.size(); ++k) {
+        CAPTURE(k);
+        REQUIRE(copies[k]->arrange_order == int(k + 1));
+    }
+
+    // The As object list path of the G-code export orders the instances from those numbers.
+    const std::vector<const PrintInstance *> ordered = sort_object_instances_by_model_order(print);
+    REQUIRE(ordered.size() == copies.size());
+    for (size_t k = 0; k < copies.size(); ++k) {
+        CAPTURE(k);
+        REQUIRE(ordered[k]->model_instance == copies[k]);
+    }
+}
+
+// Orca #16491: the height ranges are uncompensated print heights; their layer height and their settings both
+// follow the Z shrinkage compensation.
+// A 20 mm cube on the bed with a height range override.
+static ModelObject* cube_with_height_range(Model &model, const t_layer_height_range &range, DynamicPrintConfig &&range_config)
+{
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 20.));
+    // Every layer range must carry a layer_height (see layer_height_profile_from_ranges).
+    object->layer_config_ranges[range].assign_config(std::move(range_config));
+    object->add_instance()->set_offset(Vec3d(90., 90., 0.));
+    object->ensure_on_bed();
+    return object;
+}
+
+static DynamicPrintConfig height_range_test_config(double shrinkage_z)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "filament_shrinkage_compensation_z", shrinkage_z },
+        { "layer_height", 0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "precise_z_height", false },
+        { "sparse_infill_density", "15%" },
+    });
+    return config;
+}
+
+// The 0.1 mm / 50 % height range [10, 15] has to print both its layer height and its infill from 10 * 100 / z
+// up to 15 * 100 / z of the object.
+static void check_thin_dense_height_range(const PrintObject &print_object, double shrinkage_z)
+{
+    size_t mismatched = 0;
+    double first_dense_z = -1.;
+    for (const Layer *layer : print_object.layers()) {
+        const bool thin  = layer->height < 0.15;
+        const bool dense = std::any_of(layer->regions().begin(), layer->regions().end(), [](const LayerRegion *region) {
+            return ! region->slices.empty() && region->region().config().sparse_infill_density.value > 40.;
+        });
+        if (thin != dense)
+            ++ mismatched;
+        if (dense && first_dense_z < 0.)
+            first_dense_z = layer->slice_z;
+    }
+    CHECK(mismatched == 0);
+    CHECK_THAT(first_dense_z, Catch::Matchers::WithinAbs(10. * 100. / shrinkage_z, 0.2));
+}
+
+static DynamicPrintConfig thin_dense_height_range()
+{
+    DynamicPrintConfig range;
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.1));
+    range.set_key_value("sparse_infill_density", new ConfigOptionPercent(50));
+    return range;
+}
+
+TEST_CASE("A height range above the object keeps its layer height up to the compensated top", "[Print][Shrinkage][Regression]")
+{
+    // The range [10, 100] covers the top of the 20 mm cube, which the Z shrinkage compensation moves to 20 * 100 / z.
+    const double z = GENERATE(95., 105.);
+    DynamicPrintConfig range;
+    range.set_key_value("layer_height", new ConfigOptionFloat(0.1));
+    Model model;
+    cube_with_height_range(model, { 10., 100. }, std::move(range));
+    Print print;
+    print.apply(model, height_range_test_config(z));
+    print.process();
+
+    const PrintObject &print_object = *print.objects().front();
+    CHECK_THAT(print_object.layers().back()->print_z, Catch::Matchers::WithinAbs(20. * 100. / z, 0.1));
+    const size_t thick_layers_in_range = std::count_if(print_object.layers().begin(), print_object.layers().end(),
+        [z](const Layer *layer) { return layer->slice_z > 11. * 100. / z && layer->height > 0.15; });
+    CHECK(thick_layers_in_range == 0);
+}
+
+TEST_CASE("Height range settings apply where the height range prints", "[Print][Shrinkage][Regression]")
+{
+    // The range [10, 15] prints with 0.1 mm layers and 50 % infill. The Z shrinkage compensation moves both
+    // to 10 * 100 / z ... 15 * 100 / z.
+    const double z = GENERATE(100., 95., 105.);
+    Model model;
+    cube_with_height_range(model, { 10., 15. }, thin_dense_height_range());
+    Print print;
+    print.apply(model, height_range_test_config(z));
+    print.process();
+
+    check_thin_dense_height_range(*print.objects().front(), z);
+}
+
+TEST_CASE("Height range settings follow a Z shrinkage change that comes with a modifier change", "[Print][Shrinkage][Regression]")
+{
+    // Adding a modifier lets Print::apply() reuse the cached regions; the cached height ranges were
+    // compensated for the old Z shrinkage.
+    Model model;
+    ModelObject *object = cube_with_height_range(model, { 10., 15. }, thin_dense_height_range());
+    Print print;
+    print.apply(model, height_range_test_config(100.));
+    print.process();
+
+    DynamicPrintConfig modifier_config;
+    modifier_config.set_key_value("wall_loops", new ConfigOptionInt(3));
+    object->add_volume(make_cube(5., 5., 5.), ModelVolumeType::PARAMETER_MODIFIER, false)->config.apply(modifier_config);
+    print.apply(model, height_range_test_config(95.));
+    print.process();
+
+    check_thin_dense_height_range(*print.objects().front(), 95.);
+}
+
 // ---------------------------------------------------------------------------
 // Orca #14112: Print::validate() warning collection
 //
@@ -2353,6 +2512,69 @@ TEST_CASE("Print::validate flags each of several overlapping instances of one ob
         return w.type == STRING_EXCEPT_OBJECT_COLLISION_IN_LAYER_PRINT; });
     REQUIRE(it != warnings.end());
     CHECK(dynamic_cast<const ModelInstance*>(it->object) != nullptr);
+}
+
+// Bambu #12861: identical objects share sliced layers only when their layers sit in the same place.
+// Layers are stored relative to PrintObject::center_offset(), which follows the first instance of each
+// ModelObject. Two copies of one mesh can then get PrintObjects with the same trafo but a different
+// center_offset; sharing the layers between them printed one copy in the wrong place.
+TEST_CASE("Print: shared layers need the same center offset, not only the same trafo", "[Print][SharedObject][Regression]")
+{
+    Model model;
+    // A right-triangle prism: not point-symmetric, so the centre of its XY bounding box is not the image of the
+    // original box centre once it is rotated about Z by an angle other than a multiple of 90 degrees.
+    // (A cube would pass either way: rotating its box centre gives the box centre of the rotated cube.)
+    indexed_triangle_set prism;
+    prism.vertices = { {0.f, 0.f, 0.f}, {30.f, 0.f, 0.f}, {0.f, 10.f, 0.f}, {0.f, 0.f, 10.f}, {30.f, 0.f, 10.f}, {0.f, 10.f, 10.f} };
+    prism.indices  = { {0, 2, 1}, {3, 4, 5}, {0, 1, 4}, {0, 4, 3}, {1, 2, 5}, {1, 5, 4}, {2, 0, 3}, {2, 3, 5} };
+    ModelObject *a = model.add_object();
+    a->name        = "A";
+    // Model::add_object(const ModelObject&) gives the copies an "extruder" key; give A the same one, or no object shares.
+    a->config.set_key_value("extruder", new ConfigOptionInt(1));
+    a->add_volume(TriangleMesh(prism));
+    a->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    a->ensure_on_bed();
+
+    // B is a copy of A (same mesh, volumes and settings) whose first instance is turned by 30 degrees.
+    // Its second, unrotated instance gets a PrintObject with A's trafo but a rotated center_offset.
+    ModelObject *b = model.add_object(*a);
+    b->name        = "B";
+    b->instances.front()->set_offset(Vec3d(100., 40., 0.));
+    b->instances.front()->set_rotation(Vec3d(0., 0., PI / 6.));
+    b->add_instance()->set_offset(Vec3d(40., 100., 0.));
+    b->ensure_on_bed();
+
+    // C is a plain copy of A elsewhere on the bed: same trafo and same center_offset, so it must still share.
+    ModelObject *c = model.add_object(*a);
+    c->name        = "C";
+    c->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    c->ensure_on_bed();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Print print;
+    for (ModelObject *obj : model.objects)
+        print.auto_assign_extruders(obj);
+    print.apply(model, config);
+    print.process();
+
+    bool same_trafo_other_offset = false;
+    for (const PrintObject *o1 : print.objects())
+        for (const PrintObject *o2 : print.objects())
+            if (o1 != o2 && o1->trafo().matrix() == o2->trafo().matrix() && o1->center_offset() != o2->center_offset())
+                same_trafo_other_offset = true;
+    // Without such a pair this test would not exercise the fix.
+    REQUIRE(same_trafo_other_offset);
+
+    size_t num_shared = 0;
+    for (const PrintObject *obj : print.objects()) {
+        if (const PrintObject *shared = obj->get_shared_object()) {
+            ++num_shared;
+            CAPTURE(obj->model_object()->name, shared->model_object()->name);
+            CHECK(obj->center_offset() == shared->center_offset());
+        }
+    }
+    // Layer sharing itself must still happen (C with A), otherwise the check above proves nothing.
+    REQUIRE(num_shared >= 1);
 }
 
 namespace {
@@ -2637,4 +2859,39 @@ TEST_CASE("An export the background thread invalidates is written again without 
     in.close();
     boost::nowide::remove(out.string().c_str());
     CHECK(gcode.find("; half edited") == std::string::npos);
+}
+
+TEST_CASE("Sequential printing keeps copies of one object in their list order", "[Print]")
+{
+    // Every copy of an object shares its object index, so ordering by that alone leaves the copies to
+    // the sort, which shuffles them once there are enough. Nothing here comes near the rod: 200 copies
+    // of a part lower than the nozzle, on a grid, so nothing needs reordering.
+    // Edge: init_print always arranges, so the copies are placed by hand and applied like the
+    // Print::validate helper cases in this file.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",     "by object" },
+        { "skirt_loops",        0 },
+        { "layer_change_gcode", "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(5., 5., 2.));
+    for (int k = 0; k < 200; ++k) {
+        ModelInstance *inst = object->add_instance();
+        inst->set_offset(Vec3d(10. + 12. * double(k % 15), 10. + 12. * double(k / 15), 0.));
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+    // validate() records the print order on the print's own copy of the model.
+    const ModelInstancePtrs &copies = print.model().objects.front()->instances;
+    CHECK(std::is_sorted(copies.begin(), copies.end(),
+                         [](const ModelInstance *l, const ModelInstance *r) { return l->arrange_order < r->arrange_order; }));
 }

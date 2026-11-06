@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -500,4 +501,70 @@ TEST_CASE("Bridge infill is not slowed to the overhang speeds along its span", "
 
     REQUIRE(bridge_length > 100.);
     CHECK(slow_length < 0.05 * bridge_length);
+}
+
+// Orca #17144: speeds in mm/s of the bridge infill moves over the middle half of TestMesh::bridge's first deck layer.
+static std::vector<double> bridge_center_feed_rates(const std::string& gcode)
+{
+    struct BridgeMove { double start_x, end_x, speed; };
+    std::vector<BridgeMove> bridge_moves;
+    bool bridge = false;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&bridge_moves, &bridge](GCodeReader& self, const GCodeReader::GCodeLine& line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            bridge = comment.find("Bridge") != std::string_view::npos && comment.find("Internal Bridge") == std::string_view::npos;
+
+        const double start_x = self.x();
+        const double end_x   = line.new_X(self);
+        if (bridge && line.extruding(self) && std::abs(line.new_Z(self) - 5.2) < 0.01 &&
+            std::abs(end_x - start_x) > 1.0)
+            bridge_moves.push_back({start_x, end_x, line.new_F(self) / MM_PER_MIN});
+    });
+
+    if (bridge_moves.empty())
+        return {};
+
+    double min_x = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    for (const BridgeMove& move : bridge_moves) {
+        min_x = std::min({min_x, move.start_x, move.end_x});
+        max_x = std::max({max_x, move.start_x, move.end_x});
+    }
+
+    const double center_margin = 0.25 * (max_x - min_x);
+    std::vector<double> feed_rates;
+    for (const BridgeMove& move : bridge_moves) {
+        const double mid_x = 0.5 * (move.start_x + move.end_x);
+        if (mid_x > min_x + center_margin && mid_x < max_x - center_margin)
+            feed_rates.push_back(move.speed);
+    }
+    return feed_rates;
+}
+
+// Orca #17144: with the curled perimeter slowdown on, the fully unsupported entry of the speed table was the
+// 4/4 overhang speed for every role, so an unsupported point of a bridge strand got 10 mm/s.
+TEST_CASE("Bridge infill keeps bridge speed with curled perimeter slowdown", "[ExtrusionProcessor][Regression]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"initial_layer_print_height", "0.2"},
+        {"layer_height", "0.2"},
+        {"enable_overhang_speed", "1"},
+        {"slowdown_for_curled_perimeters", "1"},
+        {"overhang_1_4_speed", "0"},
+        {"overhang_2_4_speed", "50"},
+        {"overhang_3_4_speed", "30"},
+        {"overhang_4_4_speed", "10"},
+        {"bridge_speed", "45"},
+        {"filament_max_volumetric_speed", "1000"},
+        {"slow_down_for_layer_cooling", "0"},
+        {"slow_down_layers", "0"},
+    });
+
+    const std::vector<double> feed_rates = bridge_center_feed_rates(Slic3r::Test::slice({TestMesh::bridge}, config));
+
+    REQUIRE_FALSE(feed_rates.empty());
+    for (const double feed_rate : feed_rates)
+        CHECK_THAT(feed_rate, Catch::Matchers::WithinAbs(45.0, 0.5));
 }
