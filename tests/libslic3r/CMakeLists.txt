@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
 	test_reload_from_disk_match.cpp
 	test_arrange_support_clearance.cpp
 	test_arrange_seq_print.cpp
+	test_arrange_compacted_tower.cpp
 	test_appconfig_trailing_newline.cpp
 	test_appconfig_auto_slice.cpp
 	test_device_info_json.cpp
