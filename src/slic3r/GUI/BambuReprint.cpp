@@ -17,6 +17,7 @@
 #include "libslic3r/miniz_extension.hpp"
 
 #include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 
@@ -84,7 +85,8 @@ static std::vector<double> parse_diameters(const std::string& text)
     boost::split(parts, text, boost::is_any_of(", "), boost::token_compress_on);
     for (const std::string& p : parts) {
         if (p.empty()) continue;
-        try { out.push_back(std::stod(p)); } catch (...) { return {}; }
+        // A 3MF writes "0.4"; std::stod reads it as 0 under a decimal-comma UI language.
+        try { out.push_back(boost::lexical_cast<double>(p)); } catch (...) { return {}; }
     }
     return out;
 }

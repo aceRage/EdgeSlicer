@@ -317,3 +317,27 @@ TEST_CASE("libvgcode color range with no values is safe to query", "[libvgcode][
     CHECK(range.get_values().empty());
     CHECK(range.get_color_at(1.0f) == libvgcode::Color{ 0, 0, 255 });
 }
+
+// The Layer height and Line width legends skip custom G-code extrusions: the start G-code's load line has no
+// height tag, so its height is guessed from Z (5.8 on the H3C) and stretched the legend to 0.20-5.80.
+TEST_CASE("libvgcode height and width ranges skip custom G-code extrusions", "[libvgcode][Regression]")
+{
+    libvgcode::Settings settings;
+    libvgcode::PathVertex wall;
+    wall.type = libvgcode::EMoveType::Extrude;
+    wall.role = libvgcode::EGCodeExtrusionRole::ExternalPerimeter;
+    libvgcode::PathVertex purge = wall;
+    purge.role = libvgcode::EGCodeExtrusionRole::Custom;
+    libvgcode::PathVertex travel = wall;
+    travel.type = libvgcode::EMoveType::Travel;
+
+    CHECK(libvgcode::counts_for_height_width_ranges(wall, settings));
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(purge, settings));
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(travel, settings));
+    // the other ranges (speed, fan, temperature...) still count it
+    CHECK(libvgcode::counts_for_color_ranges(purge, settings));
+
+    // a hidden line type stays out as before
+    settings.extrusion_roles_visibility[size_t(libvgcode::EGCodeExtrusionRole::ExternalPerimeter)] = false;
+    CHECK_FALSE(libvgcode::counts_for_height_width_ranges(wall, settings));
+}

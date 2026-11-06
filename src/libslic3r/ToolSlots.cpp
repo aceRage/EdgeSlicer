@@ -2,6 +2,7 @@
 
 #include "ToolSlots.hpp"
 
+#include "LocalesUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "NozzleOverride.hpp"
 #include "Preset.hpp"
@@ -83,9 +84,10 @@ bool parse_positive_number(const std::string &text, double &out)
 {
     if (text.empty())
         return false;
-    char        *end   = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || *end != '\0' || !(value > 0.) || !std::isfinite(value))
+    // Nozzle diameters are written with a decimal point; strtod reads "0.4" as 0 under a comma locale.
+    size_t       used  = 0;
+    const double value = string_to_double_decimal_point(text, &used);
+    if (used != text.size() || !(value > 0.) || !std::isfinite(value))
         return false;
     out = value;
     return true;
