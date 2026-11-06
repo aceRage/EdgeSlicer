@@ -420,7 +420,7 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
 
     // The filaments sharing this physical nozzle: the one asked about and every used filament mapped to the same
     // extruder at the same diameter. Where the limits are filament-sized vectors (Preset::normalize sizes them by
-    // filament under single_extruder_multi_material, F15) each of them may carry its own pair, and the band this
+    // filament under single_extruder_multi_material) each of them may carry its own pair, and the band this
     // nozzle prints must satisfy all of them: the tightest wins.
     std::vector<size_t> sharers { size_t(filament_id - 1) };
     for (unsigned int used : used_filament_ids) {

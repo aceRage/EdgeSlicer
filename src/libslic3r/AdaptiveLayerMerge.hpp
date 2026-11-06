@@ -195,7 +195,7 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 // one shared grid the wipe tower syncs to.
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id);
 
-// The per-nozzle clamp the live planner uses (step 3, review findings F9/F15 of PR #857). The window of the nozzle
+// The per-nozzle clamp the live planner sizes every band with. The window of the nozzle
 // that prints 1-based `filament_id`, narrowed by min_layer_height / max_layer_height as follows:
 //   * extruder-sized vectors (the normal layout): the slot of the physical extruder the filament maps to, and only
 //     when that extruder's preset nozzle IS the resolved diameter. A rack slot of another size (H3C P4/P9) is a

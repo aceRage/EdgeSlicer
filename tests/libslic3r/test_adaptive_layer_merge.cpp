@@ -157,7 +157,11 @@ TEST_CASE("Adaptive layer merge: Edge nozzle mapping", "[AdaptiveLayerMerge]")
     CHECK(r0.max_height == Approx(0.28));
 }
 
-// Step 3 per-nozzle clamp (PR #857 review F9/F15): adaptive_layer_height_range_for_nozzle().
+// Per-nozzle clamp: adaptive_layer_height_range_for_nozzle() narrows a nozzle's window by the configured min/max
+// layer height of the nozzle that prints the band, the tightest pair where used filaments share it, and never
+// reads values.front() for a missing slot.
+using Catch::Matchers::WithinAbs;
+
 TEST_CASE("Adaptive layer merge: clamp resolves to the nozzle that prints the band", "[AdaptiveLayerMerge]")
 {
     // Two nozzles with their own limits; three filaments, the third on nozzle 2 through filament_map.
@@ -169,11 +173,11 @@ TEST_CASE("Adaptive layer merge: clamp resolves to the nozzle that prints the ba
     REQUIRE(physical_extruder_for_filament(pc, 3) == 1);
     const AdaptiveLayerHeightRange r3 = adaptive_layer_height_range_for_nozzle(pc, 3, { 0, 1, 2 });
     // 0.8 window [0.16, 0.56] narrowed by nozzle 2's own pair, never nozzle 1's (values.front()).
-    CHECK(r3.min_height == Approx(0.2));
-    CHECK(r3.max_height == Approx(0.5));
+    CHECK_THAT(r3.min_height, WithinAbs(0.2, 1e-9));
+    CHECK_THAT(r3.max_height, WithinAbs(0.5, 1e-9));
     const AdaptiveLayerHeightRange r1 = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1, 2 });
-    CHECK(r1.min_height == Approx(0.1));
-    CHECK(r1.max_height == Approx(0.25));
+    CHECK_THAT(r1.min_height, WithinAbs(0.1, 1e-9));
+    CHECK_THAT(r1.max_height, WithinAbs(0.25, 1e-9));
     // The band size walks into the clamped window: 0.8 over a 0.4 reference at 0.2 is 2 layers (0.4 <= 0.5),
     // and at a 0.3 base the ratio's 0.6 exceeds 0.5, so it falls back to one layer.
     CHECK(adaptive_layer_band_size(0.8, 0.4, 0.2, r3) == 2);
@@ -184,7 +188,7 @@ TEST_CASE("Adaptive layer merge: clamp resolves to the nozzle that prints the ba
 TEST_CASE("Adaptive layer merge: clamp takes the tightest limits of filaments sharing a nozzle (AMS)", "[AdaptiveLayerMerge]")
 {
     // Five AMS filaments on two nozzles; filaments 1 and 5 share nozzle 1. The limits are filament-sized
-    // vectors (the Preset::normalize layout of F15), and filaments 1 and 5 disagree.
+    // vectors (the layout Preset::normalize gives them under SEMM), and filaments 1 and 5 disagree.
     PrintConfig pc = nozzle_config(2, 5, { { "nozzle_diameter", "0.4,0.8" },
                                            { "filament_map", "1,2,2,2,1" },
                                            { "single_extruder_multi_material", "0" },
@@ -195,20 +199,20 @@ TEST_CASE("Adaptive layer merge: clamp takes the tightest limits of filaments sh
 
     // Both used: the band nozzle 1 prints must satisfy both pairs, so the larger minimum and the smaller maximum.
     const AdaptiveLayerHeightRange both = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1, 4 });
-    CHECK(both.min_height == Approx(0.12));
-    CHECK(both.max_height == Approx(0.24));
+    CHECK_THAT(both.min_height, WithinAbs(0.12, 1e-9));
+    CHECK_THAT(both.max_height, WithinAbs(0.24, 1e-9));
     // Asked from filament 5's side, the same nozzle gets the same window.
     const AdaptiveLayerHeightRange from5 = adaptive_layer_height_range_for_nozzle(pc, 5, { 0, 1, 4 });
-    CHECK(from5.min_height == Approx(both.min_height));
-    CHECK(from5.max_height == Approx(both.max_height));
+    CHECK_THAT(from5.min_height, WithinAbs(both.min_height, 1e-9));
+    CHECK_THAT(from5.max_height, WithinAbs(both.max_height, 1e-9));
     // Filament 5 not on the plate: filament 1's own pair only (window [0.08, 0.28], max 0.3 is a no-op).
     const AdaptiveLayerHeightRange alone = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1 });
-    CHECK(alone.min_height == Approx(0.08));
-    CHECK(alone.max_height == Approx(0.28));
+    CHECK_THAT(alone.min_height, WithinAbs(0.08, 1e-9));
+    CHECK_THAT(alone.max_height, WithinAbs(0.28, 1e-9));
     // Filaments 2-4 on nozzle 2 are not mixed into nozzle 1's limits.
     const AdaptiveLayerHeightRange coarse = adaptive_layer_height_range_for_nozzle(pc, 2, { 0, 1, 4 });
-    CHECK(coarse.min_height == Approx(0.2));
-    CHECK(coarse.max_height == Approx(0.5));
+    CHECK_THAT(coarse.min_height, WithinAbs(0.2, 1e-9));
+    CHECK_THAT(coarse.max_height, WithinAbs(0.5, 1e-9));
 }
 
 TEST_CASE("Adaptive layer merge: clamp never falls back to values.front()", "[AdaptiveLayerMerge]")
@@ -220,12 +224,12 @@ TEST_CASE("Adaptive layer merge: clamp never falls back to values.front()", "[Ad
     pc.min_layer_height.values = { 0.1 };
     pc.max_layer_height.values = { 0.25 };
     const AdaptiveLayerHeightRange r2 = adaptive_layer_height_range_for_nozzle(pc, 2, { 0, 1 });
-    CHECK(r2.min_height == Approx(0.16));
-    CHECK(r2.max_height == Approx(0.56));
+    CHECK_THAT(r2.min_height, WithinAbs(0.16, 1e-9));
+    CHECK_THAT(r2.max_height, WithinAbs(0.56, 1e-9));
     // Nozzle 1 still gets its own slot.
     const AdaptiveLayerHeightRange r1 = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1 });
-    CHECK(r1.min_height == Approx(0.1));
-    CHECK(r1.max_height == Approx(0.25));
+    CHECK_THAT(r1.min_height, WithinAbs(0.1, 1e-9));
+    CHECK_THAT(r1.max_height, WithinAbs(0.25, 1e-9));
 
     // An H3C-style rack: one extruder whose preset carries a 0.4 and 0.28 ceiling, filament 2 pinned to the rack's
     // 0.8. The preset's pair belongs to the 0.4, so the 0.8 keeps its own window instead of the 0.28 ceiling.
@@ -239,11 +243,11 @@ TEST_CASE("Adaptive layer merge: clamp never falls back to values.front()", "[Ad
     rack.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0., 0.8 };
     PrintConfig rack_pc;
     rack_pc.apply(rack, true);
-    REQUIRE(nozzle_diameter_for_filament(rack_pc, 2) == Approx(0.8));
+    REQUIRE_THAT(nozzle_diameter_for_filament(rack_pc, 2), WithinAbs(0.8, 1e-9));
     const AdaptiveLayerHeightRange on_rack = adaptive_layer_height_range_for_nozzle(rack_pc, 2, { 0, 1 });
-    CHECK(on_rack.min_height == Approx(0.16));
-    CHECK(on_rack.max_height == Approx(0.56));
+    CHECK_THAT(on_rack.min_height, WithinAbs(0.16, 1e-9));
+    CHECK_THAT(on_rack.max_height, WithinAbs(0.56, 1e-9));
     const AdaptiveLayerHeightRange own = adaptive_layer_height_range_for_nozzle(rack_pc, 1, { 0, 1 });
-    CHECK(own.min_height == Approx(0.08));
-    CHECK(own.max_height == Approx(0.28));
+    CHECK_THAT(own.min_height, WithinAbs(0.08, 1e-9));
+    CHECK_THAT(own.max_height, WithinAbs(0.28, 1e-9));
 }
