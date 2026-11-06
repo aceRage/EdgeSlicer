@@ -16,6 +16,7 @@
 #include "test_data.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <regex>
@@ -413,4 +414,198 @@ TEST_CASE("Adaptive layer merge support: a single-diameter plate plans nothing f
             CHECK(layer->effective_print_height() == layer->height);
         }
     }
+}
+
+// "Don't care" support and the nozzle that can print its height (BambuStudio v02.09.01.70 GCode.cpp:5310-5330,
+// nozzle_can_print_height). A 0.4 object with two overhangs at different heights: a ledge on +x at z 4 and a cap on
+// -x at z 6, so on the ledge's contact/interface levels the same support layer carries the ledge's interface and the
+// cap's base. Next to it a block on filament 2 on a 0.8 nozzle. At 0.12 layers the 0.8 prints in 0.24 slabs and
+// cannot extrude a 0.12 support layer (its window is 0.16..0.56), which the 0.4 can (0.08..0.28): the H3C rack case.
+namespace {
+
+void add_ledge_plate(Model &model)
+{
+    TriangleMesh ledge(its_make_cube(4., 4., 7.));
+    ledge.translate(6.f, 6.f, 0.f);
+    TriangleMesh low(its_make_cube(6., 12., 1.));
+    low.translate(10.f, 2.f, 4.f);
+    ledge.merge(low);
+    TriangleMesh high(its_make_cube(6., 12., 1.));
+    high.translate(0.f, 2.f, 6.f);
+    ledge.merge(high);
+    ModelObject *fine = model.add_object();
+    fine->name        = "ledge";
+    fine->add_volume(std::move(ledge));
+    fine->add_instance()->set_offset(Vec3d(60., 100., 0.));
+    fine->ensure_on_bed();
+    fine->volumes.front()->config.set("extruder", 1);
+
+    ModelObject *coarse = model.add_object();
+    coarse->name        = "block";
+    // Taller than the ledge object, so filament 2 is on the layers of both overhangs.
+    coarse->add_volume(TriangleMesh(its_make_cube(8., 8., 8.)));
+    coarse->add_instance()->set_offset(Vec3d(120., 100., 0.));
+    coarse->ensure_on_bed();
+    coarse->volumes.front()->config.set("extruder", 2);
+}
+
+struct SupportToolLayer
+{
+    double        z { 0. };
+    std::set<int> tools;         // every tool extruding on the layer
+    std::set<int> support_tools; // tools extruding Support / Support interface / Support transition
+    std::set<int> base_tools;    // tools extruding Support (the base)
+};
+
+std::vector<SupportToolLayer> parse_support_tools(const std::string &gcode)
+{
+    std::vector<SupportToolLayer> out;
+    std::istringstream            in(gcode);
+    std::string                   line;
+    int                           tool = 0;
+    std::string                   type;
+    while (std::getline(in, line)) {
+        if (! line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind(";LAYER_CHANGE", 0) == 0) {
+            out.emplace_back();
+            continue;
+        }
+        if (line.rfind(";Z:", 0) == 0) {
+            if (! out.empty())
+                out.back().z = std::stod(line.substr(3));
+            continue;
+        }
+        if (line.rfind(";TYPE:", 0) == 0) {
+            type = line.substr(6);
+            continue;
+        }
+        if (line.size() >= 2 && line[0] == 'T' && std::isdigit((unsigned char) line[1])) {
+            tool = std::stoi(line.substr(1));
+            continue;
+        }
+        if (out.empty() || line.compare(0, 3, "G1 ") != 0 || line.find(" X") == std::string::npos)
+            continue;
+        const size_t e = line.find(" E");
+        if (e == std::string::npos || e + 2 >= line.size() || line[e + 2] == '-')
+            continue;
+        out.back().tools.insert(tool);
+        if (type.rfind("Support", 0) == 0)
+            out.back().support_tools.insert(tool);
+        if (type == "Support")
+            out.back().base_tools.insert(tool);
+    }
+    return out;
+}
+
+const SupportToolLayer *gcode_layer_at(const std::vector<SupportToolLayer> &layers, double z)
+{
+    for (const SupportToolLayer &layer : layers)
+        if (std::abs(layer.z - z) < 1e-3)
+            return &layer;
+    return nullptr;
+}
+
+struct LedgePlate
+{
+    Print                         print;
+    std::string                   gcode;
+    std::vector<SupportToolLayer> layers;
+    const PrintObject            *ledge { nullptr };
+};
+
+void slice_ledge(LedgePlate &plate, const DynamicPrintConfig &config)
+{
+    Model model;
+    add_ledge_plate(model);
+    plate.print.apply(model, config);
+    plate.print.validate();
+    plate.print.set_status_silent();
+    plate.gcode = Test::gcode(plate.print);
+    REQUIRE(! plate.gcode.empty());
+    plate.layers = parse_support_tools(plate.gcode);
+    plate.ledge  = object_named(plate.print, "ledge");
+    REQUIRE(plate.ledge != nullptr);
+    REQUIRE(plate.ledge->support_layer_count() > 4);
+}
+
+bool has_role(const SupportLayer &layer, ExtrusionRole role)
+{
+    for (const PathInfo &path : support_paths(layer))
+        if (path.role == role)
+            return true;
+    return false;
+}
+
+} // namespace
+
+
+TEST_CASE("Adaptive layer merge support: don't care support base goes to a nozzle that can print its height", "[AdaptiveLayerMergeSupport]")
+{
+    // 0.12 layers: outside the 0.8's window, inside the 0.4's.
+    // Support "don't care", interface on filament 1: process_layer sends the base to "a filament other than the
+    // interface's", which on the block's slab tops is filament 2 (the same branch the merge plan's interface pin puts
+    // a "don't care" interface layer in, review finding g). Its 0.8 cannot extrude the 0.12 base; the 0.4 can.
+    const DynamicPrintConfig config = support_plate("0.4,0.8", "0.12", "0.08,0.16", "0.28,0.56", "0", "1", "normal(auto)", "default");
+    LedgePlate plate;
+    slice_ledge(plate, config);
+    REQUIRE(plate.print.uses_multiple_nozzle_diameters());
+    const PrintConfig &print_config = plate.print.config();
+    REQUIRE(adaptive_layer_height_range_for_nozzle(print_config, 1, { 0, 1 }).contains(0.12));
+    REQUIRE_FALSE(adaptive_layer_height_range_for_nozzle(print_config, 2, { 0, 1 }).contains(0.12));
+
+    size_t exercised = 0;
+    for (const SupportLayer *layer : plate.ledge->support_layers()) {
+        if (layer->planned_filament_id != 0 || ! has_role(*layer, erSupportMaterial))
+            continue;
+        const SupportToolLayer *glayer = gcode_layer_at(plate.layers, layer->print_z);
+        REQUIRE(glayer != nullptr);
+        if (glayer->tools.count(1) == 0)
+            continue;
+        CAPTURE(layer->print_z);
+        CHECK_THAT(layer->height, WithinAbs(0.12, 1e-6));
+        // The base on T0, with the interface filament, instead of on the 0.8.
+        CHECK(glayer->base_tools == std::set<int>{ 0 });
+        ++ exercised;
+    }
+    // Layer 0 and the block's slab tops under the ledge object's support: every other layer up to about z 5.8.
+    CHECK(exercised >= 5);
+
+    // Nowhere on the plate does the 0.8 print the 0.4 object's support at a height it cannot extrude, with an
+    // explicit interface filament or with both roles "don't care".
+    for (const SupportToolLayer &glayer : plate.layers) {
+        CAPTURE(glayer.z);
+        CHECK(glayer.support_tools.count(1) == 0);
+    }
+    LedgePlate dontcare;
+    slice_ledge(dontcare, support_plate("0.4,0.8", "0.12", "0.08,0.16", "0.28,0.56", "0", "0", "normal(auto)", "default"));
+    for (const SupportToolLayer &glayer : dontcare.layers) {
+        CAPTURE(glayer.z);
+        CHECK(glayer.support_tools.count(1) == 0);
+    }
+}
+
+TEST_CASE("Adaptive layer merge support: a single-diameter plate keeps its don't care support pick", "[AdaptiveLayerMergeSupport]")
+{
+    // The same plate on two 0.4 nozzles, extruder 2 still with min_layer_height 0.24: its per-nozzle window rejects
+    // 0.2, but the check is off on a single-diameter plate, so the base keeps going to the filament other than the
+    // interface's (T1, which prints the block on every layer), exactly as before the check.
+    const DynamicPrintConfig config = support_plate("0.4,0.4", "0.2", "0.08,0.24", "0.28,0.28", "0", "1", "normal(auto)", "default");
+    LedgePlate plate;
+    slice_ledge(plate, config);
+    REQUIRE_FALSE(plate.print.uses_multiple_nozzle_diameters());
+    REQUIRE_FALSE(adaptive_layer_height_range_for_nozzle(plate.print.config(), 2, { 0, 1 }).contains(0.2));
+    size_t base_layers = 0;
+    for (const SupportLayer *layer : plate.ledge->support_layers()) {
+        CHECK(layer->planned_filament_id == 0);
+        CHECK(layer->planned_interface_filament_id == 0);
+        if (! has_role(*layer, erSupportMaterial))
+            continue;
+        const SupportToolLayer *glayer = gcode_layer_at(plate.layers, layer->print_z);
+        REQUIRE(glayer != nullptr);
+        CAPTURE(layer->print_z);
+        CHECK(glayer->base_tools == std::set<int>{ 1 });
+        ++ base_layers;
+    }
+    CHECK(base_layers >= 10);
 }
