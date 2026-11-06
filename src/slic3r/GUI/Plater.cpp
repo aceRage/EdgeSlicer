@@ -16893,7 +16893,17 @@ bool Plater::priv::restart_background_process(unsigned int state)
                 // "Empty ams filament in For-Match mode" slice error on the H2C (2026-09-06).
                 size_t loaded = 0; for (auto& v : infos) loaded += v.size();
                 if (dual_nozzle_profile && !infos.empty() && infos.size() == profile_nozzles && loaded > 0) {
+                    // Upstream Orca #17195: a changed inventory takes back the grouping steps, so a plate sliced
+                    // before the spools changed is grouped again. Installed here, after apply(), where this fork
+                    // reads the live AMS; an unchanged inventory or a first one leaves the slice alone.
                     print->set_extruder_filament_info(infos);
+                    if (print->install_pending_extruder_filament_info()) {
+                        this->background_process.get_current_plate()->update_slice_result_valid_state(false);
+                        if (preview != nullptr) {
+                            reset_gcode_toolpaths();
+                            preview->reload_print();
+                        }
+                    }
                     print->set_ultra_ams_count(ams_count);
                     print->set_ultra_force_match_mode(true);
                     int total = 0; for (auto& v : infos) total += (int)v.size();
