@@ -3245,8 +3245,15 @@ void Tab::on_presets_changed()
     // nozzle drops the processes that no longer fit it. Before the process tab reloads its nozzle switch.
     if (m_type == Preset::TYPE_PRINTER) {
         // Per-nozzle process P7 first: the processes that fit a nozzle depend on the size it carries in this project.
-        wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
+        // Owner bugs 2026-11-06: another printer model (startup included) gets its remembered nozzles back (rack slots, sizes,
+        // flow types). The sidebar was updated above, before they were back: the nozzle UI, filament lists and Tabs follow.
+        const bool rack_restored = wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
         wxGetApp().preset_bundle->update_nozzle_processes_for_printer(*wxGetApp().app_config);
+        if (rack_restored)
+            wxGetApp().CallAfter([]() {
+                if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+                    plater->sidebar().on_nozzle_sizes_changed();
+            });
     }
 
     // Printer selected at the Printer tab, update "compatible" marks at the print and filament selectors.

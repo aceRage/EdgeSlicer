@@ -2,6 +2,7 @@
 
 #include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/NozzleProcess.hpp"
+#include "libslic3r/NozzleRackMemory.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ToolSlots.hpp"
@@ -138,10 +139,20 @@ std::vector<NozzleVolumeType> nozzle_strip_type_choices()
     std::vector<NozzleVolumeType> out{ nvtStandard };
     if (FlowType::printer_supports_high_flow())
         out.push_back(nvtHighFlow);
-    // A printer that declares a TPU285 nozzle (the H3C's rack slot 8) offers it too.
-    if (PresetBundle *bundle = wxGetApp().preset_bundle)
-        if (nozzle_strip_printer_has_type(bundle->printer_config_with_project_sizes(), nvtTPU285))
+    // A printer that declares a TPU285 nozzle (the H3C's rack slot 8) offers it too. Owner bug 2026-11-06: declared by any
+    // nozzle variant of the selected printer's model (extruder_variant_list, default_nozzle_volume_type), read whenever the
+    // list is shown, so the list is the same before and after the printer variant follows the nozzles (the H3C 0.2 variant
+    // names no TPU285, but its rack can hold a 0.4 TPU285 nozzle), not only after a restart.
+    if (PresetBundle *bundle = wxGetApp().preset_bundle) {
+        bool tpu285 = nozzle_strip_printer_has_type(bundle->printer_config_with_project_sizes(), nvtTPU285);
+        const NozzleRackLimits limits = bundle->nozzle_rack_limits();
+        for (size_t e = 0; !tpu285 && e < limits.types.size(); ++e) {
+            const std::vector<NozzleVolumeType> types = nozzle_rack_types(limits, e);
+            tpu285 = std::find(types.begin(), types.end(), nvtTPU285) != types.end();
+        }
+        if (tpu285)
             out.push_back(nvtTPU285);
+    }
     return out;
 }
 

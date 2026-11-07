@@ -3769,7 +3769,7 @@ void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
     config.set("nozzle_diameter_override", model, serialize_nozzle_diameter_override(stored));
 }
 
-void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config)
+bool PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config)
 {
     const std::string model = nozzle_override_model_key(this->printers);
     if (model != m_nozzle_override_model) {
@@ -3782,10 +3782,93 @@ void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config
         // P9 (owner hand test 2026-11-02): another printer model has its own rack, if any: an H2C project's rack slots must not
         // turn up on a U1.
         this->project_config.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings());
-        return;
+        // Owner bugs 2026-11-06: ...but this printer's own rack (and sizes, flow types) as they were last set, startup included.
+        return this->restore_nozzle_rack(config);
     }
-    // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders.
+    // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders. The rack is the same
+    // hardware: it stays, and is remembered for the new variant at its next edit.
     this->set_nozzle_diameter_override(nozzle_diameter_override_values(this->project_config));
+    return false;
+}
+
+NozzleRackMemory PresetBundle::current_nozzle_rack_memory() const
+{
+    NozzleRackMemory memory;
+    memory.diameters      = this->effective_nozzle_diameters();
+    const size_t extruders = memory.diameters.size();
+    if (const auto *opt = this->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"); opt != nullptr && !opt->values.empty()) {
+        memory.volume_types = opt->values;
+        memory.volume_types.resize(extruders, int(nvtStandard));
+    }
+    memory.rack_texts.resize(extruders);
+    for (size_t e = 0; e < extruders; ++e)
+        memory.rack_texts[e] = this->rack_nozzle_override(e);
+    if (std::all_of(memory.rack_texts.begin(), memory.rack_texts.end(), [](const std::string &s) { return s.empty(); }))
+        memory.rack_texts.clear();
+    return memory;
+}
+
+void PresetBundle::remember_nozzle_rack(AppConfig &config) const
+{
+    const std::string model = nozzle_override_model_key(this->printers);
+    // Until the model's memory was restored (startup, before the Printer tab loaded) the project holds no choice yet: writing
+    // it would put the defaults over what was remembered.
+    if (model.empty() || model != m_nozzle_override_model)
+        return;
+    const Preset &printer = this->printers.get_selected_preset();
+    if (printer.is_default || printer.name.empty())
+        return;
+    const std::string text = serialize_nozzle_rack_memory(this->current_nozzle_rack_memory());
+    if (text.empty())
+        return;
+    config.set("nozzle_rack", printer.name, text);
+    config.set("nozzle_rack_model", model, text);
+}
+
+NozzleRackLimits PresetBundle::nozzle_rack_limits() const
+{
+    const Preset    &edited = this->printers.get_edited_preset();
+    NozzleRackLimits limits = Slic3r::nozzle_rack_limits(edited.config);
+    const auto      *model  = edited.config.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || model->value.empty())
+        return limits;
+    for (const Preset &p : this->printers) {
+        if (!p.is_system || p.is_default)
+            continue;
+        const auto *m = p.config.option<ConfigOptionString>("printer_model");
+        if (m != nullptr && m->value == model->value)
+            merge_nozzle_rack_limits(limits, p.config);
+    }
+    return limits;
+}
+
+bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
+{
+    const Preset     &printer = this->printers.get_selected_preset();
+    const std::string model   = nozzle_override_model_key(this->printers);
+    std::string       text;
+    if (!printer.name.empty() && config.has("nozzle_rack", printer.name))
+        text = config.get("nozzle_rack", printer.name);
+    else if (!model.empty() && config.has("nozzle_rack_model", model))
+        text = config.get("nozzle_rack_model", model);
+    NozzleRackMemory memory;
+    if (!parse_nozzle_rack_memory(text, memory))
+        return false;
+    if (const std::string why = validate_nozzle_rack_memory(memory, this->nozzle_rack_limits()); !why.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "nozzle rack: the nozzles remembered for " << printer.name << " do not fit it (" << why << "), the printer's defaults are used";
+        return false;
+    }
+    this->set_nozzle_diameter_override(memory.diameters);
+    if (!memory.volume_types.empty())
+        this->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = memory.volume_types;
+    std::vector<std::string> racks = memory.rack_texts;
+    if (std::all_of(racks.begin(), racks.end(), [](const std::string &s) { return s.empty(); }))
+        racks.clear();
+    this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = racks;
+    this->prune_nozzle_processes();
+    BOOST_LOG_TRIVIAL(info) << "nozzle rack: restored the nozzles last used on " << printer.name << ": "
+                            << nozzle_diameter_summary(this->effective_nozzle_diameters());
+    return true;
 }
 
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const

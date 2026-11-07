@@ -5401,6 +5401,8 @@ void Sidebar::on_nozzle_sizes_changed()
     if (bundle == nullptr)
         return;
     bundle->remember_nozzle_diameter_override(*wxGetApp().app_config);
+    // Owner bugs 2026-11-06: and the whole set (sizes, flow types, rack slots) for this printer, put back at the next start.
+    bundle->remember_nozzle_rack(*wxGetApp().app_config);
     // Per-nozzle process P8: the Process tab shows the Plate while the sizes change (a tool's profile depends on its size).
     // P9 (owner bug from P8): and the same tool again afterwards, when it still exists (its profile follows the new size).
     std::string shown_tool;
@@ -5492,6 +5494,10 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         on_nozzle_sizes_changed();
         // The printer variant follows one reported size (after the summary below is closed).
         wxGetApp().CallAfter([this]() { follow_nozzle_sizes_with_printer_variant(); });
+    } else {
+        // What the printer reported is what this printer has: it becomes the remembered set even when the project already
+        // matched it (a sync wins over an older memory).
+        bundle->remember_nozzle_rack(*wxGetApp().app_config);
     }
     MessageDialog dlg(wxGetApp().mainframe,
                       wxString::Format(_L("Nozzle sizes in this project: %s mm."), from_u8(nozzle_diameter_summary(bundle->effective_nozzle_diameters()))) +
