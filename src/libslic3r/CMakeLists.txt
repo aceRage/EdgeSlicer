@@ -466,6 +466,7 @@ set(lisbslic3r_sources
     LayOnFace.hpp
     libslic3r.cpp
     libslic3r.h
+    LifecycleEvents.hpp
     Line.cpp
     Line.hpp
     LocalesUtils.cpp

@@ -372,6 +372,9 @@ public:
     static const std::vector<std::string>&  filament_options();
     // Printer options contain the nozzle options.
     static const std::vector<std::string>&  printer_options();
+    // Option key holding this preset type's plugin capability overrides. The keys are unused
+    // until Phase 6 adds them to PrintConfig; option() then returns nullptr and callers no-op.
+    static const char*                      plugin_overrides_key(Type type);
     // Nozzle options of the printer options.
     static const std::vector<std::string>&  nozzle_options();
     // Printer machine limits, those are contained in printer_options().

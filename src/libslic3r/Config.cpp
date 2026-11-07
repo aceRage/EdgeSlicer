@@ -1973,6 +1973,29 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
     return std::move(substitutions_ctxt.substitutions);
 }
 
+std::optional<PluginCapabilityRef> parse_capability_ref(const std::string& value)
+{
+    // Capability references are stored as "<plugin_name>;<cloud_uuid>;<capability_name>".
+    // The cloud UUID is empty for local plugins (two consecutive semicolons).
+    if (value.empty())
+        return std::nullopt;
+
+    const size_t first = value.find(';');
+    if (first == std::string::npos)
+        return std::nullopt;
+    const size_t second = value.find(';', first + 1);
+    if (second == std::string::npos)
+        return std::nullopt;
+
+    std::string name            = value.substr(0, first);
+    std::string uuid            = value.substr(first + 1, second - first - 1);
+    std::string capability_name = value.substr(second + 1);
+    if (name.empty() || capability_name.empty())
+        return std::nullopt;
+
+    return PluginCapabilityRef{ std::move(name), std::move(capability_name), std::move(uuid) };
+}
+
 //BBS: add json support
 bool ConfigBase::save_to_json(const std::string &file, const std::string &name, const std::string &from, const std::string &version, const std::string is_custom) const
 {

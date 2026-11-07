@@ -11,6 +11,11 @@ add_executable(${_TEST_NAME}_tests
     snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_lifecycle.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_install.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_config.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_json_depth.cpp>
+    $<$<BOOL:${EDGE_PYTHON_PLUGINS}>:test_plugin_ultranet_isolation.cpp>
     camera_module_tests.cpp
     plugin_load_diagnostics_tests.cpp
     device_model_code_tests.cpp
@@ -185,6 +190,34 @@ elseif (APPLE)
 endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
+if (EDGE_PYTHON_PLUGINS)
+    target_link_libraries(${_TEST_NAME}_tests pybind11::embed)
+    if (APPLE)
+        target_link_options(${_TEST_NAME}_tests PRIVATE "LINKER:-rpath,@executable_path/python/lib")
+    elseif (UNIX AND NOT WIN32)
+        set_property(TARGET ${_TEST_NAME}_tests APPEND PROPERTY BUILD_RPATH "$ORIGIN/python/lib")
+    endif ()
+    add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/python"
+        COMMENT "Copying bundled Python runtime for plugin tests"
+        VERBATIM)
+    if (WIN32)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_PREFIX_PATH}/libpython/python${_bundled_python_abi}.dll"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+            VERBATIM)
+    endif ()
+    if (ORCA_BUNDLED_UV_EXECUTABLE)
+        add_custom_command(TARGET ${_TEST_NAME}_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORCA_BUNDLED_UV_EXECUTABLE}"
+                "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>/tools/uv/${ORCA_BUNDLED_UV_FILENAME}"
+            COMMENT "Copying bundled uv for plugin tests"
+            VERBATIM)
+    endif ()
+endif ()
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)

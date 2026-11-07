@@ -25,6 +25,15 @@ REQUIRED_DEV_PACKAGES=(
     ninja-build
     texinfo
     wget
+    # CPython 3.12 (deps/python3) when EDGE_PYTHON_PLUGINS=ON. libseccomp-dev is Phase 8, not here.
+    libffi-dev
+    libbz2-dev
+    liblzma-dev
+    libsqlite3-dev
+    libncurses-dev
+    libreadline-dev
+    uuid-dev
+    libgdbm-dev
 )
 
 if [[ -n "$UPDATE_LIB" ]]
