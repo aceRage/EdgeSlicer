@@ -13,6 +13,8 @@
 #include "Search.hpp"
 #include "OG_CustomCtrl.hpp"
 
+#include <array>
+
 #include <wx/app.h>
 #include <wx/button.h>
 #include <wx/panel.h>
@@ -4104,12 +4106,8 @@ void TabPrint::create_tool_selector()
         const int tool = index <= 0 || size_t(index - 1) >= m_tool_ids.size() ? -1 : int(m_tool_ids[size_t(index - 1)]);
         wxGetApp().CallAfter([this, tool]() { show_tool(tool); });
     };
-    m_tool_chips->on_height_changed = [this]() {
-        if (m_tool_panel != nullptr) {
-            m_tool_panel->Layout();
-            Layout();
-        }
-    };
+    // The chips wrapped onto more (or fewer) rows: the whole header grows or shrinks, not only this panel.
+    m_tool_chips->on_height_changed = [this]() { relayout_tool_selector(true); };
     m_tool_chips->Hide();
     m_tool_row->Add(m_tool_chips, 1, wxALIGN_CENTER_VERTICAL);
     // Per-nozzle process P9 (owner hand test 2026-11-02): the way back. One process for every nozzle again: the per-nozzle choices
@@ -4189,6 +4187,14 @@ void TabPrint::refresh_tool_selector()
         return;
     const std::vector<wxString> labels = tool_selector_labels();
     const bool                  available = !labels.empty();
+    // Owner hand test 2026-11-06 (H3C): what is shown before this refresh. When it changes (the chips and "Reset choices" come
+    // or go as a filament moves to a nozzle of another size), the header changes height and the sidebar is laid out again.
+    auto shown_state = [this]() {
+        return std::array<bool, 4>{ m_tool_panel->IsShown(), m_tool_chips != nullptr && m_tool_chips->IsShown(),
+                                    m_tool_expand_btn != nullptr && m_tool_expand_btn->IsShown(),
+                                    m_tool_collapse_btn != nullptr && m_tool_collapse_btn->IsShown() };
+    };
+    const std::array<bool, 4> shown_before = shown_state();
     // P9: the tool of each entry after Plate.
     std::vector<size_t> tool_ids = available ? m_preset_bundle->nozzle_selector_tools() : std::vector<size_t>();
     tool_ids.resize(labels.empty() ? 0 : labels.size() - 1);
@@ -4259,8 +4265,30 @@ void TabPrint::refresh_tool_selector()
     m_tool_note->Hide();
     m_tool_panel->Show(available);
     mark_plate_fields(m_preset_bundle->nozzle_tool_view() >= 0);
+    relayout_tool_selector(shown_state() != shown_before);
+}
+
+void TabPrint::relayout_tool_selector(bool header_changed)
+{
+    if (m_tool_panel == nullptr)
+        return;
+    // InvalidateBestSize runs up the parent chain, so the Tab's best height follows the panel's (taller with the chips, back
+    // to the preset combo's height without them).
+    m_tool_panel->InvalidateBestSize();
     m_tool_panel->Layout();
     Layout();
+    if (!header_changed)
+        return;
+    // The Tab sits at its best height in the ParamsPanel's sizer: a Layout() of the Tab alone keeps its old height, so the
+    // preset combo and page tabs were pushed out of view (chips shown) or a gap stayed (chips hidden) until the Global /
+    // Objects switch laid the sidebar out. Do that layout here.
+    if (wxWindow *parent = GetParent(); parent != nullptr) {
+        parent->InvalidateBestSize();
+        parent->Layout();
+    }
+    if (wxGetApp().plater() != nullptr && GetParent() == wxGetApp().params_panel())
+        wxGetApp().sidebar().relayout_params_section();
+    Refresh();
 }
 
 void TabPrint::use_one_process()

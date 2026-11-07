@@ -619,6 +619,9 @@ private:
 	bool					m_tools_expanded    = false; // the user opened the selector on a printer whose tools all match
 	bool					m_tool_marks_shown  = false; // the plate-wide fields carry the "(Plate)" mark
 	void					create_tool_selector();
+	// Lays the selector out; with header_changed (something shown or hidden, the chips' height changed) the ParamsPanel and
+	// the sidebar too, as the Global / Objects switch does.
+	void					relayout_tool_selector(bool header_changed);
 	std::vector<wxString>	tool_selector_labels() const;
 	bool					tool_selector_expanded() const;
 	// On Plate (selector open): the per-tool fields are greyed out. On a tool: the plate-wide fields carry "(Plate)".
