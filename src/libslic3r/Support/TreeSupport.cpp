@@ -11,6 +11,7 @@
 #include "ShortestPath.hpp"
 #include "SupportCommon.hpp"
 #include "SupportInterlock.hpp"
+#include "SupportMergePlan.hpp"
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
 #include "TreeSupport.hpp"
@@ -1720,6 +1721,12 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                     else {
                         // base_areas
                         Flow flow               = (layer_id == 0 && m_raft_layers == 0) ? m_support_params.first_layer_flow : support_flow;
+                        // Mixed nozzle diameters (AdaptiveLayerMerge step 4): a base folded into a slab
+                        // (fold_base_areas_multi_diameter) is one extrusion of the slab height, by the nozzle the plan
+                        // picked. base_slab_height is 0 on every single-diameter plate.
+                        if (ts_layer->base_slab_height > EPSILON && ! (layer_id == 0 && m_raft_layers == 0))
+                            flow = Flow(float(support_extrusion_width), float(ts_layer->base_slab_height),
+                                        float(ts_layer->planned_nozzle_diameter > EPSILON ? ts_layer->planned_nozzle_diameter : nozzle_diameter));
                         bool need_infill = with_infill;
                         if(m_object_config->support_base_pattern==smpDefault)
                             need_infill &= area_group.need_infill;
@@ -1993,6 +2000,7 @@ void TreeSupport::generate()
     profiler.stage_start(STAGE_DRAW_CIRCLES);
     m_object->print()->set_status(65, _u8L("Generating support"));
     draw_circles();
+    fold_base_areas_multi_diameter();
     profiler.stage_finish(STAGE_DRAW_CIRCLES);
 
 
@@ -2191,6 +2199,128 @@ Polygons TreeSupport::get_trim_support_regions(
         }
 
     return polygons_trimming;
+}
+
+// Mixed nozzle diameters (AdaptiveLayerMerge step 4). A reduced form of BambuStudio v02.09.01.70's
+// TreeSupport::fold_nodes_multi_diameter() (TreeSupport.cpp:1784-2890): Bambu folds the node chains before
+// draw_circles(), column by column, and renumbers the roof counters so roofs can fold too. Here the drawn areas are
+// folded afterwards, with the rule merge_support_layers_multi_diameter() applies to normal supports:
+//   * the slab is the base of its top layer (the band face the model ladder uses), less every roof / floor / gap
+//     column inside the slab and less the object (grown by the XY distance) over the whole slab height;
+//   * a swallowed layer keeps only the base under a roof / floor that lands inside the slab above it, so no column
+//     hangs over the void the cut opened; everything else of its base is printed by the slab;
+//   * roofs, floors and the roof gap stay on the fine grid with their own height and are never pinned here.
+// Skipped for independent support layer heights (the support layers are then not the object layers) and for the
+// lightning base (its trees were grown on the unfolded areas), as well as for a slab holding woven interlock roofs
+// or one whose layers are not all present.
+void TreeSupport::fold_base_areas_multi_diameter()
+{
+    if (m_support_params.independent_layer_height || m_support_params.base_fill_pattern == ipLightning)
+        return;
+    if (m_object->support_layer_count() <= m_raft_layers || m_ts_data == nullptr)
+        return;
+    const SupportMergePlan plan = make_support_merge_plan(*m_object);
+    if (! plan.enabled || plan.slabs.empty())
+        return;
+
+    const ConstLayerPtrsAdaptor object_layers = static_cast<const PrintObject *>(m_object)->layers();
+    // The support layer printed at each object layer's print_z; null where none prints. draw_circles() has already
+    // dropped the empty support layers, so they are matched by print_z, not by index.
+    std::vector<SupportLayer *> support_at(object_layers.size(), nullptr);
+    for (SupportLayer *ts_layer : m_object->support_layers()) {
+        if (ts_layer == nullptr || ts_layer->height < EPSILON)
+            continue;
+        auto it = std::lower_bound(object_layers.begin(), object_layers.end(), ts_layer->print_z - EPSILON,
+            [](const Layer *layer, coordf_t z) { return layer->print_z < z; });
+        if (it != object_layers.end() && std::abs((*it)->print_z - ts_layer->print_z) < EPSILON)
+            support_at[size_t(it - object_layers.begin())] = ts_layer;
+    }
+
+    auto interface_of = [](const SupportLayer &layer) {
+        Polygons out = to_polygons(layer.roof_areas);
+        polygons_append(out, to_polygons(layer.roof_1st_layer));
+        polygons_append(out, to_polygons(layer.floor_areas));
+        polygons_append(out, to_polygons(layer.roof_gap_areas));
+        return out;
+    };
+    const float xy_gap = float(scale_(m_ts_data->m_xy_distance));
+
+    // Every slab owns its own layers, so the slabs fold independently.
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, plan.slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t slab_idx = range.begin(); slab_idx < range.end(); ++ slab_idx) {
+            const SupportMergePlan::Slab &slab = plan.slabs[slab_idx];
+            if (slab.top_idx <= slab.bottom_idx || slab.top_idx >= support_at.size())
+                continue;
+            SupportLayer *top = support_at[slab.top_idx];
+            if (top == nullptr || top->base_areas.empty() || slab.height <= top->height + EPSILON)
+                continue;
+            bool foldable = true;
+            for (size_t idx = slab.bottom_idx; idx <= slab.top_idx && foldable; ++ idx) {
+                const SupportLayer *layer = support_at[idx];
+                // A slab is one extrusion from its bottom up: every layer it replaces has to carry support, or the
+                // slab would hang over a void. Woven interlock roofs keep their own layers.
+                foldable = layer != nullptr && (idx == slab.top_idx || ! layer->base_areas.empty()) && layer->interlock_roof.empty();
+            }
+            if (! foldable)
+                continue;
+
+            Polygons keep_out;
+            for (size_t idx = slab.bottom_idx; idx <= slab.top_idx; ++ idx) {
+                polygons_append(keep_out, interface_of(*support_at[idx]));
+                polygons_append(keep_out, offset(object_layers[idx]->lslices, xy_gap));
+            }
+            ExPolygons representative = keep_out.empty() ? top->base_areas : diff_ex(top->base_areas, union_(keep_out));
+            if (representative.empty())
+                continue;
+
+            // The base area groups carry draw_circles()' per-area decisions (infill, extra wall, distance to top).
+            // Remember them before the areas they point into are replaced.
+            auto base_metas = [](const SupportLayer &layer) {
+                std::vector<std::pair<ExPolygon, SupportLayer::AreaGroup>> metas;
+                for (const SupportLayer::AreaGroup &group : layer.area_groups)
+                    if (group.type == SupportLayer::BaseType && group.area != nullptr)
+                        metas.emplace_back(*group.area, group);
+                return metas;
+            };
+            auto replace_base = [](SupportLayer &layer, ExPolygons new_base,
+                                   const std::vector<std::pair<ExPolygon, SupportLayer::AreaGroup>> &metas) {
+                std::vector<SupportLayer::AreaGroup> others;
+                for (const SupportLayer::AreaGroup &group : layer.area_groups)
+                    if (group.type != SupportLayer::BaseType)
+                        others.emplace_back(group);
+                layer.base_areas = std::move(new_base);
+                layer.area_groups.clear();
+                for (ExPolygon &expoly : layer.base_areas) {
+                    const std::pair<ExPolygon, SupportLayer::AreaGroup> *meta = metas.empty() ? nullptr : &metas.front();
+                    for (const auto &candidate : metas)
+                        if (overlaps(ExPolygons{ expoly }, ExPolygons{ candidate.first })) {
+                            meta = &candidate;
+                            break;
+                        }
+                    SupportLayer::AreaGroup group(&expoly, SupportLayer::BaseType, meta ? meta->second.dist_to_top : 0.);
+                    if (meta != nullptr) {
+                        group.need_infill     = meta->second.need_infill;
+                        group.need_extra_wall = meta->second.need_extra_wall;
+                    }
+                    layer.area_groups.emplace_back(group);
+                }
+                append(layer.area_groups, std::move(others));
+            };
+
+            for (size_t idx = slab.bottom_idx; idx < slab.top_idx; ++ idx) {
+                SupportLayer &layer = *support_at[idx];
+                Polygons landing;
+                for (size_t above = idx + 1; above <= slab.top_idx; ++ above)
+                    polygons_append(landing, interface_of(*support_at[above]));
+                ExPolygons preserved = landing.empty() ? ExPolygons() : intersection_ex(layer.base_areas, union_(landing));
+                replace_base(layer, std::move(preserved), base_metas(layer));
+            }
+            replace_base(*top, std::move(representative), base_metas(*top));
+            top->base_slab_height        = slab.height;
+            top->planned_filament_id     = slab.filament_id;
+            top->planned_nozzle_diameter = slab.nozzle_diameter;
+        }
+    });
 }
 
 void TreeSupport::draw_circles()

@@ -686,6 +686,8 @@ set(lisbslic3r_sources
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportMergePlan.cpp
+    Support/SupportMergePlan.hpp
     Support/SupportOverhangDetect.cpp
     Support/SupportOverhangDetect.hpp
     Support/SupportOverhangHighlight.cpp
