@@ -420,6 +420,32 @@ public:
     int new_project(bool skip_confirm = false, bool silent = false, const wxString& project_name = wxString(), bool reload_presets = true);
     // BBS: save & backup
     void load_project(wxString const & filename = "", wxString const & originfile = "-");
+
+    // ---- Project strip (tests/design_multi_project_sidebar.md, P1). ProjectStrip drives these. ----
+    // Why the active project cannot be swapped out right now (a job holds the plate, a print or send is being prepared,
+    // a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool first.
+    wxString project_swap_blocker();
+    // Cancels a running slice (D4: no slicing in parked projects). True when one was running.
+    bool     cancel_slicing_for_project_swap();
+    // Parks the active project: snapshot_3mf (project_park_save_strategy) and every valid plate's G-code copied into
+    // gcode_dir, listed in plate_gcodes as (plate index, file). False with the reason in `error` when the export failed.
+    bool park_project(const std::string& snapshot_3mf, const std::string& gcode_dir, std::vector<std::pair<int, std::string>>& plate_gcodes,
+                      std::string& error);
+    // Loads a parked project in place of the active one without asking anything: the active one is parked (or closed)
+    // already. Restores its file name or Untitled name, its unsaved flag, its plates' G-code (Preview without slicing again)
+    // and the current plate. False when nothing could be loaded.
+    bool swap_in_project(const std::string& snapshot_3mf, const wxString& origin_path, const wxString& name, bool dirty,
+                         const std::vector<std::pair<int, std::string>>& plate_gcodes, int plate);
+    // Opens a project file (or a model file as a new project) in place of the active one without the save prompt: the
+    // strip parked the active one first. False when nothing was loaded.
+    bool load_project_unprompted(const wxString& filename);
+    // True while swap_in_project() loads: load_files() stays quiet (no warnings, no untrusted-settings strip of the
+    // project's own presets, no "keep my printer" switch).
+    bool is_project_swap_loading() const { return m_project_swap_loading; }
+    // Set by the strip for a whole switch. Opens arriving meanwhile (hub, Layerling or Vault "send to plate", another
+    // instance) wait until it is over.
+    void set_project_switch_busy(bool busy) { m_project_switch_busy = busy; }
+    bool is_project_switch_busy() const { return m_project_switch_busy; }
     int save_project(bool saveAs = false);
     void set_opened_from_zip(bool opened);
     bool opened_from_zip() const;
@@ -1206,6 +1232,12 @@ private:
     bool m_exported_file { false };
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
+    bool m_project_swap_loading { false };
+    bool m_project_switch_busy { false };
+    // Project strip: the next load_project() skips close_with_confirm (the strip parked the project); the strip's own loads
+    // run while m_project_switch_busy is set and must not wait for themselves.
+    bool m_skip_close_confirm { false };
+    int  m_project_strip_loads { 0 };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };
 

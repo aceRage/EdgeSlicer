@@ -55,6 +55,7 @@ class Tab;
 class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
+class ProjectStrip;
 class ParamsDialog;
 class SliceModePopup;
 class HomePanel;
@@ -126,6 +127,7 @@ class MainFrame : public DPIFrame
 #endif
     wxMenuItem* m_menu_item_reslice_now { nullptr };
     wxSizer*    m_main_sizer{ nullptr };
+    ProjectStrip* m_project_strip{ nullptr };
 
     size_t      m_last_selected_tab;
 
@@ -421,6 +423,10 @@ public:
     bool save_project_as(const wxString& filename = wxString());
 
     void        add_to_recent_projects(const wxString& filename);
+    // Project strip (tests/design_multi_project_sidebar.md): the open projects of this window; null in the G-code viewer.
+    ProjectStrip* project_strip() const { return m_project_strip; }
+    // The active project's name, file or unsaved state changed.
+    void        on_active_project_changed();
     void        get_recent_projects(boost::property_tree::wptree &tree, int images);
     void        get_recent_projects(nlohmann::json& data, int images);
     void        open_recent_project(size_t file_id, wxString const & filename);

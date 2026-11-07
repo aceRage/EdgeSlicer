@@ -8,6 +8,7 @@
 #include "PrintConfig.hpp"
 #include "NozzleProcess.hpp"
 #include "NozzleOverride.hpp"
+#include "ProjectSwapGuard.hpp"
 #include "ToolSlots.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
@@ -3845,6 +3846,9 @@ bool PresetBundle::set_tool_nozzle_diameter(size_t tool, double diameter)
 
 void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
 {
+    // Project strip: a project switch loads another project's nozzles, it does not set this printer's.
+    if (ProjectSwapGuard::active())
+        return;
     const std::string model = nozzle_override_model_key(this->printers);
     if (model.empty())
         return;
@@ -3894,6 +3898,9 @@ NozzleRackMemory PresetBundle::current_nozzle_rack_memory() const
 
 void PresetBundle::remember_nozzle_rack(AppConfig &config) const
 {
+    // Project strip (design risk 1): the rack of a project switched in is that project's, not a new memory for the printer.
+    if (ProjectSwapGuard::active())
+        return;
     const std::string model = nozzle_override_model_key(this->printers);
     // Until the model's memory was restored (startup, before the Printer tab loaded) the project holds no choice yet: writing
     // it would put the defaults over what was remembered.
@@ -3928,6 +3935,9 @@ NozzleRackLimits PresetBundle::nozzle_rack_limits() const
 
 bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
 {
+    // Project strip: a project switched in brings its own rack (as an opened 3MF does, #914); the memory stays out of it.
+    if (ProjectSwapGuard::active())
+        return false;
     const Preset     &printer = this->printers.get_selected_preset();
     const std::string model   = nozzle_override_model_key(this->printers);
     std::string       text;

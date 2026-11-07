@@ -99,6 +99,7 @@
 #include "libslic3r/Format/AMF.hpp"
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/CustomModels.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "../Utils/BambuStudioLauncher.hpp"
@@ -5368,6 +5369,12 @@ bool Sidebar::follow_nozzle_sizes_with_printer_variant()
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return false;
+    // Project strip (design risk 1): a project switched in keeps its printer and nozzles as saved; switching presets here
+    // would also ask the keep / transfer / discard question a switch must never ask.
+    if (ProjectSwapGuard::active()) {
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process: printer variant follow skipped during a project switch";
+        return false;
+    }
     const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
     const std::vector<double> preset = bundle->preset_nozzle_diameters();
     if (sizes.empty() || preset.size() != sizes.size())
@@ -14197,7 +14204,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     // export / slice), an output name that leaves the output folder, or print-host
                     // endpoints along silently - neither in its settings nor in its embedded presets.
                     // Our own crash backup (Restore) is not a foreign file.
-                    if (load_config && !(strategy & LoadStrategy::Restore))
+                    // Project strip: a parked project is the user's own, already through this guard when it was first opened.
+                    if (load_config && !(strategy & LoadStrategy::Restore) && !q->is_project_swap_loading())
                         guard_untrusted_settings(into_u8(from_path(real_filename)), &config_loaded, &project_presets);
 
                     auto imported_string_count = [&config_loaded](const char *key) -> size_t {
@@ -14420,7 +14428,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             bool is_safe_to_rotate = _sparse_infill_pattern == ipRectilinear || _sparse_infill_pattern == ipLine ||
                                                      _sparse_infill_pattern == ipZigZag || _sparse_infill_pattern == ipCrossZag ||
                                                      _sparse_infill_pattern == ipLockedZag;
-                            if (!is_safe_to_rotate) {
+                            if (!is_safe_to_rotate && !q->is_project_swap_loading()) {
                                 wxString msg_text = _(
                                     L("This project was created with an EdgeSlicer and uses "
                                       "infill rotation template settings that may not work properly with your current infill pattern. "
@@ -14642,7 +14650,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                         auto choise = wxGetApp().app_config->get("no_warn_when_modified_gcodes");
                         // A file from the web always gets the warning (GUI_App::mark_web_download).
-                        if (choise.empty() || choise != "true" || wxGetApp().is_web_download(filename)) {
+                        if (!q->is_project_swap_loading() && (choise.empty() || choise != "true" || wxGetApp().is_web_download(filename))) {
                             // BBS: first validate the printer
                             // validate the system profiles
                             std::set<std::string> modified_gcodes;
@@ -14783,7 +14791,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             // new printer cannot use them, so they were deselected, hidden from the combos
                             // and replaced by that printer's defaults - the project "lost" its presets on
                             // every re-open. Such a project opens on its own printer.
-                            if (wxGetApp().app_config->get("keep_printer_on_open") == "true") {
+                            // Project strip: a switch brings the project's own printer back, as its 3MF was opened.
+                            if (wxGetApp().app_config->get("keep_printer_on_open") == "true" && !q->is_project_swap_loading()) {
                                 const std::string preferred = wxGetApp().app_config->get("preferred_printer");
                                 const bool switch_wanted = !preferred.empty()
                                     && preferred != preset_bundle->printers.get_selected_preset_name()
@@ -14969,7 +14978,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                 // BBS:: project embedded presets
                 if (project_presets.size() > 0) {
-                    guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
+                    if (!q->is_project_swap_loading())
+                        guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
                     // load project embedded presets
                     PresetsConfigSubstitutions preset_substitutions;
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
@@ -15333,7 +15343,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     //    q->model().stl_design_country = "";
     //}
 
-    if (tolal_model_count <= 0 && !q->m_exported_file) {
+    if (tolal_model_count <= 0 && !q->m_exported_file && !q->is_project_swap_loading()) {
         dlg.Hide();
         if (!is_user_cancel) {
             MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxOK | wxICON_WARNING);
@@ -19966,6 +19976,9 @@ void Plater::priv::set_project_name(const wxString& project_name)
     m_project_name = project_name;
     // Ultra: what the hub lists for this instance (path follows in set_project_filename).
     RemoteAccess::get().note_project(project_name.ToUTF8().data(), "");
+    // Project strip: the active item shows the project's name.
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->on_active_project_changed();
     //update topbar title
 #ifdef __WINDOWS__
     wxGetApp().mainframe->SetTitle(m_project_name + " - EdgeSlicer");
@@ -19987,6 +20000,8 @@ void Plater::priv::update_title_dirty_status()
         title = "*" + m_project_name;
     else
         title = m_project_name;
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->on_active_project_changed();
 
 #ifdef __WINDOWS__
     wxGetApp().mainframe->topbar()->SetTitle(title);
@@ -21334,6 +21349,12 @@ void Plater::load_project(wxString const& filename2,
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "filename is: " << filename2 << "and originfile is: " << originfile;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
+    // Project strip: an open that arrives while the strip switches projects waits for the switch.
+    if (m_project_switch_busy && !m_skip_close_confirm) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": a project switch is running, the open waits for it";
+        wxGetApp().CallAfter([this, filename2, originfile]() { load_project(filename2, originfile); });
+        return;
+    }
     auto filename = filename2;
     auto check = [&filename, this] (bool yes_or_no) {
         if (!yes_or_no && !wxGetApp().check_and_save_current_preset_changes(_L("Load project"),
@@ -21348,7 +21369,14 @@ void Plater::load_project(wxString const& filename2,
 
     // BSS: save project, force close
     int result;
-    if ((result = close_with_confirm(check)) == wxID_CANCEL) {
+    if (m_skip_close_confirm) {
+        // Project strip: the active project is parked in its slot already (or was closed), so there is nothing to ask. What
+        // close_with_confirm() does once answered: its backup folder goes, the new project starts clean.
+        m_skip_close_confirm = false;
+        model().set_backup_path("");
+        up_to_date(true, false);
+        up_to_date(true, true);
+    } else if ((result = close_with_confirm(check)) == wxID_CANCEL) {
         return;
     }
 
@@ -21476,6 +21504,152 @@ void Plater::load_project(wxString const& filename2,
         });
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
+}
+
+// ---- Project strip (tests/design_multi_project_sidebar.md, P1) ----------------------------------------------------------
+
+wxString Plater::project_swap_blocker()
+{
+    if (m_loading_project)
+        return _L("A project is loading.");
+    // Arrange, Fill bed, Emboss / text, texture displacement bake, orient, and the preparation of a print or send all run
+    // on the plater's job worker and hold its model.
+    if (!get_ui_job_worker().is_idle())
+        return _L("A job is running on the plate. Wait for it to finish or cancel it first.");
+    if (p->m_is_publishing)
+        return _L("A print or send is being prepared.");
+    if (ShowcaseView *showcase = get_showcase_view(); showcase != nullptr && showcase->is_rendering_video())
+        return _L("A Showcase video is being rendered.");
+    if (GLCanvas3D *canvas = get_view3D_canvas3D(); canvas != nullptr) {
+        GLGizmosManager &gizmos = canvas->get_gizmos_manager();
+        if (gizmos.is_in_editing_mode(false))
+            return _L("Finish or cancel the tool you are editing with first.");
+        if (gizmos.get_current_type() != GLGizmosManager::EType::Undefined) {
+            // Tools are closed before parking (their state is not in a project file); one that refuses stays.
+            gizmos.reset_all_states();
+            if (gizmos.get_current_type() != GLGizmosManager::EType::Undefined)
+                return _L("Close the open tool first.");
+        }
+    }
+    return {};
+}
+
+bool Plater::cancel_slicing_for_project_swap()
+{
+    p->background_process_timer.Stop();
+    p->auto_reslice_timer.Stop();
+    if (p->background_process.idle())
+        return false;
+    BOOST_LOG_TRIVIAL(info) << "project strip: cancelling the running slice before the switch";
+    p->background_process.stop();
+    return true;
+}
+
+bool Plater::park_project(const std::string &snapshot_3mf, const std::string &gcode_dir, std::vector<std::pair<int, std::string>> &plate_gcodes,
+                          std::string &error)
+{
+    plate_gcodes.clear();
+    error.clear();
+    boost::system::error_code ec;
+    fs::create_directories(gcode_dir, ec);
+    // The plates keep their G-code in this project's backup folder, which goes when the next project loads: copy it out first.
+    PartPlateList &plates = p->partplate_list;
+    for (int i = 0; i < plates.get_plate_count(); ++i) {
+        PartPlate *plate = plates.get_plate(i);
+        if (plate == nullptr || !plate->is_valid_gcode_file())
+            continue;
+        const std::string src = plate->get_gcode_filename();
+        const std::string dst = (fs::path(gcode_dir) / ("plate_" + std::to_string(i + 1) + ".gcode")).string();
+        ec.clear();
+        fs::copy_file(fs::path(src), fs::path(dst), fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            // That plate shows "Slice" again after the switch; nothing else is lost.
+            BOOST_LOG_TRIVIAL(warning) << "project strip: could not keep the G-code of plate " << i + 1 << ": " << ec.message();
+            continue;
+        }
+        plate_gcodes.emplace_back(i, dst);
+    }
+    if (export_3mf(fs::path(snapshot_3mf), project_park_save_strategy()) < 0) {
+        error = p->last_export_error.empty() ? std::string("the project could not be written") : p->last_export_error;
+        BOOST_LOG_TRIVIAL(error) << "project strip: parking failed: " << error;
+        return false;
+    }
+    return true;
+}
+
+bool Plater::load_project_unprompted(const wxString &filename)
+{
+    if (filename.empty())
+        return false;
+    m_skip_close_confirm = true;
+    ++m_project_strip_loads;
+    ScopeGuard sg([this]() {
+        m_skip_close_confirm = false;
+        --m_project_strip_loads;
+    });
+    // "<loadall>": as a project (model and settings), no "open as project or import geometry" question.
+    load_project(filename, "<loadall>");
+    return true;
+}
+
+bool Plater::swap_in_project(const std::string &snapshot_3mf, const wxString &origin_path, const wxString &name, bool dirty,
+                             const std::vector<std::pair<int, std::string>> &plate_gcodes, int plate)
+{
+    boost::system::error_code ec;
+    if (snapshot_3mf.empty() || !fs::exists(fs::path(snapshot_3mf), ec)) {
+        BOOST_LOG_TRIVIAL(error) << "project strip: the parked project " << snapshot_3mf << " is missing";
+        return false;
+    }
+    ProjectSwapGuard swap_guard;
+    m_project_swap_loading = true;
+    m_skip_close_confirm   = true;
+    ++m_project_strip_loads;
+    ScopeGuard sg([this]() {
+        m_project_swap_loading = false;
+        m_skip_close_confirm   = false;
+        --m_project_strip_loads;
+    });
+
+    // Quietly, as an opened project 3MF: its printer, process and filaments with their changes, its project settings.
+    load_project(from_u8(snapshot_3mf), "<silence>");
+
+    // Its own name: the file it belongs to, or its Untitled name.
+    if (origin_path.empty()) {
+        p->set_project_filename(wxEmptyString);
+        p->set_project_name(name);
+    } else
+        p->set_project_filename(origin_path);
+
+    // The plates sliced before the switch get their G-code back: Preview without slicing again. Each plate takes its own
+    // copy in this project's backup folder, where a sliced plate keeps it.
+    PartPlateList &plates = p->partplate_list;
+    int            loaded = 0;
+    for (const auto &item : plate_gcodes) {
+        PartPlate *pl = plates.get_plate(item.first);
+        ec.clear();
+        if (pl == nullptr || !fs::exists(fs::path(item.second), ec))
+            continue;
+        const fs::path dst = fs::path(model().get_backup_path("Metadata")) /
+                             (boost::format(".%1%.strip_%2%_%3%.gcode") % get_current_pid() % item.first % loaded).str();
+        ec.clear();
+        fs::copy_file(fs::path(item.second), dst, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: plate " << item.first + 1 << " G-code not restored: " << ec.message();
+            continue;
+        }
+        if (pl->load_gcode_from_file(dst.string()) == 0)
+            ++loaded;
+    }
+    if (plate >= 0 && plate < plates.get_plate_count())
+        select_plate(plate);
+
+    // Unsaved before the switch, unsaved after it (the load marked it clean).
+    if (dirty)
+        set_plater_dirty(true);
+    update_title_dirty_status();
+    BOOST_LOG_TRIVIAL(info) << "project strip: switched in " << into_u8(origin_path.empty() ? name : origin_path) << ", " << loaded
+                            << " plate(s) with G-code" << log_memory_info();
+    return true;
 }
 
 // BBS: save logic
@@ -23444,6 +23618,13 @@ void Plater::force_update_all_plate_thumbnails()
 
 // BBS: backup
 std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_in, LoadStrategy strategy, bool ask_multi) {
+    // Project strip: files sent to the plate while a switch runs (hub, Layerling / Vault "send to plate", another instance)
+    // go to the project that is active once the switch is over.
+    if (m_project_switch_busy && m_project_strip_loads == 0) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": a project switch is running, " << input_files_in.size() << " file(s) wait for it";
+        wxGetApp().CallAfter([this, input_files_in, strategy, ask_multi]() { load_files(input_files_in, strategy, ask_multi); });
+        return {};
+    }
     // Every model import of the GUI ends here (menu File > Import, toolbar, Home, recent files,
     // downloads, files handed to the running app, ...): .svg files go to the SVG gizmo after the
     // SVG / SVG (Split) question, the same as Add Primitive. The callers which route them already

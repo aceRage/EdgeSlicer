@@ -46,6 +46,7 @@
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
+#include "ProjectStrip.hpp"
 #include "RemoteAccess.hpp"
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
@@ -514,7 +515,10 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     m_loaded = true;
 
     // initialize layout
-    m_main_sizer = new wxBoxSizer(wxVERTICAL);
+    // Horizontal: the project strip (far left, D1), then the tab notebook.
+    m_main_sizer = new wxBoxSizer(wxHORIZONTAL);
+    if (m_plater != nullptr && wxGetApp().is_editor())
+        m_project_strip = new ProjectStrip(this, this);
     wxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 #ifndef __APPLE__
      sizer->Add(m_topbar, 0, wxEXPAND);
@@ -595,7 +599,19 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         // BBS: close save project
         int result;
-        if (event.CanVeto() && ((result = m_plater->close_with_confirm(check)) == wxID_CANCEL)) {
+        if (event.CanVeto() && m_project_strip != nullptr && m_project_strip->switching()) {
+            event.Veto();
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " cancelled: a project switch is running";
+            return;
+        }
+        if (event.CanVeto() && m_project_strip != nullptr && m_project_strip->project_count() > 1) {
+            // Project strip: one dialog for every unsaved project of the window, not one per project.
+            if (!m_project_strip->confirm_close_all()) {
+                event.Veto();
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "cancelled by the unsaved projects dialog";
+                return;
+            }
+        } else if (event.CanVeto() && ((result = m_plater->close_with_confirm(check)) == wxID_CANCEL)) {
             event.Veto();
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "cancelled by close_with_confirm selection";
             return;
@@ -624,6 +640,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         MarkdownTip::ExitTip();
 
         m_plater->reset();
+        // Project strip: the parked projects' temporary files (each one by its own path).
+        if (m_project_strip != nullptr)
+            m_project_strip->remove_all_slot_files();
         this->shutdown();
         // propagate event
 
@@ -680,6 +699,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
                 wxPostEvent(this, wxCommandEvent(EVT_BACKUP_POST));
             }
             else if (action == 1) {
+                // Project strip: not while a switch replaces the project (its backup folder changes under it).
+                if (m_project_strip != nullptr && m_project_strip->switching())
+                    return;
                 if (!m_plater->up_to_date(false, true)) {
                     m_plater->export_3mf(m_plater->model().get_backup_path() + "/.3mf", SaveStrategy::Backup);
                     m_plater->up_to_date(true, true);
@@ -764,8 +786,17 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         }
         else if (evt.CmdDown() && evt.GetKeyCode() == 'G') { if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); } evt.Skip(); return; }
         if (evt.CmdDown() && evt.GetKeyCode() == 'J') { m_printhost_queue_dlg->Show(); return; }
-        if (evt.CmdDown() && evt.GetKeyCode() == 'N') { m_plater->new_project(); return;}
-        if (evt.CmdDown() && evt.GetKeyCode() == 'O') { m_plater->load_project(); return;}
+        // Project strip: New and Open add a project next to the active one; Ctrl+PgDn / Ctrl+PgUp go to the next / previous
+        // one (Ctrl+Tab switches table pages).
+        if (evt.CmdDown() && evt.GetKeyCode() == 'N') { if (m_project_strip) m_project_strip->new_project(); else m_plater->new_project(); return;}
+        if (evt.CmdDown() && evt.GetKeyCode() == 'O') { if (m_project_strip) m_project_strip->open_project(); else m_plater->load_project(); return;}
+        if (evt.ControlDown() && !evt.AltDown() && m_project_strip != nullptr &&
+            (evt.GetKeyCode() == WXK_PAGEDOWN || evt.GetKeyCode() == WXK_PAGEUP || evt.GetKeyCode() == WXK_NUMPAD_PAGEDOWN ||
+             evt.GetKeyCode() == WXK_NUMPAD_PAGEUP)) {
+            const bool next = evt.GetKeyCode() == WXK_PAGEDOWN || evt.GetKeyCode() == WXK_NUMPAD_PAGEDOWN;
+            m_project_strip->cycle(next ? 1 : -1);
+            return;
+        }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'S') { if (can_save_as()) m_plater->save_project(true); return;}
         else if (evt.CmdDown() && evt.GetKeyCode() == 'S') { if (can_save()) m_plater->save_project(); return;}
         if (evt.CmdDown() && evt.GetKeyCode() == 'F') {
@@ -1082,6 +1113,11 @@ void MainFrame::update_layout()
         m_tabpanel->InsertPage(tpPreview, m_plater, _L("Preview"), std::string("tab_preview_active"), std::string("tab_preview_active"), false);
         // Showcase (D1): presentation renders, the plater's third page.
         m_tabpanel->InsertPage(tpShowcase, m_plater, _L("Showcase"), std::string("tab_showcase_active"), std::string("tab_showcase_active"), false);
+        // Project strip: a full-height column left of every tab (Home and Device included, D1 / D9).
+        if (m_project_strip != nullptr) {
+            m_main_sizer->Add(m_project_strip, 0, wxEXPAND);
+            m_project_strip->Show();
+        }
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 0);
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
@@ -1103,6 +1139,8 @@ void MainFrame::update_layout()
     }
     case ESettingsLayout::GCodeViewer:
     {
+        if (m_project_strip != nullptr)
+            m_project_strip->Hide();
         m_main_sizer->Add(m_plater, 1, wxEXPAND);
         //BBS: add bed exclude area
         m_plater->set_bed_shape({ { 0.0, 0.0 }, { 200.0, 0.0 }, { 200.0, 200.0 }, { 0.0, 200.0 } }, {}, 0.0, {}, {}, true);
@@ -1272,6 +1310,12 @@ void MainFrame::update_filament_tab_ui()
 void MainFrame::update_title()
 {
     return;
+}
+
+void MainFrame::on_active_project_changed()
+{
+    if (m_project_strip != nullptr)
+        m_project_strip->on_active_project_changed();
 }
 
 void MainFrame::show_publish_button(bool show)
@@ -2736,6 +2780,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
 {
     wxGetApp().update_fonts(this);
     this->SetFont(this->normal_font());
+    if (m_project_strip != nullptr)
+        m_project_strip->rescale();
 
 #ifdef _MSW_DARK_MODE
     // update common mode sizer
@@ -2806,6 +2852,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
 void MainFrame::on_sys_color_changed()
 {
     wxBusyCursor wait;
+    if (m_project_strip != nullptr)
+        m_project_strip->Refresh();
 
     // update label colors in respect to the system mode
     wxGetApp().init_label_colours();
@@ -3176,17 +3224,17 @@ void MainFrame::init_menubar_as_editor()
 #endif
         // New Project
         append_menu_item(fileMenu, wxID_ANY, _L("New Project") + "\t" + ctrl + "N", _L("Start a new project"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->new_project(); }, "", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->new_project(); else if (m_plater) m_plater->new_project(); }, "", nullptr,
             [this](){return can_start_new_project(); }, this);
         // Open Project
 
 #ifndef __APPLE__
         append_menu_item(fileMenu, wxID_ANY, _L("Open Project") + dots + "\t" + ctrl + "O", _L("Open a project file"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->load_project(); }, "menu_open", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->open_project(); else if (m_plater) m_plater->load_project(); }, "menu_open", nullptr,
             [this](){return can_open_project(); }, this);
 #else
         append_menu_item(fileMenu, wxID_ANY, _L("Open Project") + dots + "\t" + ctrl + "O", _L("Open a project file"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->load_project(); }, "", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->open_project(); else if (m_plater) m_plater->load_project(); }, "", nullptr,
             [this](){return can_open_project(); }, this);
 #endif
 
@@ -4882,7 +4930,12 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
     }
     if (wxFileExists(filename)) {
         CallAfter([this, filename] {
-            if (wxGetApp().can_load_project())
+            if (!wxGetApp().can_load_project())
+                return;
+            // Project strip: a recent project opens next to the active one (its own slot when it is open already).
+            if (m_project_strip != nullptr)
+                m_project_strip->open_project(filename);
+            else
                 m_plater->load_project(filename);
         });
     }

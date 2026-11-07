@@ -9,6 +9,7 @@
 #include "libslic3r/NozzleRackMemory.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -267,4 +268,45 @@ TEST_CASE("H3C and H2C racks come back after a printer switch or a restart", "[N
         CHECK_FALSE(select_printer(b, config, "Bambu Lab H3C 0.2 nozzle"));
         CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
     }
+}
+
+// Project strip (tests/design_multi_project_sidebar.md risk 1): switching to another open project loads its nozzles as opening
+// its 3MF does. That is not an edit of the printer's nozzles: while the switch runs, neither the rack memory nor the size memory
+// is written, and no remembered rack is put over the project's own.
+TEST_CASE("A project switch neither writes nor restores the nozzle memory", "[NozzleRackMemory][PresetBundle][ProjectSwapGuard]")
+{
+    PresetBundle     &b = bbl_bundle();
+    AppConfig         config;
+    const std::string h2c_rack = "0.4:high_flow,0.4,0.6,0.4,0.4,0.4";
+    REQUIRE_FALSE(ProjectSwapGuard::active());
+
+    select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+    select_printer(b, config, "Bambu Lab H2C 0.4 nozzle");
+    REQUIRE(b.set_rack_nozzle_override(1, h2c_rack));
+    {
+        ProjectSwapGuard swap;
+        b.remember_nozzle_rack(config);
+        b.remember_nozzle_diameter_override(config);
+        CHECK_FALSE(config.has("nozzle_rack", "Bambu Lab H2C 0.4 nozzle"));
+        CHECK_FALSE(config.has("nozzle_rack_model", "Bambu Lab H2C"));
+        CHECK_FALSE(config.has("nozzle_diameter_override", "Bambu Lab H2C"));
+    }
+    // A user edit after the switch is remembered as before.
+    b.remember_nozzle_rack(config);
+    CHECK(config.has("nozzle_rack", "Bambu Lab H2C 0.4 nozzle"));
+    const std::string remembered = config.get("nozzle_rack", "Bambu Lab H2C 0.4 nozzle");
+
+    // Another model, then back to the H2C during a switch: the memory is not put over the project.
+    select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+    {
+        ProjectSwapGuard swap;
+        CHECK_FALSE(select_printer(b, config, "Bambu Lab H2C 0.4 nozzle"));
+        CHECK(project_racks(b).empty());
+    }
+    CHECK(config.get("nozzle_rack", "Bambu Lab H2C 0.4 nozzle") == remembered);
+
+    // Outside a switch the memory works as before.
+    select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+    CHECK(select_printer(b, config, "Bambu Lab H2C 0.4 nozzle"));
+    CHECK(project_racks(b) == std::vector<std::string>{ "", h2c_rack });
 }
