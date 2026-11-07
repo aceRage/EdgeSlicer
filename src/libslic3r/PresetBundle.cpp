@@ -3846,7 +3846,10 @@ bool PresetBundle::set_tool_nozzle_diameter(size_t tool, double diameter)
 void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
 {
     const std::string model = nozzle_override_model_key(this->printers);
-    if (model.empty())
+    // Owner bug 2026-11-07: a nozzle change handled after the printer was switched but before the Printer tab updated the
+    // project for it (a queued sync, strip or variant-follow step) would store the previous printer's sizes under this model.
+    // (A bundle no printer update ran on yet - used without the Printer tab - keeps the old behaviour.)
+    if (model.empty() || (!m_nozzle_override_model.empty() && model != m_nozzle_override_model))
         return;
     const std::vector<double> stored = nozzle_diameter_override_stored(nozzle_diameter_override_values(this->project_config),
                                                                        this->preset_nozzle_diameters());
@@ -3930,16 +3933,26 @@ bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
 {
     const Preset     &printer = this->printers.get_selected_preset();
     const std::string model   = nozzle_override_model_key(this->printers);
-    std::string       text;
-    if (!printer.name.empty() && config.has("nozzle_rack", printer.name))
-        text = config.get("nozzle_rack", printer.name);
-    else if (!model.empty() && config.has("nozzle_rack_model", model))
-        text = config.get("nozzle_rack_model", model);
-    NozzleRackMemory memory;
-    if (!parse_nozzle_rack_memory(text, memory))
+    const std::string by_name = !printer.name.empty() && config.has("nozzle_rack", printer.name) ? config.get("nozzle_rack", printer.name) : std::string();
+    const std::string by_model = !model.empty() && config.has("nozzle_rack_model", model) ? config.get("nozzle_rack_model", model) : std::string();
+    const std::vector<std::string> candidates = nozzle_rack_memory_candidates(printer.is_system, by_name, by_model);
+    if (candidates.empty())
         return false;
-    if (const std::string why = validate_nozzle_rack_memory(memory, this->nozzle_rack_limits()); !why.empty()) {
-        BOOST_LOG_TRIVIAL(info) << "nozzle rack: the nozzles remembered for " << printer.name << " do not fit it (" << why << "), the printer's defaults are used";
+    const NozzleRackLimits limits = this->nozzle_rack_limits();
+    NozzleRackMemory       memory;
+    bool                   found = false;
+    for (const std::string &text : candidates) {
+        if (!parse_nozzle_rack_memory(text, memory))
+            continue;
+        if (const std::string why = validate_nozzle_rack_memory(memory, limits); !why.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "nozzle rack: nozzles remembered for " << printer.name << " do not fit it (" << why << ")";
+            continue;
+        }
+        found = true;
+        break;
+    }
+    if (!found) {
+        BOOST_LOG_TRIVIAL(info) << "nozzle rack: nothing remembered fits " << printer.name << ", the printer's defaults are used";
         return false;
     }
     this->set_nozzle_diameter_override(memory.diameters);
@@ -3953,6 +3966,72 @@ bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
     BOOST_LOG_TRIVIAL(info) << "nozzle rack: restored the nozzles last used on " << printer.name << ": "
                             << nozzle_diameter_summary(this->effective_nozzle_diameters());
     return true;
+}
+
+// The system variant of `model` with `extruders` nozzles, all of size `size`; nullptr when it has none.
+static const Preset *system_printer_variant_of_size(const PresetCollection &printers, const std::string &model, size_t extruders, double size)
+{
+    if (model.empty() || extruders == 0 || !(size > 0.))
+        return nullptr;
+    for (const Preset &p : printers) {
+        if (!p.is_system || p.is_default || p.config.opt_string("printer_model") != model)
+            continue;
+        const auto *nd = p.config.option<ConfigOptionFloats>("nozzle_diameter");
+        if (nd == nullptr || nd->values.size() != extruders ||
+            !std::all_of(nd->values.begin(), nd->values.end(), [size](double d) { return same_nozzle_diameter(d, size); }))
+            continue;
+        return &p;
+    }
+    return nullptr;
+}
+
+// One size on every extruder: that size, else 0.
+static double uniform_nozzle_size(const std::vector<double> &sizes)
+{
+    if (sizes.empty() || !(sizes.front() > 0.))
+        return 0.;
+    for (double d : sizes)
+        if (!same_nozzle_diameter(d, sizes.front()))
+            return 0.;
+    return sizes.front();
+}
+
+std::string PresetBundle::printer_variant_for_nozzle_sizes() const
+{
+    const std::vector<double> sizes  = this->effective_nozzle_diameters();
+    const std::vector<double> preset = this->preset_nozzle_diameters();
+    const double              size   = uniform_nozzle_size(sizes);
+    if (!(size > 0.) || preset.size() != sizes.size())
+        return std::string();
+    if (std::all_of(preset.begin(), preset.end(), [size](double d) { return same_nozzle_diameter(d, size); }))
+        return std::string(); // the variant already has this size
+    const Preset &current = this->printers.get_selected_preset();
+    const Preset *target  = system_printer_variant_of_size(this->printers, current.config.opt_string("printer_model"), sizes.size(), size);
+    return target != nullptr && target->name != current.name ? target->name : std::string();
+}
+
+std::string PresetBundle::printer_preset_for_remembered_nozzles(const AppConfig &config, const std::string &target) const
+{
+    const Preset *preset = this->printers.find_preset(target, false);
+    if (preset == nullptr || !preset->is_system)
+        return target; // a user preset is its own machine: its variant is what the user picked
+    const std::string model = preset->config.opt_string("printer_model");
+    const auto       *nd    = preset->config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (model.empty() || nd == nullptr || nd->values.empty())
+        return target;
+    const std::string by_name  = config.has("nozzle_rack", target) ? config.get("nozzle_rack", target) : std::string();
+    const std::string by_model = config.has("nozzle_rack_model", model) ? config.get("nozzle_rack_model", model) : std::string();
+    for (const std::string &text : nozzle_rack_memory_candidates(true, by_name, by_model)) {
+        NozzleRackMemory memory;
+        if (!parse_nozzle_rack_memory(text, memory) || memory.diameters.size() != nd->values.size())
+            continue;
+        const double size = uniform_nozzle_size(memory.diameters);
+        if (!(size > 0.))
+            return target; // mixed sizes: no variant carries them, the project override does (P7)
+        const Preset *variant = system_printer_variant_of_size(this->printers, model, nd->values.size(), size);
+        return variant != nullptr ? variant->name : target;
+    }
+    return target;
 }
 
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const

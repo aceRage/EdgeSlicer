@@ -24,6 +24,7 @@ namespace Slic3r {
 class ConfigBase;
 class DynamicPrintConfig;
 namespace DualNozzleSync { struct PrinterState; }
+struct RackNozzle; // ToolSlots.hpp
 
 // The project key.
 inline constexpr const char *NOZZLE_DIAMETER_OVERRIDE_KEY = "nozzle_diameter_override";
@@ -95,6 +96,9 @@ std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<do
 // followed by the usable rack nozzles in rack position order; empty for an extruder without rack nozzles.
 // rack_override_from_reported() (ToolSlots.hpp) turns it into the project's rack texts.
 std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders);
+// The same nozzles with their reported types (owner bug 2026-11-07: an H3C sync must bring each slot's type too).
+// Every RackNozzle has volume_given set.
+std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync::PrinterState &state, size_t extruders);
 
 } // namespace Slic3r
 
