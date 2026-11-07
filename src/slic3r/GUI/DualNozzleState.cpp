@@ -81,6 +81,22 @@ static std::string diameter_string(float d)
     return s;
 }
 
+// The nozzles obj reports: mounted ones (pos 0/1) and rack slots (0x10 + n).
+static void add_reported_nozzles(DualNozzleSync::PrinterState &s, MachineObject *obj)
+{
+    for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
+        DualNozzleSync::PrinterNozzle pn;
+        pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
+        pn.diameter = diameter_string(n.diameter);
+        pn.volume   = n.volume_exact;
+        pn.normal   = n.is_normal();
+        pn.wear     = n.wear;
+        pn.fila_id  = n.fila_id;
+        pn.color    = n.color_m;
+        s.nozzles.push_back(pn);
+    }
+}
+
 DualNozzleSync::PrinterState printer_state(MachineObject *obj)
 {
     DualNozzleSync::PrinterState s;
@@ -145,17 +161,20 @@ DualNozzleSync::PrinterState printer_state(MachineObject *obj)
         s.ams.push_back(unit);
     }
 
-    for (const Nozzle &n : obj->m_nozzle_data.nozzles) {
-        DualNozzleSync::PrinterNozzle pn;
-        pn.pos      = n.on_rack() ? (0x10 + (n.id & 0xF)) : (n.id & 0xF);
-        pn.diameter = diameter_string(n.diameter);
-        pn.volume   = n.volume_exact;
-        pn.normal   = n.is_normal();
-        pn.wear     = n.wear;
-        pn.fila_id  = n.fila_id;
-        pn.color    = n.color_m;
-        s.nozzles.push_back(pn);
-    }
+    add_reported_nozzles(s, obj);
+    return s;
+}
+
+DualNozzleSync::PrinterState nozzle_report_state(MachineObject *obj)
+{
+    DualNozzleSync::PrinterState s;
+    s.physical_extruder_map = preset_physical_extruder_map();
+    if (!obj)
+        return s;
+    s.dev_id       = obj->dev_id;
+    s.dev_name     = obj->dev_name;
+    s.printer_type = obj->printer_type;
+    add_reported_nozzles(s, obj);
     return s;
 }
 

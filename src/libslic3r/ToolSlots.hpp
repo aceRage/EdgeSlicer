@@ -214,6 +214,13 @@ std::vector<std::string> rack_slot_send_problems(const ConfigBase &config, const
 // extruder the mounted nozzle first and then the rack positions in order. An extruder that reports fewer than two nozzles
 // keeps its `current` text; an all-empty result is returned empty.
 std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<double>> &mounted_then_rack, const std::vector<std::string> &current);
+// The same with each nozzle's type (owner bug 2026-11-07, H3C: size AND type per slot). `extruder_types` is the project's
+// nozzle_volume_type per extruder: a slot without ":<type>" takes it (extruder_rack_nozzles), so a slot of that type is written
+// bare and every other slot names its type. `capacity` (extruder_max_nozzle_count per extruder; missing = no limit) caps an
+// extruder's slots, and an extruder of capacity 1 (no rack) keeps its `current` text.
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity);
 
 // ---- 4. Per-nozzle filament values ------------------------------------------------------------------------------
 
