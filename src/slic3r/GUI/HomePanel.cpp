@@ -5,6 +5,9 @@
 #include "GcodeArchive.hpp"
 #include "HomeVaults.hpp"
 #include "HomeVendors.hpp"
+#ifdef EDGE_PYTHON_PLUGINS
+#include "HomePlugins.hpp"
+#endif
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "ModelBrowserPanel.hpp"
@@ -104,6 +107,9 @@ HomePanel::~HomePanel()
 {
     m_vendors.reset();
     m_vaults.reset();
+#ifdef EDGE_PYTHON_PLUGINS
+    m_plugins.reset();
+#endif
     *m_alive = false;
     *m_library_cancel = true;
 }
@@ -133,6 +139,20 @@ void HomePanel::ensure_vaults()
             this, [this](const json& m) { send(m); }, [this]() { library_refresh(true); },
             [this](const std::string& path) { open_downloaded(path); });
 }
+
+#ifdef EDGE_PYTHON_PLUGINS
+void HomePanel::ensure_plugins()
+{
+    if (!m_plugins)
+        m_plugins = std::make_unique<HomePlugins>(this, [this](const json& m) { send(m); });
+}
+
+void HomePanel::refresh_plugins()
+{
+    if (m_plugins)
+        m_plugins->send_state();
+}
+#endif
 
 void HomePanel::ensure_browser()
 {
@@ -376,8 +396,16 @@ void HomePanel::handle(const json& msg)
         m_vendors->send_state();
         ensure_vaults();
         m_vaults->send_state();
+#ifdef EDGE_PYTHON_PLUGINS
+        ensure_plugins();
+        m_plugins->send_state();
+#endif
     } else if (command == "home_section") {
-        const std::string section = msg.value("section", std::string());
+        std::string section = msg.value("section", std::string());
+#ifndef EDGE_PYTHON_PLUGINS
+        if (section == "plugins")
+            section.clear();
+#endif
         if (HomeTab::valid_section(section))
             wxGetApp().app_config->set(SECTION_KEY, section);
     } else if (command == "models_open") {
@@ -425,6 +453,10 @@ void HomePanel::handle(const json& msg)
         // a Vendors command
     } else if (m_vaults && m_vaults->handle(msg)) {
         // a Vaults command
+#ifdef EDGE_PYTHON_PLUGINS
+    } else if (m_plugins && m_plugins->handle(msg)) {
+        // a Plugins command
+#endif
     } else if (command == "library_scan") {
         library_refresh(true);
     } else if (command == "library_thumbs") {
@@ -674,12 +706,42 @@ void HomePanel::send_init()
     s["delete_connector"]  = _u8L("Remove connector");
     s["limited_downloads"] = _u8L("Downloads count against a limit");
     s["models"]            = _u8L("Models");
+#ifdef EDGE_PYTHON_PLUGINS
+    s["plugins"]              = _u8L("Plugins");
+    s["install_plugin"]       = _u8L("Install from file");
+    s["browse_catalog"]       = _u8L("Browse catalog");
+    s["plugins_empty"]        = _u8L("Install a Python plugin from a .py or .whl file to manage it here.");
+    s["enable"]               = _u8L("Enable");
+    s["disable"]              = _u8L("Disable");
+    s["reload"]               = _u8L("Reload");
+    s["reload_clear"]         = _u8L("Reload (clear dependency cache)");
+    s["run_script"]           = _u8L("Run");
+    s["configure"]            = _u8L("Configure");
+    s["permissions"]          = _u8L("Permissions");
+    s["loaded"]               = _u8L("Loaded");
+    s["enabled"]              = _u8L("Enabled");
+    s["not_loaded"]           = _u8L("Not loaded");
+    s["plugin_error"]         = _u8L("Error");
+    s["update_available"]     = _u8L("Update available");
+    s["source_local"]         = _u8L("Local file");
+    s["source_catalog"]       = _u8L("Catalog");
+    s["in_process_pipeline"]  = _u8L("Early slicing steps run in-process");
+    s["plugin_deleted"]       = _u8L("Plugin deleted.");
+#endif
 
     json init;
     init["type"]    = "init";
     init["strings"] = s;
-    init["section"] = HomeTab::section_or_default(wxGetApp().app_config->get(SECTION_KEY));
+    std::string section = HomeTab::section_or_default(wxGetApp().app_config->get(SECTION_KEY));
+#ifndef EDGE_PYTHON_PLUGINS
+    if (section == "plugins")
+        section = "recent";
+#endif
+    init["section"] = section;
     init["models"]  = model_browser_enabled();
+#ifdef EDGE_PYTHON_PLUGINS
+    init["plugins"] = true;
+#endif
     if (Theme::active())
         init["theme"] = ThemePack::home_css(Theme::spec()); // CSS variable -> #RRGGBB
     send(init);

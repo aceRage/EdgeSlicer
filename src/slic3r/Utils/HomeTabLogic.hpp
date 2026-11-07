@@ -17,7 +17,9 @@
 namespace Slic3r {
 namespace HomeTab {
 
-// The sections the page has: "recent", "library", "history", "vendors" and "vaults".
+// The sections the page has: "recent", "library", "history", "vendors", "vaults" and "plugins".
+// "plugins" is a valid name in every build; the Home rail only shows it when EDGE_PYTHON_PLUGINS
+// is on (HomePanel send_init). "Plugins" and "plugin" are not section ids.
 bool valid_section(const std::string& section);
 // `section` when it is one of them, else "recent".
 std::string section_or_default(const std::string& section);
