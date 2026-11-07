@@ -29,13 +29,13 @@
 #include "ProjectSessions.hpp"
 
 class wxMenu;
+class ScalableButton; // wxExtensions.hpp, global namespace
 
 namespace Slic3r {
 namespace GUI {
 
 class MainFrame;
 class Plater;
-class ScalableButton;
 
 class ProjectStrip : public wxPanel
 {
