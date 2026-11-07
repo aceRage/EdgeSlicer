@@ -71,7 +71,7 @@ wxFont label_font() { return strip_bold_font(Label::Body_9); }
 wxFont tile_label_font() { return strip_bold_font(Label::Body_12); }
 wxFont size_font() { return Label::Body_14; }
 wxFont flow_font() { return Label::Body_12; }
-wxFont chip_font() { return strip_bold_font(Label::Body_14); } // the preset combos' text size (owner, 2026-11-06)
+wxFont chip_font() { return Label::Body_14; } // the preset combos' text size, regular weight: bold distorts our font (owner, 2026-11-06)
 wxFont chip_pill_font() { return Label::Body_12; }
 } // namespace NozzleStyle
 

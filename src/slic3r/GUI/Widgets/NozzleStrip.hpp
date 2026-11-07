@@ -39,7 +39,7 @@ wxFont   label_font();      // filament badges: Body 9 bold
 wxFont   tile_label_font(); // tile labels: Body 12 bold
 wxFont   size_font();      // tile size line: Body 14
 wxFont   flow_font();      // tile flow line: Body 12
-wxFont   chip_font();      // chip label: Body 14 bold
+wxFont   chip_font();      // chip label: Body 14 (regular)
 wxFont   chip_pill_font(); // chip tools: Body 12
 } // namespace NozzleStyle
 

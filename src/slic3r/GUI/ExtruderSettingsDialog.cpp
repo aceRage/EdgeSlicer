@@ -232,6 +232,12 @@ bool apply_nozzle_strip_edit(wxWindow *parent, const NozzleStripInput &in, const
     BOOST_LOG_TRIVIAL(info) << "nozzle strip: nozzles in this project now " << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
     // One rebuild for the whole batch.
     plater->sidebar().on_nozzle_sizes_changed();
+    // Owner hand test 2026-11-06: the printer variant follows when every extruder now carries one size (the Extruder settings
+    // dialog and the strip's picker alike), after the dialog is closed.
+    wxGetApp().CallAfter([]() {
+        if (Plater *p = wxGetApp().plater(); p != nullptr)
+            p->sidebar().follow_nozzle_sizes_with_printer_variant();
+    });
     return true;
 }
 

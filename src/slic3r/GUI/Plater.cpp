@@ -5344,6 +5344,57 @@ void Sidebar::set_tool_nozzle_size(int tool, double diameter)
     on_nozzle_sizes_changed();
 }
 
+bool Sidebar::follow_nozzle_sizes_with_printer_variant()
+{
+    // Owner hand test 2026-11-06 (H3C): a rack set to 0.4 nozzles in Extruder settings left the printer on its 0.2 variant, so the
+    // Plate kept the 0.2-nozzle processes. The rule: the extruder's own nozzle is the Plate's nozzle (the per-nozzle process
+    // selector treats every other rack size as a size tool), so when all extruders carry one size the printer variant follows
+    // it, as the sidebar's nozzle-size combo and the device sync do. Mixed sizes keep the variant (project sizes, P7).
+    PresetBundle *bundle = wxGetApp().preset_bundle;
+    if (bundle == nullptr)
+        return false;
+    const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
+    const std::vector<double> preset = bundle->preset_nozzle_diameters();
+    if (sizes.empty() || preset.size() != sizes.size())
+        return false;
+    for (double d : sizes)
+        if (!same_nozzle_diameter(d, sizes.front()))
+            return false;
+    if (std::all_of(preset.begin(), preset.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
+        return false; // the variant already has this size
+    const Preset &current = bundle->printers.get_selected_preset();
+    if (!current.is_system || bundle->printers.current_is_dirty())
+        return false;
+    const std::string model = current.config.opt_string("printer_model");
+    const Preset     *target = nullptr;
+    for (const Preset &p : bundle->printers) {
+        if (!p.is_system || p.is_default || p.config.opt_string("printer_model") != model)
+            continue;
+        const auto *nd = p.config.option<ConfigOptionFloats>("nozzle_diameter");
+        if (nd == nullptr || nd->values.size() != sizes.size() ||
+            !std::all_of(nd->values.begin(), nd->values.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
+            continue;
+        target = &p;
+        break;
+    }
+    if (target == nullptr)
+        return false; // no variant of this size: it stays the project's size (P7)
+    const std::string name = target->name;
+    BOOST_LOG_TRIVIAL(info) << "per-nozzle process: every nozzle is " << sizes.front() << " mm, printer variant follows: " << current.name
+                            << " -> " << name;
+    const_cast<Preset *>(target)->is_visible = true;
+    // Not forced: the printer has no unsaved changes (checked above), but a changed process or filament still gets its usual
+    // keep / transfer / discard question rather than being dropped. Cancelled: the printer and the rack stay as they are.
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER); tab == nullptr || !tab->select_preset(name))
+        return false;
+    // The variant now carries the size itself: no project override. The rack (same model) is kept.
+    bundle->set_nozzle_diameter_override(std::vector<double>(sizes.size(), 0.));
+    update_all_preset_comboboxes(true);
+    update_nozzle_settings(true);
+    on_nozzle_sizes_changed();
+    return true;
+}
+
 void Sidebar::on_nozzle_sizes_changed()
 {
     PresetBundle *bundle = wxGetApp().preset_bundle;
@@ -5437,8 +5488,11 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
             if (!texts[e].empty())
                 rack_note += "\n" + wxString::Format(_L("Rack of extruder %d: %s mm (slot 1 is the mounted nozzle)."), int(e + 1), from_u8(texts[e]));
     }
-    if (changed)
+    if (changed) {
         on_nozzle_sizes_changed();
+        // The printer variant follows one reported size (after the summary below is closed).
+        wxGetApp().CallAfter([this]() { follow_nozzle_sizes_with_printer_variant(); });
+    }
     MessageDialog dlg(wxGetApp().mainframe,
                       wxString::Format(_L("Nozzle sizes in this project: %s mm."), from_u8(nozzle_diameter_summary(bundle->effective_nozzle_diameters()))) +
                           rack_note,
