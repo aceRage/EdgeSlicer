@@ -364,14 +364,29 @@ FinalPurgeSlice slice_final_purge(const DynamicPrintConfig &config, double size_
     return out;
 }
 
-// After the last per-layer ;Z: comment, a Z decrease must not start with XY still over the object.
-void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+// After the last per-layer ;Z: comment, a descent below that layer's print height must not start
+// with XY still over the object. That is the final-unload drop (object top → tower).
+//
+// retract_after_outer_wall (default on, Orca #16982) retracts and Z-hops on a short travel off the
+// last outer wall. The hop restore is a small Z drop back to the last layer height, still over the
+// object, and is not mid-air. Only a drop that goes below last-layer Z is the unload.
+struct FinalZDropScan
 {
-    const size_t last_z_cmt = gcode.rfind(";Z:");
+    bool saw_unload_drop     = false;
+    bool midair_over_object  = false;
+};
+
+FinalZDropScan scan_final_z_drops(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+{
+    FinalZDropScan     out;
+    const size_t       last_z_cmt = gcode.rfind(";Z:");
     REQUIRE(last_z_cmt != std::string::npos);
+    const double       last_layer_z = std::atof(gcode.c_str() + last_z_cmt + 3);
     std::istringstream in(gcode.substr(last_z_cmt));
     std::string        line;
-    double             x = 0, y = 0, z = 0;
+    // ;Z: is a comment, not a move. Seed modal Z from it so the first G1 Z below that height
+    // counts as a drop even if no G1 has restated layer Z yet.
+    double             x = 0, y = 0, z = last_layer_z;
     bool               have_xy = false;
     const std::regex   word("([XYZ])(-?[0-9]*\\.?[0-9]+)");
     while (std::getline(in, line)) {
@@ -391,10 +406,13 @@ void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, doub
             case 'Z': nz = v; has_z = true; break;
             }
         }
-        if (has_z && have_xy && nz < z - 1e-3) {
+        if (has_z && have_xy && nz < z - 1e-3 && nz < last_layer_z - 1e-3) {
             const bool start_in_object = x + 1e-3 >= obj_xmin && x - 1e-3 <= obj_xmax && y + 1e-3 >= obj_ymin && y - 1e-3 <= obj_ymax;
-            INFO("Z drop from " << z << " to " << nz << " starting at XY " << x << "," << y);
-            CHECK_FALSE(start_in_object);
+            INFO("Unload Z drop from " << z << " to " << nz << " starting at XY " << x << "," << y
+                                       << " (last layer Z " << last_layer_z << ")");
+            out.saw_unload_drop = true;
+            if (start_in_object)
+                out.midair_over_object = true;
         }
         if (std::abs(nx - x) > 1e-9 || std::abs(ny - y) > 1e-9)
             have_xy = true;
@@ -402,6 +420,14 @@ void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, doub
         y = ny;
         z = nz;
     }
+    return out;
+}
+
+void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+{
+    const FinalZDropScan scan = scan_final_z_drops(gcode, obj_xmin, obj_xmax, obj_ymin, obj_ymax);
+    CHECK(scan.saw_unload_drop);
+    CHECK_FALSE(scan.midair_over_object);
 }
 
 int count_g1_x_and_e_positive(const std::string &block)
@@ -457,6 +483,45 @@ double z_on_comment_line(const std::string &gcode, const char *needle)
 }
 
 } // namespace
+
+// The mid-air helper must still flag an unload that starts over the object, and must not treat a
+// last-layer Z-hop restore (retract_after_outer_wall + default z_hop) as that unload.
+TEST_CASE("Wipe-tower mid-air check ignores hop restores and flags an unload over the object", "[WipeTower][GCode][FinalPurge]")
+{
+    const double xmin = 40., xmax = 50., ymin = 40., ymax = 50.;
+    SECTION("hop restore over the object then unload over the tower")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45 Z10.4\n"
+            "G1 Z10\n"
+            "G1 X140 Y140\n"
+            "G1 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK_FALSE(scan.midair_over_object);
+    }
+    SECTION("unload Z drop starts over the object")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45\n"
+            "G1 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK(scan.midair_over_object);
+    }
+    SECTION("combined XY+Z unload starting over the object")
+    {
+        const std::string gcode =
+            ";Z:10\n"
+            "G1 X45 Y45\n"
+            "G1 X140 Y140 Z2\n";
+        const FinalZDropScan scan = scan_final_z_drops(gcode, xmin, xmax, ymin, ymax);
+        CHECK(scan.saw_unload_drop);
+        CHECK(scan.midair_over_object);
+    }
+}
 
 TEST_CASE("The final unload prints on the tower's last layer, never mid-air", "[WipeTower][GCode][FinalPurge]")
 {
