@@ -4770,6 +4770,17 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionStrings {});
     def->cli = ConfigOptionDef::nocli;
 
+    // H3C fix (2026-11-06, NozzleProcess.hpp "Layer height per nozzle"): filled by fill_nozzle_process_slots(). Per filament, the
+    // layer height of the process chosen for its nozzle (0 = none: the slab height follows the nozzle size). Read by the band
+    // planner on mixed-diameter plates. Internal. Absolute mm in the nozzle_*_line_width per-filament array type, whose empty
+    // value survives a 3MF round trip (an empty coFloats loads back as { 0 }).
+    def = this->add("nozzle_layer_height", coFloatsOrPercents);
+    def->label = "Layer height per filament";
+    def->tooltip = "The layer height of the process chosen for each filament's nozzle (internal).";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloatsOrPercents {});
+    def->cli = ConfigOptionDef::nocli;
+
     // Per-nozzle process P7 (NozzleOverride.hpp): the nozzle size each extruder really carries, set per project
     // (Prepare sidebar, Printer settings > Extruder N), one value per extruder; 0 = the printer preset's nozzle_diameter.
     def = this->add("nozzle_diameter_override", coFloats);
