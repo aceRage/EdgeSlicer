@@ -4845,6 +4845,28 @@ void Sidebar::update_filament_nozzle_summary()
     update_filament_tool_buttons();
 }
 
+// Owner hand test 2026-11-06 (H3C): the badge sized itself to its label ("A", "S3", "0.6", "R.4", "T2"), so the filament combo
+// beside it changed width from row to row. One fixed size instead: as wide as the widest label any printer gives it (a two-digit
+// slot, a rack size of 0.25 on a side) and as tall as the filament combo (FromDIP(30), see the combo's sizer item).
+static bool apply_filament_badge_size(Button *btn)
+{
+    if (btn == nullptr)
+        return false;
+    wxClientDC dc(btn);
+    dc.SetFont(btn->GetFont());
+    const wxString caret = wxString::FromUTF8(" \xE2\x96\xBE");
+    int            text  = 0;
+    for (const char *sample : { "A", "S10", "T10", "L10", "R10", "0.25", "R.25", "L.25" })
+        text = std::max(text, dc.GetTextExtent(wxString(sample) + caret).x);
+    const wxSize size(text + btn->FromDIP(2 * 6) + btn->FromDIP(2), btn->FromDIP(30)); // padding 6 DIP each side, border
+    if (btn->GetMinSize() == size)
+        return false;
+    btn->SetMinSize(size);
+    btn->SetSize(size);
+    btn->Refresh();
+    return true;
+}
+
 wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
 {
     // On a toolchanger without an AMS (U1 class), the toolhead this filament prints on, always visible: click = the next
@@ -4856,6 +4878,7 @@ wxWindow *Sidebar::make_filament_tool_button(int filament_idx)
     tool_btn->SetFont(NozzleStyle::label_font());
     tool_btn->SetCornerRadius(tool_btn->FromDIP(4));
     tool_btn->SetPaddingSize(tool_btn->FromDIP(wxSize(6, 3)));
+    apply_filament_badge_size(tool_btn); // a fixed size, so the filament combos keep one width
     tool_btn->SetBackgroundColor(StateColor(std::pair(wxColour("#E8E8E8"), (int) StateColor::Hovered),
                                             std::pair(wxColour("#F4F4F4"), (int) StateColor::Normal)));
     tool_btn->SetBorderColor(StateColor(std::pair(wxColour("#009688"), (int) StateColor::Normal)));
@@ -5166,6 +5189,9 @@ void Sidebar::update_filament_tool_buttons()
         if (combo == nullptr || combo->tool_btn == nullptr)
             continue;
         auto      *btn  = static_cast<Button *>(combo->tool_btn);
+        // Re-applied here (cheap when unchanged) so a DPI change or Button::Rescale (which resets the style) keeps the size.
+        if (apply_filament_badge_size(btn))
+            changed = true;
         if (sides && f < bundle->filament_presets.size()) {
             const std::vector<SideChoice> choices = filament_side_choices();
             const int                     current = filament_side_choice(f);
@@ -5436,6 +5462,23 @@ void Sidebar::relayout_printer_section()
             sw->FitInside();
     }
     Layout();
+}
+
+void Sidebar::relayout_params_section()
+{
+    // What the Global / Objects switch ends up doing (ParamsPanel::set_active_tab + show_object_list): the ParamsPanel lays its
+    // tabs out again at their new best heights, then the scrolled sidebar around it.
+    if (ParamsPanel *params = wxGetApp().params_panel(); params != nullptr) {
+        params->InvalidateBestSize();
+        params->Layout();
+    }
+    if (p->scrolled != nullptr) {
+        p->scrolled->Layout();
+        if (auto *sw = dynamic_cast<wxScrolledWindow *>(p->scrolled))
+            sw->FitInside();
+    }
+    Layout();
+    Refresh();
 }
 
 void Sidebar::request_nozzle_strip_refresh()
