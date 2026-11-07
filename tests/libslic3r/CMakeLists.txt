@@ -139,6 +139,7 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_rack_slots.cpp
 	test_h2c_rack_group_id.cpp
 	test_nozzle_strip_model.cpp
+	test_nozzle_rack_memory.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
