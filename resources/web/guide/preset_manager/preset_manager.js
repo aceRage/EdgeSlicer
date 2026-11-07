@@ -417,6 +417,18 @@ var PresetManager = (function () {
 		input.addEventListener('input', function () { onEditInput(r, input.value); });
 		input.addEventListener('keydown', function (e) { onEditKey(e, r); });
 		input.addEventListener('focus', function () { if (editing) editing.focused = true; });
+		// Clicking anywhere else (another row, blank space, the footer) renames, as Enter does; an invalid
+		// name keeps the field open and red. Not when the window itself lost the focus, nor for a click
+		// inside the field's own box ("Only this printer"), nor once Esc cancelled.
+		input.addEventListener('blur', function () {
+			setTimeout(function () {
+				if (!editing || editing.key !== r.key || editing.busy || !input.isConnected) return;
+				if (!document.hasFocus() || document.activeElement === input) return;
+				var a = document.activeElement;
+				if (a && a.closest && a.closest('.pm-edit')) return;
+				commitEdit(r, false, true);
+			}, 0);
+		});
 		box.appendChild(input);
 		if (r.suffix) box.appendChild(h('span', 'pm-edit-suffix', r.suffix));
 		if (r.suffix && r.family.length > 1) {
@@ -495,12 +507,14 @@ var PresetManager = (function () {
 			commitEdit(r, e.key === 'Tab');
 		}
 	}
-	function commitEdit(r, thenNext) {
+	// viaBlur: the field lost the focus (a click elsewhere): the row clicked keeps the focus afterwards.
+	function commitEdit(r, thenNext, viaBlur) {
 		if (!editing || editing.busy) return;
+		editing.viaBlur = !!viaBlur;
 		if (editing.level === 'invalid') { status(editing.message, true); return; }
 		var nextKey = thenNext ? rowInView(r.key, 1) : null;
 		if (editing.value === editing.original) {
-			cancelEdit();
+			cancelEdit(viaBlur);
 			if (nextKey && byKey[nextKey]) { table.focusRow(byKey[nextKey]); startEdit(byKey[nextKey]); }
 			return;
 		}
@@ -510,7 +524,8 @@ var PresetManager = (function () {
 		paintEditor();
 		send('pm_rename', { id: r.key, name: editing.value, scope: editing.scope });
 	}
-	function cancelEdit() {
+	// keepFocus: leave the row focus where it is (the click that ended the edit put it there).
+	function cancelEdit(keepFocus) {
 		if (!editing) return;
 		var r = byKey[editing.key];
 		editing = null;
@@ -518,31 +533,33 @@ var PresetManager = (function () {
 		status('');
 		if (r) {
 			table.repaintRow(r);
-			table.focusRow(r);
+			if (!keepFocus) table.focusRow(r);
 		}
 	}
 	function renameResult(m) {
 		if (!editing || !m || m.id !== editing.key) return;
 		if (m.ok) {
-			var next = editing.next;
+			var next = editing.next, viaBlur = editing.viaBlur;
 			editing = null;
 			status(m.message || T('pm_renamed', 'Renamed'));
 			var newKey = typeof m.new_key === 'string' && m.new_key ? m.new_key : m.id;
 			if (newKey === m.id && byKey[m.id]) {
 				// Nothing changed: no rows follow.
 				table.repaintRow(byKey[m.id]);
-				table.focusRow(byKey[m.id]);
+				if (!viaBlur) table.focusRow(byKey[m.id]);
 				if (next && byKey[next]) { table.focusRow(byKey[next]); startEdit(byKey[next]); }
 				return;
 			}
-			afterRows = { focus: newKey, edit: next };
+			// After a click elsewhere the clicked row keeps the focus (the renamed one if it was the row itself).
+			var clicked = viaBlur ? table.focusedRow() : null;
+			afterRows = { focus: clicked && clicked.key !== m.id ? clicked.key : newKey, edit: next };
 			return;
 		}
 		editing.busy = false;
 		editing.message = typeof m.message === 'string' ? m.message : '';
 		editing.level = editing.message ? 'invalid' : 'ok'; // no message: cancelled in the slicer, keep editing
 		paintEditor();
-		focusEditor(false);
+		if (!editing.viaBlur) focusEditor(false);
 	}
 
 	// ---- delete (user presets): the slicer asks first, naming what uses the preset ----
@@ -693,6 +710,10 @@ document.addEventListener('keydown', function (e) {
 		if (s) { s.focus(); s.select(); }
 	}
 });
+
+// No browser context menu (Back / Refresh / Save as / Print / Inspect) anywhere in the manager, as the
+// home page does; the dialog also turns the web view's own menu off (PresetManagerDialog.cpp).
+document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
 // Ctrl + wheel would zoom the page.
 window.addEventListener('wheel', function (event) {

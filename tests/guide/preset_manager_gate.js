@@ -18,7 +18,8 @@
 //   * F2 / Delete on system rows only explain; Create new / Edit printers...
 //   * phase 2: rename (F2, double-click, the row button; Return on macOS): the field, the fixed
 //     printer suffix, "Only this printer", name checks block Enter, Esc cancels, Tab moves on, the field
-//     survives scrolling and re-sent rows; delete (Delete key, row button; Backspace on macOS): pm_delete,
+//     survives scrolling and re-sent rows, a click elsewhere renames (an invalid name stays red); no
+//     browser context menu; delete (Delete key, row button; Backspace on macOS): pm_delete,
 //     the focus moves on, a cancelled delete keeps the row
 //   * a re-sent pm_rows keeps filters, sort, scroll and the focused row
 //   * Esc order: popover, then Close (pm_close, after flushing the ticks); pm_escape from the slicer
@@ -218,6 +219,8 @@ async function main() {
             if (d.method === 'Runtime.exceptionThrown') errors.push((d.params.exceptionDetails.exception && d.params.exceptionDetails.exception.description) || d.params.exceptionDetails.text);
         });
         await S('Page.enable'); await S('Runtime.enable');
+        // A focused page, as the slicer's dialog is (document.hasFocus(): the rename commits on blur only then).
+        await S('Emulation.setFocusEmulationEnabled', { enabled: true });
         let stubId = null;
         const load = async (kind, { dark = false, w = 1200, h = 760, mac = false } = {}) => {
             const mock = kind === 'process' ? processRows() : filamentRows();
@@ -543,6 +546,50 @@ async function main() {
         await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${id}"] .pm-act-delete').click()`);
         await sleep(250);
         check('the row\'s delete button deletes too', await evalJs(`window.__sent.some(function(m){ return m.command === 'pm_delete'; })`) && !(await rowKeys()).includes('u|Solo PLA 2 @' + PRINTERS[1]));
+        // a click off the field renames, as Enter does (owner hand test of #909)
+        await clearAllFilters();
+        const blurKey = await st(`s.rows.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); })[5].key`);
+        const otherKey = await st(`s.rows.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); })[6].key`);
+        id = await showRow(blurKey);
+        await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${id}"]').children[3].click()`);
+        await keyOn(id, 'F2');
+        await sleep(50);
+        const blurBase = await evalJs(`${field}.value`);
+        await typeName(blurBase + ' blur');
+        await evalJs(`window.__sent = []`);
+        const otherId = await st(`s.rows.filter(function(r){ return r.key === ${JSON.stringify(otherKey)}; })[0].id`);
+        await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row[data-id="${otherId}"]').children[3];
+            n.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); n.click(); })()`);
+        await sleep(300);
+        check('a click on another row renames the row being edited (pm_rename, as Enter)', await evalJs(`window.__sent.some(function(m){ return m.command === 'pm_rename' && m.id === ${JSON.stringify(blurKey)} && m.name === ${JSON.stringify(blurBase + ' blur')}; })`) &&
+            !(await evalJs(`!!${field}`)) && (await rowKeys()).some(function (k) { return k.indexOf('u|' + blurBase + ' blur') === 0; }));
+        check('and the row clicked keeps the focus', await evalJs(`(function(){ var f = PresetManager.table.focusedRow(); return !!f && f.key === ${JSON.stringify(otherKey)}; })()`));
+        // an invalid name: a click on blank space keeps the field open and red, nothing renamed
+        id = await showRow(otherKey);
+        await keyOn(id, 'F2');
+        await sleep(50);
+        await typeName('Still bad');
+        await evalJs(`window.__sent = []`);
+        await evalJs(`(function(){ var f = document.getElementById('PmFooter'); f.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); document.querySelector('.pm-edit-input').blur(); f.click(); })()`);
+        await sleep(300);
+        check('an invalid name stays in its red field when the field loses the focus (nothing renamed)', !(await sentCmds()).includes('pm_rename') &&
+            await evalJs(`!!${field} && ${field}.classList.contains('invalid') && ${field}.value === 'Still bad'`) && /Name is invalid/.test(await statusText()));
+        // ticking "Only this printer" is inside the field's box: no rename
+        await docKey('Escape');
+        await sleep(50);
+        check('Esc still cancels that field', !(await evalJs(`!!${field}`)) && !(await sentCmds()).includes('pm_rename'));
+        id = await showRow('u|Fam PLA+ @' + PRINTERS[0]);
+        await keyOn(id, 'F2');
+        await sleep(50);
+        await evalJs(`window.__sent = []`);
+        await evalJs(`(function(){ var c = document.querySelector('.pm-edit-one'); if (!c) return; c.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); c.focus(); c.click(); })()`);
+        await sleep(300);
+        check('a click on "Only this printer" does not rename (the field stays open)', !(await sentCmds()).includes('pm_rename') && await evalJs(`!!${field}`));
+        await docKey('Escape');
+        // no browser context menu
+        const ctxRow = await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row'); var e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }); n.dispatchEvent(e); return e.defaultPrevented; })()`);
+        const ctxFoot = await evalJs(`(function(){ var e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }); document.getElementById('PmFooter').dispatchEvent(e); return e.defaultPrevented; })()`);
+        check('right-click on a row or the footer: no browser context menu (filament page)', ctxRow === true && ctxFoot === true);
         check('no uncaught exception while renaming and deleting', errors.length === 0, errors.join(' | '));
         await clearAllFilters();
 
@@ -640,6 +687,7 @@ async function main() {
         check('a user process is renamed whole (no fixed printer part, no "Only this printer")', await evalJs(`(function(){ var i = document.querySelector('.pm-edit-input');
             return !!i && i.value === PresetManager._state().rows[${id}].name && !document.querySelector('.pm-edit-suffix') && !document.querySelector('.pm-edit-one'); })()`));
         await docKey('Escape');
+        check('right-click: no browser context menu (process page)', await evalJs(`(function(){ var e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }); document.querySelector('.pt-body .pt-row').dispatchEvent(e); return e.defaultPrevented; })()`) === true);
         check('no uncaught exception on the process page', errors.length === 0, errors.join(' | '));
         await shot('process_light.png');
     } finally {

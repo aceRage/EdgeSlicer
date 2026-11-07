@@ -67,6 +67,8 @@ PresetManagerDialog::PresetManagerDialog(wxWindow *parent, PresetManagerKind kin
     m_view = WebView::CreateWebView(this, url);
     auto *sizer = new wxBoxSizer(wxVERTICAL);
     if (m_view != nullptr) {
+        // No browser context menu (Back / Refresh / Print / Inspect); the page blocks it too.
+        m_view->EnableContextMenu(false);
         Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PresetManagerDialog::on_message, this, m_view->GetId());
         sizer->Add(m_view, 1, wxEXPAND);
     } else {
