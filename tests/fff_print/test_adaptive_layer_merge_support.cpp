@@ -398,6 +398,75 @@ TEST_CASE("Adaptive layer merge support: organic tree base merges onto the 0.8 s
     check_tree_base_slabs("organic");
 }
 
+// Owner crash 2026-11-07: H3C 0.4 + 0.8 rack, a mushroom with organic tree supports, crashed every time in "Generating
+// support". A base layer merged into a 0.4 slab of the 0.8 overlaps the top contacts inside its Z span, so
+// modulate_extrusion_by_overlapping_layers() saw the double-walled branches tree_supports_generate_paths() wraps in an
+// ExtrusionEntityCollection and read them as a null ExtrusionPath. A stepped cap (a new overhang every 0.6 mm, off the
+// 0.4 ladder) puts top contacts inside the slabs; tree_support_wall_count 2 double-walls every branch; the 0.8 nozzle's
+// own process prints 0.40 layers on the 0.20 plate (nozzle_layer_height, #910) as in the owner's project.
+TEST_CASE("Adaptive layer merge support: organic tree slabs with double-walled branches under a stepped cap", "[AdaptiveLayerMergeSupport]")
+{
+    DynamicPrintConfig config = support_plate("0.4,0.8", "0.2", "0.08,0.16", "0.28,0.56", "0", "0", "tree(auto)", "organic");
+    config.set_deserialize_strict({
+        { "tree_support_wall_count", "2" },
+        { "nozzle_layer_height", "0,0.4" },
+        { "support_on_build_plate_only", "0" },
+    });
+
+    const float stem = 4.f;
+    const float top  = stem + 6 * 0.6f + 1.f;
+    TriangleMesh mushroom(its_make_cube(4., 4., stem));
+    mushroom.translate(-2.f, -2.f, 0.f);
+    for (int k = 0; k < 6; ++ k) {
+        const float half = 2.f + 1.2f * float(k + 1);
+        TriangleMesh plate(its_make_cube(2. * half, 2. * half, top - (stem + 0.6f * float(k))));
+        plate.translate(-half, -half, stem + 0.6f * float(k));
+        mushroom.merge(plate);
+    }
+    Model model;
+    ModelObject *coarse_object = model.add_object();
+    coarse_object->name        = "mushroom";
+    coarse_object->add_volume(std::move(mushroom));
+    coarse_object->add_instance()->set_offset(Vec3d(120., 100., 0.));
+    coarse_object->ensure_on_bed();
+    coarse_object->volumes.front()->config.set("extruder", 2);
+    ModelObject *fine_object = model.add_object();
+    fine_object->name        = "cube-1";
+    fine_object->add_volume(TriangleMesh(its_make_cube(8., 8., double(top))));
+    fine_object->add_instance()->set_offset(Vec3d(60., 100., 0.));
+    fine_object->ensure_on_bed();
+    fine_object->volumes.front()->config.set("extruder", 1);
+
+    Print print;
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(! gcode.empty());
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+    const PrintObject *coarse = object_named(print, "mushroom");
+    REQUIRE(coarse != nullptr);
+
+    // The case that crashed: a merged base slab carrying double-walled branches.
+    size_t slabs_with_branches = 0;
+    for (const SupportLayer *layer : coarse->support_layers()) {
+        if (layer->base_slab_height <= EPSILON)
+            continue;
+        CAPTURE(layer->print_z);
+        CHECK(layer->planned_filament_id == 2);
+        bool branches = false;
+        for (const ExtrusionEntity *e : layer->support_fills.entities)
+            branches |= dynamic_cast<const ExtrusionEntityCollection *>(e) != nullptr;
+        slabs_with_branches += branches;
+        // Every base path of the slab, the branches' walls included, keeps the full slab height or a modulated
+        // smaller one; none prints thicker than the slab.
+        for (const PathInfo &path : support_paths(*layer))
+            if (path.role == erSupportMaterial)
+                CHECK(path.height <= layer->base_slab_height + EPSILON);
+    }
+    CHECK(slabs_with_branches >= 1);
+}
+
 TEST_CASE("Adaptive layer merge support: a single-diameter plate plans nothing for its supports", "[AdaptiveLayerMergeSupport]")
 {
     for (const char *type : { "normal(auto)", "tree(auto)" }) {
