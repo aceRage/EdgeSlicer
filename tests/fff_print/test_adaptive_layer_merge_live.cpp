@@ -88,6 +88,19 @@ const PrintObject *object_named(const Print &print, const std::string &name)
     return nullptr;
 }
 
+// The 0.8's ladder next to a 0.4 at the given window, as compute_adaptive_merge_groups() cuts it: layer 0 prints as
+// sliced, the bands start on layer 1.
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder_for_test(const std::vector<double> &stack, AdaptiveLayerHeightRange range)
+{
+    std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_bands(std::vector<double>(stack.begin() + 1, stack.end()),
+                                                                      adaptive_layer_band_size(0.8, 0.4, stack.back(), range), range);
+    for (AdaptiveLayerBand &band : bands) {
+        ++band.bottom_idx;
+        ++band.top_idx;
+    }
+    return bands;
+}
+
 // Heights of every extrusion path of a layer (walls, overhang walls, gap fill and infill). Bridge infill is left out:
 // it prints with the bridging flow (a thick bridge is as tall as its nozzle), whatever the layer or slab height.
 // Overhang walls are kept: on a slab they must carry the slab's height like every other wall.
@@ -422,6 +435,71 @@ TEST_CASE("Adaptive layer merge live: a configured max layer height keeps the co
             CHECK(layerm->adaptive_merge_patches.empty());
         CHECK(layer->has_extrusions());
     }
+}
+
+// #907 report: the 0.8's own min_layer_height of 0.24 at 0.20 layers leaves the clamp [0.24, 0.56] one band height
+// only (0.4). The 49 layers above the bed contact of a 10 mm cube cannot be cut into 0.4 slabs, the ladder came
+// back empty and the 0.8 printed layer 0 and nothing else. The ceiling is now relaxed to the nozzle diameter:
+// 0.4 slabs with one 0.6 slab, every slab at or above the configured minimum.
+TEST_CASE("Adaptive layer merge live: a configured min layer height that leaves one slab height still prints the whole object", "[AdaptiveLayerMergeLive]")
+{
+    const DynamicPrintConfig config = two_nozzles("0.4,0.8", "0.2", "0.08,0.24", "0.28,0.56");
+    check_mixed_plate(config, 10., { 0.2, 0.4, 2 });
+
+    Model model;
+    add_cubes(model, 10.);
+    Print print;
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(! gcode.empty());
+    const PrintObject *coarse = object_named(print, "cube-2");
+    REQUIRE(coarse != nullptr);
+    const size_t layers = coarse->layer_count();
+    REQUIRE(layers == 50);
+    // The cube's top layer is a slab top: the object reaches its full height.
+    const AdaptiveMergePatch *last = group_top_patch(*coarse->layers().back());
+    REQUIRE(last != nullptr);
+    CHECK(coarse->layers().back()->has_extrusions());
+    double printed = coarse->layers().front()->height;
+    for (size_t idx = 1; idx < layers; ++idx) {
+        CAPTURE(idx);
+        if (const AdaptiveMergePatch *top = group_top_patch(*coarse->layers()[idx]); top != nullptr) {
+            CHECK(top->merged_height >= 0.24 - EPSILON);
+            CHECK(top->merged_height <= 0.8 + EPSILON);
+            printed += top->merged_height;
+        }
+    }
+    CHECK_THAT(printed, WithinAbs(10., 1e-6));
+}
+
+TEST_CASE("Adaptive layer merge: the ladder window widens only a clamp that holds a single band height", "[AdaptiveLayerMergeLive]")
+{
+    auto check = [](AdaptiveLayerHeightRange clamp, double nozzle, double reference, double base, double min_h, double max_h) {
+        const AdaptiveLayerHeightRange out = adaptive_ladder_height_range(clamp, nozzle, reference, base);
+        CHECK_THAT(out.min_height, WithinAbs(min_h, 1e-9));
+        CHECK_THAT(out.max_height, WithinAbs(max_h, 1e-9));
+    };
+    // The plain 0.8 window holds 0.2 and 0.4 at 0.2 layers: unchanged.
+    check({ 0.16, 0.56 }, 0.8, 0.4, 0.2, 0.16, 0.56);
+    // min 0.24: 0.4 only. The ceiling goes to 0.8, the minimum stays.
+    check({ 0.24, 0.56 }, 0.8, 0.4, 0.2, 0.24, 0.8);
+    // max 0.3: the 0.8 does not merge at all (band size 1), so nothing is widened.
+    check({ 0.16, 0.3 }, 0.8, 0.4, 0.2, 0.16, 0.3);
+    // min 0.5 at 0.27 layers: 0.54 only, and 0.81 is past the nozzle too. Bambu's diameter window.
+    check({ 0.5, 0.56 }, 0.8, 0.4, 0.27, 0.16, 0.56);
+
+    // The cause: under the raw clamp the 49 layers above a 10 mm cube's bed contact have no cover at all, so the
+    // ladder is empty. The widened window cuts them into 23 slabs of 0.4 and one of 0.6.
+    const std::vector<double> stack(50, 0.2);
+    CHECK(build_adaptive_layer_ladder_for_test(stack, { 0.24, 0.56 }).empty());
+    const std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_ladder_for_test(stack, { 0.24, 0.8 });
+    REQUIRE(bands.size() == 24);
+    CHECK(bands.front().bottom_idx == 1);
+    CHECK(bands.back().top_idx == 49);
+    for (size_t i = 1; i < bands.size(); ++i)
+        CHECK(bands[i].bottom_idx == bands[i - 1].top_idx + 1);
 }
 
 TEST_CASE("Adaptive layer merge live: a single-diameter plate plans nothing and prints every layer as sliced", "[AdaptiveLayerMergeLive]")
