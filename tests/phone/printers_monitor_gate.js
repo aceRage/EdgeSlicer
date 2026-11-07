@@ -95,10 +95,15 @@ const SHIM = `(function(){ var PNG1 = '${PNG1}';
     function later(f) { setTimeout(f, 30); }
     window.wx = { postMessage: function(m) {
         window.__sent.push(m);
-        if (m === 'printers_get') later(function() {
-            if (window.__fail) window.__printers({ ok: false, error: window.__fail, printers: [], at: Date.now() });
-            else window.__printers({ ok: true, printers: JSON.parse(JSON.stringify(window.__rows)), at: Date.now() });
-        });
+        if (m === 'printers_get') {
+            // __slowRead: answer late with the rows as they were when the read was ASKED for, as
+            // the slicer does when a removal lands while api_printers is still probing.
+            var snap = JSON.stringify(window.__rows);
+            setTimeout(function() {
+                if (window.__fail) window.__printers({ ok: false, error: window.__fail, printers: [], at: Date.now() });
+                else window.__printers({ ok: true, printers: JSON.parse(window.__slowRead ? snap : JSON.stringify(window.__rows)), at: Date.now() });
+            }, window.__slowRead || 30);
+        }
         else if (m === 'printers_groups_get') later(function() { window.__printerGroups(window.__groups); });
         else if (m.indexOf('printers_thumb:') === 0) {
             window.__thumbAsks = (window.__thumbAsks || 0) + 1;
@@ -449,6 +454,17 @@ async function main() {
         await evalJs(`document.getElementById('refresh').click(); 1`);
         await sleep(200);
         check('it stays gone on the next read', !(await evalJs(`!!${card('sm:U1-0042')}`)) && (await evalJs(`document.querySelectorAll('#grid .pcard').length`)) === 4);
+        // ---- 11. Remove is one step: a read in flight does not bring the card back --------------
+        await evalJs(`window.__slowRead = 500; window.__sent = []; document.getElementById('refresh').click(); 1`);
+        await sleep(50); // the read is asked for and still being answered...
+        await evalJs(`document.querySelector('[data-fk="remove:ph:voron"]').click(); document.getElementById('dlgstop').click(); 1`);
+        await sleep(900); // ...its answer (still listing the printer) has landed
+        check('a read asked before the removal does not bring the card back', !(await evalJs(`!!${card('ph:voron')}`)));
+        await evalJs(`window.__slowRead = 0; document.getElementById('refresh').click(); 1`);
+        await sleep(300);
+        check('the next read leaves it out too, with one remove sent in all',
+              !(await evalJs(`!!${card('ph:voron')}`)) && (await evalJs(`window.__sent.filter(m => m.indexOf('printers_remove:') === 0).length`)) === 1,
+              await evalJs('JSON.stringify(window.__sent)'));
         check('no uncaught exception over the run', exceptions().length === 0, JSON.stringify(exceptions().map(e => e.params.exceptionDetails.text)));
     } finally {
         br.kill();

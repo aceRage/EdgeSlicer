@@ -21,12 +21,22 @@ What it checks:
   F4  loopback control plane: GET /hub/printers and POST /hub/printers/<id>/forget need the
       X-Hub-Secret (403 without), then answer like the phone plane
   F5  a hub restart keeps what was forgotten forgotten
+  F6  Remove is one step with a slicer window answering (a stand-in window: a loopback HTTP server
+      registered in hub/instances that serves /api/printers slowly). While a poll is in flight -
+      its answer still lists the printer - a Qidi-style host is removed from the phone and a U1
+      through the control plane (?removed=1, the Printers tab's call). The in-flight answer must
+      not bring either back: after it lands, after the next poll and after a hub restart neither
+      is listed, not even as a leftover, and nothing was called twice. (The race the owner hit:
+      the poll's stale answer re-created the row, which then sat as a leftover until Forget.)
 
 usage: test_hub_forget_gate.py --install=<install dir> --datadir=<scratch dir, wiped>
                                [--seed=<a data dir with a finished first run, copied>]
 """
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
+import socketserver
+import threading
 import shutil
 import subprocess
 import sys
@@ -245,6 +255,117 @@ try:
     check(any(t.get("id") == SM_DEV for t in read_json("removed_printers.json").get("removed", [])), "... and the tombstone is still there")
 finally:
     stop_hub(proc, hj)
+
+print("F6 Remove is one step while a window is polled")
+
+
+class FakeWindow(BaseHTTPRequestHandler):
+    """A slicer window as the hub sees one: /api/printers (slow, listing what it was set up with when
+    the request ARRIVED), /api/printers/<id>/remove (drops it at once), /api/info."""
+    rows = []
+    polls = []          # arrival times of /api/printers
+    removes = []        # ids /remove was called for
+    delay = 3.0
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        if self.path.startswith("/api/printers"):
+            FakeWindow.polls.append(time.time())
+            snapshot = [dict(r) for r in FakeWindow.rows]   # what the window knew when asked
+            time.sleep(FakeWindow.delay)
+            ids = [r["id"] for r in snapshot]
+            return self._send(200, {"printers": snapshot, "configured": ids, "configured_unsure_kinds": []})
+        if self.path.startswith("/api/info"):
+            return self._send(200, {})
+        self._send(404, {"error": "no such route"})
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        if self.path.startswith("/api/printers/") and self.path.endswith("/remove"):
+            pid = urllib.parse.unquote(self.path[len("/api/printers/"):-len("/remove")])
+            FakeWindow.removes.append(pid)
+            before = len(FakeWindow.rows)
+            FakeWindow.rows = [r for r in FakeWindow.rows if r["id"] != pid]
+            if len(FakeWindow.rows) == before:
+                return self._send(404, {"error": "no such printer"})
+            return self._send(200, {"ok": True, "id": pid, "done": ["print_host_devices"], "reason_kind": "print_host_device"})
+        self._send(404, {"error": "no such route"})
+
+
+class Threaded(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+QIDI = "ph:gate-qidi-test"
+U1 = "sm:GATE-U1-8110026"
+KEEP = "ph:gate-keep"
+FakeWindow.rows = [
+    {"id": QIDI, "kind": "printhost", "name": "Test", "model_key": "Qidi X-Max 4", "device_id": "gate-qidi-test", "ip": "127.0.0.32", "online": False},
+    {"id": U1, "kind": "snapmaker", "name": "U1-8110026", "ip": "192.168.77.41", "online": False},
+    {"id": KEEP, "kind": "printhost", "name": "Keep", "model_key": "Qidi X-Max 4", "device_id": "gate-keep", "ip": "127.0.0.33", "online": False},
+]
+fake = Threaded(("127.0.0.1", 0), FakeWindow)
+threading.Thread(target=fake.serve_forever, daemon=True).start()
+inst_dir = os.path.join(DD, "hub", "instances")
+os.makedirs(inst_dir, exist_ok=True)
+inst_file = os.path.join(inst_dir, "%d.json" % os.getpid())
+with open(inst_file, "w", encoding="utf-8") as f:
+    json.dump({"pid": os.getpid(), "port": fake.server_address[1], "started": int(time.time()), "hidden": True, "title": "gate window"}, f)
+
+proc, hj = start_hub()
+try:
+    R = "http://127.0.0.1:%d/r/%s" % (hj["port"], hj["token"])
+    ADM = "http://127.0.0.1:%d" % hj["admin_port"]
+    H = {"X-Hub-Secret": hj["secret"], "Content-Type": "application/json"}
+    J = {"Content-Type": "application/json"}
+    # The first poll lists all three.
+    check(wait_for(lambda: {QIDI, U1, KEEP} <= set(summary_rows(R)), 40), "the window's three printers are listed")
+    # Wait for the next poll to ARRIVE at the window, then remove while it is still answering.
+    n = len(FakeWindow.polls)
+    check(wait_for(lambda: len(FakeWindow.polls) > n, 30, 0.05), "a poll is in flight")
+    st, b = http(R + "/printers/" + urllib.parse.quote(QIDI, safe="") + "/forget", "POST", J, b"{}")
+    check(st == 200 and json.loads(b).get("removed") is True, "the phone removes the Qidi host through the window (%s %s)" % (st, b[:100]))
+    FakeWindow.rows = [r for r in FakeWindow.rows if r["id"] != U1]          # the Printers tab removed it at its source...
+    st, _ = http(ADM + "/hub/printers/" + urllib.parse.quote(U1, safe="") + "/forget?removed=1", "POST", H, b"{}")
+    check(st == 200, "... and the U1 through the control plane, as the Printers tab does (%s)" % st)
+    time.sleep(FakeWindow.delay + 1.5)                                         # the stale answer has landed
+    rows = summary_rows(R)
+    check(QIDI not in rows and U1 not in rows, "the in-flight answer did not bring them back (%s)" % sorted(rows))
+    n = len(FakeWindow.polls)
+    check(wait_for(lambda: len(FakeWindow.polls) > n, 30, 0.2), "another poll ran")
+    time.sleep(FakeWindow.delay + 1.5)
+    rows = summary_rows(R)
+    check(QIDI not in rows and U1 not in rows and KEEP in rows, "after the next poll they are still gone, not leftovers (%s)" % sorted(rows))
+    st, b = http(ADM + "/hub/printers", "GET", {"X-Hub-Secret": hj["secret"]})
+    ids = {p.get("id") for p in json.loads(b).get("printers", [])} if st == 200 else set()
+    check(not ({QIDI, U1} & ids), "the hub remembers no row for them (%s)" % sorted(ids))
+finally:
+    stop_hub(proc, hj)
+proc, hj = start_hub()
+try:
+    R = "http://127.0.0.1:%d/r/%s" % (hj["port"], hj["token"])
+    rows = wait_for(lambda: (lambda r: r if KEEP in r else None)(summary_rows(R)), 40) or {}
+    check(QIDI not in rows and U1 not in rows and KEEP in rows, "after a hub restart they stay gone (%s)" % sorted(rows))
+    check(FakeWindow.removes == [QIDI], "nothing was called twice: one remove call in all (%s)" % FakeWindow.removes)
+finally:
+    stop_hub(proc, hj)
+    fake.shutdown()
+    try:
+        os.remove(inst_file)
+    except OSError:
+        pass
 
 print("\nHUB FORGET GATE: %s (%d failed)" % ("PASS" if not fails else "FAIL", len(fails)))
 for f in fails:

@@ -2172,9 +2172,18 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
         std::map<std::string, MachineObject*> all = dm->get_my_machine_list();
         for (const auto& kv : dm->get_local_machine_list())
             all.insert(kv);
+        // Removed on the Printers tab (Log out): left out while it is still logged out, even if it
+        // keeps announcing itself on the LAN. Logged in again (the Device tab, its access code)
+        // clears the tombstone and it is listed as before.
+        nlohmann::json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        bool           removed_changed = false;
         for (const auto& kv : all) {
             MachineObject* m = kv.second;
             if (!m) continue;
+            if (PrintersMonitor::tombstoned(removed, m->dev_id, "")) {
+                if (!m->has_access_right()) continue;
+                removed_changed |= PrintersMonitor::clear_tombstone(removed, m->dev_id, "");
+            }
             nlohmann::json p;
             p["id"]           = m->dev_id;
             p["name"]         = m->dev_name;
@@ -2236,6 +2245,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
             RemoteControl::describe_bambu(m, p); // can_pause / can_resume / can_stop, stage, print error
             j["printers"].push_back(p);
         }
+        if (removed_changed) PrintersMonitor::save_tombstones(RemoteHub::removed_printers_path(), removed);
     });
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
@@ -2265,6 +2275,19 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
     // and the app all show them; the printer's own name stays as reported_name.
     try {
         PrintersMonitor::apply_aliases((*out)["printers"], PrintersMonitor::load_store_file(RemoteHub::printer_aliases_path()));
+    } catch (...) {}
+    // Removed on the Printers tab or from the phone: never reported again, whichever cache or
+    // source still holds it (the removal reaches the stores it knows; this catches the rest). Its
+    // id is then not on `configured` either, so the hub does not keep a row for it.
+    try {
+        const nlohmann::json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        if (PrintersMonitor::filter_tombstoned((*out)["printers"], removed) > 0 && (*out).contains("configured") &&
+            (*out)["configured"].is_array()) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const nlohmann::json& id : (*out)["configured"])
+                if (!(id.is_string() && PrintersMonitor::tombstoned(removed, id.get<std::string>(), ""))) kept.push_back(id);
+            (*out)["configured"] = std::move(kept);
+        }
     } catch (...) {}
     // Every row is a printer set up here (see `configured` above).
     if ((*out).contains("configured") && (*out)["configured"].is_array())

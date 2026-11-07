@@ -229,8 +229,11 @@ RemovalPlan removal_plan(const json& row)
         plan.ph_device_id = str_field(row, "device_id");
         if (plan.ph_device_id.empty()) plan.ph_device_id = id.substr(3);
         plan.ph_model_key = str_field(row, "model_key");
-        // Nothing re-adds a print-host device by itself: the only automatic source is the preset
-        // migration, which remembers every (model, address) it imported and never imports it twice.
+        // Nothing re-adds a print-host device by itself (the preset migration remembers what it
+        // imported), but the slicer's report skips a tombstoned id too, so a cache that still holds
+        // the device until its next read cannot show it again. By id only: a device added again
+        // gets a new id.
+        plan.tombstone    = true;
         return plan;
     }
     if (id.compare(0, 3, "sm:") == 0) {
@@ -254,6 +257,9 @@ RemovalPlan removal_plan(const json& row)
         plan.mode         = RemovalPlan::Mode::Logout;
         plan.reason_kind  = "bambu_lan";
         plan.bambu_dev_id = id;
+        // A logged-out LAN printer that still announces itself on the LAN would otherwise be
+        // listed again as a discovered printer; the report skips it until it is logged in again.
+        plan.tombstone    = true;
         return plan;
     }
     // Any other kind the slicer lists: nothing to delete but the remembered row.
@@ -317,6 +323,24 @@ bool clear_tombstone(json& store, const std::string& row_id, const std::string& 
     }
     store["removed"] = kept;
     return removed;
+}
+
+int filter_tombstoned(json& printers, const json& store)
+{
+    if (!printers.is_array() || !store.is_object() || !store.contains("removed") || !store["removed"].is_array() ||
+        store["removed"].empty())
+        return 0;
+    json kept = json::array();
+    int  gone = 0;
+    for (json& p : printers) {
+        const std::string id = str_field(p, "id");
+        // The address only counts for a LAN Snapmaker: that is what its discovery keys on.
+        const std::string ip = id.compare(0, 3, "sm:") == 0 ? str_field(p, "ip") : std::string();
+        if (!id.empty() && tombstoned(store, id, ip)) { ++gone; continue; }
+        kept.push_back(std::move(p));
+    }
+    printers = std::move(kept);
+    return gone;
 }
 
 json load_tombstones(const std::string& path) { return load_store_file(path); }

@@ -88,15 +88,17 @@ void add_leftovers(nlohmann::json& payload, int hub_status, const std::string& h
 //
 //   ph:<id>      a saved print-host device (Elegoo, Qidi, Creality, FlashForge, Klipper, PrusaLink:
 //                <datadir>/hub/print_host_devices.json, under the row's model_key / device_id).
-//                The preset migration remembers what it imported, so it is not re-created and
-//                needs no tombstone; only the hand-held Devices dialog adds one again.
+//                The preset migration remembers what it imported, so it is not re-created; the
+//                tombstone (by id) keeps the slicer's report from showing it again meanwhile.
 //   sm:<id>      a LAN Snapmaker (<datadir>/hub/snapmaker_lan.json). Four sources re-add one -
 //                mDNS discovery, the Device tab's saved devices (AppConfig DeviceInfo), the Stream
 //                tab's cameras and a hand-typed address - so the matching AppConfig devices go too,
 //                and a tombstone (removed_printers.json) keeps the first three from re-adding it.
 //                Adding it again by hand clears the tombstone.
 //   <dev_id>     a Bambu printer. In LAN mode: Log out (the saved LAN record and its access codes,
-//                as the Device tab's Log out does). Bound to the cloud account: not removable here
+//                as the Device tab's Log out does) plus a tombstone, so a printer that still
+//                announces itself is not listed again until it is logged in again (which clears
+//                it). Bound to the cloud account: not removable here
 //                - it is the account's, and the dialog says where to unbind it.
 //   host         the selected printer preset's own print_host: the preset's, explained.
 //   connect      the Device tab's live connection: Disconnect there, explained.
@@ -129,12 +131,17 @@ void annotate_removal(nlohmann::json& printers);
 nlohmann::json removal_json(const nlohmann::json& row);
 
 // The tombstones: { "removed": [ { "id": "sm:U1-0042", "ip": "192.168.1.40", "at": <unix s> } ] }.
-// A discovered or merged printer whose row id or address is listed is not re-added.
+// A discovered or merged printer whose row id or address is listed is not re-added, and the
+// slicer's own report (/api/printers: filter_tombstoned) leaves it out.
 bool tombstoned(const nlohmann::json& store, const std::string& row_id, const std::string& ip);
 void add_tombstone(nlohmann::json& store, const std::string& row_id, const std::string& ip, long long now_s);
 // Drops every tombstone naming this id or this ip (the person added the printer again). True when
 // one went.
 bool clear_tombstone(nlohmann::json& store, const std::string& row_id, const std::string& ip);
+// Drops the rows a tombstone names (by row id, or for a LAN Snapmaker by its address) from a
+// printer list - what /api/printers reports, so a removed printer never comes back through a
+// cache the removal did not reach. Returns how many went.
+int  filter_tombstoned(nlohmann::json& printers, const nlohmann::json& store);
 // The file: read tolerantly (missing or broken = no tombstones), written through a temporary.
 nlohmann::json load_tombstones(const std::string& path);
 bool           save_tombstones(const std::string& path, const nlohmann::json& store);

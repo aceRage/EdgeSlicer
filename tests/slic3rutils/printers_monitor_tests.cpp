@@ -317,7 +317,7 @@ TEST_CASE("printers monitor: Remove plan per kind of row", "[PrintersMonitor][re
     CHECK(ph.mode == RemovalPlan::Mode::Remove);
     CHECK(ph.ph_model_key == "Qidi X-Max 4");
     CHECK(ph.ph_device_id == "abc123");
-    CHECK(ph.stores() == S{ "print_host_devices", "hub_printers" });
+    CHECK(ph.stores() == S{ "print_host_devices", "tombstone", "hub_printers" });
     // An id with no device_id field still names the device.
     CHECK(removal_plan(json{ { "id", "ph:zzz" }, { "kind", "printhost" } }).ph_device_id == "zzz");
 
@@ -331,7 +331,7 @@ TEST_CASE("printers monitor: Remove plan per kind of row", "[PrintersMonitor][re
     // Bambu in LAN mode: Log out. Bound to the cloud: explained, nothing touched.
     RemovalPlan lan = removal_plan(json{ { "id", "01P00A000000001" }, { "kind", "bambu" }, { "lan_mode", true } });
     CHECK(lan.mode == RemovalPlan::Mode::Logout);
-    CHECK(lan.stores() == S{ "bambu_lan", "hub_printers" });
+    CHECK(lan.stores() == S{ "bambu_lan", "tombstone", "hub_printers" });
     RemovalPlan cloud = removal_plan(json{ { "id", "01P00A000000002" }, { "kind", "bambu" }, { "lan_mode", false } });
     CHECK(cloud.mode == RemovalPlan::Mode::Explain);
     CHECK(cloud.stores().empty());
@@ -463,4 +463,27 @@ TEST_CASE("printers monitor: the remove kind a client words its button by", "[Pr
     CHECK(removal_json(json{ { "id", "host" } })["kind"] == "preset_host");
     CHECK(removal_json(json{ { "id", "connect" }, { "kind", "connect" } })["kind"] == "device_connection");
     CHECK(removal_json(json{ { "id", "sm:x" }, { "leftover", true } })["kind"] == "leftover");
+}
+
+TEST_CASE("printers monitor: the report leaves tombstoned printers out", "[PrintersMonitor][remove]")
+{
+    json store = json::object();
+    add_tombstone(store, "ph:qidi1", "", 1);
+    add_tombstone(store, "sm:U1-8110026", "192.168.1.40", 1);
+    add_tombstone(store, "01P00A000000001", "", 1);
+    json rows = json::array({ json{ { "id", "ph:qidi1" }, { "ip", "127.0.0.32" } },
+                              json{ { "id", "ph:keep" }, { "ip", "127.0.0.33" } },
+                              json{ { "id", "sm:U1-8110026" }, { "ip", "192.168.1.40" } },
+                              // the same U1 under an address-derived id (discovery without its serial)
+                              json{ { "id", "sm:192.168.1.40" }, { "ip", "192.168.1.40" } },
+                              json{ { "id", "01P00A000000001" }, { "kind", "bambu" } },
+                              // a print host on the removed U1's old address is a different printer
+                              json{ { "id", "ph:other" }, { "ip", "192.168.1.40" } } });
+    CHECK(filter_tombstoned(rows, store) == 4);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0]["id"] == "ph:keep");
+    CHECK(rows[1]["id"] == "ph:other");
+    json none = json::array({ json{ { "id", "a" } } });
+    CHECK(filter_tombstoned(none, json::object()) == 0);
+    CHECK(none.size() == 1);
 }

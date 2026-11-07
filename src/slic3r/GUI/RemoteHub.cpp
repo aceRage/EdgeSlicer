@@ -3876,6 +3876,11 @@ private:
     // with no window open still knows which remembered rows are leftovers. `known` is false until a
     // window has said, which keeps every row (an older slicer never says).
     std::set<std::string>          m_configured;
+    // Printers removed on request (Remove printer / the phone's Forget) and when: unix ms. A poll
+    // that asked a window BEFORE that moment carries the printer's last report and must not put
+    // its row (or its id on the configured list) back - that race re-created a removed card as a
+    // leftover (owner's hand test of #918). Kept ten minutes; later reports count as usual.
+    std::map<std::string, long long> m_removed_at;
     std::set<std::string>          m_configured_unsure;
     bool                           m_configured_known { false };
     // Where the archive's sidecars are, as an instance reported it (GET /api/info). Remembered so
@@ -4317,8 +4322,10 @@ void HubServer::poll_printers()
     // timeout or too old to send `configured` could be the one that knows a printer.
     std::set<std::string> round_configured, round_unsure;
     bool                  round_complete = !live.empty();
+    const long long       round_started  = now_millis();
     for (const Instance& inst : live) {
         if (inst.port <= 0) { round_complete = false; continue; }
+        const long long asked = now_millis(); // what this answer can know about (m_removed_at)
         std::string body;
         int         status = 0;
         Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0") +
@@ -4349,6 +4356,8 @@ void HubServer::poll_printers()
             if (!row.is_object()) continue;
             const std::string id = row.value("id", std::string());
             if (id.empty() || id.size() > 200) continue;
+            // Removed while this window was answering: its report predates the removal.
+            if (const auto rm = m_removed_at.find(id); rm != m_removed_at.end() && rm->second >= asked) continue;
             CachedPrinter& c = m_printers[id];
             reported.insert(id);
             // Several windows report the same printer; keep the one that is connected to it
@@ -4389,6 +4398,13 @@ void HubServer::poll_printers()
     // copy reported. Offline printers that are still set up stay (they are in `configured`).
     if (round_complete) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        // Same race for the list: a printer removed after this round began is not configured.
+        const long long now = now_millis();
+        for (auto it = m_removed_at.begin(); it != m_removed_at.end();) {
+            if (it->second >= round_started) round_configured.erase(it->first);
+            if (now - it->second > 10 * 60 * 1000) it = m_removed_at.erase(it);
+            else ++it;
+        }
         const bool changed = !m_configured_known || m_configured != round_configured || m_configured_unsure != round_unsure;
         m_configured        = std::move(round_configured);
         m_configured_unsure = std::move(round_unsure);
@@ -4528,7 +4544,10 @@ bool HubServer::prune_unconfigured_locked(long long now_ms, long long grace_ms)
 std::pair<int, std::string> HubServer::forget_printer(const std::string& id, bool removed)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (removed && m_configured.erase(id) > 0) save_printers_locked();
+    if (removed) {
+        m_removed_at[id] = now_millis(); // a poll already in flight must not bring it back
+        if (m_configured.erase(id) > 0) save_printers_locked();
+    }
     const auto it     = m_printers.find(id);
     const int  status = Testing::forget_printer_status(id, it != m_printers.end(), m_configured, m_configured_known);
     if (status == 404) return { 404, json_error("no such printer") };
