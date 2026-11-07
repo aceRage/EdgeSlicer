@@ -216,8 +216,9 @@ static void expand_slabs(SupportMergePlan &plan, const std::vector<std::vector<i
 // compute_adaptive_merge_groups() stacks the walls on:
 //   * the band reference is Print::adaptive_merge_reference_nozzle() (the plate's smallest wall nozzle), not
 //     Bambu's layer_grid_nozzle_diameter();
-//   * each candidate's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle(), and its band size
-//     walks into that window (the four-argument adaptive_layer_band_size());
+//   * each candidate's window is the per-nozzle clamp adaptive_layer_height_range_for_nozzle(), widened by
+//     adaptive_ladder_height_range() exactly as the walls' is, and its band size walks into that window (the
+//     four-argument adaptive_layer_band_size());
 //   * the ladders come from build_adaptive_layer_ladder(), so layer 0 is never part of a slab;
 //   * the "whatever the object prints with" fallback collects the object's region filaments, not its model
 //     volumes' extruders (Edge has no GlobalFeatureFilaments), and the per-layer extruded filaments use the raw
@@ -261,7 +262,9 @@ SupportMergePlan make_support_merge_plan(const PrintObject &object)
         SupportMergePlan::Candidate candidate;
         candidate.filament_id     = filament_id;
         candidate.nozzle_diameter = nozzle_diameter_for_filament(print_config, (unsigned int) filament_id);
-        candidate.window          = adaptive_layer_height_range_for_nozzle(print_config, (unsigned int) filament_id, used_filaments);
+        candidate.window          = adaptive_ladder_height_range(
+            adaptive_layer_height_range_for_nozzle(print_config, (unsigned int) filament_id, used_filaments),
+            candidate.nozzle_diameter, reference_nozzle, base_height);
         candidate.band_size       = candidate.nozzle_diameter > EPSILON ?
             adaptive_layer_band_size(candidate.nozzle_diameter, reference_nozzle, base_height, candidate.window) : 1;
         return candidate;
