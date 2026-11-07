@@ -273,7 +273,9 @@ void HomePlugins::reveal(const std::string& key)
         notice(_u8L("The plugin folder could not be found."), true);
         return;
     }
-    desktop_open_any_folderEx(root.make_preferred().string());
+    fs::path p = root;
+    p.make_preferred();
+    desktop_open_any_folderEx(p.string());
 }
 
 } // namespace GUI
