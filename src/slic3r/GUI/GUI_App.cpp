@@ -2151,7 +2151,10 @@ int GUI_App::download_plugin(std::string name, std::string package_name, Install
     BOOST_LOG_TRIVIAL(info) << "[download_plugin] get_url = " << download_url;
 
     // download
+    // download_url is whatever the resource endpoint above listed, and nothing re-checks it once
+    // curl starts following redirects. Keep the hops on https and off this machine's network.
     Slic3r::Http http = Slic3r::Http::get(download_url);
+    http.restrict_redirects(10);
     int reported_percent = 0;
     http.on_progress(
         [this, &pro_fn, cancel_fn, &result, &reported_percent, &err_msg](Slic3r::Http::Progress progress, bool& cancel) {

@@ -21658,7 +21658,10 @@ void Plater::import_model_id(wxString download_info)
 
         auto filesize = 0;
         bool size_limit = false;
+        // Same rule as the Downloader path: the address above was checked, a redirect out of it
+        // was not. MakerWorld's own links are signed storage URLs, so they do redirect.
         auto http = Http::get(download_url.ToStdString());
+        http.restrict_redirects(10);
 
         while (cont && retry_count < max_retries) {
             retry_count++;
@@ -21693,7 +21696,14 @@ void Plater::import_model_id(wxString download_info)
                         http_status,
                         error);
 
-                    if (retry_count == max_retries) {
+                    // A refusal is a decision about where the redirects went, not a flaky transfer:
+                    // re-sending the same request would be refused in exactly the same way, and each
+                    // try is another blind request to a host that already sent us somewhere we would
+                    // not go. So it ends the loop here rather than after max_retries.
+                    // error_is_redirect_refusal() matches REDIRECT_REFUSAL_PREFIX in Http.cpp.
+                    // That exact text is asserted in tests/slic3rutils/http_body_redirect_tests.cpp,
+                    // so rewording the prefix breaks the test rather than silently restoring retries.
+                    if (Http::error_is_redirect_refusal(error) || retry_count == max_retries) {
                         boost::system::error_code ec;
                         fs::remove(tmp_path, ec);
                         msg = _L("Importing to EdgeSlicer failed. Please download the file and manually import it.");

@@ -107,6 +107,10 @@ Transport http_transport()
         // None of the slicer's global client headers (the X-BBL-* set, which carries a device id):
         // the service is told this hub's id and nothing else about the PC.
         h.clear_headers();
+        // The service answers at the address it was given and does not redirect. A POST body here
+        // is signed (X-Hub-Sig) and the headers carry the hub's key, so following a redirect would
+        // replay both to wherever it pointed. url_allowed() has already made it https.
+        h.follow_redirects(false);
         h.timeout_connect(T_CONNECT).timeout_max(T_MAX);
         for (const auto& kv : c.headers) h.header(kv.first, kv.second);
         if (c.method != "GET") h.set_post_body(c.body);
