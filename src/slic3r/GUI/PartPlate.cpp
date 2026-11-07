@@ -6249,6 +6249,8 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 						}
 						plate_data_item->is_support_used = print->is_support_used();
 						plate_data_item->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
+						// AdaptiveLayerMerge step 5: the 3MF writer derives Bambu's multi_nozzle_diameter_mode from it.
+						plate_data_item->uses_multiple_nozzle_diameters = print->uses_multiple_nozzle_diameters();
 					} else {
 						BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("print is null!");
 					}
