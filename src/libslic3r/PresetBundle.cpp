@@ -3764,7 +3764,8 @@ void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
     const std::string model = nozzle_override_model_key(this->printers);
     // Owner bug 2026-11-07: a nozzle change handled after the printer was switched but before the Printer tab updated the
     // project for it (a queued sync, strip or variant-follow step) would store the previous printer's sizes under this model.
-    if (model.empty() || model != m_nozzle_override_model)
+    // (A bundle no printer update ran on yet - used without the Printer tab - keeps the old behaviour.)
+    if (model.empty() || (!m_nozzle_override_model.empty() && model != m_nozzle_override_model))
         return;
     const std::vector<double> stored = nozzle_diameter_override_stored(nozzle_diameter_override_values(this->project_config),
                                                                        this->preset_nozzle_diameters());

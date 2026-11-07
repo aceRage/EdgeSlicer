@@ -769,8 +769,8 @@ public:
     bool                        set_tool_nozzle_diameter(size_t tool, double diameter);
     // Replace the whole override (stored form, NozzleOverride.hpp). Returns true when it changed.
     bool                        set_nozzle_diameter_override(const std::vector<double> &values);
-    // Remember the current override as the default of the edited printer's model. Not before the model's nozzles were
-    // updated for it (update_nozzle_diameter_override_for_printer): until then the project holds the previous printer's sizes.
+    // Remember the current override as the default of the edited printer's model. Not while another model's nozzles are
+    // in the project (update_nozzle_diameter_override_for_printer has not run for this one): they are the previous printer's.
     void                        remember_nozzle_diameter_override(AppConfig &config) const;
     // After a printer switch: another printer model brings its own remembered sizes (none: the preset's); the same
     // model keeps the project's sizes, cut to its extruder count. Another model (startup included) also gets its remembered
