@@ -312,3 +312,167 @@ TEST_CASE("project strip: names wrap on two lines at word ends, never inside a w
             CHECK(int(l.size()) <= 6);
     }
 }
+
+// ---- P3 ----------------------------------------------------------------------------------------------------------------------
+
+TEST_CASE("project strip: drag reorder keeps the active project and the other slots", "[ProjectSessions][P3]")
+{
+    ProjectSessions s;
+    const int a = s.add("", "a");
+    s.select(a);
+    const int b = s.add("", "b");
+    s.select(b);
+    const int c = s.add("", "c");
+    s.select(c);
+    const int d = s.add("", "d");
+    // Drag "a" below "c", then "d" to the top.
+    REQUIRE(s.move(a, 2));
+    CHECK(names(s) == std::vector<std::string>{ "b", "c", "a", "d" });
+    REQUIRE(s.move(d, 0));
+    CHECK(names(s) == std::vector<std::string>{ "d", "b", "c", "a" });
+    // The active project is still the active one, and cycling follows the new order.
+    CHECK(s.active_id() == c);
+    CHECK(s.neighbour_id(1) == a);
+    CHECK(s.neighbour_id(-1) == b);
+    // Dropping on its own place changes nothing.
+    REQUIRE(s.move(c, s.index_of(c)));
+    CHECK(names(s) == std::vector<std::string>{ "d", "b", "c", "a" });
+}
+
+TEST_CASE("project strip: warm park keeps the two most recent within 1.5 GB", "[ProjectSessions][P3][WarmPark]")
+{
+    const size_t MB = 1024 * 1024;
+    using V        = std::vector<int>;
+    CHECK(WarmPolicy::evictions({}).empty());
+    // Three parked, all small: the oldest goes (K = 2).
+    CHECK(WarmPolicy::evictions({ { 1, 100 * MB, 10 }, { 2, 100 * MB, 30 }, { 3, 100 * MB, 20 } }) == V{ 1 });
+    // Two that do not fit together: the newer stays.
+    CHECK(WarmPolicy::evictions({ { 1, 1000 * MB, 10 }, { 2, 900 * MB, 20 } }) == V{ 1 });
+    // One alone over the budget: dropped, it switches back from disk.
+    CHECK(WarmPolicy::evictions({ { 7, 2000 * MB, 5 } }) == V{ 7 });
+    // A big newest one and a small older one fit together.
+    CHECK(WarmPolicy::evictions({ { 1, 200 * MB, 10 }, { 2, 1300 * MB, 20 } }).empty());
+    // Several dropped: oldest first.
+    CHECK(WarmPolicy::evictions({ { 1, 10 * MB, 1 }, { 2, 10 * MB, 2 }, { 3, 10 * MB, 3 }, { 4, 10 * MB, 4 } }) == V{ 1, 2 });
+    // Another K and budget.
+    CHECK(WarmPolicy::evictions({ { 1, 10 * MB, 1 }, { 2, 10 * MB, 2 } }, 1, WarmPolicy::default_budget) == V{ 1 });
+    CHECK(WarmPolicy::evictions({ { 1, 10 * MB, 1 }, { 2, 10 * MB, 2 } }, 2, 15 * MB) == V{ 1 });
+}
+
+TEST_CASE("project strip: the session manifest round-trips and skips what is gone", "[ProjectSessions][P3][SessionRestore]")
+{
+    SessionManifest m;
+    ProjectSlot     a;
+    a.name          = "Benchy";
+    a.origin_path   = "C:/Prints/Benchy.3mf";
+    a.snapshot_path = "C:/tmp/slot-1/project.3mf";
+    a.plate         = 1;
+    a.main_tab      = 2;
+    a.plate_gcodes  = { { 0, "C:/tmp/slot-1/plate_1.gcode" }, { 1, "C:/tmp/slot-1/plate_2.gcode" } };
+    a.plates_with_objects = 2;
+    a.plates_sliced       = 2;
+    ProjectSlot b;
+    b.name          = "Untitled 2";
+    b.snapshot_path = "C:/tmp/slot-2/project.3mf";
+    b.dirty         = true;
+    ProjectSlot c;
+    c.name          = "Gone";
+    c.snapshot_path = "C:/tmp/slot-3/project.3mf";
+    m.slots         = { a, b, c };
+    m.active        = 2;
+
+    SessionManifest back;
+    REQUIRE(SessionManifest::from_json(m.to_json(), back));
+    REQUIRE(back.slots.size() == 3);
+    CHECK(back.active == 2);
+    CHECK(back.slots[0].name == "Benchy");
+    CHECK(back.slots[0].origin_path == a.origin_path);
+    CHECK(back.slots[0].snapshot_path == a.snapshot_path);
+    CHECK(back.slots[0].plate == 1);
+    CHECK(back.slots[0].main_tab == 2);
+    CHECK(back.slots[0].plate_gcodes == a.plate_gcodes);
+    CHECK(back.slots[1].dirty);
+    CHECK(back.slots[1].origin_path.empty());
+
+    // Slot 3's snapshot and plate 2's G-code are gone: slot 3 is skipped (it was the active one: the first one takes over),
+    // and slot 1 keeps only plate 1's G-code.
+    const auto exists = [](const std::string &p) { return p.find("slot-3") == std::string::npos && p.find("plate_2") == std::string::npos; };
+    const SessionManifest r = back.restorable(exists);
+    REQUIRE(r.slots.size() == 2);
+    CHECK(r.active == 0);
+    CHECK(r.slots[0].plate_gcodes == std::vector<std::pair<int, std::string>>{ { 0, "C:/tmp/slot-1/plate_1.gcode" } });
+    CHECK(r.slots[0].plates_sliced == 1);
+    CHECK(r.slots[1].name == "Untitled 2");
+
+    // Not a manifest.
+    SessionManifest bad;
+    CHECK_FALSE(SessionManifest::from_json("", bad));
+    CHECK_FALSE(SessionManifest::from_json("{\"version\":99,\"slots\":[]}", bad));
+    CHECK_FALSE(SessionManifest::from_json("[1,2]", bad));
+    CHECK(bad.slots.empty());
+}
+
+TEST_CASE("project strip: restored slots go to the end with new ids, within the cap", "[ProjectSessions][P3][SessionRestore]")
+{
+    ProjectSessions s(ProjectSessions::parse_max_open("3"));
+    const int first = s.add("", "Untitled");
+    s.select(first);
+    ProjectSlot r;
+    r.name          = "restored";
+    r.id            = 999;
+    r.snapshot_path = "x/project.3mf";
+    const int a     = s.add_restored(r);
+    const int b     = s.add_restored(r);
+    CHECK(a != 999);
+    CHECK(a != b);
+    CHECK(s.find(a)->state == ProjectSlot::State::Parked);
+    CHECK(s.find(a)->snapshot_path == "x/project.3mf");
+    CHECK(s.add_restored(r) == -1);
+    CHECK(s.active_id() == first);
+}
+
+TEST_CASE("project strip: Explorer / Finder open goes into the strip unless set to replace", "[ProjectSessions][P3]")
+{
+    CHECK(shell_open_into_strip(""));
+    CHECK(shell_open_into_strip("strip"));
+    CHECK_FALSE(shell_open_into_strip("replace"));
+}
+
+TEST_CASE("project strip: a park keeps the G-code of every sliced plate (owner bug: sliced state lost on a switch)", "[ProjectSessions][P3][SlicedState]")
+{
+    // On disk: plate 1's result file, plate 3's temp G-code (its result names a file that was renamed), plate 4's result.
+    const auto exists = [](const std::string &f) { return f == "B/.1.0.gcode" || f == "B/.1.2.gcode" || f == "B/.1.3.gcode"; };
+    const std::vector<PlateGcodeSource> plates = {
+        { 0, true, "B/.1.0.gcode", "B/.1.0.gcode" }, // sliced in the GUI
+        { 1, false, "", "" },                       // never sliced
+        { 2, true, "B/old.gcode", "B/.1.2.gcode" },  // the result's file is gone, the temp G-code is there
+        { 3, true, "B/.1.3.gcode", "" },             // a .gcode.3mf plate: its G-code from the file, no temp path
+        { 4, true, "", "" },                        // sliced but nothing on disk: comes back unsliced
+    };
+    const auto plan = park_gcode_plan(plates, exists);
+    REQUIRE(plan.size() == 3);
+    CHECK(plan[0] == std::make_pair(0, std::string("B/.1.0.gcode")));
+    CHECK(plan[1] == std::make_pair(2, std::string("B/.1.2.gcode")));
+    CHECK(plan[2] == std::make_pair(3, std::string("B/.1.3.gcode")));
+    CHECK(parked_gcode_name(0) == "plate_1.gcode");
+    CHECK(parked_gcode_name(2) == "plate_3.gcode");
+
+    // What the park records is what the restore puts back, and what the badge counts as sliced: through the session manifest
+    // too (a restored session comes back sliced).
+    SessionManifest m;
+    ProjectSlot     s;
+    s.snapshot_path = "S/project.3mf";
+    for (const auto &p : plan)
+        s.plate_gcodes.emplace_back(p.first, "S/" + parked_gcode_name(p.first));
+    s.plates_with_objects = 4;
+    s.plates_sliced       = int(s.plate_gcodes.size());
+    m.slots.push_back(s);
+    m.active = 0;
+    SessionManifest back;
+    REQUIRE(SessionManifest::from_json(m.to_json(), back));
+    const SessionManifest r = back.restorable([](const std::string &) { return true; });
+    REQUIRE(r.slots.size() == 1);
+    CHECK(r.slots[0].plate_gcodes == s.plate_gcodes);
+    CHECK(slice_badge(false, r.slots[0].plates_with_objects, r.slots[0].plates_sliced) == SliceBadge::None);
+    CHECK(slice_badge(false, 3, r.slots[0].plates_sliced) == SliceBadge::Sliced);
+}

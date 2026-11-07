@@ -3,6 +3,7 @@
 
 #include <cereal/access.hpp>
 #include <cereal/types/base_class.hpp>
+#include <atomic>
 #include <cstddef>
 
 namespace Slic3r {
@@ -58,8 +59,8 @@ struct ObjectInstanceID {
 // to synchronize the front end (UI) with the back end (BackgroundSlicingProcess / Print / PrintObject).
 // Also base for Print, PrintObject, SLAPrint, SLAPrintObject to provide a unique ID for matching Model / ModelObject
 // with their corresponding Print / PrintObject objects by the notification center at the UI when processing back-end warnings.
-// Achtung! The s_last_id counter is not thread safe, so it is expected, that the ObjectBase derived instances
-// are only instantiated from the main thread.
+// The id counters are atomic (EdgeSlicer, project strip warm park): a parked project's 3MF is read on a worker thread while
+// the main thread keeps creating objects, and both must get distinct ids.
 class ObjectBase
 {
 public:
@@ -107,9 +108,9 @@ private:
     ObjectID                m_id;
 
 	static inline ObjectID  generate_new_id() { return ObjectID(++ s_last_id); }
-    static size_t           s_last_id;
+    static std::atomic<size_t> s_last_id;
     static inline ObjectID  generate_new_secondary_id() { return ObjectID(++ s_last_secondary_id); }
-    static size_t           s_last_secondary_id;
+    static std::atomic<size_t> s_last_secondary_id;
 	
 	friend ObjectID wipe_tower_object_id();
 	friend ObjectID wipe_tower_instance_id();

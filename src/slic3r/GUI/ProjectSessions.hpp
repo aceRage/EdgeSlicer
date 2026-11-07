@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace Slic3r {
 namespace GUI {
 
@@ -143,6 +145,18 @@ public:
             m_slots.push_back(std::move(slot));
         else
             m_slots.insert(m_slots.begin() + at + 1, std::move(slot));
+        return m_next_id - 1;
+    }
+
+    // A slot read back from a session manifest (P3), at the end of the strip with a new id; -1 when the cap is reached.
+    int add_restored(ProjectSlot slot)
+    {
+        if (!can_add())
+            return -1;
+        slot.id        = m_next_id++;
+        slot.state     = ProjectSlot::State::Parked;
+        slot.last_used = ++m_clock;
+        m_slots.push_back(std::move(slot));
         return m_next_id - 1;
     }
 
@@ -329,6 +343,160 @@ inline std::vector<std::string> wrap_name_two_lines(const std::string &name, int
         return { first };
     return { first, measure(rest) <= width ? rest : ellipsize(rest, width) };
 }
+
+// ---- P3: warm park budget, the session manifest, opening from Explorer / Finder -----------------------------------------
+
+// D5b: the parked projects read ahead in memory. The most recently parked `keep` stay while they fit `budget` together;
+// anything older, or what would go over the budget, is dropped (it switches back from its disk snapshot).
+struct WarmEntry
+{
+    int           id{ 0 };
+    size_t        bytes{ 0 };
+    std::uint64_t parked_at{ 0 };
+};
+struct WarmPolicy
+{
+    static constexpr size_t default_keep   = 2;
+    static constexpr size_t default_budget = size_t(1536) * 1024 * 1024; // 1.5 GB
+
+    // The ids to drop, oldest first.
+    static std::vector<int> evictions(std::vector<WarmEntry> entries, size_t keep = default_keep, size_t budget = default_budget)
+    {
+        std::sort(entries.begin(), entries.end(), [](const WarmEntry &a, const WarmEntry &b) { return a.parked_at > b.parked_at; });
+        std::vector<int> drop;
+        size_t           kept = 0, total = 0;
+        for (const WarmEntry &e : entries) {
+            if (kept < keep && total + e.bytes <= budget) {
+                ++kept;
+                total += e.bytes;
+            } else
+                drop.push_back(e.id);
+        }
+        std::reverse(drop.begin(), drop.end());
+        return drop;
+    }
+};
+
+// Session restore (opt-in, "project_strip_restore_session"): the open projects written at exit, read back at the next start.
+struct SessionManifest
+{
+    static constexpr int version = 1;
+    int                      active{ -1 }; // index into slots
+    std::vector<ProjectSlot> slots;
+
+    std::string to_json() const
+    {
+        nlohmann::json j;
+        j["version"] = version;
+        j["active"]  = active;
+        j["slots"]   = nlohmann::json::array();
+        for (const ProjectSlot &s : slots) {
+            nlohmann::json js;
+            js["name"]     = s.name;
+            js["origin"]   = s.origin_path;
+            js["snapshot"] = s.snapshot_path;
+            js["dirty"]    = s.dirty;
+            js["plate"]    = s.plate;
+            js["tab"]      = s.main_tab;
+            js["plates_with_objects"] = s.plates_with_objects;
+            js["plates_sliced"]       = s.plates_sliced;
+            nlohmann::json g = nlohmann::json::array();
+            for (const auto &pg : s.plate_gcodes)
+                g.push_back({ { "plate", pg.first }, { "file", pg.second } });
+            js["gcode"] = g;
+            j["slots"].push_back(js);
+        }
+        return j.dump(1);
+    }
+
+    // False for anything that is not a manifest of this version.
+    static bool from_json(const std::string &text, SessionManifest &out)
+    {
+        out = SessionManifest();
+        try {
+            const nlohmann::json j = nlohmann::json::parse(text);
+            if (!j.is_object() || j.value("version", 0) != version || !j.contains("slots") || !j["slots"].is_array())
+                return false;
+            out.active = j.value("active", -1);
+            for (const nlohmann::json &js : j["slots"]) {
+                ProjectSlot s;
+                s.name                = js.value("name", std::string());
+                s.origin_path         = js.value("origin", std::string());
+                s.snapshot_path       = js.value("snapshot", std::string());
+                s.dirty               = js.value("dirty", false);
+                s.plate               = js.value("plate", 0);
+                s.main_tab            = js.value("tab", 1);
+                s.plates_with_objects = js.value("plates_with_objects", 0);
+                s.plates_sliced       = js.value("plates_sliced", 0);
+                if (js.contains("gcode") && js["gcode"].is_array())
+                    for (const nlohmann::json &g : js["gcode"])
+                        s.plate_gcodes.emplace_back(g.value("plate", 0), g.value("file", std::string()));
+                out.slots.push_back(std::move(s));
+            }
+            if (out.active >= int(out.slots.size()))
+                out.active = -1;
+            return true;
+        } catch (...) {
+            out = SessionManifest();
+            return false;
+        }
+    }
+
+    // What can come back: the slots whose snapshot is still there (`exists`), the active one's index adjusted (-1 when it
+    // is gone too; then the first one restored is the active one). G-code files that are gone are dropped from their slot.
+    SessionManifest restorable(const std::function<bool(const std::string &)> &exists) const
+    {
+        SessionManifest out;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const ProjectSlot &s = slots[i];
+            if (s.snapshot_path.empty() || !exists(s.snapshot_path))
+                continue;
+            ProjectSlot copy = s;
+            copy.plate_gcodes.clear();
+            for (const auto &g : s.plate_gcodes)
+                if (exists(g.second))
+                    copy.plate_gcodes.push_back(g);
+            copy.plates_sliced = int(copy.plate_gcodes.size());
+            if (int(i) == active)
+                out.active = int(out.slots.size());
+            out.slots.push_back(std::move(copy));
+        }
+        if (out.active < 0 && !out.slots.empty())
+            out.active = 0;
+        return out;
+    }
+};
+
+// Bug A (owner, P2 hand test): the sliced state must survive a switch. Which plate G-code a park keeps: every sliced plate's
+// G-code file, the slice result's file when it is on disk, else the plate's temp G-code; a sliced plate with neither on
+// disk is logged and comes back unsliced. Returns (plate index, source file) in plate order.
+struct PlateGcodeSource
+{
+    int         plate{ 0 };
+    bool        sliced{ false };
+    std::string result_file;
+    std::string temp_file;
+};
+inline std::vector<std::pair<int, std::string>> park_gcode_plan(const std::vector<PlateGcodeSource> &plates,
+                                                                const std::function<bool(const std::string &)> &exists)
+{
+    std::vector<std::pair<int, std::string>> out;
+    for (const PlateGcodeSource &p : plates) {
+        if (!p.sliced)
+            continue;
+        if (!p.result_file.empty() && exists(p.result_file))
+            out.emplace_back(p.plate, p.result_file);
+        else if (!p.temp_file.empty() && exists(p.temp_file))
+            out.emplace_back(p.plate, p.temp_file);
+    }
+    return out;
+}
+// The parked copy's name beside the snapshot.
+inline std::string parked_gcode_name(int plate) { return "plate_" + std::to_string(plate + 1) + ".gcode"; }
+
+// D7: a project file double-clicked in Explorer / Finder while EdgeSlicer runs (single instance on) opens as a new project in
+// the strip ("strip", the default) or in place of the active project ("replace", the old behaviour).
+inline bool shell_open_into_strip(const std::string &app_config_value) { return app_config_value != "replace"; }
 
 } // namespace GUI
 } // namespace Slic3r

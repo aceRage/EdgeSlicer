@@ -15,6 +15,7 @@
 // thumbnail of the active project, "Send..." in the item menu.
 
 #include <chrono>
+#include <future>
 #include <map>
 #include <optional>
 #include <string>
@@ -26,6 +27,7 @@
 #include <wx/timer.h>
 
 #include "Camera.hpp"
+#include "Plater.hpp"
 #include "ProjectSessions.hpp"
 
 class wxMenu;
@@ -67,6 +69,16 @@ public:
     void rescale();
     void sys_color_changed();
 
+    // P3 (D7): project files from Explorer / Finder (another instance handed them over, or macOS opened them) go into the
+    // strip when the preference says so. False when they are not all project files or the preference is "replace".
+    bool open_files_from_shell(const wxArrayString &files);
+    // P3 session restore (opt-in): at exit, park the active project and write the manifest so the next start brings every
+    // project back. Called by MainFrame after the unsaved-projects dialog; the slot files then stay on disk.
+    void save_session_for_restart();
+    // P3 macOS Window menu: the projects in strip order, and the active one.
+    std::vector<std::pair<int, wxString>> menu_entries() const;
+    int                                   active_project_id() const { return m_sessions.active_id(); }
+
 private:
     struct SlotExtra
     {
@@ -76,6 +88,14 @@ private:
         std::optional<Camera> camera;
         // Every file the slot wrote, deleted one by one when it closes.
         std::vector<std::string> files;
+        // The folder holding them (a restored session's are under the previous run's folder).
+        std::string dir;
+        // A sliced-file project (.gcode.3mf): a preview of its G-code.
+        bool exported_file{ false };
+        // P3 warm park: its snapshot read ahead on a worker thread.
+        std::shared_future<std::shared_ptr<Plater::PreparsedProject>> warm;
+        std::uint64_t parked_at{ 0 };
+        size_t        warm_estimate{ 0 };
     };
     enum class HitKind { None, Header, Grip, Item, ItemClose };
     struct Hit
@@ -100,7 +120,14 @@ private:
     bool        can_switch(bool cancel_slicing, bool &slicing_cancelled);
     bool        park_active(std::string &error);
     bool        restore(ProjectSlot &target);
-    void        after_switch(int id, bool slicing_cancelled, std::chrono::steady_clock::time_point started, long long park_ms);
+    void        after_switch(int id, bool slicing_cancelled, std::chrono::steady_clock::time_point started, long long park_ms, const char *mode);
+    void        reattach_gcode(int id);
+    void        start_read_ahead(int id);
+    void        drop_warm(SlotExtra &extra);
+    void        enforce_warm_budget();
+    void        wait_for_read_aheads();
+    void        restore_session();
+    std::string session_manifest_path() const;
     bool        active_is_blank() const;
     bool        save_slot(int id, bool save_as);
     void        send_project(int id);
@@ -142,6 +169,7 @@ private:
     void set_collapsed(bool collapsed);
     void set_text_mode(bool text_mode);
     void end_drag();
+    int  drop_index_at(int y) const;
 
     MainFrame               *m_frame{ nullptr };
     ProjectSessions          m_sessions;
@@ -165,6 +193,17 @@ private:
     bool                     m_active_slicing{ false };
     size_t                   m_active_marker{ size_t(-1) };
     int                      m_spin{ 0 };
+    // P3: the last switch's read, the slot parked by it, read-aheads being dropped, drag reorder, session restore.
+    bool                     m_last_restore_warm{ false };
+    int                      m_last_parked{ -1 };
+    std::uint64_t            m_park_clock{ 0 };
+    std::vector<std::shared_future<std::shared_ptr<Plater::PreparsedProject>>> m_retiring;
+    int                      m_press_id{ -1 };
+    int                      m_press_y{ 0 };
+    bool                     m_reordering{ false };
+    int                      m_drop_index{ -1 };
+    bool                     m_keep_files_for_session{ false };
+    wxTimer                  m_session_timer;
 };
 
 } // namespace GUI

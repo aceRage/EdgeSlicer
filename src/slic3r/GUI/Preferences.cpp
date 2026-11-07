@@ -2208,6 +2208,18 @@ wxWindow* PreferencesDialog::create_general_page()
     std::vector<string> projectLoadSettingsConfigOptions = { OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL, OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT, OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY };
     auto item_project_load_behaviour = create_item_combobox(_L("Load Behaviour"), page, _L("Should printer/filament/process settings be loaded when opening a .3mf?"), SETTING_PROJECT_LOAD_BEHAVIOUR, projectLoadSettingsBehaviourOptions, projectLoadSettingsConfigOptions);
 
+    // Project strip P3 (D7): a project file double-clicked in Explorer / Finder while EdgeSlicer runs ("Allow only one
+    // instance" on) opens as another project in the strip, or in place of the current one as before.
+    std::vector<wxString>    shellOpenOptions       = { _L("A new project in the project strip"), _L("The current project") };
+    std::vector<std::string> shellOpenConfigOptions = { "strip", "replace" };
+    auto item_shell_open = create_item_combobox(_L("Open project files from Explorer / Finder in"), page,
+                                                _L("Where a project file opened from Explorer or Finder goes while EdgeSlicer is running (with \"Allow only one EdgeSlicer instance\" on)."),
+                                                "project_strip_shell_open", shellOpenOptions, shellOpenConfigOptions);
+    // Project strip P3: session restore (opt-in).
+    auto item_strip_session = create_item_checkbox(_L("Reopen the open projects at the next start"), page,
+                                                   _L("When EdgeSlicer closes with several projects in the project strip, they come back at the next start as they were, unsaved changes included."),
+                                                   50, "project_strip_restore_session");
+
     auto item_max_recent_count = create_item_input(_L("Maximum recent files"), "", page, _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
         long max = 0;
         if (value.ToLong(&max))
@@ -2412,6 +2424,8 @@ wxWindow* PreferencesDialog::create_general_page()
     // item_region->GetItem(size_t(2))->GetWindow()->Bind(wxEVT_COMBOBOX, update_modelmall);
     sizer_page->Add(title_project, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_project_load_behaviour, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_shell_open, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_strip_session, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_max_recent_count, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_recent_models, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_save_choise, 0, wxTOP, FromDIP(3));

@@ -639,6 +639,10 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         MarkdownTip::ExitTip();
 
+        // Project strip P3: the open projects for the next start (opt-in), before the plater is emptied.
+        if (m_project_strip != nullptr)
+            m_project_strip->save_session_for_restart();
+
         m_plater->reset();
         // Project strip: the parked projects' temporary files (each one by its own path).
         if (m_project_strip != nullptr)
@@ -4094,6 +4098,39 @@ void MainFrame::init_menubar_as_editor()
     refresh_account_menu(m_account_menubar_menu);
     m_account_menubar_sig = account_menu_signature();
     m_menubar->Append(m_account_menubar_menu, wxString::Format("&%s", _L("Account")));
+#ifdef __APPLE__
+    // Project strip P3: the Window menu lists the open projects; Cmd+Shift+] / [ go to the next / previous one.
+    // The strip is made after the menu bar: the handlers look it up when they run.
+    if (wxGetApp().is_editor()) {
+        wxMenu   *window_menu = new wxMenu();
+        const int id_next     = wxWindow::NewControlId();
+        const int id_prev     = wxWindow::NewControlId();
+        window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]");
+        window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+[");
+        window_menu->AppendSeparator();
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(1); }, id_next);
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(-1); }, id_prev);
+        // The project entries are rebuilt each time the menu opens.
+        auto project_item_ids = std::make_shared<std::vector<int>>();
+        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_item_ids](wxMenuEvent &e) {
+            e.Skip();
+            if (e.GetMenu() != window_menu || m_project_strip == nullptr)
+                return;
+            for (int id : *project_item_ids)
+                window_menu->Destroy(id);
+            project_item_ids->clear();
+            for (const auto &entry : m_project_strip->menu_entries()) {
+                const int item_id = wxWindow::NewControlId();
+                window_menu->AppendCheckItem(item_id, entry.second);
+                window_menu->Check(item_id, entry.first == m_project_strip->active_project_id());
+                const int project = entry.first;
+                Bind(wxEVT_MENU, [this, project](wxCommandEvent &) { if (m_project_strip) m_project_strip->select_project(project); }, item_id);
+                project_item_ids->push_back(item_id);
+            }
+        });
+        m_menubar->Append(window_menu, wxString::Format("&%s", _L("Window")));
+    }
+#endif
     if (helpMenu)
         m_menubar->Append(helpMenu, wxString::Format("&%s", _L("Help")));
     SetMenuBar(m_menubar);

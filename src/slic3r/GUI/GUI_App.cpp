@@ -107,6 +107,7 @@
 #include "GUI_Utils.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
+#include "ProjectStrip.hpp"
 #include "slic3r/GUI/FlashForge/DeviceData.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
 #include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
@@ -9176,6 +9177,9 @@ void GUI_App::MacOpenFiles(const wxArrayString &fileNames)
                 for (size_t i = 0; i < non_gcode_files.size(); ++i) {
                     input_files.push_back(non_gcode_files[i]);
                 }
+                // Project strip P3 (D7): with a single instance, project files go in as another project (or replace it).
+                if (mainframe != nullptr && mainframe->project_strip() != nullptr && mainframe->project_strip()->open_files_from_shell(input_files))
+                    return;
                 this->plater()->load_files(input_files);
             } else {
                 for (size_t i = 0; i < files.size(); ++i) {

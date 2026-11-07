@@ -452,6 +452,34 @@ public:
     bool render_current_plate_thumbnail(ThumbnailData& out, unsigned int size);
     // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo).
     size_t project_change_marker() const;
+    // P3 (owner bug: the sliced state did not survive a switch): puts the parked plates' G-code back, after the load and
+    // what it deferred ran. Each plate's Print is applied through the background process with the config it slices with,
+    // then takes its G-code as its slice, so the next apply changes nothing and the plate stays sliced. Returns how many.
+    int  reattach_parked_gcode(const std::vector<std::pair<int, std::string>>& plate_gcodes, int plate, bool exported_file);
+
+    // P3 warm park (D5b): a parked project's 3MF read ahead on a worker thread (the same read the load does), so switching
+    // back skips the read. The strip keeps up to two within a budget; load_files() takes the one for its file.
+    struct PreparsedProject
+    {
+        std::string               path;
+        bool                      ok{ false };
+        Model                     model;
+        DynamicPrintConfig        config;
+        ConfigSubstitutionContext substitutions{ ForwardCompatibilitySubstitutionRule::Enable };
+        En3mfType                 file_type{ En3mfType::From_BBS };
+        PlateDataPtrs             plates;
+        std::vector<Preset*>      presets;
+        Semver                    file_version;
+        bool                      from_bambu_studio{ false };
+        size_t                    bytes{ 0 }; // the meshes, roughly
+        long long                 read_ms{ 0 };
+        bool                      consumed{ false };
+        ~PreparsedProject();
+    };
+    // Reads a parked project's 3MF as load_files() would for a project switch. Thread safe (no GUI access).
+    static std::shared_ptr<PreparsedProject> preparse_project(const std::string& snapshot_3mf);
+    // The next load of that file uses it instead of reading the file.
+    void set_preparsed_project(std::shared_ptr<PreparsedProject> pre) { m_preparsed = std::move(pre); }
     int save_project(bool saveAs = false);
     void set_opened_from_zip(bool opened);
     bool opened_from_zip() const;
@@ -1243,6 +1271,7 @@ private:
     // Project strip: the next load_project() skips close_with_confirm (the strip parked the project); the strip's own loads
     // run while m_project_switch_busy is set and must not wait for themselves.
     bool m_skip_close_confirm { false };
+    std::shared_ptr<PreparsedProject> m_preparsed;
     int  m_project_strip_loads { 0 };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };

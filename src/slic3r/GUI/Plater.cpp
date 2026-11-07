@@ -100,6 +100,7 @@
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/ProjectSwapGuard.hpp"
+#include "ProjectStrip.hpp"
 #include "libslic3r/CustomModels.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "../Utils/BambuStudioLauncher.hpp"
@@ -13680,6 +13681,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             RemoteAccess::get().set_hidden(false);
         }
         wxGetApp().mainframe->Raise();
+        // Project strip P3 (D7): project files go in as another project, unless the preference says replace.
+        if (ProjectStrip *strip = wxGetApp().mainframe->project_strip(); strip != nullptr && strip->open_files_from_shell(input_files))
+            return;
         this->q->load_files(input_files);
     });
     
@@ -14232,6 +14236,28 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     bool                      from_bambu_studio = false;
                     // BBS: backup & restore
                     q->skip_thumbnail_invalid = true;
+                    // Project strip warm park: this parked project was read ahead on a worker thread; take that read.
+                    std::shared_ptr<Plater::PreparsedProject> pre;
+                    if (q->m_preparsed && q->m_preparsed->ok && q->is_project_swap_loading() &&
+                        fs::path(q->m_preparsed->path).make_preferred() == fs::path(path).make_preferred()) {
+                        pre = std::move(q->m_preparsed);
+                        q->m_preparsed.reset();
+                    }
+                    if (pre) {
+                        BOOST_LOG_TRIVIAL(info) << "project strip: using the read-ahead of " << pre->path << " (" << pre->read_ms << " ms saved)";
+                        model                                = std::move(pre->model);
+                        config_loaded                        = std::move(pre->config);
+                        config_substitutions.substitutions   = std::move(pre->substitutions.substitutions);
+                        config_substitutions.unrecogized_keys = std::move(pre->substitutions.unrecogized_keys);
+                        en_3mf_file_type                     = pre->file_type;
+                        plate_data                           = std::move(pre->plates);
+                        pre->plates.clear();
+                        project_presets = std::move(pre->presets);
+                        pre->presets.clear();
+                        file_version      = pre->file_version;
+                        from_bambu_studio = pre->from_bambu_studio;
+                        pre->consumed     = true;
+                    } else
                     model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type, strategy, &plate_data, &project_presets,
                                                              &file_version,
                                                              [this, &dlg, real_filename, &progress_percent, &file_percent, stage_percent, INPUT_FILES_RATIO, total_files, i,
@@ -21621,13 +21647,22 @@ bool Plater::park_project(const std::string &snapshot_3mf, const std::string &gc
     boost::system::error_code ec;
     fs::create_directories(gcode_dir, ec);
     // The plates keep their G-code in this project's backup folder, which goes when the next project loads: copy it out first.
-    PartPlateList &plates = p->partplate_list;
-    for (int i = 0; i < plates.get_plate_count(); ++i) {
-        PartPlate *plate = plates.get_plate(i);
-        if (plate == nullptr || !plate->is_valid_gcode_file())
-            continue;
-        const std::string src = plate->get_gcode_filename();
-        const std::string dst = (fs::path(gcode_dir) / ("plate_" + std::to_string(i + 1) + ".gcode")).string();
+    PartPlateList                &plates = p->partplate_list;
+    std::vector<PlateGcodeSource> sources;
+    for (int i = 0; i < plates.get_plate_count(); ++i)
+        if (PartPlate *plate = plates.get_plate(i); plate != nullptr) {
+            sources.push_back({ i, plate->is_slice_result_valid(), plate->gcode_result_file(), plate->tmp_gcode_file() });
+            BOOST_LOG_TRIVIAL(info) << "project strip: park plate " << i + 1 << ": sliced " << sources.back().sliced << ", result '"
+                                    << sources.back().result_file << "', temp '" << sources.back().temp_file << "'";
+        }
+    const auto plan = park_gcode_plan(sources, [](const std::string &f) {
+        boost::system::error_code e;
+        return fs::exists(fs::path(f), e);
+    });
+    for (const auto &item : plan) {
+        const int          i   = item.first;
+        const std::string &src = item.second;
+        const std::string dst = (fs::path(gcode_dir) / parked_gcode_name(i)).string();
         ec.clear();
         fs::copy_file(fs::path(src), fs::path(dst), fs::copy_options::overwrite_existing, ec);
         if (ec) {
@@ -21637,6 +21672,7 @@ bool Plater::park_project(const std::string &snapshot_3mf, const std::string &gc
         }
         plate_gcodes.emplace_back(i, dst);
     }
+    BOOST_LOG_TRIVIAL(info) << "project strip: parked " << plate_gcodes.size() << " plate(s) with G-code";
     if (export_3mf(fs::path(snapshot_3mf), project_park_save_strategy()) < 0) {
         error = p->last_export_error.empty() ? std::string("the project could not be written") : p->last_export_error;
         BOOST_LOG_TRIVIAL(error) << "project strip: parking failed: " << error;
@@ -21688,15 +21724,51 @@ bool Plater::swap_in_project(const std::string &snapshot_3mf, const wxString &or
     } else
         p->set_project_filename(origin_path);
 
-    // The plates sliced before the switch get their G-code back: Preview without slicing again. Each plate takes its own
-    // copy in this project's backup folder, where a sliced plate keeps it.
+    // Crash recovery reads origin.txt in the backup folder for the project's file; the load wrote the snapshot's path there.
+    {
+        const fs::path origin_txt = fs::path(model().get_backup_path()) / "origin.txt";
+        boost::system::error_code oec;
+        try {
+            if (origin_path.empty())
+                fs::remove(origin_txt, oec);
+            else
+                save_string_file(origin_txt, into_u8(origin_path));
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: origin.txt not updated: " << e.what();
+        }
+    }
+
+    // The plates' G-code goes back once the load's deferred work ran (ProjectStrip calls reattach_parked_gcode()).
     PartPlateList &plates = p->partplate_list;
+    if (plate >= 0 && plate < plates.get_plate_count())
+        select_plate(plate);
+
+    // Unsaved before the switch, unsaved after it (the load marked it clean).
+    if (dirty)
+        set_plater_dirty(true);
+    update_title_dirty_status();
+    BOOST_LOG_TRIVIAL(info) << "project strip: switched in " << into_u8(origin_path.empty() ? name : origin_path) << ", "
+                            << plate_gcodes.size() << " plate(s) with parked G-code" << log_memory_info();
+    return true;
+}
+
+int Plater::reattach_parked_gcode(const std::vector<std::pair<int, std::string>> &plate_gcodes, int plate, bool exported_file)
+{
+    if (plate_gcodes.empty())
+        return 0;
+    // A slice the load started (auto slice) is not wanted: the plates are sliced already.
+    cancel_slicing_for_project_swap();
+    PartPlateList &plates = p->partplate_list;
+    const int      keep   = plate >= 0 && plate < plates.get_plate_count() ? plate : plates.get_curr_plate_index();
     int            loaded = 0;
     for (const auto &item : plate_gcodes) {
-        PartPlate *pl = plates.get_plate(item.first);
-        ec.clear();
-        if (pl == nullptr || !fs::exists(fs::path(item.second), ec))
+        PartPlate                *pl = plates.get_plate(item.first);
+        boost::system::error_code ec;
+        if (pl == nullptr || !fs::exists(fs::path(item.second), ec)) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: plate " << item.first + 1 << ": parked G-code missing: " << item.second;
             continue;
+        }
+        // The plate keeps its own copy in this project's backup folder, where a sliced plate keeps its G-code.
         const fs::path dst = fs::path(model().get_backup_path("Metadata")) /
                              (boost::format(".%1%.strip_%2%_%3%.gcode") % get_current_pid() % item.first % loaded).str();
         ec.clear();
@@ -21705,19 +21777,60 @@ bool Plater::swap_in_project(const std::string &snapshot_3mf, const wxString &or
             BOOST_LOG_TRIVIAL(warning) << "project strip: plate " << item.first + 1 << " G-code not restored: " << ec.message();
             continue;
         }
-        if (pl->load_gcode_from_file(dst.string()) == 0)
+        // Apply the plate's Print exactly as slicing it does, then take the G-code as its result.
+        plates.select_plate(item.first);
+        plates.update_slice_context_to_current_plate(p->background_process);
+        p->background_process.apply(model(), wxGetApp().preset_bundle->full_config());
+        if (pl->adopt_parked_gcode(dst.string()))
             ++loaded;
+        BOOST_LOG_TRIVIAL(info) << "project strip: plate " << item.first + 1 << " sliced again from " << dst.string() << ": "
+                                << pl->is_slice_result_valid();
     }
-    if (plate >= 0 && plate < plates.get_plate_count())
-        select_plate(plate);
+    // A sliced-file project (.gcode.3mf) stays a preview of its G-code.
+    if (exported_file && loaded > 0)
+        set_using_exported_file(true);
+    select_plate(keep);
+    update_slicing_context_to_current_partplate();
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventSliceUpdate, true, true);
+    BOOST_LOG_TRIVIAL(info) << "project strip: " << loaded << " plate(s) with G-code back";
+    return loaded;
+}
 
-    // Unsaved before the switch, unsaved after it (the load marked it clean).
-    if (dirty)
-        set_plater_dirty(true);
-    update_title_dirty_status();
-    BOOST_LOG_TRIVIAL(info) << "project strip: switched in " << into_u8(origin_path.empty() ? name : origin_path) << ", " << loaded
-                            << " plate(s) with G-code" << log_memory_info();
-    return true;
+Plater::PreparsedProject::~PreparsedProject()
+{
+    release_PlateData_list(plates);
+    for (Preset *preset : presets)
+        delete preset;
+    presets.clear();
+    // Not taken by a load: its scratch folder (thumbnails, configs read from the archive) goes with it.
+    if (!consumed)
+        model.remove_backup_path_if_exist();
+}
+
+std::shared_ptr<Plater::PreparsedProject> Plater::preparse_project(const std::string &snapshot_3mf)
+{
+    auto       pre     = std::make_shared<PreparsedProject>();
+    pre->path          = snapshot_3mf;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        // What load_files() passes for a project switch (project_park_load_strategy() plus the version check it adds).
+        const LoadStrategy strategy = project_park_load_strategy() | LoadStrategy::CheckVersion;
+        pre->model = Model::read_from_archive(snapshot_3mf, &pre->config, &pre->substitutions, pre->file_type, strategy, &pre->plates,
+                                              &pre->presets, &pre->file_version, nullptr, nullptr, &pre->from_bambu_studio);
+        size_t bytes = 0;
+        for (const ModelObject *o : pre->model.objects)
+            for (const ModelVolume *v : o->volumes)
+                bytes += v->mesh().its.vertices.size() * sizeof(stl_vertex) + v->mesh().its.indices.size() * sizeof(stl_triangle_vertex_indices);
+        // The model graph, configs and per-facet data on top of the bare meshes.
+        pre->bytes = bytes * 2 + (size_t(1) << 20);
+        pre->ok    = true;
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(warning) << "project strip: reading " << snapshot_3mf << " ahead failed: " << e.what();
+        pre->ok = false;
+    }
+    pre->read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    return pre;
 }
 
 void Plater::count_sliced_plates(int &plates_with_objects, int &plates_sliced)
