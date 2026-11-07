@@ -25,6 +25,10 @@ class wxCheckBox;
 namespace Slic3r {
 namespace GUI {
 
+// The message a preset name check (validate_preset_name, also used by the preset managers' rename) shows;
+// empty when the name is fine. A warning (saving over an existing user preset) adds the overwrite note.
+wxString preset_name_check_message(const PresetNameCheck &check, const std::string &name);
+
 class SavePresetDialog : public DPIDialog
 {
     enum ActionType

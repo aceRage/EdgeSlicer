@@ -3357,10 +3357,163 @@ bool PresetCollection::delete_preset(const std::string& name)
     }
     //BBS: add lock logic for sync preset in background
     lock();
+    const size_t erased = size_t(it - m_presets.begin());
     m_presets.erase(it);
+    // The selected preset stays the selected one (it moved up by one); deleting the selected preset
+    // itself leaves the caller to select another one, as before.
+    if (m_idx_selected != size_t(-1) && erased < m_idx_selected)
+        --m_idx_selected;
     unlock();
 
     return true;
+}
+
+std::vector<std::string> PresetCollection::user_presets_inheriting(const std::string &name) const
+{
+    std::vector<std::string> out;
+    if (name.empty())
+        return out;
+    for (const Preset &preset : m_presets)
+        if (preset.is_user() && preset.inherits() == name)
+            out.push_back(preset.name);
+    return out;
+}
+
+// The "<type>_settings_id" option of a preset config: the preset's own name.
+static void set_preset_settings_id(Preset::Type type, DynamicPrintConfig &config, const std::string &name)
+{
+    if (type == Preset::TYPE_PRINT) {
+        config.option<ConfigOptionString>("print_settings_id", true)->value = name;
+    } else if (type == Preset::TYPE_FILAMENT) {
+        auto *ids = config.option<ConfigOptionStrings>("filament_settings_id", true);
+        if (ids->values.empty())
+            ids->values.push_back(name);
+        else
+            ids->values.front() = name;
+    } else if (type == Preset::TYPE_PRINTER) {
+        config.option<ConfigOptionString>("printer_settings_id", true)->value = name;
+    }
+}
+
+bool PresetCollection::rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error)
+{
+    auto fail = [error, &old_name](const std::string &why) {
+        BOOST_LOG_TRIVIAL(warning) << "rename_user_preset: " << old_name << ": " << why;
+        if (error != nullptr)
+            *error = why;
+        return false;
+    };
+    if (new_name.empty() || old_name == new_name)
+        return fail("the new name is empty or the same");
+    auto it = this->find_preset_internal(old_name);
+    if (it == m_presets.end() || it->name != old_name)
+        return fail("no such preset");
+    if (!it->is_user() || it->is_external)
+        return fail("not a user preset");
+    if (this->find_preset(new_name, false) != nullptr)
+        return fail("a preset named \"" + new_name + "\" exists");
+
+    const bool        has_selection = m_idx_selected != size_t(-1) && m_idx_selected < m_presets.size();
+    const std::string selected_name = has_selection ? m_presets[m_idx_selected].name : std::string();
+    const bool        was_selected  = has_selection && selected_name == old_name;
+
+    Preset renamed = *it;
+    renamed.name   = new_name;
+    set_preset_settings_id(m_type, renamed.config, new_name);
+    renamed.file         = this->path_for_preset(renamed);
+    renamed.updated_time = (long long) Slic3r::Utils::get_current_time_utc();
+    if (!renamed.setting_id.empty() && renamed.sync_info.empty())
+        renamed.sync_info = "update"; // as a save would mark it
+    const Preset *parent = renamed.inherits().empty() ? nullptr : this->find_preset2(renamed.inherits(), false);
+    DynamicPrintConfig parent_config;
+    if (parent != nullptr)
+        parent_config = parent->config;
+
+    // A rename that only changes letter case keeps the same file on a case-insensitive disk: drop the
+    // old file first there, or removing it afterwards would remove the new one.
+    const bool same_file = boost::iequals(fs::path(it->file).make_preferred().string(), fs::path(renamed.file).make_preferred().string());
+    Preset     old_copy  = *it;
+    if (same_file)
+        old_copy.remove_files();
+    if (!renamed.save(parent != nullptr ? &parent_config : nullptr)) {
+        if (same_file)
+            old_copy.save(parent != nullptr ? &parent_config : nullptr); // put it back
+        else
+            renamed.remove_files();
+        return fail("could not write " + renamed.file);
+    }
+    if (!same_file)
+        old_copy.remove_files();
+
+    lock();
+    m_presets.erase(it);
+    auto pos      = this->find_preset_internal(new_name);
+    Preset &added = *m_presets.insert(pos, std::move(renamed));
+    DynamicPrintConfig new_parent_config = added.config;
+    // The selection by name: indices moved.
+    if (has_selection) {
+        auto sel = this->find_preset_internal(was_selected ? new_name : selected_name);
+        if (sel != m_presets.end())
+            m_idx_selected = size_t(sel - m_presets.begin());
+    }
+    unlock();
+
+    if (was_selected) {
+        for (Preset *copy : {&m_edited_preset, &m_saved_preset}) {
+            copy->name = new_name;
+            copy->file = added.file;
+            set_preset_settings_id(m_type, copy->config, new_name);
+        }
+    }
+
+    // User presets built on it follow the new name.
+    for (Preset &child : m_presets) {
+        if (!child.is_user() || child.inherits() != old_name)
+            continue;
+        child.inherits() = new_name;
+        if (!child.save(&new_parent_config))
+            BOOST_LOG_TRIVIAL(error) << "rename_user_preset: could not save " << child.name << " (now inheriting " << new_name << ")";
+        if (has_selection && m_idx_selected < m_presets.size() && &m_presets[m_idx_selected] == &child) {
+            m_edited_preset.inherits() = new_name;
+            m_saved_preset.inherits()  = new_name;
+        }
+    }
+    BOOST_LOG_TRIVIAL(info) << "rename_user_preset: " << old_name << " -> " << new_name;
+    return true;
+}
+
+const char *preset_name_illegal_characters() { return "<>[]:/\\|?*\""; }
+
+PresetNameCheck validate_preset_name(const PresetCollection &presets, const std::string &name, const std::string &current_name, PresetNameUse use)
+{
+    using Level = PresetNameCheck::Level;
+    using Issue = PresetNameCheck::Issue;
+    auto result = [](Level level, Issue issue) {
+        PresetNameCheck c;
+        c.level = level;
+        c.issue = issue;
+        return c;
+    };
+    if (name.find_first_of(preset_name_illegal_characters()) != std::string::npos)
+        return result(Level::Invalid, Issue::IllegalCharacters);
+    if (name.find(PresetCollection::get_suffix_modified()) != std::string::npos)
+        return result(Level::Invalid, Issue::IllegalSuffix);
+    if (name == "Default Setting" || name == "Default Filament" || name == "Default Printer")
+        return result(Level::Invalid, Issue::Reserved);
+    const Preset *existing = presets.find_preset(name, false);
+    if (existing != nullptr && (existing->is_default || existing->is_system))
+        return result(Level::Invalid, Issue::SystemExists);
+    if (existing != nullptr && name != current_name)
+        return result(use == PresetNameUse::Rename ? Level::Invalid : Level::Warning, existing->is_compatible ? Issue::Exists : Issue::ExistsIncompatible);
+    if (name.empty())
+        return result(Level::Invalid, Issue::Empty);
+    if (name.front() == ' ')
+        return result(Level::Invalid, Issue::LeadingSpace);
+    if (name.back() == ' ')
+        return result(Level::Invalid, Issue::TrailingSpace);
+    if (presets.get_preset_name_by_alias(name) != name)
+        return result(Level::Invalid, Issue::AliasName);
+    return PresetNameCheck();
 }
 
 const Preset* PresetCollection::get_selected_preset_parent() const
