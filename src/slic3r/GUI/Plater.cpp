@@ -1448,6 +1448,21 @@ struct Sidebar::priv
     ScalableButton* m_printer_setting = nullptr;
     wxStaticText* m_text_printer_settings = nullptr;
     wxPanel* m_panel_printer_content = nullptr;
+    // Section chevrons in the Printer / Filament Management title bars: down when the section is expanded, right when it is
+    // collapsed. The state is read from the content panel (collapsed = max height 0), so every path that folds or unfolds a
+    // section only has to call update_section_chevrons() afterwards.
+    ScalableButton* m_printer_chevron = nullptr;
+    ScalableButton* m_filament_chevron = nullptr;
+    void update_section_chevrons()
+    {
+        auto flip = [](ScalableButton *chevron, wxWindow *content) {
+            if (chevron == nullptr || content == nullptr)
+                return;
+            chevron->SetBitmap_(content->GetMaxHeight() == 0 ? "chevron_right" : "chevron_down");
+        };
+        flip(m_printer_chevron, m_panel_printer_content);
+        flip(m_filament_chevron, m_panel_filament_content);
+    }
 
     // nozzle notebook  and related controls
     CustomNotebook*                  m_nozzle_notebook{nullptr};
@@ -2368,9 +2383,19 @@ Sidebar::Sidebar(Plater *parent)
         p->m_panel_printer_title = new StaticBox(p->scrolled, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
         p->m_panel_printer_title->SetBackgroundColor(title_bg);
         p->m_panel_printer_title->SetBackgroundColor2(0xF1F1F1);
+        // A 1 px outline marks the whole bar as clickable (it folds the section).
+        p->m_panel_printer_title->SetCornerRadius(0);
+        p->m_panel_printer_title->SetBorderWidth(1);
+        p->m_panel_printer_title->SetBorderColor(StateColor(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Normal)));
+        p->m_panel_printer_title->SetToolTip(_L("Click to collapse / expand"));
+        p->m_printer_chevron = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "chevron_down", wxEmptyString, wxDefaultSize,
+                                                  wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 12);
+        p->m_printer_chevron->SetCursor(wxCURSOR_HAND);
+        p->m_printer_chevron->SetToolTip(_L("Click to collapse / expand"));
 
         p->m_printer_icon = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "printer");
         p->m_text_printer_settings = new Label(p->m_panel_printer_title, _L("Printer"), LB_PROPAGATE_MOUSE_EVENT);
+        p->m_text_printer_settings->SetToolTip(_L("Click to collapse / expand"));
 
         // Use ams_fila_sync icon (sync_nozzle_info.svg does not exist in resources)
         p->m_printerinfo_syncbtn = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "nozzle_sync");
@@ -2561,7 +2586,9 @@ Sidebar::Sidebar(Plater *parent)
             });
 
         wxBoxSizer* h_sizer_title = new wxBoxSizer(wxHORIZONTAL);
-        h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+        h_sizer_title->Add(p->m_printer_chevron, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+        h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
+        h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE, 0);
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         h_sizer_title->Add(p->m_text_printer_settings, 0, wxALIGN_CENTER);
         h_sizer_title->AddStretchSpacer();
@@ -2584,10 +2611,13 @@ Sidebar::Sidebar(Plater *parent)
                 p->m_panel_printer_content->SetMaxSize({-1, -1});
             else
                 p->m_panel_printer_content->SetMaxSize({-1, 0});
+            p->update_section_chevrons();
             m_scrolled_sizer->Layout();
         };
         p->m_panel_printer_title->Bind(wxEVT_LEFT_DOWN, toggle_printer_section);
         p->m_panel_printer_title->Bind(wxEVT_LEFT_DCLICK, toggle_printer_section);
+        p->m_printer_chevron->Bind(wxEVT_LEFT_DOWN, toggle_printer_section);
+        p->m_printer_chevron->Bind(wxEVT_LEFT_DCLICK, toggle_printer_section);
 
         // add spliter 2
         auto spliter_2 = new ::StaticLine(p->scrolled);
@@ -2797,6 +2827,11 @@ Sidebar::Sidebar(Plater *parent)
     p->m_panel_filament_title = new StaticBox(p->scrolled, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
     p->m_panel_filament_title->SetBackgroundColor(title_bg);
     p->m_panel_filament_title->SetBackgroundColor2(0xF1F1F1);
+    // A 1 px outline marks the whole bar as clickable (it folds the section).
+    p->m_panel_filament_title->SetCornerRadius(0);
+    p->m_panel_filament_title->SetBorderWidth(1);
+    p->m_panel_filament_title->SetBorderColor(StateColor(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Normal)));
+    p->m_panel_filament_title->SetToolTip(_L("Click to collapse / expand"));
     // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
     // close on mouse-down, so a leftover LEFT_UP would land on this title
     // and collapse the section.
@@ -2821,6 +2856,7 @@ Sidebar::Sidebar(Plater *parent)
             p->m_panel_filament_content->SetMaxSize({-1, -1});
         else
             p->m_panel_filament_content->SetMaxSize({-1, 0});
+        p->update_section_chevrons();
         m_scrolled_sizer->Layout();
     };
     p->m_panel_filament_title->Bind(wxEVT_LEFT_DOWN, toggle_filament_section);
@@ -2828,9 +2864,18 @@ Sidebar::Sidebar(Plater *parent)
 
     wxBoxSizer* bSizer39;
     bSizer39 = new wxBoxSizer( wxHORIZONTAL );
+    p->m_filament_chevron = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "chevron_down", wxEmptyString, wxDefaultSize,
+                                               wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 12);
+    p->m_filament_chevron->SetCursor(wxCURSOR_HAND);
+    p->m_filament_chevron->SetToolTip(_L("Click to collapse / expand"));
+    // The chevron sits left of every title button, so the handler's button-area test never excludes it.
+    p->m_filament_chevron->Bind(wxEVT_LEFT_DOWN, toggle_filament_section);
+    p->m_filament_chevron->Bind(wxEVT_LEFT_DCLICK, toggle_filament_section);
+    bSizer39->Add(p->m_filament_chevron, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     p->m_filament_config_icon = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "filament_group");
-    bSizer39->Add(p->m_filament_config_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+    bSizer39->Add(p->m_filament_config_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::ElementSpacing()));
     p->m_staticText_filament_settings = new Label(p->m_panel_filament_title, _L("Filament Management"), LB_PROPAGATE_MOUSE_EVENT);
+    p->m_staticText_filament_settings->SetToolTip(_L("Click to collapse / expand"));
     bSizer39->Add( p->m_staticText_filament_settings, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     bSizer39->Add(FromDIP(10), 0, 0, 0, 0);
     bSizer39->SetMinSize(-1, FromDIP(30));
@@ -4669,6 +4714,8 @@ void Sidebar::msw_rescale()
     p->m_panel_filament_title->GetSizer()
         ->SetMinSize(-1, 3 * wxGetApp().em_unit());
     p->m_printer_icon->msw_rescale();
+    if (p->m_printer_chevron) p->m_printer_chevron->msw_rescale();
+    if (p->m_filament_chevron) p->m_filament_chevron->msw_rescale();
     p->m_printerinfo_syncbtn->msw_rescale();
     p->m_printer_setting->msw_rescale();
     p->m_filament_icon->msw_rescale();
@@ -4748,6 +4795,8 @@ void Sidebar::sys_color_changed()
     //for (wxWindow* btn : std::vector<wxWindow*>{ p->btn_reslice, p->btn_export_gcode })
     //    wxGetApp().UpdateDarkUI(btn, true);
     p->m_printer_icon->msw_rescale();
+    if (p->m_printer_chevron) p->m_printer_chevron->msw_rescale();
+    if (p->m_filament_chevron) p->m_filament_chevron->msw_rescale();
     p->m_printerinfo_syncbtn->msw_rescale();
     p->m_printer_setting->msw_rescale();
     p->m_filament_icon->msw_rescale();
@@ -10862,6 +10911,7 @@ void Sidebar::sync_ams_list()
     update_dynamic_filament_list();
     // Expand filament list
     p->m_panel_filament_content->SetMaxSize({-1, -1});
+    p->update_section_chevrons();
     if (!snapshot_as_of.empty())
         wxGetApp().plater()->get_notification_manager()->push_notification(
             NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
