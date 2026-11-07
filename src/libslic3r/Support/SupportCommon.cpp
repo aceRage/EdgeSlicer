@@ -1334,6 +1334,25 @@ static void modulate_extrusion_by_overlapping_layers(
         // The extrusions do not overlap with any other extrusion.
         return;
 
+    // Edge: only plain ExtrusionPaths can be split by height below. The organic tree's hollow base wraps every branch
+    // it double-walls into an ExtrusionEntityCollection (tree_supports_generate_paths), and since AdaptiveLayerMerge
+    // step 4 a base layer merged into a coarse nozzle's slab overlaps the top contacts inside its Z span, so such a
+    // collection reaches this point (H3C 0.4 + 0.8 with organic tree supports read a null ExtrusionPath and crashed).
+    // The contacts were cut out of the merged base already (merge_support_layers_multi_diameter), so those entities
+    // keep their full height and go back in front of the modulated paths. Without such entities nothing changes.
+    ExtrusionEntitiesPtr kept_whole;
+    if (std::any_of(extrusions_in_out.begin(), extrusions_in_out.end(),
+                    [](const ExtrusionEntity *ee) { return dynamic_cast<const ExtrusionPath *>(ee) == nullptr; })) {
+        ExtrusionEntitiesPtr paths;
+        for (ExtrusionEntity *ee : extrusions_in_out)
+            (dynamic_cast<ExtrusionPath *>(ee) != nullptr ? paths : kept_whole).emplace_back(ee);
+        extrusions_in_out = std::move(paths);
+        if (extrusions_in_out.empty()) {
+            extrusions_in_out = std::move(kept_whole);
+            return;
+        }
+    }
+
     // Get the initial extrusion parameters.
     ExtrusionPath *extrusion_path_template = dynamic_cast<ExtrusionPath*>(extrusions_in_out.front());
     assert(extrusion_path_template != nullptr);
@@ -1561,6 +1580,8 @@ static void modulate_extrusion_by_overlapping_layers(
     //FIXME this shall not happen, if the Clipper works as expected and all paths split to fragments could be re-connected.
     for (auto it_fragment = path_fragments.begin(); it_fragment != path_fragments.end(); ++ it_fragment)
         extrusion_entities_append_paths(extrusions_in_out, std::move(it_fragment->polylines), extrusion_role, it_fragment->mm3_per_mm, it_fragment->width, it_fragment->height);
+    // Edge: the entities that could not be split (see the top of this function).
+    extrusions_in_out.insert(extrusions_in_out.begin(), kept_whole.begin(), kept_whole.end());
 }
 
 // Support layer that is covered by some form of dense interface.
