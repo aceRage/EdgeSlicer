@@ -255,3 +255,48 @@ TEST_CASE("printers monitor: the shared device page (owner D6)", "[PrintersMonit
     CHECK(device_page_id("http://192.168.1.40/web/orca/device.html?id=%22%3E").empty()); // decodes to a refused id
     CHECK(device_page_id("http://127.0.0.1:1/web/orca/device.html?embed=1").empty());
 }
+
+TEST_CASE("printers monitor: printers_forget names one printer", "[PrintersMonitor]")
+{
+    Message m = parse_message("printers_forget:sm:U1-0042");
+    CHECK(m.kind == Message::Kind::Forget);
+    CHECK(m.id == "sm:U1-0042");
+    CHECK(parse_message("printers_forget:").kind == Message::Kind::Invalid);
+    CHECK(parse_message("printers_forget:a b").kind == Message::Kind::Invalid);
+    CHECK(parse_message("printers_forget:<x>").kind == Message::Kind::Invalid);
+}
+
+TEST_CASE("printers monitor: leftovers from the hub are added, marked and stripped of controls", "[PrintersMonitor]")
+{
+    json payload = page_payload(200, R"({"printers":[{"id":"sm:U1-0042","kind":"snapmaker","online":false}]})", 1);
+    const std::string hub = R"({"printers":[
+        {"id":"sm:U1-0042","kind":"snapmaker","configured":true,"age_s":5},
+        {"id":"sm:TEST-MOCK","kind":"snapmaker","name":"Mock U1","configured":false,"stale":true,"age_s":7200,
+         "can_pause":true,"controls":{"light":{"on":true}}},
+        {"id":"ph:old","kind":"printhost"},
+        {"id":"bad id","kind":"printhost","configured":false}
+    ]})";
+    add_leftovers(payload, 200, hub);
+    REQUIRE(payload["printers"].size() == 2);
+    const json& p = payload["printers"][1];
+    CHECK(p["id"] == "sm:TEST-MOCK");
+    CHECK(p["leftover"] == true);
+    CHECK(p["online"] == false);
+    CHECK(p["seen_s"] == 7200);
+    CHECK_FALSE(p.contains("can_pause"));
+    CHECK_FALSE(p.contains("controls"));
+    CHECK_FALSE(payload["printers"][0].contains("leftover")); // the slicer's own row is untouched
+}
+
+TEST_CASE("printers monitor: no leftovers without an ok payload or an ok hub", "[PrintersMonitor]")
+{
+    const std::string hub = R"({"printers":[{"id":"sm:TEST-MOCK","configured":false}]})";
+    json failed = page_payload(503, "", 1);
+    add_leftovers(failed, 200, hub);
+    CHECK(failed["printers"].empty());
+    json ok = page_payload(200, R"({"printers":[]})", 1);
+    add_leftovers(ok, 503, hub);
+    CHECK(ok["printers"].empty());
+    add_leftovers(ok, 200, "not json");
+    CHECK(ok["printers"].empty());
+}

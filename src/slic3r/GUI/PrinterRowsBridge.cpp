@@ -2,6 +2,7 @@
 
 #include "GUI_App.hpp"
 #include "RemoteAccess.hpp"
+#include "RemoteHub.hpp"
 #include "GcodeArchive.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -94,17 +95,25 @@ void enrich(json& payload)
 } // namespace
 
 void read_rows(std::weak_ptr<bool> alive, std::shared_ptr<std::atomic<bool>> reading, Reply reply,
-               std::function<void(const json& payload)> rows_read)
+               std::function<void(const json& payload)> rows_read, bool with_leftovers)
 {
     bool expected = false;
     if (!reading->compare_exchange_strong(expected, true))
         return; // the read in flight answers this tick too
     // api_printers waits for the GUI thread for the Bambu part and probes the network hosts on the
     // calling thread, so it runs here, never on the GUI thread (RemoteAccess.cpp).
-    std::thread([alive, reading, reply, rows_read]() {
+    std::thread([alive, reading, reply, rows_read, with_leftovers]() {
         std::pair<int, std::string> res { 503, "" };
         try { res = RemoteAccess::get().monitor_printers(); } catch (...) {}
         auto payload = std::make_shared<json>(PMon::page_payload(res.first, res.second, now_ms()));
+        // The rows only the hub still remembers (printers this slicer no longer has), so the tab
+        // can offer Forget. One loopback request; no hub, nothing added.
+        if (with_leftovers) {
+            try {
+                const std::pair<int, std::string> hub = RemoteHub::hub_printers();
+                PMon::add_leftovers(*payload, hub.first, hub.second);
+            } catch (...) {}
+        }
         try { enrich(*payload); } catch (...) {}
         *reading = false;
         RemoteAccess::post_to_app([alive, payload, reply, rows_read]() {
@@ -112,6 +121,27 @@ void read_rows(std::weak_ptr<bool> alive, std::shared_ptr<std::atomic<bool>> rea
             if (!a || !*a) return;
             if (rows_read) rows_read(*payload);
             reply("__printers", *payload);
+        });
+    }).detach();
+}
+
+void forget(std::weak_ptr<bool> alive, const std::string& printer_id, Reply reply)
+{
+    std::thread([alive, printer_id, reply]() {
+        std::pair<int, std::string> res { 503, "" };
+        try { res = RemoteHub::forget_printer(printer_id); } catch (...) {}
+        json answer = { { "id", printer_id }, { "ok", res.first == 200 } };
+        if (res.first != 200) {
+            std::string why;
+            try {
+                const json e = json::parse(res.second);
+                if (e.is_object() && e.contains("error") && e["error"].is_string()) why = e["error"].get<std::string>();
+            } catch (...) {}
+            answer["error"] = why.empty() ? std::string("the hub did not answer") : why;
+        }
+        RemoteAccess::post_to_app([alive, answer, reply]() {
+            auto a = alive.lock();
+            if (a && *a) reply("__printerForget", answer);
         });
     }).detach();
 }

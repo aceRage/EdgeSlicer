@@ -154,6 +154,7 @@ void PrintersPanel::OnScriptMessage(wxWebViewEvent& evt)
     case PMon::Message::Kind::Job: job(m.job); break;
     case PMon::Message::Kind::Open: open_device(m.id); break;
     case PMon::Message::Kind::Thumb: thumbnail(m.id); break;
+    case PMon::Message::Kind::Forget: PrinterRowsBridge::forget(m_alive, m.id, reply()); break;
     case PMon::Message::Kind::Tasks:
         if (wxGetApp().is_enable_multi_machine() && wxGetApp().mainframe)
             wxGetApp().mainframe->jump_to_multipage();
@@ -175,7 +176,7 @@ void PrintersPanel::get_printers()
 {
     PrinterRowsBridge::read_rows(m_alive, m_reading, reply(), [this](const json& payload) {
         if (payload.value("ok", false)) m_targets = PMon::targets_of(payload["printers"]);
-    });
+    }, /* with_leftovers */ true);
 }
 
 void PrintersPanel::thumbnail(const std::string& archive_id) { PrinterRowsBridge::thumbnail(m_alive, archive_id, reply()); }

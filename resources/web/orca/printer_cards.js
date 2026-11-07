@@ -13,6 +13,8 @@
 //       showOpen: false,
 //       thumbFor: function(row) { return src },  // the job's plate picture, '' = none
 //       isDismissed: function(key) {}, onDismiss: function(row, key) {}   // error dismissal
+//       onForget: function(row) {}           // "Forget" on a leftover row (row.leftover: the hub
+//                                            // remembers it, the slicer no longer has it)
 //   })
 //   PrinterCards.errorKey(row)                    -> the key a dismissal is kept under ('' = no error)
 //   PrinterCards.sortRows(rows, 'status'|'name')  -> a sorted copy
@@ -360,8 +362,22 @@
                 acts.appendChild(b);
             });
         }
+        // A row only the hub still remembers (leftover: the slicer no longer has this printer - a
+        // removed or test printer). It goes by itself after a few minutes; Forget drops it now.
+        if (p.leftover) {
+            c.appendChild(el('div', 'pnote', 'No longer set up in EdgeSlicer: this is the hub’s last record of it.'));
+            if (opts && opts.onForget) {
+                var fb = button('Forget', 'alt', 'forget:' + p.id, 'Forget ' + name);
+                setEnabled(fb, !busy, busy ? 'Already forgetting it' : 'Remove this leftover printer from the hub, the app and this tab');
+                fb.addEventListener('click', function() {
+                    if (fb.getAttribute('aria-disabled') === 'true') return;
+                    opts.onForget(p);
+                });
+                acts.appendChild(fb);
+            }
+        }
         // Hidden for now (owner, 2026-10-07); the bridge and MainFrame's per-vendor open stay in place.
-        if (opts && opts.showOpen) {
+        if (opts && opts.showOpen && !p.leftover) {
             var open = button('Open Device page', 'alt', 'open:' + p.id, 'Open the Device page of ' + name);
             open.addEventListener('click', function() { if (opts.onOpen) opts.onOpen(p); });
             acts.appendChild(open);

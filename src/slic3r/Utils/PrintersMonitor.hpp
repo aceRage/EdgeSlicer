@@ -34,13 +34,16 @@ namespace PrintersMonitor {
 //   printers_tasks                            the old multi-device task list (cloud send queue)
 //   printers_thumb:<archive id>               a G-code archive record's plate picture, answered
 //                                             with __printerThumb({ id, data: "data:image/png;..." })
+//   printers_forget:<id>                      forget a leftover row the hub remembers (the page
+//                                             asked the person), answered with
+//                                             __printerForget({ id, ok, error })
 //
 // The id goes last because printer ids carry colons ("sm:<serial>", "ph:<id>").
 struct Message
 {
-    enum class Kind { Invalid, Get, Groups, Control, Job, Open, Tasks, Thumb };
+    enum class Kind { Invalid, Get, Groups, Control, Job, Open, Tasks, Thumb, Forget };
     Kind        kind { Kind::Invalid };
-    std::string id;              // Control, Open; Thumb: the archive record id
+    std::string id;              // Control, Open, Forget; Thumb: the archive record id
     std::string action;          // Control: pause | resume | stop
     bool        confirm { false };
     int         job { 0 };       // Job
@@ -62,6 +65,13 @@ std::string script_call(const std::string& fn, const nlohmann::json& arg);
 // What the page is given for one poll: { ok, printers: [...rows...], at: <ms since epoch> } when
 // api_printers answered 200 with a parsable body, otherwise { ok: false, error, printers: [] }.
 nlohmann::json page_payload(int status, const std::string& body, long long now_ms);
+
+// The leftovers: rows the hub still remembers (GET /hub/printers, `hub_status` / `hub_body`) for
+// printers this slicer no longer has (`configured: false`), appended to an ok payload so the tab
+// can offer Forget. Each is marked leftover: true, online: false, with its control flags removed
+// and `seen_s` = the row's age_s. A row the payload already has, an id valid_printer_id refuses,
+// or a row with configured true or absent is never added. Nothing happens unless both are ok.
+void add_leftovers(nlohmann::json& payload, int hub_status, const std::string& hub_body);
 
 // ---- Open Device page --------------------------------------------------------------------------
 struct Target

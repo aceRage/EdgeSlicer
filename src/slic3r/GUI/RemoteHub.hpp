@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -94,6 +95,13 @@ std::string saved_state();
 // POST /hub/event on the loopback control plane. Fire and forget: with no hub running it is a
 // failed connect and false, never an error anybody sees. The hub assigns the id and the time.
 bool post_event(const std::string& event_json);
+// The hub's remembered printer rows (GET /hub/printers on the loopback control plane): what the
+// app's /summary is built from, each row with age_s / stale and, once a window has reported its
+// list, `configured`. {http status, body}; 503 with no hub running.
+std::pair<int, std::string> hub_printers();
+// Forget one leftover row (POST /hub/printers/<id>/forget): 200, 404 (no such row) or 409 (still
+// set up in the slicer). {http status, body}.
+std::pair<int, std::string> forget_printer(const std::string& printer_id);
 void quit();
 
 std::string hub_dir();
@@ -324,6 +332,31 @@ struct MergedPrinterRow
 };
 MergedPrinterRow merge_printer_row(const std::string& cached_row_json, long cached_instance, bool cached_fresh,
                                    const std::string& incoming_row_json, long incoming_instance);
+
+// ---- leftover printers (poll_printers / load_printers / POST .../printers/<id>/forget) ----
+// The hub remembers every printer a slicer window ever reported. A row stays only while the
+// printer is still set up in the slicer: each window's /api/printers carries `configured`, every
+// printer id it knows (bound or saved Bambu printers, LAN Snapmakers, saved print hosts - offline
+// ones included), and the hub keeps the union of the live windows' lists. A row missing from it
+// for `grace_ms` is dropped; load_printers applies the list saved with the rows at once (grace 0).
+//
+// `kind` is the row's kind, except that a cloud-bound Bambu row (kind bambu, lan_mode false) is
+// judged as "bambu_cloud": a window that is not signed in to Bambu cannot list those, so it says
+// so in `unsure_kinds` and such rows are kept rather than judged.
+//
+// Returns the row's new `unconfigured_since`: 0 while the printer is configured (or its kind
+// cannot be judged), the time it was first found missing while it is, and -1 once it has been
+// missing for grace_ms - the row goes.
+long long configured_row_fate(const std::string& id, const std::string& kind, const std::set<std::string>& configured,
+                              const std::set<std::string>& unsure_kinds, long long unconfigured_since, long long now_ms,
+                              long long grace_ms);
+// The kind configured_row_fate judges a cached row by (see there).
+std::string configured_judge_kind(const std::string& row_json);
+// POST .../printers/<id>/forget: 200 (the row goes), 404 (no such row) or 409 (the printer is still
+// set up in the slicer, by the last list a window gave - forgetting it would only last until the
+// next poll). With no list known yet (no window has reported one) a row can always be forgotten.
+int forget_printer_status(const std::string& id, bool row_exists, const std::set<std::string>& configured,
+                          bool configured_known);
 
 // What a new phone link (HubServer::new_link) revokes besides the token itself: every native-app
 // push device (AppPush) and every phone-page Web Push subscription (WebPush), all of which were

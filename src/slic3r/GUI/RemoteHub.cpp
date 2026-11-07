@@ -165,6 +165,10 @@ static const size_t      MAX_EVENTS         = 200;
 static const int         PRINTERS_POLL_MS   = 10000;
 static const long long   PRINTERS_STALE_MS  = 30000;
 static const size_t      MAX_CACHED_PRINTERS = 64;
+// A remembered row whose printer the slicer no longer lists (a removed printer, a test printer a
+// test copy reported) goes once it has been missing from every live window's `configured` list for
+// this long. The grace covers a window that has just started and not yet read its Bambu cloud list.
+static const long long   PRINTERS_PRUNE_GRACE_MS = 5 * 60 * 1000;
 
 // ------------------------------------------------------------------ paths ----
 
@@ -2591,13 +2595,44 @@ Testing::MergedPrinterRow Testing::merge_printer_row(const std::string& cached_r
     return out;
 }
 
+long long Testing::configured_row_fate(const std::string& id, const std::string& kind, const std::set<std::string>& configured,
+                                       const std::set<std::string>& unsure_kinds, long long unconfigured_since, long long now_ms,
+                                       long long grace_ms)
+{
+    if (configured.count(id) || unsure_kinds.count(kind)) return 0;
+    const long long since = unconfigured_since > 0 ? unconfigured_since : now_ms;
+    return now_ms - since >= grace_ms ? -1 : since;
+}
+
+std::string Testing::configured_judge_kind(const std::string& row_json)
+{
+    try {
+        const json row = json::parse(row_json);
+        if (!row.is_object()) return "";
+        const std::string kind = row.value("kind", std::string());
+        if (kind == "bambu" && !(row.contains("lan_mode") && row["lan_mode"].is_boolean() && row["lan_mode"].get<bool>()))
+            return "bambu_cloud";
+        return kind;
+    } catch (...) {}
+    return "";
+}
+
+int Testing::forget_printer_status(const std::string& id, bool row_exists, const std::set<std::string>& configured, bool configured_known)
+{
+    if (!row_exists) return 404;
+    if (configured_known && configured.count(id)) return 409;
+    return 200;
+}
+
 // The pairing document's origins and identity, pure so the shape can be tested without a hub.
 // Three named origins, one of them always empty today, and the public half of the hub identity.
 // "slice_v1" (+ "slice_result", "slice_cancel"): the companion app's native Slice tab
 // (EdgeSlicerApp docs/design_native_slice.md); the app shows it only on a hub that lists slice_v1.
 std::vector<std::string> Testing::pair_features()
 {
-    std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" };
+    std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity",
+                                   // POST /printers/<id>/forget, and `configured` on the /summary rows
+                                   "forget_printer" };
     for (const std::string& s : SliceV1::pair_features())
         f.push_back(s);
     for (const std::string& s : PaintV1::pair_features())
@@ -3668,13 +3703,19 @@ public:
     // has to infer from an id going backwards (the app's follow-up 6).
     std::string hub_instance();
     void poll_printers();                   // one round: ask every live instance, merge, remember
+    // POST .../printers/<id>/forget: drop one leftover row and save (Testing::forget_printer_status
+    // says which status). {http status, JSON body}.
+    std::pair<int, std::string> forget_printer(const std::string& id);
 
 private:
     void load_events();          // start(): the ring from the last run
     void save_events_locked();   // m_mutex held
     void load_printers();        // start(): the last-known printer status from the last run
     void save_printers_locked(); // m_mutex held
-    std::string archive_dir();   // where the G-code archive keeps its sidecars (see m_archive_dir)
+    // m_mutex held: drop the rows the slicer no longer lists (Testing::configured_row_fate); true
+    // when a row went or a row's unconfigured_since changed (the caller saves).
+    bool prune_unconfigured_locked(long long now_ms, long long grace_ms);
+    std::string archive_dir();  // where the G-code archive keeps its sidecars (see m_archive_dir)
 public:
     // The G-code archive as the Reprint tab lists it, read by the hub itself: one page of records,
     // newest first, from a cached pass over the sidecars. No slicer window is involved, so the
@@ -3814,8 +3855,17 @@ private:
         json      row;             // the instance's own /api/printers row, as it sent it
         long long at { 0 };        // unix ms when this value was read
         long      instance { 0 };  // the pid that reported it; 0 once that window is gone
+        long long unconfigured_since { 0 }; // unix ms the slicer first stopped listing it (Testing::configured_row_fate)
     };
     std::map<std::string, CachedPrinter> m_printers;
+    // Every printer id the live windows say is set up in the slicer (their /api/printers
+    // `configured`), as of the last poll round in which every live window answered with one, and
+    // the kinds a window could not judge (unsure_kinds). Saved with the rows, so a hub that starts
+    // with no window open still knows which remembered rows are leftovers. `known` is false until a
+    // window has said, which keeps every row (an older slicer never says).
+    std::set<std::string>          m_configured;
+    std::set<std::string>          m_configured_unsure;
+    bool                           m_configured_known { false };
     // Where the archive's sidecars are, as an instance reported it (GET /api/info). Remembered so
     // a thumbnail still resolves after the window that told us closed; empty falls back to
     // <datadir>/gcode_archive, which is the archive's own default.
@@ -4250,8 +4300,13 @@ void HubServer::poll_printers()
     // print is then watched to its end even with nobody looking (ElegooSdcpMonitor).
     bool notify = false;
     try { notify = RemoteNotify::has_destinations(); } catch (...) {}
+    // What the live windows say is set up in the slicer, this round (see m_configured). Judged only
+    // when every live window answered with its list: one that is still starting, busy past the
+    // timeout or too old to send `configured` could be the one that knows a printer.
+    std::set<std::string> round_configured, round_unsure;
+    bool                  round_complete = !live.empty();
     for (const Instance& inst : live) {
-        if (inst.port <= 0) continue;
+        if (inst.port <= 0) { round_complete = false; continue; }
         std::string body;
         int         status = 0;
         Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers?watching=" + (watched ? "1" : "0") +
@@ -4260,10 +4315,21 @@ void HubServer::poll_printers()
             .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
             .on_error([&](std::string, std::string, unsigned) {})
             .perform_sync();
-        if (status != 200) continue;
+        if (status != 200) { round_complete = false; continue; }
         json rows;
-        try { rows = json::parse(body); } catch (...) { continue; }
-        if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) continue;
+        try { rows = json::parse(body); } catch (...) { round_complete = false; continue; }
+        if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) { round_complete = false; continue; }
+        if (rows.contains("configured") && rows["configured"].is_array()) {
+            for (const json& id : rows["configured"])
+                if (id.is_string() && !id.get<std::string>().empty()) round_configured.insert(id.get<std::string>());
+            if (rows.contains("configured_unsure_kinds") && rows["configured_unsure_kinds"].is_array())
+                for (const json& k : rows["configured_unsure_kinds"])
+                    if (k.is_string()) round_unsure.insert(k.get<std::string>());
+            // A row the window reports is set up there by definition (the print host, "connect").
+            for (const json& row : rows["printers"])
+                if (row.is_object() && row.contains("id") && row["id"].is_string()) round_configured.insert(row["id"].get<std::string>());
+        } else
+            round_complete = false;
         const long long at = now_millis();
         std::lock_guard<std::mutex> lock(m_mutex);
         std::set<std::string> reported;
@@ -4306,6 +4372,16 @@ void HubServer::poll_printers()
             m_printers.erase(oldest);
         }
         save_printers_locked();
+    }
+    // The rows of printers the slicer no longer has: a removed printer, or a test printer a test
+    // copy reported. Offline printers that are still set up stay (they are in `configured`).
+    if (round_complete) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const bool changed = !m_configured_known || m_configured != round_configured || m_configured_unsure != round_unsure;
+        m_configured        = std::move(round_configured);
+        m_configured_unsure = std::move(round_unsure);
+        m_configured_known  = true;
+        if (prune_unconfigured_locked(now_millis(), PRINTERS_PRUNE_GRACE_MS) || changed) save_printers_locked();
     }
     // Where the archive keeps its sidecars, so a thumbnail still resolves once every window is
     // closed. Asked once per round off the same instances, and only while we do not have it.
@@ -4369,6 +4445,12 @@ json HubServer::printers_json()
         row["age_s"]  = (long long) (fr.age_ms / 1000);
         row["stale"]  = fr.stale;
         row["seen_at"] = kv.second.at;
+        // Whether the printer is still set up in the slicer, once a window has said: false marks a
+        // leftover the app and the Printers tab offer to Forget (it also goes by itself after
+        // PRINTERS_PRUNE_GRACE_MS). Absent while no window has reported its list.
+        if (m_configured_known)
+            row["configured"] = m_configured.count(kv.first) > 0 ||
+                                m_configured_unsure.count(Testing::configured_judge_kind(kv.second.row.dump())) > 0;
         // The pid only stays in the row while that window is still there: the app addresses the
         // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
         long pid = 0;
@@ -4390,10 +4472,57 @@ void HubServer::save_printers_locked()
         e["row"]      = kv.second.row;
         e["at"]       = kv.second.at;
         e["instance"] = (long long) kv.second.instance;
+        if (kv.second.unconfigured_since > 0) e["unconfigured_since"] = kv.second.unconfigured_since;
         j["printers"].push_back(e);
+    }
+    if (m_configured_known) {
+        j["configured"]              = m_configured;
+        j["configured_unsure_kinds"] = m_configured_unsure;
     }
     if (!m_archive_dir.empty()) j["archive_dir"] = m_archive_dir;
     write_file(printers_json_path(), j.dump());
+}
+
+bool HubServer::prune_unconfigured_locked(long long now_ms, long long grace_ms)
+{
+    if (!m_configured_known) return false;
+    bool changed = false;
+    for (auto it = m_printers.begin(); it != m_printers.end();) {
+        const long long fate = Testing::configured_row_fate(it->first, Testing::configured_judge_kind(it->second.row.dump()), m_configured,
+                                                            m_configured_unsure, it->second.unconfigured_since, now_ms, grace_ms);
+        if (fate < 0) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: forgetting printer row " << it->first.substr(0, 6)
+                                    << "... (no longer set up in the slicer)";
+            it      = m_printers.erase(it);
+            changed = true;
+            continue;
+        }
+        if (fate != it->second.unconfigured_since) {
+            it->second.unconfigured_since = fate;
+            changed                       = true;
+        }
+        ++it;
+    }
+    return changed;
+}
+
+std::pair<int, std::string> HubServer::forget_printer(const std::string& id)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it     = m_printers.find(id);
+    const int  status = Testing::forget_printer_status(id, it != m_printers.end(), m_configured, m_configured_known);
+    if (status == 404) return { 404, json_error("no such printer") };
+    if (status == 409)
+        return { 409, json_error("this printer is still set up in EdgeSlicer; remove it there first (Device tab, or the saved "
+                                 "printer list) and it disappears here by itself") };
+    m_printers.erase(it);
+    save_printers_locked();
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: printer row " << id.substr(0, 6) << "... forgotten on request";
+    json j;
+    j["ok"]        = true;
+    j["id"]        = id;
+    j["forgotten"] = true;
+    return { 200, j.dump() };
 }
 
 // What the printers were doing when this hub last ran. Served straight away (with an age that says
@@ -4410,9 +4539,20 @@ void HubServer::load_printers()
             c.row      = e["row"];
             c.at       = e.value("at", (long long) 0);
             c.instance = 0; // whatever window reported it last time is certainly gone
+            c.unconfigured_since = e.value("unconfigured_since", (long long) 0);
             m_printers[id] = c;
         }
         m_archive_dir = j.value("archive_dir", std::string());
+        // The list of printers set up in the slicer, as the last run knew it: a row that was not
+        // on it is a leftover and goes now (no grace - the list is not a window still starting).
+        if (j.contains("configured") && j["configured"].is_array()) {
+            for (const json& id : j["configured"])
+                if (id.is_string()) m_configured.insert(id.get<std::string>());
+            for (const json& k : j.value("configured_unsure_kinds", json::array()))
+                if (k.is_string()) m_configured_unsure.insert(k.get<std::string>());
+            m_configured_known = true;
+            if (prune_unconfigured_locked(now_millis(), 0)) save_printers_locked();
+        }
     } catch (...) {}
 }
 
@@ -4748,6 +4888,9 @@ json HubServer::summary_json()
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
         p["instance"] = row.value("instance", 0);
+        // false: a leftover the slicer no longer has - the app offers Forget (POST
+        // /printers/<id>/forget). Absent while no window has listed its printers.
+        if (row.contains("configured")) p["configured"] = row["configured"];
         // The opaque per-hub id a Live Activity push carries instead of the printer id (the alerts'
         // thread-id), so the app can put a name to an activity the hub started by push.
         p["push_id"]  = AppPush::push_id(id);
@@ -6551,6 +6694,22 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         respond_json(client, 200, e.dump());
     } else if (r.path == "/hub/events" && r.method == "GET") {
         respond_json(client, 200, events_json(std::atoi(query_param(r.query, "since").c_str())).dump());
+    } else if (r.path == "/hub/printers" && r.method == "GET") {
+        // The remembered rows, as /summary builds on them: the slicer's Printers tab adds the
+        // leftovers (configured: false) to its own cards so they can be forgotten there too.
+        json j;
+        j["printers"] = printers_json();
+        respond_json(client, 200, j.dump());
+    } else if (r.path.compare(0, 14, "/hub/printers/") == 0 && r.method == "POST" && r.path.size() > 21 &&
+               r.path.compare(r.path.size() - 7, 7, "/forget") == 0) {
+        // The same forget as the phone plane's POST /r/<token>/printers/<id>/forget.
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
+        const std::string id = percent_decode(r.path.substr(14, r.path.size() - 21));
+        if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
+        const auto res = forget_printer(id);
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/phone" && r.method == "POST") {
         set_phone(query_param(r.query, "on") == "1", query_param(r.query, "token") /* only used by a hub with no link yet */);
         respond_json(client, 200, info_json().dump());
@@ -6880,6 +7039,21 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     // G-code archive's sidecars. The id is whatever /api/printers calls the printer, so it is
     // percent-decoded and then only ever compared against what a sidecar says; nothing from the
     // request reaches a file name (printer_thumbnail() builds the path from the sidecar's own id).
+    // POST /printers/<id>/forget - drop a remembered printer row the slicer no longer has (a test
+    // printer, a printer removed while the hub was not looking). JSON content type like every
+    // other POST here (a cross-site form cannot send one without a preflight); the body is ignored.
+    // 409 while the printer is still set up in the slicer: it would be back at the next poll.
+    if (r.method == "POST" && rest.compare(0, 10, "/printers/") == 0 && rest.size() > 17 &&
+        rest.compare(rest.size() - 7, 7, "/forget") == 0) {
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const std::string id = percent_decode(rest.substr(10, rest.size() - 17));
+        if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
+        const auto res = forget_printer(id);
+        respond_json(client, res.first, res.second);
+        return;
+    }
     if (r.method == "GET" && rest.compare(0, 10, "/printers/") == 0 && rest.size() > 10) {
         const std::string tail = rest.substr(10);
         const size_t      slash = tail.rfind('/');
@@ -7058,9 +7232,10 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
             { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall, plus lan_url / remote_url / ips (the two origins this hub answers on), the last-known printer rows and hub_instance"} },
-            { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s and stale). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
+            { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s, stale and configured - false for a leftover the slicer no longer has, absent until a slicer window has listed its printers). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
             { {"method", "GET"},  {"path", "/pair"},                {"description", "the pairing document: name (this PC), hub, version, hub_instance, urls {lan, remote}, ips, push {webpush, apns, fcm, unified}, token_version and features"} },
             { {"method", "GET"},  {"path", "/printers/{id}/thumbnail.png"}, {"description", "the running job's picture for that printer, from the G-code archive; 404 when there is none"} },
+            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): forget a remembered printer row the slicer no longer has (/summary row with configured: false - a removed or test printer). {ok, id, forgotten} on 200; 404 no such row; 409 while the printer is still set up in the slicer (it would be back at the next poll). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts"} },
             { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
             { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id, hub_instance}. hub_instance changes only when a data dir's hub settings are created, so a client can tell an id reset from an id it has already seen"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },
@@ -8342,6 +8517,38 @@ bool post_event(const std::string& event_json)
         .on_complete([&ok](std::string, unsigned status) { ok = status == 200; })
         .perform_sync();
     return ok;
+}
+
+std::pair<int, std::string> hub_printers()
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    int         status = 0;
+    std::string body;
+    Http::get("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers")
+        .timeout_connect(1).timeout_max(5)
+        .header("X-Hub-Secret", hf.secret)
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
+}
+
+std::pair<int, std::string> forget_printer(const std::string& printer_id)
+{
+    const HubFile hf = hub_file();
+    if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
+    int         status = 0;
+    std::string body;
+    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers/" + percent_encode(printer_id) + "/forget")
+        .timeout_connect(1).timeout_max(5)
+        .header("Content-Type", "application/json")
+        .header("X-Hub-Secret", hf.secret)
+        .set_post_body(std::string("{}")) // a bodyless POST hangs the fork's Http
+        .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+        .on_error([&](std::string b, std::string err, unsigned s) { status = s ? (int) s : 502; body = b.empty() ? json_error(err) : b; })
+        .perform_sync();
+    return { status == 0 ? 502 : status, body };
 }
 
 // Ask the hub to quit and say whether it accepted: hub_call() hides the status (its answer parses

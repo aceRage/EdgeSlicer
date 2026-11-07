@@ -49,6 +49,13 @@ Message parse_message(const std::string& msg)
         m.kind = m.job > 0 ? Message::Kind::Job : Message::Kind::Invalid;
         return m;
     }
+    if (starts_with(msg, "printers_forget:")) {
+        const std::string id = msg.substr(16);
+        if (!valid_printer_id(id)) return m;
+        m.id   = id;
+        m.kind = Message::Kind::Forget;
+        return m;
+    }
     if (starts_with(msg, "printers_open:")) {
         const std::string id = msg.substr(14);
         if (!valid_printer_id(id)) return m;
@@ -121,6 +128,33 @@ json page_payload(int status, const std::string& body, long long now_ms)
     out["ok"]    = false;
     out["error"] = "the printer list could not be read";
     return out;
+}
+
+void add_leftovers(json& payload, int hub_status, const std::string& hub_body)
+{
+    if (hub_status != 200 || !payload.is_object() || !payload.value("ok", false) || !payload.contains("printers") ||
+        !payload["printers"].is_array())
+        return;
+    json hub;
+    try { hub = json::parse(hub_body); } catch (...) { return; }
+    if (!hub.is_object() || !hub.contains("printers") || !hub["printers"].is_array()) return;
+    std::set<std::string> have;
+    for (const json& p : payload["printers"])
+        if (p.is_object() && p.contains("id") && p["id"].is_string()) have.insert(p["id"].get<std::string>());
+    for (const json& row : hub["printers"]) {
+        if (!row.is_object() || !row.contains("id") || !row["id"].is_string()) continue;
+        if (!(row.contains("configured") && row["configured"].is_boolean() && !row["configured"].get<bool>())) continue;
+        const std::string id = row["id"].get<std::string>();
+        if (!valid_printer_id(id) || have.count(id)) continue;
+        json p = row;
+        p["leftover"] = true;
+        p["online"]   = false;
+        for (const char* k : { "can_pause", "can_resume", "can_stop", "can_print", "can_upload", "controls", "print_error" })
+            p.erase(k);
+        if (row.contains("age_s") && row["age_s"].is_number()) p["seen_s"] = row["age_s"];
+        have.insert(id);
+        payload["printers"].push_back(std::move(p));
+    }
 }
 
 std::map<std::string, Target> targets_of(const json& printers)
