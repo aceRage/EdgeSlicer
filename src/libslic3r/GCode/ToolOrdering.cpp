@@ -56,8 +56,12 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
 
-    // Mixed color sublayer: a layer whose row prints as Ratio passes is filed under the pass that ends it.
-    if (current_object != nullptr && !current_object->local_z_intervals().empty()) {
+    // Mixed color sublayer: a layer whose row prints as Ratio passes is filed under the pass that ends it, so no
+    // nominal tool change follows the passes. Only without a prime tower: with one, the tower's tool-change plan
+    // and the G-code's nominal sequence must keep the ordinary resolve (as Subdivide does), or the planned and
+    // the requested tool changes no longer match (seen on the X1C tower).
+    if (current_object != nullptr && !current_object->local_z_intervals().empty() &&
+        current_object->print() != nullptr && !current_object->print()->has_wipe_tower()) {
         const int mixed_idx = mixed_mgr->mixed_index_from_filament_id(filament_id_1based, num_physical);
         if (mixed_idx >= 0)
             if (const unsigned int ratio_last = local_z_ratio_last_extruder(current_object->local_z_intervals(),
