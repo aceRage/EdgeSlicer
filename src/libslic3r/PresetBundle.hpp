@@ -7,6 +7,7 @@
 #include "enum_bitmask.hpp"
 #include "MixedFilament.hpp"
 #include "NozzleProcess.hpp"
+#include "NozzleRackMemory.hpp"
 
 #include <memory>
 #include <functional>
@@ -771,8 +772,22 @@ public:
     // Remember the current override as the default of the edited printer's model.
     void                        remember_nozzle_diameter_override(AppConfig &config) const;
     // After a printer switch: another printer model brings its own remembered sizes (none: the preset's); the same
-    // model keeps the project's sizes, cut to its extruder count.
-    void                        update_nozzle_diameter_override_for_printer(AppConfig &config);
+    // model keeps the project's sizes, cut to its extruder count. Another model (startup included) also gets its remembered
+    // nozzles back (restore_nozzle_rack). Returns true when a remembered rack was put back.
+    bool                        update_nozzle_diameter_override_for_printer(AppConfig &config);
+
+    // ---- The project's nozzles remembered per printer (NozzleRackMemory.hpp, owner bugs 2026-11-06) ----
+    // The nozzles of this project now: each extruder's size, flow type and rack.
+    NozzleRackMemory            current_nozzle_rack_memory() const;
+    // Remember them for the selected printer preset (app config section "nozzle_rack", key = preset name) and its model
+    // (section "nozzle_rack_model", key = printer_model). Not before the model's memory was restored (startup).
+    void                        remember_nozzle_rack(AppConfig &config) const;
+    // Put the remembered nozzles of the selected printer (else of its model) back into the project when they still fit the
+    // printer model (nozzle_rack_limits). Returns true when they were applied.
+    bool                        restore_nozzle_rack(const AppConfig &config);
+    // What the selected printer's model takes: every system variant of its printer_model with the same extruder count, and
+    // the selected preset itself (extruder_variant_list, default_nozzle_volume_type, sizes, rack capacity).
+    NozzleRackLimits            nozzle_rack_limits() const;
 
     // ---- Per-nozzle process P8: a whole process profile per tool (NozzleProcess.hpp "P8") ----
     // Every tool of a printer that takes per-nozzle processes has a process profile: the one chosen for it
