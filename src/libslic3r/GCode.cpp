@@ -9481,6 +9481,20 @@ LayerResult GCode::process_layer(const Print& print,
 
         nominal_layer_start_extruder = local_z_phase_b_active_extruder;
 
+        // Mixed color sublayer, Bambu Lab (Type1) tower: the tower's plan for this layer does not know the Ratio
+        // passes' own filament changes, so its next planned change starts from the filament the layer began with.
+        // Go back to it before the planned changes, or the tower and the G-code disagree (append_tcr throws).
+        if (has_wipe_tower && m_wipe_tower && wipe_tower_type() == WipeTowerType::Type1 &&
+            std::any_of(local_z_pass_refs.begin(), local_z_pass_refs.end(), [](const LocalZPassRef& ref) {
+                return ref.bucket != nullptr && ref.bucket->plan != nullptr && ref.bucket->plan->ratio_pass;
+            })) {
+            const int planned_tool = m_wipe_tower->planned_current_tool();
+            if (planned_tool >= 0 && m_writer.extruder() != nullptr && int(m_writer.extruder()->id()) != planned_tool) {
+                gcode += this->set_extruder(unsigned(planned_tool), print_z);
+                nominal_layer_start_extruder = planned_tool;
+            }
+        }
+
         if (std::abs(m_writer.get_position().z() - nominal_layer_z) > EPSILON) {
             gcode += this->retract(false, false, LiftType::NormalLift);
             gcode += m_writer.travel_to_z(nominal_layer_z, "Local-Z return to nominal layer");
