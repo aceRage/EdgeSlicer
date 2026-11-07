@@ -2715,7 +2715,7 @@ void PresetBundle::export_selections(AppConfig &config)
     config.set_printer_setting(printer_name, "curr_bed_type", config.get("curr_bed_type"));
     // Per-nozzle process P1: remembered per printer, like its filaments.
     // Written empty too, so going back to the plate's process on every nozzle is remembered as well.
-    if (supports_nozzle_processes(printers.get_edited_preset().config)) {
+    if (supports_nozzle_processes(this->nozzle_tool_config())) {
         const auto *nozzle_processes = project_config.option<ConfigOptionStrings>("nozzle_process_presets");
         config.set_printer_setting(printer_name, "nozzle_process_presets",
                                    nozzle_processes != nullptr && has_nozzle_process_presets(project_config) ?
@@ -3359,8 +3359,7 @@ std::string PresetBundle::nozzle_tool_selection(size_t tool) const
 
 bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) const
 {
-    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
+    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(this->nozzle_tool_config()))
         return false;
     // Per-nozzle process P7: the size the extruder carries in this project. P9: `extruder` is a tool, a rack slot past the
     // extruders (its own size).
@@ -3378,7 +3377,7 @@ bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) c
 bool PresetBundle::nozzle_process_fits_size(const Preset &process, double nozzle) const
 {
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
+    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(this->nozzle_tool_config()))
         return false;
 
     const Preset &binding  = nozzle_process_binding(process, this->prints);
@@ -3794,7 +3793,7 @@ void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
     // Per-nozzle process P8: every tool's own profile (chosen, auto-picked or the plate's) with its changes. A tool whose
     // effective per-tool values equal the plate's is no source, so a job where every tool follows the plate is untouched.
     out.set_key_value("nozzle_process_missing", new ConfigOptionInts());
-    if (!supports_nozzle_processes(this->printers.get_edited_preset().config))
+    if (!supports_nozzle_processes(this->nozzle_tool_config()))
         return;
     const size_t extruders = this->effective_nozzle_diameters().size();
     const DynamicPrintConfig &plate = this->plate_print_preset().config;
@@ -3889,7 +3888,7 @@ std::string PresetBundle::auto_nozzle_process(size_t extruder, bool *missing) co
     if (missing != nullptr)
         *missing = false;
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (!supports_nozzle_processes(printer))
+    if (!supports_nozzle_processes(this->nozzle_tool_config()))
         return std::string();
     // P9: `extruder` is a tool (an extruder or a rack slot with its own size).
     const NozzleToolRef ref = this->nozzle_tool_ref(extruder);
@@ -3964,11 +3963,14 @@ PresetBundle::NozzleToolProcess PresetBundle::nozzle_tool_process_info(size_t ex
 bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfig &out) const
 {
     const DynamicPrintConfig &plate = this->plate_print_preset().config;
+    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
     if (m_tool_view.extruder == int(extruder)) {
         out = nozzle_tool_process(plate, this->prints.get_edited_preset().config, nullptr);
+        // The view shows the plate's layer height; the tool's chosen process (the selected one) keeps its own.
+        if (info.kind == NozzleToolProcessKind::Chosen && !m_tool_view.follows_plate)
+            set_nozzle_tool_layer_height(out, this->prints.get_selected_preset().config);
         return true;
     }
-    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
     if (info.kind == NozzleToolProcessKind::Missing) {
         out = plate;
         return false;
@@ -3979,6 +3981,9 @@ bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfi
     const DynamicPrintConfig *own  = it != edits.end() ? &it->second : nullptr;
     const Preset *preset = info.kind == NozzleToolProcessKind::FollowsPlate ? nullptr : this->prints.find_preset(info.name, false);
     out = nozzle_tool_process(plate, preset != nullptr ? preset->config : plate, own);
+    // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate (an automatic pick's does not).
+    if (info.kind == NozzleToolProcessKind::Chosen && preset != nullptr)
+        set_nozzle_tool_layer_height(out, preset->config);
     return true;
 }
 
@@ -4031,7 +4036,7 @@ bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
         return true;
     this->end_nozzle_tool_view();
     // P9: any tool, the rack slots past the extruders included.
-    if (!supports_nozzle_processes(this->printers.get_edited_preset().config) || extruder >= this->nozzle_tool_count() ||
+    if (!supports_nozzle_processes(this->nozzle_tool_config()) || extruder >= this->nozzle_tool_count() ||
         this->prints.get_selected_idx() == size_t(-1))
         return false;
     const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);

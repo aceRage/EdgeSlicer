@@ -6,6 +6,7 @@
 #include "../ExtrusionEntity.hpp"
 #include "../ExtrusionEntityCollection.hpp"
 #include "../Layer.hpp"
+#include "../NozzleProcess.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../libslic3r.h"
@@ -267,6 +268,11 @@ SupportMergePlan make_support_merge_plan(const PrintObject &object)
             candidate.nozzle_diameter, reference_nozzle, base_height);
         candidate.band_size       = candidate.nozzle_diameter > EPSILON ?
             adaptive_layer_band_size(candidate.nozzle_diameter, reference_nozzle, base_height, candidate.window) : 1;
+        // H3C fix: a process chosen for a coarser nozzle sets its slab height, as for the walls (compute_adaptive_merge_groups).
+        if (candidate.nozzle_diameter > reference_nozzle + EPSILON)
+            candidate.band_size = nozzle_process_band_size(nozzle_layer_height_for_filament(print_config, (unsigned int) filament_id),
+                                                           candidate.band_size, base_height, candidate.window.min_height,
+                                                           candidate.window.max_height);
         return candidate;
     };
     auto ensure_fixed_grid = [&plan](const SupportMergePlan::Candidate &candidate) {
