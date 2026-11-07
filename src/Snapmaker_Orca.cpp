@@ -4064,6 +4064,7 @@ int CLI::run(int argc, char **argv)
         auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
             DynamicPrintConfig base;
             bool               has_base = false;
+            const bool         chosen   = !name.empty(); // named in the project / on the command line, not picked for its size
             std::string        filament_id_unused;
             if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
                 name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
@@ -4089,6 +4090,9 @@ int CLI::run(int argc, char **argv)
             }
             const auto it = edits.find(id);
             store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate, as in the GUI.
+            if (chosen && has_base)
+                set_nozzle_tool_layer_height(store, base);
             return true;
         };
 
