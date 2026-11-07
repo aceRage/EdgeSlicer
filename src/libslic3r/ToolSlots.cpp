@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <set>
 #include <sstream>
@@ -961,6 +962,40 @@ std::vector<std::string> rack_override_from_reported(const std::vector<std::vect
         std::string text;
         for (double d : mounted_then_rack[e])
             text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(d);
+        out[e] = text;
+    }
+    if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))
+        out.clear();
+    return out;
+}
+
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity)
+{
+    std::vector<std::string> out = current;
+    if (out.size() < mounted_then_rack.size())
+        out.resize(mounted_then_rack.size());
+    for (size_t e = 0; e < mounted_then_rack.size(); ++e) {
+        const int slots = e < capacity.size() ? capacity[e] : std::numeric_limits<int>::max();
+        // One nozzle (or an extruder without a rack) is no rack to choose from: leave the extruder as it was.
+        if (mounted_then_rack[e].size() < 2 || slots < 2)
+            continue;
+        // What an unannotated slot means on this extruder (extruder_rack_nozzles): the extruder's type, Standard for Hybrid.
+        NozzleVolumeType bare = e < extruder_types.size() ? NozzleVolumeType(extruder_types[e]) : nvtStandard;
+        if (bare == nvtHybrid)
+            bare = nvtStandard;
+        std::string text;
+        size_t      written = 0;
+        for (const RackNozzle &n : mounted_then_rack[e]) {
+            if (written == size_t(slots))
+                break; // more nozzles than the printer profile has slots: the rack cannot list them
+            const NozzleVolumeType type = n.volume_given && n.volume_type != nvtHybrid ? n.volume_type : bare;
+            text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(n.diameter);
+            if (type != bare)
+                text += std::string(":") + nozzle_volume_word(type);
+            ++written;
+        }
         out[e] = text;
     }
     if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))

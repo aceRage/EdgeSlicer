@@ -57,3 +57,128 @@ body.pm-page #PtRoot {
 	display: flex;
 	padding: 0;
 }
+
+/* Rename (F2 / double-click): the field in the Name cell, the printer part after it, and "Only this
+   printer" when the filament has variants for other printers. */
+.pm-edit {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	min-width: 0;
+}
+
+.pm-edit-input {
+	flex: 1 1 auto;
+	min-width: 60px;
+	height: 24px;
+	box-sizing: border-box;
+	padding: 0 6px;
+	border: 1px solid var(--pt-focus-ring);
+	border-radius: 4px;
+	background-color: var(--pt-input-bg);
+	color: var(--pt-fg);
+	font: inherit;
+	outline: none;
+}
+
+.pm-edit-input.invalid {
+	border-color: var(--pt-error);
+	box-shadow: 0 0 0 1px var(--pt-error);
+}
+
+.pm-edit-input[readonly] {
+	opacity: 0.7;
+}
+
+.pm-edit-suffix {
+	flex: 0 1 auto;
+	color: var(--pt-muted);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.pm-edit-scope {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-size: 11px;
+	color: var(--pt-muted);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+/* Row buttons: rename and delete (user presets) */
+.pt-td.actions {
+	display: flex;
+	justify-content: center;
+	padding: 0;
+}
+
+.pm-actions {
+	display: inline-flex;
+	gap: 2px;
+}
+
+.pm-act {
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: 4px;
+	background: transparent;
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.pm-act svg {
+	width: 14px;
+	height: 14px;
+	fill: var(--pt-muted);
+}
+
+.pm-act:hover {
+	background-color: var(--pt-hover);
+}
+
+.pm-act-delete:hover svg {
+	fill: var(--pt-error);
+}
+
+.pm-act:focus-visible {
+	outline: 1px solid var(--pt-focus-ring);
+}
+
+/* In the managers the Enabled tick shows in its checkbox only: an enabled row is not tinted (Printer
+   Selection keeps its tint), a row that is not enabled has a muted name. The tint belongs to the
+   selection (Ctrl / Shift+click): its own colour and a bar on the left, over the focus and hover. */
+body.pm-page .pt-body .pt-row.on {
+	background-color: transparent;
+}
+
+body.pm-page .pt-body .pt-row.on:hover {
+	background-color: var(--pt-hover);
+}
+
+body.pm-page .pt-body .pt-row.focus {
+	background-color: var(--pt-focus-bg);
+}
+
+body.pm-page .pt-body .pt-row:not(.on) .pm-name {
+	color: var(--pt-muted);
+}
+
+body.pm-page .pt-body .pt-row.sel,
+body.pm-page .pt-body .pt-row.sel:hover,
+body.pm-page .pt-body .pt-row.sel.focus {
+	background-color: var(--pt-sel-bg);
+	box-shadow: inset 4px 0 0 var(--pt-sel-bar);
+}
+
+body.pm-page .pt-body .pt-row.sel.focus:focus {
+	box-shadow: inset 4px 0 0 var(--pt-sel-bar), inset 0 0 0 1px var(--pt-focus-ring);
+}

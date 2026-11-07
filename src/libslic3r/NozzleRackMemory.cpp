@@ -169,6 +169,16 @@ bool parse_nozzle_rack_memory(const std::string &text, NozzleRackMemory &out)
     return true;
 }
 
+std::vector<std::string> nozzle_rack_memory_candidates(bool system_preset, const std::string &by_name, const std::string &by_model)
+{
+    std::vector<std::string> out;
+    for (const std::string *text : system_preset ? std::vector<const std::string *>{ &by_model, &by_name } :
+                                                   std::vector<const std::string *>{ &by_name, &by_model })
+        if (!text->empty() && std::find(out.begin(), out.end(), *text) == out.end())
+            out.push_back(*text);
+    return out;
+}
+
 bool nozzle_type_of_extruder_variant(const std::string &variant, NozzleVolumeType &out)
 {
     std::string text = variant;

@@ -654,6 +654,15 @@ public:
     // Delete the current preset, activate the first visible preset.
     // returns true if the preset was deleted successfully.
     bool            delete_preset(const std::string& name);
+    // Renames a user preset (not a system, default, external or project preset): the preset keeps its
+    // config, filament_id, inherits and base_id; its file moves to the new name in the same folder (the
+    // old .json / .info go); the collection stays sorted; user presets that inherit it point at the new
+    // name and are saved; the selection (and the edited copy, edits kept) follows when it was selected.
+    // false, with the reason in *error, when the preset is not a user preset, the new name is taken or
+    // the file cannot be written; nothing changes then.
+    bool            rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error = nullptr);
+    // The user presets whose "inherits" names the preset.
+    std::vector<std::string> user_presets_inheriting(const std::string &name) const;
 
     // Enable / disable the "- default -" preset.
     void            set_default_suppressed(bool default_suppressed);
@@ -1014,6 +1023,40 @@ private:
     // Orca: used for validation only
     int m_errors = 0;
 };
+
+// The rules a preset name must follow, shared by the Save preset dialog and the preset managers' rename
+// (GUI-free; the GUI turns the issue into its message).
+struct PresetNameCheck
+{
+    enum class Level { Ok, Warning, Invalid };
+    enum class Issue {
+        None,
+        IllegalCharacters,  // one of preset_name_illegal_characters()
+        IllegalSuffix,      // contains "(modified)"
+        Reserved,           // "Default Setting" / "Default Filament" / "Default Printer"
+        SystemExists,       // a system or default preset has the name
+        Exists,             // a preset (compatible with the current printer) has the name
+        ExistsIncompatible, // a preset that is not compatible with the current printer has the name
+        Empty,
+        LeadingSpace,
+        TrailingSpace,
+        AliasName,          // the name of a system preset alias
+        PrinterSuffix,      // rename of a filament " @printer" variant: the edited part contains "@"
+    };
+    Level level = Level::Ok;
+    Issue issue = Issue::None;
+    bool  ok() const { return level != Level::Invalid; }
+};
+enum class PresetNameUse {
+    Save,   // saving: an existing user preset of that name is a warning (it is overwritten)
+    Rename, // renaming: no preset may have the name already (nothing is overwritten by a rename)
+};
+// "<>[]:/\|?*" and the double quote
+const char *preset_name_illegal_characters();
+// The checks of the Save preset dialog, in its order. current_name: the preset being saved or renamed
+// (its own name is not "taken").
+PresetNameCheck validate_preset_name(const PresetCollection &presets, const std::string &name, const std::string &current_name,
+                                     PresetNameUse use = PresetNameUse::Save);
 
 // Printer supports the FFF and SLA technologies, with different set of configuration values,
 // therefore this PresetCollection needs to handle two defaults.
