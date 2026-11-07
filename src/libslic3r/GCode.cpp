@@ -8245,10 +8245,13 @@ LayerResult GCode::process_layer(const Print& print,
                     print.used_printing_filaments(used_filaments);
                 const coordf_t support_slab_height   = support_layer.base_slab_height > EPSILON ? support_layer.base_slab_height : support_layer.height;
                 const coordf_t interface_slab_height = support_layer.interface_slab_height > EPSILON ? support_layer.interface_slab_height : support_layer.height;
-                auto nozzle_can_print_height = [&print, &used_filaments](unsigned int extruder_id, coordf_t height) {
+                // The same widened window the merge plan cuts this nozzle's slabs in (adaptive_ladder_height_range).
+                auto nozzle_can_print_height = [&print, &object, &used_filaments](unsigned int extruder_id, coordf_t height) {
                     const double nozzle = nozzle_diameter_for_filament(print.config(), extruder_id + 1);
                     return nozzle <= EPSILON ||
-                           adaptive_layer_height_range_for_nozzle(print.config(), extruder_id + 1, used_filaments).contains(height);
+                           adaptive_ladder_height_range(
+                               adaptive_layer_height_range_for_nozzle(print.config(), extruder_id + 1, used_filaments), nozzle,
+                               print.adaptive_merge_reference_nozzle(), object.slicing_parameters().layer_height).contains(height);
                 };
                 // Only the roles still resolved here constrain the choice: a filament already pinned above (merge plan,
                 // wiping override, Chameleon) is not picked by the code below.
