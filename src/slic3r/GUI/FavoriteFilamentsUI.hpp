@@ -44,6 +44,11 @@ bool                  is_favorite(const Preset &preset);
 // Stars or un-stars the key, saves the app config and notifies the pickers. Returns the new state.
 bool                  toggle(const std::string &key, Kind kind = Kind::Filament);
 
+// A user preset was renamed / deleted: its star follows the new name / goes (saved, pickers told).
+// Nothing happens when the preset was not a favourite.
+void rename_key(const std::string &old_key, const std::string &new_key, Kind kind = Kind::Filament);
+void remove_key(const std::string &key, Kind kind = Kind::Filament);
+
 // Pickers that list presets of a kind subscribe to hear about a change made anywhere (a star in the AMS
 // dialog regroups the sidebar too). The returned id unsubscribes.
 int  subscribe(std::function<void()> on_changed, Kind kind = Kind::Filament);

@@ -3523,6 +3523,90 @@ bool PresetBundle::prune_nozzle_processes()
     return true;
 }
 
+PresetBundle::PresetUsage PresetBundle::preset_usage(Preset::Type type, const std::string &name) const
+{
+    PresetUsage usage;
+    if (name.empty())
+        return usage;
+    if (type == Preset::TYPE_FILAMENT) {
+        for (size_t i = 0; i < this->filament_presets.size(); ++i)
+            if (this->filament_presets[i] == name)
+                usage.filament_slots.push_back(i);
+        usage.selected = this->filaments.get_selected_idx() != size_t(-1) && this->filaments.get_selected_preset_name() == name;
+    } else if (type == Preset::TYPE_PRINT) {
+        usage.selected = this->prints.get_selected_idx() != size_t(-1) && this->prints.get_selected_preset_name() == name;
+        if (const auto *names = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets"))
+            for (size_t e = 0; e < names->values.size(); ++e)
+                if (names->values[e] == name)
+                    usage.nozzles.push_back(e);
+        for (const auto &[id, slot_name] : nozzle_slot_process_names(this->project_config))
+            if (slot_name == name)
+                usage.nozzle_slots.push_back(id);
+    }
+    return usage;
+}
+
+bool PresetBundle::repoint_preset_references(Preset::Type type, const std::string &from, const std::string &to)
+{
+    if (from.empty() || from == to)
+        return false;
+    bool changed = false;
+    if (type == Preset::TYPE_FILAMENT) {
+        if (to.empty())
+            return false; // the caller moves the slots to the next visible preset
+        for (std::string &slot : this->filament_presets)
+            if (slot == from) {
+                slot    = to;
+                changed = true;
+            }
+        return changed;
+    }
+    if (type != Preset::TYPE_PRINT)
+        return false;
+    if (auto *opt = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets")) {
+        std::vector<std::string> names = opt->values;
+        for (size_t e = 0; e < names.size(); ++e)
+            if (names[e] == from) {
+                names[e] = to;
+                if (to.empty())
+                    this->set_nozzle_process_edits(e, DynamicPrintConfig()); // its changes went with it
+                changed = true;
+            }
+        if (changed)
+            opt->values = nozzle_process_stored(std::move(names));
+    }
+    std::map<std::string, std::string> slots = nozzle_slot_process_names(this->project_config);
+    bool slots_changed = false;
+    std::set<std::string> cleared;
+    for (auto it = slots.begin(); it != slots.end();) {
+        if (it->second != from) {
+            ++it;
+            continue;
+        }
+        slots_changed = true;
+        if (to.empty()) {
+            cleared.insert(it->first);
+            it = slots.erase(it);
+        } else {
+            it->second = to;
+            ++it;
+        }
+    }
+    if (slots_changed) {
+        this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(serialize_nozzle_slot_process_names(slots)));
+        if (!cleared.empty()) {
+            NozzleProcessEdits edits = this->nozzle_process_edits_map();
+            bool               dropped = false;
+            for (const std::string &id : cleared)
+                dropped |= edits.erase(id) > 0;
+            if (dropped)
+                this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings(serialize_nozzle_process_edits(edits)));
+        }
+        changed = true;
+    }
+    return changed;
+}
+
 void PresetBundle::update_nozzle_processes_for_printer(AppConfig &config)
 {
     const std::string printer_name = this->printers.get_selected_preset_name();
