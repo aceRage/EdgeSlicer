@@ -40,6 +40,13 @@ std::string serialize_nozzle_rack_memory(const NozzleRackMemory &memory);
 // False (and `out` empty) when the text is empty or not a rack memory.
 bool parse_nozzle_rack_memory(const std::string &text, NozzleRackMemory &out);
 
+// The remembered texts a printer preset tries, in order, empty ones left out (owner bug 2026-11-07). A system preset is one
+// nozzle variant of its model: the same machine and the same rack, so the model's entry (the last nozzles set on any variant)
+// comes first; the entry under the variant's own name was written the last time that variant was selected and can be older
+// (a rack of that variant's size, put back after a printer switch picked that variant). A user preset may stand for another
+// machine of the model: its own entry first, the model's as the fallback.
+std::vector<std::string> nozzle_rack_memory_candidates(bool system_preset, const std::string &by_name, const std::string &by_model);
+
 // "Direct Drive TPU285" -> nvtTPU285 (the longest flow name an extruder_variant_list entry ends with); false when none.
 bool nozzle_type_of_extruder_variant(const std::string &variant, NozzleVolumeType &out);
 

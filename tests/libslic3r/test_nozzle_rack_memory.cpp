@@ -6,10 +6,13 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/BambuDualNozzleSync.hpp"
+#include "libslic3r/NozzleOverride.hpp"
 #include "libslic3r/NozzleRackMemory.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/ProjectSwapGuard.hpp"
+#include "libslic3r/ToolSlots.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -256,10 +259,29 @@ TEST_CASE("H3C and H2C racks come back after a printer switch or a restart", "[N
 
     SECTION("a memory that no longer fits is dropped: the printer's own defaults")
     {
-        config.set("nozzle_rack", "Bambu Lab H3C 0.4 nozzle", "{\"diameters\":[0.4],\"racks\":[\"0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4\"]}");
-        select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
-        CHECK_FALSE(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
-        CHECK(project_racks(b).empty());
+        const std::string ten = "{\"diameters\":[0.4],\"racks\":[\"0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4,0.4\"]}";
+        SECTION("only the variant's own entry is bad: the model's entry is used")
+        {
+            config.set("nozzle_rack", "Bambu Lab H3C 0.4 nozzle", ten);
+            select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+            CHECK(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
+            CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+        }
+        SECTION("only the model's entry is bad: the variant's own entry is used")
+        {
+            config.set("nozzle_rack_model", "Bambu Lab H3C", ten);
+            select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+            CHECK(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
+            CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+        }
+        SECTION("both are bad")
+        {
+            config.set("nozzle_rack", "Bambu Lab H3C 0.4 nozzle", ten);
+            config.set("nozzle_rack_model", "Bambu Lab H3C", ten);
+            select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+            CHECK_FALSE(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
+            CHECK(project_racks(b).empty());
+        }
     }
 
     SECTION("the same model's variant switch keeps the rack and is remembered under the new name")
@@ -309,4 +331,162 @@ TEST_CASE("A project switch neither writes nor restores the nozzle memory", "[No
     select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
     CHECK(select_printer(b, config, "Bambu Lab H2C 0.4 nozzle"));
     CHECK(project_racks(b) == std::vector<std::string>{ "", h2c_rack });
+}
+
+// ---- Owner bugs 2026-11-07 (H3C): cross-printer rack bleed and "Sync from printer" on a single-extruder rack -----------------
+
+TEST_CASE("Which remembered entry a printer preset tries first", "[NozzleRackMemory]")
+{
+    // A system variant is one machine with its model's other variants: the model's last rack wins over the variant's older entry.
+    CHECK(nozzle_rack_memory_candidates(true, "name", "model") == std::vector<std::string>{ "model", "name" });
+    // A user preset may be another machine of the model: its own entry first.
+    CHECK(nozzle_rack_memory_candidates(false, "name", "model") == std::vector<std::string>{ "name", "model" });
+    CHECK(nozzle_rack_memory_candidates(true, "", "model") == std::vector<std::string>{ "model" });
+    CHECK(nozzle_rack_memory_candidates(false, "same", "same") == std::vector<std::string>{ "same" });
+    CHECK(nozzle_rack_memory_candidates(true, "", "").empty());
+}
+
+TEST_CASE("H2S 0.8 then H3C: the H3C keeps its own rack", "[NozzleRackMemory][PresetBundle][BblH3C]")
+{
+    PresetBundle     &b = bbl_bundle();
+    AppConfig         config;
+    const std::string h3c_rack = "0.4,0.6,0.4,0.4,0.4,0.4,0.4,0.4:tpu285,0.4";
+
+    // The owner's H3C: a rack set on the 0.4 variant, remembered.
+    select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+    select_printer(b, config, "Bambu Lab H3C 0.4 nozzle");
+    REQUIRE(b.set_rack_nozzle_override(0, h3c_rack));
+    b.remember_nozzle_rack(config);
+    b.remember_nozzle_diameter_override(config);
+    const std::string h3c_model_entry = config.get("nozzle_rack_model", "Bambu Lab H3C");
+    REQUIRE_FALSE(h3c_model_entry.empty());
+    // An older entry under the 0.8 variant's own name: every slot 0.8, from a time the H3C sat on that variant.
+    config.set("nozzle_rack", "Bambu Lab H3C 0.8 nozzle", "{\"diameters\":[0.8],\"types\":[0],\"racks\":[]}");
+
+    // The H2S: 0.8 in the main nozzle-size selector (its 0.8 variant), remembered as the H2S's.
+    select_printer(b, config, "Bambu Lab H2S 0.4 nozzle");
+    CHECK(project_racks(b).empty()); // the H3C's rack does not come along
+    select_printer(b, config, "Bambu Lab H2S 0.8 nozzle");
+    CHECK(b.effective_nozzle_diameters() == std::vector<double>{ 0.8 });
+    b.remember_nozzle_rack(config);
+    b.remember_nozzle_diameter_override(config);
+    // The H2S's 0.8 never changes what the H3C remembers.
+    CHECK(config.get("nozzle_rack_model", "Bambu Lab H3C") == h3c_model_entry);
+    CHECK(config.has("nozzle_rack_model", "Bambu Lab H2S"));
+
+    SECTION("the printer combo opens the H3C on the variant of its own nozzle, not the H2S's 0.8")
+    {
+        // get_similar_printer_preset gives the H2S's variant; the remembered nozzles pick the H3C's own.
+        CHECK(b.printer_preset_for_remembered_nozzles(config, "Bambu Lab H3C 0.8 nozzle") == "Bambu Lab H3C 0.4 nozzle");
+        CHECK(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
+        CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+        CHECK(b.effective_nozzle_diameters() == std::vector<double>{ 0.4 });
+        CHECK(b.printer_variant_for_nozzle_sizes().empty()); // already on the 0.4 variant
+    }
+    SECTION("landing on the 0.8 variant anyway: the model's rack, not the variant's stale all-0.8 entry; the variant follows")
+    {
+        CHECK(select_printer(b, config, "Bambu Lab H3C 0.8 nozzle"));
+        CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+        CHECK(b.effective_nozzle_diameters() == std::vector<double>{ 0.4 });
+        CHECK(b.printer_variant_for_nozzle_sizes() == "Bambu Lab H3C 0.4 nozzle");
+    }
+    SECTION("back to the H2S, 0.6, back to the H3C: still its own rack")
+    {
+        select_printer(b, config, "Bambu Lab H3C 0.4 nozzle");
+        select_printer(b, config, "Bambu Lab H2S 0.6 nozzle");
+        b.remember_nozzle_rack(config);
+        CHECK(b.printer_preset_for_remembered_nozzles(config, "Bambu Lab H3C 0.6 nozzle") == "Bambu Lab H3C 0.4 nozzle");
+        CHECK(select_printer(b, config, "Bambu Lab H3C 0.6 nozzle"));
+        CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+        CHECK(b.effective_nozzle_diameters() == std::vector<double>{ 0.4 });
+    }
+    SECTION("a nozzle change handled before the Printer tab caught up stores nothing under the new model")
+    {
+        // The H2S project (0.8 variant, a 0.6 override) is still in place when the H3C preset is already selected.
+        REQUIRE(b.set_nozzle_diameter_override({ 0.6 }));
+        b.remember_nozzle_diameter_override(config);
+        const std::string h2s_sizes = config.get("nozzle_diameter_override", "Bambu Lab H2S");
+        const bool        had_h3c   = config.has("nozzle_diameter_override", "Bambu Lab H3C");
+        const std::string h3c_sizes = had_h3c ? config.get("nozzle_diameter_override", "Bambu Lab H3C") : std::string();
+        REQUIRE(b.printers.select_preset_by_name("Bambu Lab H3C 0.4 nozzle", true));
+        b.remember_nozzle_diameter_override(config);
+        b.remember_nozzle_rack(config);
+        CHECK(config.has("nozzle_diameter_override", "Bambu Lab H3C") == had_h3c);
+        if (had_h3c)
+            CHECK(config.get("nozzle_diameter_override", "Bambu Lab H3C") == h3c_sizes);
+        CHECK(config.get("nozzle_rack_model", "Bambu Lab H3C") == h3c_model_entry);
+        CHECK(config.get("nozzle_diameter_override", "Bambu Lab H2S") == h2s_sizes);
+        // The Printer tab's update then brings the H3C's own nozzles.
+        CHECK(b.update_nozzle_diameter_override_for_printer(config));
+        CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+    }
+    SECTION("a restart after the switches: the H3C's rack")
+    {
+        AppConfig restarted;
+        for (const char *section : { "nozzle_rack", "nozzle_rack_model", "nozzle_diameter_override" })
+            for (const auto &kv : config.get_section(section))
+                restarted.set(section, kv.first, kv.second);
+        b.project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values.clear();
+        select_printer(b, restarted, "Bambu Lab X1 Carbon 0.4 nozzle");
+        CHECK(select_printer(b, restarted, "Bambu Lab H3C 0.4 nozzle"));
+        CHECK(project_racks(b) == std::vector<std::string>{ h3c_rack });
+    }
+}
+
+TEST_CASE("H3C Sync from printer: all nine slots with their sizes and types", "[NozzleRackMemory][Sync][BblH3C]")
+{
+    // What an H3C reports: its mounted nozzle (pos 0) and rack positions 0x10 + n, in any order.
+    DualNozzleSync::PrinterState state;
+    state.physical_extruder_map = { 0 };
+    auto add = [&state](int pos, const char *d, NozzleVolumeType t, bool normal = true) {
+        DualNozzleSync::PrinterNozzle n;
+        n.pos      = pos;
+        n.diameter = d;
+        n.volume   = t;
+        n.normal   = normal;
+        state.nozzles.push_back(n);
+    };
+    add(0, "0.4", nvtStandard);
+    add(0x13, "0.2", nvtStandard);
+    add(0x10, "0.6", nvtHighFlow);
+    add(0x11, "0.4", nvtTPU285);
+    add(0x12, "0.8", nvtStandard, false); // not usable
+    add(0x14, "0.4", nvtStandard);
+    add(0x15, "0.4", nvtStandard);
+    add(0x16, "0.4", nvtHighFlow);
+    add(0x17, "0.4", nvtStandard);
+    add(0x18, "0.6", nvtStandard);
+
+    const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(state, 1);
+    REQUIRE(layout.size() == 1);
+    REQUIRE(layout[0].size() == 9);
+    CHECK(reported_rack_layout(state, 1) == std::vector<std::vector<double>>{ { 0.4, 0.6, 0.4, 0.2, 0.4, 0.4, 0.4, 0.4, 0.6 } });
+
+    const std::string synced = "0.4,0.6:high_flow,0.4:tpu285,0.2,0.4,0.4,0.4:high_flow,0.4,0.6";
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 9 }) == std::vector<std::string>{ synced });
+    // On a High Flow extruder an unannotated slot is High Flow: Standard slots name their type.
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtHighFlow) }, { 9 }) ==
+          std::vector<std::string>{ "0.4:standard,0.6,0.4:tpu285,0.2:standard,0.4:standard,0.4:standard,0.4,0.4:standard,0.6:standard" });
+    // No more slots than the profile has; an extruder without a rack keeps its text.
+    CHECK(rack_override_from_reported(layout, { "" }, { int(nvtStandard) }, { 3 }) == std::vector<std::string>{ "0.4,0.6:high_flow,0.4:tpu285" });
+    CHECK(rack_override_from_reported(layout, { "old" }, { int(nvtStandard) }, { 1 }) == std::vector<std::string>{ "old" });
+    // A report without rack nozzles changes nothing.
+    DualNozzleSync::PrinterState mounted_only;
+    mounted_only.physical_extruder_map = { 0 };
+    mounted_only.nozzles.push_back(state.nozzles.front());
+    CHECK(rack_override_from_reported(reported_rack_nozzles(mounted_only, 1), { "" }, { int(nvtStandard) }, { 9 }).empty());
+
+    // The synced rack fits the H3C, is remembered and comes back after a printer switch.
+    PresetBundle &b = bbl_bundle();
+    AppConfig     config;
+    select_printer(b, config, "Bambu Lab X1 Carbon 0.4 nozzle");
+    select_printer(b, config, "Bambu Lab H3C 0.4 nozzle");
+    REQUIRE(b.nozzle_rack_limits().capacity == std::vector<int>{ 9 });
+    REQUIRE(b.set_rack_nozzle_override(rack_override_from_reported(layout, { b.rack_nozzle_override(0) }, { int(nvtStandard) },
+                                                                   b.nozzle_rack_limits().capacity)));
+    CHECK(validate_nozzle_rack_memory(b.current_nozzle_rack_memory(), b.nozzle_rack_limits()).empty());
+    b.remember_nozzle_rack(config);
+    select_printer(b, config, "Bambu Lab H2S 0.8 nozzle");
+    CHECK(select_printer(b, config, "Bambu Lab H3C 0.4 nozzle"));
+    CHECK(project_racks(b) == std::vector<std::string>{ synced });
 }

@@ -1449,6 +1449,21 @@ struct Sidebar::priv
     ScalableButton* m_printer_setting = nullptr;
     wxStaticText* m_text_printer_settings = nullptr;
     wxPanel* m_panel_printer_content = nullptr;
+    // Section chevrons in the Printer / Filament Management title bars: down when the section is expanded, right when it is
+    // collapsed. The state is read from the content panel (collapsed = max height 0), so every path that folds or unfolds a
+    // section only has to call update_section_chevrons() afterwards.
+    ScalableButton* m_printer_chevron = nullptr;
+    ScalableButton* m_filament_chevron = nullptr;
+    void update_section_chevrons()
+    {
+        auto flip = [](ScalableButton *chevron, wxWindow *content) {
+            if (chevron == nullptr || content == nullptr)
+                return;
+            chevron->SetBitmap_(content->GetMaxHeight() == 0 ? "chevron_right" : "chevron_down");
+        };
+        flip(m_printer_chevron, m_panel_printer_content);
+        flip(m_filament_chevron, m_panel_filament_content);
+    }
 
     // nozzle notebook  and related controls
     CustomNotebook*                  m_nozzle_notebook{nullptr};
@@ -2369,9 +2384,19 @@ Sidebar::Sidebar(Plater *parent)
         p->m_panel_printer_title = new StaticBox(p->scrolled, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
         p->m_panel_printer_title->SetBackgroundColor(title_bg);
         p->m_panel_printer_title->SetBackgroundColor2(0xF1F1F1);
+        // A 1 px outline marks the whole bar as clickable (it folds the section).
+        p->m_panel_printer_title->SetCornerRadius(0);
+        p->m_panel_printer_title->SetBorderWidth(1);
+        p->m_panel_printer_title->SetBorderColor(StateColor(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Normal)));
+        p->m_panel_printer_title->SetToolTip(_L("Click to collapse / expand"));
+        p->m_printer_chevron = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "chevron_down", wxEmptyString, wxDefaultSize,
+                                                  wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 12);
+        p->m_printer_chevron->SetCursor(wxCURSOR_HAND);
+        p->m_printer_chevron->SetToolTip(_L("Click to collapse / expand"));
 
         p->m_printer_icon = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "printer");
         p->m_text_printer_settings = new Label(p->m_panel_printer_title, _L("Printer"), LB_PROPAGATE_MOUSE_EVENT);
+        p->m_text_printer_settings->SetToolTip(_L("Click to collapse / expand"));
 
         // Use ams_fila_sync icon (sync_nozzle_info.svg does not exist in resources)
         p->m_printerinfo_syncbtn = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "nozzle_sync");
@@ -2562,7 +2587,9 @@ Sidebar::Sidebar(Plater *parent)
             });
 
         wxBoxSizer* h_sizer_title = new wxBoxSizer(wxHORIZONTAL);
-        h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+        h_sizer_title->Add(p->m_printer_chevron, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+        h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
+        h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE, 0);
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
         h_sizer_title->Add(p->m_text_printer_settings, 0, wxALIGN_CENTER);
         h_sizer_title->AddStretchSpacer();
@@ -2585,10 +2612,13 @@ Sidebar::Sidebar(Plater *parent)
                 p->m_panel_printer_content->SetMaxSize({-1, -1});
             else
                 p->m_panel_printer_content->SetMaxSize({-1, 0});
+            p->update_section_chevrons();
             m_scrolled_sizer->Layout();
         };
         p->m_panel_printer_title->Bind(wxEVT_LEFT_DOWN, toggle_printer_section);
         p->m_panel_printer_title->Bind(wxEVT_LEFT_DCLICK, toggle_printer_section);
+        p->m_printer_chevron->Bind(wxEVT_LEFT_DOWN, toggle_printer_section);
+        p->m_printer_chevron->Bind(wxEVT_LEFT_DCLICK, toggle_printer_section);
 
         // add spliter 2
         auto spliter_2 = new ::StaticLine(p->scrolled);
@@ -2798,6 +2828,11 @@ Sidebar::Sidebar(Plater *parent)
     p->m_panel_filament_title = new StaticBox(p->scrolled, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxBORDER_NONE);
     p->m_panel_filament_title->SetBackgroundColor(title_bg);
     p->m_panel_filament_title->SetBackgroundColor2(0xF1F1F1);
+    // A 1 px outline marks the whole bar as clickable (it folds the section).
+    p->m_panel_filament_title->SetCornerRadius(0);
+    p->m_panel_filament_title->SetBorderWidth(1);
+    p->m_panel_filament_title->SetBorderColor(StateColor(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Normal)));
+    p->m_panel_filament_title->SetToolTip(_L("Click to collapse / expand"));
     // Fold on LEFT_DOWN (and LEFT_DCLICK), not LEFT_UP. Selection dialogs
     // close on mouse-down, so a leftover LEFT_UP would land on this title
     // and collapse the section.
@@ -2822,6 +2857,7 @@ Sidebar::Sidebar(Plater *parent)
             p->m_panel_filament_content->SetMaxSize({-1, -1});
         else
             p->m_panel_filament_content->SetMaxSize({-1, 0});
+        p->update_section_chevrons();
         m_scrolled_sizer->Layout();
     };
     p->m_panel_filament_title->Bind(wxEVT_LEFT_DOWN, toggle_filament_section);
@@ -2829,9 +2865,18 @@ Sidebar::Sidebar(Plater *parent)
 
     wxBoxSizer* bSizer39;
     bSizer39 = new wxBoxSizer( wxHORIZONTAL );
+    p->m_filament_chevron = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "chevron_down", wxEmptyString, wxDefaultSize,
+                                               wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, false, 12);
+    p->m_filament_chevron->SetCursor(wxCURSOR_HAND);
+    p->m_filament_chevron->SetToolTip(_L("Click to collapse / expand"));
+    // The chevron sits left of every title button, so the handler's button-area test never excludes it.
+    p->m_filament_chevron->Bind(wxEVT_LEFT_DOWN, toggle_filament_section);
+    p->m_filament_chevron->Bind(wxEVT_LEFT_DCLICK, toggle_filament_section);
+    bSizer39->Add(p->m_filament_chevron, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     p->m_filament_config_icon = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "filament_group");
-    bSizer39->Add(p->m_filament_config_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
+    bSizer39->Add(p->m_filament_config_icon, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::ElementSpacing()));
     p->m_staticText_filament_settings = new Label(p->m_panel_filament_title, _L("Filament Management"), LB_PROPAGATE_MOUSE_EVENT);
+    p->m_staticText_filament_settings->SetToolTip(_L("Click to collapse / expand"));
     bSizer39->Add( p->m_staticText_filament_settings, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
     bSizer39->Add(FromDIP(10), 0, 0, 0, 0);
     bSizer39->SetMinSize(-1, FromDIP(30));
@@ -4670,6 +4715,8 @@ void Sidebar::msw_rescale()
     p->m_panel_filament_title->GetSizer()
         ->SetMinSize(-1, 3 * wxGetApp().em_unit());
     p->m_printer_icon->msw_rescale();
+    if (p->m_printer_chevron) p->m_printer_chevron->msw_rescale();
+    if (p->m_filament_chevron) p->m_filament_chevron->msw_rescale();
     p->m_printerinfo_syncbtn->msw_rescale();
     p->m_printer_setting->msw_rescale();
     p->m_filament_icon->msw_rescale();
@@ -4749,6 +4796,8 @@ void Sidebar::sys_color_changed()
     //for (wxWindow* btn : std::vector<wxWindow*>{ p->btn_reslice, p->btn_export_gcode })
     //    wxGetApp().UpdateDarkUI(btn, true);
     p->m_printer_icon->msw_rescale();
+    if (p->m_printer_chevron) p->m_printer_chevron->msw_rescale();
+    if (p->m_filament_chevron) p->m_filament_chevron->msw_rescale();
     p->m_printerinfo_syncbtn->msw_rescale();
     p->m_printer_setting->msw_rescale();
     p->m_filament_icon->msw_rescale();
@@ -5375,36 +5424,20 @@ bool Sidebar::follow_nozzle_sizes_with_printer_variant()
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process: printer variant follow skipped during a project switch";
         return false;
     }
-    const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
-    const std::vector<double> preset = bundle->preset_nozzle_diameters();
-    if (sizes.empty() || preset.size() != sizes.size())
-        return false;
-    for (double d : sizes)
-        if (!same_nozzle_diameter(d, sizes.front()))
-            return false;
-    if (std::all_of(preset.begin(), preset.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
-        return false; // the variant already has this size
     const Preset &current = bundle->printers.get_selected_preset();
     if (!current.is_system || bundle->printers.current_is_dirty())
         return false;
-    const std::string model = current.config.opt_string("printer_model");
-    const Preset     *target = nullptr;
-    for (const Preset &p : bundle->printers) {
-        if (!p.is_system || p.is_default || p.config.opt_string("printer_model") != model)
-            continue;
-        const auto *nd = p.config.option<ConfigOptionFloats>("nozzle_diameter");
-        if (nd == nullptr || nd->values.size() != sizes.size() ||
-            !std::all_of(nd->values.begin(), nd->values.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
-            continue;
-        target = &p;
-        break;
-    }
+    // Mixed sizes, the variant already of this size, or no variant of it: it stays the project's size (P7).
+    const std::string name = bundle->printer_variant_for_nozzle_sizes();
+    if (name.empty())
+        return false;
+    const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
+    Preset                   *target = bundle->printers.find_preset(name, false);
     if (target == nullptr)
-        return false; // no variant of this size: it stays the project's size (P7)
-    const std::string name = target->name;
+        return false;
     BOOST_LOG_TRIVIAL(info) << "per-nozzle process: every nozzle is " << sizes.front() << " mm, printer variant follows: " << current.name
                             << " -> " << name;
-    const_cast<Preset *>(target)->is_visible = true;
+    target->is_visible = true;
     // Not forced: the printer has no unsaved changes (checked above), but a changed process or filament still gets its usual
     // keep / transfer / discard question rather than being dropped. Cancelled: the printer and the rack stay as they are.
     if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER); tab == nullptr || !tab->select_preset(name))
@@ -5467,6 +5500,22 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         dlg.ShowModal();
         return;
     }
+    // Owner bug 2026-11-07: the Device page's selected machine is not always the printer selected here. An H2S's 0.8 nozzle
+    // synced into the H3C gave every one of its rack slots 0.8 (and was remembered for the H3C). Only the same model syncs.
+    const std::string profile_type = bundle->printers.get_edited_preset().get_printer_type(bundle);
+    const bool        p1_pair      = (profile_type == "C11" || profile_type == "C12") && (obj->printer_type == "C11" || obj->printer_type == "C12");
+    if (!profile_type.empty() && !p1_pair && !DualNozzle::machine_matches_preset(obj)) {
+        const std::string profile_model = bundle->printers.get_edited_preset().config.opt_string("printer_model");
+        BOOST_LOG_TRIVIAL(warning) << "nozzle sync: the selected device " << obj->dev_id << " (" << obj->printer_type << ") is not a "
+                                   << profile_model << ", nothing synced";
+        MessageDialog dlg(wxGetApp().mainframe,
+                          wxString::Format(_L("The printer selected on the Device page (%s) is not a %s. Select that printer on the Device page, "
+                                              "or select its printer profile here, then sync again."),
+                                           from_u8(obj->dev_name), from_u8(profile_model)),
+                          _L("Sync nozzle sizes"), wxOK);
+        dlg.ShowModal();
+        return;
+    }
     const std::vector<double> preset = bundle->preset_nozzle_diameters();
     std::vector<double>       reported(preset.size(), 0.);
     if (preset.size() >= 2 && obj->m_extder_data.extders.size() >= 2) {
@@ -5494,16 +5543,21 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
     if (changed)
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process P7: nozzle sizes synced from " << obj->dev_id << ": "
                                 << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
-    // Per-nozzle process P9: a printer with a nozzle rack (H2C) also reports the nozzles in it. Read from the device state the
-    // Device page already holds (no request is sent): the mounted nozzle, then the rack positions in order, become the
-    // project's rack slots.
+    // Per-nozzle process P9: a printer with a nozzle rack (H2C, H3C) also reports the nozzles in it. Read from the device state
+    // the Device page already holds (no request is sent): the mounted nozzle, then the rack positions in order, become the
+    // project's rack slots, each with its size and type. Owner bug 2026-11-07: this ran on two-extruder printers only
+    // (printer_state() reports no nozzles on a single-extruder one), so an H3C sync left its nine slots as they were.
     wxString rack_note;
-    if (obj->has_nozzle_rack() && preset.size() >= 2) {
-        const std::vector<std::vector<double>> layout = reported_rack_layout(DualNozzle::printer_state(obj), preset.size());
-        std::vector<std::string>               current(preset.size());
+    if (obj->has_nozzle_rack()) {
+        const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(DualNozzle::nozzle_report_state(obj), preset.size());
+        std::vector<std::string>                   current(preset.size());
         for (size_t e = 0; e < preset.size(); ++e)
             current[e] = bundle->rack_nozzle_override(e);
-        const std::vector<std::string> texts = rack_override_from_reported(layout, current);
+        std::vector<int> types(preset.size(), int(nvtStandard));
+        if (const auto *opt = bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
+            for (size_t e = 0; e < types.size() && e < opt->values.size(); ++e)
+                types[e] = opt->values[e];
+        const std::vector<std::string> texts = rack_override_from_reported(layout, current, types, bundle->nozzle_rack_limits().capacity);
         if (bundle->set_rack_nozzle_override(texts)) {
             changed = true;
             BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: rack nozzles synced from " << obj->dev_id;
@@ -10864,6 +10918,7 @@ void Sidebar::sync_ams_list()
     update_dynamic_filament_list();
     // Expand filament list
     p->m_panel_filament_content->SetMaxSize({-1, -1});
+    p->update_section_chevrons();
     if (!snapshot_as_of.empty())
         wxGetApp().plater()->get_notification_manager()->push_notification(
             NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
@@ -18464,6 +18519,19 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
                 }
                 preset->is_visible = true; // force visible
                 preset_name = preset->name;
+                // Owner bug 2026-11-07: get_similar_printer_preset keeps the previous printer's nozzle variant (H2S 0.8 -> H3C
+                // 0.8). A printer with remembered nozzles opens on the variant of its own nozzle instead.
+                const PresetCollection &printers  = wxGetApp().preset_bundle->printers;
+                const bool              new_model = preset->config.opt_string("printer_model") !=
+                                                    printers.get_selected_preset().config.opt_string("printer_model");
+                const std::string own = new_model ? wxGetApp().preset_bundle->printer_preset_for_remembered_nozzles(*wxGetApp().app_config, preset_name) :
+                                                    preset_name;
+                if (own != preset_name)
+                    if (Preset *own_preset = wxGetApp().preset_bundle->printers.find_preset(own, false); own_preset != nullptr) {
+                        BOOST_LOG_TRIVIAL(info) << "nozzle rack: " << preset_name << " -> " << own << " (the variant of its remembered nozzles)";
+                        own_preset->is_visible = true;
+                        preset_name = own;
+                    }
             }
         }
         //BBS
