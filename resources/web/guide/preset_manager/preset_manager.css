@@ -153,12 +153,32 @@ body.pm-page #PtRoot {
 	outline: 1px solid var(--pt-focus-ring);
 }
 
-/* Rows selected for Delete selected (Ctrl / Shift+click) */
-.pt-row.sel {
-	background-color: var(--pt-accent-soft);
+/* In the managers the Enabled tick shows in its checkbox only: an enabled row is not tinted (Printer
+   Selection keeps its tint), a row that is not enabled has a muted name. The tint belongs to the
+   selection (Ctrl / Shift+click): its own colour and a bar on the left, over the focus and hover. */
+body.pm-page .pt-body .pt-row.on {
+	background-color: transparent;
 }
 
-.pt-row.sel.focus {
+body.pm-page .pt-body .pt-row.on:hover {
+	background-color: var(--pt-hover);
+}
+
+body.pm-page .pt-body .pt-row.focus {
 	background-color: var(--pt-focus-bg);
-	box-shadow: inset 3px 0 0 var(--pt-accent);
+}
+
+body.pm-page .pt-body .pt-row:not(.on) .pm-name {
+	color: var(--pt-muted);
+}
+
+body.pm-page .pt-body .pt-row.sel,
+body.pm-page .pt-body .pt-row.sel:hover,
+body.pm-page .pt-body .pt-row.sel.focus {
+	background-color: var(--pt-sel-bg);
+	box-shadow: inset 4px 0 0 var(--pt-sel-bar);
+}
+
+body.pm-page .pt-body .pt-row.sel.focus:focus {
+	box-shadow: inset 4px 0 0 var(--pt-sel-bar), inset 0 0 0 1px var(--pt-focus-ring);
 }

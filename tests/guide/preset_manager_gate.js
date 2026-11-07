@@ -616,6 +616,17 @@ async function main() {
         check('Ctrl+click selects user rows (with the row clicked before); a system row cannot be selected', JSON.stringify((await evalJs(`PresetManager.table.selectedRows().map(function(r){ return r.key; })`)).sort()) === JSON.stringify(users.slice().sort()) &&
             await evalJs(`(function(){ var id = ${await showRow(users[2])}; var n = document.querySelector('.pt-body .pt-row[data-id="' + id + '"]'); return !!n && n.classList.contains('sel'); })()`), JSON.stringify(await evalJs(`PresetManager.table.selectedRows().map(function(r){ return r.key; })`)));
         check('the Delete selected button counts them', /\(3\)/.test(await evalJs(`document.getElementById('PmDeleteSelected').textContent`)));
+        // every selected row shows the selection (not only the focused one); an Enabled row is not tinted
+        await showRow(users[1]);
+        const selLook = await evalJs(`(function(){ var s = PresetManager._state(); var keys = ${JSON.stringify(users)};
+            return keys.map(function(k){ var r = s.rows.filter(function(x){ return x.key === k; })[0]; var n = document.querySelector('.pt-body .pt-row[data-id="' + r.id + '"]');
+                if (!n) return 'missing'; var cs = getComputedStyle(n); return cs.backgroundColor + '|' + cs.boxShadow + '|' + n.classList.contains('focus'); }); })()`);
+        check('all three selected rows (none of them focused) have the selection colour and the left bar',
+            selLook.length === 3 && selLook.every(function (t) { return t.indexOf('rgb(196, 228, 247)|') === 0 && t.indexOf('rgb(26, 115, 200)') > 0 && /\|false$/.test(t); }), JSON.stringify(selLook));
+        const plainLook = await evalJs(`(function(){ var out = []; document.querySelectorAll('.pt-body .pt-row.on:not(.sel):not(.focus)').forEach(function(n){ out.push(getComputedStyle(n).backgroundColor + '|' + getComputedStyle(n).boxShadow); }); return out; })()`);
+        check('an Enabled row that is not selected has no background and no bar', plainLook.length > 0 && plainLook.every(function (t) { return t === 'rgba(0, 0, 0, 0)|none'; }), JSON.stringify(plainLook.slice(0, 3)));
+        const offLook = await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row:not(.on):not(.sel):not(.focus) .pm-name'); return n ? getComputedStyle(n).color : ''; })()`);
+        check('a row that is not enabled only mutes its name', offLook === 'rgb(110, 110, 115)', offLook);
         // Shift+click: the shown rows from the last clicked one (system rows in between are left out)
         await clickRow(users[0]);
         await clickRow(users[2], { shiftKey: true });
@@ -695,6 +706,9 @@ async function main() {
         check('dark user agent: the table turns dark', bgLight === 'rgb(255, 255, 255)' && bgDark === 'rgb(45, 45, 49)', bgLight + ' / ' + bgDark);
         check('dark: the star and focus tokens switch too', (await evalJs(`getComputedStyle(document.documentElement).getPropertyValue('--pt-star-on').trim()`)).toUpperCase() === '#F5B82E' &&
             (await evalJs(`getComputedStyle(document.documentElement).getPropertyValue('--pt-focus-bg').trim()`)).toUpperCase() === '#2F4744');
+        check('dark: the selection has its own colour and bar', (await evalJs(`getComputedStyle(document.documentElement).getPropertyValue('--pt-sel-bg').trim()`)).toUpperCase() === '#1E3F5C' &&
+            (await evalJs(`getComputedStyle(document.documentElement).getPropertyValue('--pt-sel-bar').trim()`)).toUpperCase() === '#6AB4F5' &&
+            await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row.on:not(.focus)'); return !!n && getComputedStyle(n).backgroundColor === 'rgba(0, 0, 0, 0)'; })()`));
         await shot('filament_dark.png');
 
         // ============================================================ 10b. macOS keys
