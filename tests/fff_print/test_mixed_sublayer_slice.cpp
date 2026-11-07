@@ -96,6 +96,7 @@ TEST_CASE("Mixed sublayer: Ratio plan on a painted cube", "[MixedSublayer][Slice
 
     size_t       ratio_layers = 0;
     unsigned int last_top     = 0;
+    double       total_a = 0., total_b = 0., total_h = 0.;
     for (const LocalZInterval &interval : intervals) {
         INFO("layer " << interval.layer_id);
         if (interval.layer_id == 0) {
@@ -126,18 +127,27 @@ TEST_CASE("Mixed sublayer: Ratio plan on a painted cube", "[MixedSublayer][Slice
             last_extruder = extruder;
         }
         CHECK_THAT(sum, WithinAbs(interval.base_height, 1e-9));
-        CHECK_THAT(a, WithinAbs(0.7 * interval.base_height, 1e-6));
-        CHECK_THAT(b, WithinAbs(0.3 * interval.base_height, 1e-6));
+        total_a += a;
+        total_b += b;
+        total_h += interval.base_height;
         CHECK(plans[interval.first_sublayer_idx + interval.sublayer_count - 1].ratio_last_pass);
-        // Alternating order, except on the top layer, which uses the ascending (Bambu Studio) order.
+        // Alternating order: a layer printed by both components starts with the one that ended the layer below.
+        // The top layer uses the ascending (Bambu Studio) order, so the higher id is on top. A layer whose thin
+        // pass fell under the nozzle's minimum layer height is printed by one component (D5 carry-over).
         const bool top = interval.layer_id + 1 == object->layer_count();
-        if (last_top != 0 && !top)
-            CHECK(first_extruder == last_top);
-        if (top)
-            CHECK(last_extruder == 2);
+        if (interval.sublayer_count >= 2) {
+            if (last_top != 0 && !top)
+                CHECK(first_extruder == last_top);
+            if (top)
+                CHECK(last_extruder == 2);
+        }
         last_top = last_extruder;
     }
     CHECK(ratio_layers + 1 == object->layer_count());
+    // Over the split layers each component prints its share to within one thin pass (the carry is bounded).
+    REQUIRE(total_h > 0.);
+    CHECK_THAT(total_b, WithinAbs(0.3 * total_h, 0.1));
+    CHECK_THAT(total_a + total_b, WithinAbs(total_h, 1e-6));
 }
 
 TEST_CASE("Mixed sublayer: Ratio G-code keeps one layer change per layer", "[MixedSublayer][Slice]")
