@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
 	test_multicolour_glsl.cpp
 	test_glow_filament.cpp
 	test_connect_filament_maps.cpp
+	test_bambu_multi_diameter.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
