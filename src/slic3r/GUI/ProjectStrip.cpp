@@ -21,6 +21,7 @@
 #include "libslic3r/Utils.hpp"
 
 #include "GUI.hpp"
+#include "GLCanvas3D.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
 #include "MainFrame.hpp"

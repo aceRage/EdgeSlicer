@@ -2893,7 +2893,7 @@ TEST_CASE("A parked project comes back from its snapshot as it was", "[3mf][Proj
         REQUIRE(d->config.has("wall_loops"));
         CHECK(d->config.opt_int("wall_loops") == 4);
         REQUIRE(d->volumes[2]->config.has("sparse_infill_density"));
-        CHECK(d->volumes[2]->config.option<ConfigOptionPercent>("sparse_infill_density")->value == 60.);
+        CHECK(d->volumes[2]->config.get().option<ConfigOptionPercent>("sparse_infill_density")->value == 60.);
     }
 
     SECTION("colour, support and seam paint")
