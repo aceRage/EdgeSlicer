@@ -19,6 +19,7 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "LanAccessCodeWatch.hpp"
 #include "BambuCloudWatch.hpp"
 #include "FirstRequestGate.hpp"
 #include "SsdpConnectType.hpp"
@@ -1458,7 +1459,24 @@ public:
 
     static constexpr long long lan_backoff_ms(int attempts) { return LanReconnectLadder::backoff_ms(attempts); }
 
+    // EdgeSlicer: a LAN printer that refuses its saved access code (LanAccessCodeWatch.hpp).
+    // MachineObject::connect reports every LAN dial and the code it used; the on_local_connect
+    // handler reports how each one ended. REFUSALS_FOR_NOTICE refused dials in a row with one code
+    // show one notice whose button opens the printer's edit dialog; a session that stays up closes
+    // it. GUI thread only.
+    void note_lan_dial_started(const std::string& dev_id, const std::string& code);
+    void note_lan_dial_up(const std::string& dev_id);
+    void note_lan_dial_ended(const std::string& dev_id, const std::string& msg);
+    // The last LAN dial to this printer with its current code was refused.
+    bool lan_access_code_refused(const std::string& dev_id) const;
+    // The user saved a new access code for this LAN printer: forget the refusals, close the
+    // notice, and - when it is the printer this instance holds a session to - redial it now with
+    // the new code instead of waiting out the reconnect backoff.
+    void lan_access_code_changed(MachineObject* obj);
+
 private:
+    std::map<std::string, LanAccessCode::Watch> m_lan_code_watch;
+    void lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v);
     // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
     // inherit another's backoff.
     // (down_since / probe_at / last_try / attempts - see LanReconnectLadder::lan_tick_step.)

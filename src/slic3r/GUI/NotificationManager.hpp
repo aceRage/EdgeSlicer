@@ -168,6 +168,9 @@ enum class NotificationType
     // Nozzle hardness (HRC) too low for the loaded filament, no fade-out.
     // Appended at the end so existing NotificationType ordinals stay stable.
     NozzleHrcWarning,
+    // EdgeSlicer: a Bambu LAN printer keeps refusing its saved access code (LanAccessCodeWatch.hpp);
+    // the hyperlink opens the printer's name / access code dialog. Closed when the code works again.
+    LanAccessCodeRejected,
 };
 
 class NotificationManager

@@ -717,6 +717,9 @@ void SelectMachinePopup::update_user_devices()
                 if (mobj->has_access_right() && mobj->is_avaliable()) {
                     op->set_printer_state(PrinterState::IN_LAN);
                     op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
+                    // The pencil edits a LAN printer's name and access code (EditDevNameDialog),
+                    // so a changed code no longer needs Log out + reconnect.
+                    op->show_edit_printer_name(true);
                     op->SetToolTip(_L("Online"));
                 }
                 else {
@@ -890,6 +893,29 @@ void SelectMachinePopup::on_panel_edit_name(MachineObject *mobj)
     dlg.ShowModal();
 }
 
+void open_printer_edit_dialog(const std::string &dev_id)
+{
+    DeviceManager *dev = wxGetApp().getDeviceManager();
+    if (!dev || dev_id.empty())
+        return;
+    MachineObject *obj = dev->get_my_machine(dev_id);
+    if (!obj)
+        obj = dev->get_local_machine(dev_id);
+    if (!obj) {
+        BOOST_LOG_TRIVIAL(info) << "edit printer: dev_id=" << dev_id << " is not known any more";
+        return;
+    }
+    // One at a time: a second click on the notice while the dialog is open does nothing.
+    static bool open = false;
+    if (open)
+        return;
+    open = true;
+    EditDevNameDialog dlg;
+    dlg.set_machine_obj(obj);
+    dlg.ShowModal();
+    open = false;
+}
+
 void SelectMachinePopup::OnLeftUp(wxMouseEvent &event)
 {
     auto mouse_pos = ClientToScreen(event.GetPosition());
@@ -980,10 +1006,26 @@ EditDevNameDialog::EditDevNameDialog(Plater *plater /*= nullptr*/)
     m_line_top->SetBackgroundColour(wxColour(166, 169, 170));
     m_sizer_main->Add(m_line_top, 0, wxEXPAND, 0);
     m_sizer_main->Add(0, 0, 0, wxTOP, FromDIP(38));
+    // The two labels and the access code field are shown for a LAN-mode printer only (set_machine_obj).
+    m_name_label = new wxStaticText(this, wxID_ANY, _L("Printer name"));
+    m_name_label->SetFont(::Label::Body_13);
+    m_name_label->Hide();
+    m_sizer_main->Add(m_name_label, 0, wxLEFT | wxRIGHT, FromDIP(40));
     m_textCtr = new ::TextInput(this, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), FromDIP(40)), wxTE_PROCESS_ENTER);
     m_textCtr->GetTextCtrl()->SetSize(wxSize(-1, FromDIP(22)));
     m_textCtr->SetMinSize(wxSize(FromDIP(260), FromDIP(40)));
     m_sizer_main->Add(m_textCtr, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(40));
+
+    m_code_label = new wxStaticText(this, wxID_ANY, _L("Access code (shown on the printer's screen)"));
+    m_code_label->SetFont(::Label::Body_13);
+    m_code_label->Hide();
+    m_sizer_main->Add(0, 0, 0, wxTOP, FromDIP(8));
+    m_sizer_main->Add(m_code_label, 0, wxLEFT | wxRIGHT, FromDIP(40));
+    m_codeCtr = new ::TextInput(this, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(260), FromDIP(40)), wxTE_PROCESS_ENTER);
+    m_codeCtr->GetTextCtrl()->SetSize(wxSize(-1, FromDIP(22)));
+    m_codeCtr->SetMinSize(wxSize(FromDIP(260), FromDIP(40)));
+    m_codeCtr->Hide();
+    m_sizer_main->Add(m_codeCtr, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(40));
 
     m_static_valid = new wxStaticText(this, wxID_ANY, wxT(""), wxDefaultPosition, wxDefaultSize, 0);
     m_static_valid->Wrap(-1);
@@ -1019,6 +1061,19 @@ void EditDevNameDialog::set_machine_obj(MachineObject *obj)
     m_info = obj;
     if (m_info)
         m_textCtr->GetTextCtrl()->SetValue(from_u8(m_info->dev_name));
+    // A LAN-mode printer: its name and its access code in one dialog. The saved code is shown as
+    // it is, so it can be compared with the one on the printer's screen.
+    const bool lan = m_info && m_info->is_lan_mode_printer();
+    m_name_label->Show(lan);
+    m_code_label->Show(lan);
+    m_codeCtr->Show(lan);
+    if (lan) {
+        SetTitle(_L("Edit printer"));
+        m_codeCtr->GetTextCtrl()->SetValue(from_u8(m_info->get_access_code()));
+    }
+    Layout();
+    Fit();
+    Centre(wxBOTH);
 }
 
 void EditDevNameDialog::on_dpi_changed(const wxRect &suggested_rect)
@@ -1065,9 +1120,59 @@ void EditDevNameDialog::on_edit_name(wxCommandEvent &e)
         m_valid_type = NoValid;
     }
 
+    // A LAN-mode printer's access code: letters and digits only, as in ConnectPrinterDialog.
+    const bool lan      = m_info && m_info->is_lan_mode_printer() && m_codeCtr->IsShown();
+    wxString   new_code = lan ? m_codeCtr->GetTextCtrl()->GetValue().Strip(wxString::both) : wxString();
+    if (m_valid_type == Valid && lan) {
+        if (new_code.empty()) {
+            info_line    = _L("The access code is not allowed to be empty.");
+            m_valid_type = NoValid;
+        }
+        for (wxUniChar c : new_code) {
+            if (!(('0' <= c && c <= '9') || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z'))) {
+                info_line    = _L("The access code may only contain letters and digits.");
+                m_valid_type = NoValid;
+                break;
+            }
+        }
+    }
+
     if (m_valid_type == NoValid) {
         m_static_valid->SetLabel(info_line);
         Layout();
+        Fit();
+    }
+
+    if (m_valid_type == Valid && lan) {
+        m_static_valid->SetLabel(wxEmptyString);
+        DeviceManager *dev  = Slic3r::GUI::wxGetApp().getDeviceManager();
+        auto           utf8 = new_dev_name.ToUTF8();
+        const std::string name(utf8.data(), utf8.length());
+        const std::string code    = new_code.ToStdString();
+        const std::string dev_id  = m_info->dev_id;
+        const bool        changed = code != m_info->get_access_code();
+        // The name is the slicer's own for a LAN printer: kept on the object and in the saved
+        // local printer entry (no account to rename it through).
+        if (name != m_info->dev_name) {
+            m_info->dev_name = name;
+            if (dev)
+                if (MachineObject *local = dev->get_local_machine(dev_id); local && local != m_info)
+                    local->dev_name = name;
+            DeviceManager::update_local_machine(*m_info);
+            BOOST_LOG_TRIVIAL(info) << "edit printer: dev_id=" << dev_id << " LAN printer renamed";
+        }
+        // The same persistence as the first connect (ConnectPrinterDialog::on_button_confirm):
+        // app_config user_access_code and the saved local printer entry.
+        // A code the printer has been refusing is redialled on OK even when it was saved unchanged
+        // (the printer's code may have been set back): the user asked for another try.
+        if (changed) {
+            m_info->set_user_access_code(code);
+            BOOST_LOG_TRIVIAL(warning) << "edit printer: dev_id=" << dev_id << " access code changed by the user";
+        }
+        if (dev && (changed || dev->lan_access_code_refused(dev_id)))
+            dev->lan_access_code_changed(m_info);
+        DPIDialog::EndModal(wxID_OK);
+        return;
     }
 
     if (m_valid_type == Valid) {

@@ -21,6 +21,10 @@
 #include "Plater.hpp"
 #include "GUI_App.hpp"
 #include "ReleaseNote.hpp"
+#include "NotificationManager.hpp"
+#include "SelectMachinePop.hpp"
+#include "I18N.hpp"
+#include "format.hpp"
 #include <thread>
 #include <cstring>
 #include <functional>
@@ -3099,6 +3103,10 @@ int MachineObject::connect(bool is_anonymous, bool use_openssl, bool session_up)
             note_dial_on_live_session();
         else
             note_dial_started();
+        // A dial with this code: how it ends tells a refused code from a printer that is off.
+        if (!session_up && !is_anonymous)
+            if (DeviceManager* dm = Slic3r::GUI::wxGetApp().getDeviceManager())
+                dm->note_lan_dial_started(dev_id, password);
         try {
             return m_agent->connect_printer(dev_id, dev_ip, username, password, use_openssl);
         } catch (...) {
@@ -7185,6 +7193,17 @@ void DeviceManager::lan_reconnect_tick()
 {
     if (!m_agent) return;
 
+    // A LAN session that has stayed up long enough proves its access code (LanAccessCodeWatch.hpp).
+    if (!m_lan_code_watch.empty()) {
+        const long long steady = first_request_now_ms();
+        std::vector<std::pair<std::string, LanAccessCode::Verdict>> verdicts;
+        for (auto& kv : m_lan_code_watch)
+            if (LanAccessCode::Verdict v = kv.second.tick(steady); v != LanAccessCode::Verdict::None)
+                verdicts.emplace_back(kv.first, v);
+        for (const auto& v : verdicts)
+            lan_code_verdict(v.first, v.second);
+    }
+
     // Which printer this instance is meant to hold a session to.
     //
     // The hidden hub-managed instance owns the choice itself: nobody is there to pick one on the
@@ -7260,6 +7279,100 @@ void DeviceManager::lan_reconnect_tick()
             break;
         }
     }
+}
+
+// --------------------------------------------------- the refused access code ----
+//
+// See LanAccessCodeWatch.hpp for the rule. The reconnect ladder keeps backing off as before (one
+// dial a minute at most once it is up to speed); this only decides when to tell the user.
+
+void DeviceManager::note_lan_dial_started(const std::string& dev_id, const std::string& code)
+{
+    if (dev_id.empty()) return;
+    m_lan_code_watch[dev_id].dial_started(first_request_now_ms(), LanAccessCode::code_fingerprint(code));
+}
+
+void DeviceManager::note_lan_dial_up(const std::string& dev_id)
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    if (it != m_lan_code_watch.end())
+        it->second.session_up(first_request_now_ms());
+}
+
+void DeviceManager::note_lan_dial_ended(const std::string& dev_id, const std::string& msg)
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    if (it == m_lan_code_watch.end()) return;
+    const LanAccessCode::Verdict v = it->second.dial_ended(first_request_now_ms(), msg);
+    if (it->second.last_outcome() == LanAccessCode::Outcome::Refused && !it->second.notice_shown())
+        BOOST_LOG_TRIVIAL(info) << "lan_access_code: dev_id=" << dev_id << " dial refused (" << it->second.refusals() << " in a row)";
+    lan_code_verdict(dev_id, v);
+}
+
+bool DeviceManager::lan_access_code_refused(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.last_dial_refused();
+}
+
+void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v)
+{
+    if (v == LanAccessCode::Verdict::None) return;
+    GUI::GUI_App& app = Slic3r::GUI::wxGetApp();
+    GUI::NotificationManager* nm = (app.plater() != nullptr) ? app.plater()->get_notification_manager() : nullptr;
+    if (v == LanAccessCode::Verdict::Clear) {
+        BOOST_LOG_TRIVIAL(warning) << "lan_access_code: dev_id=" << dev_id << " the access code works again, notice closed";
+        if (nm) nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+        return;
+    }
+    // Notify: once per code, the one line a user's log shows for it.
+    auto it = m_lan_code_watch.find(dev_id);
+    BOOST_LOG_TRIVIAL(warning) << "lan_access_code: dev_id=" << dev_id << " refused "
+                               << (it != m_lan_code_watch.end() ? it->second.refusals() : 0)
+                               << " dial(s) in a row with its saved access code: asking the user to re-enter it";
+    // The hidden hub-managed instance has nobody to show it to.
+    if (!nm || app.is_hub_managed()) return;
+    MachineObject* obj  = get_my_machine(dev_id);
+    std::string    name = obj ? obj->dev_name : dev_id;
+    const std::string text = GUI::format(_u8L("The printer refused the access code for %1%. Re-enter it."), name);
+    nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+    nm->push_notification(GUI::NotificationType::LanAccessCodeRejected, GUI::NotificationManager::NotificationLevel::WarningNotificationLevel,
+                          text, _u8L("Re-enter access code"), [dev_id](wxEvtHandler*) {
+                              // Out of the canvas's mouse handling before a modal dialog opens.
+                              Slic3r::GUI::wxGetApp().CallAfter([dev_id]() { GUI::open_printer_edit_dialog(dev_id); });
+                              // Stays up until a saved code or a working session closes it (a
+                              // cancelled dialog leaves it there to click again).
+                              return false;
+                          });
+}
+
+void DeviceManager::lan_access_code_changed(MachineObject* obj)
+{
+    if (!obj || obj->dev_id.empty()) return;
+    const std::string dev_id = obj->dev_id;
+    m_lan_code_watch.erase(dev_id);
+    GUI::GUI_App& app = Slic3r::GUI::wxGetApp();
+    if (app.plater() != nullptr)
+        if (GUI::NotificationManager* nm = app.plater()->get_notification_manager())
+            nm->close_notification_of_type(GUI::NotificationType::LanAccessCodeRejected);
+
+    // Redial now, from a clean ladder, when this is the printer the session is for. Any other
+    // printer uses the new code the next time it is selected.
+    m_lan_reconnect.erase(dev_id);
+    MachineObject* sel = get_selected_machine();
+    if (!m_agent || !sel || sel->dev_id != dev_id || !sel->is_lan_mode_printer() || sel->dev_ip.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "lan_access_code: dev_id=" << dev_id << " access code changed (not the selected printer, no redial)";
+        return;
+    }
+    // (Both copies of the printer object read the code from the app config by serial.)
+    sel->m_redial_due = false;
+    lan_reconnect_now(sel, "access code changed");
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+    LanReconnect& r = m_lan_reconnect[dev_id];
+    r.last_try   = now;
+    r.attempts   = 1;
+    r.down_since = now;
 }
 
 void DeviceManager::full_report_tick()
