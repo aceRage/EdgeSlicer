@@ -4,8 +4,10 @@
 #include <libslic3r/Utils.hpp>
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
 
+#include <optional>
 #include <string>
 
 #include "test_utils.hpp"
@@ -41,6 +43,55 @@ struct ScopedTemporaryDir
 
     ScopedTemporaryDir(const ScopedTemporaryDir&)            = delete;
     ScopedTemporaryDir& operator=(const ScopedTemporaryDir&) = delete;
+};
+
+// Temp file path reserved for the caller to write; removed on scope exit.
+// Orca keeps this in tests/test_utils.hpp; Edge's copy does not, so plugin tests own it.
+struct ScopedTemporaryFile
+{
+    boost::filesystem::path m_path;
+
+    explicit ScopedTemporaryFile(const std::string& extension = ".tmp")
+        : m_path(boost::filesystem::temp_directory_path() /
+                 boost::filesystem::unique_path("orca-%%%%-%%%%-%%%%" + extension))
+    {}
+
+    ~ScopedTemporaryFile()
+    {
+        boost::system::error_code ec;
+        boost::filesystem::remove(m_path, ec);
+    }
+
+    const boost::filesystem::path& path() const { return m_path; }
+    std::string                    string() const { return m_path.string(); }
+
+    ScopedTemporaryFile(const ScopedTemporaryFile&)            = delete;
+    ScopedTemporaryFile& operator=(const ScopedTemporaryFile&) = delete;
+};
+
+// Sets an environment variable for the lifetime of the guard and restores the previous value.
+struct ScopedEnvVar
+{
+    std::string                m_name;
+    std::optional<std::string> m_previous;
+
+    ScopedEnvVar(std::string name, const std::string& value) : m_name(std::move(name))
+    {
+        if (const char* old = boost::nowide::getenv(m_name.c_str()))
+            m_previous = old;
+        boost::nowide::setenv(m_name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (m_previous)
+            boost::nowide::setenv(m_name.c_str(), m_previous->c_str(), 1);
+        else
+            boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&)            = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
 };
 
 // Point data_dir() at a throwaway directory for the lifetime of a test and

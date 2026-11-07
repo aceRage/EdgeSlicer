@@ -1804,9 +1804,10 @@ void PluginManager::fetch_plugins_from_cloud(std::vector<std::string>* out_not_f
                 return;
 
             GUI::NotificationManager* notifications = plater->get_notification_manager();
-            if (notifications == nullptr ||
-                notifications->has_notification_of_type(GUI::NotificationType::CustomNotification))
+            if (notifications == nullptr)
                 return;
+            // Edge has no has_notification_of_type(); Orca uses it to avoid stacking
+            // OrcaCloudPluginUpdateAvailable. Phase 1 cloud fetch is a no-op anyway.
             notifications->push_notification(GUI::NotificationType::CustomNotification,
                                               GUI::NotificationManager::NotificationLevel::ImportantNotificationLevel,
                                               _u8L("Plugin updates are available."));
