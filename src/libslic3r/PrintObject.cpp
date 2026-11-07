@@ -1387,6 +1387,7 @@ bool PrintObject::invalidate_state_by_config_options(
                opt_key == "layer_height"
             || opt_key == "dithering_z_step_size"
             || opt_key == "dithering_local_z_mode"
+            || opt_key == "enable_mixed_color_sublayer"
             || opt_key == "dithering_local_z_whole_objects"
             || opt_key == "dithering_local_z_direct_multicolor"
             || opt_key == "dithering_step_painted_zones_only"

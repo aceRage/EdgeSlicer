@@ -4,6 +4,8 @@
 #include "../Model.hpp"
 #include "../NozzleOverride.hpp"
 #include "../MixedFilament.hpp"
+#include "../MixedFilamentConfigRemap.hpp"
+#include "../MixedSublayer.hpp"
 #include "../Preset.hpp"
 #include "../CostOverrides.hpp"
 #include "../Utils.hpp"
@@ -1402,6 +1404,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // Edge also stamps its own and Snapmaker Orca 3MFs as From_BBS, so callers
         // that want a genuine BambuStudio project must use this flag, not From_BBS.
         bool m_is_bambu_studio_generator { false };
+        // Bambu Studio mixed filament slots converted to Edge mixed rows while the project config loaded
+        // (MixedSublayer.hpp). The model's ids are remapped once the objects are read.
+        BambuMixedImportResult m_bambu_mixed_import;
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1698,6 +1703,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_backup_path = model.get_backup_path();
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
+        // Bambu Studio mixed filament slots (MixedSublayer.hpp): the plates' per-filament nozzle maps lose the
+        // removed slots too.
+        if (result && m_bambu_mixed_import.converted) {
+            const BambuMixedImportResult &remap = m_bambu_mixed_import;
+            auto drop_removed = [&remap](std::vector<int> &values) {
+                if (values.size() != remap.old_slot_count)
+                    return;
+                for (auto it = remap.removed_slots.rbegin(); it != remap.removed_slots.rend(); ++it)
+                    values.erase(values.begin() + std::ptrdiff_t(*it));
+            };
+            for (PlateData *plate : plate_data_list)
+                if (plate != nullptr) {
+                    drop_removed(plate->filament_maps);
+                    drop_removed(plate->limit_filament_maps);
+                }
+        }
         is_bbl_3mf = m_is_bbl_3mf;
         if (is_bambu_studio)
             *is_bambu_studio = m_is_bambu_studio_generator;
@@ -2613,6 +2634,33 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 ++volume_idx;
             }
             ++object_idx;
+        }
+
+        // Bambu Studio mixed filament slots were removed from the filament list while the project config loaded:
+        // move every painted state and filament setting to its new id (physical ids above a removed slot shift
+        // down, a mixed slot becomes its Edge mixed row).
+        if (m_bambu_mixed_import.converted) {
+            const BambuMixedImportResult &remap = m_bambu_mixed_import;
+            size_t total = std::max(remap.old_slot_count, remap.new_physical_count);
+            for (unsigned int mapped : remap.id_remap)
+                total = std::max(total, size_t(mapped));
+            EnforcerBlockerStateMap state_map;
+            for (size_t i = 0; i < state_map.size(); ++i)
+                state_map[i] = EnforcerBlockerType(i);
+            for (size_t i = 1; i < remap.id_remap.size() && i < state_map.size(); ++i) {
+                const unsigned int mapped = remap.id_remap[i];
+                state_map[i] = (mapped == 0 || mapped >= state_map.size()) ? EnforcerBlockerType::NONE : EnforcerBlockerType(mapped);
+            }
+            for (ModelObject *mo : m_model->objects) {
+                remap_model_config_filament_ids(mo->config, remap.id_remap, total);
+                for (ModelVolume *mv : mo->volumes) {
+                    remap_model_config_filament_ids(mv->config, remap.id_remap, total);
+                    if (mv->type() == ModelVolumeType::MODEL_PART)
+                        mv->remap_extruder_ids(total, state_map);
+                }
+                for (auto &range : mo->layer_config_ranges)
+                    remap_model_config_filament_ids(range.second, remap.id_remap, total);
+            }
         }
 
         const int max_filament_id = max_supported_filament_id_from_project_config(config);
@@ -3591,6 +3639,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // A damaged settings file stays a warning, as it always was.
                 add_error("Error load config from json:"+reason);
                 return true;
+            }
+            // Mixed color sublayer (D3): Bambu Studio 2.9.1 mixed filament slots become Edge mixed rows. Edge does not
+            // define filament_is_mixed and friends, so they are read from the raw file.
+            m_bambu_mixed_import = BambuMixedImportResult();
+            try {
+                std::string json_text;
+                load_string_file(dest_file, json_text);
+                BambuMixedSlots slots;
+                if (parse_bambu_mixed_slots_json(json_text, slots) && slots.any_mixed()) {
+                    m_bambu_mixed_import = convert_bambu_mixed_slots(config, slots);
+                    if (const ConfigOptionDef *def = print_config_def.get("mixed_filament_definitions"); def != nullptr)
+                        for (const std::string &notice : m_bambu_mixed_import.notices) {
+                            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << notice;
+                            config_substitutions.substitutions.push_back(
+                                ConfigSubstitution{ def, notice, ConfigOptionUniquePtr(new ConfigOptionString("linear gradient")) });
+                        }
+                }
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": reading Bambu Studio mixed filaments failed: " << e.what();
             }
             // Edge (Orca #11582): a Bambu Lab project from before the option keeps its M1003.
             if (upgrade_missing_power_loss_recovery(config))

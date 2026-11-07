@@ -17,6 +17,7 @@
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
 #include "LocalZOrderOptimizer.hpp"
+#include "MixedSublayer.hpp"
 #include "ShortestPath.hpp"
 #include "Thread.hpp"
 #include "Time.hpp"
@@ -68,6 +69,35 @@ template class PrintState<PrintObjectStep, posCount>;
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}
 PrintRegion::PrintRegion(PrintRegionConfig &&config) : PrintRegion(std::move(config), config.hash()) {}
+
+bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans)
+{
+    if (!interval.has_mixed_paint || interval.first_sublayer_idx >= plans.size())
+        return false;
+    if (interval.sublayer_count > 1)
+        return true;
+    const SubLayerPlan &first = plans[interval.first_sublayer_idx];
+    return interval.sublayer_count == 1 && first.ratio_pass && first.split_interval;
+}
+
+unsigned int local_z_ratio_last_extruder(const std::vector<LocalZInterval> &intervals, const std::vector<SubLayerPlan> &plans,
+                                         size_t row_idx, double print_z)
+{
+    for (const LocalZInterval &interval : intervals) {
+        if (std::abs(interval.z_hi - print_z) > 1e-4 || !local_z_interval_has_passes(interval, plans))
+            continue;
+        const size_t end_idx = std::min(plans.size(), interval.first_sublayer_idx + interval.sublayer_count);
+        for (size_t plan_idx = interval.first_sublayer_idx; plan_idx < end_idx; ++plan_idx) {
+            const SubLayerPlan &plan = plans[plan_idx];
+            if (!plan.ratio_pass || !plan.ratio_last_pass || plan.dependency_group != row_idx + 1)
+                continue;
+            for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e)
+                if (!plan.painted_masks_by_extruder[e].empty())
+                    return unsigned(e + 1);
+        }
+    }
+    return 0;
+}
 
 namespace {
 
@@ -175,6 +205,31 @@ static inline int shared_local_z_extruder_for_wipe_tower(const std::vector<unsig
     return -1;
 }
 
+// True when a Ratio (mixed color sublayer) pass prints on one of these layers.
+static bool local_z_layers_have_ratio_pass(const std::vector<GCode::LayerToPrint> &layers)
+{
+    for (const GCode::LayerToPrint &layer_to_print : layers) {
+        if (layer_to_print.object_layer == nullptr)
+            continue;
+        const PrintObject *print_object =
+            layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+        if (print_object == nullptr)
+            continue;
+        const size_t layer_id  = size_t(layer_to_print.object_layer->id());
+        const auto  &intervals = print_object->local_z_intervals();
+        const auto  &plans     = print_object->local_z_sublayer_plan();
+        for (const LocalZInterval &interval : intervals) {
+            if (interval.layer_id != layer_id || !local_z_interval_has_passes(interval, plans))
+                continue;
+            const size_t end_idx = std::min(plans.size(), interval.first_sublayer_idx + interval.sublayer_count);
+            for (size_t plan_idx = interval.first_sublayer_idx; plan_idx < end_idx; ++plan_idx)
+                if (plans[plan_idx].ratio_pass)
+                    return true;
+        }
+    }
+    return false;
+}
+
 static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolchanges(
     const Print                              &print,
     const std::vector<GCode::LayerToPrint>   &layers,
@@ -201,10 +256,8 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
         const auto interval_it = std::find_if(intervals.begin(), intervals.end(), [layer_id](const LocalZInterval &interval) {
             return interval.layer_id == layer_id;
         });
-        if (interval_it == intervals.end() || !interval_it->has_mixed_paint || interval_it->sublayer_count <= 1 ||
-            interval_it->first_sublayer_idx >= plans.size()) {
+        if (interval_it == intervals.end() || !local_z_interval_has_passes(*interval_it, plans))
             continue;
-        }
 
         const size_t first_idx = interval_it->first_sublayer_idx;
         const size_t end_idx   = std::min(plans.size(), first_idx + interval_it->sublayer_count);
@@ -264,7 +317,7 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
                 const ExPolygons &pass_masks = compensated_masks_by_extruder[extruder_id];
                 if (pass_masks.empty())
                     continue;
-                if (layer_has_local_z_extrusions(*layer_to_print.object_layer, pass_masks, local_z_infill_enabled))
+                if (layer_has_local_z_extrusions(*layer_to_print.object_layer, pass_masks, local_z_infill_enabled || plan.ratio_pass))
                     pass_ref.extruders.push_back(unsigned(extruder_id));
             }
 
@@ -894,6 +947,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "precise_z_height"
             || opt_key == "dithering_z_step_size"
             || opt_key == "dithering_local_z_mode"
+            || opt_key == "enable_mixed_color_sublayer"
             || opt_key == "dithering_local_z_whole_objects"
             || opt_key == "dithering_local_z_direct_multicolor"
             || opt_key == "dithering_step_painted_zones_only"
@@ -2587,6 +2641,122 @@ static std::string extruder_reach_error(const Print &print, const ModelObject **
     return text;
 }
 
+// Mixed color sublayer: the 1-based virtual (mixed) filament ids the plate's objects use - painted, per part or
+// object, or as a feature filament of a region.
+static std::vector<unsigned int> used_mixed_filament_ids(const Print &print)
+{
+    const size_t                num_physical = print.config().filament_diameter.size();
+    const MixedFilamentManager &mgr          = print.mixed_filament_manager();
+    std::vector<unsigned int>   ids;
+    auto add = [&](int id) {
+        if (id > 0 && mgr.is_mixed(unsigned(id), num_physical))
+            ids.push_back(unsigned(id));
+    };
+    for (const PrintObject *object : print.objects()) {
+        const ModelObject *mo = object->model_object();
+        if (mo == nullptr)
+            continue;
+        if (mo->config.has("extruder"))
+            add(mo->config.extruder());
+        for (const ModelVolume *mv : mo->volumes)
+            for (int id : mv->get_extruders())
+                add(id);
+        for (const auto &range : mo->layer_config_ranges)
+            if (range.second.has("extruder"))
+                add(range.second.option("extruder")->getInt());
+        for (size_t region_id = 0; region_id < object->num_printing_regions(); ++region_id) {
+            const PrintRegionConfig &rc = object->printing_region(region_id).config();
+            add(rc.wall_filament.value);
+            add(rc.sparse_infill_filament.value);
+            add(rc.solid_infill_filament.value);
+        }
+    }
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
+// Mixed color sublayer checks (design_mixed_color_sublayer.md D7-D9): a Ratio row's components share one nozzle
+// diameter; the plate merging layers of different diameters makes Ratio rows print whole layers; a single-nozzle
+// printer is told what the sub-layers cost. Returns an error, or adds warnings.
+static StringObjectException validate_mixed_color_sublayer(const Print &print, const std::function<void(std::string, std::string)> &warn)
+{
+    const PrintConfig          &cfg     = print.config();
+    const MixedFilamentManager &mgr     = print.mixed_filament_manager();
+    if (mixed_sublayer_legacy_mode(mgr.mixed_filaments(), cfg.enable_mixed_color_sublayer.value))
+        return {};
+    const size_t num_physical = cfg.filament_diameter.size();
+    if (num_physical < 2)
+        return {};
+    std::vector<double> nozzle_by_filament(num_physical, 0.);
+    for (size_t i = 0; i < num_physical; ++i)
+        nozzle_by_filament[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
+    const bool single_nozzle = cfg.nozzle_diameter.size() == 1 || cfg.single_extruder_multi_material.value;
+    bool       alm_checked   = false;
+    bool       alm_live      = false;
+
+    double max_object_height = 0.;
+    for (const PrintObject *object : print.objects())
+        max_object_height = std::max(max_object_height, unscale<double>(object->height()));
+    const double layer_height = std::max(0.01, print.default_object_config().layer_height.value);
+    const size_t layers       = size_t(std::ceil(max_object_height / layer_height));
+
+    for (unsigned int id : used_mixed_filament_ids(print)) {
+        const MixedFilament *mf = mgr.mixed_filament_from_id(id, num_physical);
+        if (mf == nullptr)
+            continue;
+        const bool gradient = mf->gradient_enabled && mf->component_a != mf->component_b;
+        if (mixed_sublayer_effective_method(mf->sublayer_method, cfg.enable_mixed_color_sublayer.value,
+                                            cfg.dithering_local_z_mode.value, gradient) != MixedSublayerMethod::Ratio)
+            continue;
+        const std::vector<MixedRatioComponent> components = mixed_ratio_components(*mf, num_physical);
+        std::vector<unsigned int>              comp_ids;
+        for (const MixedRatioComponent &c : components)
+            comp_ids.push_back(c.extruder);
+        const MixedDiameterMismatch mismatch = mixed_ratio_diameter_mismatch(comp_ids, nozzle_by_filament);
+        if (mismatch.mismatch()) {
+            StringObjectException err;
+            err.string  = Slic3r::format(L("Mixed filament %1% mixes filaments %2% (%3% mm nozzle) and %4% (%5% mm nozzle). "
+                                           "The filaments of a mixed color sublayer must print through the same nozzle diameter."),
+                                         id, mismatch.filament_a, mismatch.diameter_a, mismatch.filament_b, mismatch.diameter_b);
+            err.opt_key = "enable_mixed_color_sublayer";
+            return err;
+        }
+        if (!alm_checked) {
+            alm_live    = print.uses_multiple_nozzle_diameters();
+            alm_checked = true;
+        }
+        if (alm_live) {
+            warn(Slic3r::format(L("Mixed filament %1% prints whole layers one colour at a time: mixed color sublayers are not "
+                                  "split yet on a plate that uses different nozzle diameters."), id),
+                 "enable_mixed_color_sublayer");
+            continue;
+        }
+        if (single_nozzle && components.size() >= 2) {
+            const size_t per_layer = mixed_ratio_toolchanges_per_layer(components.size(), mf->sublayer_bs_order);
+            const size_t changes   = per_layer * layers;
+            double       flush     = 0.;
+            size_t       pairs     = 0;
+            const auto  &matrix    = cfg.flush_volumes_matrix.values;
+            for (size_t a = 0; a < components.size(); ++a)
+                for (size_t b = 0; b < components.size(); ++b) {
+                    if (a == b)
+                        continue;
+                    const size_t ia = components[a].extruder - 1, ib = components[b].extruder - 1;
+                    if (ia * num_physical + ib < matrix.size()) {
+                        flush += matrix[ia * num_physical + ib];
+                        ++pairs;
+                    }
+                }
+            const double flush_per_change = pairs > 0 ? flush / double(pairs) * cfg.flush_multiplier.value : 0.;
+            warn(Slic3r::format(L("Mixed filament %1% prints a sub-layer per filament on a single-nozzle printer: up to about %2% "
+                                  "extra filament changes (%3% per layer) and %4% mm3 of flush. Expect a much longer print."),
+                                id, changes, per_layer, int(std::lround(flush_per_change * double(changes)))),
+                 "enable_mixed_color_sublayer");
+        }
+    }
+    return {};
+}
+
 StringObjectException Print::validate(std::vector<StringObjectException> *warnings, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     // ORCA #14112: every check that finds a problem adds its own entry, so the plater can show all of them.
@@ -2611,6 +2781,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    if (StringObjectException err = validate_mixed_color_sublayer(*this, [&warn](std::string msg, std::string key) { warn(std::move(msg), std::move(key)); });
+        !err.string.empty())
+        return err;
 
     // A height range (or a height colour pattern band) naming a filament the project does not have
     // is not printed with that filament (object_extruders() drops it). The slice is unchanged; the user is told.
@@ -7310,9 +7484,17 @@ void Print::_make_wipe_tower()
                                                  << " local_z_toolchanges=" << local_z_toolchanges.size()
                                                  << " sequence=" << local_z_sequence.str();
                     }
+                    // D10 (mixed color sublayer): a Ratio pass on a shared nozzle gets the full flush, as a filament change
+                    // does; across heads it only primes. Subdivide passes keep the prime volume.
+                    const bool ratio_layer = !local_z_toolchanges.empty() && local_z_layers_have_ratio_pass(*layers_with_same_print_z);
+                    const bool shared_nozzle = m_config.purge_in_prime_tower && m_config.single_extruder_multi_material;
                     for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
+                        float volume = (float) m_config.prime_volume;
+                        if (ratio_layer && toolchange.old_tool < wipe_volumes.size() && toolchange.new_tool < wipe_volumes[toolchange.old_tool].size())
+                            volume = mixed_ratio_toolchange_purge_volume(shared_nozzle, wipe_volumes[toolchange.old_tool][toolchange.new_tool],
+                                                                         float(m_config.flush_multiplier), volume);
                         wipe_tower.plan_local_z_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
-                                                           toolchange.old_tool, toolchange.new_tool, (float) m_config.prime_volume);
+                                                           toolchange.old_tool, toolchange.new_tool, volume);
                     }
                     if (!local_z_toolchanges.empty())
                         current_extruder_id = local_z_toolchanges.back().new_tool;

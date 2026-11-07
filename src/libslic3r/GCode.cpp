@@ -1870,6 +1870,14 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         const double tower_z            = local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
         const double toolchange_print_z = tower_z - gcodegen.config().z_offset.value;
 
+        // A Bambu Lab (Type1) tower never takes the WipeTower2 tool changes below: those are planned and laid out
+        // for the other tower type, and appending them to a Type1 tower prints a foreign tower block (mixed color
+        // sublayer risk 1, X1C / H2D / H2C). On these printers the change_filament_gcode does the purge itself, so
+        // the Local-Z pass changes filament directly. This is what Type1 always ended up doing, since Print never
+        // plans Local-Z tool changes or reserve slots for it; the guard makes it explicit.
+        if (gcodegen.wipe_tower_type() == WipeTowerType::Type1)
+            return gcodegen.set_extruder(unsigned(extruder_id), toolchange_print_z);
+
         if (m_layer_idx >= 0 && size_t(m_layer_idx) < m_local_z_tool_changes.size() &&
             size_t(m_layer_idx) < m_local_z_tool_change_idx.size()) {
             size_t &local_z_tool_change_idx = m_local_z_tool_change_idx[size_t(m_layer_idx)];
@@ -7858,6 +7866,8 @@ LayerResult GCode::process_layer(const Print& print,
         size_t                  local_clipped_collections { 0 };
         size_t                  base_clipped_collections { 0 };
         size_t                  base_clip_leak_warnings { 0 };
+        // A Ratio (mixed color sublayer) pass is on this layer: its passes cover infill too.
+        bool                    has_ratio_pass { false };
         std::vector<LocalZPassBucket> pass_buckets;
     };
 
@@ -7890,7 +7900,7 @@ LayerResult GCode::process_layer(const Print& print,
             });
             if (it_interval == intervals.end())
                 continue;
-            if (!it_interval->has_mixed_paint || it_interval->sublayer_count <= 1 || it_interval->first_sublayer_idx >= plans.size())
+            if (!local_z_interval_has_passes(*it_interval, plans))
                 continue;
             local_z_phase_b_requested_for_layer = true;
 
@@ -7961,6 +7971,8 @@ LayerResult GCode::process_layer(const Print& print,
                     ++split_plan_with_raw_masks;
                 if (pass_has_compensated_masks) {
                     ++split_plan_with_compensated_masks;
+                    if (plan.ratio_pass)
+                        ctx.has_ratio_pass = true;
                     ctx.pass_buckets.emplace_back(std::move(bucket));
 
                     const LocalZPassBucket& appended_bucket = ctx.pass_buckets.back();
@@ -8026,7 +8038,7 @@ LayerResult GCode::process_layer(const Print& print,
             auto it_interval = std::find_if(intervals.begin(), intervals.end(), [layer_id](const LocalZInterval& interval) {
                 return interval.layer_id == layer_id;
             });
-            if (it_interval != intervals.end() && it_interval->has_mixed_paint && it_interval->sublayer_count > 1) {
+            if (it_interval != intervals.end() && local_z_interval_has_passes(*it_interval, print_object->local_z_sublayer_plan())) {
                 local_z_phase_b_requested_for_layer = true;
                 break;
             }
@@ -8504,13 +8516,23 @@ LayerResult GCode::process_layer(const Print& print,
                             continue;
 
                         const ExtrusionEntityCollection* filtered_extrusions = extrusions;
+                        // Ratio passes (mixed color sublayer) re-extrude every role of the mixed region, infill included.
+                        const bool local_z_infill_for_layer =
+                            local_z_infill_enabled || (local_z_ctx != nullptr && local_z_ctx->has_ratio_pass);
                         const bool local_z_entity_enabled =
                             entity_type == ObjectByExtruder::Island::Region::PERIMETERS ||
-                            (local_z_infill_enabled && entity_type == ObjectByExtruder::Island::Region::INFILL);
+                            (local_z_infill_for_layer && entity_type == ObjectByExtruder::Island::Region::INFILL);
+                        const bool local_z_entity_is_ironing =
+                            entity_type == ObjectByExtruder::Island::Region::INFILL && extrusions->role() == erIroning;
                         if (local_z_entity_enabled && local_z_ctx != nullptr && !local_z_ctx->mixed_masks_union.empty()) {
                             for (LocalZPassBucket& pass_bucket : local_z_ctx->pass_buckets) {
                                 if (pass_bucket.plan == nullptr)
                                     continue;
+                                // D6: ironing in a Ratio region prints once, after the last pass, at its own flow.
+                                if (local_z_entity_is_ironing && pass_bucket.plan->ratio_pass && !pass_bucket.plan->ratio_last_pass)
+                                    continue;
+                                const double pass_flow_height =
+                                    (local_z_entity_is_ironing && pass_bucket.plan->ratio_pass) ? 0. : pass_bucket.plan->flow_height;
                                 for (size_t pass_extruder_id = 0; pass_extruder_id < pass_bucket.plan->painted_masks_by_extruder.size();
                                      ++pass_extruder_id) {
                                     const ExPolygons& pass_masks = pass_bucket.compensated_masks_by_extruder.empty()
@@ -8521,7 +8543,7 @@ LayerResult GCode::process_layer(const Print& print,
                                     auto clipped_local = clip_extrusion_collection_for_local_z(*extrusions,
                                                                                                &pass_masks,
                                                                                                nullptr,
-                                                                                               pass_bucket.plan->flow_height,
+                                                                                               pass_flow_height,
                                                                                                &local_z_loop_seam_placer);
                                     if (!clipped_local)
                                         continue;
@@ -8529,7 +8551,7 @@ LayerResult GCode::process_layer(const Print& print,
                                     const ExtrusionEntityCollection* clipped_ptr = clipped_local.get();
                                     const LocalZPathHeightStats local_height_stats = collect_local_z_path_height_stats(*clipped_ptr);
                                     ++local_z_ctx->local_clipped_collections;
-                                    if (local_height_stats.count > 0 &&
+                                    if (pass_flow_height > 0. && local_height_stats.count > 0 &&
                                         (std::abs(local_height_stats.min - pass_bucket.plan->flow_height) > 1e-3 ||
                                          std::abs(local_height_stats.max - pass_bucket.plan->flow_height) > 1e-3)) {
                                         BOOST_LOG_TRIVIAL(warning) << "Local-Z local pass height mismatch"

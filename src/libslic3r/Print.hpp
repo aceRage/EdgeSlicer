@@ -79,6 +79,15 @@ struct LocalZInterval
     size_t sublayer_count { 0 };
 };
 
+struct SubLayerPlan;
+// The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
+bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
+// The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
+// that row has no Ratio pass there. ToolOrdering files the row's layer under it, so the layer's nominal extruder
+// is the one the Ratio passes end with and no extra tool change follows them.
+unsigned int local_z_ratio_last_extruder(const std::vector<LocalZInterval> &intervals, const std::vector<SubLayerPlan> &plans,
+                                         size_t row_idx, double print_z);
+
 struct SubLayerPlan
 {
     size_t layer_id { 0 };
@@ -90,6 +99,11 @@ struct SubLayerPlan
     double flow_height { 0.0 };
     size_t dependency_group { 0 };
     size_t dependency_order { 0 };
+    // Mixed color sublayer (MixedSublayer.hpp): a pass of a Ratio row. Ratio passes cover the whole mixed region,
+    // infill included, and may be the only plan of their layer (a layer whose minor component carried over).
+    bool   ratio_pass { false };
+    // The top pass of its Ratio row on this layer: ironing prints here only, once (D6).
+    bool   ratio_last_pass { false };
     std::vector<ExPolygons> painted_masks_by_extruder;
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;

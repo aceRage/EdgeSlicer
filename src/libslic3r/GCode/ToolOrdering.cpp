@@ -56,6 +56,17 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
 
+    // Mixed color sublayer: a layer whose row prints as Ratio passes is filed under the pass that ends it.
+    if (current_object != nullptr && !current_object->local_z_intervals().empty()) {
+        const int mixed_idx = mixed_mgr->mixed_index_from_filament_id(filament_id_1based, num_physical);
+        if (mixed_idx >= 0)
+            if (const unsigned int ratio_last = local_z_ratio_last_extruder(current_object->local_z_intervals(),
+                                                                            current_object->local_z_sublayer_plan(), size_t(mixed_idx),
+                                                                            double(layer_print_z));
+                ratio_last != 0)
+                return ratio_last;
+    }
+
     // Z-direction gradient short-circuits the legacy A/B layer cycle below: the
     // gradient path needs the per-(object, layer) run lookup performed inside
     // MixedFilamentManager::resolve.
