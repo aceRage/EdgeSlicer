@@ -14,6 +14,12 @@ std::shared_ptr<OrcaCloudServiceAgent> CloudPluginService::get_cloud_agent() con
     return m_orca_agent;
 }
 
+std::string CloudPluginService::logged_in_user_id() const
+{
+    // Phase 1: cloud networking is not wired; storage stays on the local plugin_key path.
+    return {};
+}
+
 bool CloudPluginService::can_fetch_cloud_plugins() const
 {
     // Phase 1: Orca Cloud is not wired. Local packages only.

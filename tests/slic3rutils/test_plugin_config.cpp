@@ -1,6 +1,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <catch.hpp>
+#include <catch2/catch.hpp>
 
 #include <ios>
 #include <slic3r/plugin/PluginConfig.hpp>

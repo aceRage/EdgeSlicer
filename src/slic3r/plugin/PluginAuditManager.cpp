@@ -2,8 +2,7 @@
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
-#include "libslic3r/libslic3r.h" // GCODEVIEWER_APP_KEY, and SLIC3R_APP_KEY via libslic3r_version.h
-#include "libslic3r_version.h"
+#include "libslic3r/libslic3r.h" // GCODEVIEWER_APP_KEY, SLIC3R_APP_KEY
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>

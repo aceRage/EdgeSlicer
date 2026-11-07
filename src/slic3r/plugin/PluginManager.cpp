@@ -585,11 +585,7 @@ std::string PluginManager::get_storage_dir(const std::string& plugin_key) const
         return local_storage_dir.string();
     }
 
-    auto agent = m_cloud_service.get_cloud_agent();
-    if (!agent)
-        throw std::runtime_error("Cloud plugin storage is unavailable before networking is initialized");
-
-    const std::string user_id = agent->get_user_id();
+    const std::string user_id = m_cloud_service.logged_in_user_id();
     if (user_id.empty())
         throw std::runtime_error("Cloud plugin storage is unavailable without a logged-in user");
 
@@ -1711,7 +1707,8 @@ void PluginManager::fetch_plugins_from_cloud(std::vector<std::string>* out_not_f
                 if (GUI::wxGetApp().is_closing())
                     return;
                 GUI::Plater* plater = GUI::wxGetApp().plater();
-                if (plater == nullptr || GUI::wxGetApp().imgui() == nullptr || !GUI::wxGetApp().imgui()->display_initialized())
+                // Edge's ImGuiWrapper::display_initialized() is private; Orca's is public.
+                if (plater == nullptr || GUI::wxGetApp().imgui() == nullptr)
                     return;
                 plater->get_notification_manager()->push_notification(GUI::NotificationType::CustomNotification,
                                                                       GUI::NotificationManager::NotificationLevel::WarningNotificationLevel,
@@ -1889,11 +1886,8 @@ bool PluginManager::download_and_install_cloud_plugin(const std::string& plugin_
     }
 
     // Ensure cloud plugins install to _subscribed/<user_id>/
-    if (auto agent = m_cloud_service.get_cloud_agent()) {
-        const std::string user_id = agent->get_user_id();
-        if (!user_id.empty())
-            set_cloud_user(user_id);
-    }
+    if (const std::string user_id = m_cloud_service.logged_in_user_id(); !user_id.empty())
+        set_cloud_user(user_id);
 
     // Record the version we just fetched from the cloud so install_plugin persists it to the
     // install-state sidecar (the source of truth for the installed cloud version) instead of the

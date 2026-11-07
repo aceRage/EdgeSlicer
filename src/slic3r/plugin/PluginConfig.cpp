@@ -32,8 +32,7 @@
 #include <system_error>
 #include <vector>
 #include <wx/app.h>
-#include <wx/busycursor.h>
-#include <wx/utils.h>
+#include <wx/utils.h> // EdgeSlicer: wxBusyCursor (wx 3.1 has no wx/busycursor.h)
 #include <nlohmann/json.hpp>
 
 namespace Slic3r {
@@ -265,9 +264,11 @@ bool PluginConfig::save()
     }
 
     // Written beside the target and moved into place, so a crash mid-write cannot truncate an
-    // existing config.
-    if (const std::error_code ec = write_file_atomically(path, root.dump(1, '\t') + "\n")) {
-        BOOST_LOG_TRIVIAL(error) << "PluginConfig: failed to write " << path << ": " << ec.message() << "; keeping the existing config";
+    // existing config. Edge's write_file_atomically returns bool; Orca's returns std::error_code.
+    std::string write_err;
+    if (!write_file_atomically(path, root.dump(1, '\t') + "\n", &write_err)) {
+        BOOST_LOG_TRIVIAL(error) << "PluginConfig: failed to write " << path << ": " << write_err
+                                 << "; keeping the existing config";
         return false;
     }
 

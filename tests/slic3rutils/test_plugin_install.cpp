@@ -1,6 +1,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <catch.hpp>
+#include <catch2/catch.hpp>
 
 #include <chrono>
 #include <ios>
@@ -68,7 +68,8 @@ std::string read_sidecar_text(const fs::path& plugin_dir, const std::string& fil
 // clean up a tree past MAX_PATH even with LongPathsEnabled off. Identity on other platforms.
 fs::path to_extended_path(const fs::path& p)
 {
-    return Slic3r::extended_path(p);
+    // Orca's extended_path() is a Windows MAX_PATH helper Edge does not ship.
+    return p;
 }
 
 // Brings the plugin system up for a case that drives a real plugin load, and tears it down

@@ -1,4 +1,4 @@
-#include <catch.hpp>
+#include <catch2/catch.hpp>
 
 #include <slic3r/plugin/PluginFsUtils.hpp>
 #include <slic3r/plugin/PluginJsonPy.hpp>

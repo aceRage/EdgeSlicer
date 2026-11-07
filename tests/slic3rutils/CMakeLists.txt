@@ -170,14 +170,12 @@ add_executable(${_TEST_NAME}_tests
 # wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
 # does the same), so the test executable has to carry the same files or it cannot link. The
 # Sentry SDK itself comes with libslic3r_gui (SLIC3R_SENTRY and sentry::sentry are PUBLIC there).
-if (WIN32 OR APPLE)
-    target_sources(${_TEST_NAME}_tests PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
-        )
-    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
-endif ()
+# Linux needs the same objects once GUI_App is rebuilt (EDGE_PYTHON_PLUGINS rebuilds it).
+target_sources(${_TEST_NAME}_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+    )
 if (WIN32)
     target_sources(${_TEST_NAME}_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp

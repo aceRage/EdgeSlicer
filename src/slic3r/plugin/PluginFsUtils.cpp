@@ -716,7 +716,7 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
     namespace fs = boost::filesystem;
 
     boost::system::error_code ec;
-    fs::create_directories(extended_path(destination), ec);
+    fs::create_directories(destination, ec);
     if (ec) {
         error = "Failed to create plugin staging directory: " + ec.message();
         return false;
@@ -760,7 +760,7 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
 
         const fs::path output_path = destination / relative_path;
         if (stat.m_is_directory || mz_zip_reader_is_file_a_directory(&reader.archive, stat.m_file_index)) {
-            fs::create_directories(extended_path(output_path), ec);
+            fs::create_directories(output_path, ec);
             if (ec) {
                 error = "Failed to create plugin zip directory " + output_path.string() + ": " + ec.message();
                 return false;
@@ -768,19 +768,19 @@ bool extract_zip_to_directory(const boost::filesystem::path& zip_path, const boo
             continue;
         }
 
-        fs::create_directories(extended_path(output_path.parent_path()), ec);
+        fs::create_directories(output_path.parent_path(), ec);
         if (ec) {
             error = "Failed to create plugin zip parent directory " + output_path.parent_path().string() + ": " + ec.message();
             return false;
         }
 
-        if (fs::exists(extended_path(output_path), ec) && fs::is_directory(extended_path(output_path), ec)) {
+        if (fs::exists(output_path, ec) && fs::is_directory(output_path, ec)) {
             error = "Plugin zip file conflicts with an existing directory: " + output_path.string();
             return false;
         }
 
         // Shared with the rest of the archive code: long-path capable and binary-safe.
-        if (!extract_zip_entry_to_file(&reader.archive, stat.m_file_index, output_path)) {
+        if (!extract_entry_to_file(reader.archive, stat.m_file_index, output_path)) {
             error = "Failed to extract plugin zip entry " + relative_key + ": " +
                     MZ_Archive::get_errorstr(mz_zip_get_last_error(&reader.archive));
             return false;
