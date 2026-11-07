@@ -21,6 +21,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "Preset.hpp"
+
 namespace Slic3r {
 
 class PresetBundle;
@@ -85,6 +87,13 @@ struct PresetManagerRow
     // Why the Enabled box cannot change: "user" (user presets are always shown), "in_use" (shown and in
     // use in this project), empty when it can.
     std::string              lock;
+    // User presets (rename, phase 2): the name split as the rename field shows it (filaments: the part
+    // before " @" and the " @printer" suffix kept as it is; processes: the whole name, no suffix), and
+    // the user filament presets renamed with it by default (same filament_id and base name, itself
+    // included; one entry when it has no family).
+    std::string              base;
+    std::string              suffix;
+    std::vector<std::string> family;
 };
 
 struct PresetManagerModel
@@ -114,10 +123,29 @@ std::vector<PresetManagerItem> collect_preset_manager_items(const PresetBundle &
 // What the page gets:
 //   { kind, rows: [ { key, fav, name, members, vendor, type, source: "System"|"User", filament_id, version,
 //                     printers, all, nozzles, nozzle_t, nozzle_lo, nozzle_hi, bed_t, lh, tier, inherits,
-//                     mtime, enabled, lock, in_use, star, can_rename, can_delete } ],
+//                     mtime, enabled, lock, in_use, star, can_rename, can_delete, base, suffix, family } ],
 //     printers, current_printer }
 // Unknown numbers are null. star = favorite_key in `favorites`.
 nlohmann::json preset_manager_rows_json(const PresetManagerModel &model, const std::set<std::string> &favorites, const std::string &current_printer);
+
+// "My PLA @BBL X1C" -> "My PLA" + " @BBL X1C" (the first " @"); a name without one is all base.
+void split_preset_suffix(const std::string &name, std::string &base, std::string &suffix);
+
+// A rename the preset managers asked for: the names that change (old -> new, the row's first) and
+// whether the new names pass validate_preset_name (PresetNameUse::Rename) plus the rename rules:
+// the edited part of a filament " @printer" name may not contain "@" (the printer part is kept) and
+// may not be empty or start / end with a space.
+struct PresetRenamePlan
+{
+    PresetNameCheck                                  check;
+    std::string                                      checked_name; // the new name the check is about (the one that failed)
+    std::vector<std::pair<std::string, std::string>> renames;      // empty when nothing changes or the check failed
+};
+// `name`: the row's preset; `new_base`: what the user typed (the base for a filament with a suffix, the
+// whole name otherwise); `family`: the presets renamed with it (each keeps its own suffix; `name` is
+// added when missing). Process presets: pass an empty family.
+PresetRenamePlan plan_preset_rename(const PresetCollection &presets, const std::string &name, const std::string &new_base,
+                                    const std::vector<std::string> &family);
 
 // [filaments] with the row's presets enabled (members added) or not (members and their old names removed).
 std::map<std::string, std::string> filament_section_with(std::map<std::string, std::string> section, const PresetManagerRow &row, bool enabled);

@@ -45,6 +45,16 @@
 //   onAction(act, r, e)  a click on an element with data-act="..." inside a row
 //   onRowKey(e, r)       a key on the focused row the engine did not use (return true when handled)
 //   onFocusRow(r)        the focused row changed (r may be null)
+//   onDblClick(r, e)     a double-click on a row (not on its checkbox)
+//   multiSelect          rowClick 'focus' only: Ctrl/Cmd+click adds or removes a row (the first one also
+//                        takes the row clicked before it), Shift+click selects the rows shown from the
+//                        last clicked row; a plain click clears it. The selected
+//                        rows get the class 'sel'. selectable(r) limits which rows can be selected;
+//                        onSelect() follows changes; selectedRows(), clearSelection() read / clear it.
+//   pinned(r)            truthy: the row's element is kept while it scrolls out of view (an inline
+//                        edit in it keeps its field, value and focus); setRows() still rebuilds it
+// Keys typed in a text field inside a row (an inline edit) are the field's: the body does not move
+// the focus or call onRowKey for them, and only the row's own checkbox changes its tick.
 //   setRows(list, {keepScroll: true}), repaintRow(r), focusRow(r), focusedRow(), toggleRow(r, on)
 // Every column but the last can be resized by dragging the right edge of its header (double-click
 // an edge: back to the default widths). Until a column is dragged the layout is cfg.cols[].w.
@@ -135,6 +145,8 @@ var DataTable = (function () {
 		var selects = [];       // { cfg, node, multi } of the toolbar drop-downs
 		var FOCUS_MODE = cfg.rowClick === 'focus';
 		var focusKey = null;    // rowKey() of the focused row (rowClick: 'focus')
+		var selKeys = {};       // multiSelect: rowKey() -> true
+		var anchorKey = null;   // multiSelect: the row Shift+click starts from
 		function keyOf(r) { return cfg.rowKey ? cfg.rowKey(r) : r.id; }
 		function lockOf(r) { return cfg.locked ? cfg.locked(r) : false; }
 
@@ -345,6 +357,7 @@ var DataTable = (function () {
 			el.body.addEventListener('change', onBodyChange);
 			el.body.addEventListener('keydown', onBodyKey);
 			el.body.addEventListener('mouseover', onBodyOver);
+			if (cfg.onDblClick) el.body.addEventListener('dblclick', onBodyDblClick);
 			grid.appendChild(el.body);
 			el.empty = h('div', 'pt-empty', X('none_match'));
 			el.empty.style.display = 'none';
@@ -362,6 +375,11 @@ var DataTable = (function () {
 		// opts.keepScroll: a re-sent list (same rows, new values) keeps the scroll position.
 		function setRows(list, opts) {
 			rows = list;
+			if (cfg.multiSelect) {
+				var keep = {};
+				for (var i = 0; i < rows.length; i++) if (selKeys[keyOf(rows[i])]) keep[keyOf(rows[i])] = true;
+				selKeys = keep;
+			}
 			fillSelects();
 			clearRendered();
 			recompute(!!(opts && opts.keepScroll));
@@ -423,6 +441,7 @@ var DataTable = (function () {
 				if (lk && typeof lk === 'string') cb.parentNode.title = lk; else cb.parentNode.removeAttribute('title');
 			}
 			if (FOCUS_MODE) node.classList.toggle('focus', focusKey !== null && keyOf(r) === focusKey);
+			if (cfg.multiSelect) node.classList.toggle('sel', !!selKeys[keyOf(r)]);
 		}
 		function makeRow(r) {
 			var row = h('div', 'pt-row');
@@ -463,7 +482,10 @@ var DataTable = (function () {
 			var want = {};
 			for (var p = first; p <= last; p++) want[view[p].id] = p;
 			for (var id in rendered) {
-				if (rendered.hasOwnProperty(id) && !want.hasOwnProperty(id)) { rendered[id].remove(); delete rendered[id]; }
+				if (rendered.hasOwnProperty(id) && !want.hasOwnProperty(id)) {
+					if (cfg.pinned && rows[+id] && cfg.pinned(rows[+id])) continue;
+					rendered[id].remove(); delete rendered[id];
+				}
 			}
 			for (var q = first; q <= last; q++) {
 				var r = view[q];
@@ -492,19 +514,73 @@ var DataTable = (function () {
 				while (a && a !== node && !(a.dataset && a.dataset.act)) a = a.parentNode;
 				if (a && a !== node) { setFocus(r, false); cfg.onAction(a.dataset.act, r, e); return; }
 			}
-			if (FOCUS_MODE) { setFocus(r, true); return; }
+			if (FOCUS_MODE) {
+				if (cfg.multiSelect) selectClick(r, e);
+				setFocus(r, true);
+				return;
+			}
 			if (lockOf(r)) return;
 			setChecked(r, !r.checked);
 			changed();
 		}
+		function onBodyDblClick(e) {
+			if (e.target.tagName === 'INPUT') return;
+			var node = rowOf(e.target);
+			if (node) cfg.onDblClick(rows[+node.dataset.id], e);
+		}
+		function isTextField(t) {
+			return !!t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'radio'));
+		}
 		function onBodyChange(e) {
 			var node = rowOf(e.target);
 			if (!node) return;
+			// Only the row's own select checkbox ticks it (not a box inside a row's inline edit).
+			if (e.target.parentNode !== node.firstChild) return;
 			var r = rows[+node.dataset.id];
 			if (lockOf(r)) { e.target.checked = r.checked; return; }
 			if (FOCUS_MODE) setFocus(r, false);
 			setChecked(r, e.target.checked);
 			changed();
+		}
+		// multiSelect: Ctrl/Cmd+click toggles, Shift+click takes the shown rows from the anchor, a plain
+		// click clears.
+		function canSelect(r) { return !cfg.selectable || !!cfg.selectable(r); }
+		function selectClick(r, e) {
+			var before = JSON.stringify(selKeys);
+			if (e.shiftKey && anchorKey !== null) {
+				var a = -1, b = -1;
+				for (var i = 0; i < view.length; i++) {
+					if (keyOf(view[i]) === anchorKey) a = i;
+					if (view[i] === r) b = i;
+				}
+				if (a >= 0 && b >= 0) {
+					selKeys = {};
+					for (var j = Math.min(a, b); j <= Math.max(a, b); j++) if (canSelect(view[j])) selKeys[keyOf(view[j])] = true;
+				}
+			} else if (e.ctrlKey || e.metaKey) {
+				var k = keyOf(r);
+				// The first Ctrl+click also takes the row clicked before it (as a file list does).
+				if (isEmpty(selKeys) && anchorKey !== null && anchorKey !== k)
+					for (var q = 0; q < rows.length; q++) if (keyOf(rows[q]) === anchorKey && canSelect(rows[q])) selKeys[anchorKey] = true;
+				if (selKeys[k]) delete selKeys[k];
+				else if (canSelect(r)) selKeys[k] = true;
+				anchorKey = k;
+			} else {
+				selKeys = {};
+				anchorKey = keyOf(r);
+			}
+			if (JSON.stringify(selKeys) !== before) paintSelection();
+		}
+		function paintSelection() {
+			for (var id in rendered) if (rendered.hasOwnProperty(id)) rendered[id].classList.toggle('sel', !!selKeys[keyOf(rows[+id])]);
+			if (cfg.onSelect) cfg.onSelect();
+		}
+		function selectedRows() { return rows.filter(function (x) { return !!selKeys[keyOf(x)]; }); }
+		function clearSelection() {
+			var had = !isEmpty(selKeys);
+			selKeys = {};
+			if (had) paintSelection();
+			return had;
 		}
 		// rowClick: 'focus' - one focused row; keyboard focus goes to it when `take`.
 		function setFocus(r, take) {
@@ -534,6 +610,7 @@ var DataTable = (function () {
 			else td.removeAttribute('title');
 		}
 		function onBodyKey(e) {
+			if (isTextField(e.target)) return;
 			var nav = e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End' ||
 				(FOCUS_MODE && (e.key === 'PageDown' || e.key === 'PageUp'));
 			var node = rowOf(e.target);
@@ -921,6 +998,8 @@ var DataTable = (function () {
 			repaintRow: repaintRow,
 			focusRow: function (r) { if (!r) { setFocus(null, false); return; } var p = view.indexOf(r); if (p >= 0) focusPos(p); else setFocus(r, false); },
 			focusedRow: focusedRow,
+			selectedRows: selectedRows,
+			clearSelection: clearSelection,
 			toggleRow: toggleRow,
 			search: function () { return el.search; },
 			_state: function () { return { rows: rows, view: view, state: state }; }

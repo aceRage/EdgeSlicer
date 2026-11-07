@@ -24,6 +24,11 @@
 	--pt-locked-fg: #9A9AA0;
 	--pt-focus-ring: #009688;
 	--pt-focus-bg: #E6F4F2;
+	/* the preset managers' rename field: a name that cannot be used */
+	--pt-error: #D93025;
+	/* the preset managers' row selection (Ctrl / Shift+click), apart from the Enabled tick and the focus */
+	--pt-sel-bg: #C4E4F7;
+	--pt-sel-bar: #1A73C8;
 }
 
 body.pt-page {

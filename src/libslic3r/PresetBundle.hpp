@@ -736,6 +736,22 @@ public:
     // Drop names that no longer exist or no longer fit their extruder (printer switched, nozzle changed).
     // Returns true when something was dropped.
     bool                        prune_nozzle_processes();
+
+    // ---- Preset manager: what a rename / delete of a preset touches in the project ----
+    struct PresetUsage
+    {
+        std::vector<size_t>      filament_slots; // filaments: 0-based slots of filament_presets that name it
+        bool                     selected{ false }; // the selected preset of its collection (filament tab / the plate's process)
+        std::vector<size_t>      nozzles;        // processes: 0-based extruders whose per-nozzle process it is
+        std::vector<std::string> nozzle_slots;   // processes: rack slot ids (nozzle_slot_process_presets) that name it
+        bool                     in_use() const { return !filament_slots.empty() || selected || !nozzles.empty() || !nozzle_slots.empty(); }
+    };
+    PresetUsage                 preset_usage(Preset::Type type, const std::string &name) const;
+    // Every project reference to `from` names `to` instead: filaments: the filament slots; processes: the
+    // per-nozzle choices (nozzle_process_presets, nozzle_slot_process_presets). An empty `to` clears the
+    // per-nozzle choices (that tool falls back to the plate's process, its edits go) and leaves filament
+    // slots to the caller (they move to the next visible preset). Returns true when anything changed.
+    bool                        repoint_preset_references(Preset::Type type, const std::string &from, const std::string &to);
     // After a printer switch or a printer settings change: a different printer brings its own remembered
     // selection (none: the plate's process everywhere); the same printer keeps its selection, pruned.
     void                        update_nozzle_processes_for_printer(AppConfig &config);

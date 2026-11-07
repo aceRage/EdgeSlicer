@@ -247,6 +247,26 @@ PresetManagerModel build_preset_manager_model(PresetManagerKind kind, const std:
     for (PresetManagerRow &row : user_rows)
         pm_set_lock(row);
 
+    // Rename: the name as the field edits it, and (filaments) the family renamed with the row.
+    std::map<std::pair<std::string, std::string>, std::vector<std::string>> families;
+    for (PresetManagerRow &row : user_rows) {
+        if (kind == PresetManagerKind::Filament) {
+            split_preset_suffix(row.name, row.base, row.suffix);
+            if (!row.filament_id.empty())
+                families[{row.filament_id, row.base}].push_back(row.name);
+        } else {
+            row.base = row.name;
+        }
+    }
+    for (PresetManagerRow &row : user_rows) {
+        auto it = kind == PresetManagerKind::Filament && !row.filament_id.empty() ? families.find({row.filament_id, row.base}) : families.end();
+        if (it != families.end())
+            row.family = it->second;
+        else
+            row.family = {row.name};
+        pm_sort_unique(row.family);
+    }
+
     std::stable_sort(system_rows.begin(), system_rows.end(), [](const PresetManagerRow &a, const PresetManagerRow &b) {
         if (a.vendor != b.vendor)
             return pm_less_name(a.vendor, b.vendor);
@@ -396,13 +416,79 @@ nlohmann::json preset_manager_rows_json(const PresetManagerModel &model, const s
         r["lock"]        = row.lock;
         r["in_use"]      = row.in_use;
         r["star"]        = !row.favorite_key.empty() && favorites.count(row.favorite_key) > 0;
-        // Phase 2 (rename, delete) turns these on for user presets.
-        r["can_rename"]  = false;
-        r["can_delete"]  = false;
+        // User presets can be renamed and deleted here; system presets only starred / enabled.
+        r["can_rename"]  = !row.is_system;
+        r["can_delete"]  = !row.is_system;
+        r["base"]        = row.base;
+        r["suffix"]      = row.suffix;
+        r["family"]      = row.family;
         rows.push_back(std::move(r));
     }
     out["rows"] = std::move(rows);
     return out;
+}
+
+void split_preset_suffix(const std::string &name, std::string &base, std::string &suffix)
+{
+    const size_t at = name.find(" @");
+    if (at == std::string::npos) {
+        base = name;
+        suffix.clear();
+    } else {
+        base   = name.substr(0, at);
+        suffix = name.substr(at);
+    }
+}
+
+PresetRenamePlan plan_preset_rename(const PresetCollection &presets, const std::string &name, const std::string &new_base,
+                                    const std::vector<std::string> &family)
+{
+    using Level = PresetNameCheck::Level;
+    using Issue = PresetNameCheck::Issue;
+    PresetRenamePlan plan;
+    auto invalid = [&plan](Issue issue) {
+        plan.check.level = Level::Invalid;
+        plan.check.issue = issue;
+        plan.renames.clear();
+        return plan;
+    };
+    std::string base, suffix;
+    split_preset_suffix(name, base, suffix);
+    plan.checked_name = new_base + suffix;
+    if (suffix.empty()) {
+        // Edited whole: the shared rules decide.
+        plan.check = validate_preset_name(presets, new_base, name, PresetNameUse::Rename);
+        if (plan.check.ok() && new_base != name)
+            plan.renames.emplace_back(name, new_base);
+        return plan;
+    }
+    // A " @printer" variant: the field holds the part before " @".
+    if (new_base.empty())
+        return invalid(Issue::Empty);
+    if (new_base.find('@') != std::string::npos)
+        return invalid(Issue::PrinterSuffix);
+    if (new_base.front() == ' ')
+        return invalid(Issue::LeadingSpace);
+    if (new_base.back() == ' ')
+        return invalid(Issue::TrailingSpace);
+    std::vector<std::string> members{name};
+    for (const std::string &m : family)
+        if (m != name)
+            members.push_back(m);
+    for (const std::string &m : members) {
+        std::string m_base, m_suffix;
+        split_preset_suffix(m, m_base, m_suffix);
+        const std::string to = new_base + m_suffix;
+        if (to == m)
+            continue;
+        const PresetNameCheck check = validate_preset_name(presets, to, m, PresetNameUse::Rename);
+        if (!check.ok()) {
+            plan.checked_name = to;
+            return invalid(check.issue);
+        }
+        plan.renames.emplace_back(m, to);
+    }
+    return plan;
 }
 
 std::map<std::string, std::string> filament_section_with(std::map<std::string, std::string> section, const PresetManagerRow &row, bool enabled)
