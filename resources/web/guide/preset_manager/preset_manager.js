@@ -26,13 +26,17 @@
 //   pm_check_name {id, name, scope}     while renaming, 150 ms after the last key (scope: family|one)
 //   pm_rename {id, name, scope}         Enter (or Tab) in the rename field
 //   pm_delete {id}             Delete / the row's delete button (the slicer asks to confirm)
+//   pm_delete_many {ids}       Delete / Delete selected with rows selected (Ctrl / Shift+click): one
+//                              confirmation; the answer is pm_delete_result with id '*'
+//   pm_open {id}               the row's edit button: the preset's settings (the manager closes)
 //   pm_close                   Close, or Esc with nothing open
 //
 // Keys on the focused row: Space = Enabled, F or * = star, F2 = rename, Delete = delete (Return and
 // Backspace / Cmd+Backspace on macOS), arrows / Home / End / PageUp / PageDown move; a double-click
 // renames too. System rows say why they cannot be renamed or deleted. In the rename field: Enter
 // renames, Esc cancels, Tab renames and moves on to the next row's name. Ctrl+F: the search box.
-// Esc: closes a filter popover, else cancels a rename, else closes the dialog.
+// Esc: closes a filter popover, else cancels a rename, else clears a selection, else closes the dialog.
+// Ctrl/Cmd+click and Shift+click select user rows; Delete then deletes them all (one confirmation).
 var PresetManager = (function () {
 	'use strict';
 
@@ -165,12 +169,12 @@ var PresetManager = (function () {
 				title: r.mtime === null && r.version ? T('pm_bundle_version', 'Vendor bundle {v}', { v: r.version }) : undefined };
 		} };
 
-	// Rename / delete buttons on user rows (the mouse path of F2 / Delete).
+	// Edit (the preset's settings) and delete buttons on user rows; rename is F2 / double-click.
 	var COL_ACTIONS = { key: 'actions', tid: 'pm_actions', label: 'Actions', w: '80px', kind: 'none', cls: 'actions',
 		node: function (r) {
 			var box = h('span', 'pm-actions');
 			if (!r.can_rename && !r.can_delete) return box;
-			[['rename', PENCIL, 'pm_rename_tip', 'Rename {name}', r.can_rename], ['delete', TRASH, 'pm_delete_tip', 'Delete {name}', r.can_delete]].forEach(function (a) {
+			[['open', PENCIL, 'pm_open_tip', 'Edit {name}', r.can_rename], ['delete', TRASH, 'pm_delete_tip', 'Delete {name}', r.can_delete]].forEach(function (a) {
 				if (!a[4]) return;
 				var b = h('button', 'pm-act pm-act-' + a[0]);
 				b.type = 'button';
@@ -237,7 +241,7 @@ var PresetManager = (function () {
 	tx.range_hint = ['pm_range_hint', 'Rows without this value are hidden while a limit is set.'];
 	tx.head_check = ['pm_head_check', 'Enable or disable every row shown'];
 
-	var editBtn = null;
+	var editBtn = null, delSelBtn = null;
 	var table = DataTable.create({
 		headerCheck: true,
 		storageKey: 'edge_pm_cols_' + KIND,
@@ -250,7 +254,7 @@ var PresetManager = (function () {
 		onSelectionChange: onTicks,
 		onAction: function (act, r) {
 			if (act === 'star') star(r);
-			else if (act === 'rename') startEdit(r);
+			else if (act === 'open') send('pm_open', { id: r.key }); // its settings (the manager closes, then reopens)
 			else if (act === 'delete') requestDelete(r);
 		},
 		onDblClick: function (r, e) {
@@ -261,8 +265,19 @@ var PresetManager = (function () {
 		pinned: function (r) { return !!(editing && editing.key === r.key); },
 		onRowKey: onRowKey,
 		onFocusRow: updateButtons,
+		multiSelect: true,
+		selectable: function (r) { return !!r.can_delete; },
+		onSelect: updateButtons,
 		toolbar: function (bar) {
-			if (KIND !== 'filament') return;
+			// Delete selected: the rows picked with Ctrl / Shift+click (user presets only).
+			delSelBtn = h('div', 'SmallBtn', T('pm_delete_selected', 'Delete selected'));
+			delSelBtn.id = 'PmDeleteSelected';
+			delSelBtn.setAttribute('role', 'button');
+			delSelBtn.tabIndex = 0;
+			delSelBtn.addEventListener('click', deleteSelected);
+			delSelBtn.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); deleteSelected(); } });
+			bar.appendChild(delSelBtn);
+			if (KIND !== 'filament') { updateButtons(null); return; }
 			var create = h('div', 'SmallBtn', T('pm_create', 'Create new'));
 			create.id = 'PmCreate';
 			create.title = T('pm_create_tip', 'Create a new filament preset');
@@ -282,6 +297,14 @@ var PresetManager = (function () {
 
 	function editable(r) { return !!(r && r.source === 'User' && r.filament_id); }
 	function updateButtons() {
+		if (delSelBtn) {
+			var n = table.selectedRows().length;
+			delSelBtn.textContent = n ? T('pm_delete_selected_n', 'Delete selected ({n})', { n: n }) : T('pm_delete_selected', 'Delete selected');
+			delSelBtn.classList.toggle('disabled', !n);
+			delSelBtn.setAttribute('aria-disabled', n ? 'false' : 'true');
+			delSelBtn.style.opacity = n ? '' : '0.5';
+			delSelBtn.title = n ? T('pm_delete_selected_tip', 'Delete the selected presets (Delete key)') : T('pm_select_tip', 'Ctrl+click or Shift+click your own presets to select them');
+		}
 		if (!editBtn) return;
 		var r = table.focusedRow();
 		var ok = editable(r);
@@ -367,6 +390,7 @@ var PresetManager = (function () {
 	function escape() {
 		if (table.closePopover()) return 'popover';
 		if (editing) { cancelEdit(); return 'edit'; }
+		if (table.clearSelection()) return 'selection';
 		close();
 		return 'close';
 	}
@@ -564,12 +588,27 @@ var PresetManager = (function () {
 
 	// ---- delete (user presets): the slicer asks first, naming what uses the preset ----
 	function requestDelete(r) {
+		if (table.selectedRows().length) { deleteSelected(); return; }
 		if (!r) return;
 		if (!r.can_delete) { status(T('pm_no_delete_system', 'System presets cannot be deleted')); return; }
 		if (editing) cancelEdit();
 		// Afterwards the focus moves to the next row in view (the previous one at the end).
 		afterRows = { focus: rowInView(r.key, 1) || rowInView(r.key, -1), edit: null, deleting: r.key };
 		send('pm_delete', { id: r.key });
+	}
+	// The selection, in one go: one confirmation from the slicer (count, names, what uses them).
+	function deleteSelected() {
+		var sel = table.selectedRows();
+		if (!sel.length) { status(T('pm_select_tip', 'Ctrl+click or Shift+click your own presets to select them')); return; }
+		if (editing) cancelEdit();
+		var picked = {};
+		sel.forEach(function (x) { picked[x.key] = true; });
+		var view = table._state().view, focus = null, last = -1;
+		for (var i = 0; i < view.length; i++) if (picked[view[i].key]) last = i;
+		for (var j = last + 1; j < view.length && !focus; j++) if (!picked[view[j].key]) focus = view[j].key;
+		for (var k = last - 1; k >= 0 && !focus; k--) if (!picked[view[k].key]) focus = view[k].key;
+		afterRows = { focus: focus, edit: null, deleting: '*' };
+		send('pm_delete_many', { ids: sel.map(function (x) { return x.key; }) });
 	}
 	function deleteResult(m) {
 		if (!m) return;

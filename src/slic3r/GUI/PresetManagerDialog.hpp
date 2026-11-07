@@ -12,7 +12,7 @@
 // (with its unsaved-changes prompt) runs once when the Filament manager closes, if the enabled set
 // changed: GUI_App::run_preset_manager. There is a single Close button.
 //
-// Rename (F2 / double-click) and delete (Delete key, row button) of user presets apply at once too
+// Rename (F2 / double-click) and delete (Delete key, row button, several selected rows) apply at once too
 // (phase 2). A rename moves the preset's file, re-points user presets that inherit it, the selection,
 // the project's filament slots / per-nozzle processes and the favourite star; a user filament renames
 // its whole " @printer" family by default. A delete asks first and names what uses the preset; those
@@ -29,6 +29,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -46,7 +47,8 @@ class PresetManagerDialog : public DPIDialog
 {
 public:
     // What to do once the dialog is closed.
-    enum class Then { Nothing, EditPresetSettings };
+    // EditPresetSettings: "Edit" inside Edit printers...; OpenPresetEditor: the row's edit button.
+    enum class Then { Nothing, EditPresetSettings, OpenPresetEditor };
 
     PresetManagerDialog(wxWindow *parent, PresetManagerKind kind);
     ~PresetManagerDialog() override;
@@ -88,6 +90,10 @@ private:
     void                    check_name(const std::string &key, const std::string &typed, bool whole_family);
     void                    rename(const std::string &key, const std::string &typed, bool whole_family);
     void                    delete_row(const std::string &key);
+    // Several rows at once (the selection): one confirmation, one refresh.
+    void                    delete_rows(const std::vector<std::string> &keys);
+    // The row's edit button: the preset's settings tab (closes the manager; it reopens afterwards).
+    void                    open_editor(const std::string &key);
     // The side bar, the settings tab and the other pickers show the presets as they are now.
     void                    refresh_app_presets();
 

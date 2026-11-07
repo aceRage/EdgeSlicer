@@ -9543,6 +9543,24 @@ bool GUI_App::run_preset_manager(PresetManagerKind kind)
                 tab->select_preset(edit_preset_name);
         }
     }
+    // The row's edit button: that preset's settings tab, shown the way the sidebar's edit buttons show it
+    // (PlaterPresetComboBox::switch_to_tab). The settings window cannot be used under the modal manager,
+    // so the manager closed; when the settings are a window of their own it opens again (same page)
+    // when that window closes. Docked settings (no window to close) leave it closed.
+    if (then == PresetManagerDialog::Then::OpenPresetEditor && !edit_preset_name.empty()) {
+        const Preset::Type type = kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT;
+        if (Tab *tab = get_tab(type)) {
+            tab->select_preset(edit_preset_name);
+            if (tab->GetParent() == params_panel()) {
+                mainframe->select_tab(MainFrame::tp3DEditor);
+            } else {
+                params_dialog()->set_on_close_once([this, kind]() { run_preset_manager(kind); });
+                params_dialog()->Popup();
+                tab->OnActivate();
+            }
+            tab->restore_last_select_item();
+        }
+    }
     return reloaded;
 }
 

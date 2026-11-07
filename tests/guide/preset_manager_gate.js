@@ -19,7 +19,8 @@
 //   * phase 2: rename (F2, double-click, the row button; Return on macOS): the field, the fixed
 //     printer suffix, "Only this printer", name checks block Enter, Esc cancels, Tab moves on, the field
 //     survives scrolling and re-sent rows, a click elsewhere renames (an invalid name stays red); no
-//     browser context menu; delete (Delete key, row button; Backspace on macOS): pm_delete,
+//     browser context menu; the row's edit button asks for the settings (pm_open); Ctrl / Shift+click
+//     select user rows and Delete / Delete selected send them in one pm_delete_many; delete (Delete key, row button; Backspace on macOS): pm_delete,
 //     the focus moves on, a cancelled delete keeps the row
 //   * a re-sent pm_rows keeps filters, sort, scroll and the focused row
 //   * Esc order: popover, then Close (pm_close, after flushing the ticks); pm_escape from the slicer
@@ -176,6 +177,12 @@ function stub(mock) {
                 if (window.__confirmDelete === false) { HandleStudio({ command: 'pm_delete_result', id: m.id, ok: false, message: '' }); return; }
                 window.__mock.rows = window.__mock.rows.filter(function (x) { return x.key !== m.id; });
                 HandleStudio({ command: 'pm_delete_result', id: m.id, ok: true, message: '' });
+                rowsAgain(); }, 20);
+            else if (m.command === 'pm_delete_many') setTimeout(function () {
+                if (window.__confirmDelete === false) { HandleStudio({ command: 'pm_delete_result', id: '*', ok: false, message: '' }); return; }
+                var gone = {}; (m.ids || []).forEach(function (k) { gone[k] = true; });
+                window.__mock.rows = window.__mock.rows.filter(function (x) { return !gone[x.key] || x.source !== 'User'; });
+                HandleStudio({ command: 'pm_delete_result', id: '*', ok: true, message: '' });
                 rowsAgain(); }, 20);
             else if (m.command === 'pm_enabled') setTimeout(function () {
                 var out = (m.changes || []).map(function (c) {
@@ -438,7 +445,7 @@ async function main() {
         const rowKeys = () => st(`s.rows.map(function(r){ return r.key; })`);
         await clearAllFilters();
         id = await showRow('u|Fam PLA @' + PRINTERS[0]);
-        check('a user row has rename and delete buttons', await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row[data-id="${id}"]'); return !!n.querySelector('.pm-act-rename') && !!n.querySelector('.pm-act-delete'); })()`));
+        check('a user row has edit and delete buttons', await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row[data-id="${id}"]'); return !!n.querySelector('.pm-act-open') && !!n.querySelector('.pm-act-delete'); })()`));
         const sysId = await showRow('s|BBL|Generic PLA');
         check('a system row has none', await evalJs(`!document.querySelector('.pt-body .pt-row[data-id="${sysId}"] .pm-act')`));
         id = await showRow('u|Fam PLA @' + PRINTERS[0]);
@@ -494,11 +501,17 @@ async function main() {
             !keysAfter.includes('u|Fam PLA @' + PRINTERS[0]));
         check('the renamed row has the focus, the field is gone', !(await evalJs(`!!${field}`)) && await evalJs(`(function(){ var f = PresetManager.table.focusedRow(); return !!f && f.key === ${JSON.stringify('u|Fam PLA+ @' + PRINTERS[0])}; })()`));
         check('its star went with it', await st(`s.rows.filter(function(r){ return r.key === ${JSON.stringify('u|Fam PLA+ @' + PRINTERS[0])}; })[0].star === true`));
-        // the row button, "Only this printer"
+        // the row's edit button opens the preset's settings (pm_open), not the rename field
         id = await showRow('u|Fam PLA+ @' + PRINTERS[1]);
-        await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${id}"] .pm-act-rename').click()`);
+        await evalJs(`window.__sent = []`);
+        await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${id}"] .pm-act-open').click()`);
         await sleep(50);
-        check('the row\'s rename button opens the field', await evalJs(`!!${field} && ${field}.value === 'Fam PLA+'`));
+        check('the row\'s edit button asks for the preset\'s settings (pm_open), no rename field', await evalJs(`window.__sent.some(function(m){ return m.command === 'pm_open' && m.id === ${JSON.stringify('u|Fam PLA+ @' + PRINTERS[1])}; })`) &&
+            !(await evalJs(`!!${field}`)));
+        // "Only this printer"
+        await keyOn(id, 'F2');
+        await sleep(50);
+        check('F2 opens the rename field', await evalJs(`!!${field} && ${field}.value === 'Fam PLA+'`));
         await evalJs(`document.querySelector('.pm-edit-one').click()`);
         await typeName('Solo PLA');
         await evalJs(`window.__sent = []`);
@@ -590,6 +603,46 @@ async function main() {
         const ctxRow = await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row'); var e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }); n.dispatchEvent(e); return e.defaultPrevented; })()`);
         const ctxFoot = await evalJs(`(function(){ var e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 }); document.getElementById('PmFooter').dispatchEvent(e); return e.defaultPrevented; })()`);
         check('right-click on a row or the footer: no browser context menu (filament page)', ctxRow === true && ctxFoot === true);
+        // bulk delete: Ctrl+click / Shift+click select user rows (not system rows), Delete sends them all
+        await clearAllFilters();
+        const users = await st(`s.view.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); }).slice(10, 13).map(function(r){ return r.key; })`);
+        const clickRow = async (key, mods) => { const rid = await showRow(key);
+            await evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row[data-id="${rid}"]').children[3]; n.dispatchEvent(new MouseEvent('click', Object.assign({ bubbles: true }, ${JSON.stringify(mods || {})}))); })()`); };
+        await clickRow(users[0]);
+        await clickRow(users[1], { ctrlKey: true });
+        await clickRow(users[2], { ctrlKey: true });
+        const sysPick = await st(`s.view.filter(function(r){ return r.source === 'System'; })[3].key`);
+        await clickRow(sysPick, { ctrlKey: true });
+        check('Ctrl+click selects user rows (with the row clicked before); a system row cannot be selected', JSON.stringify((await evalJs(`PresetManager.table.selectedRows().map(function(r){ return r.key; })`)).sort()) === JSON.stringify(users.slice().sort()) &&
+            await evalJs(`(function(){ var id = ${await showRow(users[2])}; var n = document.querySelector('.pt-body .pt-row[data-id="' + id + '"]'); return !!n && n.classList.contains('sel'); })()`), JSON.stringify(await evalJs(`PresetManager.table.selectedRows().map(function(r){ return r.key; })`)));
+        check('the Delete selected button counts them', /\(3\)/.test(await evalJs(`document.getElementById('PmDeleteSelected').textContent`)));
+        // Shift+click: the shown rows from the last clicked one (system rows in between are left out)
+        await clickRow(users[0]);
+        await clickRow(users[2], { shiftKey: true });
+        const shiftSel = await evalJs(`PresetManager.table.selectedRows().map(function(r){ return r.key; })`);
+        check('Shift+click selects the user rows in between', users.every(function (k) { return shiftSel.indexOf(k) >= 0; }) &&
+            await st(`PresetManager.table.selectedRows().every(function(r){ return r.can_delete; })`), JSON.stringify(shiftSel));
+        await evalJs(`window.__sent = []; window.__confirmDelete = true`);
+        const focusedId = await evalJs(`+document.querySelector('.pt-body .pt-row.focus').dataset.id`);
+        await keyOn(focusedId, 'Delete');
+        await sleep(250);
+        check('Delete with a selection sends pm_delete_many with every selected row (one request)', await evalJs(`(function(){ var m = window.__sent.filter(function(x){ return x.command === 'pm_delete_many'; });
+            return m.length === 1 && m[0].ids.length === ${JSON.stringify(shiftSel.length)} && !window.__sent.some(function(x){ return x.command === 'pm_delete'; }); })()`));
+        check('they are gone and the selection is empty', !(await rowKeys()).some(function (k) { return users.indexOf(k) >= 0; }) &&
+            await evalJs(`PresetManager.table.selectedRows().length === 0 && /^Delete selected$/.test(document.getElementById('PmDeleteSelected').textContent)`));
+        const more = await st(`s.view.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); }).slice(20, 22).map(function(r){ return r.key; })`);
+        await clickRow(more[0]);
+        await clickRow(more[1], { ctrlKey: true });
+        const selBefore = await evalJs(`PresetManager.table.selectedRows().length`);
+        await evalJs(`window.__sent = []`);
+        await click('#PmDeleteSelected');
+        await sleep(250);
+        check('the Delete selected button sends them too', await evalJs(`window.__sent.some(function(x){ return x.command === 'pm_delete_many' && x.ids.length === 2; })`), selBefore + ' ' + (await sentCmds()));
+        await clickRow(await st(`s.view.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); })[25].key`));
+        await clickRow(await st(`s.view.filter(function(r){ return r.source === 'User' && /^My /.test(r.name); })[26].key`), { ctrlKey: true });
+        await evalJs(`window.__sent = []`);
+        await docKey('Escape');
+        check('Esc clears a selection before it closes the dialog', await evalJs(`PresetManager.table.selectedRows().length === 0`) && !(await sentCmds()).includes('pm_close'));
         check('no uncaught exception while renaming and deleting', errors.length === 0, errors.join(' | '));
         await clearAllFilters();
 

@@ -310,6 +310,16 @@ void PresetManagerDialog::on_message(wxWebViewEvent &evt)
         } else if (cmd == "pm_delete") {
             const std::string key = j.value("id", std::string());
             CallAfter([this, key] { delete_row(key); });
+        } else if (cmd == "pm_delete_many") {
+            std::vector<std::string> keys;
+            if (j.contains("ids") && j["ids"].is_array())
+                for (const nlohmann::json &k : j["ids"])
+                    if (k.is_string())
+                        keys.push_back(k.get<std::string>());
+            CallAfter([this, keys] { delete_rows(keys); });
+        } else if (cmd == "pm_open") {
+            const std::string key = j.value("id", std::string());
+            CallAfter([this, key] { open_editor(key); });
         } else if (cmd == "pm_close") {
             close_with(Then::Nothing);
         }
@@ -579,6 +589,174 @@ void PresetManagerDialog::delete_row(const std::string &key)
         wxGetApp().plater()->update_project_dirty_from_presets();
     result(true, wxString());
     reload_rows();
+}
+
+// "Filament slot 2 of this project", "The plate's process", ... for a preset in use.
+static std::vector<wxString> pm_usage_lines(Preset::Type type, const PresetBundle::PresetUsage &usage)
+{
+    std::vector<wxString> lines;
+    for (size_t slot : usage.filament_slots)
+        lines.push_back(wxString::Format(_L("Filament slot %d of this project"), int(slot + 1)));
+    if (usage.selected)
+        lines.push_back(type == Preset::TYPE_FILAMENT ? _L("The filament shown in the filament settings") : _L("The plate's process"));
+    for (size_t e : usage.nozzles)
+        lines.push_back(wxString::Format(_L("The process of nozzle %d"), int(e + 1)));
+    for (const std::string &id : usage.nozzle_slots)
+        lines.push_back(wxString::Format(_L("The process of rack slot %s"), from_u8(id)));
+    return lines;
+}
+
+void PresetManagerDialog::delete_rows(const std::vector<std::string> &keys)
+{
+    auto result = [this](bool ok, const wxString &message) {
+        send("pm_delete_result", {{"id", "*"}, {"ok", ok}, {"message", into_u8(message)}});
+    };
+    if (m_busy || m_closing)
+        return result(false, wxString());
+    PresetCollection  &presets = collection();
+    PresetBundle      &bundle  = *wxGetApp().preset_bundle;
+    const Preset::Type type    = m_kind == PresetManagerKind::Filament ? Preset::TYPE_FILAMENT : Preset::TYPE_PRINT;
+
+    // The user presets asked for (system rows and unknown keys are ignored).
+    std::vector<std::string> names;
+    for (const std::string &key : keys)
+        if (const PresetManagerRow *row = user_row(key); row != nullptr)
+            if (const Preset *p = presets.find_preset(row->members.front(), false); p != nullptr && p->is_user() &&
+                std::find(names.begin(), names.end(), p->name) == names.end())
+                names.push_back(p->name);
+    if (names.empty())
+        return result(false, _L("System presets cannot be deleted."));
+
+    // A preset that a preset outside the selection inherits is skipped, as the settings tab refuses it.
+    // Inside the selection, children go before their parents.
+    std::set<std::string>    chosen(names.begin(), names.end());
+    std::vector<std::string> skipped, todo;
+    for (bool changed = true; changed;) { // until stable: skipping a child can make its parent kept too
+        changed = false;
+        for (const std::string &name : names) {
+            if (chosen.count(name) == 0)
+                continue;
+            for (const std::string &child : presets.user_presets_inheriting(name))
+                if (chosen.count(child) == 0) {
+                    chosen.erase(name);
+                    skipped.push_back(name);
+                    changed = true;
+                    break;
+                }
+        }
+    }
+    for (const std::string &name : names)
+        if (chosen.count(name) > 0)
+            todo.push_back(name);
+    // Deepest first (a grandchild before its parent before the root), by the inherits chain inside the set.
+    auto depth = [&presets, &chosen](const std::string &name) {
+        int           d = 0;
+        const Preset *p = presets.find_preset(name, false);
+        while (p != nullptr && d < 16 && chosen.count(p->inherits()) > 0) {
+            ++d;
+            p = presets.find_preset(p->inherits(), false);
+        }
+        return d;
+    };
+    std::stable_sort(todo.begin(), todo.end(), [&depth](const std::string &a, const std::string &b) { return depth(a) > depth(b); });
+
+    // One confirmation: the count, the first names, what uses them, what is skipped.
+    wxString msg;
+    if (todo.empty()) {
+        msg = _L("Presets inherited by other presets cannot be deleted!");
+    } else {
+        msg = wxString::Format(_L_PLURAL("Delete %d preset?", "Delete these %d presets?", todo.size()), int(todo.size()));
+        const size_t shown = std::min<size_t>(todo.size(), 10);
+        for (size_t i = 0; i < shown; ++i)
+            msg += "\n - " + from_u8(todo[i]);
+        if (todo.size() > shown)
+            msg += "\n" + wxString::Format(_L("and %d more"), int(todo.size() - shown));
+        wxString used;
+        for (const std::string &name : todo) {
+            const std::vector<wxString> lines = pm_usage_lines(type, bundle.preset_usage(type, name));
+            if (lines.empty())
+                continue;
+            wxString line = "\n - " + from_u8(name) + ": ";
+            for (size_t i = 0; i < lines.size(); ++i)
+                line += (i ? ", " : "") + lines[i];
+            used += line;
+        }
+        if (!used.empty())
+            msg += "\n\n" + _L("Used by:") + used + "\n\n" +
+                   (type == Preset::TYPE_FILAMENT ? _L("They switch to the next visible filament preset.") :
+                                                    _L("The plate switches to the next visible process preset; a nozzle goes back to the plate's process."));
+    }
+    if (!skipped.empty()) {
+        msg += "\n\n" + _L("Skipped: other presets inherit these:");
+        for (const std::string &name : skipped)
+            msg += "\n - " + from_u8(name);
+    }
+    if (!todo.empty() && wxGetApp().app_config->get_bool("sync_bambu_user_presets"))
+        msg += "\n\n" + _L("A preset copied from Bambu Studio comes back the next time presets are copied from there.");
+    m_busy     = true;
+    int answer = wxID_NO;
+    if (todo.empty())
+        MessageDialog(this, msg, _L("Delete Preset"), wxOK | wxICON_ERROR).ShowModal();
+    else
+        answer = MessageDialog(this, msg, _L("Delete Preset"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION).ShowModal();
+    m_busy = false;
+    if (answer != wxID_YES)
+        return result(false, wxString());
+
+    // The selected preset last, through its settings tab (it picks the next visible preset); every
+    // other one with the shared helper. The side bar, tab and rows are refreshed once at the end.
+    std::vector<std::string> deleted;
+    std::string              selected_name;
+    for (const std::string &name : todo) {
+        if (presets.get_selected_preset_name() == name) {
+            selected_name = name;
+            continue;
+        }
+        std::string next_selected = presets.get_selected_preset_name();
+        if (delete_user_preset_by_name(type, name, next_selected))
+            deleted.push_back(name);
+    }
+    if (!selected_name.empty()) {
+        if (Tab *tab = wxGetApp().get_tab(type))
+            tab->delete_preset(true);
+        if (presets.find_preset(selected_name, false) == nullptr)
+            deleted.push_back(selected_name);
+    }
+
+    const std::string next = presets.get_selected_preset_name();
+    if (type == Preset::TYPE_FILAMENT)
+        for (std::string &slot : bundle.filament_presets)
+            if (presets.find_preset(slot, false) == nullptr)
+                slot = next;
+    for (const std::string &name : deleted) {
+        if (type == Preset::TYPE_PRINT)
+            bundle.repoint_preset_references(type, name, std::string());
+        FavoriteFilamentsUI::remove_key(name, pm_fav_kind(m_kind));
+    }
+    // One refresh for all of them (combos, per-nozzle choices, selections in the app config).
+    if (!deleted.empty())
+        wxGetApp().sidebar().update_presets_from_to(type, deleted.front(), type == Preset::TYPE_FILAMENT ? next : std::string());
+    BOOST_LOG_TRIVIAL(info) << "Preset manager (" << pm_kind_name(m_kind) << "): deleted " << deleted.size() << " of " << todo.size()
+                            << " user preset(s), " << skipped.size() << " skipped";
+    refresh_app_presets();
+    if (wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->update_project_dirty_from_presets();
+    result(!deleted.empty(), deleted.size() == todo.size() ? wxString() : _L("Some presets were not deleted."));
+    reload_rows();
+}
+
+void PresetManagerDialog::open_editor(const std::string &key)
+{
+    if (m_busy || m_closing)
+        return;
+    const PresetManagerRow *row = user_row(key);
+    if (row == nullptr)
+        return;
+    // The settings window cannot be used under this modal dialog: close it, open the preset's tab;
+    // GUI_App::run_preset_manager reopens the manager when the settings window closes.
+    m_edit_preset_name = row->members.front();
+    m_edit_filament_id.clear();
+    close_with(Then::OpenPresetEditor);
 }
 
 }} // namespace Slic3r::GUI
