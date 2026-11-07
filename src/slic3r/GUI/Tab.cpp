@@ -3249,10 +3249,14 @@ void Tab::on_presets_changed()
         // flow types). The sidebar was updated above, before they were back: the nozzle UI, filament lists and Tabs follow.
         const bool rack_restored = wxGetApp().preset_bundle->update_nozzle_diameter_override_for_printer(*wxGetApp().app_config);
         wxGetApp().preset_bundle->update_nozzle_processes_for_printer(*wxGetApp().app_config);
+        // Owner bug 2026-11-07: a switch from another model can land on that printer's nozzle variant (H2S 0.8 -> H3C 0.8 with a
+        // rack of 0.4 nozzles): the variant then follows the restored extruder size (#911), so the Plate's processes fit it.
         if (rack_restored)
             wxGetApp().CallAfter([]() {
-                if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+                if (Plater *plater = wxGetApp().plater(); plater != nullptr) {
                     plater->sidebar().on_nozzle_sizes_changed();
+                    plater->sidebar().follow_nozzle_sizes_with_printer_variant();
+                }
             });
     }
 

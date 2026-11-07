@@ -769,7 +769,8 @@ public:
     bool                        set_tool_nozzle_diameter(size_t tool, double diameter);
     // Replace the whole override (stored form, NozzleOverride.hpp). Returns true when it changed.
     bool                        set_nozzle_diameter_override(const std::vector<double> &values);
-    // Remember the current override as the default of the edited printer's model.
+    // Remember the current override as the default of the edited printer's model. Not before the model's nozzles were
+    // updated for it (update_nozzle_diameter_override_for_printer): until then the project holds the previous printer's sizes.
     void                        remember_nozzle_diameter_override(AppConfig &config) const;
     // After a printer switch: another printer model brings its own remembered sizes (none: the preset's); the same
     // model keeps the project's sizes, cut to its extruder count. Another model (startup included) also gets its remembered
@@ -782,9 +783,18 @@ public:
     // Remember them for the selected printer preset (app config section "nozzle_rack", key = preset name) and its model
     // (section "nozzle_rack_model", key = printer_model). Not before the model's memory was restored (startup).
     void                        remember_nozzle_rack(AppConfig &config) const;
-    // Put the remembered nozzles of the selected printer (else of its model) back into the project when they still fit the
-    // printer model (nozzle_rack_limits). Returns true when they were applied.
+    // Put the remembered nozzles of the selected printer back into the project when they still fit the printer model
+    // (nozzle_rack_limits). The entries are tried in nozzle_rack_memory_candidates() order: on a system variant the model's
+    // last rack comes first. Returns true when they were applied.
     bool                        restore_nozzle_rack(const AppConfig &config);
+    // The system variant of the selected printer's model whose nozzle_diameter is the size every extruder carries now, when
+    // that is another variant than the selected one (#911: the extruder's own nozzle is the Plate's nozzle). Empty when the
+    // sizes are mixed, the selected variant already has that size, or no variant of the model has it.
+    std::string                 printer_variant_for_nozzle_sizes() const;
+    // Owner bug 2026-11-07 (H2S 0.8 -> H3C showed every rack slot 0.8): a switch to another printer model keeps the previous
+    // printer's nozzle variant (get_similar_printer_preset). When printer preset `target` has remembered nozzles of one size
+    // on every extruder, the system variant of its model with that size; otherwise `target`.
+    std::string                 printer_preset_for_remembered_nozzles(const AppConfig &config, const std::string &target) const;
     // What the selected printer's model takes: every system variant of its printer_model with the same extruder count, and
     // the selected preset itself (extruder_variant_list, default_nozzle_volume_type, sizes, rack capacity).
     NozzleRackLimits            nozzle_rack_limits() const;

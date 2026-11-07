@@ -303,10 +303,10 @@ std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<do
     return out;
 }
 
-std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders)
+std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync::PrinterState &state, size_t extruders)
 {
-    // Per logical extruder: (order key, size); the mounted nozzle sorts first, rack positions after it in their order.
-    std::vector<std::vector<std::pair<int, double>>> found(extruders);
+    // Per logical extruder: (order key, nozzle); the mounted nozzle sorts first, rack positions after it in their order.
+    std::vector<std::vector<std::pair<int, RackNozzle>>> found(extruders);
     for (const DualNozzleSync::PrinterNozzle &nozzle : state.nozzles) {
         if (nozzle.on_rack() && !nozzle.normal)
             continue;
@@ -315,12 +315,17 @@ std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::Prin
             continue;
         try {
             const double d = string_to_double_decimal_point(nozzle.diameter); // "0.4" in any UI locale
-            if (plausible_size(d))
-                found[size_t(logical)].emplace_back(nozzle.on_rack() ? 1 + nozzle.rack_slot() : 0, d);
+            if (!plausible_size(d))
+                continue;
+            RackNozzle n;
+            n.diameter     = d;
+            n.volume_type  = nozzle.volume;
+            n.volume_given = true;
+            found[size_t(logical)].emplace_back(nozzle.on_rack() ? 1 + nozzle.rack_slot() : 0, n);
         } catch (...) {
         }
     }
-    std::vector<std::vector<double>> out(extruders);
+    std::vector<std::vector<RackNozzle>> out(extruders);
     for (size_t e = 0; e < extruders; ++e) {
         std::stable_sort(found[e].begin(), found[e].end(), [](const auto &a, const auto &b) { return a.first < b.first; });
         // Only an extruder with rack nozzles has a rack to describe.
@@ -329,6 +334,16 @@ std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::Prin
         for (const auto &n : found[e])
             out[e].push_back(n.second);
     }
+    return out;
+}
+
+std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders)
+{
+    const std::vector<std::vector<RackNozzle>> nozzles = reported_rack_nozzles(state, extruders);
+    std::vector<std::vector<double>>           out(nozzles.size());
+    for (size_t e = 0; e < nozzles.size(); ++e)
+        for (const RackNozzle &n : nozzles[e])
+            out[e].push_back(n.diameter);
     return out;
 }
 
