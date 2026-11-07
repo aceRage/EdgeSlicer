@@ -35,6 +35,9 @@ bool machine_matches_preset(MachineObject *obj);
 // Snapshot of obj (nullptr or offline: has_report = false). Only loaded, identified trays; each
 // extruder's external spool holder is a one-slot unit of its own (ams id 254 / 255).
 DualNozzleSync::PrinterState printer_state(MachineObject *obj);
+// Only the nozzles obj reports (mounted and rack), on any printer: printer_state() leaves them out on a single-extruder one,
+// so an H3C's nine-slot rack never reached "Sync from printer" (owner bug 2026-11-07). has_report stays false.
+DualNozzleSync::PrinterState nozzle_report_state(MachineObject *obj);
 
 // Filaments printed on the plate, with the project's colours and filament types.
 std::vector<DualNozzleSync::ProjectFilament> plate_filaments(PartPlate *plate);

@@ -5417,36 +5417,20 @@ bool Sidebar::follow_nozzle_sizes_with_printer_variant()
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return false;
-    const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
-    const std::vector<double> preset = bundle->preset_nozzle_diameters();
-    if (sizes.empty() || preset.size() != sizes.size())
-        return false;
-    for (double d : sizes)
-        if (!same_nozzle_diameter(d, sizes.front()))
-            return false;
-    if (std::all_of(preset.begin(), preset.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
-        return false; // the variant already has this size
     const Preset &current = bundle->printers.get_selected_preset();
     if (!current.is_system || bundle->printers.current_is_dirty())
         return false;
-    const std::string model = current.config.opt_string("printer_model");
-    const Preset     *target = nullptr;
-    for (const Preset &p : bundle->printers) {
-        if (!p.is_system || p.is_default || p.config.opt_string("printer_model") != model)
-            continue;
-        const auto *nd = p.config.option<ConfigOptionFloats>("nozzle_diameter");
-        if (nd == nullptr || nd->values.size() != sizes.size() ||
-            !std::all_of(nd->values.begin(), nd->values.end(), [&](double d) { return same_nozzle_diameter(d, sizes.front()); }))
-            continue;
-        target = &p;
-        break;
-    }
+    // Mixed sizes, the variant already of this size, or no variant of it: it stays the project's size (P7).
+    const std::string name = bundle->printer_variant_for_nozzle_sizes();
+    if (name.empty())
+        return false;
+    const std::vector<double> sizes  = bundle->effective_nozzle_diameters();
+    Preset                   *target = bundle->printers.find_preset(name, false);
     if (target == nullptr)
-        return false; // no variant of this size: it stays the project's size (P7)
-    const std::string name = target->name;
+        return false;
     BOOST_LOG_TRIVIAL(info) << "per-nozzle process: every nozzle is " << sizes.front() << " mm, printer variant follows: " << current.name
                             << " -> " << name;
-    const_cast<Preset *>(target)->is_visible = true;
+    target->is_visible = true;
     // Not forced: the printer has no unsaved changes (checked above), but a changed process or filament still gets its usual
     // keep / transfer / discard question rather than being dropped. Cancelled: the printer and the rack stay as they are.
     if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER); tab == nullptr || !tab->select_preset(name))
@@ -5509,6 +5493,22 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
         dlg.ShowModal();
         return;
     }
+    // Owner bug 2026-11-07: the Device page's selected machine is not always the printer selected here. An H2S's 0.8 nozzle
+    // synced into the H3C gave every one of its rack slots 0.8 (and was remembered for the H3C). Only the same model syncs.
+    const std::string profile_type = bundle->printers.get_edited_preset().get_printer_type(bundle);
+    const bool        p1_pair      = (profile_type == "C11" || profile_type == "C12") && (obj->printer_type == "C11" || obj->printer_type == "C12");
+    if (!profile_type.empty() && !p1_pair && !DualNozzle::machine_matches_preset(obj)) {
+        const std::string profile_model = bundle->printers.get_edited_preset().config.opt_string("printer_model");
+        BOOST_LOG_TRIVIAL(warning) << "nozzle sync: the selected device " << obj->dev_id << " (" << obj->printer_type << ") is not a "
+                                   << profile_model << ", nothing synced";
+        MessageDialog dlg(wxGetApp().mainframe,
+                          wxString::Format(_L("The printer selected on the Device page (%s) is not a %s. Select that printer on the Device page, "
+                                              "or select its printer profile here, then sync again."),
+                                           from_u8(obj->dev_name), from_u8(profile_model)),
+                          _L("Sync nozzle sizes"), wxOK);
+        dlg.ShowModal();
+        return;
+    }
     const std::vector<double> preset = bundle->preset_nozzle_diameters();
     std::vector<double>       reported(preset.size(), 0.);
     if (preset.size() >= 2 && obj->m_extder_data.extders.size() >= 2) {
@@ -5536,16 +5536,21 @@ void Sidebar::sync_nozzle_sizes_from_bambu_printer()
     if (changed)
         BOOST_LOG_TRIVIAL(info) << "per-nozzle process P7: nozzle sizes synced from " << obj->dev_id << ": "
                                 << nozzle_diameter_summary(bundle->effective_nozzle_diameters());
-    // Per-nozzle process P9: a printer with a nozzle rack (H2C) also reports the nozzles in it. Read from the device state the
-    // Device page already holds (no request is sent): the mounted nozzle, then the rack positions in order, become the
-    // project's rack slots.
+    // Per-nozzle process P9: a printer with a nozzle rack (H2C, H3C) also reports the nozzles in it. Read from the device state
+    // the Device page already holds (no request is sent): the mounted nozzle, then the rack positions in order, become the
+    // project's rack slots, each with its size and type. Owner bug 2026-11-07: this ran on two-extruder printers only
+    // (printer_state() reports no nozzles on a single-extruder one), so an H3C sync left its nine slots as they were.
     wxString rack_note;
-    if (obj->has_nozzle_rack() && preset.size() >= 2) {
-        const std::vector<std::vector<double>> layout = reported_rack_layout(DualNozzle::printer_state(obj), preset.size());
-        std::vector<std::string>               current(preset.size());
+    if (obj->has_nozzle_rack()) {
+        const std::vector<std::vector<RackNozzle>> layout = reported_rack_nozzles(DualNozzle::nozzle_report_state(obj), preset.size());
+        std::vector<std::string>                   current(preset.size());
         for (size_t e = 0; e < preset.size(); ++e)
             current[e] = bundle->rack_nozzle_override(e);
-        const std::vector<std::string> texts = rack_override_from_reported(layout, current);
+        std::vector<int> types(preset.size(), int(nvtStandard));
+        if (const auto *opt = bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
+            for (size_t e = 0; e < types.size() && e < opt->values.size(); ++e)
+                types[e] = opt->values[e];
+        const std::vector<std::string> texts = rack_override_from_reported(layout, current, types, bundle->nozzle_rack_limits().capacity);
         if (bundle->set_rack_nozzle_override(texts)) {
             changed = true;
             BOOST_LOG_TRIVIAL(info) << "per-nozzle process P9: rack nozzles synced from " << obj->dev_id;
@@ -18504,6 +18509,19 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
                 }
                 preset->is_visible = true; // force visible
                 preset_name = preset->name;
+                // Owner bug 2026-11-07: get_similar_printer_preset keeps the previous printer's nozzle variant (H2S 0.8 -> H3C
+                // 0.8). A printer with remembered nozzles opens on the variant of its own nozzle instead.
+                const PresetCollection &printers  = wxGetApp().preset_bundle->printers;
+                const bool              new_model = preset->config.opt_string("printer_model") !=
+                                                    printers.get_selected_preset().config.opt_string("printer_model");
+                const std::string own = new_model ? wxGetApp().preset_bundle->printer_preset_for_remembered_nozzles(*wxGetApp().app_config, preset_name) :
+                                                    preset_name;
+                if (own != preset_name)
+                    if (Preset *own_preset = wxGetApp().preset_bundle->printers.find_preset(own, false); own_preset != nullptr) {
+                        BOOST_LOG_TRIVIAL(info) << "nozzle rack: " << preset_name << " -> " << own << " (the variant of its remembered nozzles)";
+                        own_preset->is_visible = true;
+                        preset_name = own;
+                    }
             }
         }
         //BBS
