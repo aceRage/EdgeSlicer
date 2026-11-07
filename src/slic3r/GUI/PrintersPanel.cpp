@@ -155,6 +155,15 @@ void PrintersPanel::OnScriptMessage(wxWebViewEvent& evt)
     case PMon::Message::Kind::Open: open_device(m.id); break;
     case PMon::Message::Kind::Thumb: thumbnail(m.id); break;
     case PMon::Message::Kind::Forget: PrinterRowsBridge::forget(m_alive, m.id, reply()); break;
+    case PMon::Message::Kind::Remove: {
+        auto it = m_rows.find(m.id);
+        if (it == m_rows.end())
+            RunPageScript("__printerRemove", json{ { "id", m.id }, { "ok", false }, { "error", "That printer is not on the list any more." } });
+        else
+            PrinterRowsBridge::remove(m_alive, it->second, reply());
+        break;
+    }
+    case PMon::Message::Kind::Rename: PrinterRowsBridge::rename(m_alive, m.id, m.name, reply()); break;
     case PMon::Message::Kind::Tasks:
         if (wxGetApp().is_enable_multi_machine() && wxGetApp().mainframe)
             wxGetApp().mainframe->jump_to_multipage();
@@ -175,7 +184,12 @@ std::function<void(const std::string&, const json&)> PrintersPanel::reply()
 void PrintersPanel::get_printers()
 {
     PrinterRowsBridge::read_rows(m_alive, m_reading, reply(), [this](const json& payload) {
-        if (payload.value("ok", false)) m_targets = PMon::targets_of(payload["printers"]);
+        if (payload.value("ok", false)) {
+            m_targets = PMon::targets_of(payload["printers"]);
+            m_rows.clear();
+            for (const json& p : payload["printers"])
+                if (p.is_object() && p.contains("id") && p["id"].is_string()) m_rows[p["id"].get<std::string>()] = p;
+        }
     }, /* with_leftovers */ true);
 }
 

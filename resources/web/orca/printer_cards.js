@@ -13,8 +13,10 @@
 //       showOpen: false,
 //       thumbFor: function(row) { return src },  // the job's plate picture, '' = none
 //       isDismissed: function(key) {}, onDismiss: function(row, key) {}   // error dismissal
-//       onForget: function(row) {}           // "Forget" on a leftover row (row.leftover: the hub
-//                                            // remembers it, the slicer no longer has it)
+//       onRemove: function(row) {}           // "Remove" / "Log out" / "Forget" on every card
+//                                            // (row.remove.mode; a leftover row's is Forget).
+//                                            // onForget is the older name, still accepted.
+//       onRename: function(row) {}           // "Rename": a name of the person's own
 //   })
 //   PrinterCards.errorKey(row)                    -> the key a dismissal is kept under ('' = no error)
 //   PrinterCards.sortRows(rows, 'status'|'name')  -> a sorted copy
@@ -366,15 +368,26 @@
         // removed or test printer). It goes by itself after a few minutes; Forget drops it now.
         if (p.leftover) {
             c.appendChild(el('div', 'pnote', 'No longer set up in EdgeSlicer: this is the hub’s last record of it.'));
-            if (opts && opts.onForget) {
-                var fb = button('Forget', 'alt', 'forget:' + p.id, 'Forget ' + name);
-                setEnabled(fb, !busy, busy ? 'Already forgetting it' : 'Remove this leftover printer from the hub, the app and this tab');
-                fb.addEventListener('click', function() {
-                    if (fb.getAttribute('aria-disabled') === 'true') return;
-                    opts.onForget(p);
-                });
-                acts.appendChild(fb);
-            }
+        }
+        if (p.custom_name && p.reported_name && p.reported_name !== p.custom_name)
+            titles.appendChild(el('div', 'pmodel', 'Reports itself as ' + str(p.reported_name)));
+        // Rename (a name of the person's own, kept by the slicer) and Remove printer (deleted where
+        // it comes from; p.remove says how: remove | logout | explain). A leftover's is "Forget".
+        if (opts && opts.onRename && !p.leftover) {
+            var rn = button('Rename', 'alt', 'rename:' + p.id, 'Rename ' + name);
+            setEnabled(rn, !busy, busy ? 'A command is already running' : 'Give this printer a name of your own');
+            rn.addEventListener('click', function() { if (rn.getAttribute('aria-disabled') !== 'true') opts.onRename(p); });
+            acts.appendChild(rn);
+        }
+        var onRemove = opts && (opts.onRemove || opts.onForget);
+        if (onRemove) {
+            var mode = p.remove && p.remove.mode ? str(p.remove.mode) : 'remove';
+            var label = p.leftover ? 'Forget' : (mode === 'logout' ? 'Log out' : 'Remove');
+            var rb = button(label, (opts.onRename && !p.leftover) ? '' : 'alt', 'remove:' + p.id, label + ' ' + name);
+            setEnabled(rb, !busy, busy ? 'A command is already running'
+                : (mode === 'explain' ? 'Why this printer cannot be removed here' : 'Remove this printer from EdgeSlicer, the hub and the app'));
+            rb.addEventListener('click', function() { if (rb.getAttribute('aria-disabled') !== 'true') onRemove(p); });
+            acts.appendChild(rb);
         }
         // Hidden for now (owner, 2026-10-07); the bridge and MainFrame's per-vendor open stay in place.
         if (opts && opts.showOpen && !p.leftover) {

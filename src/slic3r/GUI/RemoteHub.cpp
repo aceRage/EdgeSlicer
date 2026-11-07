@@ -174,6 +174,8 @@ static const long long   PRINTERS_PRUNE_GRACE_MS = 5 * 60 * 1000;
 
 std::string hub_dir()       { return (fs::path(data_dir()) / "hub").string(); }
 std::string instances_dir() { return (fs::path(hub_dir()) / "instances").string(); }
+std::string removed_printers_path() { return (fs::path(hub_dir()) / "removed_printers.json").string(); }
+std::string printer_aliases_path() { return (fs::path(hub_dir()) / "printer_aliases.json").string(); }
 std::string uploads_dir()   { return (fs::path(hub_dir()) / "uploads").string(); }
 std::string saves_dir()     { return (fs::path(hub_dir()) / "saves").string(); }
 static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json").string(); }
@@ -3705,7 +3707,9 @@ public:
     void poll_printers();                   // one round: ask every live instance, merge, remember
     // POST .../printers/<id>/forget: drop one leftover row and save (Testing::forget_printer_status
     // says which status). {http status, JSON body}.
-    std::pair<int, std::string> forget_printer(const std::string& id);
+    // `removed` (control plane only, ?removed=1): the printer was just removed at its source, so
+    // the last configured list no longer counts for it - it is taken off and the row goes.
+    std::pair<int, std::string> forget_printer(const std::string& id, bool removed = false);
 
 private:
     void load_events();          // start(): the ring from the last run
@@ -4506,9 +4510,10 @@ bool HubServer::prune_unconfigured_locked(long long now_ms, long long grace_ms)
     return changed;
 }
 
-std::pair<int, std::string> HubServer::forget_printer(const std::string& id)
+std::pair<int, std::string> HubServer::forget_printer(const std::string& id, bool removed)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (removed && m_configured.erase(id) > 0) save_printers_locked();
     const auto it     = m_printers.find(id);
     const int  status = Testing::forget_printer_status(id, it != m_printers.end(), m_configured, m_configured_known);
     if (status == 404) return { 404, json_error("no such printer") };
@@ -6708,7 +6713,8 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("request too large")); return; }
         const std::string id = percent_decode(r.path.substr(14, r.path.size() - 21));
         if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
-        const auto res = forget_printer(id);
+        // ?removed=1: the Printers tab's "Remove printer" just deleted it at its source.
+        const auto res = forget_printer(id, query_param(r.query, "removed") == "1");
         respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/phone" && r.method == "POST") {
         set_phone(query_param(r.query, "on") == "1", query_param(r.query, "token") /* only used by a hub with no link yet */);
@@ -7235,7 +7241,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s, stale and configured - false for a leftover the slicer no longer has, absent until a slicer window has listed its printers). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
             { {"method", "GET"},  {"path", "/pair"},                {"description", "the pairing document: name (this PC), hub, version, hub_instance, urls {lan, remote}, ips, push {webpush, apns, fcm, unified}, token_version and features"} },
             { {"method", "GET"},  {"path", "/printers/{id}/thumbnail.png"}, {"description", "the running job's picture for that printer, from the G-code archive; 404 when there is none"} },
-            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): forget a remembered printer row the slicer no longer has (/summary row with configured: false - a removed or test printer). {ok, id, forgotten} on 200; 404 no such row; 409 while the printer is still set up in the slicer (it would be back at the next poll). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts"} },
+            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): forget a remembered printer row the slicer no longer has (/summary row with configured: false - a removed or test printer). {ok, id, forgotten} on 200; 404 no such row; 409 while the printer is still set up in the slicer (it would be back at the next poll). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts. (The loopback control plane's POST /hub/printers/{id}/forget?removed=1 is the Printers tab's Remove printer: the printer was just deleted at its source, so it is taken off the configured list and its row goes.)"} },
             { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
             { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id, hub_instance}. hub_instance changes only when a data dir's hub settings are created, so a client can tell an id reset from an id it has already seen"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },
@@ -8534,13 +8540,14 @@ std::pair<int, std::string> hub_printers()
     return { status == 0 ? 502 : status, body };
 }
 
-std::pair<int, std::string> forget_printer(const std::string& printer_id)
+std::pair<int, std::string> forget_printer(const std::string& printer_id, bool removed)
 {
     const HubFile hf = hub_file();
     if (hf.admin_port == 0) return { 503, json_error("the hub is not running") };
     int         status = 0;
     std::string body;
-    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers/" + percent_encode(printer_id) + "/forget")
+    Http::post("http://127.0.0.1:" + std::to_string(hf.admin_port) + "/hub/printers/" + percent_encode(printer_id) + "/forget" +
+               (removed ? "?removed=1" : ""))
         .timeout_connect(1).timeout_max(5)
         .header("Content-Type", "application/json")
         .header("X-Hub-Secret", hf.secret)

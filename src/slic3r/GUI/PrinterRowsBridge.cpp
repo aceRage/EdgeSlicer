@@ -3,7 +3,11 @@
 #include "GUI_App.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
+#include "DeviceManager.hpp"
+#include "SnapmakerLan.hpp"
 #include "GcodeArchive.hpp"
+#include "slic3r/Utils/PrintHostDevices.hpp"
+#include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -90,6 +94,8 @@ void enrich(json& payload)
     std::map<std::string, std::string> thumbs;
     try { thumbs = PMon::pick_thumbnails(archive_entries(), jobs); } catch (...) {}
     PMon::enrich_rows(payload["printers"], cover_index(), thumbs);
+    // What "Remove printer" will do with each card (remove / log out / only explain).
+    PMon::annotate_removal(payload["printers"]);
 }
 
 } // namespace
@@ -144,6 +150,105 @@ void forget(std::weak_ptr<bool> alive, const std::string& printer_id, Reply repl
             if (a && *a) reply("__printerForget", answer);
         });
     }).detach();
+}
+
+// The GUI-thread half of a removal: what lives in AppConfig and the device manager.
+static void remove_on_gui_thread(const PMon::RemovalPlan& plan, std::vector<std::string>& done)
+{
+    AppConfig* cfg = wxGetApp().app_config;
+    if (!plan.bambu_dev_id.empty()) {
+        // The Device tab's own LAN Log out (SelectMachinePopup::on_panel_unbind): the saved LAN
+        // record and both access codes.
+        if (DeviceManager* dm = wxGetApp().getDeviceManager()) {
+            MachineObject* m = nullptr;
+            auto it = dm->localMachineList.find(plan.bambu_dev_id);
+            if (it != dm->localMachineList.end()) m = it->second;
+            if (!m) {
+                auto ut = dm->userMachineList.find(plan.bambu_dev_id);
+                if (ut != dm->userMachineList.end()) m = ut->second;
+            }
+            MachineObject* selected = dm->get_selected_machine();
+            if (selected && selected->dev_id == plan.bambu_dev_id) dm->set_selected_machine("");
+            if (m) {
+                m->set_access_code("");
+                m->erase_user_access_code();
+            }
+        }
+        if (cfg) {
+            cfg->erase_local_machine(plan.bambu_dev_id);
+            cfg->erase("access_code", plan.bambu_dev_id);
+            cfg->erase("user_access_code", plan.bambu_dev_id);
+        }
+        done.push_back("bambu_lan");
+    }
+    if (plan.app_config_devices && cfg) {
+        // The Device tab's saved Snapmaker devices: one of them is what merge_app_devices would
+        // re-add the LAN card from.
+        bool any = false;
+        for (const DeviceInfo& d : cfg->get_devices()) {
+            const bool same = (!plan.sm_id.empty() && (d.sn == plan.sm_id || d.dev_id == plan.sm_id || d.ip == plan.sm_id)) ||
+                              (!plan.sm_ip.empty() && d.ip == plan.sm_ip);
+            if (same) { cfg->remove_device_info(d.dev_id); any = true; }
+        }
+        if (any) done.push_back("app_config_devices");
+    }
+    if (cfg && cfg->dirty()) cfg->save();
+}
+
+void remove(std::weak_ptr<bool> alive, const json& row, Reply reply)
+{
+    const std::string      id   = row.value("id", std::string());
+    const PMon::RemovalPlan plan = PMon::removal_plan(row);
+    if (plan.mode == PMon::RemovalPlan::Mode::Explain) {
+        reply("__printerRemove", json{ { "id", id }, { "ok", false }, { "explain", true }, { "error", plan.reason } });
+        return;
+    }
+    auto done = std::make_shared<std::vector<std::string>>();
+    try { remove_on_gui_thread(plan, *done); } catch (...) {}
+    std::thread([alive, id, plan, done, reply]() {
+        try {
+            if (!plan.ph_device_id.empty()) {
+                bool gone = !plan.ph_model_key.empty() && PrintHostDevices::remove(plan.ph_model_key, plan.ph_device_id);
+                if (!gone) // the row did not say its model: look for the device under every model
+                    for (const auto& kv : PrintHostDevices::all_devices())
+                        for (const PrintHostDevices::Device& d : kv.second)
+                            if (!gone && d.id == plan.ph_device_id) gone = PrintHostDevices::remove(kv.first, d.id);
+                if (gone) done->push_back("print_host_devices");
+            }
+            if (!plan.sm_id.empty() || !plan.sm_ip.empty()) {
+                const bool a = !plan.sm_id.empty() && SnapmakerLan::remove(plan.sm_id);
+                const bool b = !plan.sm_ip.empty() && SnapmakerLan::remove(plan.sm_ip);
+                if (a || b) done->push_back("snapmaker_lan");
+            }
+            if (plan.tombstone) {
+                json store = PMon::load_tombstones(RemoteHub::removed_printers_path());
+                PMon::add_tombstone(store, id, plan.sm_ip,
+                                    (long long) std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::system_clock::now().time_since_epoch()).count());
+                if (PMon::save_tombstones(RemoteHub::removed_printers_path(), store)) done->push_back("tombstone");
+            }
+            if (plan.hub_row) {
+                const auto res = RemoteHub::forget_printer(id, /* removed */ true);
+                if (res.first == 200 || res.first == 404) done->push_back("hub_printers");
+            }
+        } catch (...) {}
+        BOOST_LOG_TRIVIAL(info) << "Printers tab: removed printer " << id.substr(0, 6) << "... (" << done->size() << " stores)";
+        json answer = { { "id", id }, { "ok", true }, { "done", *done }, { "logout", plan.mode == PMon::RemovalPlan::Mode::Logout } };
+        RemoteAccess::post_to_app([alive, answer, reply]() {
+            auto a = alive.lock();
+            if (a && *a) reply("__printerRemove", answer);
+        });
+    }).detach();
+}
+
+void rename(std::weak_ptr<bool> alive, const std::string& printer_id, const std::string& name, Reply reply)
+{
+    json store = PMon::load_store_file(RemoteHub::printer_aliases_path());
+    const bool ok = PMon::set_alias(store, printer_id, name) && PMon::save_store_file(RemoteHub::printer_aliases_path(), store);
+    json answer = { { "id", printer_id }, { "ok", ok }, { "name", PMon::alias_of(store, printer_id) } };
+    if (!ok) answer["error"] = "the name could not be saved";
+    reply("__printerRename", answer);
+    (void) alive;
 }
 
 void thumbnail(std::weak_ptr<bool> alive, const std::string& archive_id, Reply reply)

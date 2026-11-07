@@ -59,6 +59,8 @@ private:
     std::shared_ptr<std::atomic<bool>> m_reading;
     // What "Open Device page" may open, from the rows the page was last given (never from the page).
     std::map<std::string, PrintersMonitor::Target> m_targets;
+    // The rows themselves, by id: what "Remove printer" removes (never the page's copy of a row).
+    std::map<std::string, nlohmann::json> m_rows;
     std::shared_ptr<bool> m_alive;
 };
 

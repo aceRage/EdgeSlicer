@@ -35,6 +35,16 @@ void read_rows(std::weak_ptr<bool> alive, std::shared_ptr<std::atomic<bool>> rea
 // __printerForget({ id, ok, error }).
 void forget(std::weak_ptr<bool> alive, const std::string& printer_id, Reply reply);
 
+// printers_remove: "Remove printer" - deletes `row` (the row as the slicer last gave it, never the
+// page's copy) at its source per PrintersMonitor::removal_plan, answered with
+// __printerRemove({ id, ok, done[], logout? } | { id, ok: false, explain: true, error }).
+// GUI thread (AppConfig and the device manager are touched there; the files on a worker).
+void remove(std::weak_ptr<bool> alive, const nlohmann::json& row, Reply reply);
+
+// printers_rename: store (or, for "", clear) the person's own name for that printer
+// (<datadir>/hub/printer_aliases.json), answered with __printerRename({ id, ok, name }).
+void rename(std::weak_ptr<bool> alive, const std::string& printer_id, const std::string& name, Reply reply);
+
 // printers_control: answered with __printerControl.
 void control(std::weak_ptr<bool> alive, const PrintersMonitor::Message& m, Reply reply);
 

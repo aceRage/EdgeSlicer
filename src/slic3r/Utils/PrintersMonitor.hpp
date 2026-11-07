@@ -37,13 +37,21 @@ namespace PrintersMonitor {
 //   printers_forget:<id>                      forget a leftover row the hub remembers (the page
 //                                             asked the person), answered with
 //                                             __printerForget({ id, ok, error })
+//   printers_remove:<id>                      "Remove printer" on any card (the page asked the
+//                                             person): removes the printer at its source (see
+//                                             removal_plan), answered with
+//                                             __printerRemove({ id, ok, error, done[] })
+//   printers_rename:{"id":..,"name":..}       a name of the person's own for that card ("" = the
+//                                             printer's own again), answered with
+//                                             __printerRename({ id, ok, name, error })
 //
 // The id goes last because printer ids carry colons ("sm:<serial>", "ph:<id>").
 struct Message
 {
-    enum class Kind { Invalid, Get, Groups, Control, Job, Open, Tasks, Thumb, Forget };
+    enum class Kind { Invalid, Get, Groups, Control, Job, Open, Tasks, Thumb, Forget, Remove, Rename };
     Kind        kind { Kind::Invalid };
-    std::string id;              // Control, Open, Forget; Thumb: the archive record id
+    std::string id;              // Control, Open, Forget, Remove, Rename; Thumb: the archive record id
+    std::string name;            // Rename: the cleaned new name, "" = clear
     std::string action;          // Control: pause | resume | stop
     bool        confirm { false };
     int         job { 0 };       // Job
@@ -72,6 +80,80 @@ nlohmann::json page_payload(int status, const std::string& body, long long now_m
 // and `seen_s` = the row's age_s. A row the payload already has, an id valid_printer_id refuses,
 // or a row with configured true or absent is never added. Nothing happens unless both are ok.
 void add_leftovers(nlohmann::json& payload, int hub_status, const std::string& hub_body);
+
+// ---- "Remove printer" ------------------------------------------------------------------------
+//
+// Where each kind of row comes from, and so what removing it means. A printer is removed at its
+// source so it never comes back:
+//
+//   ph:<id>      a saved print-host device (Elegoo, Qidi, Creality, FlashForge, Klipper, PrusaLink:
+//                <datadir>/hub/print_host_devices.json, under the row's model_key / device_id).
+//                The preset migration remembers what it imported, so it is not re-created and
+//                needs no tombstone; only the hand-held Devices dialog adds one again.
+//   sm:<id>      a LAN Snapmaker (<datadir>/hub/snapmaker_lan.json). Four sources re-add one -
+//                mDNS discovery, the Device tab's saved devices (AppConfig DeviceInfo), the Stream
+//                tab's cameras and a hand-typed address - so the matching AppConfig devices go too,
+//                and a tombstone (removed_printers.json) keeps the first three from re-adding it.
+//                Adding it again by hand clears the tombstone.
+//   <dev_id>     a Bambu printer. In LAN mode: Log out (the saved LAN record and its access codes,
+//                as the Device tab's Log out does). Bound to the cloud account: not removable here
+//                - it is the account's, and the dialog says where to unbind it.
+//   host         the selected printer preset's own print_host: the preset's, explained.
+//   connect      the Device tab's live connection: Disconnect there, explained.
+//   leftover     a row only the hub remembers: just the hub row (Forget).
+// Every removal also drops the hub's remembered row (printers.json) at once.
+struct RemovalPlan
+{
+    enum class Mode { Remove, Logout, Explain };
+    Mode        mode { Mode::Explain };
+    std::string reason;               // Explain: why, and where to do it instead
+    std::string ph_model_key;         // print_host_devices.json entry
+    std::string ph_device_id;
+    std::string sm_id;                // snapmaker_lan.json entry (by id or ip)
+    std::string sm_ip;
+    bool        app_config_devices { false }; // AppConfig DeviceInfo entries with this sn / ip
+    std::string bambu_dev_id;         // Logout
+    bool        tombstone { false };  // keep discovery from re-adding it (key: row id, and ip)
+    bool        hub_row { true };
+    // The stores touched, by name: "print_host_devices", "snapmaker_lan", "app_config_devices",
+    // "bambu_lan", "tombstone", "hub_printers" - what the tests and the answer's done[] list.
+    std::vector<std::string> stores() const;
+};
+RemovalPlan removal_plan(const nlohmann::json& row);
+// What the card shows: each row gets "remove": { mode: remove|logout|explain, reason? }.
+void annotate_removal(nlohmann::json& printers);
+
+// The tombstones: { "removed": [ { "id": "sm:U1-0042", "ip": "192.168.1.40", "at": <unix s> } ] }.
+// A discovered or merged printer whose row id or address is listed is not re-added.
+bool tombstoned(const nlohmann::json& store, const std::string& row_id, const std::string& ip);
+void add_tombstone(nlohmann::json& store, const std::string& row_id, const std::string& ip, long long now_s);
+// Drops every tombstone naming this id or this ip (the person added the printer again). True when
+// one went.
+bool clear_tombstone(nlohmann::json& store, const std::string& row_id, const std::string& ip);
+// The file: read tolerantly (missing or broken = no tombstones), written through a temporary.
+nlohmann::json load_tombstones(const std::string& path);
+bool           save_tombstones(const std::string& path, const nlohmann::json& store);
+// The same reader / writer for any of these small JSON stores (the aliases below too).
+nlohmann::json load_store_file(const std::string& path);
+bool           save_store_file(const std::string& path, const nlohmann::json& store);
+
+// ---- "Rename" --------------------------------------------------------------------------------
+//
+// A name of the person's own for any printer row, kept by the slicer (<datadir>/hub/
+// printer_aliases.json: { "aliases": { "<row id>": "Left U1" } }) and put on the rows
+// /api/printers reports - so the Printers tab, the hub's /summary and the phone app all show it.
+// The printer's own reported name is kept as `reported_name`; `custom_name` is the alias.
+//
+// A name as stored: trimmed, at most 64 characters (UTF-8 bytes up to 160), no control characters.
+// Empty after that = no alias.
+std::string clean_alias(const std::string& name);
+// Sets (or, for an empty name, clears) the alias of `row_id`. False for an invalid id.
+bool set_alias(nlohmann::json& store, const std::string& row_id, const std::string& name);
+std::string alias_of(const nlohmann::json& store, const std::string& row_id);
+// Puts the aliases on the rows: name = alias, reported_name = what the row said, custom_name = alias.
+void apply_aliases(nlohmann::json& printers, const nlohmann::json& store);
+// printers_rename:{"id":"<row id>","name":"<new name>"} - the id and the cleaned name, or false.
+bool parse_rename(const std::string& payload, std::string& id, std::string& name);
 
 // ---- Open Device page --------------------------------------------------------------------------
 struct Target

@@ -101,10 +101,19 @@ bool post_event(const std::string& event_json);
 std::pair<int, std::string> hub_printers();
 // Forget one leftover row (POST /hub/printers/<id>/forget): 200, 404 (no such row) or 409 (still
 // set up in the slicer). {http status, body}.
-std::pair<int, std::string> forget_printer(const std::string& printer_id);
+// `removed`: the printer was just removed at its source on the Printers tab, so the hub drops the
+// row even though its last configured list still names it (POST ...?removed=1), and takes the id
+// off that list.
+std::pair<int, std::string> forget_printer(const std::string& printer_id, bool removed = false);
 void quit();
 
 std::string hub_dir();
+// <datadir>/hub/removed_printers.json: the printers a person removed on the Printers tab, which
+// discovery must not re-add (PrintersMonitor::tombstoned).
+std::string removed_printers_path();
+// <datadir>/hub/printer_aliases.json: the person's own names for printers (Printers tab "Rename"),
+// put on the /api/printers rows (PrintersMonitor::apply_aliases).
+std::string printer_aliases_path();
 std::string instances_dir();
 std::string uploads_dir();
 std::string saves_dir();

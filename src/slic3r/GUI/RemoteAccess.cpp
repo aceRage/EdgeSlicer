@@ -17,6 +17,7 @@
 #include "RemoteControl.hpp"
 #include "RemoteEvents.hpp"
 #include "RemoteHub.hpp"
+#include "slic3r/Utils/PrintersMonitor.hpp" // apply_aliases (Printers tab "Rename")
 #include "RemotePaintV1.hpp"
 #include "RemoteSend.hpp"
 #include "RemoteSliceV1.hpp"
@@ -2259,6 +2260,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate, bool watching)
     // One card per printer: the Device tab's connect (often through the Snapmaker cloud) gives way
     // to the same printer's LAN card while that one answers.
     try { SnapmakerLan::prefer_lan((*out)["printers"]); } catch (...) {}
+    // The person's own names (Printers tab "Rename"): on every row, so the tab, the hub's /summary
+    // and the app all show them; the printer's own name stays as reported_name.
+    try {
+        PrintersMonitor::apply_aliases((*out)["printers"], PrintersMonitor::load_store_file(RemoteHub::printer_aliases_path()));
+    } catch (...) {}
     // Every row is a printer set up here (see `configured` above).
     if ((*out).contains("configured") && (*out)["configured"].is_array())
         for (const nlohmann::json& p : (*out)["printers"])
