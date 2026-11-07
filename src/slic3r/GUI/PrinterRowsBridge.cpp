@@ -153,7 +153,7 @@ void forget(std::weak_ptr<bool> alive, const std::string& printer_id, Reply repl
 }
 
 // The GUI-thread half of a removal: what lives in AppConfig and the device manager.
-static void remove_on_gui_thread(const PMon::RemovalPlan& plan, std::vector<std::string>& done)
+void remove_on_gui_thread(const PMon::RemovalPlan& plan, std::vector<std::string>& done)
 {
     AppConfig* cfg = wxGetApp().app_config;
     if (!plan.bambu_dev_id.empty()) {
@@ -195,45 +195,52 @@ static void remove_on_gui_thread(const PMon::RemovalPlan& plan, std::vector<std:
     if (cfg && cfg->dirty()) cfg->save();
 }
 
+void remove_files(const PMon::RemovalPlan& plan, const std::string& row_id, std::vector<std::string>& done)
+{
+    if (!plan.ph_device_id.empty()) {
+        bool gone = !plan.ph_model_key.empty() && PrintHostDevices::remove(plan.ph_model_key, plan.ph_device_id);
+        if (!gone) // the row did not say its model: look for the device under every model
+            for (const auto& kv : PrintHostDevices::all_devices())
+                for (const PrintHostDevices::Device& d : kv.second)
+                    if (!gone && d.id == plan.ph_device_id) gone = PrintHostDevices::remove(kv.first, d.id);
+        if (gone) done.push_back("print_host_devices");
+    }
+    if (!plan.sm_id.empty() || !plan.sm_ip.empty()) {
+        const bool a = !plan.sm_id.empty() && SnapmakerLan::remove(plan.sm_id);
+        const bool b = !plan.sm_ip.empty() && SnapmakerLan::remove(plan.sm_ip);
+        if (a || b) done.push_back("snapmaker_lan");
+    }
+    if (plan.tombstone) {
+        json store = PMon::load_tombstones(RemoteHub::removed_printers_path());
+        PMon::add_tombstone(store, row_id, plan.sm_ip,
+                            (long long) std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count());
+        if (PMon::save_tombstones(RemoteHub::removed_printers_path(), store)) done.push_back("tombstone");
+    }
+}
+
 void remove(std::weak_ptr<bool> alive, const json& row, Reply reply)
 {
-    const std::string      id   = row.value("id", std::string());
+    const std::string       id   = row.value("id", std::string());
     const PMon::RemovalPlan plan = PMon::removal_plan(row);
     if (plan.mode == PMon::RemovalPlan::Mode::Explain) {
         reply("__printerRemove", json{ { "id", id }, { "ok", false }, { "explain", true }, { "error", plan.reason } });
         return;
     }
-    auto done = std::make_shared<std::vector<std::string>>();
-    try { remove_on_gui_thread(plan, *done); } catch (...) {}
-    std::thread([alive, id, plan, done, reply]() {
+    std::thread([alive, id, row, plan, reply]() {
+        json answer = { { "id", id }, { "ok", false } };
         try {
-            if (!plan.ph_device_id.empty()) {
-                bool gone = !plan.ph_model_key.empty() && PrintHostDevices::remove(plan.ph_model_key, plan.ph_device_id);
-                if (!gone) // the row did not say its model: look for the device under every model
-                    for (const auto& kv : PrintHostDevices::all_devices())
-                        for (const PrintHostDevices::Device& d : kv.second)
-                            if (!gone && d.id == plan.ph_device_id) gone = PrintHostDevices::remove(kv.first, d.id);
-                if (gone) done->push_back("print_host_devices");
-            }
-            if (!plan.sm_id.empty() || !plan.sm_ip.empty()) {
-                const bool a = !plan.sm_id.empty() && SnapmakerLan::remove(plan.sm_id);
-                const bool b = !plan.sm_ip.empty() && SnapmakerLan::remove(plan.sm_ip);
-                if (a || b) done->push_back("snapmaker_lan");
-            }
-            if (plan.tombstone) {
-                json store = PMon::load_tombstones(RemoteHub::removed_printers_path());
-                PMon::add_tombstone(store, id, plan.sm_ip,
-                                    (long long) std::chrono::duration_cast<std::chrono::seconds>(
-                                        std::chrono::system_clock::now().time_since_epoch()).count());
-                if (PMon::save_tombstones(RemoteHub::removed_printers_path(), store)) done->push_back("tombstone");
-            }
-            if (plan.hub_row) {
-                const auto res = RemoteHub::forget_printer(id, /* removed */ true);
-                if (res.first == 200 || res.first == 404) done->push_back("hub_printers");
+            const std::pair<int, std::string> res = RemoteAccess::get().remove_printer(row);
+            try { answer = json::parse(res.second); } catch (...) {}
+            answer["id"] = id;
+            answer["ok"] = res.first == 200;
+            if (res.first == 200 && plan.hub_row) {
+                const auto hub = RemoteHub::forget_printer(id, /* removed */ true);
+                if ((hub.first == 200 || hub.first == 404) && answer.contains("done") && answer["done"].is_array())
+                    answer["done"].push_back("hub_printers");
             }
         } catch (...) {}
-        BOOST_LOG_TRIVIAL(info) << "Printers tab: removed printer " << id.substr(0, 6) << "... (" << done->size() << " stores)";
-        json answer = { { "id", id }, { "ok", true }, { "done", *done }, { "logout", plan.mode == PMon::RemovalPlan::Mode::Logout } };
+        if (!answer.value("ok", false) && !answer.contains("error")) answer["error"] = "the printer could not be removed";
         RemoteAccess::post_to_app([alive, answer, reply]() {
             auto a = alive.lock();
             if (a && *a) reply("__printerRemove", answer);

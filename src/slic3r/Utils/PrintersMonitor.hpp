@@ -107,6 +107,9 @@ struct RemovalPlan
     enum class Mode { Remove, Logout, Explain };
     Mode        mode { Mode::Explain };
     std::string reason;               // Explain: why, and where to do it instead
+    // What kind of printer this is, for a client's wording: bambu_cloud | preset_host |
+    // device_connection (Explain); leftover | print_host_device | lan_snapmaker | bambu_lan | other.
+    std::string reason_kind;
     std::string ph_model_key;         // print_host_devices.json entry
     std::string ph_device_id;
     std::string sm_id;                // snapmaker_lan.json entry (by id or ip)
@@ -120,8 +123,10 @@ struct RemovalPlan
     std::vector<std::string> stores() const;
 };
 RemovalPlan removal_plan(const nlohmann::json& row);
-// What the card shows: each row gets "remove": { mode: remove|logout|explain, reason? }.
+// What the card shows: each row gets "remove": { mode: remove|logout|explain, kind, reason? }.
 void annotate_removal(nlohmann::json& printers);
+// The same for one row (the hub puts it on its /summary rows, so the app can word its button).
+nlohmann::json removal_json(const nlohmann::json& row);
 
 // The tombstones: { "removed": [ { "id": "sm:U1-0042", "ip": "192.168.1.40", "at": <unix s> } ] }.
 // A discovered or merged printer whose row id or address is listed is not re-added.

@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -38,8 +39,15 @@ void forget(std::weak_ptr<bool> alive, const std::string& printer_id, Reply repl
 // printers_remove: "Remove printer" - deletes `row` (the row as the slicer last gave it, never the
 // page's copy) at its source per PrintersMonitor::removal_plan, answered with
 // __printerRemove({ id, ok, done[], logout? } | { id, ok: false, explain: true, error }).
-// GUI thread (AppConfig and the device manager are touched there; the files on a worker).
+// Runs RemoteAccess::remove_printer on a worker, then drops the hub's row.
 void remove(std::weak_ptr<bool> alive, const nlohmann::json& row, Reply reply);
+
+// The two halves of a removal, shared with RemoteAccess::remove_printer and the hub's Forget:
+// what lives in AppConfig and the device manager (GUI thread only), and the files - the saved
+// print-host device, the LAN Snapmaker list and the tombstone (any thread, also the hub process).
+// Each appends the store names it changed to `done`.
+void remove_on_gui_thread(const PrintersMonitor::RemovalPlan& plan, std::vector<std::string>& done);
+void remove_files(const PrintersMonitor::RemovalPlan& plan, const std::string& row_id, std::vector<std::string>& done);
 
 // printers_rename: store (or, for "", clear) the person's own name for that printer
 // (<datadir>/hub/printer_aliases.json), answered with __printerRename({ id, ok, name }).

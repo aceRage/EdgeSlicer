@@ -451,3 +451,16 @@ TEST_CASE("printers monitor: aliases are cleaned, set, cleared and put on the ro
     CHECK(again[0]["name"] == "U1-8110026");
     CHECK_FALSE(again[0].contains("custom_name"));
 }
+
+TEST_CASE("printers monitor: the remove kind a client words its button by", "[PrintersMonitor][remove]")
+{
+    CHECK(removal_json(json{ { "id", "ph:a" }, { "kind", "printhost" } })["kind"] == "print_host_device");
+    CHECK(removal_json(json{ { "id", "sm:a" }, { "kind", "snapmaker" } })["kind"] == "lan_snapmaker");
+    CHECK(removal_json(json{ { "id", "01P00A000000001" }, { "kind", "bambu" }, { "lan_mode", true } })["kind"] == "bambu_lan");
+    const json cloud = removal_json(json{ { "id", "01P00A000000002" }, { "kind", "bambu" } });
+    CHECK(cloud["mode"] == "explain");
+    CHECK(cloud["kind"] == "bambu_cloud");
+    CHECK(removal_json(json{ { "id", "host" } })["kind"] == "preset_host");
+    CHECK(removal_json(json{ { "id", "connect" }, { "kind", "connect" } })["kind"] == "device_connection");
+    CHECK(removal_json(json{ { "id", "sm:x" }, { "leftover", true } })["kind"] == "leftover");
+}

@@ -15,6 +15,8 @@
 #include "HubPushOwner.hpp"
 #include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
 #include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
+#include "PrinterRowsBridge.hpp" // remove_files: the phone's Remove with no slicer window open
+#include "slic3r/Utils/PrintersMonitor.hpp" // removal_plan: what removing a row means
 #include "slic3r/Utils/HubAddresses.hpp" // which of this PC's addresses a phone is told about
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
@@ -2634,7 +2636,9 @@ std::vector<std::string> Testing::pair_features()
 {
     std::vector<std::string> f = { "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity",
                                    // POST /printers/<id>/forget, and `configured` on the /summary rows
-                                   "forget_printer" };
+                                   "forget_printer",
+                                   // the same route removes the printer at its source; /summary rows carry `remove`
+                                   "remove_printer" };
     for (const std::string& s : SliceV1::pair_features())
         f.push_back(s);
     for (const std::string& s : PaintV1::pair_features())
@@ -3710,6 +3714,10 @@ public:
     // `removed` (control plane only, ?removed=1): the printer was just removed at its source, so
     // the last configured list no longer counts for it - it is taken off and the row goes.
     std::pair<int, std::string> forget_printer(const std::string& id, bool removed = false);
+    // The phone's Forget (POST /r/<token>/printers/<id>/forget): the Printers tab's Remove printer,
+    // so any card but a cloud-bound Bambu one can go - at its source (a live slicer window does it,
+    // AppConfig included; with none open the hub deletes the files itself), then the row.
+    std::pair<int, std::string> phone_remove_printer(const std::string& id);
 
 private:
     void load_events();          // start(): the ring from the last run
@@ -4455,6 +4463,13 @@ json HubServer::printers_json()
         if (m_configured_known)
             row["configured"] = m_configured.count(kv.first) > 0 ||
                                 m_configured_unsure.count(Testing::configured_judge_kind(kv.second.row.dump())) > 0;
+        // What the app's Remove does with this card (PrintersMonitor::removal_plan): remove |
+        // logout | explain, with the kind for its wording. A leftover is the hub row alone.
+        {
+            json judged = row;
+            if (row.contains("configured") && row["configured"].is_boolean() && !row["configured"].get<bool>()) judged["leftover"] = true;
+            row["remove"] = PrintersMonitor::removal_json(judged);
+        }
         // The pid only stays in the row while that window is still there: the app addresses the
         // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
         long pid = 0;
@@ -4527,6 +4542,78 @@ std::pair<int, std::string> HubServer::forget_printer(const std::string& id, boo
     j["ok"]        = true;
     j["id"]        = id;
     j["forgotten"] = true;
+    return { 200, j.dump() };
+}
+
+std::pair<int, std::string> HubServer::phone_remove_printer(const std::string& id)
+{
+    json row;
+    bool leftover = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = m_printers.find(id);
+        if (it == m_printers.end()) return { 404, json_error("no such printer") };
+        row       = it->second.row.is_object() ? it->second.row : json::object();
+        row["id"] = id;
+        leftover  = m_configured_known && !m_configured.count(id) &&
+                   !m_configured_unsure.count(Testing::configured_judge_kind(it->second.row.dump()));
+    }
+    if (leftover) return forget_printer(id); // nothing of it is left in the slicer
+    const PrintersMonitor::RemovalPlan plan = PrintersMonitor::removal_plan(row);
+    if (plan.mode == PrintersMonitor::RemovalPlan::Mode::Explain) {
+        json e;
+        e["error"]       = plan.reason;
+        e["reason_kind"] = plan.reason_kind;
+        return { 409, e.dump() };
+    }
+    // A live window removes it the way the Printers tab does (AppConfig and the device manager
+    // included). The window lists the row itself; one that does not know it answers 404.
+    bool                     done_by_window = false;
+    std::vector<std::string> done;
+    for (const Instance& inst : instances(false)) {
+        if (inst.port <= 0) continue;
+        int         status = 0;
+        std::string body;
+        Http::post("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers/" + percent_encode(id) + "/remove")
+            .timeout_connect(1).timeout_max(30)
+            .header("Content-Type", "application/json")
+            .set_post_body(std::string("{}")) // a bodyless POST hangs the fork's Http
+            .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+            .on_error([&](std::string b, std::string, unsigned s) { status = (int) s; body = b; })
+            .perform_sync();
+        if (status == 0 || status == 404) continue; // gone, or not this window's printer
+        if (status != 200) return { status, body.empty() ? json_error("the slicer could not remove it") : body };
+        try {
+            const json j = json::parse(body);
+            for (const json& d : j.value("done", json::array()))
+                if (d.is_string()) done.push_back(d.get<std::string>());
+        } catch (...) {}
+        done_by_window = true;
+        break;
+    }
+    if (!done_by_window) {
+        // No slicer window: the files the hub can reach itself. The Device tab's saved devices
+        // stay in AppConfig, but the tombstone keeps them from bringing the printer back; a Bambu
+        // LAN printer's access code lives in AppConfig only, so that one needs the slicer.
+        if (plan.mode == PrintersMonitor::RemovalPlan::Mode::Logout) {
+            json e;
+            e["error"]       = "Open EdgeSlicer on the PC to log out of this printer (its access code is kept by the slicer).";
+            e["reason_kind"] = "needs_slicer";
+            return { 409, e.dump() };
+        }
+        try { PrinterRowsBridge::remove_files(plan, id, done); } catch (...) {}
+    }
+    forget_printer(id, /* removed */ true);
+    done.push_back("hub_printers");
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: printer " << id.substr(0, 6) << "... removed from the phone ("
+                            << (done_by_window ? "by a slicer window" : "by the hub") << ")";
+    json j;
+    j["ok"]          = true;
+    j["id"]          = id;
+    j["forgotten"]   = true;
+    j["removed"]     = true;
+    j["done"]        = done;
+    j["reason_kind"] = plan.reason_kind;
     return { 200, j.dump() };
 }
 
@@ -4896,6 +4983,8 @@ json HubServer::summary_json()
         // false: a leftover the slicer no longer has - the app offers Forget (POST
         // /printers/<id>/forget). Absent while no window has listed its printers.
         if (row.contains("configured")) p["configured"] = row["configured"];
+        // What Remove does with it: {mode remove|logout|explain, kind, reason?} (removal_json).
+        if (row.contains("remove")) p["remove"] = row["remove"];
         // The opaque per-hub id a Live Activity push carries instead of the printer id (the alerts'
         // thread-id), so the app can put a name to an activity the hub started by push.
         p["push_id"]  = AppPush::push_id(id);
@@ -7056,7 +7145,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         if (!read_small_body(client, r, body, 4096)) { respond_json(client, 413, json_error("that is too large")); return; }
         const std::string id = percent_decode(rest.substr(10, rest.size() - 17));
         if (id.empty() || id.size() > 200 || id.find('/') != std::string::npos) { respond_json(client, 404, json_error("no such printer")); return; }
-        const auto res = forget_printer(id);
+        const auto res = phone_remove_printer(id);
         respond_json(client, res.first, res.second);
         return;
     }
@@ -7241,7 +7330,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s, stale and configured - false for a leftover the slicer no longer has, absent until a slicer window has listed its printers). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
             { {"method", "GET"},  {"path", "/pair"},                {"description", "the pairing document: name (this PC), hub, version, hub_instance, urls {lan, remote}, ips, push {webpush, apns, fcm, unified}, token_version and features"} },
             { {"method", "GET"},  {"path", "/printers/{id}/thumbnail.png"}, {"description", "the running job's picture for that printer, from the G-code archive; 404 when there is none"} },
-            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): forget a remembered printer row the slicer no longer has (/summary row with configured: false - a removed or test printer). {ok, id, forgotten} on 200; 404 no such row; 409 while the printer is still set up in the slicer (it would be back at the next poll). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts. (The loopback control plane's POST /hub/printers/{id}/forget?removed=1 is the Printers tab's Remove printer: the printer was just deleted at its source, so it is taken off the configured list and its row goes.)"} },
+            { {"method", "POST"}, {"path", "/printers/{id}/forget"}, {"description", "Content-Type application/json, body ignored ({}): remove a printer - the Printers tab's Remove printer. A leftover (/summary configured: false) loses its hub row; any other printer is deleted at its source first (a saved print-host device, a LAN Snapmaker with a tombstone so discovery does not re-add it, a Bambu LAN printer's login), by a live slicer window or, with none open, by the hub itself. /summary rows carry remove {mode remove|logout|explain, kind, reason?}. {ok, id, forgotten, removed, done[], reason_kind} on 200; 404 no such row; 409 {error, reason_kind} for what cannot be removed here: bambu_cloud (remove it from the Bambu account), preset_host, device_connection, needs_slicer (a Bambu LAN log out with no slicer open). Rows the slicer stops listing also go by themselves after 5 minutes, and at once when the hub starts. (The loopback control plane's POST /hub/printers/{id}/forget?removed=1 is the Printers tab's Remove printer: the printer was just deleted at its source, so it is taken off the configured list and its row goes.)"} },
             { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
             { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id, hub_instance}. hub_instance changes only when a data dir's hub settings are created, so a client can tell an id reset from an id it has already seen"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },

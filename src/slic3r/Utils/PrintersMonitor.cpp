@@ -206,22 +206,26 @@ RemovalPlan removal_plan(const json& row)
     }
     // A row only the hub remembers: the slicer has nothing of it any more, only the hub row is left.
     if (row.is_object() && row.contains("leftover") && row["leftover"].is_boolean() && row["leftover"].get<bool>()) {
-        plan.mode = RemovalPlan::Mode::Remove;
+        plan.mode        = RemovalPlan::Mode::Remove;
+        plan.reason_kind = "leftover";
         return plan;
     }
     if (id == "host") {
-        plan.hub_row = false;
+        plan.hub_row     = false;
+        plan.reason_kind = "preset_host";
         plan.reason  = "This printer is the selected printer preset's own print host. Clear its address in the preset "
                        "(the printer settings' connection / Physical Printer field) to remove it.";
         return plan;
     }
     if (id == "connect" || kind == "connect") {
-        plan.hub_row = false;
+        plan.hub_row     = false;
+        plan.reason_kind = "device_connection";
         plan.reason  = "This is the Device tab's current connection. Disconnect it on the Device tab.";
         return plan;
     }
     if (id.compare(0, 3, "ph:") == 0) {
         plan.mode         = RemovalPlan::Mode::Remove;
+        plan.reason_kind  = "print_host_device";
         plan.ph_device_id = str_field(row, "device_id");
         if (plan.ph_device_id.empty()) plan.ph_device_id = id.substr(3);
         plan.ph_model_key = str_field(row, "model_key");
@@ -231,6 +235,7 @@ RemovalPlan removal_plan(const json& row)
     }
     if (id.compare(0, 3, "sm:") == 0) {
         plan.mode               = RemovalPlan::Mode::Remove;
+        plan.reason_kind        = "lan_snapmaker";
         plan.sm_id              = id.substr(3);
         plan.sm_ip              = str_field(row, "ip");
         plan.app_config_devices = true;
@@ -240,31 +245,38 @@ RemovalPlan removal_plan(const json& row)
     if (kind == "bambu") {
         const bool lan = row.contains("lan_mode") && row["lan_mode"].is_boolean() && row["lan_mode"].get<bool>();
         if (!lan) {
-            plan.hub_row = false;
+            plan.hub_row     = false;
+            plan.reason_kind = "bambu_cloud";
             plan.reason  = "This printer is bound to your Bambu Lab account, which is where the list comes from. Unbind it "
                            "on the Device tab (or in Bambu Handy) to remove it.";
             return plan;
         }
         plan.mode         = RemovalPlan::Mode::Logout;
+        plan.reason_kind  = "bambu_lan";
         plan.bambu_dev_id = id;
         return plan;
     }
     // Any other kind the slicer lists: nothing to delete but the remembered row.
-    plan.mode = RemovalPlan::Mode::Remove;
+    plan.mode        = RemovalPlan::Mode::Remove;
+    plan.reason_kind = "other";
     return plan;
+}
+
+json removal_json(const json& row)
+{
+    const RemovalPlan plan = removal_plan(row);
+    json r;
+    r["mode"] = plan.mode == RemovalPlan::Mode::Remove ? "remove" : plan.mode == RemovalPlan::Mode::Logout ? "logout" : "explain";
+    if (!plan.reason.empty()) r["reason"] = plan.reason;
+    if (!plan.reason_kind.empty()) r["kind"] = plan.reason_kind;
+    return r;
 }
 
 void annotate_removal(json& printers)
 {
     if (!printers.is_array()) return;
-    for (json& p : printers) {
-        if (!p.is_object()) continue;
-        const RemovalPlan plan = removal_plan(p);
-        json r;
-        r["mode"] = plan.mode == RemovalPlan::Mode::Remove ? "remove" : plan.mode == RemovalPlan::Mode::Logout ? "logout" : "explain";
-        if (!plan.reason.empty()) r["reason"] = plan.reason;
-        p["remove"] = r;
-    }
+    for (json& p : printers)
+        if (p.is_object()) p["remove"] = removal_json(p);
 }
 
 static bool names(const json& e, const std::string& row_id, const std::string& ip)

@@ -17,7 +17,8 @@
 #include "RemoteControl.hpp"
 #include "RemoteEvents.hpp"
 #include "RemoteHub.hpp"
-#include "slic3r/Utils/PrintersMonitor.hpp" // apply_aliases (Printers tab "Rename")
+#include "slic3r/Utils/PrintersMonitor.hpp" // apply_aliases (Printers tab "Rename"), removal_plan
+#include "PrinterRowsBridge.hpp"            // the removal executors
 #include "RemotePaintV1.hpp"
 #include "RemoteSend.hpp"
 #include "RemoteSliceV1.hpp"
@@ -2483,6 +2484,51 @@ std::pair<int, std::string> RemoteAccess::monitor_control(const std::string& pri
     return { r.status, r.body };
 }
 
+std::pair<int, std::string> RemoteAccess::remove_printer(const nlohmann::json& row)
+{
+    const std::string                    id   = row.is_object() ? row.value("id", std::string()) : std::string();
+    const PrintersMonitor::RemovalPlan    plan = PrintersMonitor::removal_plan(row);
+    if (plan.mode == PrintersMonitor::RemovalPlan::Mode::Explain) {
+        nlohmann::json e;
+        e["error"]       = plan.reason;
+        e["reason_kind"] = plan.reason_kind;
+        return { 409, e.dump() };
+    }
+    auto done = std::make_shared<std::vector<std::string>>();
+    // AppConfig and the device manager are the GUI thread's.
+    if (!plan.bambu_dev_id.empty() || plan.app_config_devices) {
+        const bool ok = run_on_main([plan, done]() { PrinterRowsBridge::remove_on_gui_thread(plan, *done); }, 15000, "removing a printer");
+        if (!ok) return { 503, json_error("the slicer is busy") };
+    }
+    PrinterRowsBridge::remove_files(plan, id, *done);
+    BOOST_LOG_TRIVIAL(info) << "RemoteAccess: removed printer " << id.substr(0, 6) << "... (" << done->size() << " stores)";
+    nlohmann::json j;
+    j["ok"]          = true;
+    j["id"]          = id;
+    j["done"]        = *done;
+    j["logout"]      = plan.mode == PrintersMonitor::RemovalPlan::Mode::Logout;
+    j["reason_kind"] = plan.reason_kind;
+    return { 200, j.dump() };
+}
+
+RemoteAccess::ApiResponse RemoteAccess::api_printer_remove(const std::string& printer)
+{
+    ApiResponse r;
+    // The row as the slicer lists it right now - never a description the caller sends.
+    const ApiResponse list = api_printers(-1, false);
+    nlohmann::json    row;
+    try {
+        const nlohmann::json j = nlohmann::json::parse(list.body);
+        for (const nlohmann::json& p : j.value("printers", nlohmann::json::array()))
+            if (p.is_object() && p.value("id", std::string()) == printer) { row = p; break; }
+    } catch (...) {}
+    if (!row.is_object()) { r.status = 404; r.body = json_error("no such printer"); return r; }
+    const auto res = remove_printer(row);
+    r.status = res.first;
+    r.body   = res.second;
+    return r;
+}
+
 std::pair<int, std::string> RemoteAccess::monitor_job(int id)
 {
     if (id <= 0) return { 404, json_error("no such job") };
@@ -4621,6 +4667,9 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         // encodeURIComponent - so it is decoded here, unlike every other path in this dispatch.
         if (slash != std::string::npos && rest.substr(slash) == "/control")
             return api_printer_control(percent_decode(rest.substr(0, slash)), body.empty() ? query : body);
+        // The phone's Forget, through the hub (loopback only: not in instance_api_allowed).
+        if (slash != std::string::npos && rest.substr(slash) == "/remove")
+            return api_printer_remove(percent_decode(rest.substr(0, slash)));
     }
     if (path == "/snapmaker/devices" && method == "GET")
         return api_snapmaker_devices();
