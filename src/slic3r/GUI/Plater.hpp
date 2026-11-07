@@ -200,6 +200,11 @@ public:
     // After the project's nozzle sizes changed: remembered for the printer model, the sidebar, the filament lists, the
     // Tabs and the slice follow.
     void on_nozzle_sizes_changed();
+    // After the nozzles were edited (strip picker, Extruder settings, sync from the printer): when every extruder now carries
+    // one size and the selected system printer is another nozzle variant of the same model, select the variant of that size,
+    // so the Plate's process list (and the filament lists) follow the nozzles. The project's rack is kept. Not for a printer
+    // preset with unsaved changes or a user printer preset. Returns whether the printer changed.
+    bool follow_nozzle_sizes_with_printer_variant();
     // "Sync nozzle sizes from printer" for a Bambu printer: the sizes the selected printer reports become the project's.
     void sync_nozzle_sizes_from_bambu_printer();
     // Nozzle strip (tests/design_bambu29_mixed_nozzle_compare.md section 4): its tiles (sizes, used state, filament dots), a
@@ -212,6 +217,9 @@ public:
     void show_extruder_settings_dialog();
     void sync_nozzles_from_strip();
     void relayout_printer_section();
+    // The Process section (ParamsPanel) and the scrolled sidebar after a part of the Process tab's header was shown, hidden or
+    // changed height (the per-nozzle process chips), so the preset combo and page tabs move at once.
+    void relayout_params_section();
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);

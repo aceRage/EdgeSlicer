@@ -476,4 +476,22 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
     return out.min_height <= out.max_height + EPSILON ? out : window;
 }
 
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height)
+{
+    if (adaptive_layer_band_size(nozzle_diameter, min_nozzle_diameter, base_layer_height, clamp) < 2)
+        return clamp;
+    // Two consecutive layer counts inside the window: every run of at least k * (k - 1) layers can be cut.
+    auto tiles = [base_layer_height](const AdaptiveLayerHeightRange &range) {
+        for (size_t k = 1; double(k + 1) * base_layer_height <= range.max_height + EPSILON; ++ k)
+            if (range.contains(double(k) * base_layer_height))
+                return true;
+        return false;
+    };
+    if (tiles(clamp))
+        return clamp;
+    const AdaptiveLayerHeightRange relaxed { clamp.min_height, std::max(clamp.max_height, nozzle_diameter) };
+    return tiles(relaxed) ? relaxed : adaptive_layer_height_range(nozzle_diameter);
+}
+
 } // namespace Slic3r
