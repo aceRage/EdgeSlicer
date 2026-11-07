@@ -427,6 +427,9 @@ public:
     ProjectStrip* project_strip() const { return m_project_strip; }
     // The active project's name, file or unsaved state changed.
     void        on_active_project_changed();
+    // Project strip P2 "Send...": the print / send action of Ctrl+Shift+G for the active project's plate. False when the plate
+    // cannot be printed yet (not sliced).
+    bool        send_current_plate();
     void        get_recent_projects(boost::property_tree::wptree &tree, int images);
     void        get_recent_projects(nlohmann::json& data, int images);
     void        open_recent_project(size_t file_id, wxString const & filename);

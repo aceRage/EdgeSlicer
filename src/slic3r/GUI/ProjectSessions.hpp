@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,6 +29,8 @@ struct ProjectSlot
     bool          dirty{ false };
     bool          empty{ true };     // no objects (an empty Untitled is reused by New / Open)
     int           plate{ 0 };        // current plate when parked
+    int           plates_with_objects{ 0 }; // P2 badge: plates holding objects, and those with G-code
+    int           plates_sliced{ 0 };
     int           main_tab{ 1 };     // MainTabs::Editor3D, Preview or Showcase when parked
     std::uint64_t last_used{ 0 };
     State         state{ State::Parked };
@@ -244,6 +247,88 @@ private:
     int                      m_max_open{ default_max_open };
     std::uint64_t            m_clock{ 0 };
 };
+
+// ---- P2: the strip's width, the tile's name lines and the slice badge (owner feedback on the P1 hand test, 2026-11-07) ----
+
+// The strip's width in DIP. The user drags its right edge between 88 (the D1 default) and 200; it is remembered in the app
+// config ("project_strip_width"). Collapsed it is the 24 DIP rail whatever was dragged. Names only (text mode) needs room for
+// a name, so never less than 120.
+struct StripLayout
+{
+    static constexpr int rail_width     = 24;
+    static constexpr int default_width  = 88;
+    static constexpr int min_width      = 88;
+    static constexpr int max_width      = 200;
+    static constexpr int text_min_width = 120;
+    static constexpr int padding        = 8;  // around the thumbnail, both sides
+    static constexpr int min_thumb      = 56;
+
+    static int clamp_width(int dip) { return std::max(min_width, std::min(max_width, dip)); }
+    static int parse_width(const std::string &text)
+    {
+        if (text.empty() || text.size() > 4 || !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }))
+            return default_width;
+        return clamp_width(std::stoi(text));
+    }
+    // What the strip is drawn at.
+    static int width(bool collapsed, bool text_mode, int wanted)
+    {
+        if (collapsed)
+            return rail_width;
+        const int w = clamp_width(wanted);
+        return text_mode ? std::max(w, text_min_width) : w;
+    }
+    // The thumbnail grows with the strip.
+    static int thumb_side(int width) { return std::max(min_thumb, width - 2 * padding); }
+};
+
+// The corner badge of a tile: a spinner while the project slices, a tick once every plate holding objects has G-code.
+enum class SliceBadge { None, Slicing, Sliced };
+inline SliceBadge slice_badge(bool slicing, int plates_with_objects, int plates_sliced)
+{
+    if (slicing)
+        return SliceBadge::Slicing;
+    return plates_with_objects > 0 && plates_sliced >= plates_with_objects ? SliceBadge::Sliced : SliceBadge::None;
+}
+
+// A tile's name on at most two lines of `width`. Lines break only after a space, '_', '-' or '.', never inside a word (the P1
+// strip showed "h3c_mus / hroom"); what does not fit is ellipsised by `ellipsize(text, width)`. A first word wider than the line
+// is the one ellipsised line. `measure` gives a text's width in the same unit.
+inline std::vector<std::string> wrap_name_two_lines(const std::string &name, int width, const std::function<int(const std::string &)> &measure,
+                                                    const std::function<std::string(const std::string &, int)> &ellipsize)
+{
+    if (name.empty())
+        return {};
+    if (measure(name) <= width)
+        return { name };
+    std::vector<std::string> tokens;
+    std::string              cur;
+    for (char c : name) {
+        cur += c;
+        if (c == ' ' || c == '_' || c == '-' || c == '.') {
+            tokens.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty())
+        tokens.push_back(cur);
+    std::string first;
+    size_t      i = 0;
+    while (i < tokens.size() && measure(first + tokens[i]) <= width)
+        first += tokens[i++];
+    if (first.empty())
+        return { ellipsize(name, width) };
+    std::string rest;
+    for (; i < tokens.size(); ++i)
+        rest += tokens[i];
+    while (!first.empty() && first.back() == ' ')
+        first.pop_back();
+    while (!rest.empty() && rest.front() == ' ')
+        rest.erase(rest.begin());
+    if (rest.empty())
+        return { first };
+    return { first, measure(rest) <= width ? rest : ellipsize(rest, width) };
+}
 
 } // namespace GUI
 } // namespace Slic3r

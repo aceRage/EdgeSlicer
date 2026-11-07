@@ -3,6 +3,7 @@
 #include "slic3r/GUI/ProjectSessions.hpp"
 #include "libslic3r/ProjectSwapGuard.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -235,4 +236,79 @@ TEST_CASE("project strip: the swap guard nests and never goes below zero", "[Pro
     CHECK_FALSE(ProjectSwapGuard::active());
     ProjectSwapGuard again;
     CHECK(ProjectSwapGuard::active());
+}
+
+// ---- P2 (owner feedback on the P1 hand test) -------------------------------------------------------------------------------
+
+TEST_CASE("project strip: width is dragged between 88 and 200 DIP, the rail stays 24", "[ProjectSessions][StripLayout]")
+{
+    CHECK(StripLayout::parse_width("") == 88);
+    CHECK(StripLayout::parse_width("140") == 140);
+    CHECK(StripLayout::parse_width("40") == 88);
+    CHECK(StripLayout::parse_width("900") == 200);
+    CHECK(StripLayout::parse_width("-5") == 88);
+    CHECK(StripLayout::parse_width("wide") == 88);
+    CHECK(StripLayout::parse_width("123456") == 88);
+
+    CHECK(StripLayout::width(false, false, 88) == 88);
+    CHECK(StripLayout::width(false, false, 150) == 150);
+    CHECK(StripLayout::width(false, false, 260) == 200);
+    CHECK(StripLayout::width(false, false, 10) == 88);
+    // Collapsed: the rail, whatever was dragged; expanding again gives the dragged width back.
+    CHECK(StripLayout::width(true, false, 180) == 24);
+    CHECK(StripLayout::width(true, true, 180) == 24);
+    CHECK(StripLayout::width(false, false, 180) == 180);
+    // Names only needs room for a name.
+    CHECK(StripLayout::width(false, true, 88) == 120);
+    CHECK(StripLayout::width(false, true, 170) == 170);
+}
+
+TEST_CASE("project strip: the thumbnail grows with the strip", "[ProjectSessions][StripLayout]")
+{
+    CHECK(StripLayout::thumb_side(88) == 72);
+    CHECK(StripLayout::thumb_side(200) == 184);
+    CHECK(StripLayout::thumb_side(StripLayout::width(false, false, 150)) == 134);
+    CHECK(StripLayout::thumb_side(40) == StripLayout::min_thumb);
+    int previous = 0;
+    for (int w = StripLayout::min_width; w <= StripLayout::max_width; w += 8) {
+        const int side = StripLayout::thumb_side(w);
+        CHECK(side >= previous);
+        CHECK(side + 2 * StripLayout::padding <= std::max(w, StripLayout::min_thumb + 2 * StripLayout::padding));
+        previous = side;
+    }
+}
+
+TEST_CASE("project strip: the slice badge", "[ProjectSessions]")
+{
+    CHECK(slice_badge(false, 0, 0) == SliceBadge::None);
+    CHECK(slice_badge(false, 3, 1) == SliceBadge::None);
+    CHECK(slice_badge(false, 3, 3) == SliceBadge::Sliced);
+    CHECK(slice_badge(false, 1, 1) == SliceBadge::Sliced);
+    CHECK(slice_badge(true, 3, 3) == SliceBadge::Slicing);
+    CHECK(slice_badge(true, 0, 0) == SliceBadge::Slicing);
+}
+
+TEST_CASE("project strip: names wrap on two lines at word ends, never inside a word", "[ProjectSessions]")
+{
+    // One character = one unit; "..." marks an ellipsis.
+    const auto measure  = [](const std::string &s) { return int(s.size()); };
+    const auto ellipsis = [](const std::string &s, int w) { return int(s.size()) <= w ? s : s.substr(0, size_t(std::max(0, w - 3))) + "..."; };
+    using Lines         = std::vector<std::string>;
+
+    CHECK(wrap_name_two_lines("", 10, measure, ellipsis).empty());
+    CHECK(wrap_name_two_lines("Benchy", 10, measure, ellipsis) == Lines{ "Benchy" });
+    // The P1 strip broke these mid-word ("h3c_mus / hroom").
+    CHECK(wrap_name_two_lines("h3c_mushroom", 9, measure, ellipsis) == Lines{ "h3c_", "mushroom" });
+    CHECK(wrap_name_two_lines("my big project", 8, measure, ellipsis) == Lines{ "my big", "project" });
+    CHECK(wrap_name_two_lines("plate.gcode", 7, measure, ellipsis) == Lines{ "plate.", "gcode" });
+    // The rest does not fit the second line: ellipsised.
+    CHECK(wrap_name_two_lines("h3c_mushroom_with_supports", 10, measure, ellipsis) == Lines{ "h3c_", "mushroo..." });
+    // A first word wider than the line: one ellipsised line, not a broken word.
+    CHECK(wrap_name_two_lines("zephyrawt_fail", 7, measure, ellipsis) == Lines{ "zeph..." });
+    for (const Lines &lines : { wrap_name_two_lines("a_long_name_with_many_parts", 6, measure, ellipsis),
+                                wrap_name_two_lines("x y z w v u t", 3, measure, ellipsis) }) {
+        CHECK(lines.size() <= 2);
+        for (const std::string &l : lines)
+            CHECK(int(l.size()) <= 6);
+    }
 }

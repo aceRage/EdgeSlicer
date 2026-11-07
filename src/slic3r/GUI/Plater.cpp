@@ -21720,6 +21720,33 @@ bool Plater::swap_in_project(const std::string &snapshot_3mf, const wxString &or
     return true;
 }
 
+void Plater::count_sliced_plates(int &plates_with_objects, int &plates_sliced)
+{
+    plates_with_objects = 0;
+    plates_sliced       = 0;
+    PartPlateList &plates = p->partplate_list;
+    for (int i = 0; i < plates.get_plate_count(); ++i) {
+        PartPlate *plate = plates.get_plate(i);
+        if (plate == nullptr || plate->empty())
+            continue;
+        ++plates_with_objects;
+        if (plate->is_slice_result_valid())
+            ++plates_sliced;
+    }
+}
+
+bool Plater::render_current_plate_thumbnail(ThumbnailData &out, unsigned int size)
+{
+    GLCanvas3D *canvas = get_view3D_canvas3D();
+    if (canvas == nullptr || size == 0)
+        return false;
+    const ThumbnailsParams params = { {}, false, true, true, true, p->partplate_list.get_curr_plate_index() };
+    canvas->render_thumbnail(out, size, size, params, Camera::EType::Ortho);
+    return out.is_valid();
+}
+
+size_t Plater::project_change_marker() const { return p->undo_redo_stack().active_snapshot_time(); }
+
 // BBS: save logic
 void Plater::set_opened_from_zip(bool opened)
 {

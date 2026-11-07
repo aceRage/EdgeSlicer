@@ -1,6 +1,7 @@
 #include "ProjectStrip.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -17,6 +18,7 @@
 #include <wx/button.h>
 
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -30,6 +32,7 @@
 #include "Notebook.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
+#include "wxExtensions.hpp"
 #include "../Utils/Process.hpp"
 
 namespace fs = boost::filesystem;
@@ -42,6 +45,7 @@ namespace {
 const char *CFG_COLLAPSED = "project_strip_collapsed";
 const char *CFG_TEXT_MODE = "project_strip_text_mode";
 const char *CFG_MAX_OPEN  = "project_strip_max_open";
+const char *CFG_WIDTH     = "project_strip_width";
 
 long long ms_since(std::chrono::steady_clock::time_point t)
 {
@@ -104,6 +108,7 @@ ProjectStrip::ProjectStrip(wxWindow *parent, MainFrame *frame)
         m_collapsed = cfg->get(CFG_COLLAPSED) == "1";
         m_text_mode = cfg->get(CFG_TEXT_MODE) == "1";
         m_sessions.set_max_open(ProjectSessions::parse_max_open(cfg->get(CFG_MAX_OPEN)));
+        m_width_dip = StripLayout::parse_width(cfg->get(CFG_WIDTH));
     }
     // Per process and per slot, under the app's temp folder (the backup folders live there too).
     m_root = (fs::path(temporary_dir()) / "project_strip" / std::to_string(get_current_pid())).string();
@@ -113,7 +118,25 @@ ProjectStrip::ProjectStrip(wxWindow *parent, MainFrame *frame)
     m_sessions.select(first);
     m_extra[first];
 
+    // New and Open: two icon buttons at the top (owner feedback on P1), the words in their tooltips.
+    m_btn_new  = new ScalableButton(this, wxID_ANY, "add", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true, 16);
+    m_btn_open = new ScalableButton(this, wxID_ANY, "menu_open", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true, 16);
+    m_btn_new->SetToolTip(_L("New project"));
+    m_btn_open->SetToolTip(_L("Open project"));
+    m_btn_new->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { new_project(); });
+    m_btn_open->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { open_project(); });
+    apply_colours();
+
+    m_poll_timer.SetOwner(this);
+    m_thumb_timer.SetOwner(this);
+    Bind(wxEVT_TIMER, &ProjectStrip::on_poll, this, m_poll_timer.GetId());
+    Bind(wxEVT_TIMER, &ProjectStrip::on_thumbnail_timer, this, m_thumb_timer.GetId());
+    m_poll_timer.Start(500);
+
     Bind(wxEVT_PAINT, &ProjectStrip::on_paint, this);
+    Bind(wxEVT_LEFT_UP, &ProjectStrip::on_left_up, this);
+    Bind(wxEVT_MOUSE_CAPTURE_LOST, &ProjectStrip::on_capture_lost, this);
+    Bind(wxEVT_SIZE, &ProjectStrip::on_size, this);
     Bind(wxEVT_LEFT_DOWN, &ProjectStrip::on_left_down, this);
     Bind(wxEVT_MIDDLE_DOWN, &ProjectStrip::on_middle_down, this);
     Bind(wxEVT_RIGHT_DOWN, &ProjectStrip::on_right_down, this);
@@ -121,6 +144,12 @@ ProjectStrip::ProjectStrip(wxWindow *parent, MainFrame *frame)
     Bind(wxEVT_LEAVE_WINDOW, &ProjectStrip::on_leave, this);
     Bind(wxEVT_MOUSEWHEEL, &ProjectStrip::on_wheel, this);
     apply_width();
+}
+
+ProjectStrip::~ProjectStrip()
+{
+    m_poll_timer.Stop();
+    m_thumb_timer.Stop();
 }
 
 Plater *ProjectStrip::plater() const { return wxGetApp().plater(); }
@@ -187,8 +216,6 @@ bool ProjectStrip::can_switch(bool cancel_slicing, bool &slicing_cancelled)
 
 void ProjectStrip::load_thumbnail(ProjectSlot &slot)
 {
-    SlotExtra &extra = m_extra[slot.id];
-    extra.thumbnail  = wxBitmap();
     if (slot.snapshot_path.empty())
         return;
     const std::string png = bbs_3mf_get_thumbnail(slot.snapshot_path.c_str());
@@ -198,10 +225,27 @@ void ProjectStrip::load_thumbnail(ProjectSlot &slot)
     wxImage             image;
     if (!image.LoadFile(stream, wxBITMAP_TYPE_PNG) || !image.IsOk())
         return;
-    const int side = FromDIP(72);
-    const double scale = std::min(double(side) / image.GetWidth(), double(side) / image.GetHeight());
-    image.Rescale(std::max(1, int(image.GetWidth() * scale)), std::max(1, int(image.GetHeight() * scale)), wxIMAGE_QUALITY_HIGH);
-    extra.thumbnail = wxBitmap(image);
+    SlotExtra &extra  = m_extra[slot.id];
+    extra.image       = image;
+    extra.scaled      = wxBitmap();
+    extra.scaled_side = 0;
+}
+
+// The tile's thumbnail at `side` px (the thumbnail grows with the strip), scaled once per size.
+const wxBitmap *ProjectStrip::tile_bitmap(int id, int side)
+{
+    auto it = m_extra.find(id);
+    if (it == m_extra.end() || !it->second.image.IsOk())
+        return nullptr;
+    SlotExtra &extra = it->second;
+    if (extra.scaled_side != side || !extra.scaled.IsOk()) {
+        wxImage      image = extra.image;
+        const double scale = std::min(double(side) / image.GetWidth(), double(side) / image.GetHeight());
+        image.Rescale(std::max(1, int(image.GetWidth() * scale)), std::max(1, int(image.GetHeight() * scale)), wxIMAGE_QUALITY_HIGH);
+        extra.scaled      = wxBitmap(image);
+        extra.scaled_side = side;
+    }
+    return &extra.scaled;
 }
 
 bool ProjectStrip::park_active(std::string &error)
@@ -228,6 +272,11 @@ bool ProjectStrip::park_active(std::string &error)
         return false;
     slot->snapshot_path = snapshot;
     slot->plate_gcodes  = gcodes;
+    // The badge of the parked tile: what is sliced is what kept its G-code.
+    int with_objects = 0, sliced = 0;
+    p->count_sliced_plates(with_objects, sliced);
+    slot->plates_with_objects = with_objects;
+    slot->plates_sliced       = int(gcodes.size());
     slot->plate         = p->get_partplate_list().get_curr_plate_index();
     const int tab       = m_frame != nullptr && m_frame->m_tabpanel != nullptr ? m_frame->m_tabpanel->GetSelection() : int(MainTabs::Editor3D);
     slot->main_tab      = MainTabs::hosts_plater(tab) ? tab : (MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : int(MainTabs::Editor3D));
@@ -266,9 +315,15 @@ void ProjectStrip::after_switch(int id, bool slicing_cancelled, std::chrono::ste
         // The tab it was on; from Home or Device, the project's last plater tab.
         m_frame->select_tab(size_t(MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : int(MainTabs::Editor3D)));
     }
-    if (Plater *p = plater())
+    if (Plater *p = plater()) {
         if (GLCanvas3D *canvas = p->get_current_canvas3D())
             canvas->set_as_dirty();
+        // The live thumbnail: none to render while the snapshot's is current; a project with none yet gets one shortly.
+        auto it         = m_extra.find(id);
+        m_active_marker = it != m_extra.end() && it->second.image.IsOk() ?
+                              p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index())) :
+                              size_t(-1);
+    }
     const long long total = ms_since(started);
     BOOST_LOG_TRIVIAL(info) << "project strip: switch to slot " << id << " took " << total << " ms (park " << park_ms << " ms, load "
                             << (total - park_ms) << " ms)" << log_memory_info();
@@ -646,19 +701,139 @@ wxString ProjectStrip::tooltip_for(const ProjectSlot &slot) const
 
 void ProjectStrip::rescale()
 {
-    for (auto &kv : m_extra)
-        if (ProjectSlot *slot = m_sessions.find(kv.first))
-            load_thumbnail(*slot);
+    // Same images, new tile sizes.
+    for (auto &kv : m_extra) {
+        kv.second.scaled      = wxBitmap();
+        kv.second.scaled_side = 0;
+    }
+    if (m_btn_new != nullptr)
+        m_btn_new->msw_rescale();
+    if (m_btn_open != nullptr)
+        m_btn_open->msw_rescale();
     apply_width();
     Refresh();
 }
 
+void ProjectStrip::sys_color_changed()
+{
+    apply_colours();
+    if (m_btn_new != nullptr)
+        m_btn_new->msw_rescale();
+    if (m_btn_open != nullptr)
+        m_btn_open->msw_rescale();
+    Refresh();
+}
+
+void ProjectStrip::apply_colours()
+{
+    const wxColour bg = wxGetApp().dark_mode() ? wxColour(0x2B, 0x2B, 0x30) : wxColour(0xF0, 0xF0, 0xF0);
+    SetBackgroundColour(bg);
+    for (ScalableButton *b : { m_btn_new, m_btn_open })
+        if (b != nullptr)
+            b->SetBackgroundColour(bg);
+}
+
+// ---- P2: badges, live thumbnail, Send ---------------------------------------------------------------------------------------
+
+bool ProjectStrip::plater_tab_shown() const
+{
+    return m_frame != nullptr && m_frame->m_tabpanel != nullptr && m_frame->IsShown() && !m_frame->IsIconized() &&
+           MainTabs::hosts_plater(m_frame->m_tabpanel->GetSelection());
+}
+
+void ProjectStrip::on_poll(wxTimerEvent &)
+{
+    Plater      *p      = plater();
+    ProjectSlot *active = m_sessions.active();
+    if (m_switching || p == nullptr || active == nullptr || !IsShown())
+        return;
+    int with_objects = 0, sliced = 0;
+    p->count_sliced_plates(with_objects, sliced);
+    const bool slicing = p->is_background_process_slicing();
+    const bool dirty   = p->is_project_dirty();
+    bool       changed = active->plates_with_objects != with_objects || active->plates_sliced != sliced || m_active_slicing != slicing ||
+                   active->dirty != dirty;
+    active->plates_with_objects = with_objects;
+    active->plates_sliced       = sliced;
+    active->dirty               = dirty;
+    m_active_slicing            = slicing;
+    if (slicing) {
+        m_spin  = (m_spin + 1) % 8;
+        changed = true;
+    }
+    // The live thumbnail: rendered again once the project stops changing for a moment (an undo snapshot or another plate).
+    const size_t marker = p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index()));
+    if (marker != m_active_marker) {
+        m_active_marker = marker;
+        m_thumb_timer.StartOnce(1500);
+    }
+    if (changed)
+        Refresh();
+}
+
+void ProjectStrip::on_thumbnail_timer(wxTimerEvent &)
+{
+    Plater      *p      = plater();
+    ProjectSlot *active = m_sessions.active();
+    if (m_switching || p == nullptr || active == nullptr || m_collapsed || m_text_mode)
+        return;
+    if (!plater_tab_shown()) {
+        // The canvas is not on screen: try again after the next change, or when the plater is back.
+        m_active_marker = size_t(-1);
+        return;
+    }
+    ThumbnailData data;
+    const unsigned size = unsigned(std::max(128, FromDIP(StripLayout::thumb_side(StripLayout::max_width))));
+    if (!p->render_current_plate_thumbnail(data, size))
+        return;
+    wxImage image(int(data.width), int(data.height));
+    image.InitAlpha();
+    for (unsigned r = 0; r < data.height; ++r) {
+        const unsigned rr = (data.height - 1 - r) * data.width; // the GL image is bottom-up
+        for (unsigned c = 0; c < data.width; ++c) {
+            const unsigned char *px = data.pixels.data() + 4 * (rr + c);
+            image.SetRGB(int(c), int(r), px[0], px[1], px[2]);
+            image.SetAlpha(int(c), int(r), px[3]);
+        }
+    }
+    SlotExtra &extra  = m_extra[active->id];
+    extra.image       = image;
+    extra.scaled      = wxBitmap();
+    extra.scaled_side = 0;
+    Refresh();
+}
+
+void ProjectStrip::send_project(int id)
+{
+    if (id != m_sessions.active_id() && !select_project(id))
+        return;
+    if (m_frame == nullptr)
+        return;
+    // After the switch the plate's G-code is processed for Preview first; send once that ran.
+    wxGetApp().CallAfter([this]() {
+        if (m_frame != nullptr && !m_frame->send_current_plate())
+            toast(_L("Slice the plate first, then send it."));
+    });
+}
+
 // ---- Layout and drawing ---------------------------------------------------------------------------------------------------
 
-int ProjectStrip::strip_width() const { return FromDIP(m_collapsed ? 24 : (m_text_mode ? 160 : 88)); }
-int ProjectStrip::header_height() const { return FromDIP(24); }
-int ProjectStrip::item_height() const { return FromDIP(m_collapsed ? 22 : (m_text_mode ? 32 : 112)); }
-int ProjectStrip::button_height() const { return FromDIP(m_collapsed ? 22 : 28); }
+int ProjectStrip::strip_width() const { return FromDIP(StripLayout::width(m_collapsed, m_text_mode, m_width_dip)); }
+int ProjectStrip::thumb_side() const { return FromDIP(StripLayout::thumb_side(StripLayout::width(false, false, m_width_dip))); }
+int ProjectStrip::grip_width() const { return m_collapsed ? 0 : FromDIP(5); }
+// Expanded: one row, the chevron at the left, New and Open at the right. The rail: the three stacked.
+int ProjectStrip::header_height() const { return FromDIP(m_collapsed ? 3 * 24 : 30); }
+
+int ProjectStrip::item_height() const
+{
+    if (m_collapsed)
+        return FromDIP(22);
+    const int line = std::max(FromDIP(12), wxGetApp().small_font().GetPixelSize().GetHeight() + FromDIP(2));
+    if (m_text_mode)
+        return std::max(FromDIP(32), line + FromDIP(14));
+    // Padding, the thumbnail, a gap, two name lines, padding.
+    return FromDIP(6) + thumb_side() + FromDIP(4) + 2 * line + FromDIP(8);
+}
 
 void ProjectStrip::apply_width()
 {
@@ -666,8 +841,35 @@ void ProjectStrip::apply_width()
     SetMinSize(wxSize(w, -1));
     SetMaxSize(wxSize(w, -1));
     SetSize(wxSize(w, GetSize().GetHeight()));
+    layout_buttons();
     if (wxWindow *parent = GetParent())
         parent->Layout();
+}
+
+void ProjectStrip::layout_buttons()
+{
+    if (m_btn_new == nullptr || m_btn_open == nullptr)
+        return;
+    const int    w   = GetClientSize().x > 0 ? GetClientSize().x : strip_width();
+    const wxSize bsz = m_btn_new->GetBestSize();
+    const int    b   = std::max(bsz.x, bsz.y);
+    if (m_collapsed) {
+        const int row = FromDIP(24);
+        m_btn_new->SetSize((w - b) / 2, row + (row - b) / 2, b, b);
+        m_btn_open->SetSize((w - b) / 2, 2 * row + (row - b) / 2, b, b);
+    } else {
+        const int top = (header_height() - b) / 2;
+        const int gap = FromDIP(4);
+        m_btn_open->SetSize(w - grip_width() - b - gap, top, b, b);
+        m_btn_new->SetSize(w - grip_width() - 2 * b - 2 * gap, top, b, b);
+    }
+}
+
+void ProjectStrip::on_size(wxSizeEvent &evt)
+{
+    layout_buttons();
+    Refresh();
+    evt.Skip();
 }
 
 void ProjectStrip::set_collapsed(bool collapsed)
@@ -693,22 +895,20 @@ void ProjectStrip::set_text_mode(bool text_mode)
 ProjectStrip::Hit ProjectStrip::hit_test(const wxPoint &pt) const
 {
     const wxSize size = GetClientSize();
+    if (!m_collapsed && pt.x >= size.x - grip_width())
+        return { HitKind::Grip, -1 };
     if (pt.y < header_height())
-        return { HitKind::Header, -1 };
-    const int bh      = button_height();
-    const int buttons = size.y - 2 * bh;
-    if (pt.y >= buttons)
-        return { pt.y < buttons + bh ? HitKind::New : HitKind::Open, -1 };
+        return (m_collapsed ? pt.y < FromDIP(24) : pt.x < FromDIP(26)) ? Hit{ HitKind::Header, -1 } : Hit{};
     const int y = pt.y - header_height() + m_scroll;
     const int i = y / item_height();
-    if (i < 0 || size_t(i) >= m_sessions.size())
+    if (y < 0 || i < 0 || size_t(i) >= m_sessions.size())
         return {};
     const int id = m_sessions.slots()[size_t(i)].id;
     if (!m_collapsed) {
-        // The close cross in the item's top-right corner.
-        const int cross = FromDIP(14);
+        // The close cross in the tile's top-right corner.
         const int top   = header_height() + i * item_height() - m_scroll;
-        if (pt.x >= size.x - cross - FromDIP(4) && pt.y < top + cross + FromDIP(4))
+        const int cross = FromDIP(18);
+        if (pt.x >= size.x - grip_width() - cross - FromDIP(6) && pt.y < top + cross + FromDIP(6))
             return { HitKind::ItemClose, id };
     }
     return { HitKind::Item, id };
@@ -717,155 +917,209 @@ ProjectStrip::Hit ProjectStrip::hit_test(const wxPoint &pt) const
 void ProjectStrip::on_paint(wxPaintEvent &)
 {
     wxAutoBufferedPaintDC dc(this);
-    const bool   dark   = wxGetApp().dark_mode();
-    const wxSize size   = GetClientSize();
-    const wxColour bg     = dark ? wxColour(0x2B, 0x2B, 0x30) : wxColour(0xF0, 0xF0, 0xF0);
-    const wxColour item_bg = dark ? wxColour(0x36, 0x36, 0x3C) : wxColour(0xFF, 0xFF, 0xFF);
-    const wxColour hover_bg = dark ? wxColour(0x42, 0x42, 0x4A) : wxColour(0xE4, 0xF4, 0xEA);
-    const wxColour text   = dark ? wxColour(0xE0, 0xE0, 0xE0) : wxColour(0x26, 0x2E, 0x30);
-    const wxColour muted  = dark ? wxColour(0x90, 0x90, 0x98) : wxColour(0x8A, 0x8A, 0x8A);
-    const wxColour line   = dark ? wxColour(0x4A, 0x4A, 0x50) : wxColour(0xD8, 0xD8, 0xD8);
+    const bool     dark     = wxGetApp().dark_mode();
+    const wxSize   size     = GetClientSize();
+    const wxColour bg       = dark ? wxColour(0x2B, 0x2B, 0x30) : wxColour(0xF0, 0xF0, 0xF0);
+    const wxColour hover_bg = dark ? wxColour(0x38, 0x38, 0x40) : wxColour(0xE4, 0xF4, 0xEA);
+    const wxColour text     = dark ? wxColour(0xE0, 0xE0, 0xE0) : wxColour(0x26, 0x2E, 0x30);
+    const wxColour text_dim = dark ? wxColour(0xB8, 0xB8, 0xBE) : wxColour(0x50, 0x58, 0x5A);
+    const wxColour muted    = dark ? wxColour(0x90, 0x90, 0x98) : wxColour(0x8A, 0x8A, 0x8A);
+    const wxColour line     = dark ? wxColour(0x4A, 0x4A, 0x50) : wxColour(0xD8, 0xD8, 0xD8);
+    const wxColour frame_bg = dark ? wxColour(0x36, 0x36, 0x3C) : wxColour(0xFF, 0xFF, 0xFF);
+    const wxColour dirty_c  = wxColour(0xF5, 0x9E, 0x0B);
     dc.SetBackground(wxBrush(bg));
     dc.Clear();
     dc.SetFont(wxGetApp().small_font());
 
-    // Header: the collapse chevron.
-    dc.SetTextForeground(muted);
+    // Header: the collapse chevron (New / Open are child buttons).
+    dc.SetTextForeground(m_hover.kind == HitKind::Header ? accent_colour() : muted);
     const wxString chevron = m_collapsed ? wxString::FromUTF8("\xC2\xBB") : wxString::FromUTF8("\xC2\xAB");
     const wxSize   cs      = dc.GetTextExtent(chevron);
-    dc.DrawText(chevron, (size.x - cs.x) / 2, (header_height() - cs.y) / 2);
+    if (m_collapsed)
+        dc.DrawText(chevron, (size.x - cs.x) / 2, (FromDIP(24) - cs.y) / 2);
+    else
+        dc.DrawText(chevron, FromDIP(8), (header_height() - cs.y) / 2);
     dc.SetPen(wxPen(line));
     dc.DrawLine(0, header_height() - 1, size.x, header_height() - 1);
+    // The right edge: the grip to widen the strip.
+    const bool grip_hot = m_dragging || m_hover.kind == HitKind::Grip;
+    dc.SetPen(wxPen(grip_hot ? accent_colour() : line, grip_hot ? FromDIP(2) : 1));
     dc.DrawLine(size.x - 1, 0, size.x - 1, size.y);
 
-    const int bh      = button_height();
     const int list_top = header_height();
-    const int list_bottom = size.y - 2 * bh;
-    dc.SetClippingRegion(0, list_top, size.x, std::max(0, list_bottom - list_top));
-    const int ih = item_height();
+    dc.SetClippingRegion(0, list_top, std::max(0, size.x - 1), std::max(0, size.y - list_top));
+    const int ih    = item_height();
+    const int side  = thumb_side();
+    const int inner = size.x - grip_width(); // what the tiles may use
     for (size_t i = 0; i < m_sessions.size(); ++i) {
         const ProjectSlot &slot   = m_sessions.slots()[i];
         const bool         active = slot.id == m_sessions.active_id();
-        const bool         hover  = m_hover.id == slot.id;
+        const bool         hover  = m_hover.id == slot.id && (m_hover.kind == HitKind::Item || m_hover.kind == HitKind::ItemClose);
         const int          top    = list_top + int(i) * ih - m_scroll;
-        if (top + ih < list_top || top > list_bottom)
+        if (top + ih < list_top || top > size.y)
             continue;
-        const wxRect card(FromDIP(m_collapsed ? 3 : 4), top + FromDIP(2), size.x - FromDIP(m_collapsed ? 6 : 8), ih - FromDIP(4));
-        dc.SetBrush(wxBrush(hover ? hover_bg : item_bg));
-        dc.SetPen(active ? wxPen(accent_colour(), FromDIP(2)) : wxPen(line));
-        dc.DrawRoundedRectangle(card, FromDIP(4));
+        const SliceBadge badge = slice_badge(active && m_active_slicing, slot.plates_with_objects, slot.plates_sliced);
 
         if (m_collapsed) {
-            // The rail: one mark per project, filled for the active one.
-            const int r = FromDIP(4);
+            // The rail: one mark per project, filled for the active one; the unsaved dot next to it.
+            const int cx = size.x / 2, cy = top + ih / 2;
+            if (hover) {
+                dc.SetBrush(wxBrush(hover_bg));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(0, top, size.x - 1, ih);
+            }
+            dc.SetPen(badge == SliceBadge::Sliced ? wxPen(accent_colour(), FromDIP(2)) : *wxTRANSPARENT_PEN);
             dc.SetBrush(active ? wxBrush(accent_colour()) : wxBrush(muted));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawCircle(card.x + card.width / 2, card.y + card.height / 2, r);
+            dc.DrawCircle(cx, cy, FromDIP(4));
             if (slot.dirty) {
-                dc.SetBrush(wxBrush(wxColour(0xF5, 0x9E, 0x0B)));
-                dc.DrawCircle(card.x + card.width - FromDIP(3), card.y + FromDIP(3), FromDIP(2));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.SetBrush(wxBrush(dirty_c));
+                dc.DrawCircle(cx + FromDIP(6), cy - FromDIP(5), FromDIP(2));
             }
             continue;
         }
 
-        int text_top = card.y + FromDIP(6);
+        // The tile's frame: the thumbnail (thumbnail mode) or the row (text mode). The active project's highlight is this frame.
+        wxRect frame;
+        if (m_text_mode)
+            frame = wxRect(FromDIP(4), top + FromDIP(3), inner - FromDIP(8), ih - FromDIP(6));
+        else
+            frame = wxRect((inner - side) / 2, top + FromDIP(6), side, side);
+        if (hover) {
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(hover_bg));
+            dc.DrawRoundedRectangle(wxRect(FromDIP(2), top + FromDIP(1), inner - FromDIP(4), ih - FromDIP(2)), FromDIP(4));
+        }
+        dc.SetBrush(wxBrush(frame_bg));
+        dc.SetPen(active ? wxPen(accent_colour(), FromDIP(2)) : wxPen(line));
+        dc.DrawRoundedRectangle(frame, FromDIP(4));
+
         if (!m_text_mode) {
-            // A project card: the plate thumbnail of its snapshot, or a file shape with a folded corner (not a plate tile).
-            const int    side = FromDIP(72);
-            const wxRect thumb(card.x + (card.width - side) / 2, card.y + FromDIP(6), side, side);
-            auto         it = m_extra.find(slot.id);
-            if (it != m_extra.end() && it->second.thumbnail.IsOk()) {
-                const wxBitmap &bmp = it->second.thumbnail;
-                dc.DrawBitmap(bmp, thumb.x + (side - bmp.GetWidth()) / 2, thumb.y + (side - bmp.GetHeight()) / 2, true);
+            if (const wxBitmap *bmp = tile_bitmap(slot.id, side - FromDIP(6)); bmp != nullptr && bmp->IsOk()) {
+                dc.DrawBitmap(*bmp, frame.x + (side - bmp->GetWidth()) / 2, frame.y + (side - bmp->GetHeight()) / 2, true);
             } else {
-                const int fold = FromDIP(14);
-                dc.SetPen(wxPen(muted));
-                dc.SetBrush(*wxTRANSPARENT_BRUSH);
-                const wxRect page(thumb.x + FromDIP(14), thumb.y + FromDIP(8), side - FromDIP(28), side - FromDIP(16));
+                // Not parked yet: a file shape with a folded corner (a project, not a plate tile).
+                const int    fold = side / 5;
+                const wxRect page(frame.x + side / 5, frame.y + side / 8, side - 2 * (side / 5), side - 2 * (side / 8));
                 wxPoint      outline[] = { { page.x, page.y }, { page.GetRight() - fold, page.y }, { page.GetRight(), page.y + fold },
                                            { page.GetRight(), page.GetBottom() }, { page.x, page.GetBottom() } };
+                dc.SetPen(wxPen(muted));
+                dc.SetBrush(*wxTRANSPARENT_BRUSH);
                 dc.DrawPolygon(5, outline);
                 dc.DrawLine(page.GetRight() - fold, page.y, page.GetRight() - fold, page.y + fold);
                 dc.DrawLine(page.GetRight() - fold, page.y + fold, page.GetRight(), page.y + fold);
             }
-            text_top = thumb.GetBottom() + FromDIP(4);
         }
 
-        // The name: two lines under the thumbnail, one line in text mode; ellipsised.
-        dc.SetTextForeground(active ? text : (dark ? wxColour(0xC8, 0xC8, 0xC8) : wxColour(0x44, 0x4C, 0x4E)));
-        const int      dot_w   = slot.dirty ? FromDIP(10) : 0;
-        const int      avail   = card.width - FromDIP(10) - dot_w - (m_text_mode ? FromDIP(14) : 0);
-        const wxString name    = from_u8(slot.name);
-        const int      lh      = dc.GetCharHeight();
-        int            x       = card.x + FromDIP(5) + dot_w;
+        // Corners: the unsaved dot top-left, the slice badge bottom-right, the close cross top-right while hovered.
+        const int r = FromDIP(5);
         if (slot.dirty) {
-            dc.SetBrush(wxBrush(wxColour(0xF5, 0x9E, 0x0B)));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            const int cy = m_text_mode ? card.y + card.height / 2 : text_top + lh / 2;
-            dc.DrawCircle(card.x + FromDIP(8), cy, FromDIP(3));
+            dc.SetPen(wxPen(frame_bg, FromDIP(1)));
+            dc.SetBrush(wxBrush(dirty_c));
+            const wxPoint c = m_text_mode ? wxPoint(frame.x + FromDIP(10), frame.y + frame.height / 2) : wxPoint(frame.x + r + FromDIP(3), frame.y + r + FromDIP(3));
+            dc.DrawCircle(c, FromDIP(4));
         }
-        if (m_text_mode) {
-            const wxString shown = wxControl::Ellipsize(name, dc, wxELLIPSIZE_END, avail);
-            dc.DrawText(shown, x, card.y + (card.height - lh) / 2);
-        } else {
-            // First line: as many characters as fit, broken at a space when there is one.
-            wxString first = name, rest;
-            if (dc.GetTextExtent(name).x > avail) {
-                size_t n = 0;
-                while (n < name.length() && dc.GetTextExtent(name.Left(n + 1)).x <= avail)
-                    ++n;
-                const size_t space = name.Left(n).find_last_of(' ');
-                if (space != wxString::npos && space > 0)
-                    n = space + 1;
-                first = name.Left(n);
-                rest  = name.Mid(n);
+        if (badge != SliceBadge::None && !(hover && m_text_mode)) {
+            const wxPoint c = m_text_mode ? wxPoint(frame.GetRight() - FromDIP(12), frame.y + frame.height / 2)
+                                          : wxPoint(frame.GetRight() - r - FromDIP(3), frame.GetBottom() - r - FromDIP(3));
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(frame_bg));
+            dc.DrawCircle(c, r + FromDIP(2));
+            if (badge == SliceBadge::Sliced) {
+                dc.SetBrush(wxBrush(accent_colour()));
+                dc.DrawCircle(c, r);
+                dc.SetPen(wxPen(*wxWHITE, FromDIP(2)));
+                dc.DrawLine(c.x - r / 2, c.y, c.x - r / 6, c.y + r / 2);
+                dc.DrawLine(c.x - r / 6, c.y + r / 2, c.x + r / 2, c.y - r / 3);
+            } else {
+                // Slicing: eight dots going round.
+                for (int k = 0; k < 8; ++k) {
+                    const double a = k * 3.14159265358979 / 4.;
+                    dc.SetBrush(wxBrush(k == m_spin ? accent_colour() : muted));
+                    dc.DrawCircle(c.x + int(std::lround(r * std::cos(a))), c.y + int(std::lround(r * std::sin(a))), std::max(1, FromDIP(1)));
+                }
             }
-            dc.DrawText(first, x, text_top);
-            if (!rest.empty())
-                dc.DrawText(wxControl::Ellipsize(rest, dc, wxELLIPSIZE_END, avail), card.x + FromDIP(5), text_top + lh);
+        }
+        if (hover) {
+            const int     cr = FromDIP(7);
+            const wxPoint c  = m_text_mode ? wxPoint(frame.GetRight() - FromDIP(12), frame.y + frame.height / 2)
+                                           : wxPoint(frame.GetRight() - cr - FromDIP(2), frame.y + cr + FromDIP(2));
+            const bool hot = m_hover.kind == HitKind::ItemClose;
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(hot ? wxColour(0xE0, 0x4B, 0x4B) : (dark ? wxColour(0x55, 0x55, 0x5C) : wxColour(0xC8, 0xC8, 0xC8))));
+            dc.DrawCircle(c, cr);
+            dc.SetPen(wxPen(*wxWHITE, FromDIP(2)));
+            const int d = cr / 2;
+            dc.DrawLine(c.x - d, c.y - d, c.x + d, c.y + d);
+            dc.DrawLine(c.x - d, c.y + d, c.x + d, c.y - d);
         }
 
-        // The close cross, while hovered.
-        if (hover) {
-            dc.SetTextForeground(muted);
-            const wxString cross = wxString::FromUTF8("\xC3\x97");
-            const wxSize   xs    = dc.GetTextExtent(cross);
-            dc.DrawText(cross, card.GetRight() - xs.x - FromDIP(3), card.y + FromDIP(1));
+        // The name: under the thumbnail on at most two lines, broken at word ends and ellipsised (the full name is the tooltip).
+        dc.SetTextForeground(active ? text : text_dim);
+        const int lh = dc.GetCharHeight();
+        if (m_text_mode) {
+            const int x     = frame.x + (slot.dirty ? FromDIP(20) : FromDIP(8));
+            const int avail = frame.GetRight() - FromDIP(24) - x;
+            dc.DrawText(wxControl::Ellipsize(from_u8(slot.name), dc, wxELLIPSIZE_END, std::max(10, avail)), x, frame.y + (frame.height - lh) / 2);
+        } else {
+            const int avail = inner - FromDIP(2 * StripLayout::padding);
+            const auto measure = [&dc](const std::string &s) { return dc.GetTextExtent(from_u8(s)).x; };
+            const auto ellipsize = [&dc](const std::string &s, int w) {
+                return into_u8(wxControl::Ellipsize(from_u8(s), dc, wxELLIPSIZE_END, w));
+            };
+            const std::vector<std::string> lines = wrap_name_two_lines(slot.name, avail, measure, ellipsize);
+            int y = frame.GetBottom() + FromDIP(4);
+            for (const std::string &l : lines) {
+                const wxString shown = from_u8(l);
+                const int      tw    = dc.GetTextExtent(shown).x;
+                dc.DrawText(shown, (inner - tw) / 2, y);
+                y += lh;
+            }
         }
     }
     dc.DestroyClippingRegion();
-
-    // "+ New" and "Open..." at the bottom.
-    dc.SetPen(wxPen(line));
-    dc.DrawLine(0, list_bottom, size.x, list_bottom);
-    const wxString labels[2] = { m_collapsed ? wxString("+") : "+ " + _L("New"),
-                                 m_collapsed ? wxString::FromUTF8("\xE2\x80\xA6") : _L("Open...") };
-    for (int b = 0; b < 2; ++b) {
-        const int    top = list_bottom + b * bh;
-        const bool   hot = (b == 0 && m_hover.kind == HitKind::New) || (b == 1 && m_hover.kind == HitKind::Open);
-        if (hot) {
-            dc.SetBrush(wxBrush(hover_bg));
-            dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.DrawRectangle(0, top, size.x - 1, bh);
-        }
-        dc.SetTextForeground(hot ? accent_colour() : text);
-        const wxString shown = wxControl::Ellipsize(labels[b], dc, wxELLIPSIZE_END, size.x - FromDIP(4));
-        const wxSize   ts    = dc.GetTextExtent(shown);
-        dc.DrawText(shown, (size.x - ts.x) / 2, top + (bh - ts.y) / 2);
-    }
 }
 
 void ProjectStrip::on_left_down(wxMouseEvent &evt)
 {
     const Hit hit = hit_test(evt.GetPosition());
     switch (hit.kind) {
+    case HitKind::Grip:
+        m_dragging       = true;
+        m_drag_start_x   = ClientToScreen(evt.GetPosition()).x;
+        m_drag_start_dip = StripLayout::width(false, m_text_mode, m_width_dip);
+        CaptureMouse();
+        break;
     case HitKind::Header: set_collapsed(!m_collapsed); break;
     case HitKind::Item: select_project(hit.id); break;
     case HitKind::ItemClose: close_project(hit.id); break;
-    case HitKind::New: new_project(); break;
-    case HitKind::Open: open_project(); break;
     default: break;
     }
+}
+
+void ProjectStrip::end_drag()
+{
+    if (!m_dragging)
+        return;
+    m_dragging = false;
+    if (HasCapture())
+        ReleaseMouse();
+    if (AppConfig *cfg = wxGetApp().app_config)
+        cfg->set(CFG_WIDTH, std::to_string(m_width_dip));
+    Refresh();
+}
+
+void ProjectStrip::on_left_up(wxMouseEvent &evt)
+{
+    end_drag();
+    evt.Skip();
+}
+
+void ProjectStrip::on_capture_lost(wxMouseCaptureLostEvent &)
+{
+    m_dragging = false;
+    if (AppConfig *cfg = wxGetApp().app_config)
+        cfg->set(CFG_WIDTH, std::to_string(m_width_dip));
 }
 
 void ProjectStrip::on_middle_down(wxMouseEvent &evt)
@@ -886,19 +1140,32 @@ void ProjectStrip::on_right_down(wxMouseEvent &evt)
 
 void ProjectStrip::on_motion(wxMouseEvent &evt)
 {
+    if (m_dragging) {
+        // DIP from the drag distance in pixels, clamped to 88-200.
+        const double px_per_dip = FromDIP(100) / 100.;
+        const int    dx         = ClientToScreen(evt.GetPosition()).x - m_drag_start_x;
+        const int    wanted     = StripLayout::clamp_width(m_drag_start_dip + int(std::lround(dx / px_per_dip)));
+        if (wanted != m_width_dip) {
+            m_width_dip = wanted;
+            apply_width();
+            Refresh();
+        }
+        return;
+    }
     const Hit hit = hit_test(evt.GetPosition());
+    SetCursor(hit.kind == HitKind::Grip ? wxCursor(wxCURSOR_SIZEWE) : wxNullCursor);
     if (hit.kind != m_hover.kind || hit.id != m_hover.id) {
         m_hover = hit;
         wxString tip;
-        if (hit.kind == HitKind::Item || hit.kind == HitKind::ItemClose) {
+        if (hit.kind == HitKind::Item) {
             if (const ProjectSlot *slot = m_sessions.find(hit.id))
-                tip = hit.kind == HitKind::ItemClose ? _L("Close project") : tooltip_for(*slot);
-        } else if (hit.kind == HitKind::Header)
+                tip = tooltip_for(*slot);
+        } else if (hit.kind == HitKind::ItemClose)
+            tip = _L("Close project");
+        else if (hit.kind == HitKind::Header)
             tip = m_collapsed ? _L("Show the project strip") : _L("Collapse the project strip");
-        else if (hit.kind == HitKind::New)
-            tip = _L("New project");
-        else if (hit.kind == HitKind::Open)
-            tip = _L("Open project");
+        else if (hit.kind == HitKind::Grip)
+            tip = _L("Drag to widen the project strip");
         SetToolTip(tip);
         Refresh();
     }
@@ -907,15 +1174,18 @@ void ProjectStrip::on_motion(wxMouseEvent &evt)
 
 void ProjectStrip::on_leave(wxMouseEvent &evt)
 {
-    m_hover = {};
-    Refresh();
+    if (!m_dragging) {
+        m_hover = {};
+        SetCursor(wxNullCursor);
+        Refresh();
+    }
     evt.Skip();
 }
 
 void ProjectStrip::on_wheel(wxMouseEvent &evt)
 {
     const int content = int(m_sessions.size()) * item_height();
-    const int view    = GetClientSize().y - header_height() - 2 * button_height();
+    const int view    = GetClientSize().y - header_height();
     const int max     = std::max(0, content - view);
     m_scroll          = std::max(0, std::min(max, m_scroll - evt.GetWheelRotation() / std::max(1, evt.GetWheelDelta()) * item_height() / 2));
     Refresh();
@@ -927,10 +1197,15 @@ void ProjectStrip::show_item_menu(int id)
     if (slot == nullptr)
         return;
     wxMenu    menu;
-    const int id_save = wxWindow::NewControlId(), id_save_as = wxWindow::NewControlId(), id_close = wxWindow::NewControlId(),
-              id_close_others = wxWindow::NewControlId(), id_reveal = wxWindow::NewControlId(), id_window = wxWindow::NewControlId();
+    const int id_save = wxWindow::NewControlId(), id_save_as = wxWindow::NewControlId(), id_send = wxWindow::NewControlId(),
+              id_close = wxWindow::NewControlId(), id_close_others = wxWindow::NewControlId(), id_reveal = wxWindow::NewControlId(),
+              id_window = wxWindow::NewControlId();
     menu.Append(id_save, _L("Save"));
     menu.Append(id_save_as, _L("Save as..."));
+    menu.AppendSeparator();
+    // P2: switch to it, then the print / send of its plate (as Ctrl+Shift+G).
+    menu.Append(id_send, _L("Send..."));
+    menu.Enable(id_send, slot->plates_sliced > 0 || id == m_sessions.active_id());
     menu.AppendSeparator();
     menu.Append(id_close, _L("Close"));
     menu.Append(id_close_others, _L("Close others"));
@@ -948,6 +1223,8 @@ void ProjectStrip::show_item_menu(int id)
         save_slot(id, false);
     else if (chosen == id_save_as)
         save_slot(id, true);
+    else if (chosen == id_send)
+        send_project(id);
     else if (chosen == id_close)
         close_project(id);
     else if (chosen == id_close_others)
@@ -962,11 +1239,14 @@ void ProjectStrip::show_item_menu(int id)
 void ProjectStrip::show_strip_menu()
 {
     wxMenu    menu;
-    const int id_thumbs = wxWindow::NewControlId(), id_names = wxWindow::NewControlId(), id_collapse = wxWindow::NewControlId();
+    const int id_thumbs = wxWindow::NewControlId(), id_names = wxWindow::NewControlId(), id_collapse = wxWindow::NewControlId(),
+              id_reset = wxWindow::NewControlId();
     menu.AppendRadioItem(id_thumbs, _L("Show thumbnails"));
     menu.AppendRadioItem(id_names, _L("Show names only"));
     menu.Check(m_text_mode ? id_names : id_thumbs, true);
     menu.AppendSeparator();
+    menu.Append(id_reset, _L("Default width"));
+    menu.Enable(id_reset, !m_collapsed && m_width_dip != StripLayout::default_width);
     menu.Append(id_collapse, m_collapsed ? _L("Show the project strip") : _L("Collapse the project strip"));
     const int chosen = GetPopupMenuSelectionFromUser(menu);
     if (chosen == id_thumbs)
@@ -975,6 +1255,13 @@ void ProjectStrip::show_strip_menu()
         set_text_mode(true);
     else if (chosen == id_collapse)
         set_collapsed(!m_collapsed);
+    else if (chosen == id_reset) {
+        m_width_dip = StripLayout::default_width;
+        if (AppConfig *cfg = wxGetApp().app_config)
+            cfg->set(CFG_WIDTH, std::to_string(m_width_dip));
+        apply_width();
+        Refresh();
+    }
 }
 
 } // namespace GUI

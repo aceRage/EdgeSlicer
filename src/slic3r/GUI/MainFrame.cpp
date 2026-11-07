@@ -1318,6 +1318,22 @@ void MainFrame::on_active_project_changed()
         m_project_strip->on_active_project_changed();
 }
 
+bool MainFrame::send_current_plate()
+{
+    if (m_plater == nullptr || m_print_btn == nullptr)
+        return false;
+    m_plater->apply_background_progress();
+    m_print_enable = get_enable_print_status();
+    m_print_btn->Enable(m_print_enable);
+    if (!m_print_enable)
+        return false;
+    if (wxGetApp().preset_bundle->use_bbl_network())
+        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
+    else
+        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
+    return true;
+}
+
 void MainFrame::show_publish_button(bool show)
 {
     // m_publish_btn->Show(show);
@@ -2853,7 +2869,7 @@ void MainFrame::on_sys_color_changed()
 {
     wxBusyCursor wait;
     if (m_project_strip != nullptr)
-        m_project_strip->Refresh();
+        m_project_strip->sys_color_changed();
 
     // update label colors in respect to the system mode
     wxGetApp().init_label_colours();

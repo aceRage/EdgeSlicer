@@ -446,6 +446,12 @@ public:
     // instance) wait until it is over.
     void set_project_switch_busy(bool busy) { m_project_switch_busy = busy; }
     bool is_project_switch_busy() const { return m_project_switch_busy; }
+    // P2 strip badges: plates holding objects, and those of them with valid G-code.
+    void count_sliced_plates(int& plates_with_objects, int& plates_sliced);
+    // P2 live strip thumbnail: the current plate rendered as the 3MF thumbnail is (false when there is no canvas).
+    bool render_current_plate_thumbnail(ThumbnailData& out, unsigned int size);
+    // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo).
+    size_t project_change_marker() const;
     int save_project(bool saveAs = false);
     void set_opened_from_zip(bool opened);
     bool opened_from_zip() const;
