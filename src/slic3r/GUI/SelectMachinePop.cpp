@@ -1,4 +1,5 @@
 #include "SelectMachinePop.hpp"
+#include "MacPopupHover.hpp"
 #include "I18N.hpp"
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
@@ -76,15 +77,10 @@ MachineObjectPanel::MachineObjectPanel(wxWindow *parent, wxWindowID id, const wx
     this->Bind(wxEVT_LEFT_UP, &MachineObjectPanel::on_mouse_left_up, this);
 
 #ifdef __APPLE__
+    // macOS 13.1 and later: the popup's rows get no hover, so their icons are always drawn
+    // (MacPopupHover.hpp; the old test missed every x.0 release after 13).
     wxPlatformInfo platformInfo;
-    auto major = platformInfo.GetOSMajorVersion();
-    auto minor = platformInfo.GetOSMinorVersion();
-    auto micro = platformInfo.GetOSMicroVersion();
-
-    //macos 13.1.0
-    if (major >= 13 && minor >= 1 && micro >= 0) {
-        m_is_macos_special_version = true;
-    }
+    m_is_macos_special_version = macos_popup_icons_always_drawn(platformInfo.GetOSMajorVersion(), platformInfo.GetOSMinorVersion());
 #endif
 
 }

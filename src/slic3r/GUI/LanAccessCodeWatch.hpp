@@ -214,5 +214,13 @@ private:
     Outcome   m_last{Outcome::Ignored};
 };
 
+// Whether the reconnect ladder should stop redialling this printer: its code has been refused often
+// enough to raise the notice. Another dial with the same code only repeats the refusal, and kept the
+// Device page on "Connecting..." for ever. The user's next step dials again: a saved code
+// (DeviceManager::lan_access_code_changed), OK on the unchanged code, or picking the printer again.
+// The hidden hub-managed instance keeps redialling: nobody there can re-enter the code, and the
+// visible slicer may already have saved a new one that its next dial reads.
+inline bool redial_paused(const Watch& w, bool hub_managed) { return !hub_managed && w.notice_shown(); }
+
 } // namespace LanAccessCode
 } // namespace Slic3r

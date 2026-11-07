@@ -1469,6 +1469,10 @@ public:
     void note_lan_dial_ended(const std::string& dev_id, const std::string& msg);
     // The last LAN dial to this printer with its current code was refused.
     bool lan_access_code_refused(const std::string& dev_id) const;
+    // The printer refused its saved code often enough to raise the notice, and it has not worked
+    // since: the Device page says so and the visible slicer stops redialling it
+    // (LanAccessCode::redial_paused).
+    bool lan_access_code_blocked(const std::string& dev_id) const;
     // The user saved a new access code for this LAN printer: forget the refusals, close the
     // notice, and - when it is the printer this instance holds a session to - redial it now with
     // the new code instead of waiting out the reconnect backoff.

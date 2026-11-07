@@ -217,3 +217,36 @@ TEST_CASE("A printer still booting does not raise the notice", "[LanAccessCode]"
     CHECK(refused_dial(w, 246500) == Verdict::None);
     CHECK(refused_dial(w, 306500) == Verdict::Notify);
 }
+
+TEST_CASE("A refused code stops the redials until the user acts", "[LanAccessCode]")
+{
+    Watch w;
+    refused_dial(w, 0);
+    refused_dial(w, 15000);
+    CHECK_FALSE(redial_paused(w, false)); // not yet told: keep trying
+    REQUIRE(refused_dial(w, 105000) == Verdict::Notify);
+    CHECK(redial_paused(w, false));       // the visible slicer waits for the user
+    CHECK_FALSE(redial_paused(w, true));  // the hidden hub instance keeps dialling
+
+    // Picking the printer again dials it with the same code: still refused, still paused.
+    refused_dial(w, 400000);
+    CHECK(redial_paused(w, false));
+
+    // The printer's code was set back: that dial works, the notice closes, redials resume.
+    w.dial_started(500000, OLD_CODE);
+    w.session_up(500800);
+    CHECK(w.tick(500800 + SHORT_SESSION_MS) == Verdict::Clear);
+    CHECK_FALSE(redial_paused(w, false));
+}
+
+TEST_CASE("A new code resumes the redials", "[LanAccessCode]")
+{
+    Watch w;
+    refused_dial(w, 0);
+    refused_dial(w, 45000);
+    REQUIRE(refused_dial(w, 105000) == Verdict::Notify);
+    REQUIRE(redial_paused(w, false));
+    // A dial with another code (saved in the edit dialog, or by the visible slicer for the hub).
+    w.dial_started(200000, NEW_CODE);
+    CHECK_FALSE(redial_paused(w, false));
+}

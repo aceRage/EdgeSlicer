@@ -7237,6 +7237,13 @@ void DeviceManager::lan_reconnect_tick()
 
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        // A code the printer keeps refusing: wait for the user rather than redial every minute
+        // (LanAccessCode::redial_paused; the Device page offers the edit dialog).
+        if (auto w = m_lan_code_watch.find(obj->dev_id);
+            w != m_lan_code_watch.end() && LanAccessCode::redial_paused(w->second, hidden)) {
+            obj->m_redial_due = false;
+            continue;
+        }
         // The selection's first dial was refused (MachineObject::note_dial_failed): its one
         // re-dial, while what it held keeps waiting.
         if (obj->m_redial_due && std::chrono::steady_clock::now() >= obj->m_redial_at) {
@@ -7315,6 +7322,12 @@ bool DeviceManager::lan_access_code_refused(const std::string& dev_id) const
     return it != m_lan_code_watch.end() && it->second.last_dial_refused();
 }
 
+bool DeviceManager::lan_access_code_blocked(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.notice_shown();
+}
+
 void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v)
 {
     if (v == LanAccessCode::Verdict::None) return;
@@ -7329,7 +7342,8 @@ void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::V
     auto it = m_lan_code_watch.find(dev_id);
     BOOST_LOG_TRIVIAL(warning) << "lan_access_code: dev_id=" << dev_id << " refused "
                                << (it != m_lan_code_watch.end() ? it->second.refusals() : 0)
-                               << " dial(s) in a row with its saved access code: asking the user to re-enter it";
+                               << " dial(s) in a row with its saved access code: asking the user to re-enter it"
+                               << (app.is_hub_managed() ? "" : " (no more redials until then)");
     // The hidden hub-managed instance has nobody to show it to.
     if (!nm || app.is_hub_managed()) return;
     MachineObject* obj  = get_my_machine(dev_id);
