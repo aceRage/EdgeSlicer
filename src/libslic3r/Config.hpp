@@ -10,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <optional>
 #include <string>
 #include <vector>
 #include "libslic3r.h"
@@ -2123,6 +2124,11 @@ public:
     std::string                         category;
     // A tooltip text shown in the GUI.
     std::string                         tooltip;
+    // Empty unless this option names a plugin capability type (e.g. "slicing-pipeline").
+    // Unused by default; adding a value here is the only step that makes an option plugin-backed.
+    // Not serialized into G-code.
+    std::string                         plugin_type;
+    bool is_plugin_backed() const { return !plugin_type.empty(); }
     // Text right from the input field, usually a unit of measurement.
     std::string                         sidetext;
     // Format of this parameter on a command line.
@@ -2641,6 +2647,18 @@ protected:
     /// Set all statically defined config options to their defaults defined by this->def().
     void set_defaults();
 };
+
+// A plugin capability referenced by a preset as "name;uuid;capability". The UUID is empty for
+// local plugins (two consecutive semicolons). Lives here so dispatch templates in PluginManager
+// can parse refs without pulling the plugin layer into every Config.hpp consumer's compile.
+struct PluginCapabilityRef
+{
+    std::string name;
+    std::string capability_name;
+    std::string uuid;
+};
+
+std::optional<PluginCapabilityRef> parse_capability_ref(const std::string& value);
 
 }
 

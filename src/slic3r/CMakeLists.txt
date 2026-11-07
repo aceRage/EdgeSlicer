@@ -1216,6 +1216,42 @@ if (UNIX AND NOT APPLE)
     )
 endif ()
 
+if (EDGE_PYTHON_PLUGINS)
+    list(APPEND SLIC3R_GUI_SOURCES
+        plugin/PythonInterpreter.cpp
+        plugin/PythonInterpreter.hpp
+        plugin/PythonPluginBridge.cpp
+        plugin/PythonPluginBridge.hpp
+        plugin/PythonPluginInterface.hpp
+        plugin/PyPluginPackage.hpp
+        plugin/CloudPluginService.cpp
+        plugin/CloudPluginService.hpp
+        plugin/PluginFsUtils.cpp
+        plugin/PluginFsUtils.hpp
+        plugin/PluginJsonPy.hpp
+        plugin/PluginConfig.cpp
+        plugin/PluginConfig.hpp
+        plugin/PluginLoader.cpp
+        plugin/PluginLoader.hpp
+        plugin/PluginDescriptor.hpp
+        plugin/PluginHooks.cpp
+        plugin/PluginHooks.hpp
+        plugin/PluginManager.cpp
+        plugin/PluginManager.hpp
+        plugin/PluginAuditManager.cpp
+        plugin/PluginAuditManager.hpp
+        plugin/PluginResolver.cpp
+        plugin/PluginResolver.hpp
+        plugin/PyPluginTrampoline.hpp
+        plugin/host/PluginHost.cpp
+        plugin/host/PluginHost.hpp
+        plugin/pluginTypes/script/ScriptPluginCapability.hpp
+        plugin/pluginTypes/script/ScriptPluginCapability.cpp
+        plugin/pluginTypes/script/ScriptPluginCapabilityTrampoline.hpp
+        Utils/BoostProcessCompat.hpp
+    )
+endif ()
+
 set(ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY}")
 string(STRIP "${ORCA_UPDATER_SIG_KEY_B64}" ORCA_UPDATER_SIG_KEY_B64)
 string(REPLACE "\n" "" ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY_B64}")
@@ -1226,6 +1262,13 @@ string(REPLACE " "  "" ORCA_UPDATER_SIG_KEY_B64 "${ORCA_UPDATER_SIG_KEY_B64}")
 set(ORCA_UPDATER_SIG_KEY_AVAILABLE 0)
 if(ORCA_UPDATER_SIG_KEY_B64)
     set(ORCA_UPDATER_SIG_KEY_AVAILABLE 1)
+endif()
+
+if(NOT DEFINED _bundled_python_root)
+    set(_bundled_python_root "")
+endif()
+if(NOT DEFINED ORCA_BUNDLED_UV_EXECUTABLE_CONFIG)
+    set(ORCA_BUNDLED_UV_EXECUTABLE_CONFIG "")
 endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
@@ -1257,6 +1300,18 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
     GUI/IMSlider.cpp                              # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    plugin/PythonInterpreter.cpp
+    plugin/PythonPluginBridge.cpp
+    plugin/CloudPluginService.cpp
+    plugin/PluginFsUtils.cpp
+    plugin/PluginConfig.cpp
+    plugin/PluginLoader.cpp
+    plugin/PluginHooks.cpp
+    plugin/PluginManager.cpp
+    plugin/PluginAuditManager.cpp
+    plugin/PluginResolver.cpp
+    plugin/host/PluginHost.cpp
+    plugin/pluginTypes/script/ScriptPluginCapability.cpp
     GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
     GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
     GUI/OptionsGroup.cpp                          # titleWidth clash
@@ -1392,6 +1447,10 @@ encoding_check(libslic3r_gui)
 
 find_package(libnoise REQUIRED)
 target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode glad OpenGL::GL hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise)
+if (EDGE_PYTHON_PLUGINS)
+    target_link_libraries(libslic3r_gui pybind11::embed)
+    target_compile_definitions(libslic3r_gui PUBLIC EDGE_PYTHON_PLUGINS)
+endif ()
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)
@@ -1424,7 +1483,10 @@ if (SPNAV_LIB)
     target_link_libraries(libslic3r_gui ${SPNAV_LIB})
 endif()
 
-if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX AND NOT APPLE)
+if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX)
+    # Linux historically; macOS too so Http::tls_global_init() points the bundled
+    # OpenSSL at /etc/ssl/cert.pem (the deps prefix has no cert.pem). Windows uses
+    # the system store and must not take this path.
     target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
 endif ()
 

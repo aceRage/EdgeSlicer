@@ -115,6 +115,11 @@
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
 
+#ifdef EDGE_PYTHON_PLUGINS
+#include "slic3r/plugin/PluginManager.hpp"
+#include "slic3r/plugin/PythonInterpreter.hpp"
+#endif
+
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/AppUpdateCheck.hpp"
 #include "../Utils/StartupWizardLogic.hpp"
@@ -2813,6 +2818,10 @@ GUI_App::~GUI_App()
     GUI_App::m_app_alive.store(false);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter");
+#ifdef EDGE_PYTHON_PLUGINS
+    Slic3r::PluginManager::instance().shutdown();
+    Slic3r::PythonInterpreter::instance().shutdown();
+#endif
     if (app_config != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": destroy app_config");
         delete app_config;
@@ -2832,6 +2841,11 @@ GUI_App::~GUI_App()
 
     stop_page_http_server();
     stop_http_server();
+}
+
+void GUI_App::notify_plugin_permissions_changed(const std::string&)
+{
+    // Phase 1: no Plugins / Home-tab UI to refresh.
 }
 
 // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
@@ -3436,6 +3450,12 @@ bool GUI_App::on_init_inner()
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
         stop_sync_user_preset();
         Slic3r::NetworkAgent::unload_network_module();
+#ifdef EDGE_PYTHON_PLUGINS
+        // Orca #16136: AppKit calls exit() after wxEVT_END_SESSION, so OnExit()/~GUI_App()
+        // never run. Tear Python down here or PluginManager's static destructor aborts.
+        Slic3r::PluginManager::instance().shutdown();
+        Slic3r::PythonInterpreter::instance().shutdown();
+#endif
         e.Skip();
     });
 #endif
@@ -4108,6 +4128,13 @@ bool GUI_App::on_init_inner()
     else {
         set_startup_splash_phase(_L("Loading current presets"), 85);
         load_current_presets();
+#ifdef EDGE_PYTHON_PLUGINS
+        {
+            PluginManager& plugin_mgr = PluginManager::instance();
+            plugin_mgr.initialize();
+            plugin_mgr.discover_plugins(false, true);
+        }
+#endif
     }
     profiler.mark("load_current_presets");
 
