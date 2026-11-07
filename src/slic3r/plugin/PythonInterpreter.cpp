@@ -21,6 +21,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/system/error_code.hpp>
 #include <cstring>
 #include <ctime>
@@ -189,6 +190,43 @@ std::string executable_name(const char* base)
     return base;
 #endif
 }
+
+#ifndef _WIN32
+// Bundled OpenSSL's OPENSSLDIR is the deps prefix, so cert.pem / certs there do not
+// exist. CPython's ssl.create_default_context() then has zero CAs unless SSL_CERT_FILE
+// names a real bundle. Linux Http::tls_global_init() (OPENSSL_CERT_OVERRIDE) already
+// does this for curl; macOS did not. Leave a user-set SSL_CERT_FILE alone (even if the
+// path is empty or missing). Windows CPython also loads the system store, so it is not
+// at risk of a zero-CA default context.
+void ensure_system_ssl_cert_file()
+{
+    if (const char* env = boost::nowide::getenv("SSL_CERT_FILE"); env != nullptr && *env != '\0')
+        return;
+
+    static const char* const candidates[] = {
+        "/etc/ssl/cert.pem",                  // macOS, Alpine, Arch, Fedora (link)
+        "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Gentoo
+        "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL
+        "/usr/share/ssl/certs/ca-bundle.crt",
+        "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+        "/etc/ssl/ca-bundle.pem",             // openSUSE
+        "/usr/local/etc/openssl/cert.pem",    // Homebrew OpenSSL
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+    };
+    boost::system::error_code ec;
+    for (const char* candidate : candidates) {
+        if (!boost::filesystem::exists(boost::filesystem::path(candidate), ec))
+            continue;
+        // overwrite=0: do not replace a user-set SSL_CERT_FILE.
+        if (boost::nowide::setenv("SSL_CERT_FILE", candidate, 0) == 0)
+            BOOST_LOG_TRIVIAL(info) << "Python: using system CA bundle " << candidate;
+        else
+            BOOST_LOG_TRIVIAL(warning) << "Python: failed to set SSL_CERT_FILE to " << candidate;
+        return;
+    }
+    BOOST_LOG_TRIVIAL(warning) << "Python: no system CA bundle found; ssl.create_default_context() may have no CAs";
+}
+#endif
 
 bool add_sys_path_entry(const boost::filesystem::path& path, std::string& error, bool* inserted = nullptr)
 {
@@ -492,6 +530,10 @@ bool PythonInterpreter::initialize()
     m_plugin_path_owned.clear();
     m_plugin_module_users.clear();
     m_plugin_module_owned.clear();
+
+#ifndef _WIN32
+    ensure_system_ssl_cert_file();
+#endif
 
     try {
         // Set Python home to the bundled Python installation

@@ -1483,7 +1483,10 @@ if (SPNAV_LIB)
     target_link_libraries(libslic3r_gui ${SPNAV_LIB})
 endif()
 
-if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX AND NOT APPLE)
+if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX)
+    # Linux historically; macOS too so Http::tls_global_init() points the bundled
+    # OpenSSL at /etc/ssl/cert.pem (the deps prefix has no cert.pem). Windows uses
+    # the system store and must not take this path.
     target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
 endif ()
 
