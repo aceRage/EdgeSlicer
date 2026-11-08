@@ -426,6 +426,14 @@ struct SessionManifest
     }
 };
 
+// P4 (owner hand test 2026-11-07: the first of two projects opened back to back kept the placeholder): a project's tile
+// is rendered again before it goes out of sight when it has no image yet or the project changed since its image (its
+// change marker differs). The live thumbnail otherwise waits 1.5 s after the last change, which a quick second open beats.
+inline bool tile_thumbnail_stale(bool has_image, std::size_t rendered_marker, std::size_t current_marker)
+{
+    return !has_image || rendered_marker != current_marker;
+}
+
 // D7: a project file double-clicked in Explorer / Finder while EdgeSlicer runs (single instance on) opens as a new project in
 // the strip ("strip", the default) or in place of the active project ("replace", the old behaviour).
 inline bool shell_open_into_strip(const std::string &app_config_value) { return app_config_value != "replace"; }

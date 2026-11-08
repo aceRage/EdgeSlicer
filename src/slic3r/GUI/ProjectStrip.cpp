@@ -289,6 +289,12 @@ void ProjectStrip::stash_active()
     const int tab  = m_frame != nullptr && m_frame->m_tabpanel != nullptr ? m_frame->m_tabpanel->GetSelection() : int(MainTabs::Editor3D);
     slot->main_tab = MainTabs::hosts_plater(tab) ? tab : tab_for_view(*p);
     slot->plate    = p->get_partplate_list().get_curr_plate_index();
+    // Owner P4 hand test: a project opened and left before its live thumbnail was due (1.5 s after the last change) kept
+    // the placeholder. Its thumbnail is rendered now, while it is still the one on screen, when the tile's is not current.
+    if (const SlotExtra &e = m_extra[slot->id]; tile_thumbnail_stale(e.image.IsOk(), e.thumb_marker, active_thumbnail_marker())) {
+        m_thumb_timer.Stop();
+        render_active_thumbnail();
+    }
     // Its presets, unsaved edits included: the app-global bundle is the next project's from now on.
     m_extra[slot->id].presets = wxGetApp().preset_bundle->capture_project_presets();
 }
@@ -793,19 +799,33 @@ void ProjectStrip::on_poll(wxTimerEvent &)
 
 void ProjectStrip::on_thumbnail_timer(wxTimerEvent &)
 {
+    if (m_switching)
+        return;
+    if (render_active_thumbnail())
+        Refresh();
+}
+
+size_t ProjectStrip::active_thumbnail_marker() const
+{
+    Plater *p = plater();
+    return p == nullptr ? size_t(-1) : p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index()));
+}
+
+bool ProjectStrip::render_active_thumbnail()
+{
     Plater      *p      = plater();
     ProjectSlot *active = m_sessions.active();
-    if (m_switching || p == nullptr || active == nullptr || m_collapsed || m_text_mode || plater_of(active->id) != p)
-        return;
+    if (p == nullptr || active == nullptr || m_collapsed || m_text_mode || plater_of(active->id) != p)
+        return false;
     if (!plater_tab_shown()) {
         // The canvas is not on screen: try again after the next change, or when the plater is back.
         m_active_marker = size_t(-1);
-        return;
+        return false;
     }
     ThumbnailData data;
     const unsigned size = unsigned(std::max(128, FromDIP(StripLayout::thumb_side(StripLayout::max_width))));
     if (!p->render_current_plate_thumbnail(data, size))
-        return;
+        return false;
     wxImage image(int(data.width), int(data.height));
     image.InitAlpha();
     for (unsigned r = 0; r < data.height; ++r) {
@@ -816,11 +836,12 @@ void ProjectStrip::on_thumbnail_timer(wxTimerEvent &)
             image.SetAlpha(int(c), int(r), px[3]);
         }
     }
-    SlotExtra &extra  = m_extra[active->id];
-    extra.image       = image;
-    extra.scaled      = wxBitmap();
-    extra.scaled_side = 0;
-    Refresh();
+    SlotExtra &extra   = m_extra[active->id];
+    extra.image        = image;
+    extra.scaled       = wxBitmap();
+    extra.scaled_side  = 0;
+    extra.thumb_marker = active_thumbnail_marker();
+    return true;
 }
 
 void ProjectStrip::send_project(int id)

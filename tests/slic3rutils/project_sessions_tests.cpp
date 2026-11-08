@@ -443,3 +443,15 @@ TEST_CASE("project strip: the slice badge of a hidden project follows its own sl
     CHECK(s.find(a)->state == ProjectSlot::State::Active);
     CHECK(slice_badge(s.find(a)->slicing, s.find(a)->plates_with_objects, s.find(a)->plates_sliced) == SliceBadge::Sliced);
 }
+
+TEST_CASE("project strip: a tile is rendered before its project goes out of sight when it is stale", "[ProjectSessions][P4]")
+{
+    // Owner hand test 2026-11-07: two Recent projects opened back to back, the first kept the placeholder because the
+    // second open came before its live thumbnail (1.5 s after the last change).
+    CHECK(tile_thumbnail_stale(false, std::size_t(-1), 640));
+    CHECK(tile_thumbnail_stale(false, 640, 640));
+    // Rendered for an earlier state of the project (an edit or another plate since).
+    CHECK(tile_thumbnail_stale(true, 576, 640));
+    // Current: no render needed on the switch.
+    CHECK_FALSE(tile_thumbnail_stale(true, 640, 640));
+}

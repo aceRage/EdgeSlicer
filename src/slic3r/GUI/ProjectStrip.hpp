@@ -91,6 +91,7 @@ private:
         wxImage  image;             // the thumbnail as rendered (or read from a session snapshot)
         wxBitmap scaled;            // scaled to the tile
         int      scaled_side{ 0 };
+        size_t   thumb_marker{ size_t(-1) }; // the project's change marker when `image` was rendered
         // Session restore: the snapshot files of the previous run, deleted one by one once the project is back.
         std::vector<std::string> files;
         std::string              dir;
@@ -143,6 +144,9 @@ private:
     wxString    tooltip_for(const ProjectSlot &slot) const;
     void        on_poll(wxTimerEvent &);
     void        on_thumbnail_timer(wxTimerEvent &);
+    // Renders the shown project's plate into its tile. False when it cannot (no canvas on screen, names-only mode).
+    bool        render_active_thumbnail();
+    size_t      active_thumbnail_marker() const;
     bool        plater_tab_shown() const;
     void        refresh_max_open();
 
