@@ -3244,6 +3244,18 @@ void Tab::on_presets_changed()
     // Per-nozzle process P1: another printer brings its own remembered per-nozzle processes; a changed
     // nozzle drops the processes that no longer fit it. Before the process tab reloads its nozzle switch.
     if (m_type == Preset::TYPE_PRINTER) {
+        // Owner bug 2026-11-08: a printer of another filament routing layout (H3C -> H2C -> U1) starts from a fresh project's
+        // filament map, pins and tool assignment; the plates' maps and dual-nozzle confirmations go with them. First, so the
+        // remembered nozzles restored below are not reset.
+        if (wxGetApp().preset_bundle->update_filament_routing_for_printer()) {
+            for (PartPlate *plate : wxGetApp().plater()->get_partplate_list().get_plate_list())
+                if (plate != nullptr && plate->reset_filament_routing())
+                    plate->update_slice_result_valid_state(false);
+            wxGetApp().CallAfter([]() {
+                if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+                    plater->sidebar().update_filament_tool_buttons();
+            });
+        }
         // Per-nozzle process P7 first: the processes that fit a nozzle depend on the size it carries in this project.
         // Owner bugs 2026-11-06: another printer model (startup included) gets its remembered nozzles back (rack slots, sizes,
         // flow types). The sidebar was updated above, before they were back: the nozzle UI, filament lists and Tabs follow.

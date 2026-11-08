@@ -755,6 +755,12 @@ public:
     // After a printer switch or a printer settings change: a different printer brings its own remembered
     // selection (none: the plate's process everywhere); the same printer keeps its selection, pruned.
     void                        update_nozzle_processes_for_printer(AppConfig &config);
+    // After a printer switch or a printer settings change (owner bug 2026-11-08): a printer of another filament routing layout
+    // (filament_routing_layout: H3C -> H2C -> U1) starts from a fresh project's filament map, pins and tool assignment, not
+    // the old printer's. Returns true when the project's routing was reset (the caller resets the plates' maps too).
+    bool                        update_filament_routing_for_printer();
+    // A project was loaded or the presets were restored: its routing belongs to the selected printer.
+    void                        note_filament_routing_layout();
 
     // ---- Per-nozzle process P2: filament -> nozzle assignment (project_config "filament_nozzle_assignment") ----
     // Whether the edited printer takes an assignment (a toolchanger that is not a Bambu grouping machine).
@@ -886,6 +892,8 @@ private:
     std::string                 m_nozzle_process_printer;
     // The printer model the nozzle size override was last restored for or loaded with (a project).
     std::string                 m_nozzle_override_model;
+    // The filament routing layout the project's filament map and pins were made for (filament_routing_layout).
+    std::string                 m_filament_routing_layout;
     void                        fill_nozzle_processes(DynamicPrintConfig &out) const;
     // P9: the printer keys the tool list is read from, with the project's sizes (nozzle and rack) over them.
     DynamicPrintConfig          nozzle_tool_config() const;
