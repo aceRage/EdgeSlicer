@@ -4852,6 +4852,7 @@ PresetBundle::ProjectPresetState PresetBundle::capture_project_presets() const
     state.filament_presets = this->filament_presets;
     state.project_config   = this->project_config;
     state.mixed_filaments  = this->mixed_filaments;
+    state.full             = this->full_config();
     for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
                                              static_cast<const PresetCollection *>(&this->printers) })
         for (const Preset *preset : embedded_presets_of(*presets)) {

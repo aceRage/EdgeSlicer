@@ -312,6 +312,9 @@ public:
         DynamicPrintConfig       project_config;
         MixedFilamentManager     mixed_filaments;
         std::vector<Preset>      embedded; // the project's own presets (3MF embedded), full copies
+        // What the project slices with (full_config()) when captured: after a switch, a key that differs from this is
+        // what made its slice invalid (diagnostics).
+        DynamicPrintConfig       full;
     };
     ProjectPresetState capture_project_presets() const;
     // True when the bundle holds exactly that state already (the switch then skips the preset refresh).

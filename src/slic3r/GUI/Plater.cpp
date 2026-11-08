@@ -21917,6 +21917,11 @@ bool Plater::render_current_plate_thumbnail(ThumbnailData &out, unsigned int siz
     return out.is_valid();
 }
 
+bool Plater::has_hidden_slice_result() const
+{
+    return !p->deferred_while_hidden.empty() && p->background_process.state() == BackgroundSlicingProcess::STATE_FINISHED;
+}
+
 bool Plater::is_slicing_in_background() const { return p->background_process.state() == BackgroundSlicingProcess::STATE_STARTED ||
                                                        p->background_process.state() == BackgroundSlicingProcess::STATE_RUNNING; }
 

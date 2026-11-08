@@ -455,3 +455,23 @@ TEST_CASE("project strip: a tile is rendered before its project goes out of sigh
     // Current: no render needed on the switch.
     CHECK_FALSE(tile_thumbnail_stale(true, 640, 640));
 }
+
+TEST_CASE("project strip: the tick needs every plate with objects sliced, in each project's own counts", "[ProjectSessions][P4]")
+{
+    // Owner re-test 2026-11-07: a sliced project showed no tick. The badge is per project (each tile's own Plater is
+    // counted); a project with one of two plates sliced, or whose slice a switch invalidated, has no tick.
+    ProjectSessions s;
+    const int a = s.add("C:/p/mushroom.3mf", "mushroom");
+    s.select(a);
+    const int b = s.add("C:/p/rollers.3mf", "rollers");
+    s.find(a)->plates_with_objects = 1;
+    s.find(a)->plates_sliced       = 1;
+    s.find(b)->plates_with_objects = 1;
+    s.find(b)->plates_sliced       = 1;
+    for (const ProjectSlot &slot : s.slots())
+        CHECK(slice_badge(slot.slicing, slot.plates_with_objects, slot.plates_sliced) == SliceBadge::Sliced);
+    s.find(b)->plates_with_objects = 2;
+    CHECK(slice_badge(false, s.find(b)->plates_with_objects, s.find(b)->plates_sliced) == SliceBadge::None);
+    CHECK(slice_badge(false, 0, 0) == SliceBadge::None);
+}
+

@@ -464,6 +464,8 @@ public:
     // The slice thread is working (not finished and waiting for its result to be picked up): the strip's spinner for a
     // hidden project.
     bool is_slicing_in_background() const;
+    // A hidden project's slice finished and its result waits for the project to be shown (the strip's tick for it).
+    bool has_hidden_slice_result() const;
     int save_project(bool saveAs = false);
     void set_opened_from_zip(bool opened);
     bool opened_from_zip() const;

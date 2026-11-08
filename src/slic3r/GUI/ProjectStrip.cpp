@@ -323,6 +323,39 @@ long long ProjectStrip::show_slot(int id)
     bundle->project_config = extra.presets.project_config;
     p->sidebar().update_presets(Preset::TYPE_PRINTER);
     p->sidebar().update_presets(Preset::TYPE_FILAMENT);
+    // Owner log 2026-11-07: after some switches the next apply invalidated the project's slice. Loading the preset tabs
+    // re-derives values (the printer tab's nozzle / extruder handling, the multi-material filament list); whatever it
+    // changed goes back to the project's own, without another tab load, and what still differs is logged by key.
+    if (!bundle->project_presets_current(extra.presets)) {
+        auto changed = [](const DynamicPrintConfig &now, const DynamicPrintConfig &was) {
+            std::string keys;
+            for (const std::string &k : now.diff(was))
+                keys += (keys.empty() ? "" : ",") + k;
+            return keys;
+        };
+        BOOST_LOG_TRIVIAL(info) << "project strip: the preset refresh changed the project's presets, put back (printer ["
+                                << changed(bundle->printers.get_edited_preset().config, extra.presets.printers.edited) << "] process ["
+                                << changed(bundle->prints.get_edited_preset().config, extra.presets.prints.edited) << "] filament ["
+                                << changed(bundle->filaments.get_edited_preset().config, extra.presets.filaments.edited) << "] project ["
+                                << changed(bundle->project_config, extra.presets.project_config) << "])";
+        bundle->restore_project_presets(extra.presets);
+        for (Tab *tab : wxGetApp().tabs_list) {
+            tab->reload_config();
+            tab->update_dirty();
+        }
+        // The Plater's own copy of the config follows (bed, extruders), so its next apply sees the project's settings.
+        p->on_config_change(bundle->full_config());
+    }
+    if (!extra.presets.full.empty()) {
+        const t_config_option_keys drift = bundle->full_config().diff(extra.presets.full);
+        if (!drift.empty()) {
+            std::string keys;
+            for (size_t i = 0; i < drift.size() && i < 40; ++i)
+                keys += (i == 0 ? "" : ",") + drift[i];
+            BOOST_LOG_TRIVIAL(warning) << "project strip: slot " << id << " slices with " << drift.size()
+                                       << " setting(s) other than before the switch, its slice may need redoing: " << keys;
+        }
+    }
     p->update_project_dirty_from_presets();
     if (!missing.empty()) {
         wxString names;
@@ -777,6 +810,10 @@ void ProjectStrip::on_poll(wxTimerEvent &)
         const bool shown = pl == p;
         int with_objects = 0, sliced = 0;
         pl->count_sliced_plates(with_objects, sliced);
+        // A hidden project whose slice finished counts its plate as sliced already: the result is taken up when it is
+        // shown (Plater::on_project_shown), the tick shows now.
+        if (!shown && pl->has_hidden_slice_result())
+            sliced = std::min(with_objects, sliced + 1);
         const bool slicing = shown ? pl->is_background_process_slicing() : pl->is_slicing_in_background();
         const bool dirty   = pl->is_project_dirty();
         changed = changed || slot->plates_with_objects != with_objects || slot->plates_sliced != sliced || slot->slicing != slicing ||
