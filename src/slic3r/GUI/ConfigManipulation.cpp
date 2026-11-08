@@ -1175,8 +1175,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_field("preload_all_filaments", is_grouping_machine && have_prime_tower);
     }
 
+    // "Filament for Features": shown whenever the project has more than one filament, on every printer.
+    // It used to follow the printer's single_extruder_multi_material flag (Orca c719f5c95c), which every
+    // Bambu machine inherits, so the group was hidden on H2D/H3C/X1C even with several filaments loaded.
+    // A user may also be designing for another printer, so single-nozzle printers show it too.
+    const bool have_multiple_filaments = preset_bundle->filament_presets.size() > 1;
     for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
-        toggle_line(el, !bSEMM);
+        toggle_line(el, have_multiple_filaments);
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 
