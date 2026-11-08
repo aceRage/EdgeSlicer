@@ -67,6 +67,8 @@ add_executable(${_TEST_NAME}_tests
     mqtt_teardown_tests.cpp
     mqtt_connect_refused_tests.cpp
     first_request_gate_tests.cpp
+    lan_access_code_watch_tests.cpp
+    popup_row_icons_tests.cpp
     bind_list_refresh_tests.cpp
     ssdp_connect_type_tests.cpp
     bambu_net_info_tests.cpp
