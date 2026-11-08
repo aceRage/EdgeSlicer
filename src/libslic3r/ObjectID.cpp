@@ -2,9 +2,9 @@
 
 namespace Slic3r {
 
-std::atomic<size_t> ObjectBase::s_last_id{ 0 };
+size_t ObjectBase::s_last_id = 0;
 // Far above anything the main counter reaches; see ObjectBase::SecondaryId.
-std::atomic<size_t> ObjectBase::s_last_secondary_id{ size_t(1) << 62 };
+size_t ObjectBase::s_last_secondary_id = size_t(1) << 62;
 
 // Unique object / instance ID for the wipe tower.
 ObjectID wipe_tower_object_id()

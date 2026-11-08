@@ -570,14 +570,6 @@ public:
     }
     //load gcode from file
     int load_gcode_from_file(const std::string& filename);
-    // Project strip: where this plate's G-code may be (park_gcode_plan() picks the one on disk).
-    std::string gcode_result_file() const { return m_gcode_result != nullptr ? m_gcode_result->filename : std::string(); }
-    const std::string& tmp_gcode_file() const { return m_tmp_gcode_path; }
-    // Project strip: takes a parked G-code file back as this plate's slice without applying the config itself. The caller
-    // applied the plate's Print through the background process first, with the very config it slices with, so the next
-    // apply finds nothing changed and the plate stays sliced (load_gcode_from_file applies its own config, which differs from
-    // the background process's: own costs, the plate's filament map; the next apply then invalidated the G-code).
-    bool adopt_parked_gcode(const std::string& filename);
     //load thumbnail data from file
     int load_thumbnail_data(std::string filename, ThumbnailData& thumb_data);
     //load pattern thumbnail data from file

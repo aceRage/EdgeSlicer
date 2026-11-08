@@ -43,6 +43,8 @@
 #include "Mouse3DController.hpp"
 //#include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
+#include "RemovableDriveManager.hpp" // project strip P4: events follow the project shown
+#include "libslic3r/Utils.hpp"
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
@@ -1215,8 +1217,10 @@ void MainFrame::shutdown(bool isRecreate)
     m_shutting_down = true;
     // EDGESLICER-A: this frame's Plater stops updating the background process and the slice/print
     // buttons now; its timer could otherwise fire while the window tree is destroyed.
-    if (m_plater != nullptr)
-        m_plater->begin_shutdown();
+    // Project strip P4: every open project's Plater, the hidden ones too.
+    for (Plater *plater : m_platers)
+        if (plater != nullptr)
+            plater->begin_shutdown();
     // First of all: no phone/agent request, send or control job may queue work for the GUI thread
     // any more, and what is already queued is dropped. The Plater is torn down below and freed
     // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
@@ -1246,16 +1250,18 @@ void MainFrame::shutdown(bool isRecreate)
  	}
 #endif // _WIN32
 
-    if (m_plater != nullptr) {
-        m_plater->get_ui_job_worker().cancel_all();
+    for (Plater *plater : m_platers) {
+        if (plater == nullptr)
+            continue;
+        plater->get_ui_job_worker().cancel_all();
 
         // Unbinding of wxWidgets event handling in canvases needs to be done here because on MAC,
         // when closing the application using Command+Q, a mouse event is triggered after this lambda is completed,
         // causing a crash
-        m_plater->unbind_canvas_event_handlers();
+        plater->unbind_canvas_event_handlers();
 
         // Cleanup of canvases' volumes needs to be done here or a crash may happen on some Linux Debian flavours
-        m_plater->reset_canvas_volumes();
+        plater->reset_canvas_volumes();
     }
 
     // Weird things happen as the Paint messages are floating around the windows being destructed.
@@ -1268,12 +1274,15 @@ void MainFrame::shutdown(bool isRecreate)
         // call Close() to trigger call to lambda defined into GUI_App::persist_window_geometry()
         m_settings_dialog.Close();
 
-    if (m_plater != nullptr) {
+    for (Plater *plater : m_platers) {
+        if (plater == nullptr)
+            continue;
         // Stop the background thread (Windows and Linux).
         // Disconnect from a 3DConnextion driver (OSX).
-        m_plater->get_mouse3d_controller().shutdown();
-        // Store the device parameter database back to appconfig.
-        m_plater->get_mouse3d_controller().save_config(*wxGetApp().app_config);
+        plater->get_mouse3d_controller().shutdown();
+        // Store the device parameter database back to appconfig (the shown project's, as before).
+        if (plater == m_plater)
+            plater->get_mouse3d_controller().save_config(*wxGetApp().app_config);
     }
 
     // stop agent
@@ -1314,6 +1323,108 @@ void MainFrame::update_filament_tab_ui()
 void MainFrame::update_title()
 {
     return;
+}
+
+Plater *MainFrame::create_project_plater()
+{
+    if (m_plater == nullptr || m_tabpanel == nullptr)
+        return nullptr;
+    Plater *shown  = m_plater;
+    Plater *plater = nullptr;
+    {
+        // Built as the first Plater is at startup: nothing reaches a Plater through the app while it is being made
+        // (its sidebar, object list and canvases would otherwise find the shown project's).
+        wxBusyCursor busy;
+        wxGetApp().plater_ = nullptr;
+        Slic3r::ScopeGuard restore([shown]() { wxGetApp().plater_ = shown; });
+        plater = new Plater(this, this);
+        plater->SetBackgroundColour(*wxWHITE);
+        // Not Hide(): Plater::Show(false) would hide the window's Slice / Print buttons the shown project uses.
+        plater->wxPanel::Show(false);
+    }
+    plater->Reparent(m_tabpanel);
+#ifdef __APPLE__
+    plater->sidebar().change_top_border_for_mode_sizer(m_layout != ESettingsLayout::Old);
+#endif
+    m_platers.push_back(plater);
+    m_platers_fresh.insert(plater);
+    BOOST_LOG_TRIVIAL(info) << "project strip: new Plater, " << m_platers.size() << " open" << log_memory_info();
+    return plater;
+}
+
+void MainFrame::activate_plater(Plater *plater)
+{
+    if (plater == nullptr || plater == m_plater || std::find(m_platers.begin(), m_platers.end(), plater) == m_platers.end())
+        return;
+    Plater *previous = m_plater;
+    Freeze();
+    if (previous != nullptr) {
+        previous->on_project_hidden();
+        previous->sidebar().detach_params_panel();
+    }
+    // From here on the app's Plater is this one: whatever the page change below triggers sees it.
+    m_plater           = plater;
+    wxGetApp().plater_ = plater;
+    if (previous != nullptr)
+        m_tabpanel->ReplacePageWindow(previous, plater);
+    plater->sidebar().attach_params_panel();
+    // Files handed over by another instance, and removable drive events, go to the project shown.
+    wxGetApp().other_instance_message_handler()->set_callback_evt_handler(plater);
+    wxGetApp().removable_drive_manager()->set_callback_evt_handler(plater);
+    if (m_platers_fresh.erase(plater) > 0) {
+        // What GUI_App::on_init_inner() does for the first Plater once the window exists.
+        plater->sidebar().obj_list()->init();
+        plater->init_notification_manager();
+        plater->set_printer_technology(wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology());
+        plater->get_camera().select_view("topfront");
+        plater->get_camera().requires_zoom_to_bed = true;
+    }
+    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
+    // this project's selection now.
+    for (Tab *tab : wxGetApp().model_tabs_list)
+        if (auto *model_tab = dynamic_cast<TabPrintModel *>(tab))
+            model_tab->reset_model_config();
+    plater->sidebar().obj_list()->part_selection_changed();
+    if (m_platers_need_rescale.erase(plater) > 0)
+        plater->msw_rescale();
+    if (m_platers_need_recolour.erase(plater) > 0)
+        plater->sys_color_changed();
+    if (m_platers_need_settings.erase(plater) > 0)
+        plater->update_ui_from_settings();
+    Layout();
+    Thaw();
+    plater->on_project_shown();
+    // The Slice / Print buttons say what this project's plate can do.
+    update_slice_print_status(eEventPlateUpdate, true, true);
+}
+
+void MainFrame::destroy_project_plater(Plater *plater)
+{
+    // The shown project is never destroyed here: the strip shows another one first.
+    if (plater == nullptr || plater == m_plater)
+        return;
+    auto it = std::find(m_platers.begin(), m_platers.end(), plater);
+    if (it == m_platers.end())
+        return;
+    m_platers.erase(it);
+    m_platers_fresh.erase(plater);
+    m_platers_need_rescale.erase(plater);
+    m_platers_need_recolour.erase(plater);
+    m_platers_need_settings.erase(plater);
+    plater->begin_shutdown();
+    plater->get_ui_job_worker().cancel_all();
+    plater->cancel_slicing_for_project_close();
+    plater->get_mouse3d_controller().shutdown();
+    plater->unbind_canvas_event_handlers();
+    // Its GL buffers go with the shown canvas's context current (one context is shared by every canvas).
+    if (m_plater != nullptr)
+        if (GLCanvas3D *canvas = m_plater->get_current_canvas3D())
+            canvas->make_current_for_postinit();
+    plater->reset_canvas_volumes();
+    // Its crash backup and the plates' temporary G-code (the project is closed, as close_with_confirm() leaves it).
+    plater->model().set_backup_path("");
+    plater->Destroy();
+    BOOST_LOG_TRIVIAL(info) << "project strip: Plater closed, " << m_platers.size() << " open" << log_memory_info();
 }
 
 void MainFrame::on_active_project_changed()
@@ -1630,6 +1741,7 @@ void MainFrame::init_tabpanel() {
     }
 
     wxGetApp().plater_ = m_plater;
+    m_platers.push_back(m_plater);
 
     {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=create_preset_tabs");
@@ -2823,8 +2935,11 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     m_slice_option_btn->Rescale();
     m_print_option_btn->Rescale();
 
-    // update Plater
+    // update Plater (the hidden projects' when they are shown)
     wxGetApp().plater()->msw_rescale();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_rescale.insert(plater);
 
     // update Tabs
     //BBS GUI refactor: remove unused layout new/dlg
@@ -2907,8 +3022,11 @@ void MainFrame::on_sys_color_changed()
     m_tabpanel->Rescale();
     m_param_panel->msw_rescale();
 
-    // update Plater
+    // update Plater (the hidden projects' when they are shown)
     wxGetApp().plater()->sys_color_changed();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_recolour.insert(plater);
     if(m_monitor)
         m_monitor->on_sys_color_changed();
     if (m_printer_view)
@@ -5214,6 +5332,9 @@ void MainFrame::update_ui_from_settings()
 {
     if (m_plater)
         m_plater->update_ui_from_settings();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_settings.insert(plater);
     for (auto tab: wxGetApp().tabs_list)
         tab->update_ui_from_settings();
 }

@@ -4,7 +4,8 @@
 // The open projects of one window (project strip, tests/design_multi_project_sidebar.md 4.1), kept free of wxWidgets so
 // the rules are unit tested (tests/slic3rutils/project_sessions_tests.cpp): open with the same file selecting its slot,
 // "Untitled 2" naming, the cap on open projects, which slot becomes active when one closes, next / previous with wrap,
-// and the unsaved ones the app-close dialog lists. The GUI side (ProjectStrip) owns the files and the switch itself.
+// and the unsaved ones the app-close dialog lists. The GUI side (ProjectStrip) owns the Platers (P4: one live Plater per
+// open project) and the switch itself.
 
 #include <algorithm>
 #include <cstdint>
@@ -20,22 +21,22 @@ namespace GUI {
 
 struct ProjectSlot
 {
-    enum class State { Active, Parked };
+    // P4: every open project has a live Plater; Hidden ones are out of sight, not unloaded.
+    enum class State { Active, Hidden };
 
     int         id{ 0 };
     std::string name;          // shown in the strip (UTF-8)
     std::string origin_path;   // the project's own file; empty = never saved (Untitled)
-    std::string snapshot_path; // the parked 3MF; empty until the slot was parked once
-    // Valid plates' G-code parked next to the snapshot: plate index, file.
-    std::vector<std::pair<int, std::string>> plate_gcodes;
+    std::string snapshot_path; // session restore: the project's 3MF written at exit; empty otherwise
     bool          dirty{ false };
     bool          empty{ true };     // no objects (an empty Untitled is reused by New / Open)
-    int           plate{ 0 };        // current plate when parked
+    int           plate{ 0 };        // current plate (session restore)
     int           plates_with_objects{ 0 }; // P2 badge: plates holding objects, and those with G-code
     int           plates_sliced{ 0 };
-    int           main_tab{ 1 };     // MainTabs::Editor3D, Preview or Showcase when parked
+    bool          slicing{ false };  // the badge's spinner: its slice is running (shown or hidden)
+    int           main_tab{ 1 };     // MainTabs::Editor3D, Preview or Showcase it was on when it went out of sight
     std::uint64_t last_used{ 0 };
-    State         state{ State::Parked };
+    State         state{ State::Hidden };
 };
 
 class ProjectSessions
@@ -130,7 +131,7 @@ public:
     }
 
     // A new slot right after the active one (at the end when none is active). Its id, or -1 when the cap is reached.
-    // It is not selected: the switch parks the active project first.
+    // It is not selected: the strip shows its Plater first.
     int add(const std::string &origin_path, const std::string &name)
     {
         if (!can_add())
@@ -154,20 +155,20 @@ public:
         if (!can_add())
             return -1;
         slot.id        = m_next_id++;
-        slot.state     = ProjectSlot::State::Parked;
+        slot.state     = ProjectSlot::State::Hidden;
         slot.last_used = ++m_clock;
         m_slots.push_back(std::move(slot));
         return m_next_id - 1;
     }
 
-    // Makes the slot the active one; the previous active one becomes Parked.
+    // Makes the slot the active one; the previous active one becomes Hidden.
     bool select(int id)
     {
         ProjectSlot *slot = find(id);
         if (slot == nullptr)
             return false;
         if (ProjectSlot *old = active(); old != nullptr && old != slot)
-            old->state = ProjectSlot::State::Parked;
+            old->state = ProjectSlot::State::Hidden;
         slot->state     = ProjectSlot::State::Active;
         slot->last_used = ++m_clock;
         m_active_id     = id;
@@ -194,7 +195,7 @@ public:
         return size_t(i + 1) < m_slots.size() ? m_slots[size_t(i + 1)].id : m_slots[size_t(i - 1)].id;
     }
 
-    // Removes the slot. Closing the active one leaves no active slot: the caller loads successor_on_close() first.
+    // Removes the slot. Closing the active one leaves no active slot: the caller shows successor_on_close() first.
     bool close(int id)
     {
         const int i = index_of(id);
@@ -206,7 +207,7 @@ public:
         return true;
     }
 
-    // Moves a slot to another place in the strip (drag reorder is P3; kept here with the other rules).
+    // Moves a slot to another place in the strip (drag reorder).
     bool move(int id, int new_index)
     {
         const int i = index_of(id);
@@ -344,38 +345,7 @@ inline std::vector<std::string> wrap_name_two_lines(const std::string &name, int
     return { first, measure(rest) <= width ? rest : ellipsize(rest, width) };
 }
 
-// ---- P3: warm park budget, the session manifest, opening from Explorer / Finder -----------------------------------------
-
-// D5b: the parked projects read ahead in memory. The most recently parked `keep` stay while they fit `budget` together;
-// anything older, or what would go over the budget, is dropped (it switches back from its disk snapshot).
-struct WarmEntry
-{
-    int           id{ 0 };
-    size_t        bytes{ 0 };
-    std::uint64_t parked_at{ 0 };
-};
-struct WarmPolicy
-{
-    static constexpr size_t default_keep   = 2;
-    static constexpr size_t default_budget = size_t(1536) * 1024 * 1024; // 1.5 GB
-
-    // The ids to drop, oldest first.
-    static std::vector<int> evictions(std::vector<WarmEntry> entries, size_t keep = default_keep, size_t budget = default_budget)
-    {
-        std::sort(entries.begin(), entries.end(), [](const WarmEntry &a, const WarmEntry &b) { return a.parked_at > b.parked_at; });
-        std::vector<int> drop;
-        size_t           kept = 0, total = 0;
-        for (const WarmEntry &e : entries) {
-            if (kept < keep && total + e.bytes <= budget) {
-                ++kept;
-                total += e.bytes;
-            } else
-                drop.push_back(e.id);
-        }
-        std::reverse(drop.begin(), drop.end());
-        return drop;
-    }
-};
+// ---- P3: the session manifest, opening from Explorer / Finder ----------------------------------------------------------
 
 // Session restore (opt-in, "project_strip_restore_session"): the open projects written at exit, read back at the next start.
 struct SessionManifest
@@ -399,11 +369,6 @@ struct SessionManifest
             js["plate"]    = s.plate;
             js["tab"]      = s.main_tab;
             js["plates_with_objects"] = s.plates_with_objects;
-            js["plates_sliced"]       = s.plates_sliced;
-            nlohmann::json g = nlohmann::json::array();
-            for (const auto &pg : s.plate_gcodes)
-                g.push_back({ { "plate", pg.first }, { "file", pg.second } });
-            js["gcode"] = g;
             j["slots"].push_back(js);
         }
         return j.dump(1);
@@ -427,10 +392,8 @@ struct SessionManifest
                 s.plate               = js.value("plate", 0);
                 s.main_tab            = js.value("tab", 1);
                 s.plates_with_objects = js.value("plates_with_objects", 0);
-                s.plates_sliced       = js.value("plates_sliced", 0);
-                if (js.contains("gcode") && js["gcode"].is_array())
-                    for (const nlohmann::json &g : js["gcode"])
-                        s.plate_gcodes.emplace_back(g.value("plate", 0), g.value("file", std::string()));
+                // P4: a restart re-opens each project from its snapshot; its plates slice again (no G-code is kept).
+                s.plates_sliced = 0;
                 out.slots.push_back(std::move(s));
             }
             if (out.active >= int(out.slots.size()))
@@ -443,7 +406,7 @@ struct SessionManifest
     }
 
     // What can come back: the slots whose snapshot is still there (`exists`), the active one's index adjusted (-1 when it
-    // is gone too; then the first one restored is the active one). G-code files that are gone are dropped from their slot.
+    // is gone too; then the first one restored is the active one).
     SessionManifest restorable(const std::function<bool(const std::string &)> &exists) const
     {
         SessionManifest out;
@@ -451,12 +414,8 @@ struct SessionManifest
             const ProjectSlot &s = slots[i];
             if (s.snapshot_path.empty() || !exists(s.snapshot_path))
                 continue;
-            ProjectSlot copy = s;
-            copy.plate_gcodes.clear();
-            for (const auto &g : s.plate_gcodes)
-                if (exists(g.second))
-                    copy.plate_gcodes.push_back(g);
-            copy.plates_sliced = int(copy.plate_gcodes.size());
+            ProjectSlot copy   = s;
+            copy.plates_sliced = 0;
             if (int(i) == active)
                 out.active = int(out.slots.size());
             out.slots.push_back(std::move(copy));
@@ -466,33 +425,6 @@ struct SessionManifest
         return out;
     }
 };
-
-// Bug A (owner, P2 hand test): the sliced state must survive a switch. Which plate G-code a park keeps: every sliced plate's
-// G-code file, the slice result's file when it is on disk, else the plate's temp G-code; a sliced plate with neither on
-// disk is logged and comes back unsliced. Returns (plate index, source file) in plate order.
-struct PlateGcodeSource
-{
-    int         plate{ 0 };
-    bool        sliced{ false };
-    std::string result_file;
-    std::string temp_file;
-};
-inline std::vector<std::pair<int, std::string>> park_gcode_plan(const std::vector<PlateGcodeSource> &plates,
-                                                                const std::function<bool(const std::string &)> &exists)
-{
-    std::vector<std::pair<int, std::string>> out;
-    for (const PlateGcodeSource &p : plates) {
-        if (!p.sliced)
-            continue;
-        if (!p.result_file.empty() && exists(p.result_file))
-            out.emplace_back(p.plate, p.result_file);
-        else if (!p.temp_file.empty() && exists(p.temp_file))
-            out.emplace_back(p.plate, p.temp_file);
-    }
-    return out;
-}
-// The parked copy's name beside the snapshot.
-inline std::string parked_gcode_name(int plate) { return "plate_" + std::to_string(plate + 1) + ".gcode"; }
 
 // D7: a project file double-clicked in Explorer / Finder while EdgeSlicer runs (single instance on) opens as a new project in
 // the strip ("strip", the default) or in place of the active project ("replace", the old behaviour).

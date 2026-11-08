@@ -138,6 +138,9 @@ public:
     Sidebar &operator=(Sidebar &&) = delete;
     Sidebar &operator=(const Sidebar &) = delete;
     ~Sidebar();
+    // Project strip P4: the window's ParamsPanel moves to the sidebar of the project shown.
+    void detach_params_panel();
+    void attach_params_panel();
 
     void create_printer_preset();
     void init_filament_combo(PlaterPresetComboBox **combo, const int filament_idx);
@@ -421,65 +424,46 @@ public:
     // BBS: save & backup
     void load_project(wxString const & filename = "", wxString const & originfile = "-");
 
-    // ---- Project strip (tests/design_multi_project_sidebar.md, P1). ProjectStrip drives these. ----
-    // Why the active project cannot be swapped out right now (a job holds the plate, a print or send is being prepared,
-    // a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool first.
+    // ---- Project strip (tests/design_multi_project_sidebar.md). P4: one live Plater per open project; MainFrame shows one,
+    // wxGetApp().plater() is the one shown. ProjectStrip drives these. ----
+    // True when this is the project on screen (wxGetApp().plater()).
+    bool is_active_project() const;
+    // MainFrame::activate_plater(): this project goes out of sight / comes back. Hidden, it keeps its model, undo history,
+    // slice and preview; a slice running on it goes on, and what would touch the window or the app-global presets (the
+    // slice / export completion handling, a scheduled re-apply of the presets) waits until it is shown again.
+    void on_project_hidden();
+    void on_project_shown();
+    // Why the active project cannot be switched away from right now (a job holds the plate, a print or send is being
+    // prepared, a Showcase video renders, a project loads, a tool is being edited); empty when it can. Closes an open tool
+    // first.
     wxString project_swap_blocker();
-    // Cancels a running slice (D4: no slicing in parked projects). True when one was running.
-    bool     cancel_slicing_for_project_swap();
-    // Parks the active project: snapshot_3mf (project_park_save_strategy) and every valid plate's G-code copied into
-    // gcode_dir, listed in plate_gcodes as (plate index, file). False with the reason in `error` when the export failed.
-    bool park_project(const std::string& snapshot_3mf, const std::string& gcode_dir, std::vector<std::pair<int, std::string>>& plate_gcodes,
-                      std::string& error);
-    // Loads a parked project in place of the active one without asking anything: the active one is parked (or closed)
-    // already. Restores its file name or Untitled name, its unsaved flag, its plates' G-code (Preview without slicing again)
-    // and the current plate. False when nothing could be loaded.
-    bool swap_in_project(const std::string& snapshot_3mf, const wxString& origin_path, const wxString& name, bool dirty,
-                         const std::vector<std::pair<int, std::string>>& plate_gcodes, int plate);
-    // Opens a project file (or a model file as a new project) in place of the active one without the save prompt: the
-    // strip parked the active one first. False when nothing was loaded.
+    // Stops a running slice before the project is closed. True when one was running.
+    bool     cancel_slicing_for_project_close();
+    // Session restore: writes the project as File > Save writes it (project_park_save_strategy), quietly, without changing
+    // its file name. False with the reason in `error`.
+    bool save_project_snapshot(const std::string& snapshot_3mf, std::string& error);
+    // Session restore: loads a snapshot into this (fresh, shown) Plater without asking anything and gives it back its file
+    // name or Untitled name and its unsaved flag. False when nothing could be loaded.
+    bool load_project_snapshot(const std::string& snapshot_3mf, const wxString& origin_path, const wxString& name, bool dirty, int plate);
+    // Opens a project file (or a model file as a new project) in this fresh Plater without the save prompt. False when
+    // nothing was loaded.
     bool load_project_unprompted(const wxString& filename);
-    // True while swap_in_project() loads: load_files() stays quiet (no warnings, no untrusted-settings strip of the
+    // True while load_project_snapshot() loads: load_files() stays quiet (no warnings, no untrusted-settings strip of the
     // project's own presets, no "keep my printer" switch).
     bool is_project_swap_loading() const { return m_project_swap_loading; }
-    // Set by the strip for a whole switch. Opens arriving meanwhile (hub, Layerling or Vault "send to plate", another
-    // instance) wait until it is over.
-    void set_project_switch_busy(bool busy) { m_project_switch_busy = busy; }
-    bool is_project_switch_busy() const { return m_project_switch_busy; }
+    // Set by the strip for a whole switch or strip open. Opens arriving meanwhile (hub, Layerling or Vault "send to plate",
+    // another instance) wait until it is over, then go to the project shown.
+    static void set_project_switch_busy(bool busy) { s_project_switch_busy = busy; }
+    static bool is_project_switch_busy() { return s_project_switch_busy; }
     // P2 strip badges: plates holding objects, and those of them with valid G-code.
     void count_sliced_plates(int& plates_with_objects, int& plates_sliced);
     // P2 live strip thumbnail: the current plate rendered as the 3MF thumbnail is (false when there is no canvas).
     bool render_current_plate_thumbnail(ThumbnailData& out, unsigned int size);
     // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo).
     size_t project_change_marker() const;
-    // P3 (owner bug: the sliced state did not survive a switch): puts the parked plates' G-code back, after the load and
-    // what it deferred ran. Each plate's Print is applied through the background process with the config it slices with,
-    // then takes its G-code as its slice, so the next apply changes nothing and the plate stays sliced. Returns how many.
-    int  reattach_parked_gcode(const std::vector<std::pair<int, std::string>>& plate_gcodes, int plate, bool exported_file);
-
-    // P3 warm park (D5b): a parked project's 3MF read ahead on a worker thread (the same read the load does), so switching
-    // back skips the read. The strip keeps up to two within a budget; load_files() takes the one for its file.
-    struct PreparsedProject
-    {
-        std::string               path;
-        bool                      ok{ false };
-        Model                     model;
-        DynamicPrintConfig        config;
-        ConfigSubstitutionContext substitutions{ ForwardCompatibilitySubstitutionRule::Enable };
-        En3mfType                 file_type{ En3mfType::From_BBS };
-        PlateDataPtrs             plates;
-        std::vector<Preset*>      presets;
-        Semver                    file_version;
-        bool                      from_bambu_studio{ false };
-        size_t                    bytes{ 0 }; // the meshes, roughly
-        long long                 read_ms{ 0 };
-        bool                      consumed{ false };
-        ~PreparsedProject();
-    };
-    // Reads a parked project's 3MF as load_files() would for a project switch. Thread safe (no GUI access).
-    static std::shared_ptr<PreparsedProject> preparse_project(const std::string& snapshot_3mf);
-    // The next load of that file uses it instead of reading the file.
-    void set_preparsed_project(std::shared_ptr<PreparsedProject> pre) { m_preparsed = std::move(pre); }
+    // The slice thread is working (not finished and waiting for its result to be picked up): the strip's spinner for a
+    // hidden project.
+    bool is_slicing_in_background() const;
     int save_project(bool saveAs = false);
     void set_opened_from_zip(bool opened);
     bool opened_from_zip() const;
@@ -1267,11 +1251,10 @@ private:
     bool skip_thumbnail_invalid { false };
     bool m_loading_project { false };
     bool m_project_swap_loading { false };
-    bool m_project_switch_busy { false };
-    // Project strip: the next load_project() skips close_with_confirm (the strip parked the project); the strip's own loads
-    // run while m_project_switch_busy is set and must not wait for themselves.
+    static inline bool s_project_switch_busy { false };
+    // Project strip: the next load_project() skips close_with_confirm (it loads into a fresh Plater); the strip's own loads
+    // run while s_project_switch_busy is set and must not wait for themselves.
     bool m_skip_close_confirm { false };
-    std::shared_ptr<PreparsedProject> m_preparsed;
     int  m_project_strip_loads { 0 };
     std::string m_preview_only_filename;
     int m_valid_plates_count { 0 };

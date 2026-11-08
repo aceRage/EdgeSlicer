@@ -2220,6 +2220,11 @@ wxWindow* PreferencesDialog::create_general_page()
                                                    _L("When EdgeSlicer closes with several projects in the project strip, they come back at the next start as they were, unsaved changes included."),
                                                    50, "project_strip_restore_session");
 
+    // Project strip P4: each open project keeps a live Plater (its model, slice and preview), so the count bounds memory.
+    auto item_strip_max_open = create_item_input(_L("Maximum open projects"), "", page,
+                                                 _L("How many projects the project strip keeps open (2 to 16, 8 by default). Each one stays loaded, sliced "
+                                                    "results included, so more open projects use more memory. At the limit you are asked which one to close."),
+                                                 "project_strip_max_open", [](wxString) {});
     auto item_max_recent_count = create_item_input(_L("Maximum recent files"), "", page, _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
         long max = 0;
         if (value.ToLong(&max))
@@ -2426,6 +2431,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_project_load_behaviour, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_shell_open, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_strip_session, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_strip_max_open, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_max_recent_count, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_recent_models, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_save_choise, 0, wxTOP, FromDIP(3));

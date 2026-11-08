@@ -2767,11 +2767,12 @@ TEST_CASE("A project loads without crashing when the temporary dir is not writab
     }
 }
 
-// Project strip (tests/design_multi_project_sidebar.md 4.3, 7): switching to another open project parks the active one as
-// a temporary 3MF (project_park_save_strategy) and brings it back as its 3MF is opened (project_park_load_strategy). What a
-// switch must not lose: objects, parts and modifiers with their settings and transforms, colour / support / seam paint,
-// the plates (names, the lock), the project settings that live outside the presets, and the presets embedded in it.
-TEST_CASE("A parked project comes back from its snapshot as it was", "[3mf][ProjectStrip]")
+// Project strip (tests/design_multi_project_sidebar.md): session restore writes every open project at exit as a 3MF
+// (project_park_save_strategy) and brings it back at the next start as its 3MF is opened (project_park_load_strategy). P4
+// switches keep each project live and never use it. What a restart must not lose: objects, parts and modifiers with their
+// settings and transforms, colour / support / seam paint, the plates (names, the lock), the project settings that live
+// outside the presets, and the presets embedded in it.
+TEST_CASE("A session snapshot of a project comes back as it was", "[3mf][ProjectStrip]")
 {
     prepare_3mf_temp_dir();
     const std::string path    = make_temp_3mf_path("project_strip_park.3mf");

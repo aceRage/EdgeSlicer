@@ -294,6 +294,33 @@ public:
     std::optional<Selection> selection() const;
     void                     restore_selection(const Selection &selection);
 
+    // Project strip P4 (one live Plater per open project): the presets are app-global, so each project's choice is kept
+    // aside while another project is shown and put back when it is shown again. Unlike Selection it keeps the project's
+    // embedded presets (and puts them back), and its edits ride with it: they come back as that project's unsaved changes.
+    struct ProjectPresetState
+    {
+        struct Collection
+        {
+            std::string        selected;
+            DynamicPrintConfig edited; // what the tab shows, edits included
+            DynamicPrintConfig saved;  // the baseline the project dirty state compares against
+            DynamicPrintConfig preset; // the selected preset as it was saved when captured
+        };
+        bool                     valid{ false };
+        Collection               prints, filaments, printers;
+        std::vector<std::string> filament_presets;
+        DynamicPrintConfig       project_config;
+        MixedFilamentManager     mixed_filaments;
+        std::vector<Preset>      embedded; // the project's own presets (3MF embedded), full copies
+    };
+    ProjectPresetState capture_project_presets() const;
+    // True when the bundle holds exactly that state already (the switch then skips the preset refresh).
+    bool               project_presets_current(const ProjectPresetState &state) const;
+    // Puts a captured state back. A preset that was deleted meanwhile cannot be selected again: its edited values are put
+    // on what is selected instead and the name is returned in `missing`. A preset that was saved meanwhile is the new
+    // saved one, the project's values show as its unsaved changes where they differ.
+    void               restore_project_presets(const ProjectPresetState &state, std::vector<std::string> *missing = nullptr);
+
     // Edge: any project-embedded preset loaded (print, filament or printer)?
     bool has_project_embedded_presets() const;
     // Ultra: the project presets in use (printer, process, filament slots) that `printer_name`

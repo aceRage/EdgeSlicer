@@ -3362,20 +3362,6 @@ std::string PartPlate::get_temp_config_3mf_path()
 	return m_temp_config_3mf_path;
 }
 
-bool PartPlate::adopt_parked_gcode(const std::string& filename)
-{
-    boost::system::error_code ec;
-    if (filename.empty() || !boost::filesystem::exists(filename, ec) || m_print == nullptr || m_gcode_result == nullptr)
-        return false;
-    m_tmp_gcode_path         = filename;
-    m_gcode_result->filename = filename;
-    m_print->set_gcode_filament_prices(wxGetApp().app_config->get_bool("gcode_include_filament_prices"));
-    m_print->set_gcode_file_ready();
-    update_slice_result_valid_state(true);
-    m_ready_for_slice = true;
-    return true;
-}
-
 // load gcode from file
 int PartPlate::load_gcode_from_file(const std::string& filename)
 {

@@ -10,6 +10,7 @@
 #include <boost/log/trivial.hpp>
 
 #include <wx/checklst.h>
+#include <wx/choicdlg.h>
 #include <wx/control.h>
 #include <wx/dcbuffer.h>
 #include <wx/filedlg.h>
@@ -35,6 +36,7 @@
 #include "Notebook.hpp"
 #include "NotificationManager.hpp"
 #include "Plater.hpp"
+#include "Tab.hpp"
 #include "wxExtensions.hpp"
 #include "../Utils/Process.hpp"
 
@@ -51,11 +53,6 @@ const char *CFG_MAX_OPEN  = "project_strip_max_open";
 const char *CFG_WIDTH     = "project_strip_width";
 const char *CFG_SHELL     = "project_strip_shell_open";
 const char *CFG_SESSION   = "project_strip_restore_session";
-
-bool future_ready(const std::shared_future<std::shared_ptr<Plater::PreparsedProject>> &f)
-{
-    return f.valid() && f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-}
 
 long long ms_since(std::chrono::steady_clock::time_point t)
 {
@@ -82,6 +79,16 @@ void remove_empty_dir(const std::string &path)
 
 wxColour accent_colour() { return wxColour(0, 174, 66); }
 
+// The main tab that shows a Plater's current view.
+int tab_for_view(const Plater &plater)
+{
+    if (plater.is_preview_shown())
+        return int(MainTabs::Preview);
+    if (plater.is_showcase_shown())
+        return int(MainTabs::Showcase);
+    return int(MainTabs::Editor3D);
+}
+
 } // namespace
 
 // ---- SwitchScope ----------------------------------------------------------------------------------------------------------
@@ -89,19 +96,17 @@ wxColour accent_colour() { return wxColour(0, 174, 66); }
 ProjectStrip::SwitchScope::SwitchScope(ProjectStrip &strip, bool swap_guard) : m_strip(strip), m_swap_guard(swap_guard)
 {
     m_strip.m_switching = true;
-    if (Plater *p = m_strip.plater())
-        p->set_project_switch_busy(true);
+    Plater::set_project_switch_busy(true);
     if (m_swap_guard)
         ProjectSwapGuard::hold();
 }
 
 ProjectStrip::SwitchScope::~SwitchScope()
 {
-    if (Plater *p = m_strip.plater())
-        p->set_project_switch_busy(false);
+    Plater::set_project_switch_busy(false);
     m_strip.m_switching = false;
-    // The load queued work for later (the printer tab's nozzle refresh, the height-pattern check): wx runs CallAfter in
-    // order, so this release comes after it and the rack memory / variant follow stay out of it too.
+    // The preset refresh queued work for later (the printer tab's nozzle refresh, the height-pattern check): wx runs
+    // CallAfter in order, so this release comes after it and the rack memory / variant follow stay out of it too.
     if (m_swap_guard)
         wxGetApp().CallAfter([]() { ProjectSwapGuard::release(); });
     m_strip.sync_active();
@@ -117,16 +122,16 @@ ProjectStrip::ProjectStrip(wxWindow *parent, MainFrame *frame)
     if (AppConfig *cfg = wxGetApp().app_config) {
         m_collapsed = cfg->get(CFG_COLLAPSED) == "1";
         m_text_mode = cfg->get(CFG_TEXT_MODE) == "1";
-        m_sessions.set_max_open(ProjectSessions::parse_max_open(cfg->get(CFG_MAX_OPEN)));
         m_width_dip = StripLayout::parse_width(cfg->get(CFG_WIDTH));
     }
-    // Per process and per slot, under the app's temp folder (the backup folders live there too).
+    refresh_max_open();
+    // Session snapshots, per process and per slot, under the app's temp folder (the backup folders live there too).
     m_root = (fs::path(temporary_dir()) / "project_strip" / std::to_string(get_current_pid())).string();
 
-    // The project the window starts with.
+    // The project the window starts with, in the window's first Plater.
     const int first = m_sessions.add("", into_u8(_L("Untitled")));
     m_sessions.select(first);
-    m_extra[first];
+    m_extra[first].plater = frame != nullptr ? frame->plater() : nullptr;
 
     // New and Open: two icon buttons at the top (owner feedback on P1), the words in their tooltips.
     m_btn_new  = new ScalableButton(this, wxID_ANY, "add", wxEmptyString, wxDefaultSize, wxDefaultPosition, wxBU_EXACTFIT | wxNO_BORDER, true, 16);
@@ -166,10 +171,21 @@ ProjectStrip::~ProjectStrip()
     m_poll_timer.Stop();
     m_thumb_timer.Stop();
     m_session_timer.Stop();
-    wait_for_read_aheads();
 }
 
 Plater *ProjectStrip::plater() const { return wxGetApp().plater(); }
+
+Plater *ProjectStrip::plater_of(int id) const
+{
+    auto it = m_extra.find(id);
+    return it == m_extra.end() ? nullptr : it->second.plater;
+}
+
+void ProjectStrip::refresh_max_open()
+{
+    if (AppConfig *cfg = wxGetApp().app_config)
+        m_sessions.set_max_open(ProjectSessions::parse_max_open(cfg->get(CFG_MAX_OPEN)));
+}
 
 std::string ProjectStrip::slot_dir(int id) const { return (fs::path(m_root) / ("slot-" + std::to_string(id))).string(); }
 
@@ -196,7 +212,7 @@ void ProjectStrip::sync_active()
         return;
     Plater      *p    = plater();
     ProjectSlot *slot = m_sessions.active();
-    if (p == nullptr || slot == nullptr)
+    if (p == nullptr || slot == nullptr || plater_of(slot->id) != p)
         return;
     // A Save As, or a project opened in place of this one from elsewhere (Home, the hub, another instance), changes them.
     slot->origin_path = into_u8(p->get_project_filename(".3mf"));
@@ -215,34 +231,31 @@ void ProjectStrip::on_active_project_changed()
     Refresh();
 }
 
-bool ProjectStrip::can_switch(bool cancel_slicing, bool &slicing_cancelled)
+bool ProjectStrip::can_leave_active()
 {
-    slicing_cancelled = false;
     Plater *p = plater();
-    if (p == nullptr || m_switching)
+    if (p == nullptr || m_switching || m_frame == nullptr)
         return false;
     const wxString why = p->project_swap_blocker();
     if (!why.empty()) {
         toast(_L("The project cannot be switched now.") + " " + why);
         return false;
     }
-    if (cancel_slicing)
-        slicing_cancelled = p->cancel_slicing_for_project_swap();
     return true;
 }
 
-void ProjectStrip::load_thumbnail(ProjectSlot &slot)
+void ProjectStrip::load_thumbnail(int id, const std::string &snapshot_3mf)
 {
-    if (slot.snapshot_path.empty())
+    if (snapshot_3mf.empty())
         return;
-    const std::string png = bbs_3mf_get_thumbnail(slot.snapshot_path.c_str());
+    const std::string png = bbs_3mf_get_thumbnail(snapshot_3mf.c_str());
     if (png.empty())
         return;
     wxMemoryInputStream stream(png.data(), png.size());
     wxImage             image;
     if (!image.LoadFile(stream, wxBITMAP_TYPE_PNG) || !image.IsOk())
         return;
-    SlotExtra &extra  = m_extra[slot.id];
+    SlotExtra &extra  = m_extra[id];
     extra.image       = image;
     extra.scaled      = wxBitmap();
     extra.scaled_side = 0;
@@ -265,223 +278,112 @@ const wxBitmap *ProjectStrip::tile_bitmap(int id, int side)
     return &extra.scaled;
 }
 
-bool ProjectStrip::park_active(std::string &error)
+void ProjectStrip::stash_active()
 {
-    Plater      *p    = plater();
     ProjectSlot *slot = m_sessions.active();
-    if (p == nullptr || slot == nullptr) {
-        error = "no active project";
-        return false;
-    }
+    Plater      *p    = plater();
+    if (slot == nullptr || p == nullptr)
+        return;
     sync_active();
-    SlotExtra &extra = m_extra[slot->id];
-    // The G-code parked last time may belong to plates that are no longer sliced: start from none.
-    for (const auto &g : slot->plate_gcodes)
-        remove_literal(g.second);
-    slot->plate_gcodes.clear();
-
-    const std::string dir      = slot_dir(slot->id);
-    const std::string snapshot = (fs::path(dir) / "project.3mf").string();
-    boost::system::error_code ec;
-    fs::create_directories(fs::path(dir), ec);
-    std::vector<std::pair<int, std::string>> gcodes;
-    if (!p->park_project(snapshot, dir, gcodes, error))
-        return false;
-    slot->snapshot_path = snapshot;
-    slot->plate_gcodes  = gcodes;
-    // The badge of the parked tile: what is sliced is what kept its G-code.
-    int with_objects = 0, sliced = 0;
-    p->count_sliced_plates(with_objects, sliced);
-    slot->plates_with_objects = with_objects;
-    slot->plates_sliced       = int(gcodes.size());
-    slot->plate         = p->get_partplate_list().get_curr_plate_index();
-    const int tab       = m_frame != nullptr && m_frame->m_tabpanel != nullptr ? m_frame->m_tabpanel->GetSelection() : int(MainTabs::Editor3D);
-    slot->main_tab      = MainTabs::hosts_plater(tab) ? tab : (MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : int(MainTabs::Editor3D));
-    extra.camera        = p->get_camera();
-    extra.exported_file = p->using_exported_file();
-    extra.dir           = dir;
-    m_last_parked       = slot->id;
-    // A read-ahead of the previous snapshot is stale now.
-    drop_warm(extra);
-    extra.files         = { snapshot, snapshot + ".tmp" };
-    for (const auto &g : gcodes)
-        extra.files.push_back(g.second);
-    load_thumbnail(*slot);
-    return true;
+    // The tab it was on; from Home or Device, the tab of its current view.
+    const int tab  = m_frame != nullptr && m_frame->m_tabpanel != nullptr ? m_frame->m_tabpanel->GetSelection() : int(MainTabs::Editor3D);
+    slot->main_tab = MainTabs::hosts_plater(tab) ? tab : tab_for_view(*p);
+    slot->plate    = p->get_partplate_list().get_curr_plate_index();
+    // Its presets, unsaved edits included: the app-global bundle is the next project's from now on.
+    m_extra[slot->id].presets = wxGetApp().preset_bundle->capture_project_presets();
 }
 
-bool ProjectStrip::restore(ProjectSlot &target)
+long long ProjectStrip::show_slot(int id)
 {
-    Plater *p = plater();
-    if (p == nullptr)
-        return false;
-    // Warm park: the snapshot was read ahead; the load takes that read (waiting for it if it is still running).
-    m_last_restore_warm = false;
-    if (auto w = m_extra.find(target.id); w != m_extra.end() && w->second.warm.valid()) {
-        std::shared_ptr<Plater::PreparsedProject> pre = w->second.warm.get();
-        w->second.warm = {};
-        if (pre && pre->ok && pre->path == target.snapshot_path) {
-            p->set_preparsed_project(pre);
-            m_last_restore_warm = true;
-        }
+    auto it = m_extra.find(id);
+    if (it == m_extra.end() || it->second.plater == nullptr || m_frame == nullptr)
+        return 0;
+    SlotExtra &extra = it->second;
+    Plater    *p     = extra.plater;
+    m_frame->activate_plater(p);
+
+    const auto     started = std::chrono::steady_clock::now();
+    PresetBundle  *bundle  = wxGetApp().preset_bundle;
+    if (bundle == nullptr || !extra.presets.valid || bundle->project_presets_current(extra.presets))
+        return 0;
+    // Its presets back in the bundle, then the Tab pages and the sidebar as a project load refreshes them. The swap guard
+    // (SwitchScope) keeps the per-printer nozzle memory and the variant follow out of it: they are the project's own.
+    std::vector<std::string> missing;
+    bundle->restore_project_presets(extra.presets, &missing);
+    wxGetApp().load_current_presets(false, false);
+    // The printer tab re-derives some project settings while it loads; the project's own win.
+    bundle->project_config = extra.presets.project_config;
+    p->sidebar().update_presets(Preset::TYPE_PRINTER);
+    p->sidebar().update_presets(Preset::TYPE_FILAMENT);
+    p->update_project_dirty_from_presets();
+    if (!missing.empty()) {
+        wxString names;
+        for (const std::string &name : missing)
+            names += (names.empty() ? "" : ", ") + from_u8(name);
+        toast(wxString::Format(_L("This project's preset %s no longer exists. Its values are kept as unsaved changes."), names));
     }
-    const bool ok = p->swap_in_project(target.snapshot_path, from_u8(target.origin_path), from_u8(target.name), target.dirty,
-                                       target.plate_gcodes, target.plate);
-    p->set_preparsed_project(nullptr);
-    if (!ok)
+    return ms_since(started);
+}
+
+bool ProjectStrip::switch_to(int id, const char *mode)
+{
+    if (id == m_sessions.active_id())
+        return true;
+    if (plater_of(id) == nullptr)
         return false;
-    // Where it was looked at from.
-    auto it = m_extra.find(target.id);
-    if (it != m_extra.end() && it->second.camera.has_value()) {
-        Camera &camera = p->get_camera();
-        camera                         = *it->second.camera;
-        camera.requires_zoom_to_bed     = false;
-        camera.requires_zoom_to_volumes = false;
-        camera.requires_zoom_to_plate   = REQUIRES_ZOOM_TO_PLATE_IDLE;
+    const auto started    = std::chrono::steady_clock::now();
+    long long  presets_ms = 0;
+    {
+        SwitchScope scope(*this, true);
+        BOOST_LOG_TRIVIAL(info) << "project strip: switching from slot " << m_sessions.active_id() << " to slot " << id;
+        stash_active();
+        presets_ms = show_slot(id);
+        m_sessions.select(id);
     }
+    after_switch(id, started, presets_ms, mode);
     return true;
 }
 
-void ProjectStrip::after_switch(int id, bool slicing_cancelled, std::chrono::steady_clock::time_point started, long long park_ms,
-                                const char *mode)
+void ProjectStrip::after_switch(int id, std::chrono::steady_clock::time_point started, long long presets_ms, const char *mode)
 {
     ProjectSlot *slot = m_sessions.find(id);
-    if (slot != nullptr && m_frame != nullptr) {
-        // The tab it was on; from Home or Device, the project's last plater tab.
-        m_frame->select_tab(size_t(MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : int(MainTabs::Editor3D)));
+    Plater      *p    = plater();
+    if (slot != nullptr && p != nullptr && m_frame != nullptr && m_frame->m_tabpanel != nullptr) {
+        // On a plater tab: the tab of the project's own view (it kept it). On Home or Device: stay there.
+        if (MainTabs::hosts_plater(m_frame->m_tabpanel->GetSelection())) {
+            const int want = MainTabs::hosts_plater(slot->main_tab) ? slot->main_tab : tab_for_view(*p);
+            if (m_frame->m_tabpanel->GetSelection() != want)
+                m_frame->select_tab(size_t(want));
+            else if (tab_for_view(*p) != want)
+                // The tab is the same but this Plater shows another view: line them up as a tab change does.
+                p->select_view_3D(want == int(MainTabs::Preview) ? "Preview" : want == int(MainTabs::Showcase) ? "Showcase" : "3D");
+        }
     }
-    if (Plater *p = plater()) {
+    if (p != nullptr) {
         if (GLCanvas3D *canvas = p->get_current_canvas3D())
             canvas->set_as_dirty();
-        // The live thumbnail: none to render while the snapshot's is current; a project with none yet gets one shortly.
+        // The live thumbnail: none to render while the tile's is current; a project with none yet gets one shortly.
         auto it         = m_extra.find(id);
         m_active_marker = it != m_extra.end() && it->second.image.IsOk() ?
                               p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index())) :
                               size_t(-1);
     }
     const long long total = ms_since(started);
-    BOOST_LOG_TRIVIAL(info) << "project strip: switch to slot " << id << " took " << total << " ms (park " << park_ms << " ms, load "
-                            << (total - park_ms) << " ms, " << mode << ")" << log_memory_info();
-    if (slicing_cancelled)
-        toast(_L("Slicing was cancelled to switch projects. Slice again when you come back to it."));
-    // The plates' G-code once the load's deferred work ran (it may apply config), then the parked project read ahead.
-    wxGetApp().CallAfter([this, id]() { reattach_gcode(id); });
-    if (m_last_parked >= 0 && m_last_parked != id)
-        start_read_ahead(m_last_parked);
-    m_last_parked = -1;
-}
-
-void ProjectStrip::reattach_gcode(int id)
-{
-    Plater      *p    = plater();
-    ProjectSlot *slot = m_sessions.find(id);
-    if (p == nullptr || slot == nullptr || id != m_sessions.active_id() || m_switching || slot->plate_gcodes.empty())
-        return;
-    auto       it       = m_extra.find(id);
-    const bool exported = it != m_extra.end() && it->second.exported_file;
-    const int  loaded   = p->reattach_parked_gcode(slot->plate_gcodes, slot->plate, exported);
-    if (loaded > 0 && slot->main_tab == int(MainTabs::Preview)) {
-        // Preview processes the plate's G-code (no slicing: the plate is sliced).
-        p->select_view_3D("Preview", false);
-    }
+    BOOST_LOG_TRIVIAL(info) << "project strip: switch to slot " << id << " took " << total << " ms (presets " << presets_ms << " ms, "
+                            << m_sessions.size() << " open, " << mode << ")" << log_memory_info();
     wxTimerEvent dummy;
     on_poll(dummy);
 }
 
-void ProjectStrip::drop_warm(SlotExtra &extra)
-{
-    if (!extra.warm.valid())
-        return;
-    // A read that is still running cannot be stopped: it is let go once it finished (on_poll, or the exit waits for it).
-    m_retiring.push_back(extra.warm);
-    extra.warm = {};
-}
-
-void ProjectStrip::start_read_ahead(int id)
-{
-    ProjectSlot *slot = m_sessions.find(id);
-    if (slot == nullptr || id == m_sessions.active_id() || slot->snapshot_path.empty())
-        return;
-    SlotExtra &extra = m_extra[id];
-    drop_warm(extra);
-    extra.parked_at = ++m_park_clock;
-    boost::system::error_code ec;
-    const auto size     = fs::file_size(fs::path(slot->snapshot_path), ec);
-    extra.warm_estimate = ec ? size_t(64) << 20 : size_t(size) * 8;
-    const std::string path = slot->snapshot_path;
-    extra.warm             = std::async(std::launch::async, [path]() { return Plater::preparse_project(path); }).share();
-    BOOST_LOG_TRIVIAL(info) << "project strip: reading slot " << id << " ahead (warm park)";
-    enforce_warm_budget();
-}
-
-void ProjectStrip::enforce_warm_budget()
-{
-    std::vector<WarmEntry> entries;
-    for (auto &kv : m_extra) {
-        if (!kv.second.warm.valid())
-            continue;
-        size_t bytes = kv.second.warm_estimate;
-        if (future_ready(kv.second.warm)) {
-            const auto pre = kv.second.warm.get();
-            bytes          = pre && pre->ok ? pre->bytes : 0;
-        }
-        entries.push_back({ kv.first, bytes, kv.second.parked_at });
-    }
-    for (int id : WarmPolicy::evictions(entries)) {
-        BOOST_LOG_TRIVIAL(info) << "project strip: slot " << id << " leaves the warm park (switches back from disk)";
-        drop_warm(m_extra[id]);
-    }
-}
-
-void ProjectStrip::wait_for_read_aheads()
-{
-    for (auto &kv : m_extra)
-        if (kv.second.warm.valid())
-            kv.second.warm.wait();
-    for (auto &f : m_retiring)
-        if (f.valid())
-            f.wait();
-    m_retiring.clear();
-}
-
 bool ProjectStrip::select_project(int id)
 {
-    ProjectSlot *target = m_sessions.find(id);
-    if (target == nullptr)
+    if (m_sessions.find(id) == nullptr)
         return false;
     if (id == m_sessions.active_id())
         return true;
-    bool slicing_cancelled = false;
-    if (!can_switch(true, slicing_cancelled))
+    if (!can_leave_active())
         return false;
-    const auto  started   = std::chrono::steady_clock::now();
-    const int   previous  = m_sessions.active_id();
-    long long   park_ms   = 0;
-    {
-        SwitchScope scope(*this, true);
-        BOOST_LOG_TRIVIAL(info) << "project strip: switching from slot " << previous << " to slot " << id << log_memory_info();
-        std::string error;
-        if (!park_active(error)) {
-            MessageDialog(m_frame, _L("The current project could not be set aside, so the switch was cancelled.") + "\n\n" + from_u8(error),
-                          _L("Switch project"), wxOK | wxICON_WARNING)
-                .ShowModal();
-            return false;
-        }
-        park_ms = ms_since(started);
-        if (!restore(*target)) {
-            // The project the user left is safe in its snapshot: put it back.
-            ProjectSlot *back = m_sessions.find(previous);
-            if (back != nullptr)
-                restore(*back);
-            MessageDialog(m_frame, wxString::Format(_L("\"%s\" could not be opened again, so the switch was cancelled."), from_u8(target->name)),
-                          _L("Switch project"), wxOK | wxICON_WARNING)
-                .ShowModal();
-            return false;
-        }
-        m_sessions.select(id);
-    }
-    after_switch(id, slicing_cancelled, started, park_ms, m_last_restore_warm ? "warm" : "disk");
-    return true;
+    return switch_to(id, "switch");
 }
 
 void ProjectStrip::cycle(int step)
@@ -491,52 +393,67 @@ void ProjectStrip::cycle(int step)
         select_project(id);
 }
 
+bool ProjectStrip::make_room()
+{
+    refresh_max_open();
+    if (m_sessions.can_add())
+        return true;
+    // D3 / P4: the cap bounds the live projects (memory). Close one to open another, with the usual unsaved prompt.
+    wxArrayString names;
+    std::vector<int> ids;
+    for (const ProjectSlot &s : m_sessions.slots()) {
+        names.Add(from_u8(s.name) + (s.dirty ? wxString(" *") : wxString()));
+        ids.push_back(s.id);
+    }
+    wxSingleChoiceDialog dlg(m_frame,
+                             wxString::Format(_L("%d projects are open, the most this window keeps (Preferences > Project). Close one "
+                                                 "to open another:"),
+                                              m_sessions.max_open()),
+                             _L("Too many open projects"), names);
+    wxGetApp().UpdateDlgDarkUI(&dlg);
+    if (dlg.ShowModal() != wxID_OK || dlg.GetSelection() < 0 || dlg.GetSelection() >= int(ids.size()))
+        return false;
+    return close_project(ids[size_t(dlg.GetSelection())]) && m_sessions.can_add();
+}
+
 void ProjectStrip::new_project()
 {
     Plater *p = plater();
-    if (p == nullptr)
+    if (p == nullptr || m_frame == nullptr)
         return;
     // An empty Untitled project is simply started again, as before the strip.
     if (active_is_blank() || m_sessions.size() == 0) {
         p->new_project();
         return;
     }
-    if (!m_sessions.can_add()) {
-        toast(wxString::Format(_L("%d projects are open, the most this window keeps. Close one first."), m_sessions.max_open()));
-        return;
-    }
-    bool slicing_cancelled = false;
-    if (!can_switch(true, slicing_cancelled))
+    if (!can_leave_active() || !make_room())
         return;
     const auto started = std::chrono::steady_clock::now();
-    long long  park_ms = 0;
     int        id      = -1;
     {
         // A brand-new project starts as File > New does: no swap guard (its nozzles come from the printer's memory).
         SwitchScope scope(*this, false);
-        std::string error;
-        if (!park_active(error)) {
-            MessageDialog(m_frame, _L("The current project could not be set aside.") + "\n\n" + from_u8(error), _L("New project"),
-                          wxOK | wxICON_WARNING)
-                .ShowModal();
+        stash_active();
+        Plater *fresh = m_frame->create_project_plater();
+        if (fresh == nullptr)
             return;
-        }
-        park_ms                 = ms_since(started);
-        const std::string name  = m_sessions.next_untitled_name(into_u8(_L("Untitled")));
-        id                      = m_sessions.add("", name);
-        m_extra[id];
-        p->new_project(true, false, from_u8(name));
+        const std::string name = m_sessions.next_untitled_name(into_u8(_L("Untitled")));
+        id                     = m_sessions.add("", name);
+        m_extra[id].plater     = fresh;
+        m_frame->activate_plater(fresh);
         m_sessions.select(id);
+        // On the printer of the project it was started from, without that project's unsaved preset edits (they stay with it).
+        fresh->new_project(true, false, from_u8(name));
     }
     if (ProjectSlot *slot = m_sessions.find(id))
         slot->main_tab = int(MainTabs::Editor3D);
-    after_switch(id, slicing_cancelled, started, park_ms, "new");
+    after_switch(id, started, 0, "new");
 }
 
 void ProjectStrip::open_project(const wxString &file_in)
 {
     Plater *p = plater();
-    if (p == nullptr)
+    if (p == nullptr || m_frame == nullptr)
         return;
     wxString file = file_in;
     if (file.empty()) {
@@ -555,113 +472,73 @@ void ProjectStrip::open_project(const wxString &file_in)
         Refresh();
         return;
     }
-    if (!m_sessions.can_add()) {
-        toast(wxString::Format(_L("%d projects are open, the most this window keeps. Close one first."), m_sessions.max_open()));
-        return;
-    }
-    bool slicing_cancelled = false;
-    if (!can_switch(true, slicing_cancelled))
+    if (!can_leave_active() || !make_room())
         return;
     const auto started = std::chrono::steady_clock::now();
-    long long  park_ms = 0;
     int        id      = -1;
     {
         // Opening a file is opening a file: its 3MF brings its printer and nozzles as always (no swap guard).
         SwitchScope scope(*this, false);
-        std::string error;
-        if (!park_active(error)) {
-            MessageDialog(m_frame, _L("The current project could not be set aside.") + "\n\n" + from_u8(error), _L("Open project"),
-                          wxOK | wxICON_WARNING)
-                .ShowModal();
+        stash_active();
+        Plater *fresh = m_frame->create_project_plater();
+        if (fresh == nullptr)
             return;
-        }
-        park_ms = ms_since(started);
-        id      = m_sessions.add(into_u8(file), ProjectSessions::name_from_path(into_u8(file)));
-        m_extra[id];
+        id                 = m_sessions.add(into_u8(file), ProjectSessions::name_from_path(into_u8(file)));
+        m_extra[id].plater = fresh;
+        m_frame->activate_plater(fresh);
         m_sessions.select(id);
-        p->load_project_unprompted(file);
+        fresh->load_project_unprompted(file);
     }
     if (ProjectSlot *slot = m_sessions.find(id))
         slot->main_tab = int(MainTabs::Editor3D);
-    after_switch(id, slicing_cancelled, started, park_ms, "open");
+    after_switch(id, started, 0, "open");
 }
 
 bool ProjectStrip::save_slot(int id, bool save_as)
 {
-    ProjectSlot *slot = m_sessions.find(id);
-    Plater      *p    = plater();
-    if (slot == nullptr || p == nullptr)
+    // A project saves with its own presets in the bundle: a hidden one is shown first.
+    if (id != m_sessions.active_id() && !select_project(id))
         return false;
-    if (id == m_sessions.active_id()) {
-        const bool ok = p->save_project(save_as) == wxID_YES;
-        sync_active();
-        Refresh();
-        return ok;
-    }
-    // A parked project is saved by copying its snapshot: it was written as File > Save writes a project.
-    std::string target = save_as ? std::string() : slot->origin_path;
-    if (target.empty()) {
-        wxFileDialog dlg(m_frame, _L("Save project as"), from_u8(fs::path(slot->origin_path).parent_path().string()),
-                         from_u8(slot->name) + ".3mf", file_wildcards(FT_3MF), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-        if (dlg.ShowModal() != wxID_OK)
-            return false;
-        target = into_u8(dlg.GetPath());
-    }
-    if (slot->snapshot_path.empty())
+    Plater *p = plater();
+    if (p == nullptr)
         return false;
-    const std::string tmp = target + ".tmp";
-    boost::system::error_code ec;
-    fs::copy_file(fs::path(slot->snapshot_path), fs::path(tmp), fs::copy_options::overwrite_existing, ec);
-    if (!ec)
-        fs::rename(fs::path(tmp), fs::path(target), ec);
-    if (ec) {
-        remove_literal(tmp);
-        MessageDialog(m_frame, _L("Failed to save the project.") + "\n\n" + from_u8(ec.message()), _L("Save project"), wxOK | wxICON_WARNING)
-            .ShowModal();
-        return false;
-    }
-    slot->origin_path = target;
-    slot->name        = ProjectSessions::name_from_path(target);
-    slot->dirty       = false;
-    if (m_frame != nullptr)
-        m_frame->add_to_recent_projects(from_u8(target));
+    const bool ok = p->save_project(save_as) == wxID_YES;
+    sync_active();
     Refresh();
-    return true;
+    return ok;
 }
 
 void ProjectStrip::remove_slot_files(int id)
 {
-    std::string dir = slot_dir(id);
-    auto        it  = m_extra.find(id);
-    if (it != m_extra.end()) {
-        // A read-ahead still has the snapshot open.
-        if (it->second.warm.valid())
-            it->second.warm.wait();
-        it->second.warm = {};
-        for (const std::string &f : it->second.files)
-            remove_literal(f);
-        it->second.files.clear();
-        if (!it->second.dir.empty())
-            dir = it->second.dir;
+    auto it = m_extra.find(id);
+    if (it == m_extra.end())
+        return;
+    for (const std::string &f : it->second.files)
+        remove_literal(f);
+    it->second.files.clear();
+    if (!it->second.dir.empty()) {
+        remove_empty_dir(it->second.dir);
+        // A restored session's slots sit in the previous run's folder: it goes once empty.
+        if (fs::path(it->second.dir).parent_path() != fs::path(m_root))
+            remove_empty_dir(fs::path(it->second.dir).parent_path().string());
     }
-    if (const ProjectSlot *slot = m_sessions.find(id))
-        for (const auto &g : slot->plate_gcodes)
-            remove_literal(g.second);
-    remove_empty_dir(dir);
-    // A restored session's slots sit in the previous run's folder: it goes once empty.
-    if (fs::path(dir).parent_path() != fs::path(m_root))
-        remove_empty_dir(fs::path(dir).parent_path().string());
 }
 
 bool ProjectStrip::close_project(int id)
 {
     ProjectSlot *slot = m_sessions.find(id);
-    Plater      *p    = plater();
-    if (slot == nullptr || p == nullptr || m_switching)
+    Plater      *pl   = plater_of(id);
+    if (slot == nullptr || pl == nullptr || m_switching || m_frame == nullptr)
         return false;
     const bool is_active = id == m_sessions.active_id();
-    if (is_active)
+    if (is_active) {
         sync_active();
+        // A job or an open tool holds the shown project.
+        if (!pl->project_swap_blocker().empty()) {
+            toast(_L("The project cannot be closed now.") + " " + pl->project_swap_blocker());
+            return false;
+        }
+    }
     if (slot->dirty) {
         MessageDialog dlg(m_frame, wxString::Format(_L("\"%s\" has unsaved changes. Save them before closing it?"), from_u8(slot->name)),
                           _L("Close project"), wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxCENTRE);
@@ -674,7 +551,18 @@ bool ProjectStrip::close_project(int id)
         if (slot == nullptr)
             return false;
     }
-    if (!is_active) {
+    // A project that is slicing closes once its slice is stopped.
+    if (pl->is_background_process_slicing() || pl->is_slicing_in_background()) {
+        MessageDialog dlg(m_frame, wxString::Format(_L("\"%s\" is slicing. Stop slicing and close it?"), from_u8(slot->name)),
+                          _L("Close project"), wxYES_NO | wxNO_DEFAULT | wxCENTRE);
+        if (dlg.ShowModal() != wxID_YES)
+            return false;
+        pl->cancel_slicing_for_project_close();
+    }
+
+    if (id != m_sessions.active_id()) {
+        // Hidden: its Plater goes, nothing on screen changes.
+        m_frame->destroy_project_plater(pl);
         remove_slot_files(id);
         m_sessions.close(id);
         m_extra.erase(id);
@@ -682,39 +570,32 @@ bool ProjectStrip::close_project(int id)
         return true;
     }
 
-    bool slicing_cancelled = false;
-    if (!can_switch(true, slicing_cancelled))
-        return false;
     const int successor = m_sessions.successor_on_close(id);
     if (successor < 0) {
-        // The last project: an empty one takes its place, the strip always has one.
-        p->new_project(true);
+        // The last project: an empty one takes its place in the same Plater, the strip always has one.
+        pl->new_project(true);
         remove_slot_files(id);
         m_sessions.close(id);
         m_extra.erase(id);
-        const int fresh = m_sessions.add("", into_u8(_L("Untitled")));
-        m_extra[fresh];
+        const int fresh        = m_sessions.add("", into_u8(_L("Untitled")));
+        m_extra[fresh].plater  = pl;
         m_sessions.select(fresh);
         sync_active();
         Refresh();
         return true;
     }
-    const auto started = std::chrono::steady_clock::now();
+    const auto started    = std::chrono::steady_clock::now();
+    long long  presets_ms = 0;
     {
-        SwitchScope  scope(*this, true);
-        ProjectSlot *target = m_sessions.find(successor);
-        if (target == nullptr || !restore(*target)) {
-            MessageDialog(m_frame, _L("The next project could not be opened, so this one stays open."), _L("Close project"),
-                          wxOK | wxICON_WARNING)
-                .ShowModal();
-            return false;
-        }
+        SwitchScope scope(*this, true);
+        presets_ms = show_slot(successor);
+        m_frame->destroy_project_plater(pl);
         remove_slot_files(id);
         m_sessions.close(id);
         m_extra.erase(id);
         m_sessions.select(successor);
     }
-    after_switch(successor, slicing_cancelled, started, 0, m_last_restore_warm ? "warm" : "disk");
+    after_switch(successor, started, presets_ms, "close");
     return true;
 }
 
@@ -758,8 +639,7 @@ bool ProjectStrip::confirm_close_all()
 {
     sync_active();
     const std::vector<int> dirty = m_sessions.dirty_ids();
-    Plater                *p     = plater();
-    if (dirty.empty() || p == nullptr)
+    if (dirty.empty() || plater() == nullptr)
         return true;
 
     wxDialog dlg(m_frame, wxID_ANY, _L("Unsaved projects"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE);
@@ -789,11 +669,14 @@ bool ProjectStrip::confirm_close_all()
     if (answer != wxID_YES && answer != wxID_NO)
         return false;
     if (answer == wxID_YES) {
+        // Each one is saved shown (with its own presets in the bundle).
         for (unsigned i = 0; i < list->GetCount(); ++i)
             if (list->IsChecked(i) && !save_slot(dirty[i], false))
                 return false;
     }
-    // What close_with_confirm() does once answered: the active project's crash backup goes.
+    // What close_with_confirm() does once answered: the shown project's crash backup goes (the hidden ones' go with their
+    // Platers as the window closes).
+    Plater *p = plater();
     p->model().set_backup_path("");
     p->up_to_date(true, false);
     p->up_to_date(true, true);
@@ -802,7 +685,6 @@ bool ProjectStrip::confirm_close_all()
 
 void ProjectStrip::remove_all_slot_files()
 {
-    wait_for_read_aheads();
     // Session restore: the snapshots are what the next start reads.
     if (m_keep_files_for_session)
         return;
@@ -822,7 +704,8 @@ wxString ProjectStrip::tooltip_for(const ProjectSlot &slot) const
         tip += "\n" + from_u8(slot.origin_path);
     if (slot.dirty)
         tip += "\n" + _L("Unsaved changes");
-    tip += "\n\n" + _L("Undo history is not kept when switching projects.");
+    if (slot.slicing)
+        tip += "\n" + _L("Slicing");
     return tip;
 }
 
@@ -870,24 +753,31 @@ bool ProjectStrip::plater_tab_shown() const
 
 void ProjectStrip::on_poll(wxTimerEvent &)
 {
-    // Read-aheads that were dropped while still running: let them go once they finished.
-    m_retiring.erase(std::remove_if(m_retiring.begin(), m_retiring.end(), [](const auto &f) { return !f.valid() || future_ready(f); }),
-                     m_retiring.end());
-    Plater      *p      = plater();
-    ProjectSlot *active = m_sessions.active();
-    if (m_switching || p == nullptr || active == nullptr || !IsShown())
+    Plater *p = plater();
+    if (m_switching || p == nullptr || !IsShown())
         return;
-    int with_objects = 0, sliced = 0;
-    p->count_sliced_plates(with_objects, sliced);
-    const bool slicing = p->is_background_process_slicing();
-    const bool dirty   = p->is_project_dirty();
-    bool       changed = active->plates_with_objects != with_objects || active->plates_sliced != sliced || m_active_slicing != slicing ||
-                   active->dirty != dirty;
-    active->plates_with_objects = with_objects;
-    active->plates_sliced       = sliced;
-    active->dirty               = dirty;
-    m_active_slicing            = slicing;
-    if (slicing) {
+    // P4: every project is live, the hidden ones' badges too (a hidden project's slice goes on).
+    bool changed      = false;
+    bool any_slicing  = false;
+    for (const ProjectSlot &cs : m_sessions.slots()) {
+        ProjectSlot *slot = m_sessions.find(cs.id);
+        Plater      *pl   = plater_of(cs.id);
+        if (slot == nullptr || pl == nullptr)
+            continue;
+        const bool shown = pl == p;
+        int with_objects = 0, sliced = 0;
+        pl->count_sliced_plates(with_objects, sliced);
+        const bool slicing = shown ? pl->is_background_process_slicing() : pl->is_slicing_in_background();
+        const bool dirty   = pl->is_project_dirty();
+        changed = changed || slot->plates_with_objects != with_objects || slot->plates_sliced != sliced || slot->slicing != slicing ||
+                  slot->dirty != dirty;
+        slot->plates_with_objects = with_objects;
+        slot->plates_sliced       = sliced;
+        slot->slicing             = slicing;
+        slot->dirty               = dirty;
+        any_slicing               = any_slicing || slicing;
+    }
+    if (any_slicing) {
         m_spin  = (m_spin + 1) % 8;
         changed = true;
     }
@@ -905,7 +795,7 @@ void ProjectStrip::on_thumbnail_timer(wxTimerEvent &)
 {
     Plater      *p      = plater();
     ProjectSlot *active = m_sessions.active();
-    if (m_switching || p == nullptr || active == nullptr || m_collapsed || m_text_mode)
+    if (m_switching || p == nullptr || active == nullptr || m_collapsed || m_text_mode || plater_of(active->id) != p)
         return;
     if (!plater_tab_shown()) {
         // The canvas is not on screen: try again after the next change, or when the plater is back.
@@ -939,7 +829,7 @@ void ProjectStrip::send_project(int id)
         return;
     if (m_frame == nullptr)
         return;
-    // After the switch the plate's G-code is processed for Preview first; send once that ran.
+    // After the switch the window's buttons follow the project shown; send once that ran.
     wxGetApp().CallAfter([this]() {
         if (m_frame != nullptr && !m_frame->send_current_plate())
             toast(_L("Slice the plate first, then send it."));
@@ -1088,7 +978,7 @@ void ProjectStrip::on_paint(wxPaintEvent &)
         const int          top    = list_top + int(i) * ih - m_scroll;
         if (top + ih < list_top || top > size.y)
             continue;
-        const SliceBadge badge = slice_badge(active && m_active_slicing, slot.plates_with_objects, slot.plates_sliced);
+        const SliceBadge badge = slice_badge(slot.slicing, slot.plates_with_objects, slot.plates_sliced);
 
         if (m_collapsed) {
             // The rail: one mark per project, filled for the active one; the unsaved dot next to it.
@@ -1128,7 +1018,7 @@ void ProjectStrip::on_paint(wxPaintEvent &)
             if (const wxBitmap *bmp = tile_bitmap(slot.id, side - FromDIP(6)); bmp != nullptr && bmp->IsOk()) {
                 dc.DrawBitmap(*bmp, frame.x + (side - bmp->GetWidth()) / 2, frame.y + (side - bmp->GetHeight()) / 2, true);
             } else {
-                // Not parked yet: a file shape with a folded corner (a project, not a plate tile).
+                // No thumbnail yet: a file shape with a folded corner (a project, not a plate tile).
                 const int    fold = side / 5;
                 const wxRect page(frame.x + side / 5, frame.y + side / 8, side - 2 * (side / 5), side - 2 * (side / 8));
                 wxPoint      outline[] = { { page.x, page.y }, { page.GetRight() - fold, page.y }, { page.GetRight(), page.y + fold },
@@ -1482,18 +1372,44 @@ void ProjectStrip::save_session_for_restart()
 {
     if (wxGetApp().app_config == nullptr || !wxGetApp().app_config->get_bool(CFG_SESSION) || m_sessions.size() < 2)
         return;
-    std::string error;
-    // The active project too: every project comes back from its snapshot.
-    if (!park_active(error)) {
-        BOOST_LOG_TRIVIAL(warning) << "project strip: session not saved, the active project could not be parked: " << error;
-        return;
+    // Each project is written shown: the 3MF takes its settings from the app-global presets, which are the shown
+    // project's. The one shown at exit is written last, so it is the one selected at the next start.
+    const int        active = m_sessions.active_id();
+    std::vector<int> order;
+    for (const ProjectSlot &s : m_sessions.slots())
+        if (s.id != active)
+            order.push_back(s.id);
+    order.push_back(active);
+    for (int id : order) {
+        if (id != m_sessions.active_id() && !switch_to(id, "session save"))
+            continue;
+        ProjectSlot *slot = m_sessions.find(id);
+        Plater      *pl   = plater_of(id);
+        if (slot == nullptr || pl == nullptr)
+            continue;
+        sync_active();
+        slot->plate                 = pl->get_partplate_list().get_curr_plate_index();
+        const std::string snapshot = (fs::path(slot_dir(id)) / "project.3mf").string();
+        std::string       error;
+        if (!pl->save_project_snapshot(snapshot, error)) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: \"" << slot->name << "\" is not in the session: " << error;
+            continue;
+        }
+        slot->snapshot_path = snapshot;
+        SlotExtra &extra    = m_extra[id];
+        extra.dir           = slot_dir(id);
+        extra.files         = { snapshot, snapshot + ".tmp" };
     }
     SessionManifest m;
     for (const ProjectSlot &s : m_sessions.slots()) {
-        if (s.id == m_sessions.active_id())
+        if (s.snapshot_path.empty())
+            continue;
+        if (s.id == active)
             m.active = int(m.slots.size());
         m.slots.push_back(s);
     }
+    if (m.slots.empty())
+        return;
     try {
         save_string_file(fs::path(session_manifest_path()), m.to_json());
         m_keep_files_for_session = true;
@@ -1507,7 +1423,7 @@ void ProjectStrip::restore_session()
 {
     const std::string path = session_manifest_path();
     boost::system::error_code ec;
-    if (!fs::exists(fs::path(path), ec) || plater() == nullptr)
+    if (!fs::exists(fs::path(path), ec) || plater() == nullptr || m_frame == nullptr)
         return;
     std::string text;
     try {
@@ -1524,44 +1440,63 @@ void ProjectStrip::restore_session()
     });
     if (r.slots.empty())
         return;
+    // A project opened meanwhile (Explorer, the hub) stays in front; the start's empty project gives way.
     const bool blank      = active_is_blank();
     const int  blank_id   = m_sessions.active_id();
+    const int  front_id   = m_sessions.active_id();
     int        target_id  = -1;
-    for (size_t i = 0; i < r.slots.size(); ++i) {
-        const int id = m_sessions.add_restored(r.slots[i]);
-        if (id < 0)
-            break;
-        SlotExtra &extra = m_extra[id];
-        extra.dir        = fs::path(r.slots[i].snapshot_path).parent_path().string();
-        extra.files      = { r.slots[i].snapshot_path, r.slots[i].snapshot_path + ".tmp" };
-        for (const auto &g : r.slots[i].plate_gcodes)
-            extra.files.push_back(g.second);
-        if (ProjectSlot *slot = m_sessions.find(id))
-            load_thumbnail(*slot);
-        if (int(i) == r.active)
-            target_id = id;
+    const auto started    = std::chrono::steady_clock::now();
+    {
+        SwitchScope scope(*this, true);
+        for (size_t i = 0; i < r.slots.size(); ++i) {
+            refresh_max_open();
+            if (!m_sessions.can_add())
+                break;
+            const ProjectSlot &saved = r.slots[i];
+            stash_active();
+            Plater *fresh = m_frame->create_project_plater();
+            if (fresh == nullptr)
+                break;
+            const int id       = m_sessions.add_restored(saved);
+            SlotExtra &extra   = m_extra[id];
+            extra.plater       = fresh;
+            extra.dir          = fs::path(saved.snapshot_path).parent_path().string();
+            extra.files        = { saved.snapshot_path, saved.snapshot_path + ".tmp" };
+            m_frame->activate_plater(fresh);
+            m_sessions.select(id);
+            // Its own presets come with its 3MF (as an opened project); the swap guard keeps the printer memory out.
+            const bool ok = fresh->load_project_snapshot(saved.snapshot_path, from_u8(saved.origin_path), from_u8(saved.name), saved.dirty,
+                                                         saved.plate);
+            load_thumbnail(id, saved.snapshot_path);
+            // Back from its snapshot: the files go now (the next exit writes new ones if asked to).
+            remove_slot_files(id);
+            extra.files.clear();
+            extra.dir.clear();
+            if (ProjectSlot *slot = m_sessions.find(id)) {
+                slot->snapshot_path.clear();
+                slot->main_tab = int(MainTabs::Editor3D);
+            }
+            if (!ok)
+                BOOST_LOG_TRIVIAL(warning) << "project strip: \"" << saved.name << "\" could not be restored";
+            if (int(i) == r.active)
+                target_id = id;
+        }
+        // The project to show: the one that was shown, unless another one was opened meanwhile.
+        const int show = blank ? target_id : front_id;
+        if (show >= 0 && show != m_sessions.active_id()) {
+            stash_active();
+            show_slot(show);
+            m_sessions.select(show);
+        }
+        if (blank && blank_id != m_sessions.active_id())
+            if (Plater *pl = plater_of(blank_id)) {
+                m_frame->destroy_project_plater(pl);
+                m_sessions.close(blank_id);
+                m_extra.erase(blank_id);
+            }
     }
     BOOST_LOG_TRIVIAL(info) << "project strip: " << r.slots.size() << " projects of the previous session restored";
-    // The start's empty project gives way to the one that was active; a project opened meanwhile stays in front.
-    if (blank && target_id >= 0) {
-        ProjectSlot *target = m_sessions.find(target_id);
-        bool         slicing_cancelled = false;
-        if (target != nullptr && can_switch(true, slicing_cancelled)) {
-            const auto started = std::chrono::steady_clock::now();
-            bool       ok      = false;
-            {
-                SwitchScope scope(*this, true);
-                ok = restore(*target);
-                if (ok) {
-                    m_sessions.close(blank_id);
-                    m_extra.erase(blank_id);
-                    m_sessions.select(target_id);
-                }
-            }
-            if (ok)
-                after_switch(target_id, slicing_cancelled, started, 0, "session");
-        }
-    }
+    after_switch(m_sessions.active_id(), started, 0, "session");
     Refresh();
 }
 

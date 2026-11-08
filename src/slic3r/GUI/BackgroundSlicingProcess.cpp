@@ -196,10 +196,19 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
 
 // This function may one day be merged into the Print, but historically the print was separated
 // from the G-code generator.
+GUI::Plater *BackgroundSlicingProcess::owner() const
+{
+    if (m_owner != nullptr)
+        return m_owner;
+    return GUI::wxGetApp().mainframe != nullptr ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+}
+
 void BackgroundSlicingProcess::process_fff()
 {
     assert(m_print == m_fff_print);
-    m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
+    // is_BBL_printer() was set on the UI thread (apply() and validate()) from the presets this print was applied with. Reading the
+    // app-global presets here, on the worker thread, would take another project's (project strip P4: a hidden project
+    // slices on while another one is shown).
 	//BBS: add the logic to process from an existed gcode file
 	if (m_print->finished()) {
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: skip slicing, to process previous gcode file")%__LINE__;
@@ -208,7 +217,7 @@ void BackgroundSlicingProcess::process_fff()
 		// Post the Slicing Finished message for the G-code viewer to update.
 		// Passing the timestamp 
 		evt.SetInt((int)(m_fff_print->step_state_with_timestamp(PrintStep::psSlicingFinished).timestamp));
-		wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+		wxQueueEvent(this->owner(), evt.Clone());
 
 		m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
 		if (! m_export_path.empty()) {
@@ -237,7 +246,7 @@ void BackgroundSlicingProcess::process_fff()
 		// Post the Slicing Finished message for the G-code viewer to update.
 		// Passing the timestamp
 		evt.SetInt((int)(m_fff_print->step_state_with_timestamp(PrintStep::psSlicingFinished).timestamp));
-		wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+		wxQueueEvent(this->owner(), evt.Clone());
 
 		//BBS: add plate index into render params
 		m_temp_output_path = this->get_current_plate()->get_tmp_gcode_path();
@@ -261,13 +270,13 @@ void BackgroundSlicingProcess::process_fff()
 	}
 	if (this->set_step_started(bspsGCodeFinalize)) {
 	    if (! m_export_path.empty()) {
-			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
+			wxQueueEvent(this->owner(), new wxCommandEvent(m_event_export_began_id));
 			if(!m_fff_print->is_BBL_printer())
 				finalize_gcode();
 			else
 				export_gcode();
 	    } else if (! m_upload_job.empty()) {
-			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
+			wxQueueEvent(this->owner(), new wxCommandEvent(m_event_export_began_id));
 			prepare_upload();
 	    } else {
 			m_print->set_status(100, _utf8(L("Slicing complete")));
@@ -293,7 +302,7 @@ void BackgroundSlicingProcess::process_sla()
     m_print->process();
     if (this->set_step_started(bspsGCodeFinalize)) {
         if (! m_export_path.empty()) {
-			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
+			wxQueueEvent(this->owner(), new wxCommandEvent(m_event_export_began_id));
 
             const std::string export_path = m_sla_print->print_statistics().finalize_output_path(m_export_path);
 
@@ -362,7 +371,7 @@ void BackgroundSlicingProcess::thread_proc()
 				(m_state == STATE_CANCELED) ? SlicingProcessCompletedEvent::Cancelled :
 				exception ? SlicingProcessCompletedEvent::Error : SlicingProcessCompletedEvent::Finished, exception);
 			BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": send SlicingProcessCompletedEvent to main, status %1%")%evt.status();
-			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
+			wxQueueEvent(this->owner(), evt.Clone());
 		}
 		else {
 			//BBS: internal cancel
@@ -647,7 +656,7 @@ bool BackgroundSlicingProcess::execute_ui_task(std::function<void()> task)
 	bool result = false;
 	if (running) {
 		std::shared_ptr<UITask> ctx = m_ui_task;
-		GUI::wxGetApp().mainframe->m_plater->CallAfter([task, ctx]() {
+		this->owner()->CallAfter([task, ctx]() {
 			// Running on the UI thread, thus ctx->state does not need to be guarded with mutex against ::cancel_ui_task().
 			assert(ctx->state == UITask::Planned || ctx->state == UITask::Canceled);
 			if (ctx->state == UITask::Planned) {
@@ -702,6 +711,8 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 {
 	assert(m_print != nullptr);
 	assert(config.opt_enum<PrinterTechnology>("printer_technology") == m_print->technology());
+	// Here on the UI thread, with the presets this print is applied with (process_fff() no longer reads them).
+	m_fff_print->is_BBL_printer() = wxGetApp().preset_bundle->is_bbl_vendor();
 	// TODO: add partplate config
 	DynamicPrintConfig new_config = config;
 	// Chip-scope fix (owner hand test 2026-11-04, H2C mixed rack): the per-nozzle values of each filament (widths, region
@@ -727,7 +738,7 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	// mainframe can still be null here: on macOS the splash screen and the WebView creation run nested
 	// event loops during MainFrame construction, and the reslice timer can fire from them.
 	if (m_print->technology() == ptFFF) {
-		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		const auto plater = this->owner();
 		if (!(plater && plater->only_gcode_mode()))
 			CostOverrides::apply(new_config, *CostOverrides::global(), &GUI::wxGetApp().preset_bundle->filaments,
 			                    &GUI::wxGetApp().preset_bundle->printers);
@@ -738,7 +749,7 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 	// a change re-runs only the G-code export. Left alone in the G-code viewer mode, whose G-code
 	// is a file that is never exported again.
 	if (m_print->technology() == ptFFF) {
-		const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+		const auto plater = this->owner();
 		if (!(plater && plater->only_gcode_mode()) &&
 			m_fff_print->set_gcode_filament_prices(GUI::wxGetApp().app_config->get_bool("gcode_include_filament_prices")))
 			invalidated = PrintBase::APPLY_STATUS_INVALIDATED;
@@ -746,7 +757,7 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
 
 	// Orca: prevent resetting under gcode viewer mode
     if (invalidated != PrintBase::APPLY_STATUS_UNCHANGED) {
-        const auto plater = GUI::wxGetApp().mainframe ? GUI::wxGetApp().mainframe->m_plater : nullptr;
+        const auto plater = this->owner();
         if (plater && plater->only_gcode_mode()) {
             invalidated = PrintBase::APPLY_STATUS_UNCHANGED;
         }
@@ -958,10 +969,10 @@ void BackgroundSlicingProcess::export_gcode()
 	}
 
 	// BBS
-	auto evt = new wxCommandEvent(m_event_export_finished_id, GUI::wxGetApp().mainframe->m_plater->GetId());
+	auto evt = new wxCommandEvent(m_event_export_finished_id, this->owner()->GetId());
 	wxString output_gcode_str = wxString::FromUTF8(export_path.c_str(), export_path.length());
 	evt->SetString(output_gcode_str);
-	wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt);
+	wxQueueEvent(this->owner(), evt);
 
 	// Plate print history: the G-code reached its file. An export, not a send.
 	if (m_current_plate != nullptr)
