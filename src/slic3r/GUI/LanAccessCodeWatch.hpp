@@ -27,6 +27,10 @@
 // once; a slow failure (unreachable) breaks the run and never counts; a session that stays up for
 // SHORT_SESSION_MS proves the code and clears the notice. A new code starts afresh.
 //
+// A code the user has just typed in (the edit dialog) skips the boot allowance: the printer was up
+// when they read the code off its screen, so REFUSALS_FOR_USER_CODE refused dials in a row (the dial
+// and its quick re-dial, a few seconds) raise the notice at once.
+//
 // No wx, no clock, no printer: the caller passes steady-clock milliseconds, the tests drive it.
 // One instance per printer (DeviceManager keys them by serial), GUI thread only.
 
@@ -41,6 +45,10 @@ namespace LanAccessCode {
 static constexpr int       REFUSALS_FOR_NOTICE = 3;
 // ...and the run must have lasted this long, first refusal to last.
 static constexpr long long MIN_RUN_MS          = 90000;
+// Refused dials in a row before the user is told, for a code they have just entered (no MIN_RUN_MS).
+static constexpr int       REFUSALS_FOR_USER_CODE = 2;
+// Refused dials in a row before the Device page says the code was refused (redials go on).
+static constexpr int       REFUSALS_FOR_BAR       = 2;
 // A dial that fails sooner than this was answered by the printer.
 static constexpr long long QUICK_REFUSAL_MS    = 4000;
 // A session that drops sooner than this after coming up was closed on us, not lost.
@@ -109,6 +117,9 @@ public:
     void dial_started(long long now_ms, size_t code_fp)
     {
         if (!m_have_code || code_fp != m_code_fp) {
+            // A code from anywhere but the dialog that marked this run (code_from_user) is not the user's.
+            if (m_have_code)
+                m_user_code = false;
             m_have_code = true;
             m_code_fp   = code_fp;
             m_refusals  = 0;
@@ -143,7 +154,8 @@ public:
         case Outcome::Refused:
             if (++m_refusals == 1)
                 m_first_refusal_at = now_ms;
-            if (m_refusals >= REFUSALS_FOR_NOTICE && now_ms - m_first_refusal_at >= MIN_RUN_MS && !m_shown) {
+            if (!m_shown && (m_user_code ? m_refusals >= REFUSALS_FOR_USER_CODE
+                                         : m_refusals >= REFUSALS_FOR_NOTICE && now_ms - m_first_refusal_at >= MIN_RUN_MS)) {
                 m_shown = true;
                 return Verdict::Notify;
             }
@@ -167,16 +179,26 @@ public:
     void forget()
     {
         m_have_code = false;
+        m_user_code = false;
         m_refusals  = 0;
         m_shown     = false;
         m_dial_open = false;
         m_up_at     = -1;
     }
 
+    // The next code dialled was typed in by the user just now (DeviceManager::lan_access_code_changed).
+    void code_from_user()
+    {
+        forget();
+        m_user_code = true;
+    }
+
     int     refusals() const { return m_refusals; }
     bool    notice_shown() const { return m_shown; }
     // The last dial with this code was refused (the Send dialog offers to re-enter it).
     bool    last_dial_refused() const { return m_refusals > 0; }
+    // The Device page says the code was refused (before the notice; the redials go on).
+    bool    bar_says_refused() const { return m_shown || m_refusals >= REFUSALS_FOR_BAR; }
     Outcome last_outcome() const { return m_last; }
 
 private:
@@ -195,7 +217,8 @@ private:
 
     Verdict succeeded()
     {
-        m_refusals = 0;
+        m_refusals  = 0;
+        m_user_code = false;
         if (m_shown) {
             m_shown = false;
             return Verdict::Clear;
@@ -208,6 +231,7 @@ private:
     int       m_refusals{0};
     long long m_first_refusal_at{0};
     bool      m_shown{false};
+    bool      m_user_code{false};
     bool      m_dial_open{false};
     long long m_dial_at{0};
     long long m_up_at{-1};

@@ -1473,6 +1473,8 @@ public:
     // since: the Device page says so and the visible slicer stops redialling it
     // (LanAccessCode::redial_paused).
     bool lan_access_code_blocked(const std::string& dev_id) const;
+    // The Device page says the code was refused (from the second refused dial in a row).
+    bool lan_access_code_bar(const std::string& dev_id) const;
     // The user saved a new access code for this LAN printer: forget the refusals, close the
     // notice, and - when it is the printer this instance holds a session to - redial it now with
     // the new code instead of waiting out the reconnect backoff.

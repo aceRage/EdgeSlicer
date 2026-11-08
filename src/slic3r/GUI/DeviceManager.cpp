@@ -18,6 +18,7 @@
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
+#include "Notebook.hpp"
 #include "Plater.hpp"
 #include "GUI_App.hpp"
 #include "ReleaseNote.hpp"
@@ -7328,6 +7329,12 @@ bool DeviceManager::lan_access_code_blocked(const std::string& dev_id) const
     return it != m_lan_code_watch.end() && it->second.notice_shown();
 }
 
+bool DeviceManager::lan_access_code_bar(const std::string& dev_id) const
+{
+    auto it = m_lan_code_watch.find(dev_id);
+    return it != m_lan_code_watch.end() && it->second.bar_says_refused();
+}
+
 void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::Verdict v)
 {
     if (v == LanAccessCode::Verdict::None) return;
@@ -7358,13 +7365,39 @@ void DeviceManager::lan_code_verdict(const std::string& dev_id, LanAccessCode::V
                               // cancelled dialog leaves it there to click again).
                               return false;
                           });
+
+    // That notice lives on the 3D canvas. Anywhere else (the Device page, where a connect is
+    // watched), ask in a dialog too.
+    GUI::MainFrame* mf = app.mainframe;
+    const int       tab = (mf && mf->m_tabpanel) ? mf->m_tabpanel->GetSelection() : -1;
+    if (tab == GUI::MainFrame::tp3DEditor || tab == GUI::MainFrame::tpPreview || tab == GUI::MainFrame::tpShowcase)
+        return;
+    static bool s_open = false;
+    if (s_open)
+        return;
+    s_open = true;
+    app.CallAfter([dev_id, name]() {
+        wxWindow* parent = Slic3r::GUI::wxGetApp().mainframe;
+        const wxString msg = wxString::FromUTF8(GUI::format(_u8L("%1% refused its access code. Without the right code the slicer cannot "
+                                                                  "connect to it, and stops trying until you enter it."), name)) +
+                             "\n\n" + _L("Enter the access code shown on the printer's screen now?");
+        GUI::MessageDialog dlg(parent, msg,
+                               _L("Access code refused"), wxYES_NO | wxYES_DEFAULT | wxICON_WARNING);
+        dlg.SetButtonLabel(wxID_YES, _L("Re-enter access code"));
+        dlg.SetButtonLabel(wxID_NO, _L("Later"));
+        const int answer = dlg.ShowModal();
+        s_open           = false;
+        if (answer == wxID_YES)
+            GUI::open_printer_edit_dialog(dev_id);
+    });
 }
 
 void DeviceManager::lan_access_code_changed(MachineObject* obj)
 {
     if (!obj || obj->dev_id.empty()) return;
     const std::string dev_id = obj->dev_id;
-    m_lan_code_watch.erase(dev_id);
+    // The user typed this code in: if the printer refuses it too, say so after the quick re-dial.
+    m_lan_code_watch[dev_id].code_from_user();
     GUI::GUI_App& app = Slic3r::GUI::wxGetApp();
     if (app.plater() != nullptr)
         if (GUI::NotificationManager* nm = app.plater()->get_notification_manager())

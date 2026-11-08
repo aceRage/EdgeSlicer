@@ -250,3 +250,52 @@ TEST_CASE("A new code resumes the redials", "[LanAccessCode]")
     w.dial_started(200000, NEW_CODE);
     CHECK_FALSE(redial_paused(w, false));
 }
+
+TEST_CASE("A code the user just entered is judged after the quick re-dial", "[LanAccessCode]")
+{
+    // The printer was up when they read the code off its screen: no boot allowance.
+    Watch w;
+    w.code_from_user();
+    CHECK(refused_dial(w, 0, NEW_CODE) == Verdict::None);
+    CHECK_FALSE(w.bar_says_refused());
+    CHECK(refused_dial(w, 1500, NEW_CODE) == Verdict::Notify);
+    CHECK(w.bar_says_refused());
+    CHECK(redial_paused(w, false));
+    // Once per code.
+    CHECK(refused_dial(w, 60000, NEW_CODE) == Verdict::None);
+}
+
+TEST_CASE("The user's code loses its fast rule once it worked or another code came", "[LanAccessCode]")
+{
+    Watch w;
+    w.code_from_user();
+    w.dial_started(0, NEW_CODE);
+    w.session_up(800);
+    CHECK(w.tick(800 + SHORT_SESSION_MS) == Verdict::None);
+    // Later the code is changed on the printer: the usual rule (3 refusals over MIN_RUN_MS).
+    CHECK(refused_dial(w, 100000, NEW_CODE) == Verdict::None);
+    CHECK(refused_dial(w, 101500, NEW_CODE) == Verdict::None);
+    CHECK(refused_dial(w, 116500, NEW_CODE) == Verdict::None);
+
+    Watch other;
+    other.code_from_user();
+    refused_dial(other, 0, NEW_CODE);
+    // A different code dialled without the dialog (the hub's copy, say): not the user's.
+    CHECK(refused_dial(other, 1500, OLD_CODE) == Verdict::None);
+    CHECK(refused_dial(other, 3000, OLD_CODE) == Verdict::None);
+    CHECK_FALSE(other.notice_shown());
+}
+
+TEST_CASE("The Device page says refused from the second refusal in a row", "[LanAccessCode]")
+{
+    Watch w;
+    refused_dial(w, 0);
+    CHECK_FALSE(w.bar_says_refused());
+    refused_dial(w, 1500);
+    CHECK(w.bar_says_refused());
+    CHECK_FALSE(w.notice_shown()); // the notice still waits for the long run
+    CHECK_FALSE(redial_paused(w, false));
+    // A slow failure (unreachable) breaks the run.
+    unreachable_dial(w, 16500);
+    CHECK_FALSE(w.bar_says_refused());
+}
