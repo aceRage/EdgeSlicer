@@ -293,7 +293,9 @@ void ProjectStrip::stash_active()
     // the placeholder. Its thumbnail is rendered now, while it is still the one on screen, when the tile's is not current.
     if (const SlotExtra &e = m_extra[slot->id]; tile_thumbnail_stale(e.image.IsOk(), e.thumb_marker, active_thumbnail_marker())) {
         m_thumb_timer.Stop();
-        render_active_thumbnail();
+        // Off screen too: Recent projects are opened from Home, so the project may be left without its canvas shown (the
+        // thumbnail renders into an off-screen buffer, as the 3MF plate thumbnails do).
+        render_active_thumbnail(true);
     }
     // Its presets, unsaved edits included: the app-global bundle is the next project's from now on.
     m_extra[slot->id].presets = wxGetApp().preset_bundle->capture_project_presets();
@@ -811,13 +813,13 @@ size_t ProjectStrip::active_thumbnail_marker() const
     return p == nullptr ? size_t(-1) : p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index()));
 }
 
-bool ProjectStrip::render_active_thumbnail()
+bool ProjectStrip::render_active_thumbnail(bool off_screen)
 {
     Plater      *p      = plater();
     ProjectSlot *active = m_sessions.active();
     if (p == nullptr || active == nullptr || m_collapsed || m_text_mode || plater_of(active->id) != p)
         return false;
-    if (!plater_tab_shown()) {
+    if (!off_screen && !plater_tab_shown()) {
         // The canvas is not on screen: try again after the next change, or when the plater is back.
         m_active_marker = size_t(-1);
         return false;

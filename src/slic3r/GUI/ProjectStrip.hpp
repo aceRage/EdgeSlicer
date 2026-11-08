@@ -144,8 +144,9 @@ private:
     wxString    tooltip_for(const ProjectSlot &slot) const;
     void        on_poll(wxTimerEvent &);
     void        on_thumbnail_timer(wxTimerEvent &);
-    // Renders the shown project's plate into its tile. False when it cannot (no canvas on screen, names-only mode).
-    bool        render_active_thumbnail();
+    // Renders the shown project's plate into its tile. False when it cannot (names-only mode, or no plater tab on screen
+    // unless off_screen).
+    bool        render_active_thumbnail(bool off_screen = false);
     size_t      active_thumbnail_marker() const;
     bool        plater_tab_shown() const;
     void        refresh_max_open();
