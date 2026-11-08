@@ -21733,9 +21733,10 @@ void Plater::on_project_hidden()
 void Plater::on_project_shown()
 {
     // The window title and the hub's name are this project's.
-    p->set_project_name(p->m_project_name);
+    const wxString name = get_project_name();
+    p->set_project_name(name);
     if (const wxString file = get_project_filename(".3mf"); !file.empty())
-        RemoteAccess::get().note_project(p->m_project_name.ToUTF8().data(), file.ToUTF8().data());
+        RemoteAccess::get().note_project(name.ToUTF8().data(), file.ToUTF8().data());
     p->update_title_dirty_status();
     // The sidebar as the tab on screen wants it (the notebook told only the shown Plater about tab changes).
     if (MainFrame *frame = wxGetApp().mainframe; frame != nullptr && frame->m_tabpanel != nullptr) {
