@@ -475,3 +475,37 @@ TEST_CASE("project strip: the tick needs every plate with objects sliced, in eac
     CHECK(slice_badge(false, 0, 0) == SliceBadge::None);
 }
 
+TEST_CASE("project strip: closing a first or middle project keeps every other slot and the next open", "[ProjectSessions][P4]")
+{
+    // Owner crash 2026-11-08: three projects, close the first or the middle one, then open a file. (The crash was the
+    // Printer / Filament tabs going with the first Plater; the slot bookkeeping is checked here.)
+    for (int victim_index : { 0, 1 }) {
+        ProjectSessions s;
+        const int a = s.add("C:/p/a.3mf", "a");
+        s.select(a);
+        const int b = s.add("C:/p/b.3mf", "b");
+        s.select(b);
+        const int c = s.add("C:/p/c.3mf", "c");
+        s.select(c);
+        const int victim = victim_index == 0 ? a : b;
+        // The shown project is closed: the strip shows its successor first.
+        s.select(victim);
+        const int next = s.successor_on_close(victim);
+        REQUIRE(next >= 0);
+        REQUIRE(s.select(next));
+        REQUIRE(s.close(victim));
+        CHECK(s.size() == 2);
+        CHECK(s.active_id() == next);
+        CHECK(s.find(victim) == nullptr);
+        for (const ProjectSlot &slot : s.slots())
+            CHECK(slot.id != victim);
+        // The next open gets a new id after the active one, never a closed project's id.
+        const int d = s.add("C:/p/d.3mf", "d");
+        CHECK(d != a);
+        CHECK(d != b);
+        CHECK(d != c);
+        CHECK(s.index_of(d) == s.index_of(next) + 1);
+        CHECK(s.find_by_origin("C:/p/d.3mf") == d);
+    }
+}
+
