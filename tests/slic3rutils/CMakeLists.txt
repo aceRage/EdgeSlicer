@@ -108,6 +108,7 @@ add_executable(${_TEST_NAME}_tests
     page_server_security_tests.cpp
     login_result_page_tests.cpp
     sentry_scrub_tests.cpp
+    local_minidump_tests.cpp
     login_diagnostics_tests.cpp
     login_ticket_gate_tests.cpp
     stream_page_icon_tests.cpp
