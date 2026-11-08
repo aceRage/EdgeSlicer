@@ -31,6 +31,7 @@
 #include "Plater.hpp"
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
+#include "MixedSublayerUi.hpp"
 #include "Theme.hpp"
 #include "GUI_ObjectList.hpp"
 #include "ParamsPanel.hpp"
@@ -727,6 +728,22 @@ void GLCanvas3D::LayersEditing::render_variable_layer_height_dialog(const GLCanv
     ImGui::SameLine();
     if (imgui.button(_L("Reset")))
         wxPostEvent((wxEvtHandler*)canvas.get_wxglcanvas(), SimpleEvent(EVT_GLCANVAS_RESET_LAYER_HEIGHT_PROFILE));
+
+    // Mixed color sublayer P2 (Bambu Studio GLCanvas3D.cpp:484): an object with mixed color sublayers (Ratio rows)
+    // splits each of its variable layers by the mix, so very thin layers give very thin passes.
+    if (m_model_object != nullptr && wxGetApp().preset_bundle != nullptr) {
+        const PresetBundle &bundle = *wxGetApp().preset_bundle;
+        if (MixedSublayerUi::object_uses_ratio_rows(*m_model_object, bundle.mixed_filaments, bundle.filament_presets.size(),
+                                                    MixedSublayerUi::process_defaults(bundle))) {
+            ImGui::Separator();
+            const float wrap = std::max(ImGui::GetWindowContentRegionMax().x - ImGui::GetCursorPosX(), imgui.scaled(10.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_ORANGE_LIGHT);
+            imgui.text_wrapped(_L("Mixed color sublayer is on for this object. With variable layer height each pass is a share of "
+                                  "a thinner or thicker layer, which may affect print quality."),
+                               wrap);
+            ImGui::PopStyleColor();
+        }
+    }
 
     GLCanvas3D::LayersEditing::s_overlay_window_width = ImGui::GetWindowSize().x;
     imgui.end();

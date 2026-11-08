@@ -20,6 +20,7 @@ class Button;
 class ComboBox;
 class Label;
 class StaticBox;
+class CheckBox;
 
 namespace Slic3r { namespace GUI {
 
@@ -182,6 +183,21 @@ private:
         std::vector<int> filament_indices; // combo index → actual filament index
     };
     std::vector<FilamentRow> m_filament_rows;
+
+    // Mixed color sublayer P2 (design_mixed_color_sublayer.md 3g): the Sub-layers card. The row's own sub-layer
+    // method (Auto / Cadence / Subdivide / Ratio), Bambu Studio's order, the cost line and the broken-row notice.
+    void build_sublayer_card(wxWindow* parent, wxSizer* sizer);
+    void update_sublayer_card();
+    // The row as OK would save it now, without changing m_result.
+    Slic3r::MixedFilament preview_result();
+    class StaticBox*        m_sublayer_card          = nullptr;
+    ComboBox*               m_sublayer_method_combo  = nullptr;
+    wxPanel*                m_sublayer_order_row     = nullptr;
+    ::CheckBox*             m_sublayer_bs_order      = nullptr;
+    Label*                  m_sublayer_info          = nullptr;
+    Label*                  m_sublayer_cost          = nullptr;
+    Label*                  m_sublayer_broken        = nullptr;
+    size_t                  m_sublayer_layers        = 0; // layers of the tallest object on the plate
 
     const std::vector<std::string>& m_filament_colours;
     Slic3r::MixedFilament            m_result;
