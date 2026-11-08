@@ -1,5 +1,5 @@
 #include "SelectMachinePop.hpp"
-#include "MacPopupHover.hpp"
+#include "PopupRowIcons.hpp"
 #include "I18N.hpp"
 #include "FirewallCheckDialog.hpp"
 #include "BambuSetupNoticeDialog.hpp"
@@ -75,13 +75,6 @@ MachineObjectPanel::MachineObjectPanel(wxWindow *parent, wxWindowID id, const wx
     this->Bind(wxEVT_ENTER_WINDOW, &MachineObjectPanel::on_mouse_enter, this);
     this->Bind(wxEVT_LEAVE_WINDOW, &MachineObjectPanel::on_mouse_leave, this);
     this->Bind(wxEVT_LEFT_UP, &MachineObjectPanel::on_mouse_left_up, this);
-
-#ifdef __APPLE__
-    // macOS 13.1 and later: the popup's rows get no hover, so their icons are always drawn
-    // (MacPopupHover.hpp; the old test missed every x.0 release after 13).
-    wxPlatformInfo platformInfo;
-    m_is_macos_special_version = macos_popup_icons_always_drawn(platformInfo.GetOSMajorVersion(), platformInfo.GetOSMinorVersion());
-#endif
 
 }
 
@@ -196,9 +189,9 @@ void MachineObjectPanel::doRender(wxDC &dc)
     dc.DrawText(finally_name, wxPoint(left, (size.y - sizet.y) / 2));
 
 
-    if (m_hover || m_is_macos_special_version) {
-
-        if (m_hover && !m_is_macos_special_version) {
+    // The pencil and log-out icons are always drawn; hovering adds the highlight frame.
+    {
+        if (m_hover) {
             dc.SetPen(SELECT_MACHINE_BRAND);
             dc.SetBrush(*wxTRANSPARENT_BRUSH);
             dc.DrawRectangle(0, 0, size.x, size.y);
@@ -704,23 +697,26 @@ void SelectMachinePopup::update_user_devices()
         op->update_machine_info(mobj, true);
         //set in lan
         if (mobj->is_lan_mode_printer()) {
-            if (!mobj->is_online()) {
-                continue;
+            // Rows are reused: reset what the previous printer in this slot showed.
+            op->show_printer_bind(false, PrinterBindState::NONE);
+            op->show_edit_printer_name(false);
+            const bool online = mobj->is_online();
+            const RowEditIcons icons = edit_icons_for_row(true, online, mobj->has_access_right(), mobj->is_avaliable());
+            // The pencil edits the name and the saved access code, so a refused (LOCK) or
+            // unreachable printer can get its code re-entered here. Log-out stays where it was.
+            op->show_edit_printer_name(icons.pencil);
+            if (!online) {
+                op->set_printer_state(PrinterState::OFFLINE);
+                op->SetToolTip(_L("Offline"));
+            }
+            else if (mobj->has_access_right() && mobj->is_avaliable()) {
+                op->set_printer_state(PrinterState::IN_LAN);
+                if (icons.logout)
+                    op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
+                op->SetToolTip(_L("Online"));
             }
             else {
-                op->show_printer_bind(false, PrinterBindState::NONE);
-                op->show_edit_printer_name(false);
-                if (mobj->has_access_right() && mobj->is_avaliable()) {
-                    op->set_printer_state(PrinterState::IN_LAN);
-                    op->show_printer_bind(true, PrinterBindState::ALLOW_UNBIND);
-                    // The pencil edits a LAN printer's name and access code (EditDevNameDialog),
-                    // so a changed code no longer needs Log out + reconnect.
-                    op->show_edit_printer_name(true);
-                    op->SetToolTip(_L("Online"));
-                }
-                else {
-                    op->set_printer_state(PrinterState::LOCK);
-                }
+                op->set_printer_state(PrinterState::LOCK);
             }
         }
         else {

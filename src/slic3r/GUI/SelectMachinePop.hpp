@@ -82,7 +82,6 @@ private:
     bool        m_show_edit{false};
     bool        m_show_bind{false};
     bool        m_hover {false};
-    bool        m_is_macos_special_version{false};
 
 
     PrinterBindState   m_bind_state;
