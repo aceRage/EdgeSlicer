@@ -898,6 +898,8 @@ public:
     // Makes the theme app_config "ui_theme" names the running look without a restart: colours,
     // corner radii, icons, title bar, 3D view and Home page. Fonts still need one (Theme::fonts_pending()).
     void            apply_theme_live();
+    // Project strip P4: the theme's colour pass for a window made after the main window was themed (a new project's Plater).
+    void            theme_new_window(wxWindow *window);
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.

@@ -1354,6 +1354,9 @@ Plater *MainFrame::create_project_plater()
 #ifdef __APPLE__
     plater->sidebar().change_top_border_for_mode_sizer(m_layout != ESettingsLayout::Old);
 #endif
+    // The theme's colour pass the window got at startup (dark section headers and scroll bars). Before the ParamsPanel
+    // moves in (activate_plater): it was themed with the window already.
+    wxGetApp().theme_new_window(plater);
     m_platers.push_back(plater);
     m_platers_fresh.insert(plater);
     BOOST_LOG_TRIVIAL(info) << "project strip: new Plater, " << m_platers.size() << " open" << log_memory_info();
@@ -1380,20 +1383,24 @@ void MainFrame::activate_plater(Plater *plater)
     wxGetApp().other_instance_message_handler()->set_callback_evt_handler(plater);
     wxGetApp().removable_drive_manager()->set_callback_evt_handler(plater);
     if (m_platers_fresh.erase(plater) > 0) {
+        const auto first_show = std::chrono::steady_clock::now();
         // What GUI_App::on_init_inner() does for the first Plater once the window exists.
         plater->sidebar().obj_list()->init();
         plater->init_notification_manager();
         plater->set_printer_technology(wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology());
         plater->get_camera().select_view("topfront");
         plater->get_camera().requires_zoom_to_bed = true;
-        // Its canvases initialise now, with it as the app's Plater: until a canvas is initialised, reload_scene() does
-        // nothing, so the project the strip loads into it next would not reach the 3D view (the first Plater's canvas is
-        // initialised by GUI_App before any project loads; the hub's hidden instances use the same call).
-        plater->ensure_gl_ready();
-        if (GLCanvas3D *assemble = plater->get_assmeble_canvas3D())
-            assemble->ensure_gl_ready();
+        // Its 3D canvas initialises now, with it as the app's Plater: until a canvas is initialised, reload_scene() does
+        // nothing, so the project the strip loads into it next would not reach the 3D view. The first Plater's 3D canvas is
+        // initialised the same way by GUI_App before any project loads. Preview and Assemble stay lazy, as at startup:
+        // they initialise when their view is first shown (owner re-test: a visible hang on the first show otherwise).
+        const auto gl_started = std::chrono::steady_clock::now();
         if (GLCanvas3D *view3d = plater->get_view3D_canvas3D())
-            view3d->ensure_gl_ready(); // leaves the 3D canvas current, as Plater::ensure_gl_ready() does
+            view3d->ensure_gl_ready();
+        const auto now = std::chrono::steady_clock::now();
+        BOOST_LOG_TRIVIAL(info) << "project strip: first show of a new Plater, init "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(now - first_show).count() << " ms (3D canvas GL "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(now - gl_started).count() << " ms)";
     }
     // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
     // this project's selection now.
@@ -4268,20 +4275,32 @@ void MainFrame::init_menubar_as_editor()
             SetAcceleratorTable(wxAcceleratorTable(4, entries));
         }
         // The project list: only the items added at the last open are removed (wx no longer touches this menu).
+        // One fixed block of ids (the strip's most open projects) and one handler for it: opening the menu takes no new ids
+        // and binds nothing (the auto id pool is finite).
+        constexpr int project_id_count = ProjectSessions::max_max_open;
+        const int     id_project_first = wxWindow::NewControlId(project_id_count);
         auto project_items = std::make_shared<std::vector<wxMenuItem *>>();
-        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_items](wxMenuEvent &e) {
+        auto project_ids   = std::make_shared<std::vector<int>>(); // the strip's project id per menu position
+        Bind(wxEVT_MENU, [this, project_ids, id_project_first](wxCommandEvent &e) {
+            const int i = e.GetId() - id_project_first;
+            if (m_project_strip != nullptr && i >= 0 && i < int(project_ids->size()))
+                m_project_strip->select_project((*project_ids)[size_t(i)]);
+        }, id_project_first, id_project_first + project_id_count - 1);
+        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_items, project_ids, id_project_first](wxMenuEvent &e) {
             e.Skip();
             if (e.GetMenu() != window_menu || m_project_strip == nullptr)
                 return;
             for (wxMenuItem *item : *project_items)
                 window_menu->Destroy(item);
             project_items->clear();
+            project_ids->clear();
             for (const auto &entry : m_project_strip->menu_entries()) {
-                const int   item_id = wxWindow::NewControlId();
+                if (int(project_ids->size()) >= project_id_count)
+                    break;
+                const int   item_id = id_project_first + int(project_ids->size());
                 wxMenuItem *item    = window_menu->AppendCheckItem(item_id, entry.second);
                 item->Check(entry.first == m_project_strip->active_project_id());
-                const int project = entry.first;
-                Bind(wxEVT_MENU, [this, project](wxCommandEvent &) { if (m_project_strip) m_project_strip->select_project(project); }, item_id);
+                project_ids->push_back(entry.first);
                 project_items->push_back(item);
             }
         });
