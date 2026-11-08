@@ -406,8 +406,10 @@ void MonitorPanel::update_all()
         const bool refused = dev && obj->is_lan_mode_printer() && dev->lan_access_code_bar(obj->dev_id) &&
                              (obj->is_connecting() || !obj->is_connected());
         if (refused) {
+            // show_status() resets the panel (set_default) and with it `obj`: keep the serial first.
+            const std::string dev_id = obj->dev_id;
             show_status((int) MONITOR_DISCONNECTED);
-            m_side_tools->set_access_code_refused(obj->dev_id);
+            m_side_tools->set_access_code_refused(dev_id);
             return;
         }
         m_side_tools->set_access_code_refused(std::string());
