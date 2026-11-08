@@ -1481,3 +1481,65 @@ TEST_CASE("paint_v1 apply: /pair lists paint_v1_apply, the manifest is v9, the p
     CHECK_FALSE(instance_api_allowed("POST", "/api/paint/sessions/0123456789abcdef/apply"));
     CHECK_FALSE(instance_api_allowed("GET", "/api/paint/sessions/0123456789abcdef/apply"));
 }
+
+// ---- leftover printers: configured_row_fate / configured_judge_kind / forget_printer_status ----
+
+TEST_CASE("leftover printers: a row the slicer no longer lists goes after the grace, an offline configured one stays", "[RemoteHub][forget]")
+{
+    using namespace Slic3r::GUI::RemoteHub::Testing;
+    const std::set<std::string> configured = { "01P00A000000001", "sm:U1-0042", "ph:abc" };
+    const std::set<std::string> none;
+    const long long             grace      = 5 * 60 * 1000;
+
+    // Configured (offline or not: the list carries offline printers too) - always kept, and a
+    // pending removal is called off.
+    CHECK(configured_row_fate("01P00A000000001", "bambu", configured, none, 0, 1000000, grace) == 0);
+    CHECK(configured_row_fate("sm:U1-0042", "snapmaker", configured, none, 900000, 1000000, grace) == 0);
+
+    // Removed: first seen missing now, kept through the grace, then dropped.
+    const long long since = configured_row_fate("sm:TEST-MOCK", "snapmaker", configured, none, 0, 1000000, grace);
+    CHECK(since == 1000000);
+    CHECK(configured_row_fate("sm:TEST-MOCK", "snapmaker", configured, none, since, 1000000 + grace - 1, grace) == since);
+    CHECK(configured_row_fate("sm:TEST-MOCK", "snapmaker", configured, none, since, 1000000 + grace, grace) == -1);
+
+    // Load time (grace 0): a row that is not on the saved list goes at once.
+    CHECK(configured_row_fate("ph:gone", "printhost", configured, none, 0, 5000, 0) == -1);
+    CHECK(configured_row_fate("ph:abc", "printhost", configured, none, 0, 5000, 0) == 0);
+}
+
+TEST_CASE("leftover printers: a kind no window can judge is kept", "[RemoteHub][forget]")
+{
+    using namespace Slic3r::GUI::RemoteHub::Testing;
+    const std::set<std::string> configured = { "sm:U1-0042" };
+    const std::set<std::string> unsure     = { "bambu_cloud" };
+    // Not signed in to Bambu: the cloud printers cannot be listed, so their rows stay...
+    CHECK(configured_row_fate("01P00A000000009", "bambu_cloud", configured, unsure, 0, 1000000, 0) == 0);
+    // ... while a LAN-mode Bambu row is still judged (saved LAN printers are always listed).
+    CHECK(configured_row_fate("01P00A000000009", "bambu", configured, unsure, 0, 1000000, 0) == -1);
+}
+
+TEST_CASE("leftover printers: a cloud-bound Bambu row is judged as bambu_cloud", "[RemoteHub][forget]")
+{
+    using namespace Slic3r::GUI::RemoteHub::Testing;
+    CHECK(configured_judge_kind(R"({"id":"X","kind":"bambu","lan_mode":false})") == "bambu_cloud");
+    CHECK(configured_judge_kind(R"({"id":"X","kind":"bambu"})") == "bambu_cloud");
+    CHECK(configured_judge_kind(R"({"id":"X","kind":"bambu","lan_mode":true})") == "bambu");
+    CHECK(configured_judge_kind(R"({"id":"sm:1","kind":"snapmaker"})") == "snapmaker");
+    CHECK(configured_judge_kind("not json").empty());
+}
+
+TEST_CASE("leftover printers: Forget refuses a printer that is still set up", "[RemoteHub][forget]")
+{
+    using namespace Slic3r::GUI::RemoteHub::Testing;
+    const std::set<std::string> configured = { "sm:U1-0042" };
+    CHECK(forget_printer_status("sm:TEST-MOCK", true, configured, true) == 200);
+    CHECK(forget_printer_status("sm:U1-0042", true, configured, true) == 409);
+    CHECK(forget_printer_status("sm:U1-0042", true, configured, false) == 200); // no list known yet
+    CHECK(forget_printer_status("sm:nothing", false, configured, true) == 404);
+}
+
+TEST_CASE("leftover printers: /pair lists forget_printer", "[RemoteHub][forget]")
+{
+    const auto f = Slic3r::GUI::RemoteHub::Testing::pair_features();
+    CHECK(std::find(f.begin(), f.end(), "forget_printer") != f.end());
+}
