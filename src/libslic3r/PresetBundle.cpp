@@ -2480,6 +2480,7 @@ void PresetBundle::update_selections(AppConfig &config)
     // Per-nozzle process P1: this printer's remembered per-nozzle processes (none: every nozzle uses the
     // plate's process), checked against the presets now visible and compatible.
     this->restore_nozzle_processes(config, printers.get_selected_preset_name());
+    this->note_filament_routing_layout();
 
     std::string first_visible_filament_name;
     for (auto & fp : filament_presets) {
@@ -2640,6 +2641,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Per-nozzle process P1: this printer's remembered per-nozzle processes (none: every nozzle uses the
     // plate's process), checked against the presets now visible and compatible.
     this->restore_nozzle_processes(config, printers.get_selected_preset_name());
+    this->note_filament_routing_layout();
 
     if (initial_printer != nullptr && (preferred_printer == nullptr || initial_printer == preferred_printer)) {
         // Don't run the following code, as we want to activate default filament / SLA material profiles when installing and selecting a new printer.
@@ -3607,6 +3609,26 @@ bool PresetBundle::repoint_preset_references(Preset::Type type, const std::strin
     return changed;
 }
 
+void PresetBundle::note_filament_routing_layout()
+{
+    m_filament_routing_layout = filament_routing_layout(this->printers.get_edited_preset().config);
+}
+
+bool PresetBundle::update_filament_routing_for_printer()
+{
+    const std::string layout = filament_routing_layout(this->printers.get_edited_preset().config);
+    if (layout == m_filament_routing_layout)
+        return false;
+    const std::string old = m_filament_routing_layout;
+    m_filament_routing_layout = layout;
+    if (old.empty())
+        return false; // nothing known about the project yet (startup)
+    const bool changed = reset_filament_routing(this->project_config, this->filament_presets.size());
+    BOOST_LOG_TRIVIAL(info) << "filament routing: printer layout " << old << " -> " << layout
+                            << (changed ? ", the project's filament map, pins and tool assignment reset" : ", nothing to reset");
+    return true;
+}
+
 void PresetBundle::update_nozzle_processes_for_printer(AppConfig &config)
 {
     const std::string printer_name = this->printers.get_selected_preset_name();
@@ -3670,8 +3692,10 @@ bool PresetBundle::set_filament_nozzle(size_t filament, int tool)
     std::vector<int> values = assign->values;
     if (values.size() <= filament)
         values.resize(filament + 1, 0);
-    // The filament's own tool is stored as 0, so a project that puts every filament back reads as unassigned.
-    values[filament] = tool == int(filament) + 1 ? 0 : std::max(0, tool);
+    // The filament's own tool is stored as 0, so a project that puts every filament back reads as unassigned, unless there are
+    // more filaments than tools: an unassigned filament then follows filament_map (owner bug 2026-11-08, U1 filament 3 -> T3).
+    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    values[filament] = filament_nozzle_assignment_value(filament, tool, this->filament_presets.size(), nozzles != nullptr ? nozzles->values.size() : 0);
     values = filament_nozzle_assignment_stored(std::move(values));
     if (values == assign->values)
         return false;
@@ -5131,6 +5155,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         this->project_config.apply_only(config, s_project_options);
         m_nozzle_process_printer = this->printers.get_selected_preset_name();
         m_nozzle_override_model  = nozzle_override_model_key(this->printers);
+        this->note_filament_routing_layout(); // the project's filament map belongs to its own printer
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
         // Older projects can carry mixed_filament_definitions that no longer match the
