@@ -298,7 +298,7 @@ void ProjectStrip::stash_active()
         render_active_thumbnail(true);
     }
     // Its presets, unsaved edits included: the app-global bundle is the next project's from now on.
-    m_extra[slot->id].presets = wxGetApp().preset_bundle->capture_project_presets();
+    m_extra[slot->id].presets = wxGetApp().preset_bundle->capture_project_presets(true);
 }
 
 long long ProjectStrip::show_slot(int id)

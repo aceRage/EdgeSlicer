@@ -316,7 +316,9 @@ public:
         // what made its slice invalid (diagnostics).
         DynamicPrintConfig       full;
     };
-    ProjectPresetState capture_project_presets() const;
+    // with_full_config: also what the project slices with (ProjectPresetState::full), for the switch's diagnostics. It
+    // needs a complete bundle (printer, filament for every slot).
+    ProjectPresetState capture_project_presets(bool with_full_config = false) const;
     // True when the bundle holds exactly that state already (the switch then skips the preset refresh).
     bool               project_presets_current(const ProjectPresetState &state) const;
     // Puts a captured state back. A preset that was deleted meanwhile cannot be selected again: its edited values are put

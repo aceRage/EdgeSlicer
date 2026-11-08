@@ -4830,7 +4830,7 @@ void PresetBundle::restore_selection(const Selection &selection)
 
 // ---- Project strip P4: each open project's presets, kept aside while another project is shown ----------------------------
 
-PresetBundle::ProjectPresetState PresetBundle::capture_project_presets() const
+PresetBundle::ProjectPresetState PresetBundle::capture_project_presets(bool with_full_config) const
 {
     auto embedded_presets_of = [](const PresetCollection &presets) {
         std::vector<const Preset *> out;
@@ -4852,7 +4852,8 @@ PresetBundle::ProjectPresetState PresetBundle::capture_project_presets() const
     state.filament_presets = this->filament_presets;
     state.project_config   = this->project_config;
     state.mixed_filaments  = this->mixed_filaments;
-    state.full             = this->full_config();
+    if (with_full_config)
+        state.full = this->full_config();
     for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
                                              static_cast<const PresetCollection *>(&this->printers) })
         for (const Preset *preset : embedded_presets_of(*presets)) {
