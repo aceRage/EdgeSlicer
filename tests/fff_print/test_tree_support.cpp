@@ -182,7 +182,7 @@ TEST_CASE("A raft is still generated under tree support", "[TreeSupport]")
 // drop_nodes() decides the node merges and spawns the next layer's nodes in parallel. Every one of
 // those decisions has to be applied in a fixed order, or the same model gives different branches on
 // each slice.
-TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression]")
+TEST_CASE("Tree support toolpaths do not depend on thread scheduling", "[TreeSupport][Regression][slow]")
 {
     // Scaled up so that a layer holds enough nodes for the parallel range to be split. At stock
     // size it stays in one chunk and the order never varies.

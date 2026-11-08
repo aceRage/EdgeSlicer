@@ -241,7 +241,7 @@ TEST_CASE("MqttTeardown: destroying a connected client with QoS 1 publishes stil
     }
 }
 
-TEST_CASE("MqttTeardown: the broker resets the socket while QoS 1 publishes are being written", "[MqttTeardown]")
+TEST_CASE("MqttTeardown: the broker resets the socket while QoS 1 publishes are being written", "[MqttTeardown][slow]")
 {
     // EDGESLICER-E: a publish whose write fails with SOCKET_ERROR used to leave the outbound
     // record pointing at freed buffers, freed again by MQTTAsync_destroy (or by the PUBACK after a
