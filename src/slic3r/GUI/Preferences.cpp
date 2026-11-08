@@ -2210,7 +2210,7 @@ wxWindow* PreferencesDialog::create_general_page()
 
     // Project strip P3 (D7): a project file double-clicked in Explorer / Finder while EdgeSlicer runs ("Allow only one
     // instance" on) opens as another project in the strip, or in place of the current one as before.
-    std::vector<wxString>    shellOpenOptions       = { _L("A new project in the project strip"), _L("The current project") };
+    std::vector<wxString>    shellOpenOptions       = { _L("New project tab"), _L("The current project") };
     std::vector<std::string> shellOpenConfigOptions = { "strip", "replace" };
     auto item_shell_open = create_item_combobox(_L("Open project files from Explorer / Finder in"), page,
                                                 _L("Where a project file opened from Explorer or Finder goes while EdgeSlicer is running (with \"Allow only one EdgeSlicer instance\" on)."),
