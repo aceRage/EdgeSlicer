@@ -202,11 +202,12 @@ MixedDiameterMismatch mixed_ratio_diameter_mismatch(const std::vector<unsigned i
     return out;
 }
 
-size_t mixed_ratio_toolchanges_per_layer(size_t component_count, bool ascending_order)
+size_t mixed_ratio_toolchanges_per_layer(size_t component_count, bool ascending_order, bool with_wipe_tower)
 {
     if (component_count < 2)
         return 0;
-    return ascending_order ? component_count : component_count - 1;
+    const size_t changes = ascending_order ? component_count : component_count - 1;
+    return with_wipe_tower ? 2 * changes : changes;
 }
 
 float mixed_ratio_toolchange_purge_volume(bool same_nozzle, float flush_volume, float flush_multiplier, float prime_volume)

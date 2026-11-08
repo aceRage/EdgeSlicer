@@ -106,7 +106,9 @@ MixedDiameterMismatch mixed_ratio_diameter_mismatch(const std::vector<unsigned i
 
 // D7: a rough count of the tool changes a Ratio row adds on a single-nozzle machine. Alternating order changes
 // n - 1 times per layer (the next layer starts where this one ended); ascending order changes n times.
-size_t mixed_ratio_toolchanges_per_layer(size_t component_count, bool ascending_order);
+// With a prime tower the count doubles: ToolOrdering does not know the passes (P1 limit), so the G-code switches
+// back to the tower plan's filament after them and the planned tower change follows (gate: 1.98 per layer).
+size_t mixed_ratio_toolchanges_per_layer(size_t component_count, bool ascending_order, bool with_wipe_tower = false);
 
 // D10: the purge volume of a tool change into a Ratio pass. Two filaments sharing one nozzle (an AMS on one
 // extruder, single_extruder_multi_material) get the full flush of the flush matrix, as an ordinary filament

@@ -2732,7 +2732,7 @@ static StringObjectException validate_mixed_color_sublayer(const Print &print, c
             continue;
         }
         if (single_nozzle && components.size() >= 2) {
-            const size_t per_layer = mixed_ratio_toolchanges_per_layer(components.size(), mf->sublayer_bs_order);
+            const size_t per_layer = mixed_ratio_toolchanges_per_layer(components.size(), mf->sublayer_bs_order, print.has_wipe_tower());
             const size_t changes   = per_layer * layers;
             double       flush     = 0.;
             size_t       pairs     = 0;

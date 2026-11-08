@@ -259,6 +259,10 @@ TEST_CASE("Mixed sublayer: tool changes and tower purge (D7, D10)", "[MixedSubla
     CHECK(mixed_ratio_toolchanges_per_layer(2, true) == 2);
     CHECK(mixed_ratio_toolchanges_per_layer(3, false) == 2);
     CHECK(mixed_ratio_toolchanges_per_layer(1, false) == 0);
+    // With a prime tower: the switch back to the tower plan's filament and the planned change follow the passes.
+    CHECK(mixed_ratio_toolchanges_per_layer(2, false, true) == 2);
+    CHECK(mixed_ratio_toolchanges_per_layer(3, false, true) == 4);
+    CHECK(mixed_ratio_toolchanges_per_layer(1, false, true) == 0);
 
     // Same nozzle: full flush from the matrix. Across heads: prime only.
     CHECK_THAT(double(mixed_ratio_toolchange_purge_volume(true, 300.f, 1.f, 45.f)), WithinAbs(300., 1e-6));
