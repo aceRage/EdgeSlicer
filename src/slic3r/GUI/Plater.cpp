@@ -3962,8 +3962,9 @@ Sidebar::Sidebar(Plater *parent)
 
     {
     //add project title
-    MainFrame *frame        = (MainFrame*)parent->GetParent();
-    auto       params_panel = frame->m_param_panel;
+    // The window's MainFrame: the Plater's parent at startup; a later project's Plater is built in a hidden child of it.
+    MainFrame *frame        = dynamic_cast<MainFrame*>(wxGetTopLevelParent(parent));
+    auto       params_panel = frame != nullptr ? frame->m_param_panel : nullptr;
     // Project strip P4: the first sidebar takes the ParamsPanel; a later project's sidebar gets it when it is shown
     // (attach_params_panel), as the panel is the window's, not the project's.
     const bool take_params = params_panel != nullptr && params_panel->GetParent() == frame->m_tabpanel;

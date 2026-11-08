@@ -497,6 +497,8 @@ public:
     // Project strip P4: every open project's Plater (m_plater among them), and the hidden ones that missed a window-wide
     // refresh (DPI, colours, preferences) or were never shown yet: done when they are shown.
     std::vector<Plater*>  m_platers;
+    // Hidden parent new project Platers are built in (create_project_plater), then reparented to the notebook.
+    wxPanel*              m_plater_nursery{ nullptr };
     std::set<Plater*>     m_platers_fresh;
     std::set<Plater*>     m_platers_need_rescale;
     std::set<Plater*>     m_platers_need_recolour;

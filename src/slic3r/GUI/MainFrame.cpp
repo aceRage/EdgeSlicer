@@ -1329,15 +1329,23 @@ Plater *MainFrame::create_project_plater()
 {
     if (m_plater == nullptr || m_tabpanel == nullptr)
         return nullptr;
-    Plater *shown  = m_plater;
     Plater *plater = nullptr;
     {
-        // Built as the first Plater is at startup: nothing reaches a Plater through the app while it is being made
-        // (its sidebar, object list and canvases would otherwise find the shown project's).
+        // Owner crashes 2026-11-07 (P4 hand tests): the Plater constructor reaches the app's Plater (GLCanvas3D::init ->
+        // notification manager, set_current_panel -> MainFrame::update_slice_print_status -> get_enable_print_status, ...).
+        // At startup those paths found no window or no GL and did nothing; a new project's Plater is built with both up.
+        // So the app's Plater (wxGetApp().plater() and m_plater) stays the shown one, complete and valid, for the whole
+        // construction: whatever the constructor reaches through the app acts on what is on screen, never on a half-built
+        // or null Plater. The new Plater is built inside a hidden window, so its canvases are not on screen and cannot
+        // render or initialise before activate_plater() shows it (GLCanvas3D::render needs IsShownOnScreen()), which is
+        // what startup gave the first Plater by having no GL yet. Its own first init runs in activate_plater(), with it as
+        // the app's Plater.
         wxBusyCursor busy;
-        wxGetApp().plater_ = nullptr;
-        Slic3r::ScopeGuard restore([shown]() { wxGetApp().plater_ = shown; });
-        plater = new Plater(this, this);
+        if (m_plater_nursery == nullptr) {
+            m_plater_nursery = new wxPanel(this, wxID_ANY);
+            m_plater_nursery->Hide();
+        }
+        plater = new Plater(m_plater_nursery, this);
         plater->SetBackgroundColour(*wxWHITE);
         // Not Hide(): Plater::Show(false) would hide the window's Slice / Print buttons the shown project uses.
         plater->wxPanel::Show(false);
@@ -1378,6 +1386,14 @@ void MainFrame::activate_plater(Plater *plater)
         plater->set_printer_technology(wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology());
         plater->get_camera().select_view("topfront");
         plater->get_camera().requires_zoom_to_bed = true;
+        // Its canvases initialise now, with it as the app's Plater: until a canvas is initialised, reload_scene() does
+        // nothing, so the project the strip loads into it next would not reach the 3D view (the first Plater's canvas is
+        // initialised by GUI_App before any project loads; the hub's hidden instances use the same call).
+        plater->ensure_gl_ready();
+        if (GLCanvas3D *assemble = plater->get_assmeble_canvas3D())
+            assemble->ensure_gl_ready();
+        if (GLCanvas3D *view3d = plater->get_view3D_canvas3D())
+            view3d->ensure_gl_ready(); // leaves the 3D canvas current, as Plater::ensure_gl_ready() does
     }
     // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
     // this project's selection now.
@@ -4219,34 +4235,51 @@ void MainFrame::init_menubar_as_editor()
 #ifdef __APPLE__
     // Project strip P3: the Window menu lists the open projects; Cmd+Shift+] / [ go to the next / previous one.
     // The strip is made after the menu bar: the handlers look it up when they run.
+    // P4 (Mac session, from wxOSX menu.mm MacSetupWindowMenu): wx empties the top-level menu titled with
+    // wxApp::s_macWindowMenuTitleName whenever the menu bar is set up or the frame is activated, and puts its own Minimize /
+    // Zoom / Bring All to Front in. So: the menu uses wx's own title (one Window menu, whatever the UI language), the whole
+    // project section (Next, Previous, the separator, the projects) is added again each time the menu opens, after wx's
+    // items, and the two shortcuts are also a frame accelerator so they work while the menu holds no items of ours.
     if (wxGetApp().is_editor()) {
         wxMenu   *window_menu = new wxMenu();
         const int id_next     = wxWindow::NewControlId();
         const int id_prev     = wxWindow::NewControlId();
-        window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]");
-        window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+[");
-        window_menu->AppendSeparator();
         Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(1); }, id_next);
         Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(-1); }, id_prev);
-        // The project entries are rebuilt each time the menu opens.
-        auto project_item_ids = std::make_shared<std::vector<int>>();
-        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_item_ids](wxMenuEvent &e) {
+        {
+            // Cmd+Shift+] / [ (some keyboards report the shifted } / {).
+            wxAcceleratorEntry entries[4];
+            entries[0].Set(wxACCEL_CMD | wxACCEL_SHIFT, int(']'), id_next);
+            entries[1].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('}'), id_next);
+            entries[2].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('['), id_prev);
+            entries[3].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('{'), id_prev);
+            SetAcceleratorTable(wxAcceleratorTable(4, entries));
+        }
+        // Our items, rebuilt each time the menu opens (wx may have removed them from the real menu meanwhile).
+        auto our_items = std::make_shared<std::vector<wxMenuItem *>>();
+        Bind(wxEVT_MENU_OPEN, [this, window_menu, our_items, id_next, id_prev](wxMenuEvent &e) {
             e.Skip();
             if (e.GetMenu() != window_menu || m_project_strip == nullptr)
                 return;
-            for (int id : *project_item_ids)
-                window_menu->Destroy(id);
-            project_item_ids->clear();
+            for (wxMenuItem *item : *our_items)
+                if (window_menu->FindChildItem(item->GetId()) == item)
+                    window_menu->Destroy(item);
+            our_items->clear();
+            if (window_menu->GetMenuItemCount() > 0)
+                our_items->push_back(window_menu->AppendSeparator());
+            our_items->push_back(window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]"));
+            our_items->push_back(window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+["));
+            our_items->push_back(window_menu->AppendSeparator());
             for (const auto &entry : m_project_strip->menu_entries()) {
                 const int item_id = wxWindow::NewControlId();
-                window_menu->AppendCheckItem(item_id, entry.second);
-                window_menu->Check(item_id, entry.first == m_project_strip->active_project_id());
+                wxMenuItem *item  = window_menu->AppendCheckItem(item_id, entry.second);
+                item->Check(entry.first == m_project_strip->active_project_id());
                 const int project = entry.first;
                 Bind(wxEVT_MENU, [this, project](wxCommandEvent &) { if (m_project_strip) m_project_strip->select_project(project); }, item_id);
-                project_item_ids->push_back(item_id);
+                our_items->push_back(item);
             }
         });
-        m_menubar->Append(window_menu, wxString::Format("&%s", _L("Window")));
+        m_menubar->Append(window_menu, wxApp::s_macWindowMenuTitleName);
     }
 #endif
     if (helpMenu)

@@ -381,6 +381,7 @@ void ProjectStrip::after_switch(int id, std::chrono::steady_clock::time_point st
                             << m_sessions.size() << " open, " << mode << ")" << log_memory_info();
     wxTimerEvent dummy;
     on_poll(dummy);
+    thumbnail_after_load();
 }
 
 bool ProjectStrip::select_project(int id)
@@ -477,6 +478,7 @@ void ProjectStrip::open_project(const wxString &file_in)
     if (active_is_blank()) {
         p->load_project_unprompted(file);
         sync_active();
+        thumbnail_after_load();
         Refresh();
         return;
     }
@@ -803,8 +805,28 @@ void ProjectStrip::on_thumbnail_timer(wxTimerEvent &)
 {
     if (m_switching)
         return;
-    if (render_active_thumbnail())
+    // A tile with no picture yet gets one off screen too (a project opened from Home is not on screen).
+    const ProjectSlot *active = m_sessions.active();
+    auto               it     = active != nullptr ? m_extra.find(active->id) : m_extra.end();
+    const bool         none   = it == m_extra.end() || !it->second.image.IsOk();
+    if (render_active_thumbnail(none))
         Refresh();
+}
+
+void ProjectStrip::thumbnail_after_load()
+{
+    // Owner P4 re-test: a project opened from Recent showed no thumbnail until something changed. Once the load and what
+    // it deferred ran, the tile is rendered, on screen or not.
+    CallAfter([this]() {
+        if (m_switching)
+            return;
+        const ProjectSlot *active = m_sessions.active();
+        if (active == nullptr)
+            return;
+        const SlotExtra &e = m_extra[active->id];
+        if (tile_thumbnail_stale(e.image.IsOk(), e.thumb_marker, active_thumbnail_marker()) && render_active_thumbnail(true))
+            Refresh();
+    });
 }
 
 size_t ProjectStrip::active_thumbnail_marker() const

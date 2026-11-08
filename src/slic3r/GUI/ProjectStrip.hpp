@@ -148,6 +148,8 @@ private:
     // unless off_screen).
     bool        render_active_thumbnail(bool off_screen = false);
     size_t      active_thumbnail_marker() const;
+    // After an open, a new project or a switch: the shown project's tile once the load settled, if it is stale.
+    void        thumbnail_after_load();
     bool        plater_tab_shown() const;
     void        refresh_max_open();
 
