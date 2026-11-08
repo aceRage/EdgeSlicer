@@ -4503,7 +4503,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
     if (is_bbl_vendor || support_multi_bed_types || is_snapmaker_u1) {
         m_bed_type_list->Enable();
         // Orca: don't update bed type if loading project
-        if (!p->plater->is_loading_project()) {
+        // Project strip P4: nor while a project switch puts a project's presets back (its bed type is its own; the
+        // printer's remembered one changed its slice settings, owner log 2026-11-08 "curr_bed_type").
+        if (!p->plater->is_loading_project() && !ProjectSwapGuard::active()) {
             std::string printer_name = wxGetApp().preset_bundle->printers.get_selected_preset_name();
             auto str_bed_type = wxGetApp().app_config->get_printer_setting(printer_name, "curr_bed_type");
             

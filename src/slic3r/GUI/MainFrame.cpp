@@ -1434,6 +1434,17 @@ void MainFrame::destroy_project_plater(Plater *plater)
     m_platers_need_rescale.erase(plater);
     m_platers_need_recolour.erase(plater);
     m_platers_need_settings.erase(plater);
+    // Top-level windows (dialogs, popups) whose parent is this Plater go with it (wx destroys a top-level window with its
+    // parent). That is right for the project's own dialogs; a window-level one must not be parented to a Plater (the
+    // ParamsDialog was, owner crash 2026-11-08). Logged so another such case is found from the log.
+    for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext())
+        if (wxWindow *top = node->GetData(); top != nullptr)
+            for (wxWindow *w = top->GetParent(); w != nullptr; w = w->GetParent())
+                if (w == plater) {
+                    BOOST_LOG_TRIVIAL(info) << "project strip: the closing project's Plater takes a top-level window with it: "
+                                            << wxString(top->GetClassInfo()->GetClassName()).ToUTF8().data();
+                    break;
+                }
     plater->begin_shutdown();
     plater->get_ui_job_worker().cancel_all();
     plater->cancel_slicing_for_project_close();
@@ -2070,7 +2081,10 @@ void MainFrame::create_preset_tabs()
 
     //BBS: GUI refactor
     //m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
-    m_param_dialog = new ParamsDialog(m_plater);
+    // Project strip P4 (owner crash 2026-11-08): the window's, not the first project's. Parented to that Plater, it (and
+    // the Printer and Filament tabs it holds) went with it when that project was closed, and the next preset load used
+    // the deleted tabs.
+    m_param_dialog = new ParamsDialog(this);
 
 #define ORCA_TIMED_TAB(expr, label)                                              \
     do {                                                                         \
