@@ -25,6 +25,7 @@
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/StaticBox.hpp"
 #include "ConnectPrinter.hpp"
+#include "SelectMachinePop.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/PlaterWorker.hpp"
 
@@ -342,6 +343,18 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     sizer_basic_right_info->Add(m_sizer_printer, 0, wxTOP, 0);
     sizer_basic_right_info->Add(0, 0, 0, wxTOP, FromDIP(4));
     sizer_basic_right_info->Add(m_text_printer_msg, 0, wxLEFT, 0);
+
+    // The selected LAN printer refused its saved code: open its name / access code dialog.
+    m_link_access_code = new wxHyperlinkCtrl(m_basic_panel, wxID_ANY, _L("The printer refused the access code. Re-enter it"), "");
+    m_link_access_code->SetFont(::Label::Body_12);
+    m_link_access_code->Bind(wxEVT_LEFT_DOWN, [this](auto &) {
+        const std::string dev_id = m_printer_last_select;
+        CallAfter([dev_id]() { open_printer_edit_dialog(dev_id); });
+    });
+    m_link_access_code->Bind(wxEVT_ENTER_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_HAND); });
+    m_link_access_code->Bind(wxEVT_LEAVE_WINDOW, [this](auto &) { m_link_access_code->SetCursor(wxCURSOR_ARROW); });
+    m_link_access_code->Hide();
+    sizer_basic_right_info->Add(m_link_access_code, 0, wxLEFT, 0);
 
 
     m_basicl_sizer->Add(m_sizer_thumbnail_area, 0, wxLEFT, 0);
@@ -3267,6 +3280,15 @@ void SelectMachineDialog::update_show_status()
         }
     }
     MachineObject* obj_ = dev->get_my_machine(m_printer_last_select);
+    // The selected LAN printer refused its saved access code on the last dial: offer to re-enter it.
+    if (m_link_access_code) {
+        const bool refused = obj_ && obj_->is_lan_mode_printer() && dev->lan_access_code_refused(obj_->dev_id);
+        if (refused != m_link_access_code->IsShown()) {
+            m_link_access_code->Show(refused);
+            Layout();
+            Fit();
+        }
+    }
     if (!obj_) {
         update_ams_check(nullptr);
         if (agent) {

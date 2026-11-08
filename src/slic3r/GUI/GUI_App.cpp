@@ -2645,6 +2645,13 @@ void GUI_App::init_networking_callbacks()
                     // asked for a report, a session reported down is re-dialled.
                     if (obj)
                         obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    // How the dial ended, for the refused-access-code notice (LanAccessCodeWatch.hpp).
+                    if (obj && obj->is_lan_mode_printer()) {
+                        if (state == ConnectStatus::ConnectStatusOk)
+                            m_device_manager->note_lan_dial_up(dev_id);
+                        else
+                            m_device_manager->note_lan_dial_ended(dev_id, msg);
+                    }
                     // The one "connected" line per connect, and the end of holding this
                     // selection's early requests: the held commands go out now, the held status
                     // requests are replaced by the pushall + get_version below.
