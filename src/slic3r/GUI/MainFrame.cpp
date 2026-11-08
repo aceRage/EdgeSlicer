@@ -4235,15 +4235,27 @@ void MainFrame::init_menubar_as_editor()
 #ifdef __APPLE__
     // Project strip P3: the Window menu lists the open projects; Cmd+Shift+] / [ go to the next / previous one.
     // The strip is made after the menu bar: the handlers look it up when they run.
-    // P4 (Mac session, from wxOSX menu.mm MacSetupWindowMenu): wx empties the top-level menu titled with
-    // wxApp::s_macWindowMenuTitleName whenever the menu bar is set up or the frame is activated, and puts its own Minimize /
-    // Zoom / Bring All to Front in. So: the menu uses wx's own title (one Window menu, whatever the UI language), the whole
-    // project section (Next, Previous, the separator, the projects) is added again each time the menu opens, after wx's
-    // items, and the two shortcuts are also a frame accelerator so they work while the menu holds no items of ours.
+    // P4 (Mac session, wxOSX menu.mm MacSetupWindowMenu): with the automatic Window menu on, wx runs [removeAllItems] on the
+    // menu titled wxApp::s_macWindowMenuTitleName at every frame activation while our wxMenuItems stay in wx's list, so the
+    // next Destroy() asked Cocoa to remove an item no longer in the menu (NSInternalInconsistencyException). The automatic
+    // menu is off (SetAutoWindowMenu(false) before SetMenuBar) and this menu is ours: Minimize, Zoom, Next / Previous
+    // Project, then the project list, which alone is rebuilt each time the menu opens. It keeps wx's own title (one
+    // Window menu whatever the UI language), and the two shortcuts are also a frame accelerator.
     if (wxGetApp().is_editor()) {
+        wxMenuBar::SetAutoWindowMenu(false);
         wxMenu   *window_menu = new wxMenu();
+        const int id_minimize = wxWindow::NewControlId();
+        const int id_zoom     = wxWindow::NewControlId();
         const int id_next     = wxWindow::NewControlId();
         const int id_prev     = wxWindow::NewControlId();
+        window_menu->Append(id_minimize, _L("Minimize") + "\tCtrl+M");
+        window_menu->Append(id_zoom, _L("Zoom"));
+        window_menu->AppendSeparator();
+        window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]");
+        window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+[");
+        window_menu->AppendSeparator();
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { Iconize(true); }, id_minimize);
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { Maximize(!IsMaximized()); }, id_zoom);
         Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(1); }, id_next);
         Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(-1); }, id_prev);
         {
@@ -4255,28 +4267,22 @@ void MainFrame::init_menubar_as_editor()
             entries[3].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('{'), id_prev);
             SetAcceleratorTable(wxAcceleratorTable(4, entries));
         }
-        // Our items, rebuilt each time the menu opens (wx may have removed them from the real menu meanwhile).
-        auto our_items = std::make_shared<std::vector<wxMenuItem *>>();
-        Bind(wxEVT_MENU_OPEN, [this, window_menu, our_items, id_next, id_prev](wxMenuEvent &e) {
+        // The project list: only the items added at the last open are removed (wx no longer touches this menu).
+        auto project_items = std::make_shared<std::vector<wxMenuItem *>>();
+        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_items](wxMenuEvent &e) {
             e.Skip();
             if (e.GetMenu() != window_menu || m_project_strip == nullptr)
                 return;
-            for (wxMenuItem *item : *our_items)
-                if (window_menu->FindChildItem(item->GetId()) == item)
-                    window_menu->Destroy(item);
-            our_items->clear();
-            if (window_menu->GetMenuItemCount() > 0)
-                our_items->push_back(window_menu->AppendSeparator());
-            our_items->push_back(window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]"));
-            our_items->push_back(window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+["));
-            our_items->push_back(window_menu->AppendSeparator());
+            for (wxMenuItem *item : *project_items)
+                window_menu->Destroy(item);
+            project_items->clear();
             for (const auto &entry : m_project_strip->menu_entries()) {
-                const int item_id = wxWindow::NewControlId();
-                wxMenuItem *item  = window_menu->AppendCheckItem(item_id, entry.second);
+                const int   item_id = wxWindow::NewControlId();
+                wxMenuItem *item    = window_menu->AppendCheckItem(item_id, entry.second);
                 item->Check(entry.first == m_project_strip->active_project_id());
                 const int project = entry.first;
                 Bind(wxEVT_MENU, [this, project](wxCommandEvent &) { if (m_project_strip) m_project_strip->select_project(project); }, item_id);
-                our_items->push_back(item);
+                project_items->push_back(item);
             }
         });
         m_menubar->Append(window_menu, wxApp::s_macWindowMenuTitleName);
