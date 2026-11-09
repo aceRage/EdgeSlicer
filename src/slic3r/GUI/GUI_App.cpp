@@ -107,6 +107,7 @@
 #include "GUI_Utils.hpp"
 #include "3DScene.hpp"
 #include "MainFrame.hpp"
+#include "ProjectStrip.hpp"
 #include "slic3r/GUI/FlashForge/DeviceData.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
 #include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
@@ -5718,6 +5719,20 @@ static void refresh_tree(wxWindow* window)
         refresh_tree(child);
 }
 
+void GUI_App::theme_new_window(wxWindow *window)
+{
+    // Project strip P4 (owner re-test: a new project's sidebar section headers kept the light theme's grey labels): a
+    // Plater made after startup missed the colour pass the window got when it was themed (force_colors_update ->
+    // update_dark_children_ui on the main frame). The same pass, on that window's tree only.
+    if (window == nullptr)
+        return;
+#if defined(__WINDOWS__) && defined(_MSW_DARK_MODE)
+    update_scrolls(window);
+#endif
+    update_dark_children_ui(window);
+    window->Refresh();
+}
+
 void GUI_App::apply_theme_live()
 {
     // The hidden instance the hub manages has no window anyone sees, and its first-run and plug-in
@@ -9183,6 +9198,9 @@ void GUI_App::MacOpenFiles(const wxArrayString &fileNames)
                 for (size_t i = 0; i < non_gcode_files.size(); ++i) {
                     input_files.push_back(non_gcode_files[i]);
                 }
+                // Project strip P3 (D7): with a single instance, project files go in as another project (or replace it).
+                if (mainframe != nullptr && mainframe->project_strip() != nullptr && mainframe->project_strip()->open_files_from_shell(input_files))
+                    return;
                 this->plater()->load_files(input_files);
             } else {
                 for (size_t i = 0; i < files.size(); ++i) {

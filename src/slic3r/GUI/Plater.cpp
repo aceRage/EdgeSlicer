@@ -99,6 +99,8 @@
 #include "libslic3r/Format/AMF.hpp"
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/ProjectSwapGuard.hpp"
+#include "ProjectStrip.hpp"
 #include "libslic3r/CustomModels.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
 #include "../Utils/BambuStudioLauncher.hpp"
@@ -1374,6 +1376,9 @@ struct Sidebar::priv
     PlaterPresetComboBox *combo_sla_material;
     PlaterPresetComboBox* combo_printer = nullptr;
     wxBoxSizer *sizer_params;
+    // Project strip P4: the window's one ParamsPanel (process header and settings) sits in the shown project's sidebar,
+    // the header after this line, the settings after sizer_params.
+    wxWindow   *params_anchor = nullptr;
 
     // test
     wxStaticBitmap * image_printer = nullptr;
@@ -3957,13 +3962,21 @@ Sidebar::Sidebar(Plater *parent)
 
     {
     //add project title
-    auto params_panel = ((MainFrame*)parent->GetParent())->m_param_panel;
+    // The window's MainFrame: the Plater's parent at startup; a later project's Plater is built in a hidden child of it.
+    MainFrame *frame        = dynamic_cast<MainFrame*>(wxGetTopLevelParent(parent));
+    auto       params_panel = frame != nullptr ? frame->m_param_panel : nullptr;
+    // Project strip P4: the first sidebar takes the ParamsPanel; a later project's sidebar gets it when it is shown
+    // (attach_params_panel), as the panel is the window's, not the project's.
+    const bool take_params = params_panel != nullptr && params_panel->GetParent() == frame->m_tabpanel;
     if (params_panel) {
-        params_panel->get_top_panel()->Reparent(p->scrolled);
         auto spliter_1 = new ::StaticLine(p->scrolled);
         spliter_1->SetLineColour("#A6A9AA");
         scrolled_sizer->Add(spliter_1, 0, wxEXPAND);
-        scrolled_sizer->Add(params_panel->get_top_panel(), 0, wxEXPAND);
+        p->params_anchor = spliter_1;
+        if (take_params) {
+            params_panel->get_top_panel()->Reparent(p->scrolled);
+            scrolled_sizer->Add(params_panel->get_top_panel(), 0, wxEXPAND);
+        }
         auto spliter_2 = new ::StaticLine(p->scrolled);
         spliter_2->SetLineColour("#CECECE");
         scrolled_sizer->Add(spliter_2, 0, wxEXPAND);
@@ -4034,7 +4047,7 @@ Sidebar::Sidebar(Plater *parent)
     p->object_settings->Hide();
     p->sizer_params->Add(p->object_settings->get_sizer(), 0, wxEXPAND | wxTOP, 5 * em / 10);
 #else
-    if (params_panel) {
+    if (params_panel && take_params) {
         params_panel->Reparent(p->scrolled);
         scrolled_sizer->Add(params_panel, 3, wxEXPAND);
     }
@@ -4052,6 +4065,54 @@ Sidebar::Sidebar(Plater *parent)
 }
 
 Sidebar::~Sidebar() {}
+
+void Sidebar::detach_params_panel()
+{
+    ParamsPanel *params = wxGetApp().params_panel();
+    if (params == nullptr || m_scrolled_sizer == nullptr)
+        return;
+    if (wxWindow *top = params->get_top_panel(); top != nullptr && m_scrolled_sizer->GetItem(top) != nullptr)
+        m_scrolled_sizer->Detach(top);
+    if (m_scrolled_sizer->GetItem(params) != nullptr)
+        m_scrolled_sizer->Detach(params);
+}
+
+void Sidebar::attach_params_panel()
+{
+    ParamsPanel *params = wxGetApp().params_panel();
+    if (params == nullptr || m_scrolled_sizer == nullptr || p->params_anchor == nullptr)
+        return;
+    auto index_of = [this](auto match) {
+        const wxSizerItemList &items = m_scrolled_sizer->GetChildren();
+        int                    i     = 0;
+        for (const wxSizerItem *item : items) {
+            if (match(item))
+                return i;
+            ++i;
+        }
+        return -1;
+    };
+    if (wxWindow *top = params->get_top_panel(); top != nullptr && m_scrolled_sizer->GetItem(top) == nullptr) {
+        if (top->GetParent() != p->scrolled)
+            top->Reparent(p->scrolled);
+        const int at = index_of([this](const wxSizerItem *item) { return item->GetWindow() == p->params_anchor; });
+        if (at >= 0)
+            m_scrolled_sizer->Insert(size_t(at + 1), top, 0, wxEXPAND);
+        else
+            m_scrolled_sizer->Add(top, 0, wxEXPAND);
+    }
+    if (m_scrolled_sizer->GetItem(params) == nullptr) {
+        if (params->GetParent() != p->scrolled)
+            params->Reparent(p->scrolled);
+        const int at = index_of([this](const wxSizerItem *item) { return item->GetSizer() == p->sizer_params; });
+        if (at >= 0)
+            m_scrolled_sizer->Insert(size_t(at + 1), params, 3, wxEXPAND);
+        else
+            m_scrolled_sizer->Add(params, 3, wxEXPAND);
+    }
+    m_scrolled_sizer->Layout();
+    Layout();
+}
 
 void Sidebar::create_printer_preset()
 {
@@ -4442,7 +4503,9 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
     if (is_bbl_vendor || support_multi_bed_types || is_snapmaker_u1) {
         m_bed_type_list->Enable();
         // Orca: don't update bed type if loading project
-        if (!p->plater->is_loading_project()) {
+        // Project strip P4: nor while a project switch puts a project's presets back (its bed type is its own; the
+        // printer's remembered one changed its slice settings, owner log 2026-11-08 "curr_bed_type").
+        if (!p->plater->is_loading_project() && !ProjectSwapGuard::active()) {
             std::string printer_name = wxGetApp().preset_bundle->printers.get_selected_preset_name();
             auto str_bed_type = wxGetApp().app_config->get_printer_setting(printer_name, "curr_bed_type");
             
@@ -5417,6 +5480,12 @@ bool Sidebar::follow_nozzle_sizes_with_printer_variant()
     PresetBundle *bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
         return false;
+    // Project strip (design risk 1): a project switched in keeps its printer and nozzles as saved; switching presets here
+    // would also ask the keep / transfer / discard question a switch must never ask.
+    if (ProjectSwapGuard::active()) {
+        BOOST_LOG_TRIVIAL(info) << "per-nozzle process: printer variant follow skipped during a project switch";
+        return false;
+    }
     const Preset &current = bundle->printers.get_selected_preset();
     if (!current.is_system || bundle->printers.current_is_dirty())
         return false;
@@ -12548,6 +12617,20 @@ struct Plater::priv
     wxTimer                     auto_reslice_timer;
     // Set by Plater::begin_shutdown(); see Plater::is_shutting_down().
     bool                        gui_shutting_down { false };
+    // Project strip P4: while this project is hidden (another Plater is shown), what would touch the window or apply the
+    // app-global presets waits here; Plater::on_project_shown() runs it in order.
+    std::vector<std::function<void()>> deferred_while_hidden;
+    bool                               update_while_hidden { false };
+    // Defers a slice / export completion event of a hidden project. True when it was deferred.
+    template<class Event> bool defer_while_hidden(const Event &evt, void (priv::*handler)(Event &))
+    {
+        if (q->is_active_project())
+            return false;
+        std::shared_ptr<wxEvent> copy(evt.Clone());
+        deferred_while_hidden.push_back([this, copy, handler]() { (this->*handler)(*static_cast<Event *>(copy.get())); });
+        BOOST_LOG_TRIVIAL(info) << "project strip: a hidden project's event waits until it is shown (" << deferred_while_hidden.size() << " waiting)";
+        return true;
+    }
     // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
     std::unique_ptr<DualNozzle::Watcher> dual_nozzle_watcher;
     // "Edit in Blender" sessions; created on first use.
@@ -12746,6 +12829,8 @@ struct Plater::priv
     // Return the active Undo/Redo stack. It may be either the main stack or the Gimzo stack.
     Slic3r::UndoRedo::Stack& undo_redo_stack() { assert(m_undo_redo_stack_active != nullptr); return *m_undo_redo_stack_active; }
     Slic3r::UndoRedo::Stack& undo_redo_stack_main() { return m_undo_redo_stack_main; }
+    size_t                   project_generation_count() const { return project_generation; }
+    void                     bump_project_generation() { ++project_generation; }
     void enter_gizmos_stack();
     bool leave_gizmos_stack();
 
@@ -13004,7 +13089,10 @@ private:
     Slic3r::UndoRedo::Stack 	m_undo_redo_stack_main;
     Slic3r::UndoRedo::Stack 	m_undo_redo_stack_gizmos;
     Slic3r::UndoRedo::Stack    *m_undo_redo_stack_active = &m_undo_redo_stack_main;
-    int                         m_prevent_snapshots = 0;     /* Used for avoid of excess "snapshoting".
+    // Project strip: counts the undo stack resets (New / Load / Reset Project), which start its snapshot times at 0 again;
+    // with the active snapshot time it tells one project state from another (Plater::project_change_marker).
+    size_t                      project_generation = 0;
+    int                         m_prevent_snapshots = 0;    /* Used for avoid of excess "snapshoting".
                                                               * Like for "delete selected" or "set numbers of copies"
                                                               * we should call tack_snapshot just ones
                                                               * instead of calls for each action separately
@@ -13150,6 +13238,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     background_process.set_finished_event(EVT_PROCESS_COMPLETED);
     background_process.set_export_began_event(EVT_EXPORT_BEGAN);
     background_process.set_export_finished_event(EVT_EXPORT_FINISHED);
+    // Project strip P4: its events come here, also while another project is shown.
+    background_process.set_owner(q);
     this->q->Bind(EVT_SLICING_UPDATE, &priv::on_slicing_update, this);
     this->q->Bind(EVT_PUBLISH, &priv::on_action_publish, this);
     this->q->Bind(EVT_REPAIR_MODEL, &priv::on_repair_model, this);
@@ -13596,7 +13686,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             notification_manager->device_ejected();
         });
         // Start the background thread and register this window as a target for update events.
-        wxGetApp().removable_drive_manager()->init(this->q);
+        if (!wxGetApp().removable_drive_manager()->is_initialized())
+            wxGetApp().removable_drive_manager()->init(this->q);
 #ifdef _WIN32
         //Trigger enumeration of removable media on Win32 notification.
         this->q->Bind(EVT_VOLUME_ATTACHED, [this](VolumeAttachedEvent &evt) { wxGetApp().removable_drive_manager()->volumes_changed(); });
@@ -13673,6 +13764,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
             RemoteAccess::get().set_hidden(false);
         }
         wxGetApp().mainframe->Raise();
+        // Project strip P3 (D7): project files go in as another project, unless the preference says replace.
+        if (ProjectStrip *strip = wxGetApp().mainframe->project_strip(); strip != nullptr && strip->open_files_from_shell(input_files))
+            return;
         this->q->load_files(input_files);
     });
     
@@ -13687,7 +13781,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     this->q->Bind(EVT_INSTANCE_GO_TO_FRONT, [this](InstanceGoToFrontEvent &) {
         bring_instance_forward();
     });
-    wxGetApp().other_instance_message_handler()->init(this->q);
+    // Project strip P4: once, for the first Plater; MainFrame::activate_plater() points it at the project shown.
+    if (!wxGetApp().other_instance_message_handler()->is_initialized())
+        wxGetApp().other_instance_message_handler()->init(this->q);
 
     // collapse sidebar according to saved value
     //if (wxGetApp().is_editor()) {
@@ -14252,7 +14348,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     // export / slice), an output name that leaves the output folder, or print-host
                     // endpoints along silently - neither in its settings nor in its embedded presets.
                     // Our own crash backup (Restore) is not a foreign file.
-                    if (load_config && !(strategy & LoadStrategy::Restore))
+                    // Project strip: a parked project is the user's own, already through this guard when it was first opened.
+                    if (load_config && !(strategy & LoadStrategy::Restore) && !q->is_project_swap_loading())
                         guard_untrusted_settings(into_u8(from_path(real_filename)), &config_loaded, &project_presets);
 
                     auto imported_string_count = [&config_loaded](const char *key) -> size_t {
@@ -14475,7 +14572,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             bool is_safe_to_rotate = _sparse_infill_pattern == ipRectilinear || _sparse_infill_pattern == ipLine ||
                                                      _sparse_infill_pattern == ipZigZag || _sparse_infill_pattern == ipCrossZag ||
                                                      _sparse_infill_pattern == ipLockedZag;
-                            if (!is_safe_to_rotate) {
+                            if (!is_safe_to_rotate && !q->is_project_swap_loading()) {
                                 wxString msg_text = _(
                                     L("This project was created with an EdgeSlicer and uses "
                                       "infill rotation template settings that may not work properly with your current infill pattern. "
@@ -14697,7 +14794,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                         auto choise = wxGetApp().app_config->get("no_warn_when_modified_gcodes");
                         // A file from the web always gets the warning (GUI_App::mark_web_download).
-                        if (choise.empty() || choise != "true" || wxGetApp().is_web_download(filename)) {
+                        if (!q->is_project_swap_loading() && (choise.empty() || choise != "true" || wxGetApp().is_web_download(filename))) {
                             // BBS: first validate the printer
                             // validate the system profiles
                             std::set<std::string> modified_gcodes;
@@ -14838,7 +14935,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             // new printer cannot use them, so they were deselected, hidden from the combos
                             // and replaced by that printer's defaults - the project "lost" its presets on
                             // every re-open. Such a project opens on its own printer.
-                            if (wxGetApp().app_config->get("keep_printer_on_open") == "true") {
+                            // Project strip: a switch brings the project's own printer back, as its 3MF was opened.
+                            if (wxGetApp().app_config->get("keep_printer_on_open") == "true" && !q->is_project_swap_loading()) {
                                 const std::string preferred = wxGetApp().app_config->get("preferred_printer");
                                 const bool switch_wanted = !preferred.empty()
                                     && preferred != preset_bundle->printers.get_selected_preset_name()
@@ -15024,7 +15122,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                 // BBS:: project embedded presets
                 if (project_presets.size() > 0) {
-                    guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
+                    if (!q->is_project_swap_loading())
+                        guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
                     // load project embedded presets
                     PresetsConfigSubstitutions preset_substitutions;
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
@@ -15388,7 +15487,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     //    q->model().stl_design_country = "";
     //}
 
-    if (tolal_model_count <= 0 && !q->m_exported_file) {
+    if (tolal_model_count <= 0 && !q->m_exported_file && !q->is_project_swap_loading()) {
         dlg.Hide();
         if (!is_user_cancel) {
             MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxOK | wxICON_WARNING);
@@ -16201,6 +16300,9 @@ void Plater::priv::trigger_auto_reslice_now()
     // Edge: a delayed CallAfter can land while the frame is closing.
     if (this->q->is_shutting_down())
         return;
+    // Project strip P4: never for a hidden project (it would slice with the shown project's presets).
+    if (!this->q->is_active_project())
+        return;
 
     AppConfig* cfg = wxGetApp().app_config;
     if (cfg == nullptr || !cfg->get_bool("auto_slice_after_change"))
@@ -16458,6 +16560,13 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.
     background_process_timer.Stop();
+    // Project strip P4: the presets in the bundle are the shown project's; applying them here would re-slice this hidden
+    // project with another project's settings. It applies when it is shown again.
+    if (!q->is_active_project()) {
+        update_while_hidden = true;
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": skipped while the project is hidden, applies when it is shown";
+        return return_state;
+    }
     // EDGESLICER-A: validation below syncs notifications and the MainFrame's slice/print buttons;
     // while the frame is closing or being replaced those may already be half destroyed.
     if (q->is_shutting_down()) {
@@ -18609,7 +18718,8 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
         notification_manager->set_slicing_progress_percentage(evt.status.text, (float)evt.status.percent / 100.0f);
 
         // update slicing percent
-        PartPlateList& plate_list = wxGetApp().plater()->get_partplate_list();
+        // Project strip P4: this project's plates, also while another project is shown.
+        PartPlateList& plate_list = this->partplate_list;
         //slicing parallel, only update if percent is greater than before
         if (evt.status.percent > plate_list.get_curr_plate()->get_slicing_percent())
             plate_list.get_curr_plate()->update_slicing_percent(evt.status.percent);
@@ -18686,6 +18796,9 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
 
 void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
 {
+    // Project strip P4: a hidden project finishes its slice; the window and the project config follow when it is shown.
+    if (defer_while_hidden(evt, &priv::on_slicing_completed))
+        return;
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": event_type %1%, string %2%") % evt.GetEventType() % evt.GetString();
 
     // Snapmaker #753: a slice finishing while the GUI is being recreated (language / theme change) must not touch the half-built UI.
@@ -18729,12 +18842,16 @@ void Plater::priv::on_slicing_completed(wxCommandEvent & evt)
 
 void Plater::priv::on_export_began(wxCommandEvent& evt)
 {
+    if (defer_while_hidden(evt, &priv::on_export_began))
+        return;
     if (show_warning_dialog)
         warnings_dialog();
 }
 
 void Plater::priv::on_export_finished(wxCommandEvent& evt)
 {
+    if (defer_while_hidden(evt, &priv::on_export_finished))
+        return;
 #if 0
     //BBS: also export 3mf to the same directory for debugging
     std::string gcode_path_str(evt.GetString().ToUTF8().data());
@@ -18853,6 +18970,9 @@ static void notify_high_flow_standard_fallback(const Print *print, NotificationM
 
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
+    // Project strip P4: its notification, preview and the slice / print buttons follow when the project is shown.
+    if (defer_while_hidden(evt, &priv::on_process_completed))
+        return;
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": enter, m_ignore_event %1%, status %2%")%m_ignore_event %evt.status();
     //BBS:ignore cancel event for some special case
     if (m_ignore_event)
@@ -19376,6 +19496,11 @@ void Plater::priv::on_action_print_plate_from_sdcard(SimpleEvent&)
 
 void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
 {
+    // Project strip P4: every Plater listens to the window's notebook; only the shown one acts on it.
+    if (!q->is_active_project()) {
+        e.Skip();
+        return;
+    }
     // Ignore event raised by child controls
     if (!(main_frame->m_tabpanel && e.GetId() == main_frame->m_tabpanel->GetId())) {
         e.Skip();
@@ -19893,11 +20018,31 @@ void Plater::priv::generate_thumbnail(ThumbnailData& data, unsigned int w, unsig
 //BBS: add plate id for thumbnail generate param
 ThumbnailsList Plater::priv::generate_thumbnails(const ThumbnailsParams& params, Camera::EType camera_type)
 {
+    // Project strip P4: a hidden project's slice renders its G-code thumbnails too. The canvas code finds the plates and
+    // the model through wxGetApp().plater(), so this project stands in for the shown one while they render (synchronous,
+    // no event loop runs meanwhile); the GL context comes from the shown canvas (GLCanvas3D::_set_shown_canvas_current),
+    // and the filament colours are the ones its slice was applied with, not the shown project's.
+    Plater *const shown  = wxGetApp().plater();
+    const bool    hidden = shown != nullptr && shown != q;
+    std::vector<ColorRGBA> colors;
+    if (hidden) {
+        if (const Print *print = background_process.fff_print(); print != nullptr)
+            decode_colors(print->config().filament_colour.values, colors);
+        wxGetApp().plater_ = q;
+    }
+    ScopeGuard restore_shown([hidden, shown]() {
+        if (hidden)
+            wxGetApp().plater_ = shown;
+    });
     ThumbnailsList thumbnails;
     for (const Vec2d& size : params.sizes) {
         thumbnails.push_back(ThumbnailData());
         Point isize(size); // round to ints
-        generate_thumbnail(thumbnails.back(), isize.x(), isize.y(), params, camera_type);
+        if (hidden && !colors.empty())
+            view3D->get_canvas3d()->render_thumbnail(thumbnails.back(), isize.x(), isize.y(), params, view3D->get_canvas3d()->get_volumes(), colors,
+                                                     camera_type, false, false, false);
+        else
+            generate_thumbnail(thumbnails.back(), isize.x(), isize.y(), params, camera_type);
         if (!thumbnails.back().is_valid())
             thumbnails.pop_back();
     }
@@ -20032,8 +20177,14 @@ void Plater::priv::set_project_name(const wxString& project_name)
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " project is:" << project_name;
     m_project_name = project_name;
+    // Project strip P4: a hidden project keeps its name; the window title and the hub follow the project shown.
+    if (!q->is_active_project())
+        return;
     // Ultra: what the hub lists for this instance (path follows in set_project_filename).
     RemoteAccess::get().note_project(project_name.ToUTF8().data(), "");
+    // Project strip: the active item shows the project's name.
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->on_active_project_changed();
     //update topbar title
 #ifdef __WINDOWS__
     wxGetApp().mainframe->SetTitle(m_project_name + " - EdgeSlicer");
@@ -20047,7 +20198,7 @@ void Plater::priv::set_project_name(const wxString& project_name)
 
 void Plater::priv::update_title_dirty_status()
 {
-    if (m_project_name.empty())
+    if (m_project_name.empty() || !q->is_active_project())
         return;
 
     wxString title;
@@ -20055,6 +20206,8 @@ void Plater::priv::update_title_dirty_status()
         title = "*" + m_project_name;
     else
         title = m_project_name;
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->on_active_project_changed();
 
 #ifdef __WINDOWS__
     wxGetApp().mainframe->topbar()->SetTitle(title);
@@ -20087,7 +20240,8 @@ void Plater::priv::set_project_filename(const wxString& filename)
     //BBS
     wxString project_name = from_u8(full_path.filename().string());
     set_project_name(project_name);
-    RemoteAccess::get().note_project(project_name.ToUTF8().data(), filename.ToUTF8().data());
+    if (q->is_active_project())
+        RemoteAccess::get().note_project(project_name.ToUTF8().data(), filename.ToUTF8().data());
     // record filename for hint when open exported file/.gcode
     if (q->m_only_gcode)
         q->m_preview_only_filename = std::string((project_name + ".gcode").mb_str());
@@ -20814,8 +20968,10 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
     
     const GLGizmosManager& gizmos = canvas->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_gizmos_manager() : view3D->get_canvas3d()->get_gizmos_manager();
 
-    if (snapshot_type == UndoRedo::SnapshotType::ProjectSeparator)
+    if (snapshot_type == UndoRedo::SnapshotType::ProjectSeparator) {
         this->undo_redo_stack().clear();
+        ++project_generation;
+    }
     this->undo_redo_stack().take_snapshot(snapshot_name, model, get_current_canvas3D()->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_selection() : view3D->get_canvas3d()->get_selection(), gizmos, partplate_list, snapshot_data);
     if (snapshot_type == UndoRedo::SnapshotType::LeavingGizmoWithAction) {
         // Filter all but the last UndoRedo::SnapshotType::GizmoAction in a row between the last UndoRedo::SnapshotType::EnteringGizmo and UndoRedo::SnapshotType::LeavingGizmoWithAction.
@@ -21402,6 +21558,16 @@ void Plater::load_project(wxString const& filename2,
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "filename is: " << filename2 << "and originfile is: " << originfile;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
+    // Project strip: an open that arrives while the strip switches projects waits for the switch, then goes to the project
+    // shown.
+    if (s_project_switch_busy && !m_skip_close_confirm) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": a project switch is running, the open waits for it";
+        wxGetApp().CallAfter([filename2, originfile]() {
+            if (Plater *shown = wxGetApp().plater())
+                shown->load_project(filename2, originfile);
+        });
+        return;
+    }
     auto filename = filename2;
     auto check = [&filename, this] (bool yes_or_no) {
         if (!yes_or_no && !wxGetApp().check_and_save_current_preset_changes(_L("Load project"),
@@ -21416,7 +21582,15 @@ void Plater::load_project(wxString const& filename2,
 
     // BSS: save project, force close
     int result;
-    if ((result = close_with_confirm(check)) == wxID_CANCEL) {
+    if (m_skip_close_confirm) {
+        // Project strip: this is a fresh Plater the strip made for the project (the other projects stay open in their own),
+        // so there is nothing to ask. What close_with_confirm() does once answered: its backup folder goes, the project
+        // starts clean.
+        m_skip_close_confirm = false;
+        model().set_backup_path("");
+        up_to_date(true, false);
+        up_to_date(true, true);
+    } else if ((result = close_with_confirm(check)) == wxID_CANCEL) {
         return;
     }
 
@@ -21544,6 +21718,233 @@ void Plater::load_project(wxString const& filename2,
         });
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
+}
+
+// ---- Project strip (tests/design_multi_project_sidebar.md). P4: one live Plater per open project ------------------------
+
+bool Plater::is_active_project() const
+{
+    // No Plater yet (the first one is being built at startup, or a new one is): as before the strip, this one is it.
+    const Plater *shown = wxGetApp().plater();
+    return shown == nullptr || shown == this;
+}
+
+void Plater::on_project_hidden()
+{
+    // A re-apply scheduled just before the switch would apply the next project's presets to this one: it waits.
+    if (p->background_process_timer.IsRunning()) {
+        p->background_process_timer.Stop();
+        p->update_while_hidden = true;
+    }
+    p->auto_reslice_timer.Stop();
+    p->auto_reslice_pending = false;
+}
+
+void Plater::on_project_shown()
+{
+    // The window title and the hub's name are this project's.
+    const wxString name = get_project_name();
+    p->set_project_name(name);
+    if (const wxString file = get_project_filename(".3mf"); !file.empty())
+        RemoteAccess::get().note_project(name.ToUTF8().data(), file.ToUTF8().data());
+    p->update_title_dirty_status();
+    // The sidebar as the tab on screen wants it (the notebook told only the shown Plater about tab changes).
+    if (MainFrame *frame = wxGetApp().mainframe; frame != nullptr && frame->m_tabpanel != nullptr) {
+        const int sel          = frame->m_tabpanel->GetSelection();
+        p->sidebar_layout.show = sel == MainFrame::tp3DEditor || sel == MainFrame::tpPreview;
+        p->update_sidebar(true);
+    }
+    if (GLCanvas3D *canvas = get_current_canvas3D())
+        canvas->set_as_dirty();
+    // What waited while it was hidden: a slice or export that finished, a re-apply. After the strip put this project's
+    // presets back (it does that right after showing it), so CallAfter.
+    std::vector<std::function<void()>> deferred;
+    deferred.swap(p->deferred_while_hidden);
+    const bool reapply     = p->update_while_hidden;
+    p->update_while_hidden = false;
+    if (deferred.empty() && !reapply)
+        return;
+    BOOST_LOG_TRIVIAL(info) << "project strip: " << deferred.size() << " event(s) that waited while the project was hidden run now"
+                            << (reapply ? ", and the re-apply" : "");
+    // On this Plater's own queue: dropped with it if it closes first.
+    CallAfter([this, deferred, reapply]() {
+        if (!is_active_project()) {
+            // Hidden again before they ran: they wait for the next time.
+            p->deferred_while_hidden.insert(p->deferred_while_hidden.begin(), deferred.begin(), deferred.end());
+            p->update_while_hidden = p->update_while_hidden || reapply;
+            return;
+        }
+        for (const auto &f : deferred)
+            f();
+        if (reapply)
+            p->schedule_background_process();
+    });
+}
+
+wxString Plater::project_swap_blocker()
+{
+    if (m_loading_project)
+        return _L("A project is loading.");
+    // Arrange, Fill bed, Emboss / text, texture displacement bake, orient, and the preparation of a print or send all run
+    // on the plater's job worker; their last step works on the project shown.
+    if (!get_ui_job_worker().is_idle())
+        return _L("A job is running on the plate. Wait for it to finish or cancel it first.");
+    if (p->m_is_publishing)
+        return _L("A print or send is being prepared.");
+    if (ShowcaseView *showcase = get_showcase_view(); showcase != nullptr && showcase->is_rendering_video())
+        return _L("A Showcase video is being rendered.");
+    if (GLCanvas3D *canvas = get_view3D_canvas3D(); canvas != nullptr) {
+        GLGizmosManager &gizmos = canvas->get_gizmos_manager();
+        if (gizmos.is_in_editing_mode(false))
+            return _L("Finish or cancel the tool you are editing with first.");
+        if (gizmos.get_current_type() != GLGizmosManager::EType::Undefined) {
+            // Tools work on the project shown (wxGetApp().plater()): one is closed before its project goes out of sight.
+            gizmos.reset_all_states();
+            if (gizmos.get_current_type() != GLGizmosManager::EType::Undefined)
+                return _L("Close the open tool first.");
+        }
+    }
+    return {};
+}
+
+bool Plater::cancel_slicing_for_project_close()
+{
+    p->background_process_timer.Stop();
+    p->auto_reslice_timer.Stop();
+    p->update_while_hidden = false;
+    if (p->background_process.idle())
+        return false;
+    BOOST_LOG_TRIVIAL(info) << "project strip: cancelling the running slice before the project closes";
+    p->background_process.stop();
+    return true;
+}
+
+bool Plater::save_project_snapshot(const std::string &snapshot_3mf, std::string &error)
+{
+    error.clear();
+    boost::system::error_code ec;
+    fs::create_directories(fs::path(snapshot_3mf).parent_path(), ec);
+    if (export_3mf(fs::path(snapshot_3mf), project_park_save_strategy()) < 0) {
+        error = p->last_export_error.empty() ? std::string("the project could not be written") : p->last_export_error;
+        BOOST_LOG_TRIVIAL(error) << "project strip: the session snapshot failed: " << error;
+        return false;
+    }
+    return true;
+}
+
+bool Plater::load_project_unprompted(const wxString &filename)
+{
+    if (filename.empty())
+        return false;
+    m_skip_close_confirm = true;
+    ++m_project_strip_loads;
+    ScopeGuard sg([this]() {
+        m_skip_close_confirm = false;
+        --m_project_strip_loads;
+    });
+    // "<loadall>": as a project (model and settings), no "open as project or import geometry" question.
+    load_project(filename, "<loadall>");
+    return true;
+}
+
+bool Plater::load_project_snapshot(const std::string &snapshot_3mf, const wxString &origin_path, const wxString &name, bool dirty, int plate)
+{
+    boost::system::error_code ec;
+    if (snapshot_3mf.empty() || !fs::exists(fs::path(snapshot_3mf), ec)) {
+        BOOST_LOG_TRIVIAL(error) << "project strip: the session snapshot " << snapshot_3mf << " is missing";
+        return false;
+    }
+    ProjectSwapGuard swap_guard;
+    m_project_swap_loading = true;
+    m_skip_close_confirm   = true;
+    ++m_project_strip_loads;
+    ScopeGuard sg([this]() {
+        m_project_swap_loading = false;
+        m_skip_close_confirm   = false;
+        --m_project_strip_loads;
+    });
+
+    // Quietly, as an opened project 3MF: its printer, process and filaments with their changes, its project settings.
+    load_project(from_u8(snapshot_3mf), "<silence>");
+
+    // Its own name: the file it belongs to, or its Untitled name.
+    if (origin_path.empty()) {
+        p->set_project_filename(wxEmptyString);
+        p->set_project_name(name);
+    } else
+        p->set_project_filename(origin_path);
+
+    // Crash recovery reads origin.txt in the backup folder for the project's file; the load wrote the snapshot's path there.
+    {
+        const fs::path origin_txt = fs::path(model().get_backup_path()) / "origin.txt";
+        boost::system::error_code oec;
+        try {
+            if (origin_path.empty())
+                fs::remove(origin_txt, oec);
+            else
+                save_string_file(origin_txt, into_u8(origin_path));
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: origin.txt not updated: " << e.what();
+        }
+    }
+
+    PartPlateList &plates = p->partplate_list;
+    if (plate >= 0 && plate < plates.get_plate_count())
+        select_plate(plate);
+
+    // Unsaved before the restart, unsaved after it (the load marked it clean).
+    if (dirty)
+        set_plater_dirty(true);
+    update_title_dirty_status();
+    BOOST_LOG_TRIVIAL(info) << "project strip: session project " << into_u8(origin_path.empty() ? name : origin_path) << " restored"
+                            << log_memory_info();
+    return true;
+}
+
+void Plater::count_sliced_plates(int &plates_with_objects, int &plates_sliced)
+{
+    plates_with_objects = 0;
+    plates_sliced       = 0;
+    PartPlateList &plates = p->partplate_list;
+    for (int i = 0; i < plates.get_plate_count(); ++i) {
+        PartPlate *plate = plates.get_plate(i);
+        if (plate == nullptr || plate->empty())
+            continue;
+        ++plates_with_objects;
+        if (plate->is_slice_result_valid())
+            ++plates_sliced;
+    }
+}
+
+bool Plater::render_current_plate_thumbnail(ThumbnailData &out, unsigned int size)
+{
+    GLCanvas3D *canvas = get_view3D_canvas3D();
+    if (canvas == nullptr || size == 0 || !is_active_project())
+        return false;
+    const ThumbnailsParams params = { {}, false, true, true, true, p->partplate_list.get_curr_plate_index() };
+    canvas->render_thumbnail(out, size, size, params, Camera::EType::Ortho);
+    return out.is_valid();
+}
+
+bool Plater::has_hidden_slice_result() const
+{
+    return !p->deferred_while_hidden.empty() && p->background_process.state() == BackgroundSlicingProcess::STATE_FINISHED;
+}
+
+bool Plater::is_slicing_in_background() const { return p->background_process.state() == BackgroundSlicingProcess::STATE_STARTED ||
+                                                       p->background_process.state() == BackgroundSlicingProcess::STATE_RUNNING; }
+
+// Owner hand test 2026-11-08: the snapshot time alone came back equal after a project was loaded in place of the startup
+// Untitled one (a load clears the undo stack), so its tile kept the empty plate's picture. The reset count tells them apart.
+size_t Plater::project_change_marker() const
+{
+    return p->project_generation_count() * size_t(1000003) + p->undo_redo_stack().active_snapshot_time();
+}
+
+bool Plater::current_plate_has_objects() const
+{
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    return plate != nullptr && !plate->empty();
 }
 
 // BBS: save logic
@@ -23512,6 +23913,16 @@ void Plater::force_update_all_plate_thumbnails()
 
 // BBS: backup
 std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files_in, LoadStrategy strategy, bool ask_multi) {
+    // Project strip: files sent to the plate while a switch runs (hub, Layerling / Vault "send to plate", another instance)
+    // go to the project that is active once the switch is over.
+    if (s_project_switch_busy && m_project_strip_loads == 0) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": a project switch is running, " << input_files_in.size() << " file(s) wait for it";
+        wxGetApp().CallAfter([input_files_in, strategy, ask_multi]() {
+            if (Plater *shown = wxGetApp().plater())
+                shown->load_files(input_files_in, strategy, ask_multi);
+        });
+        return {};
+    }
     // Every model import of the GUI ends here (menu File > Import, toolbar, Home, recent files,
     // downloads, files handed to the running app, ...): .svg files go to the SVG gizmo after the
     // SVG / SVG (Split) question, the same as Add Primitive. The callers which route them already
@@ -30991,7 +31402,11 @@ bool Plater::can_scale_to_print_volume() const { return p->can_scale_to_print_vo
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
 
 const UndoRedo::Stack& Plater::undo_redo_stack_main() const { return p->undo_redo_stack_main(); }
-void Plater::clear_undo_redo_stack_main() { p->undo_redo_stack_main().clear(); }
+void Plater::clear_undo_redo_stack_main()
+{
+    p->undo_redo_stack_main().clear();
+    p->bump_project_generation();
+}
 void Plater::enter_gizmos_stack() { p->enter_gizmos_stack(); }
 bool Plater::leave_gizmos_stack() { return p->leave_gizmos_stack(); } // BBS: return false if not changed
 bool Plater::inside_snapshot_capture() { return p->inside_snapshot_capture(); }

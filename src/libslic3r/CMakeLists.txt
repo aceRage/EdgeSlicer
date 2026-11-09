@@ -609,6 +609,7 @@ set(lisbslic3r_sources
     NozzleProcess.hpp
     NozzleRackMemory.cpp
     NozzleRackMemory.hpp
+    ProjectSwapGuard.hpp
     NozzleStripModel.cpp
     NozzleStripModel.hpp
     ToolSlots.cpp

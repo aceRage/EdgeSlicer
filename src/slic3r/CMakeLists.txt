@@ -304,6 +304,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/ProjectSessions.hpp
+    GUI/ProjectStrip.cpp
+    GUI/ProjectStrip.hpp
     GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp

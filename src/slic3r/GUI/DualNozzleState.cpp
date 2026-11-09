@@ -482,7 +482,8 @@ Watcher::~Watcher() { m_timer.Stop(); }
 
 void Watcher::check()
 {
-    if (!m_plater || !preset_is_dual_nozzle_bambu())
+    // Project strip P4: the presets are the shown project's; a hidden project's plates are checked when it is shown.
+    if (!m_plater || !m_plater->is_active_project() || !preset_is_dual_nozzle_bambu())
         return;
     MachineObject *obj   = selected_machine();
     const bool     other = obj && !machine_matches_preset(obj);

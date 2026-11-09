@@ -8,6 +8,7 @@
 #include "PrintConfig.hpp"
 #include "NozzleProcess.hpp"
 #include "NozzleOverride.hpp"
+#include "ProjectSwapGuard.hpp"
 #include "ToolSlots.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
@@ -3869,6 +3870,9 @@ bool PresetBundle::set_tool_nozzle_diameter(size_t tool, double diameter)
 
 void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
 {
+    // Project strip: a project switch loads another project's nozzles, it does not set this printer's.
+    if (ProjectSwapGuard::active())
+        return;
     const std::string model = nozzle_override_model_key(this->printers);
     // Owner bug 2026-11-07: a nozzle change handled after the printer was switched but before the Printer tab updated the
     // project for it (a queued sync, strip or variant-follow step) would store the previous printer's sizes under this model.
@@ -3921,6 +3925,9 @@ NozzleRackMemory PresetBundle::current_nozzle_rack_memory() const
 
 void PresetBundle::remember_nozzle_rack(AppConfig &config) const
 {
+    // Project strip (design risk 1): the rack of a project switched in is that project's, not a new memory for the printer.
+    if (ProjectSwapGuard::active())
+        return;
     const std::string model = nozzle_override_model_key(this->printers);
     // Until the model's memory was restored (startup, before the Printer tab loaded) the project holds no choice yet: writing
     // it would put the defaults over what was remembered.
@@ -3955,6 +3962,9 @@ NozzleRackLimits PresetBundle::nozzle_rack_limits() const
 
 bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
 {
+    // Project strip: a project switched in brings its own rack (as an opened 3MF does, #914); the memory stays out of it.
+    if (ProjectSwapGuard::active())
+        return false;
     const Preset     &printer = this->printers.get_selected_preset();
     const std::string model   = nozzle_override_model_key(this->printers);
     const std::string by_name = !printer.name.empty() && config.has("nozzle_rack", printer.name) ? config.get("nozzle_rack", printer.name) : std::string();
@@ -4840,6 +4850,146 @@ void PresetBundle::restore_selection(const Selection &selection)
     this->filament_presets = selection.filament_presets;
     this->project_config   = selection.project_config;
     this->mixed_filaments  = selection.mixed_filaments;
+}
+
+// ---- Project strip P4: each open project's presets, kept aside while another project is shown ----------------------------
+
+PresetBundle::ProjectPresetState PresetBundle::capture_project_presets(bool with_full_config) const
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    ProjectPresetState state;
+    auto capture = [](const PresetCollection &presets, ProjectPresetState::Collection &out) {
+        out.selected = presets.get_selected_preset_name();
+        out.edited   = presets.get_edited_preset().config;
+        out.saved    = presets.m_saved_preset.config;
+        out.preset   = presets.get_selected_preset().config;
+    };
+    capture(this->printers, state.printers);
+    capture(this->prints, state.prints);
+    capture(this->filaments, state.filaments);
+    state.filament_presets = this->filament_presets;
+    state.project_config   = this->project_config;
+    state.mixed_filaments  = this->mixed_filaments;
+    if (with_full_config)
+        state.full = this->full_config();
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) })
+        for (const Preset *preset : embedded_presets_of(*presets)) {
+            state.embedded.push_back(*preset);
+            state.embedded.back().loading_substitutions = nullptr;
+        }
+    state.valid = true;
+    return state;
+}
+
+bool PresetBundle::project_presets_current(const ProjectPresetState &state) const
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    if (!state.valid)
+        return true;
+    auto same = [](const PresetCollection &presets, const ProjectPresetState::Collection &s) {
+        return presets.get_selected_preset_name() == s.selected && presets.get_edited_preset().config.equals(s.edited) &&
+               presets.m_saved_preset.config.equals(s.saved) && presets.get_selected_preset().config.equals(s.preset);
+    };
+    if (!same(this->printers, state.printers) || !same(this->prints, state.prints) || !same(this->filaments, state.filaments))
+        return false;
+    if (this->filament_presets != state.filament_presets || !this->project_config.equals(state.project_config))
+        return false;
+    std::vector<const Preset *> loaded;
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) }) {
+        const auto e = embedded_presets_of(*presets);
+        loaded.insert(loaded.end(), e.begin(), e.end());
+    }
+    if (loaded.size() != state.embedded.size())
+        return false;
+    for (size_t i = 0; i < loaded.size(); ++i)
+        if (loaded[i]->name != state.embedded[i].name || !loaded[i]->config.equals(state.embedded[i].config))
+            return false;
+    return true;
+}
+
+void PresetBundle::restore_project_presets(const ProjectPresetState &state, std::vector<std::string> *missing)
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    if (!state.valid)
+        return;
+    // The project's own presets: the ones loaded are the shown project's.
+    bool same_embedded = true;
+    {
+        std::vector<const Preset *> loaded;
+        for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                                 static_cast<const PresetCollection *>(&this->printers) }) {
+            const auto e = embedded_presets_of(*presets);
+            loaded.insert(loaded.end(), e.begin(), e.end());
+        }
+        same_embedded = loaded.size() == state.embedded.size();
+        for (size_t i = 0; same_embedded && i < loaded.size(); ++i)
+            same_embedded = loaded[i]->name == state.embedded[i].name && loaded[i]->config.equals(state.embedded[i].config);
+    }
+    if (!same_embedded) {
+        this->reset_project_embedded_presets();
+        if (!state.embedded.empty()) {
+            // load_project_embedded_presets() rebuilds each preset's config in place: hand it copies.
+            std::vector<Preset>   copies = state.embedded;
+            std::vector<Preset *> ptrs;
+            for (Preset &preset : copies) {
+                preset.loading_substitutions = nullptr;
+                ptrs.push_back(&preset);
+            }
+            try {
+                this->load_project_embedded_presets(ptrs, ForwardCompatibilitySubstitutionRule::EnableSilent);
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << "project strip: the project's own presets did not all come back: " << e.what();
+            }
+        }
+    }
+    auto restore = [missing](PresetCollection &presets, const ProjectPresetState::Collection &s) {
+        // A preset the project uses may be hidden (another printer's, not installed): it is shown again, as opening the
+        // project's 3MF does.
+        const std::string name = Preset::remove_suffix_modified(s.selected);
+        if (Preset *preset = presets.find_preset(name, false, true); preset != nullptr && preset->name == name)
+            preset->is_visible = true;
+        presets.select_preset_by_name(name, true);
+        const Preset &selected = presets.get_selected_preset();
+        if (selected.name != name) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: the project's preset \"" << name << "\" is gone, its values go on \"" << selected.name << "\"";
+            if (missing != nullptr)
+                missing->push_back(name);
+        } else if (selected.config.equals(s.preset)) {
+            // Unchanged since: the exact baseline, so the project's dirty state is what it was.
+            presets.m_saved_preset.config = s.saved;
+        }
+        presets.get_edited_preset().config = s.edited;
+        presets.update_dirty();
+    };
+    restore(this->printers, state.printers);
+    restore(this->prints, state.prints);
+    restore(this->filaments, state.filaments);
+    this->update_compatible(PresetSelectCompatibleType::Never);
+    this->update_multi_material_filament_presets();
+    // Last, as update_multi_material_filament_presets() resizes filament_presets and the flush data in project_config.
+    this->filament_presets = state.filament_presets;
+    this->project_config   = state.project_config;
+    this->mixed_filaments  = state.mixed_filaments;
 }
 
 // Load a config file from a boost property_tree. This is a private method called from load_config_file.
