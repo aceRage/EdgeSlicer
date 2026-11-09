@@ -3031,4 +3031,21 @@ void join_close_ends(Polylines &polylines, double max_gap, bool can_reverse)
     polylines = std::move(out);
 }
 
+// EdgeSlicer: the closed rings among the paths are clipped on their own, and the two pieces of each ring that meet at its
+// first point are joined back (OrcaSlicer #17334). Without a closed ring this is intersection_pl().
+Polylines intersection_pl_rejoining_rings(const Polylines &polylines, const ExPolygons &clip)
+{
+    auto is_ring = [](const Polyline &pl) { return pl.size() > 3 && pl.first_point() == pl.last_point(); };
+    if (std::none_of(polylines.begin(), polylines.end(), is_ring))
+        return intersection_pl(polylines, clip);
+    Polylines open, rings;
+    for (const Polyline &pl : polylines)
+        (is_ring(pl) ? rings : open).emplace_back(pl);
+    Polylines out        = intersection_pl(open, clip);
+    Polylines ring_parts = intersection_pl(rings, clip);
+    join_close_ends(ring_parts, SCALED_EPSILON, true);
+    append(out, std::move(ring_parts));
+    return out;
+}
+
 } // namespace Slic3r

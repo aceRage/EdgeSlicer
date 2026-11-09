@@ -2666,6 +2666,44 @@ TEST_CASE("join_close_ends rejoins a ring cut at its first point and leaves isla
     CHECK(apart[1] == line);
 }
 
+TEST_CASE("Clipping the paths of a Locked Zag band keeps each cut ring in one piece", "[Fill][Regression]")
+{
+    // EdgeSlicer: FillLockedZag clips the finished paths of a band by its flow regions; with Gyroid, TPMS or Concentric
+    // in a band, those paths include closed rings.
+    const ExPolygons band{ExPolygon(Points{Point::new_scale(-1., -1.), Point::new_scale(8., -1.), Point::new_scale(8., 11.), Point::new_scale(-1., 11.)})};
+    Polyline ring;
+    ring.points = {Point::new_scale(5., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.), Point::new_scale(0., 10.),
+                   Point::new_scale(0., 0.), Point::new_scale(5., 0.)};
+    Polyline line;
+    line.points = {Point::new_scale(0., 5.), Point::new_scale(12., 5.)};
+
+    SECTION("Without a ring it is intersection_pl()") {
+        Polyline zigzag;
+        zigzag.points = {Point::new_scale(0., 2.), Point::new_scale(12., 2.), Point::new_scale(12., 4.), Point::new_scale(0., 4.)};
+        const Polylines paths{line, zigzag};
+        CHECK(intersection_pl_rejoining_rings(paths, band) == intersection_pl(paths, band));
+    }
+    SECTION("A ring cut by the region boundary is one path between the two cuts") {
+        const Polylines pieces = intersection_pl_rejoining_rings(Polylines{line, ring}, band);
+        REQUIRE(pieces.size() == 2);
+        CHECK(pieces[0] == intersection_pl(Polylines{line}, band).front());
+        const Polyline &cut = pieces[1];
+        // From one cut at x = 8 to the other, through the start of the ring.
+        CHECK(cut.first_point() != cut.last_point());
+        CHECK(std::abs(cut.first_point().x() - scale_(8.)) <= SCALED_EPSILON);
+        CHECK(std::abs(cut.last_point().x() - scale_(8.)) <= SCALED_EPSILON);
+        CHECK(std::abs(cut.length() - scale_(8. + 10. + 5. + 3.)) < scale_(0.01));
+    }
+    SECTION("A ring inside the region stays a closed ring") {
+        Polyline island = ring;
+        island.translate(Point::new_scale(-0.5, 0.));
+        island.scale(0.5);
+        const Polylines pieces = intersection_pl_rejoining_rings(Polylines{island}, band);
+        REQUIRE(pieces.size() == 1);
+        CHECK(pieces.front().first_point() == pieces.front().last_point());
+    }
+}
+
 TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][TpmsAdaptive][InternalBridge]")
 {
     const std::string pattern = GENERATE("tpmsd", "tpmsfk", "gyroid");
