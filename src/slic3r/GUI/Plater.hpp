@@ -459,8 +459,10 @@ public:
     void count_sliced_plates(int& plates_with_objects, int& plates_sliced);
     // P2 live strip thumbnail: the current plate rendered as the 3MF thumbnail is (false when there is no canvas).
     bool render_current_plate_thumbnail(ThumbnailData& out, unsigned int size);
-    // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo).
+    // Changes whenever the project's model changes (a new undo snapshot, an undo or a redo, a new or loaded project).
     size_t project_change_marker() const;
+    // The current plate holds an object (an empty plate's thumbnail renders nothing).
+    bool current_plate_has_objects() const;
     // The slice thread is working (not finished and waiting for its result to be picked up): the strip's spinner for a
     // hidden project.
     bool is_slicing_in_background() const;

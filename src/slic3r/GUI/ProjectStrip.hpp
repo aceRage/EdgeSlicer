@@ -92,6 +92,8 @@ private:
         wxBitmap scaled;            // scaled to the tile
         int      scaled_side{ 0 };
         size_t   thumb_marker{ size_t(-1) }; // the project's change marker when `image` was rendered
+        bool     empty_bed{ false };         // rendered with nothing on the plate: the tile draws an empty bed
+        bool     has_thumbnail() const { return image.IsOk() || empty_bed; }
         // Session restore: the snapshot files of the previous run, deleted one by one once the project is back.
         std::vector<std::string> files;
         std::string              dir;
@@ -200,6 +202,9 @@ private:
     wxTimer                  m_poll_timer;
     wxTimer                  m_thumb_timer;
     size_t                   m_active_marker{ size_t(-1) };
+    // Failed renders of the shown project's tile (canvas or geometry not ready yet) and when the next try is due.
+    unsigned                              m_thumb_failures{ 0 };
+    std::chrono::steady_clock::time_point m_thumb_retry_at{};
     int                      m_spin{ 0 };
     // P3: drag reorder, session restore.
     int                      m_press_id{ -1 };

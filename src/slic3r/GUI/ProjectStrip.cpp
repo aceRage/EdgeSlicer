@@ -257,6 +257,7 @@ void ProjectStrip::load_thumbnail(int id, const std::string &snapshot_3mf)
         return;
     SlotExtra &extra  = m_extra[id];
     extra.image       = image;
+    extra.empty_bed   = false;
     extra.scaled      = wxBitmap();
     extra.scaled_side = 0;
 }
@@ -291,7 +292,7 @@ void ProjectStrip::stash_active()
     slot->plate    = p->get_partplate_list().get_curr_plate_index();
     // Owner P4 hand test: a project opened and left before its live thumbnail was due (1.5 s after the last change) kept
     // the placeholder. Its thumbnail is rendered now, while it is still the one on screen, when the tile's is not current.
-    if (const SlotExtra &e = m_extra[slot->id]; tile_thumbnail_stale(e.image.IsOk(), e.thumb_marker, active_thumbnail_marker())) {
+    if (const SlotExtra &e = m_extra[slot->id]; tile_thumbnail_stale(e.has_thumbnail(), e.thumb_marker, active_thumbnail_marker())) {
         m_thumb_timer.Stop();
         // Off screen too: Recent projects are opened from Home, so the project may be left without its canvas shown (the
         // thumbnail renders into an off-screen buffer, as the 3MF plate thumbnails do).
@@ -405,7 +406,9 @@ void ProjectStrip::after_switch(int id, std::chrono::steady_clock::time_point st
             canvas->set_as_dirty();
         // The live thumbnail: none to render while the tile's is current; a project with none yet gets one shortly.
         auto it         = m_extra.find(id);
-        m_active_marker = it != m_extra.end() && it->second.image.IsOk() ?
+        m_thumb_failures = 0;
+        m_thumb_retry_at = {};
+        m_active_marker = it != m_extra.end() && it->second.has_thumbnail() ?
                               p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index())) :
                               size_t(-1);
     }
@@ -831,8 +834,19 @@ void ProjectStrip::on_poll(wxTimerEvent &)
     // The live thumbnail: rendered again once the project stops changing for a moment (an undo snapshot or another plate).
     const size_t marker = p->project_change_marker() * 64 + size_t(std::max(0, p->get_partplate_list().get_curr_plate_index()));
     if (marker != m_active_marker) {
-        m_active_marker = marker;
+        m_active_marker  = marker;
+        m_thumb_failures = 0;
+        m_thumb_retry_at = {};
         m_thumb_timer.StartOnce(1500);
+    } else if (!m_thumb_timer.IsRunning() && !m_collapsed && !m_text_mode && std::chrono::steady_clock::now() >= m_thumb_retry_at) {
+        // Owner hand test 2026-11-08: the startup project's tile never got its picture. A tile left stale (a render that
+        // failed at startup or on a canvas not ready yet) is tried again here, at a growing interval, instead of waiting
+        // for the next change of the project.
+        const ProjectSlot *active = m_sessions.active();
+        auto               it     = active != nullptr ? m_extra.find(active->id) : m_extra.end();
+        if (active != nullptr && plater_of(active->id) == p &&
+            (it == m_extra.end() || tile_thumbnail_stale(it->second.has_thumbnail(), it->second.thumb_marker, marker)))
+            m_thumb_timer.StartOnce(m_thumb_failures == 0 ? 1500 : 10);
     }
     if (changed)
         Refresh();
@@ -861,7 +875,7 @@ void ProjectStrip::thumbnail_after_load()
         if (active == nullptr)
             return;
         const SlotExtra &e = m_extra[active->id];
-        if (tile_thumbnail_stale(e.image.IsOk(), e.thumb_marker, active_thumbnail_marker()) && render_active_thumbnail(true))
+        if (tile_thumbnail_stale(e.has_thumbnail(), e.thumb_marker, active_thumbnail_marker()) && render_active_thumbnail(true))
             Refresh();
     });
 }
@@ -883,10 +897,33 @@ bool ProjectStrip::render_active_thumbnail(bool off_screen)
         m_active_marker = size_t(-1);
         return false;
     }
-    ThumbnailData data;
-    const unsigned size = unsigned(std::max(128, FromDIP(StripLayout::thumb_side(StripLayout::max_width))));
-    if (!p->render_current_plate_thumbnail(data, size))
+    ThumbnailData  data;
+    const unsigned size     = unsigned(std::max(128, FromDIP(StripLayout::thumb_side(StripLayout::max_width))));
+    const bool     rendered = p->render_current_plate_thumbnail(data, size);
+    const bool     drawn    = rendered && data.pixels.size() >= size_t(4) * data.width * data.height &&
+                       rgba_any_drawn(data.pixels.data(), size_t(data.width) * data.height);
+    const TileRender outcome = classify_tile_render(rendered, drawn, p->current_plate_has_objects());
+    SlotExtra       &extra   = m_extra[active->id];
+    if (outcome == TileRender::Failed) {
+        // Nothing kept: the tile stays stale and on_poll tries again once the wait is over.
+        ++m_thumb_failures;
+        const int wait   = tile_retry_delay_ms(m_thumb_failures);
+        m_thumb_retry_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait);
+        if (m_thumb_failures <= 3 || m_thumb_failures % 20 == 0)
+            BOOST_LOG_TRIVIAL(info) << "project strip: slot " << active->id << " thumbnail not ready (" << (rendered ? "nothing drawn" : "no image")
+                                << ", try " << m_thumb_failures << "), next try in " << wait << " ms";
         return false;
+    }
+    m_thumb_failures = 0;
+    m_thumb_retry_at = {};
+    if (outcome == TileRender::EmptyBed) {
+        extra.image        = wxImage();
+        extra.empty_bed    = true;
+        extra.scaled       = wxBitmap();
+        extra.scaled_side  = 0;
+        extra.thumb_marker = active_thumbnail_marker();
+        return true;
+    }
     wxImage image(int(data.width), int(data.height));
     image.InitAlpha();
     for (unsigned r = 0; r < data.height; ++r) {
@@ -897,8 +934,8 @@ bool ProjectStrip::render_active_thumbnail(bool off_screen)
             image.SetAlpha(int(c), int(r), px[3]);
         }
     }
-    SlotExtra &extra   = m_extra[active->id];
     extra.image        = image;
+    extra.empty_bed    = false;
     extra.scaled       = wxBitmap();
     extra.scaled_side  = 0;
     extra.thumb_marker = active_thumbnail_marker();
@@ -1099,6 +1136,21 @@ void ProjectStrip::on_paint(wxPaintEvent &)
         if (!m_text_mode) {
             if (const wxBitmap *bmp = tile_bitmap(slot.id, side - FromDIP(6)); bmp != nullptr && bmp->IsOk()) {
                 dc.DrawBitmap(*bmp, frame.x + (side - bmp->GetWidth()) / 2, frame.y + (side - bmp->GetHeight()) / 2, true);
+            } else if (auto ex = m_extra.find(slot.id); ex != m_extra.end() && ex->second.empty_bed) {
+                // An empty plate (the plate thumbnail draws objects only): the bed seen from the iso view, with a grid.
+                const int     cx = frame.x + side / 2, cy = frame.y + side / 2 + side / 12;
+                const int     hw = side * 3 / 8, hh = side / 5;
+                const wxPoint top_pt(cx, cy - hh), right_pt(cx + hw, cy), bottom_pt(cx, cy + hh), left_pt(cx - hw, cy);
+                wxPoint       bed[] = { top_pt, right_pt, bottom_pt, left_pt };
+                dc.SetPen(wxPen(muted));
+                dc.SetBrush(wxBrush(wxGetApp().dark_mode() ? wxColour(0x3A, 0x3A, 0x40) : wxColour(0xDD, 0xDD, 0xDD)));
+                dc.DrawPolygon(4, bed);
+                // Grid lines between the opposite edges, at a third and two thirds.
+                for (int k = 1; k <= 2; ++k) {
+                    auto lerp = [k](const wxPoint &a, const wxPoint &b) { return wxPoint(a.x + (b.x - a.x) * k / 3, a.y + (b.y - a.y) * k / 3); };
+                    dc.DrawLine(lerp(left_pt, top_pt), lerp(bottom_pt, right_pt));
+                    dc.DrawLine(lerp(left_pt, bottom_pt), lerp(top_pt, right_pt));
+                }
             } else {
                 // No thumbnail yet: a file shape with a folded corner (a project, not a plate tile).
                 const int    fold = side / 5;

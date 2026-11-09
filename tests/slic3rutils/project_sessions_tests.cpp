@@ -456,6 +456,48 @@ TEST_CASE("project strip: a tile is rendered before its project goes out of sigh
     CHECK_FALSE(tile_thumbnail_stale(true, 640, 640));
 }
 
+TEST_CASE("project strip: a failed tile render is not kept and is tried again", "[ProjectSessions][P4]")
+{
+    // Owner hand test 2026-11-08: the startup project's tile never got its picture.
+    SECTION("what a render gave")
+    {
+        CHECK(classify_tile_render(true, true, true) == TileRender::Picture);
+        // The startup Untitled project: nothing on the plate, nothing drawn, an empty bed (not the file placeholder).
+        CHECK(classify_tile_render(true, false, false) == TileRender::EmptyBed);
+        // Objects on the plate but nothing drawn: the canvas or its geometry was not ready, try again.
+        CHECK(classify_tile_render(true, false, true) == TileRender::Failed);
+        CHECK(classify_tile_render(false, false, true) == TileRender::Failed);
+        CHECK(classify_tile_render(false, false, false) == TileRender::Failed);
+    }
+    SECTION("transparent pixels are nothing drawn")
+    {
+        std::vector<unsigned char> rgba(4 * 16, 0);
+        CHECK_FALSE(rgba_any_drawn(rgba.data(), 16));
+        CHECK_FALSE(rgba_any_drawn(nullptr, 16));
+        // Colour without alpha is still transparent; one pixel with alpha is a picture.
+        rgba[4 * 3 + 0] = 200;
+        CHECK_FALSE(rgba_any_drawn(rgba.data(), 16));
+        rgba[4 * 15 + 3] = 1;
+        CHECK(rgba_any_drawn(rgba.data(), 16));
+        CHECK_FALSE(rgba_any_drawn(rgba.data(), 15));
+    }
+    SECTION("the retry waits grow and stay bounded")
+    {
+        CHECK(tile_retry_delay_ms(0) == 1500);
+        CHECK(tile_retry_delay_ms(1) == 1500);
+        CHECK(tile_retry_delay_ms(2) == 3000);
+        CHECK(tile_retry_delay_ms(3) == 6000);
+        CHECK(tile_retry_delay_ms(6) == 30000);
+        CHECK(tile_retry_delay_ms(1000) == 30000);
+    }
+    SECTION("an empty bed counts as the tile's picture until the project changes")
+    {
+        // has_thumbnail() is image || empty_bed: an empty bed rendered for marker 7 is current at 7, stale after a load.
+        CHECK_FALSE(tile_thumbnail_stale(true, 7, 7));
+        CHECK(tile_thumbnail_stale(true, 7, 1000003 + 7));
+    }
+}
+
 TEST_CASE("project strip: the tick needs every plate with objects sliced, in each project's own counts", "[ProjectSessions][P4]")
 {
     // Owner re-test 2026-11-07: a sliced project showed no tick. The badge is per project (each tile's own Plater is

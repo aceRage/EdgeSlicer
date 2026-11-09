@@ -13087,7 +13087,10 @@ private:
     Slic3r::UndoRedo::Stack 	m_undo_redo_stack_main;
     Slic3r::UndoRedo::Stack 	m_undo_redo_stack_gizmos;
     Slic3r::UndoRedo::Stack    *m_undo_redo_stack_active = &m_undo_redo_stack_main;
-    int                         m_prevent_snapshots = 0;     /* Used for avoid of excess "snapshoting".
+    // Project strip: counts the undo stack resets (New / Load / Reset Project), which start its snapshot times at 0 again;
+    // with the active snapshot time it tells one project state from another (Plater::project_change_marker).
+    size_t                      project_generation = 0;
+    int                         m_prevent_snapshots = 0;    /* Used for avoid of excess "snapshoting".
                                                               * Like for "delete selected" or "set numbers of copies"
                                                               * we should call tack_snapshot just ones
                                                               * instead of calls for each action separately
@@ -20963,8 +20966,10 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
     
     const GLGizmosManager& gizmos = canvas->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_gizmos_manager() : view3D->get_canvas3d()->get_gizmos_manager();
 
-    if (snapshot_type == UndoRedo::SnapshotType::ProjectSeparator)
+    if (snapshot_type == UndoRedo::SnapshotType::ProjectSeparator) {
         this->undo_redo_stack().clear();
+        ++project_generation;
+    }
     this->undo_redo_stack().take_snapshot(snapshot_name, model, get_current_canvas3D()->get_canvas_type() == GLCanvas3D::CanvasAssembleView ? assemble_view->get_canvas3d()->get_selection() : view3D->get_canvas3d()->get_selection(), gizmos, partplate_list, snapshot_data);
     if (snapshot_type == UndoRedo::SnapshotType::LeavingGizmoWithAction) {
         // Filter all but the last UndoRedo::SnapshotType::GizmoAction in a row between the last UndoRedo::SnapshotType::EnteringGizmo and UndoRedo::SnapshotType::LeavingGizmoWithAction.
@@ -21927,7 +21932,18 @@ bool Plater::has_hidden_slice_result() const
 bool Plater::is_slicing_in_background() const { return p->background_process.state() == BackgroundSlicingProcess::STATE_STARTED ||
                                                        p->background_process.state() == BackgroundSlicingProcess::STATE_RUNNING; }
 
-size_t Plater::project_change_marker() const { return p->undo_redo_stack().active_snapshot_time(); }
+// Owner hand test 2026-11-08: the snapshot time alone came back equal after a project was loaded in place of the startup
+// Untitled one (a load clears the undo stack), so its tile kept the empty plate's picture. The reset count tells them apart.
+size_t Plater::project_change_marker() const
+{
+    return p->project_generation * size_t(1000003) + p->undo_redo_stack().active_snapshot_time();
+}
+
+bool Plater::current_plate_has_objects() const
+{
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    return plate != nullptr && !plate->empty();
+}
 
 // BBS: save logic
 void Plater::set_opened_from_zip(bool opened)
@@ -31384,7 +31400,11 @@ bool Plater::can_scale_to_print_volume() const { return p->can_scale_to_print_vo
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
 
 const UndoRedo::Stack& Plater::undo_redo_stack_main() const { return p->undo_redo_stack_main(); }
-void Plater::clear_undo_redo_stack_main() { p->undo_redo_stack_main().clear(); }
+void Plater::clear_undo_redo_stack_main()
+{
+    p->undo_redo_stack_main().clear();
+    ++p->project_generation;
+}
 void Plater::enter_gizmos_stack() { p->enter_gizmos_stack(); }
 bool Plater::leave_gizmos_stack() { return p->leave_gizmos_stack(); } // BBS: return false if not changed
 bool Plater::inside_snapshot_capture() { return p->inside_snapshot_capture(); }

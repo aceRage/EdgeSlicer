@@ -434,6 +434,41 @@ inline bool tile_thumbnail_stale(bool has_image, std::size_t rendered_marker, st
     return !has_image || rendered_marker != current_marker;
 }
 
+// Owner hand test 2026-11-08 (the first tile kept no picture): what one off-screen render of the shown plate gave.
+//   Picture  - something was drawn: the tile's picture.
+//   EmptyBed - nothing drawn and nothing on the plate (the startup Untitled project): the strip draws an empty bed.
+//   Failed   - no image, or nothing drawn although the plate holds objects (the canvas or its geometry was not ready yet,
+//              as at startup or right after a load on a hidden canvas): nothing is kept and the render is tried again.
+enum class TileRender { Picture, EmptyBed, Failed };
+inline TileRender classify_tile_render(bool rendered, bool any_pixel_drawn, bool plate_has_objects)
+{
+    if (!rendered)
+        return TileRender::Failed;
+    if (any_pixel_drawn)
+        return TileRender::Picture;
+    return plate_has_objects ? TileRender::Failed : TileRender::EmptyBed;
+}
+
+// Any pixel of an RGBA buffer not fully transparent (the thumbnail renders on a transparent background).
+inline bool rgba_any_drawn(const unsigned char *rgba, std::size_t pixels)
+{
+    if (rgba == nullptr)
+        return false;
+    for (std::size_t i = 0; i < pixels; ++i)
+        if (rgba[4 * i + 3] != 0)
+            return true;
+    return false;
+}
+
+// The wait before the next try after `failures` failed renders of a stale tile: 1.5 s, doubling, at most 30 s.
+inline int tile_retry_delay_ms(unsigned failures)
+{
+    int delay = 1500;
+    for (unsigned i = 1; i < failures && delay < 30000; ++i)
+        delay *= 2;
+    return std::min(delay, 30000);
+}
+
 // D7: a project file double-clicked in Explorer / Finder while EdgeSlicer runs (single instance on) opens as a new project in
 // the strip ("strip", the default) or in place of the active project ("replace", the old behaviour).
 inline bool shell_open_into_strip(const std::string &app_config_value) { return app_config_value != "replace"; }
