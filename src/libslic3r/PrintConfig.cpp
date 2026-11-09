@@ -8162,7 +8162,8 @@ void PrintConfigDef::init_fff_params()
                       "90 degrees from the layer below. The interface then cannot peel off the body. "
                       "The top interface layer, the one that touches the model, is not changed.\n"
                       "Applies to the top interfaces of normal and tree supports (all tree styles). Needs at least one top "
-                      "interface layer more than the woven layers. Not used when \"Support Filament Matching\" is on.");
+                      "interface layer more than the woven layers.\n"
+                      "Cannot run together with \"Support Filament Matching\": turning one on offers to turn the other off.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8240,7 +8241,9 @@ void PrintConfigDef::init_fff_params()
                      "wall's color. Reduces color contamination between supports and the "
                      "model. Any support geometry left over after matching keeps the color "
                      "already assigned to it and will not be repainted by Flush into objects' "
-                     "support.");
+                     "support.\n"
+                     "Cannot run together with \"Interlock interface with support body\": turning one on "
+                     "offers to turn the other off.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

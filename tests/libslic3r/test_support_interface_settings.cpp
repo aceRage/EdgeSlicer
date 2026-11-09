@@ -322,3 +322,56 @@ TEST_CASE("Top Z 0 offer: a No is remembered per filament pair until cleared", "
     in = different_interface_inputs();
     CHECK(memory.should_offer(in));
 }
+
+// ---------------------------------------------------------------------------------------------
+//   4. Interlock and Support Filament Matching are mutually exclusive but neither is greyed out:
+//      turning one on while the other is on asks which to keep.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Interlock and matching conflict only when both are on", "[SupportInterface][InterlockMatching]")
+{
+    CHECK(interlock_matching_conflict(true, true));
+    CHECK_FALSE(interlock_matching_conflict(true, false));
+    CHECK_FALSE(interlock_matching_conflict(false, true));
+    CHECK_FALSE(interlock_matching_conflict(false, false));
+}
+
+TEST_CASE("Interlock turned on with matching on: Yes keeps interlock, No reverts it", "[SupportInterface][InterlockMatching]")
+{
+    const InterlockMatchingResolution yes = resolve_interlock_matching("support_interface_interlock", true, true, true);
+    CHECK(yes.ask);
+    CHECK(yes.interlock_on);
+    CHECK_FALSE(yes.matching_on);
+    const InterlockMatchingResolution no = resolve_interlock_matching("support_interface_interlock", true, true, false);
+    CHECK(no.ask);
+    CHECK_FALSE(no.interlock_on);
+    CHECK(no.matching_on);
+    // Either answer leaves no conflict, so the question cannot come back.
+    CHECK_FALSE(interlock_matching_conflict(yes.interlock_on, yes.matching_on));
+    CHECK_FALSE(interlock_matching_conflict(no.interlock_on, no.matching_on));
+}
+
+TEST_CASE("Matching turned on with interlock on: Yes keeps matching, No reverts it", "[SupportInterface][InterlockMatching]")
+{
+    const InterlockMatchingResolution yes = resolve_interlock_matching("support_filament_matching", true, true, true);
+    CHECK(yes.ask);
+    CHECK_FALSE(yes.interlock_on);
+    CHECK(yes.matching_on);
+    const InterlockMatchingResolution no = resolve_interlock_matching("support_filament_matching", true, true, false);
+    CHECK(no.ask);
+    CHECK(no.interlock_on);
+    CHECK_FALSE(no.matching_on);
+}
+
+TEST_CASE("Interlock/matching: no question without a conflict or for another key", "[SupportInterface][InterlockMatching]")
+{
+    // Turning one off, or one on alone.
+    CHECK_FALSE(resolve_interlock_matching("support_interface_interlock", false, true, true).ask);
+    CHECK_FALSE(resolve_interlock_matching("support_filament_matching", true, false, true).ask);
+    // Both on from a loaded project or another setting: left as is (the slicer lets matching win).
+    const InterlockMatchingResolution other = resolve_interlock_matching("support_interface_interlock_layers", true, true, true);
+    CHECK_FALSE(other.ask);
+    CHECK(other.interlock_on);
+    CHECK(other.matching_on);
+    CHECK_FALSE(resolve_interlock_matching("", true, true, false).ask);
+}

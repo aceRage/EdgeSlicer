@@ -117,6 +117,12 @@ public:
     // the same values. Returns true when the config was changed.
     bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
 
+    // EdgeSlicer: the interlock and support filament matching cannot run together. Called when the
+    // user changes one of them (changed_key); when both are now on, asks once whether to keep the
+    // one just turned on (Yes: the other goes off) or not (No: it is reverted). Either answer leaves
+    // only one on, so it cannot ask again. Returns true when the config was changed.
+    bool    check_support_interlock_matching(DynamicPrintConfig* config, const std::string& changed_key);
+
     // EdgeSlicer: called when the user changes a filament selector (changed_key). When the support
     // interface now uses a filament other than the print's and the top Z distance is above 0,
     // offers once to set it to 0. A No is remembered for that filament pair for the session

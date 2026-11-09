@@ -1286,8 +1286,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
     // EdgeSlicer: support interface interlock. The weave needs an interface filament that differs from
-    // the support body filament (design D4); its two knobs only matter while it is on, and none of it
-    // applies with support filament matching on (D6).
+    // the support body filament (design D4); its two knobs only matter while it is on. It cannot run
+    // with support filament matching (D6), but it is not greyed out for that: turning either on
+    // while the other is on asks which to keep (check_support_interlock_matching).
     {
         const int  iface_filament    = config->opt_int("support_interface_filament");
         const bool separate_iface    = iface_filament != 0 && iface_filament != config->opt_int("support_filament");
@@ -1296,7 +1297,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         const bool interlock_on = interlock_visible && config->opt_bool("support_interface_interlock");
         toggle_line("support_interface_interlock_layers", interlock_on);
         toggle_line("support_interface_interlock_beam_lines", interlock_on);
-        const bool interlock_editable = have_support_material && ! config->opt_bool("support_filament_matching");
+        const bool interlock_editable = have_support_material;
         for (auto el : { "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines" })
             toggle_field(el, interlock_editable);
     }
@@ -1591,6 +1592,48 @@ bool ConfigManipulation::check_support_interlock_interface_layers(DynamicPrintCo
     } else {
         new_conf.set_key_value("support_interface_interlock", new ConfigOptionBool(false));
     }
+    apply(config, &new_conf);
+    is_msg_dlg_already_exist = false;
+    return true;
+}
+
+// EdgeSlicer: interlock and support filament matching both stay enabled (a greyed switch gave no
+// reason); turning one on while the other is on asks which to keep. Only called from
+// Tab::on_value_change for those two keys, so never during a preset or project load; a loaded
+// config with both on slices with matching and the weave off (SupportParameters).
+bool ConfigManipulation::check_support_interlock_matching(DynamicPrintConfig *config, const std::string &changed_key)
+{
+    if (is_msg_dlg_already_exist || config == nullptr ||
+        ! config->has("support_interface_interlock") || ! config->has("support_filament_matching"))
+        return false;
+    const bool interlock_on = config->opt_bool("support_interface_interlock");
+    const bool matching_on  = config->opt_bool("support_filament_matching");
+    if (! resolve_interlock_matching(changed_key, interlock_on, matching_on, true).ask)
+        return false;
+    // The interlock row is hidden while the interface shares the body's filament (it does nothing
+    // then); don't ask about a switch the user cannot see.
+    if (changed_key == "support_filament_matching" && config->has("support_interface_filament") && config->has("support_filament")) {
+        const int iface = config->opt_int("support_interface_filament");
+        if (iface == 0 || iface == config->opt_int("support_filament"))
+            return false;
+    }
+
+    const bool interlock_changed = changed_key == "support_interface_interlock";
+    wxString msg_text = interlock_changed ?
+        _L("Interlock and support filament matching cannot run together. Turn off matching and keep interlock?") :
+        _L("Support filament matching and interlock cannot run together. Turn off interlock and keep matching?");
+    msg_text += "\n\n" + (interlock_changed ?
+        _L("Yes - Turn off support filament matching and keep interlock\n"
+           "No  - Keep support filament matching and turn interlock off") :
+        _L("Yes - Turn off interlock and keep support filament matching\n"
+           "No  - Keep interlock and turn support filament matching off"));
+    MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    is_msg_dlg_already_exist = true;
+    const bool keep_changed = dialog.ShowModal() == wxID_YES;
+    const InterlockMatchingResolution r = resolve_interlock_matching(changed_key, interlock_on, matching_on, keep_changed);
+    DynamicPrintConfig new_conf = *config;
+    new_conf.set_key_value("support_interface_interlock", new ConfigOptionBool(r.interlock_on));
+    new_conf.set_key_value("support_filament_matching", new ConfigOptionBool(r.matching_on));
     apply(config, &new_conf);
     is_msg_dlg_already_exist = false;
     return true;

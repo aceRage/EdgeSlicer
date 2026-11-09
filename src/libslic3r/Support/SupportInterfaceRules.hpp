@@ -114,4 +114,42 @@ private:
     std::set<std::pair<int, int>> m_declined;
 };
 
+// ---------------------------------------------------------------------------------------------
+// The interlock and "Support Filament Matching" (Chameleon) cannot run together (design D6): the
+// slicer leaves the weave off when both are on. The GUI keeps both switches enabled and, when the
+// user turns one on while the other is on, asks which one to keep.
+// ---------------------------------------------------------------------------------------------
+
+inline bool interlock_matching_conflict(bool interlock_on, bool matching_on)
+{
+    return interlock_on && matching_on;
+}
+
+// What the conflict question resolves to. changed_key is the switch the user just turned on
+// ("support_interface_interlock" or "support_filament_matching"); keep_changed is the answer
+// (Yes = keep the one just turned on and turn the other off; No = revert the one just turned on).
+struct InterlockMatchingResolution
+{
+    bool ask          { false };
+    bool interlock_on { false };
+    bool matching_on  { false };
+};
+
+inline InterlockMatchingResolution resolve_interlock_matching(const std::string &changed_key, bool interlock_on, bool matching_on, bool keep_changed)
+{
+    InterlockMatchingResolution out;
+    out.interlock_on = interlock_on;
+    out.matching_on  = matching_on;
+    if (! interlock_matching_conflict(interlock_on, matching_on))
+        return out;
+    if (changed_key == "support_interface_interlock") {
+        out.ask = true;
+        if (keep_changed) out.matching_on = false; else out.interlock_on = false;
+    } else if (changed_key == "support_filament_matching") {
+        out.ask = true;
+        if (keep_changed) out.interlock_on = false; else out.matching_on = false;
+    }
+    return out;
+}
+
 } // namespace Slic3r

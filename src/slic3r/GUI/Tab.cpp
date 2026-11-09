@@ -2873,8 +2873,14 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     // EdgeSlicer: switching the interlock on (or raising its woven layers) offers once to raise the
     // interface layers to 1 + woven layers; No turns the interlock off.
-    if (opt_key == "support_interface_interlock" || opt_key == "support_interface_interlock_layers") {
-        if (m_config_manipulation.check_support_interlock_interface_layers(m_config))
+    // Interlock and support filament matching cannot run together: turning one on while the other
+    // is on asks which to keep; the layer check runs only if the interlock is still on after that.
+    if (opt_key == "support_interface_interlock" || opt_key == "support_interface_interlock_layers" ||
+        opt_key == "support_filament_matching") {
+        bool changed = m_config_manipulation.check_support_interlock_matching(m_config, opt_key);
+        if (opt_key != "support_filament_matching")
+            changed |= m_config_manipulation.check_support_interlock_interface_layers(m_config);
+        if (changed)
             wxGetApp().plater()->update();
     }
 

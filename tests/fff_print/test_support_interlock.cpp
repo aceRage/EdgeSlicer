@@ -604,3 +604,21 @@ TEST_CASE("The slicer weaves exactly when the interlock prompt's rule is satisfi
                 CHECK(params.interlock_layers == size_t(woven));
         }
 }
+
+// Interlock and Support Filament Matching are no longer kept apart by a greyed-out switch, so a
+// config can carry both: matching wins and the weave is left off.
+TEST_CASE("Support filament matching wins over the interlock", "[SupportInterlock][SupportInterface]")
+{
+    DynamicPrintConfig config = interlock_config("normal", true, 3);
+    config.set_key_value("support_filament_matching", new ConfigOptionBool(true));
+    Print print;
+    Model model;
+    init_print({ capped_stem() }, print, model, config);
+    REQUIRE(! print.objects().empty());
+    CHECK(SupportParameters(*print.objects().front()).interlock_layers == 0);
+    config.set_key_value("support_filament_matching", new ConfigOptionBool(false));
+    Print print2;
+    Model model2;
+    init_print({ capped_stem() }, print2, model2, config);
+    CHECK(SupportParameters(*print2.objects().front()).interlock_layers == 2);
+}
