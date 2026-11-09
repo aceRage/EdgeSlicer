@@ -819,6 +819,15 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             if (object.config().support_interface_filament.value == 0 || support_layer->chameleon_residual_all_roles)
                 extruder_interface = pinned;
         }
+        // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 ToolOrdering.cpp:1144-1147):
+        // the filament the support merge plan pinned a "don't care" slab / interface to. Mirrors GCode::process_layer.
+        // 0 on every single-diameter plate.
+        if (object.config().support_filament.value == 0 && support_layer->planned_filament_id > 0)
+            extruder_support = resolve_mixed(unsigned(support_layer->planned_filament_id), layer_tools.layer_index,
+                                             float(support_layer->print_z), float(support_layer->height), &object);
+        if (object.config().support_interface_filament.value == 0 && support_layer->planned_interface_filament_id > 0)
+            extruder_interface = resolve_mixed(unsigned(support_layer->planned_interface_filament_id), layer_tools.layer_index,
+                                               float(support_layer->print_z), float(support_layer->height), &object);
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
@@ -1694,6 +1703,8 @@ FilamentGroupContext build_filament_group_context(
             info.usage_type = filament_usage_types[idx];
         else
             info.usage_type = filament_usage_types.empty() ? FilamentUsageType::ModelOnly : filament_usage_types.front();
+        if (idx < print_config.filament_diameter.size())
+            info.diameter = float(print_config.filament_diameter.get_at(idx));
         context.model_info.filament_info.emplace_back(std::move(info));
     }
 
@@ -1733,7 +1744,8 @@ FilamentGroupContext build_filament_group_context(
     } else
         context.group_info.filament_volume_map = std::vector<int>(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
 
-    context.nozzle_info.nozzle_list = build_nozzle_list(nozzle_groups);
+    // A rack machine's nozzles numbered by physical slot (Bambu Studio 2.9.x): the ids reach slice_info and the printer.
+    context.nozzle_info.nozzle_list = grouping_nozzle_list(print_config, nozzle_groups);
     context.nozzle_info.extruder_nozzle_list = build_extruder_nozzle_list(context.nozzle_info.nozzle_list);
 
     if (context.nozzle_info.nozzle_list.empty())
@@ -2591,6 +2603,13 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                     // body of a layer with woven stripes. Always false with the feature off.
                     if (this_support_layer->interlock_woven)
                         support_overriddable = false;
+                    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70
+                    // ToolOrdering.cpp:4011-4014): a support layer the merge plan pinned to a filament is printed by
+                    // that nozzle only, so it takes no purge. 0 on every single-diameter plate.
+                    if (this_support_layer->planned_filament_id > 0)
+                        support_overriddable = false;
+                    if (this_support_layer->planned_interface_filament_id > 0)
+                        support_intf_overriddable = false;
                     if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {

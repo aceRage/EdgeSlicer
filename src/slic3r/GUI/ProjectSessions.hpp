@@ -1,0 +1,479 @@
+#ifndef slic3r_GUI_ProjectSessions_hpp_
+#define slic3r_GUI_ProjectSessions_hpp_
+
+// The open projects of one window (project strip, tests/design_multi_project_sidebar.md 4.1), kept free of wxWidgets so
+// the rules are unit tested (tests/slic3rutils/project_sessions_tests.cpp): open with the same file selecting its slot,
+// "Untitled 2" naming, the cap on open projects, which slot becomes active when one closes, next / previous with wrap,
+// and the unsaved ones the app-close dialog lists. The GUI side (ProjectStrip) owns the Platers (P4: one live Plater per
+// open project) and the switch itself.
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+namespace Slic3r {
+namespace GUI {
+
+struct ProjectSlot
+{
+    // P4: every open project has a live Plater; Hidden ones are out of sight, not unloaded.
+    enum class State { Active, Hidden };
+
+    int         id{ 0 };
+    std::string name;          // shown in the strip (UTF-8)
+    std::string origin_path;   // the project's own file; empty = never saved (Untitled)
+    std::string snapshot_path; // session restore: the project's 3MF written at exit; empty otherwise
+    bool          dirty{ false };
+    bool          empty{ true };     // no objects (an empty Untitled is reused by New / Open)
+    int           plate{ 0 };        // current plate (session restore)
+    int           plates_with_objects{ 0 }; // P2 badge: plates holding objects, and those with G-code
+    int           plates_sliced{ 0 };
+    bool          slicing{ false };  // the badge's spinner: its slice is running (shown or hidden)
+    int           main_tab{ 1 };     // MainTabs::Editor3D, Preview or Showcase it was on when it went out of sight
+    std::uint64_t last_used{ 0 };
+    State         state{ State::Hidden };
+};
+
+class ProjectSessions
+{
+public:
+    static constexpr int default_max_open = 8;
+    static constexpr int min_max_open     = 2;
+    static constexpr int max_max_open     = 16;
+
+    explicit ProjectSessions(int max_open = default_max_open) { set_max_open(max_open); }
+
+    // D3: 8 by default, 2-16 from the app config ("project_strip_max_open"); anything else is the default.
+    static int clamp_max_open(int v) { return std::max(min_max_open, std::min(max_max_open, v)); }
+    static int parse_max_open(const std::string &text)
+    {
+        if (text.empty() || text.size() > 3 || !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }))
+            return default_max_open;
+        return clamp_max_open(std::stoi(text));
+    }
+
+    int  max_open() const { return m_max_open; }
+    void set_max_open(int v) { m_max_open = clamp_max_open(v); }
+
+    const std::vector<ProjectSlot> &slots() const { return m_slots; }
+    size_t                          size() const { return m_slots.size(); }
+    bool                            empty() const { return m_slots.empty(); }
+    bool                            can_add() const { return int(m_slots.size()) < m_max_open; }
+
+    int index_of(int id) const
+    {
+        for (size_t i = 0; i < m_slots.size(); ++i)
+            if (m_slots[i].id == id)
+                return int(i);
+        return -1;
+    }
+    ProjectSlot *find(int id)
+    {
+        const int i = index_of(id);
+        return i < 0 ? nullptr : &m_slots[size_t(i)];
+    }
+    const ProjectSlot *find(int id) const
+    {
+        const int i = index_of(id);
+        return i < 0 ? nullptr : &m_slots[size_t(i)];
+    }
+
+    int                active_id() const { return m_active_id; }
+    int                active_index() const { return index_of(m_active_id); }
+    ProjectSlot       *active() { return find(m_active_id); }
+    const ProjectSlot *active() const { return find(m_active_id); }
+
+    // Two spellings of one file are one project: separators and, on Windows, case do not count.
+    static std::string normalized_path(const std::string &path, bool case_insensitive)
+    {
+        std::string out = path;
+        for (char &c : out) {
+            if (c == '\\')
+                c = '/';
+            if (case_insensitive && c >= 'A' && c <= 'Z')
+                c = char(c - 'A' + 'a');
+        }
+        while (out.size() > 1 && out.back() == '/')
+            out.pop_back();
+        return out;
+    }
+
+    // The slot holding this file, or -1. An empty path (Untitled) never matches.
+    int find_by_origin(const std::string &path, bool case_insensitive = default_case_insensitive()) const
+    {
+        if (path.empty())
+            return -1;
+        const std::string key = normalized_path(path, case_insensitive);
+        for (const ProjectSlot &s : m_slots)
+            if (!s.origin_path.empty() && normalized_path(s.origin_path, case_insensitive) == key)
+                return s.id;
+        return -1;
+    }
+
+    // "Untitled", then "Untitled 2", "Untitled 3"...: the lowest number no open slot shows.
+    std::string next_untitled_name(const std::string &base) const
+    {
+        auto taken = [this](const std::string &name) {
+            return std::any_of(m_slots.begin(), m_slots.end(), [&](const ProjectSlot &s) { return s.name == name; });
+        };
+        if (!taken(base))
+            return base;
+        for (int n = 2;; ++n) {
+            const std::string name = base + " " + std::to_string(n);
+            if (!taken(name))
+                return name;
+        }
+    }
+
+    // A new slot right after the active one (at the end when none is active). Its id, or -1 when the cap is reached.
+    // It is not selected: the strip shows its Plater first.
+    int add(const std::string &origin_path, const std::string &name)
+    {
+        if (!can_add())
+            return -1;
+        ProjectSlot slot;
+        slot.id          = m_next_id++;
+        slot.name        = name;
+        slot.origin_path = origin_path;
+        slot.last_used   = ++m_clock;
+        const int at     = active_index();
+        if (at < 0)
+            m_slots.push_back(std::move(slot));
+        else
+            m_slots.insert(m_slots.begin() + at + 1, std::move(slot));
+        return m_next_id - 1;
+    }
+
+    // A slot read back from a session manifest (P3), at the end of the strip with a new id; -1 when the cap is reached.
+    int add_restored(ProjectSlot slot)
+    {
+        if (!can_add())
+            return -1;
+        slot.id        = m_next_id++;
+        slot.state     = ProjectSlot::State::Hidden;
+        slot.last_used = ++m_clock;
+        m_slots.push_back(std::move(slot));
+        return m_next_id - 1;
+    }
+
+    // Makes the slot the active one; the previous active one becomes Hidden.
+    bool select(int id)
+    {
+        ProjectSlot *slot = find(id);
+        if (slot == nullptr)
+            return false;
+        if (ProjectSlot *old = active(); old != nullptr && old != slot)
+            old->state = ProjectSlot::State::Hidden;
+        slot->state     = ProjectSlot::State::Active;
+        slot->last_used = ++m_clock;
+        m_active_id     = id;
+        return true;
+    }
+
+    // The slot `step` places from the active one, wrapping (Ctrl+PgDn = +1, Ctrl+PgUp = -1). -1 with fewer than two slots.
+    int neighbour_id(int step) const
+    {
+        const int n = int(m_slots.size());
+        const int i = active_index();
+        if (n < 2 || i < 0)
+            return -1;
+        const int j = ((i + step) % n + n) % n;
+        return j == i ? -1 : m_slots[size_t(j)].id;
+    }
+
+    // The slot that becomes active when `id` closes: the next one, else the previous one; -1 when it is the last slot.
+    int successor_on_close(int id) const
+    {
+        const int i = index_of(id);
+        if (i < 0 || m_slots.size() < 2)
+            return -1;
+        return size_t(i + 1) < m_slots.size() ? m_slots[size_t(i + 1)].id : m_slots[size_t(i - 1)].id;
+    }
+
+    // Removes the slot. Closing the active one leaves no active slot: the caller shows successor_on_close() first.
+    bool close(int id)
+    {
+        const int i = index_of(id);
+        if (i < 0)
+            return false;
+        m_slots.erase(m_slots.begin() + i);
+        if (m_active_id == id)
+            m_active_id = -1;
+        return true;
+    }
+
+    // Moves a slot to another place in the strip (drag reorder).
+    bool move(int id, int new_index)
+    {
+        const int i = index_of(id);
+        if (i < 0 || new_index < 0 || new_index >= int(m_slots.size()))
+            return false;
+        ProjectSlot slot = std::move(m_slots[size_t(i)]);
+        m_slots.erase(m_slots.begin() + i);
+        m_slots.insert(m_slots.begin() + new_index, std::move(slot));
+        return true;
+    }
+
+    void set_dirty(int id, bool dirty)
+    {
+        if (ProjectSlot *slot = find(id))
+            slot->dirty = dirty;
+    }
+
+    // The projects the app-close dialog lists, in strip order.
+    std::vector<int> dirty_ids() const
+    {
+        std::vector<int> out;
+        for (const ProjectSlot &s : m_slots)
+            if (s.dirty)
+                out.push_back(s.id);
+        return out;
+    }
+
+    // The display name for a file: its name without the folder and the extension (".3mf", ".gcode.3mf" stays ".gcode").
+    static std::string name_from_path(const std::string &path)
+    {
+        const size_t slash = path.find_last_of("/\\");
+        std::string  name  = slash == std::string::npos ? path : path.substr(slash + 1);
+        const size_t dot   = name.find_last_of('.');
+        if (dot != std::string::npos && dot > 0)
+            name.erase(dot);
+        return name;
+    }
+
+    static constexpr bool default_case_insensitive()
+    {
+#ifdef _WIN32
+        return true;
+#else
+        return false;
+#endif
+    }
+
+private:
+    std::vector<ProjectSlot> m_slots;
+    int                      m_active_id{ -1 };
+    int                      m_next_id{ 1 };
+    int                      m_max_open{ default_max_open };
+    std::uint64_t            m_clock{ 0 };
+};
+
+// ---- P2: the strip's width, the tile's name lines and the slice badge (owner feedback on the P1 hand test, 2026-11-07) ----
+
+// The strip's width in DIP. The user drags its right edge between 88 (the D1 default) and 200; it is remembered in the app
+// config ("project_strip_width"). Collapsed it is the 24 DIP rail whatever was dragged. Names only (text mode) needs room for
+// a name, so never less than 120.
+struct StripLayout
+{
+    static constexpr int rail_width     = 24;
+    static constexpr int default_width  = 88;
+    static constexpr int min_width      = 88;
+    static constexpr int max_width      = 200;
+    static constexpr int text_min_width = 120;
+    static constexpr int padding        = 8;  // around the thumbnail, both sides
+    static constexpr int min_thumb      = 56;
+
+    static int clamp_width(int dip) { return std::max(min_width, std::min(max_width, dip)); }
+    static int parse_width(const std::string &text)
+    {
+        if (text.empty() || text.size() > 4 || !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; }))
+            return default_width;
+        return clamp_width(std::stoi(text));
+    }
+    // What the strip is drawn at.
+    static int width(bool collapsed, bool text_mode, int wanted)
+    {
+        if (collapsed)
+            return rail_width;
+        const int w = clamp_width(wanted);
+        return text_mode ? std::max(w, text_min_width) : w;
+    }
+    // The thumbnail grows with the strip.
+    static int thumb_side(int width) { return std::max(min_thumb, width - 2 * padding); }
+};
+
+// The corner badge of a tile: a spinner while the project slices, a tick once every plate holding objects has G-code.
+enum class SliceBadge { None, Slicing, Sliced };
+inline SliceBadge slice_badge(bool slicing, int plates_with_objects, int plates_sliced)
+{
+    if (slicing)
+        return SliceBadge::Slicing;
+    return plates_with_objects > 0 && plates_sliced >= plates_with_objects ? SliceBadge::Sliced : SliceBadge::None;
+}
+
+// A tile's name on at most two lines of `width`. Lines break only after a space, '_', '-' or '.', never inside a word (the P1
+// strip showed "h3c_mus / hroom"); what does not fit is ellipsised by `ellipsize(text, width)`. A first word wider than the line
+// is the one ellipsised line. `measure` gives a text's width in the same unit.
+inline std::vector<std::string> wrap_name_two_lines(const std::string &name, int width, const std::function<int(const std::string &)> &measure,
+                                                    const std::function<std::string(const std::string &, int)> &ellipsize)
+{
+    if (name.empty())
+        return {};
+    if (measure(name) <= width)
+        return { name };
+    std::vector<std::string> tokens;
+    std::string              cur;
+    for (char c : name) {
+        cur += c;
+        if (c == ' ' || c == '_' || c == '-' || c == '.') {
+            tokens.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty())
+        tokens.push_back(cur);
+    std::string first;
+    size_t      i = 0;
+    while (i < tokens.size() && measure(first + tokens[i]) <= width)
+        first += tokens[i++];
+    if (first.empty())
+        return { ellipsize(name, width) };
+    std::string rest;
+    for (; i < tokens.size(); ++i)
+        rest += tokens[i];
+    while (!first.empty() && first.back() == ' ')
+        first.pop_back();
+    while (!rest.empty() && rest.front() == ' ')
+        rest.erase(rest.begin());
+    if (rest.empty())
+        return { first };
+    return { first, measure(rest) <= width ? rest : ellipsize(rest, width) };
+}
+
+// ---- P3: the session manifest, opening from Explorer / Finder ----------------------------------------------------------
+
+// Session restore (opt-in, "project_strip_restore_session"): the open projects written at exit, read back at the next start.
+struct SessionManifest
+{
+    static constexpr int version = 1;
+    int                      active{ -1 }; // index into slots
+    std::vector<ProjectSlot> slots;
+
+    std::string to_json() const
+    {
+        nlohmann::json j;
+        j["version"] = version;
+        j["active"]  = active;
+        j["slots"]   = nlohmann::json::array();
+        for (const ProjectSlot &s : slots) {
+            nlohmann::json js;
+            js["name"]     = s.name;
+            js["origin"]   = s.origin_path;
+            js["snapshot"] = s.snapshot_path;
+            js["dirty"]    = s.dirty;
+            js["plate"]    = s.plate;
+            js["tab"]      = s.main_tab;
+            js["plates_with_objects"] = s.plates_with_objects;
+            j["slots"].push_back(js);
+        }
+        return j.dump(1);
+    }
+
+    // False for anything that is not a manifest of this version.
+    static bool from_json(const std::string &text, SessionManifest &out)
+    {
+        out = SessionManifest();
+        try {
+            const nlohmann::json j = nlohmann::json::parse(text);
+            if (!j.is_object() || j.value("version", 0) != version || !j.contains("slots") || !j["slots"].is_array())
+                return false;
+            out.active = j.value("active", -1);
+            for (const nlohmann::json &js : j["slots"]) {
+                ProjectSlot s;
+                s.name                = js.value("name", std::string());
+                s.origin_path         = js.value("origin", std::string());
+                s.snapshot_path       = js.value("snapshot", std::string());
+                s.dirty               = js.value("dirty", false);
+                s.plate               = js.value("plate", 0);
+                s.main_tab            = js.value("tab", 1);
+                s.plates_with_objects = js.value("plates_with_objects", 0);
+                // P4: a restart re-opens each project from its snapshot; its plates slice again (no G-code is kept).
+                s.plates_sliced = 0;
+                out.slots.push_back(std::move(s));
+            }
+            if (out.active >= int(out.slots.size()))
+                out.active = -1;
+            return true;
+        } catch (...) {
+            out = SessionManifest();
+            return false;
+        }
+    }
+
+    // What can come back: the slots whose snapshot is still there (`exists`), the active one's index adjusted (-1 when it
+    // is gone too; then the first one restored is the active one).
+    SessionManifest restorable(const std::function<bool(const std::string &)> &exists) const
+    {
+        SessionManifest out;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const ProjectSlot &s = slots[i];
+            if (s.snapshot_path.empty() || !exists(s.snapshot_path))
+                continue;
+            ProjectSlot copy   = s;
+            copy.plates_sliced = 0;
+            if (int(i) == active)
+                out.active = int(out.slots.size());
+            out.slots.push_back(std::move(copy));
+        }
+        if (out.active < 0 && !out.slots.empty())
+            out.active = 0;
+        return out;
+    }
+};
+
+// P4 (owner hand test 2026-11-07: the first of two projects opened back to back kept the placeholder): a project's tile
+// is rendered again before it goes out of sight when it has no image yet or the project changed since its image (its
+// change marker differs). The live thumbnail otherwise waits 1.5 s after the last change, which a quick second open beats.
+inline bool tile_thumbnail_stale(bool has_image, std::size_t rendered_marker, std::size_t current_marker)
+{
+    return !has_image || rendered_marker != current_marker;
+}
+
+// Owner hand test 2026-11-08 (the first tile kept no picture): what one off-screen render of the shown plate gave.
+//   Picture  - something was drawn: the tile's picture.
+//   EmptyBed - nothing drawn and nothing on the plate (the startup Untitled project): the strip draws an empty bed.
+//   Failed   - no image, or nothing drawn although the plate holds objects (the canvas or its geometry was not ready yet,
+//              as at startup or right after a load on a hidden canvas): nothing is kept and the render is tried again.
+enum class TileRender { Picture, EmptyBed, Failed };
+inline TileRender classify_tile_render(bool rendered, bool any_pixel_drawn, bool plate_has_objects)
+{
+    if (!rendered)
+        return TileRender::Failed;
+    if (any_pixel_drawn)
+        return TileRender::Picture;
+    return plate_has_objects ? TileRender::Failed : TileRender::EmptyBed;
+}
+
+// Any pixel of an RGBA buffer not fully transparent (the thumbnail renders on a transparent background).
+inline bool rgba_any_drawn(const unsigned char *rgba, std::size_t pixels)
+{
+    if (rgba == nullptr)
+        return false;
+    for (std::size_t i = 0; i < pixels; ++i)
+        if (rgba[4 * i + 3] != 0)
+            return true;
+    return false;
+}
+
+// The wait before the next try after `failures` failed renders of a stale tile: 1.5 s, doubling, at most 30 s.
+inline int tile_retry_delay_ms(unsigned failures)
+{
+    int delay = 1500;
+    for (unsigned i = 1; i < failures && delay < 30000; ++i)
+        delay *= 2;
+    return std::min(delay, 30000);
+}
+
+// D7: a project file double-clicked in Explorer / Finder while EdgeSlicer runs (single instance on) opens as a new project in
+// the strip ("strip", the default) or in place of the active project ("replace", the old behaviour).
+inline bool shell_open_into_strip(const std::string &app_config_value) { return app_config_value != "replace"; }
+
+} // namespace GUI
+} // namespace Slic3r
+
+#endif // slic3r_GUI_ProjectSessions_hpp_

@@ -43,9 +43,12 @@
 #include "Mouse3DController.hpp"
 //#include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
+#include "RemovableDriveManager.hpp" // project strip P4: events follow the project shown
+#include "libslic3r/Utils.hpp"
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
+#include "ProjectStrip.hpp"
 #include "RemoteAccess.hpp"
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
@@ -514,7 +517,10 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
     m_loaded = true;
 
     // initialize layout
-    m_main_sizer = new wxBoxSizer(wxVERTICAL);
+    // Horizontal: the project strip (far left, D1), then the tab notebook.
+    m_main_sizer = new wxBoxSizer(wxHORIZONTAL);
+    if (m_plater != nullptr && wxGetApp().is_editor())
+        m_project_strip = new ProjectStrip(this, this);
     wxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 #ifndef __APPLE__
      sizer->Add(m_topbar, 0, wxEXPAND);
@@ -595,7 +601,19 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         // BBS: close save project
         int result;
-        if (event.CanVeto() && ((result = m_plater->close_with_confirm(check)) == wxID_CANCEL)) {
+        if (event.CanVeto() && m_project_strip != nullptr && m_project_strip->switching()) {
+            event.Veto();
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " cancelled: a project switch is running";
+            return;
+        }
+        if (event.CanVeto() && m_project_strip != nullptr && m_project_strip->project_count() > 1) {
+            // Project strip: one dialog for every unsaved project of the window, not one per project.
+            if (!m_project_strip->confirm_close_all()) {
+                event.Veto();
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "cancelled by the unsaved projects dialog";
+                return;
+            }
+        } else if (event.CanVeto() && ((result = m_plater->close_with_confirm(check)) == wxID_CANCEL)) {
             event.Veto();
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< "cancelled by close_with_confirm selection";
             return;
@@ -623,7 +641,14 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         MarkdownTip::ExitTip();
 
+        // Project strip P3: the open projects for the next start (opt-in), before the plater is emptied.
+        if (m_project_strip != nullptr)
+            m_project_strip->save_session_for_restart();
+
         m_plater->reset();
+        // Project strip: the parked projects' temporary files (each one by its own path).
+        if (m_project_strip != nullptr)
+            m_project_strip->remove_all_slot_files();
         this->shutdown();
         // propagate event
 
@@ -680,6 +705,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
                 wxPostEvent(this, wxCommandEvent(EVT_BACKUP_POST));
             }
             else if (action == 1) {
+                // Project strip: not while a switch replaces the project (its backup folder changes under it).
+                if (m_project_strip != nullptr && m_project_strip->switching())
+                    return;
                 if (!m_plater->up_to_date(false, true)) {
                     m_plater->export_3mf(m_plater->model().get_backup_path() + "/.3mf", SaveStrategy::Backup);
                     m_plater->up_to_date(true, true);
@@ -764,8 +792,17 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         }
         else if (evt.CmdDown() && evt.GetKeyCode() == 'G') { if (can_export_gcode()) { wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); } evt.Skip(); return; }
         if (evt.CmdDown() && evt.GetKeyCode() == 'J') { m_printhost_queue_dlg->Show(); return; }
-        if (evt.CmdDown() && evt.GetKeyCode() == 'N') { m_plater->new_project(); return;}
-        if (evt.CmdDown() && evt.GetKeyCode() == 'O') { m_plater->load_project(); return;}
+        // Project strip: New and Open add a project next to the active one; Ctrl+PgDn / Ctrl+PgUp go to the next / previous
+        // one (Ctrl+Tab switches table pages).
+        if (evt.CmdDown() && evt.GetKeyCode() == 'N') { if (m_project_strip) m_project_strip->new_project(); else m_plater->new_project(); return;}
+        if (evt.CmdDown() && evt.GetKeyCode() == 'O') { if (m_project_strip) m_project_strip->open_project(); else m_plater->load_project(); return;}
+        if (evt.ControlDown() && !evt.AltDown() && m_project_strip != nullptr &&
+            (evt.GetKeyCode() == WXK_PAGEDOWN || evt.GetKeyCode() == WXK_PAGEUP || evt.GetKeyCode() == WXK_NUMPAD_PAGEDOWN ||
+             evt.GetKeyCode() == WXK_NUMPAD_PAGEUP)) {
+            const bool next = evt.GetKeyCode() == WXK_PAGEDOWN || evt.GetKeyCode() == WXK_NUMPAD_PAGEDOWN;
+            m_project_strip->cycle(next ? 1 : -1);
+            return;
+        }
         if (evt.CmdDown() && evt.ShiftDown() && evt.GetKeyCode() == 'S') { if (can_save_as()) m_plater->save_project(true); return;}
         else if (evt.CmdDown() && evt.GetKeyCode() == 'S') { if (can_save()) m_plater->save_project(); return;}
         if (evt.CmdDown() && evt.GetKeyCode() == 'F') {
@@ -1082,6 +1119,11 @@ void MainFrame::update_layout()
         m_tabpanel->InsertPage(tpPreview, m_plater, _L("Preview"), std::string("tab_preview_active"), std::string("tab_preview_active"), false);
         // Showcase (D1): presentation renders, the plater's third page.
         m_tabpanel->InsertPage(tpShowcase, m_plater, _L("Showcase"), std::string("tab_showcase_active"), std::string("tab_showcase_active"), false);
+        // Project strip: a full-height column left of every tab (Home and Device included, D1 / D9).
+        if (m_project_strip != nullptr) {
+            m_main_sizer->Add(m_project_strip, 0, wxEXPAND);
+            m_project_strip->Show();
+        }
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 0);
 
         m_tabpanel->Bind(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, [this](wxCommandEvent& evt)
@@ -1103,6 +1145,8 @@ void MainFrame::update_layout()
     }
     case ESettingsLayout::GCodeViewer:
     {
+        if (m_project_strip != nullptr)
+            m_project_strip->Hide();
         m_main_sizer->Add(m_plater, 1, wxEXPAND);
         //BBS: add bed exclude area
         m_plater->set_bed_shape({ { 0.0, 0.0 }, { 200.0, 0.0 }, { 200.0, 200.0 }, { 0.0, 200.0 } }, {}, 0.0, {}, {}, true);
@@ -1173,8 +1217,10 @@ void MainFrame::shutdown(bool isRecreate)
     m_shutting_down = true;
     // EDGESLICER-A: this frame's Plater stops updating the background process and the slice/print
     // buttons now; its timer could otherwise fire while the window tree is destroyed.
-    if (m_plater != nullptr)
-        m_plater->begin_shutdown();
+    // Project strip P4: every open project's Plater, the hidden ones too.
+    for (Plater *plater : m_platers)
+        if (plater != nullptr)
+            plater->begin_shutdown();
     // First of all: no phone/agent request, send or control job may queue work for the GUI thread
     // any more, and what is already queued is dropped. The Plater is torn down below and freed
     // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
@@ -1204,16 +1250,18 @@ void MainFrame::shutdown(bool isRecreate)
  	}
 #endif // _WIN32
 
-    if (m_plater != nullptr) {
-        m_plater->get_ui_job_worker().cancel_all();
+    for (Plater *plater : m_platers) {
+        if (plater == nullptr)
+            continue;
+        plater->get_ui_job_worker().cancel_all();
 
         // Unbinding of wxWidgets event handling in canvases needs to be done here because on MAC,
         // when closing the application using Command+Q, a mouse event is triggered after this lambda is completed,
         // causing a crash
-        m_plater->unbind_canvas_event_handlers();
+        plater->unbind_canvas_event_handlers();
 
         // Cleanup of canvases' volumes needs to be done here or a crash may happen on some Linux Debian flavours
-        m_plater->reset_canvas_volumes();
+        plater->reset_canvas_volumes();
     }
 
     // Weird things happen as the Paint messages are floating around the windows being destructed.
@@ -1226,12 +1274,15 @@ void MainFrame::shutdown(bool isRecreate)
         // call Close() to trigger call to lambda defined into GUI_App::persist_window_geometry()
         m_settings_dialog.Close();
 
-    if (m_plater != nullptr) {
+    for (Plater *plater : m_platers) {
+        if (plater == nullptr)
+            continue;
         // Stop the background thread (Windows and Linux).
         // Disconnect from a 3DConnextion driver (OSX).
-        m_plater->get_mouse3d_controller().shutdown();
-        // Store the device parameter database back to appconfig.
-        m_plater->get_mouse3d_controller().save_config(*wxGetApp().app_config);
+        plater->get_mouse3d_controller().shutdown();
+        // Store the device parameter database back to appconfig (the shown project's, as before).
+        if (plater == m_plater)
+            plater->get_mouse3d_controller().save_config(*wxGetApp().app_config);
     }
 
     // stop agent
@@ -1272,6 +1323,164 @@ void MainFrame::update_filament_tab_ui()
 void MainFrame::update_title()
 {
     return;
+}
+
+Plater *MainFrame::create_project_plater()
+{
+    if (m_plater == nullptr || m_tabpanel == nullptr)
+        return nullptr;
+    Plater *plater = nullptr;
+    {
+        // Owner crashes 2026-11-07 (P4 hand tests): the Plater constructor reaches the app's Plater (GLCanvas3D::init ->
+        // notification manager, set_current_panel -> MainFrame::update_slice_print_status -> get_enable_print_status, ...).
+        // At startup those paths found no window or no GL and did nothing; a new project's Plater is built with both up.
+        // So the app's Plater (wxGetApp().plater() and m_plater) stays the shown one, complete and valid, for the whole
+        // construction: whatever the constructor reaches through the app acts on what is on screen, never on a half-built
+        // or null Plater. The new Plater is built inside a hidden window, so its canvases are not on screen and cannot
+        // render or initialise before activate_plater() shows it (GLCanvas3D::render needs IsShownOnScreen()), which is
+        // what startup gave the first Plater by having no GL yet. Its own first init runs in activate_plater(), with it as
+        // the app's Plater.
+        wxBusyCursor busy;
+        if (m_plater_nursery == nullptr) {
+            m_plater_nursery = new wxPanel(this, wxID_ANY);
+            m_plater_nursery->Hide();
+        }
+        plater = new Plater(m_plater_nursery, this);
+        plater->SetBackgroundColour(*wxWHITE);
+        // Not Hide(): Plater::Show(false) would hide the window's Slice / Print buttons the shown project uses.
+        plater->wxPanel::Show(false);
+    }
+    plater->Reparent(m_tabpanel);
+#ifdef __APPLE__
+    plater->sidebar().change_top_border_for_mode_sizer(m_layout != ESettingsLayout::Old);
+#endif
+    // The theme's colour pass the window got at startup (dark section headers and scroll bars). Before the ParamsPanel
+    // moves in (activate_plater): it was themed with the window already.
+    wxGetApp().theme_new_window(plater);
+    m_platers.push_back(plater);
+    m_platers_fresh.insert(plater);
+    BOOST_LOG_TRIVIAL(info) << "project strip: new Plater, " << m_platers.size() << " open" << log_memory_info();
+    return plater;
+}
+
+void MainFrame::activate_plater(Plater *plater)
+{
+    if (plater == nullptr || plater == m_plater || std::find(m_platers.begin(), m_platers.end(), plater) == m_platers.end())
+        return;
+    Plater *previous = m_plater;
+    Freeze();
+    if (previous != nullptr) {
+        previous->on_project_hidden();
+        previous->sidebar().detach_params_panel();
+    }
+    // From here on the app's Plater is this one: whatever the page change below triggers sees it.
+    m_plater           = plater;
+    wxGetApp().plater_ = plater;
+    if (previous != nullptr)
+        m_tabpanel->ReplacePageWindow(previous, plater);
+    plater->sidebar().attach_params_panel();
+    // Files handed over by another instance, and removable drive events, go to the project shown.
+    wxGetApp().other_instance_message_handler()->set_callback_evt_handler(plater);
+    wxGetApp().removable_drive_manager()->set_callback_evt_handler(plater);
+    if (m_platers_fresh.erase(plater) > 0) {
+        const auto first_show = std::chrono::steady_clock::now();
+        // What GUI_App::on_init_inner() does for the first Plater once the window exists.
+        plater->sidebar().obj_list()->init();
+        plater->init_notification_manager();
+        plater->set_printer_technology(wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology());
+        plater->get_camera().select_view("topfront");
+        plater->get_camera().requires_zoom_to_bed = true;
+        // Its 3D canvas initialises now, with it as the app's Plater: until a canvas is initialised, reload_scene() does
+        // nothing, so the project the strip loads into it next would not reach the 3D view. The first Plater's 3D canvas is
+        // initialised the same way by GUI_App before any project loads. Preview and Assemble stay lazy, as at startup:
+        // they initialise when their view is first shown (owner re-test: a visible hang on the first show otherwise).
+        const auto gl_started = std::chrono::steady_clock::now();
+        if (GLCanvas3D *view3d = plater->get_view3D_canvas3D())
+            view3d->ensure_gl_ready();
+        const auto now = std::chrono::steady_clock::now();
+        BOOST_LOG_TRIVIAL(info) << "project strip: first show of a new Plater, init "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(now - first_show).count() << " ms (3D canvas GL "
+                                << std::chrono::duration_cast<std::chrono::milliseconds>(now - gl_started).count() << " ms)";
+    }
+    // The object / part / layer settings tabs held the previous project's selection (pointers into its model): they follow
+    // this project's selection now.
+    for (Tab *tab : wxGetApp().model_tabs_list)
+        if (auto *model_tab = dynamic_cast<TabPrintModel *>(tab))
+            model_tab->reset_model_config();
+    plater->sidebar().obj_list()->part_selection_changed();
+    if (m_platers_need_rescale.erase(plater) > 0)
+        plater->msw_rescale();
+    if (m_platers_need_recolour.erase(plater) > 0)
+        plater->sys_color_changed();
+    if (m_platers_need_settings.erase(plater) > 0)
+        plater->update_ui_from_settings();
+    Layout();
+    Thaw();
+    plater->on_project_shown();
+    // The Slice / Print buttons say what this project's plate can do.
+    update_slice_print_status(eEventPlateUpdate, true, true);
+}
+
+void MainFrame::destroy_project_plater(Plater *plater)
+{
+    // The shown project is never destroyed here: the strip shows another one first.
+    if (plater == nullptr || plater == m_plater)
+        return;
+    auto it = std::find(m_platers.begin(), m_platers.end(), plater);
+    if (it == m_platers.end())
+        return;
+    m_platers.erase(it);
+    m_platers_fresh.erase(plater);
+    m_platers_need_rescale.erase(plater);
+    m_platers_need_recolour.erase(plater);
+    m_platers_need_settings.erase(plater);
+    // Top-level windows (dialogs, popups) whose parent is this Plater go with it (wx destroys a top-level window with its
+    // parent). That is right for the project's own dialogs; a window-level one must not be parented to a Plater (the
+    // ParamsDialog was, owner crash 2026-11-08). Logged so another such case is found from the log.
+    for (wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst(); node; node = node->GetNext())
+        if (wxWindow *top = node->GetData(); top != nullptr)
+            for (wxWindow *w = top->GetParent(); w != nullptr; w = w->GetParent())
+                if (w == plater) {
+                    BOOST_LOG_TRIVIAL(info) << "project strip: the closing project's Plater takes a top-level window with it: "
+                                            << wxString(top->GetClassInfo()->GetClassName()).ToUTF8().data();
+                    break;
+                }
+    plater->begin_shutdown();
+    plater->get_ui_job_worker().cancel_all();
+    plater->cancel_slicing_for_project_close();
+    plater->get_mouse3d_controller().shutdown();
+    plater->unbind_canvas_event_handlers();
+    // Its GL buffers go with the shown canvas's context current (one context is shared by every canvas).
+    if (m_plater != nullptr)
+        if (GLCanvas3D *canvas = m_plater->get_current_canvas3D())
+            canvas->make_current_for_postinit();
+    plater->reset_canvas_volumes();
+    // Its crash backup and the plates' temporary G-code (the project is closed, as close_with_confirm() leaves it).
+    plater->model().set_backup_path("");
+    plater->Destroy();
+    BOOST_LOG_TRIVIAL(info) << "project strip: Plater closed, " << m_platers.size() << " open" << log_memory_info();
+}
+
+void MainFrame::on_active_project_changed()
+{
+    if (m_project_strip != nullptr)
+        m_project_strip->on_active_project_changed();
+}
+
+bool MainFrame::send_current_plate()
+{
+    if (m_plater == nullptr || m_print_btn == nullptr)
+        return false;
+    m_plater->apply_background_progress();
+    m_print_enable = get_enable_print_status();
+    m_print_btn->Enable(m_print_enable);
+    if (!m_print_enable)
+        return false;
+    if (wxGetApp().preset_bundle->use_bbl_network())
+        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_PLATE));
+    else
+        wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_GCODE));
+    return true;
 }
 
 void MainFrame::show_publish_button(bool show)
@@ -1566,6 +1775,7 @@ void MainFrame::init_tabpanel() {
     }
 
     wxGetApp().plater_ = m_plater;
+    m_platers.push_back(m_plater);
 
     {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=create_preset_tabs");
@@ -1871,7 +2081,10 @@ void MainFrame::create_preset_tabs()
 
     //BBS: GUI refactor
     //m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
-    m_param_dialog = new ParamsDialog(m_plater);
+    // Project strip P4 (owner crash 2026-11-08): the window's, not the first project's. Parented to that Plater, it (and
+    // the Printer and Filament tabs it holds) went with it when that project was closed, and the next preset load used
+    // the deleted tabs.
+    m_param_dialog = new ParamsDialog(this);
 
 #define ORCA_TIMED_TAB(expr, label)                                              \
     do {                                                                         \
@@ -2736,6 +2949,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
 {
     wxGetApp().update_fonts(this);
     this->SetFont(this->normal_font());
+    if (m_project_strip != nullptr)
+        m_project_strip->rescale();
 
 #ifdef _MSW_DARK_MODE
     // update common mode sizer
@@ -2757,8 +2972,11 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     m_slice_option_btn->Rescale();
     m_print_option_btn->Rescale();
 
-    // update Plater
+    // update Plater (the hidden projects' when they are shown)
     wxGetApp().plater()->msw_rescale();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_rescale.insert(plater);
 
     // update Tabs
     //BBS GUI refactor: remove unused layout new/dlg
@@ -2806,6 +3024,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
 void MainFrame::on_sys_color_changed()
 {
     wxBusyCursor wait;
+    if (m_project_strip != nullptr)
+        m_project_strip->sys_color_changed();
 
     // update label colors in respect to the system mode
     wxGetApp().init_label_colours();
@@ -2839,8 +3059,11 @@ void MainFrame::on_sys_color_changed()
     m_tabpanel->Rescale();
     m_param_panel->msw_rescale();
 
-    // update Plater
+    // update Plater (the hidden projects' when they are shown)
     wxGetApp().plater()->sys_color_changed();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_recolour.insert(plater);
     if(m_monitor)
         m_monitor->on_sys_color_changed();
     if (m_printer_view)
@@ -3176,17 +3399,17 @@ void MainFrame::init_menubar_as_editor()
 #endif
         // New Project
         append_menu_item(fileMenu, wxID_ANY, _L("New Project") + "\t" + ctrl + "N", _L("Start a new project"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->new_project(); }, "", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->new_project(); else if (m_plater) m_plater->new_project(); }, "", nullptr,
             [this](){return can_start_new_project(); }, this);
         // Open Project
 
 #ifndef __APPLE__
         append_menu_item(fileMenu, wxID_ANY, _L("Open Project") + dots + "\t" + ctrl + "O", _L("Open a project file"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->load_project(); }, "menu_open", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->open_project(); else if (m_plater) m_plater->load_project(); }, "menu_open", nullptr,
             [this](){return can_open_project(); }, this);
 #else
         append_menu_item(fileMenu, wxID_ANY, _L("Open Project") + dots + "\t" + ctrl + "O", _L("Open a project file"),
-            [this](wxCommandEvent&) { if (m_plater) m_plater->load_project(); }, "", nullptr,
+            [this](wxCommandEvent&) { if (m_project_strip) m_project_strip->open_project(); else if (m_plater) m_plater->load_project(); }, "", nullptr,
             [this](){return can_open_project(); }, this);
 #endif
 
@@ -4030,6 +4253,74 @@ void MainFrame::init_menubar_as_editor()
     refresh_account_menu(m_account_menubar_menu);
     m_account_menubar_sig = account_menu_signature();
     m_menubar->Append(m_account_menubar_menu, wxString::Format("&%s", _L("Account")));
+#ifdef __APPLE__
+    // Project strip P3: the Window menu lists the open projects; Cmd+Shift+] / [ go to the next / previous one.
+    // The strip is made after the menu bar: the handlers look it up when they run.
+    // P4 (Mac session, wxOSX menu.mm MacSetupWindowMenu): with the automatic Window menu on, wx runs [removeAllItems] on the
+    // menu titled wxApp::s_macWindowMenuTitleName at every frame activation while our wxMenuItems stay in wx's list, so the
+    // next Destroy() asked Cocoa to remove an item no longer in the menu (NSInternalInconsistencyException). The automatic
+    // menu is off (SetAutoWindowMenu(false) before SetMenuBar) and this menu is ours: Minimize, Zoom, Next / Previous
+    // Project, then the project list, which alone is rebuilt each time the menu opens. It keeps wx's own title (one
+    // Window menu whatever the UI language), and the two shortcuts are also a frame accelerator.
+    if (wxGetApp().is_editor()) {
+        wxMenuBar::SetAutoWindowMenu(false);
+        wxMenu   *window_menu = new wxMenu();
+        const int id_minimize = wxWindow::NewControlId();
+        const int id_zoom     = wxWindow::NewControlId();
+        const int id_next     = wxWindow::NewControlId();
+        const int id_prev     = wxWindow::NewControlId();
+        window_menu->Append(id_minimize, _L("Minimize") + "\tCtrl+M");
+        window_menu->Append(id_zoom, _L("Zoom"));
+        window_menu->AppendSeparator();
+        window_menu->Append(id_next, _L("Next Project") + "\tCtrl+Shift+]");
+        window_menu->Append(id_prev, _L("Previous Project") + "\tCtrl+Shift+[");
+        window_menu->AppendSeparator();
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { Iconize(true); }, id_minimize);
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { Maximize(!IsMaximized()); }, id_zoom);
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(1); }, id_next);
+        Bind(wxEVT_MENU, [this](wxCommandEvent &) { if (m_project_strip) m_project_strip->cycle(-1); }, id_prev);
+        {
+            // Cmd+Shift+] / [ (some keyboards report the shifted } / {).
+            wxAcceleratorEntry entries[4];
+            entries[0].Set(wxACCEL_CMD | wxACCEL_SHIFT, int(']'), id_next);
+            entries[1].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('}'), id_next);
+            entries[2].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('['), id_prev);
+            entries[3].Set(wxACCEL_CMD | wxACCEL_SHIFT, int('{'), id_prev);
+            SetAcceleratorTable(wxAcceleratorTable(4, entries));
+        }
+        // The project list: only the items added at the last open are removed (wx no longer touches this menu).
+        // One fixed block of ids (the strip's most open projects) and one handler for it: opening the menu takes no new ids
+        // and binds nothing (the auto id pool is finite).
+        constexpr int project_id_count = ProjectSessions::max_max_open;
+        const int     id_project_first = wxWindow::NewControlId(project_id_count);
+        auto project_items = std::make_shared<std::vector<wxMenuItem *>>();
+        auto project_ids   = std::make_shared<std::vector<int>>(); // the strip's project id per menu position
+        Bind(wxEVT_MENU, [this, project_ids, id_project_first](wxCommandEvent &e) {
+            const int i = e.GetId() - id_project_first;
+            if (m_project_strip != nullptr && i >= 0 && i < int(project_ids->size()))
+                m_project_strip->select_project((*project_ids)[size_t(i)]);
+        }, id_project_first, id_project_first + project_id_count - 1);
+        Bind(wxEVT_MENU_OPEN, [this, window_menu, project_items, project_ids, id_project_first](wxMenuEvent &e) {
+            e.Skip();
+            if (e.GetMenu() != window_menu || m_project_strip == nullptr)
+                return;
+            for (wxMenuItem *item : *project_items)
+                window_menu->Destroy(item);
+            project_items->clear();
+            project_ids->clear();
+            for (const auto &entry : m_project_strip->menu_entries()) {
+                if (int(project_ids->size()) >= project_id_count)
+                    break;
+                const int   item_id = id_project_first + int(project_ids->size());
+                wxMenuItem *item    = window_menu->AppendCheckItem(item_id, entry.second);
+                item->Check(entry.first == m_project_strip->active_project_id());
+                project_ids->push_back(entry.first);
+                project_items->push_back(item);
+            }
+        });
+        m_menubar->Append(window_menu, wxApp::s_macWindowMenuTitleName);
+    }
+#endif
     if (helpMenu)
         m_menubar->Append(helpMenu, wxString::Format("&%s", _L("Help")));
     SetMenuBar(m_menubar);
@@ -4882,7 +5173,12 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
     }
     if (wxFileExists(filename)) {
         CallAfter([this, filename] {
-            if (wxGetApp().can_load_project())
+            if (!wxGetApp().can_load_project())
+                return;
+            // Project strip: a recent project opens next to the active one (its own slot when it is open already).
+            if (m_project_strip != nullptr)
+                m_project_strip->open_project(filename);
+            else
                 m_plater->load_project(filename);
         });
     }
@@ -5108,6 +5404,9 @@ void MainFrame::update_ui_from_settings()
 {
     if (m_plater)
         m_plater->update_ui_from_settings();
+    for (Plater *plater : m_platers)
+        if (plater != m_plater)
+            m_platers_need_settings.insert(plater);
     for (auto tab: wxGetApp().tabs_list)
         tab->update_ui_from_settings();
 }

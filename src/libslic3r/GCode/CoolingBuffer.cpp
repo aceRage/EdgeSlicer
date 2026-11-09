@@ -442,6 +442,10 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
     // Orca: Whether we had our first extrusion in this layer.
     // Time of any other movements before the first extrusion will be excluded from the layer time.
     bool layer_had_extrusion = false;
+    // Bambu Studio 2.9.1 (GCodeEditor.cpp:143, 216, 298-301): walls of circles under the auto circle
+    // compensation ("; Slow Down Start" .. "; Slow Down End") keep their speed, which the compensation
+    // coefficients were measured at; the layer-time slowdown leaves them alone.
+    bool not_join_cooling = false;
 
     for (; *line_start != 0; line_start = line_end) 
     {
@@ -530,7 +534,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             
             // ORCA: Dont slowdown external perimeters for layer time works by not marking the external perimeter as adjustable, 
             // hence the slowdown algorithm ignores it.
-            if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && ! wipe && adjust_external) {
+            if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && ! wipe && adjust_external && ! not_join_cooling) {
                 line.type |= CoolingLine::TYPE_ADJUSTABLE;
                 // ZAA (zaa_speed_scaling): this block's F encodes the segment's local bead height,
                 // so the slowdown must scale it rather than cap it. See CoolingLine::TYPE_ZAA_SCALED.
@@ -653,6 +657,10 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 (pos_P != std::string::npos) ? atof_decimal_point(sline.c_str() + pos_P + 1) * 0.001 : 0.);
         } else if (boost::starts_with(sline, ";_FORCE_RESUME_FAN_SPEED")) {
             line.type = CoolingLine::TYPE_FORCE_RESUME_FAN;
+        } else if (boost::starts_with(sline, "; Slow Down Start")) {
+            not_join_cooling = true;
+        } else if (boost::starts_with(sline, "; Slow Down End")) {
+            not_join_cooling = false;
         }
 
         // Orca: For any movements before this layer's first ever extrusion, we exclude them from the layer time calculation.

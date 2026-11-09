@@ -36,6 +36,22 @@
 
 namespace Slic3r { namespace GUI {
 
+// How apply_enabled_filaments() brings the loaded presets in line with the new [filaments] section.
+enum class FilamentsReload
+{
+    None,       // nothing: the section did not change
+    Visibility, // only re-read which filament / process presets are shown; nothing from disk, unsaved edits stay
+    Full,       // PresetBundle::load_presets(): ask about unsaved edits first (check_and_keep_current_preset_changes)
+};
+
+// The filament half of GuideFrame::apply_config, shared with the Filament manager (PresetManagerDialog):
+// stores `enabled` as the [filaments] section, reloads as asked, switches the active filament to an
+// enabled one when it no longer is, and exports the selections. keep_shown_active (the manager): an
+// active filament that is still shown stays active even when it is not in `enabled` (a user preset).
+void apply_enabled_filaments(AppConfig &app_config, PresetBundle &bundle, const std::map<std::string, std::string> &enabled,
+                             FilamentsReload reload, const PresetBundle::PresetPreferences &preferences = {},
+                             bool keep_shown_active = false);
+
 class GuideFrame : public DPIDialog
 {
 public:

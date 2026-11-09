@@ -187,7 +187,9 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     }
 
     const double min_depth      = WipeTower::get_limit_depth_by_height(float(max_object_height));
-    const float  perimeter_width = float(nozzle_diameter) * 1.25f; // Width_To_Nozzle_Ratio
+    // Bambu Studio 2.9.1 prime_tower_line_width (Type1 only; 0 = from the nozzle diameter).
+    const float  tower_line_width = type1 ? float(std::max(0., opt_float("prime_tower_line_width"))) : 0.f;
+    const float  perimeter_width = tower_line_width > 0.f ? tower_line_width : float(nozzle_diameter) * 1.25f; // Width_To_Nozzle_Ratio
     // With nothing to purge, plan_tower_new sizes the tower for wrapping detection or the
     // stability minimum; WipeTower2 only knows the latter.
     const double idle_depth = (type1 && wrapping && !smooth_timelapse) ? WipeTower::get_wrapping_detection_depth() : min_depth;
@@ -196,7 +198,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         // below the stability minimum.
         double side;
         if (!purges.empty())
-            side = WipeTower::estimate_rib_tower_bbox_side(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), float(rib_width), float(extra_rib_length), float(max_object_height));
+            side = WipeTower::estimate_rib_tower_bbox_side(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), float(rib_width), float(extra_rib_length), float(max_object_height), tower_line_width);
         else {
             // Type2 squares the tower from its purge volume; Type1 with no purge list (a lone
             // filament kept for timelapse or wrapping) sizes for the idle depth.
@@ -210,7 +212,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
         if (type1) {
             // plan_tower_new stretches a short purge stack to the stability minimum behind its
             // leading perimeter width.
-            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing))));
+            depth = purges.empty() ? idle_depth : std::max(min_depth + perimeter_width, double(WipeTower::estimate_tower_blocks_depth(purges, float(width), float(layer_height), float(nozzle_diameter), float(extra_spacing), tower_line_width)));
         } else {
             depth = volume / (layer_height * width);
             // The flush volumes already hold the spacing between wipes.
@@ -225,7 +227,7 @@ WipeTowerFootprint estimate_wipe_tower_footprint(const ConfigBase &config, WipeT
     footprint.brim_width = opt_float("prime_tower_brim_width");
     if (footprint.brim_width < 0)
         footprint.brim_width = WipeTower::get_auto_brim_by_height(float(max_object_height));
-    footprint.brim_width = WipeTower::estimate_brim_real_width(float(footprint.brim_width), float(nozzle_diameter), float(first_layer_height > EPSILON ? first_layer_height : layer_height), !type1);
+    footprint.brim_width = WipeTower::estimate_brim_real_width(float(footprint.brim_width), float(nozzle_diameter), float(first_layer_height > EPSILON ? first_layer_height : layer_height), !type1, tower_line_width);
     // A tower interface run-in starts outside the tower (wipe_tower_interface_run_in): both
     // generators report its room through the brim width, so the reserved area covers it.
     footprint.brim_width = std::max(footprint.brim_width, TowerInterface::run_in_reserve(config, filament_ids, perimeter_width));

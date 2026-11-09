@@ -49,7 +49,7 @@ ModelObjectCutAttributes tac_attrs()
 }
 } // namespace
 
-TEST_CASE("TAC Joint sockets can be baked by Mesh Boolean and STL export", "[TACJoint][TACJointCut][TACJointBoolean]")
+TEST_CASE("TAC Joint sockets can be baked by Mesh Boolean and STL export", "[TACJoint][TACJointCut][TACJointBoolean][slow]")
 {
     Model model;
     auto* object       = tac_cube(model);

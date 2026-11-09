@@ -49,6 +49,12 @@ public:
     unsigned short  thickness_layers;   // in layers
     double          bridge_angle;       // in radians, ccw, 0 = East, only 0+ (negative means undefined)
     unsigned short  extra_perimeters;
+    // Bambu Studio 2.9.1 auto circle compensation (LayerRegion::auto_circle_compensation): the contour
+    // and the holes (indices into expolygon.holes) offset as circles below the diameter limit, whose
+    // walls print at the compensation speed. Copied with the whole surface only: a surface built
+    // around another expolygon starts without them, as hole indices would no longer match.
+    bool             counter_circle_compensation{false};
+    std::vector<int> holes_circle_compensation;
 
     Surface(SurfaceType _surface_type = stInternal)
         : surface_type(_surface_type),
@@ -57,7 +63,8 @@ public:
     Surface(const Slic3r::Surface &rhs)
         : surface_type(rhs.surface_type), expolygon(rhs.expolygon),
             thickness(rhs.thickness), thickness_layers(rhs.thickness_layers),
-            bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters)
+            bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters),
+            counter_circle_compensation(rhs.counter_circle_compensation), holes_circle_compensation(rhs.holes_circle_compensation)
         {};
 
     Surface(SurfaceType _surface_type, const ExPolygon &_expolygon)
@@ -72,7 +79,8 @@ public:
     Surface(Surface &&rhs)
         : surface_type(rhs.surface_type), expolygon(std::move(rhs.expolygon)),
             thickness(rhs.thickness), thickness_layers(rhs.thickness_layers),
-            bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters)
+            bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters),
+            counter_circle_compensation(rhs.counter_circle_compensation), holes_circle_compensation(std::move(rhs.holes_circle_compensation))
         {};
     Surface(SurfaceType _surface_type, const ExPolygon &&_expolygon)
         : surface_type(_surface_type), expolygon(std::move(_expolygon)),
@@ -92,6 +100,8 @@ public:
         thickness_layers = rhs.thickness_layers;
         bridge_angle     = rhs.bridge_angle;
         extra_perimeters = rhs.extra_perimeters;
+        counter_circle_compensation = rhs.counter_circle_compensation;
+        holes_circle_compensation   = rhs.holes_circle_compensation;
         return *this;
     }
 
@@ -103,6 +113,8 @@ public:
         thickness_layers = rhs.thickness_layers;
         bridge_angle     = rhs.bridge_angle;
         extra_perimeters = rhs.extra_perimeters;
+        counter_circle_compensation = rhs.counter_circle_compensation;
+        holes_circle_compensation   = std::move(rhs.holes_circle_compensation);
         return *this;
     }
 

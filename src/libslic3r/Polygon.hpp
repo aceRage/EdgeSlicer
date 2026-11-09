@@ -61,6 +61,10 @@ public:
     bool make_clockwise();
     bool is_valid() const { return this->points.size() >= 3; }
     void douglas_peucker(double tolerance);
+    // Bambu Studio 2.9.1 (Polygon.cpp:104): true when every vertex lies within max_deviation of the
+    // centroid distance band and the distances' variance is at most max_variance (scaled units);
+    // center and diameter (twice the mean distance) are set only then. Needs at least 8 points.
+    bool is_approx_circle(double max_deviation, double max_variance, Point &center, double &diameter) const;
     void round_to_grid(double grid_size);
 
     // Does an unoriented polygon contain a point?

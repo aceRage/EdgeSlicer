@@ -94,6 +94,37 @@ bool Polygon::make_clockwise()
     return false;
 }
 
+bool Polygon::is_approx_circle(double max_deviation, double max_variance, Point &center, double &diameter) const
+{
+    if (this->points.size() < 8)
+        return false;
+
+    const Point c = this->centroid();
+    std::vector<double> distances;
+    distances.reserve(this->points.size());
+    for (const Point &point : this->points)
+        distances.push_back((point.cast<double>() - c.cast<double>()).norm());
+
+    const auto [min_it, max_it] = std::minmax_element(distances.begin(), distances.end());
+    if (*max_it - *min_it > max_deviation)
+        return false;
+
+    double avg_dist = 0.;
+    for (double d : distances)
+        avg_dist += d;
+    avg_dist /= double(distances.size());
+    double variance = 0.;
+    for (double d : distances)
+        variance += (d - avg_dist) * (d - avg_dist);
+    variance /= double(distances.size());
+    if (variance > max_variance)
+        return false;
+
+    center   = c;
+    diameter = 2. * avg_dist;
+    return true;
+}
+
 void Polygon::douglas_peucker(double tolerance)
 {
     this->points.push_back(this->points.front());

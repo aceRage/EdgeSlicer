@@ -316,6 +316,15 @@ public:
     // Rib wall: shift of the whole output (Bambu Studio's rib_offset), set before the initial position.
     WipeTowerWriter&            set_origin_offset(const Vec2f &offset) { m_origin_offset = offset; return *this; }
     WipeTowerWriter&            set_arc_fitting(bool enable) { m_enable_arc_fitting = enable; return *this; }
+    // Bambu Studio 2.9.1 prime_tower_acceleration (WipeTower.cpp:1943-1950, 855-858, 934-937): an M204
+    // before the first extrusion after a travel and before the first travel after an extrusion. 0 for
+    // print_accel (the default) writes none, as before.
+    WipeTowerWriter&            set_accelerations(unsigned int print_accel, unsigned int travel_accel)
+    {
+        m_print_accel  = print_accel;
+        m_travel_accel = travel_accel;
+        return *this;
+    }
 
 	WipeTowerWriter&				 set_z(float z) 
 		{ m_current_z = z; return *this; }
@@ -401,6 +410,7 @@ public:
 			m_extrusions.emplace_back(WipeTower::Extrusion(rot, width, m_current_tool));
 		}
 
+        m_gcode += acceleration_for(e);
 		m_gcode += "G1";
         if (std::abs(rot.x() - rotated_current_pos.x()) > (float)EPSILON)
 			m_gcode += set_format_X(rot.x());
@@ -471,6 +481,7 @@ public:
             m_extrusions.emplace_back(WipeTower::Extrusion(rot, width, m_current_tool));
         }
 
+        m_gcode += acceleration_for(e);
         m_gcode += arc.direction == ArcDirection::Arc_Dir_CCW ? "G3" : "G2";
         const Vec2f center_offset = this->rotate(unscaled<float>(arc.center)) - rotated_current_pos;
         m_gcode += set_format_X(rot.x());
@@ -897,6 +908,22 @@ private:
     bool          m_enable_arc_fitting = false;
     Vec2f         m_origin_offset = Vec2f::Zero();
     const std::vector<WipeTower::FilamentParameters>& m_filpar;
+    unsigned int  m_print_accel       = 0;
+    unsigned int  m_travel_accel      = 0;
+    unsigned int  m_last_acceleration = 0;
+
+    // Bambu Studio set_acceleration_impl() (WipeTower.cpp:1532), M204 S for the flavours the Type 1 tower
+    // serves; nothing while the prime tower acceleration is off.
+    std::string   acceleration_for(float e)
+    {
+        if (m_print_accel == 0)
+            return std::string();
+        const unsigned int acceleration = e == 0.f ? m_travel_accel : m_print_accel;
+        if (acceleration == 0 || acceleration == m_last_acceleration)
+            return std::string();
+        m_last_acceleration = acceleration;
+        return "M204 S" + std::to_string(acceleration) + "\n";
+    }
 
 	std::string   set_format_X(float x)
     {
@@ -1090,11 +1117,11 @@ Vec2f WipeTower::move_box_inside_polygon(const BoundingBox &box, const Polygons 
 static const double wrapping_wipe_tower_depth = 10;
 static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
 
-float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2)
+float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2, float line_width)
 {
     if (brim_width <= 0.f)
         return brim_width;
-    const float spacing = nozzle_diameter * 1.25f - first_layer_height * float(1. - M_PI_4); // Width_To_Nozzle_Ratio
+    const float spacing = (line_width > 0.f ? line_width : nozzle_diameter * 1.25f) - first_layer_height * float(1. - M_PI_4); // Width_To_Nozzle_Ratio
     if (spacing <= EPSILON)
         return brim_width;
     const int loops_num = int((brim_width + spacing / 2.f) / spacing);
@@ -1122,11 +1149,11 @@ float WipeTower::nozzle_change_perimeter_width(float nozzle_diameter)
     return it != nozzle_diameter_to_nozzle_change_width.end() ? it->second : 2.f * nozzle_diameter * 1.25f;
 }
 
-float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing)
+float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float tower_line_width)
 {
     if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)
         return 0.f;
-    const float pw         = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float pw         = tower_line_width > 0.f ? tower_line_width : nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
     const float ncpw       = nozzle_change_perimeter_width(nozzle_diameter);
     const float line_width = width - 2.f * pw;
     if (line_width <= EPSILON)
@@ -1178,13 +1205,13 @@ float WipeTower::rib_footprint_side(float width, float depth, float rib_width, f
     return std::max(width, depth) + 2.f * per_side;
 }
 
-float WipeTower::estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height)
+float WipeTower::estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height, float line_width)
 {
     if (purges.empty() || width < EPSILON || layer_height < EPSILON || nozzle_diameter < EPSILON)
         return 0.f;
-    const float pw     = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
-    const float square = align_ceil(std::sqrt(estimate_tower_blocks_depth(purges, width, layer_height, nozzle_diameter, extra_spacing) * width), pw);
-    const float depth  = estimate_tower_blocks_depth(purges, square, layer_height, nozzle_diameter, extra_spacing);
+    const float pw     = line_width > 0.f ? line_width : nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float square = align_ceil(std::sqrt(estimate_tower_blocks_depth(purges, width, layer_height, nozzle_diameter, extra_spacing, line_width) * width), pw);
+    const float depth  = estimate_tower_blocks_depth(purges, square, layer_height, nozzle_diameter, extra_spacing, line_width);
     return rib_footprint_side(square, depth, rib_width, extra_rib_length, max_height);
 }
 
@@ -1383,6 +1410,12 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_used_fillet        = config.wipe_tower_fillet_wall.value;
     m_max_speed          = float(config.wipe_tower_max_purge_speed.value) * 60.f;
     m_enable_arc_fitting = config.enable_arc_fitting.value && std::abs(m_wipe_tower_rotation_angle) < EPSILON;
+    m_tower_line_width = float(std::max(0., config.prime_tower_line_width.value));
+    // Bambu Studio 2.9.1 (WipeTower.cpp:1942-1960): prime tower extrusions at prime_tower_acceleration,
+    // travels inside the tower at the travel acceleration.
+    // The travel acceleration is an object setting here: Print hands it over (set_travel_acceleration).
+    if (config.prime_tower_acceleration.value > 0.)
+        m_tower_acceleration = (unsigned int) std::floor(config.prime_tower_acceleration.value + 0.5);
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -1492,7 +1525,7 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     // changes in, and the smallest width is safe for every tool). Each tool's purge uses
     // tool_line_width(). With uniform nozzles this is the value every set_extruder() call wrote before.
     {
-        const float tool_pw = nozzle_diameter * Width_To_Nozzle_Ratio;
+        const float tool_pw = m_tower_line_width > 0.f ? m_tower_line_width : nozzle_diameter * Width_To_Nozzle_Ratio;
         const bool  forced  = config.wipe_tower_filament > 0;
         const bool  is_wall = forced && idx == size_t(config.wipe_tower_filament - 1);
         if (idx == 0 || is_wall || (!forced && tool_pw < m_perimeter_width))
@@ -1567,6 +1600,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
 		.set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift + (tool!=(unsigned int)(-1) && (m_current_shape == SHAPE_REVERSED) ? m_layer_info->depth - m_layer_info->toolchanges_depth(): 0.f))
 		.append(";--------------------\n"
 				"; CP TOOLCHANGE START\n")
@@ -2051,6 +2085,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 		.set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
@@ -2710,6 +2745,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
         .set_initial_tool(m_current_tool)
         .set_origin_offset(m_rib_offset)
         .set_arc_fitting(m_enable_arc_fitting)
+        .set_accelerations(writer_tower_acceleration(), m_tower_travel_acceleration)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     // Slow down on the 1st layer.

@@ -8,6 +8,7 @@
 #include "PrintConfig.hpp"
 #include "NozzleProcess.hpp"
 #include "NozzleOverride.hpp"
+#include "ProjectSwapGuard.hpp"
 #include "ToolSlots.hpp"
 #include "libslic3r.h"
 #include "Utils.hpp"
@@ -2368,6 +2369,18 @@ void PresetBundle::load_installed_filaments(AppConfig &config)
         preset.set_visible_from_appconfig(config);
 }
 
+void PresetBundle::load_installed_prints(const AppConfig &config)
+{
+    for (Preset &preset : prints)
+        preset.set_visible_from_appconfig(config);
+}
+
+void PresetBundle::refresh_enabled_presets(AppConfig &config)
+{
+    this->load_installed_filaments(config);
+    this->load_installed_prints(config);
+}
+
 void PresetBundle::load_installed_sla_materials(AppConfig &config)
 {
     if (! config.has_section(AppConfig::SECTION_MATERIALS)) {
@@ -2468,6 +2481,7 @@ void PresetBundle::update_selections(AppConfig &config)
     // Per-nozzle process P1: this printer's remembered per-nozzle processes (none: every nozzle uses the
     // plate's process), checked against the presets now visible and compatible.
     this->restore_nozzle_processes(config, printers.get_selected_preset_name());
+    this->note_filament_routing_layout();
 
     std::string first_visible_filament_name;
     for (auto & fp : filament_presets) {
@@ -2505,6 +2519,8 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Update visibility of filament and sla material presets
     this->load_installed_filaments(config);
     this->load_installed_sla_materials(config);
+    // Process presets the user hid in the Process manager.
+    this->load_installed_prints(config);
 
     auto is_default_printer_selection = [](const std::string &name) {
         return name.empty() || name == "Default Printer";
@@ -2626,6 +2642,7 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
     // Per-nozzle process P1: this printer's remembered per-nozzle processes (none: every nozzle uses the
     // plate's process), checked against the presets now visible and compatible.
     this->restore_nozzle_processes(config, printers.get_selected_preset_name());
+    this->note_filament_routing_layout();
 
     if (initial_printer != nullptr && (preferred_printer == nullptr || initial_printer == preferred_printer)) {
         // Don't run the following code, as we want to activate default filament / SLA material profiles when installing and selecting a new printer.
@@ -2701,7 +2718,7 @@ void PresetBundle::export_selections(AppConfig &config)
     config.set_printer_setting(printer_name, "curr_bed_type", config.get("curr_bed_type"));
     // Per-nozzle process P1: remembered per printer, like its filaments.
     // Written empty too, so going back to the plate's process on every nozzle is remembered as well.
-    if (supports_nozzle_processes(printers.get_edited_preset().config)) {
+    if (supports_nozzle_processes(this->nozzle_tool_config())) {
         const auto *nozzle_processes = project_config.option<ConfigOptionStrings>("nozzle_process_presets");
         config.set_printer_setting(printer_name, "nozzle_process_presets",
                                    nozzle_processes != nullptr && has_nozzle_process_presets(project_config) ?
@@ -3345,8 +3362,7 @@ std::string PresetBundle::nozzle_tool_selection(size_t tool) const
 
 bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) const
 {
-    const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
+    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(this->nozzle_tool_config()))
         return false;
     // Per-nozzle process P7: the size the extruder carries in this project. P9: `extruder` is a tool, a rack slot past the
     // extruders (its own size).
@@ -3364,7 +3380,7 @@ bool PresetBundle::nozzle_process_fits(const Preset &process, size_t extruder) c
 bool PresetBundle::nozzle_process_fits_size(const Preset &process, double nozzle) const
 {
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(printer))
+    if (process.type != Preset::TYPE_PRINT || process.is_default || !supports_nozzle_processes(this->nozzle_tool_config()))
         return false;
 
     const Preset &binding  = nozzle_process_binding(process, this->prints);
@@ -3510,6 +3526,110 @@ bool PresetBundle::prune_nozzle_processes()
     return true;
 }
 
+PresetBundle::PresetUsage PresetBundle::preset_usage(Preset::Type type, const std::string &name) const
+{
+    PresetUsage usage;
+    if (name.empty())
+        return usage;
+    if (type == Preset::TYPE_FILAMENT) {
+        for (size_t i = 0; i < this->filament_presets.size(); ++i)
+            if (this->filament_presets[i] == name)
+                usage.filament_slots.push_back(i);
+        usage.selected = this->filaments.get_selected_idx() != size_t(-1) && this->filaments.get_selected_preset_name() == name;
+    } else if (type == Preset::TYPE_PRINT) {
+        usage.selected = this->prints.get_selected_idx() != size_t(-1) && this->prints.get_selected_preset_name() == name;
+        if (const auto *names = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets"))
+            for (size_t e = 0; e < names->values.size(); ++e)
+                if (names->values[e] == name)
+                    usage.nozzles.push_back(e);
+        for (const auto &[id, slot_name] : nozzle_slot_process_names(this->project_config))
+            if (slot_name == name)
+                usage.nozzle_slots.push_back(id);
+    }
+    return usage;
+}
+
+bool PresetBundle::repoint_preset_references(Preset::Type type, const std::string &from, const std::string &to)
+{
+    if (from.empty() || from == to)
+        return false;
+    bool changed = false;
+    if (type == Preset::TYPE_FILAMENT) {
+        if (to.empty())
+            return false; // the caller moves the slots to the next visible preset
+        for (std::string &slot : this->filament_presets)
+            if (slot == from) {
+                slot    = to;
+                changed = true;
+            }
+        return changed;
+    }
+    if (type != Preset::TYPE_PRINT)
+        return false;
+    if (auto *opt = this->project_config.option<ConfigOptionStrings>("nozzle_process_presets")) {
+        std::vector<std::string> names = opt->values;
+        for (size_t e = 0; e < names.size(); ++e)
+            if (names[e] == from) {
+                names[e] = to;
+                if (to.empty())
+                    this->set_nozzle_process_edits(e, DynamicPrintConfig()); // its changes went with it
+                changed = true;
+            }
+        if (changed)
+            opt->values = nozzle_process_stored(std::move(names));
+    }
+    std::map<std::string, std::string> slots = nozzle_slot_process_names(this->project_config);
+    bool slots_changed = false;
+    std::set<std::string> cleared;
+    for (auto it = slots.begin(); it != slots.end();) {
+        if (it->second != from) {
+            ++it;
+            continue;
+        }
+        slots_changed = true;
+        if (to.empty()) {
+            cleared.insert(it->first);
+            it = slots.erase(it);
+        } else {
+            it->second = to;
+            ++it;
+        }
+    }
+    if (slots_changed) {
+        this->project_config.set_key_value("nozzle_slot_process_presets", new ConfigOptionStrings(serialize_nozzle_slot_process_names(slots)));
+        if (!cleared.empty()) {
+            NozzleProcessEdits edits = this->nozzle_process_edits_map();
+            bool               dropped = false;
+            for (const std::string &id : cleared)
+                dropped |= edits.erase(id) > 0;
+            if (dropped)
+                this->project_config.set_key_value("nozzle_process_edits", new ConfigOptionStrings(serialize_nozzle_process_edits(edits)));
+        }
+        changed = true;
+    }
+    return changed;
+}
+
+void PresetBundle::note_filament_routing_layout()
+{
+    m_filament_routing_layout = filament_routing_layout(this->printers.get_edited_preset().config);
+}
+
+bool PresetBundle::update_filament_routing_for_printer()
+{
+    const std::string layout = filament_routing_layout(this->printers.get_edited_preset().config);
+    if (layout == m_filament_routing_layout)
+        return false;
+    const std::string old = m_filament_routing_layout;
+    m_filament_routing_layout = layout;
+    if (old.empty())
+        return false; // nothing known about the project yet (startup)
+    const bool changed = reset_filament_routing(this->project_config, this->filament_presets.size());
+    BOOST_LOG_TRIVIAL(info) << "filament routing: printer layout " << old << " -> " << layout
+                            << (changed ? ", the project's filament map, pins and tool assignment reset" : ", nothing to reset");
+    return true;
+}
+
 void PresetBundle::update_nozzle_processes_for_printer(AppConfig &config)
 {
     const std::string printer_name = this->printers.get_selected_preset_name();
@@ -3573,8 +3693,10 @@ bool PresetBundle::set_filament_nozzle(size_t filament, int tool)
     std::vector<int> values = assign->values;
     if (values.size() <= filament)
         values.resize(filament + 1, 0);
-    // The filament's own tool is stored as 0, so a project that puts every filament back reads as unassigned.
-    values[filament] = tool == int(filament) + 1 ? 0 : std::max(0, tool);
+    // The filament's own tool is stored as 0, so a project that puts every filament back reads as unassigned, unless there are
+    // more filaments than tools: an unassigned filament then follows filament_map (owner bug 2026-11-08, U1 filament 3 -> T3).
+    const auto *nozzles = this->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    values[filament] = filament_nozzle_assignment_value(filament, tool, this->filament_presets.size(), nozzles != nullptr ? nozzles->values.size() : 0);
     values = filament_nozzle_assignment_stored(std::move(values));
     if (values == assign->values)
         return false;
@@ -3748,15 +3870,21 @@ bool PresetBundle::set_tool_nozzle_diameter(size_t tool, double diameter)
 
 void PresetBundle::remember_nozzle_diameter_override(AppConfig &config) const
 {
+    // Project strip: a project switch loads another project's nozzles, it does not set this printer's.
+    if (ProjectSwapGuard::active())
+        return;
     const std::string model = nozzle_override_model_key(this->printers);
-    if (model.empty())
+    // Owner bug 2026-11-07: a nozzle change handled after the printer was switched but before the Printer tab updated the
+    // project for it (a queued sync, strip or variant-follow step) would store the previous printer's sizes under this model.
+    // (A bundle no printer update ran on yet - used without the Printer tab - keeps the old behaviour.)
+    if (model.empty() || (!m_nozzle_override_model.empty() && model != m_nozzle_override_model))
         return;
     const std::vector<double> stored = nozzle_diameter_override_stored(nozzle_diameter_override_values(this->project_config),
                                                                        this->preset_nozzle_diameters());
     config.set("nozzle_diameter_override", model, serialize_nozzle_diameter_override(stored));
 }
 
-void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config)
+bool PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config)
 {
     const std::string model = nozzle_override_model_key(this->printers);
     if (model != m_nozzle_override_model) {
@@ -3769,10 +3897,175 @@ void PresetBundle::update_nozzle_diameter_override_for_printer(AppConfig &config
         // P9 (owner hand test 2026-11-02): another printer model has its own rack, if any: an H2C project's rack slots must not
         // turn up on a U1.
         this->project_config.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings());
-        return;
+        // Owner bugs 2026-11-06: ...but this printer's own rack (and sizes, flow types) as they were last set, startup included.
+        return this->restore_nozzle_rack(config);
     }
-    // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders.
+    // Same model (another nozzle variant, or the printer's settings changed): cut to its extruders. The rack is the same
+    // hardware: it stays, and is remembered for the new variant at its next edit.
     this->set_nozzle_diameter_override(nozzle_diameter_override_values(this->project_config));
+    return false;
+}
+
+NozzleRackMemory PresetBundle::current_nozzle_rack_memory() const
+{
+    NozzleRackMemory memory;
+    memory.diameters      = this->effective_nozzle_diameters();
+    const size_t extruders = memory.diameters.size();
+    if (const auto *opt = this->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"); opt != nullptr && !opt->values.empty()) {
+        memory.volume_types = opt->values;
+        memory.volume_types.resize(extruders, int(nvtStandard));
+    }
+    memory.rack_texts.resize(extruders);
+    for (size_t e = 0; e < extruders; ++e)
+        memory.rack_texts[e] = this->rack_nozzle_override(e);
+    if (std::all_of(memory.rack_texts.begin(), memory.rack_texts.end(), [](const std::string &s) { return s.empty(); }))
+        memory.rack_texts.clear();
+    return memory;
+}
+
+void PresetBundle::remember_nozzle_rack(AppConfig &config) const
+{
+    // Project strip (design risk 1): the rack of a project switched in is that project's, not a new memory for the printer.
+    if (ProjectSwapGuard::active())
+        return;
+    const std::string model = nozzle_override_model_key(this->printers);
+    // Until the model's memory was restored (startup, before the Printer tab loaded) the project holds no choice yet: writing
+    // it would put the defaults over what was remembered.
+    if (model.empty() || model != m_nozzle_override_model)
+        return;
+    const Preset &printer = this->printers.get_selected_preset();
+    if (printer.is_default || printer.name.empty())
+        return;
+    const std::string text = serialize_nozzle_rack_memory(this->current_nozzle_rack_memory());
+    if (text.empty())
+        return;
+    config.set("nozzle_rack", printer.name, text);
+    config.set("nozzle_rack_model", model, text);
+}
+
+NozzleRackLimits PresetBundle::nozzle_rack_limits() const
+{
+    const Preset    &edited = this->printers.get_edited_preset();
+    NozzleRackLimits limits = Slic3r::nozzle_rack_limits(edited.config);
+    const auto      *model  = edited.config.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || model->value.empty())
+        return limits;
+    for (const Preset &p : this->printers) {
+        if (!p.is_system || p.is_default)
+            continue;
+        const auto *m = p.config.option<ConfigOptionString>("printer_model");
+        if (m != nullptr && m->value == model->value)
+            merge_nozzle_rack_limits(limits, p.config);
+    }
+    return limits;
+}
+
+bool PresetBundle::restore_nozzle_rack(const AppConfig &config)
+{
+    // Project strip: a project switched in brings its own rack (as an opened 3MF does, #914); the memory stays out of it.
+    if (ProjectSwapGuard::active())
+        return false;
+    const Preset     &printer = this->printers.get_selected_preset();
+    const std::string model   = nozzle_override_model_key(this->printers);
+    const std::string by_name = !printer.name.empty() && config.has("nozzle_rack", printer.name) ? config.get("nozzle_rack", printer.name) : std::string();
+    const std::string by_model = !model.empty() && config.has("nozzle_rack_model", model) ? config.get("nozzle_rack_model", model) : std::string();
+    const std::vector<std::string> candidates = nozzle_rack_memory_candidates(printer.is_system, by_name, by_model);
+    if (candidates.empty())
+        return false;
+    const NozzleRackLimits limits = this->nozzle_rack_limits();
+    NozzleRackMemory       memory;
+    bool                   found = false;
+    for (const std::string &text : candidates) {
+        if (!parse_nozzle_rack_memory(text, memory))
+            continue;
+        if (const std::string why = validate_nozzle_rack_memory(memory, limits); !why.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "nozzle rack: nozzles remembered for " << printer.name << " do not fit it (" << why << ")";
+            continue;
+        }
+        found = true;
+        break;
+    }
+    if (!found) {
+        BOOST_LOG_TRIVIAL(info) << "nozzle rack: nothing remembered fits " << printer.name << ", the printer's defaults are used";
+        return false;
+    }
+    this->set_nozzle_diameter_override(memory.diameters);
+    if (!memory.volume_types.empty())
+        this->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = memory.volume_types;
+    std::vector<std::string> racks = memory.rack_texts;
+    if (std::all_of(racks.begin(), racks.end(), [](const std::string &s) { return s.empty(); }))
+        racks.clear();
+    this->project_config.option<ConfigOptionStrings>("extruder_rack_nozzle_override", true)->values = racks;
+    this->prune_nozzle_processes();
+    BOOST_LOG_TRIVIAL(info) << "nozzle rack: restored the nozzles last used on " << printer.name << ": "
+                            << nozzle_diameter_summary(this->effective_nozzle_diameters());
+    return true;
+}
+
+// The system variant of `model` with `extruders` nozzles, all of size `size`; nullptr when it has none.
+static const Preset *system_printer_variant_of_size(const PresetCollection &printers, const std::string &model, size_t extruders, double size)
+{
+    if (model.empty() || extruders == 0 || !(size > 0.))
+        return nullptr;
+    for (const Preset &p : printers) {
+        if (!p.is_system || p.is_default || p.config.opt_string("printer_model") != model)
+            continue;
+        const auto *nd = p.config.option<ConfigOptionFloats>("nozzle_diameter");
+        if (nd == nullptr || nd->values.size() != extruders ||
+            !std::all_of(nd->values.begin(), nd->values.end(), [size](double d) { return same_nozzle_diameter(d, size); }))
+            continue;
+        return &p;
+    }
+    return nullptr;
+}
+
+// One size on every extruder: that size, else 0.
+static double uniform_nozzle_size(const std::vector<double> &sizes)
+{
+    if (sizes.empty() || !(sizes.front() > 0.))
+        return 0.;
+    for (double d : sizes)
+        if (!same_nozzle_diameter(d, sizes.front()))
+            return 0.;
+    return sizes.front();
+}
+
+std::string PresetBundle::printer_variant_for_nozzle_sizes() const
+{
+    const std::vector<double> sizes  = this->effective_nozzle_diameters();
+    const std::vector<double> preset = this->preset_nozzle_diameters();
+    const double              size   = uniform_nozzle_size(sizes);
+    if (!(size > 0.) || preset.size() != sizes.size())
+        return std::string();
+    if (std::all_of(preset.begin(), preset.end(), [size](double d) { return same_nozzle_diameter(d, size); }))
+        return std::string(); // the variant already has this size
+    const Preset &current = this->printers.get_selected_preset();
+    const Preset *target  = system_printer_variant_of_size(this->printers, current.config.opt_string("printer_model"), sizes.size(), size);
+    return target != nullptr && target->name != current.name ? target->name : std::string();
+}
+
+std::string PresetBundle::printer_preset_for_remembered_nozzles(const AppConfig &config, const std::string &target) const
+{
+    const Preset *preset = this->printers.find_preset(target, false);
+    if (preset == nullptr || !preset->is_system)
+        return target; // a user preset is its own machine: its variant is what the user picked
+    const std::string model = preset->config.opt_string("printer_model");
+    const auto       *nd    = preset->config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (model.empty() || nd == nullptr || nd->values.empty())
+        return target;
+    const std::string by_name  = config.has("nozzle_rack", target) ? config.get("nozzle_rack", target) : std::string();
+    const std::string by_model = config.has("nozzle_rack_model", model) ? config.get("nozzle_rack_model", model) : std::string();
+    for (const std::string &text : nozzle_rack_memory_candidates(true, by_name, by_model)) {
+        NozzleRackMemory memory;
+        if (!parse_nozzle_rack_memory(text, memory) || memory.diameters.size() != nd->values.size())
+            continue;
+        const double size = uniform_nozzle_size(memory.diameters);
+        if (!(size > 0.))
+            return target; // mixed sizes: no variant carries them, the project override does (P7)
+        const Preset *variant = system_printer_variant_of_size(this->printers, model, nd->values.size(), size);
+        return variant != nullptr ? variant->name : target;
+    }
+    return target;
 }
 
 void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
@@ -3780,7 +4073,7 @@ void PresetBundle::fill_nozzle_processes(DynamicPrintConfig &out) const
     // Per-nozzle process P8: every tool's own profile (chosen, auto-picked or the plate's) with its changes. A tool whose
     // effective per-tool values equal the plate's is no source, so a job where every tool follows the plate is untouched.
     out.set_key_value("nozzle_process_missing", new ConfigOptionInts());
-    if (!supports_nozzle_processes(this->printers.get_edited_preset().config))
+    if (!supports_nozzle_processes(this->nozzle_tool_config()))
         return;
     const size_t extruders = this->effective_nozzle_diameters().size();
     const DynamicPrintConfig &plate = this->plate_print_preset().config;
@@ -3875,7 +4168,7 @@ std::string PresetBundle::auto_nozzle_process(size_t extruder, bool *missing) co
     if (missing != nullptr)
         *missing = false;
     const DynamicPrintConfig &printer = this->printers.get_edited_preset().config;
-    if (!supports_nozzle_processes(printer))
+    if (!supports_nozzle_processes(this->nozzle_tool_config()))
         return std::string();
     // P9: `extruder` is a tool (an extruder or a rack slot with its own size).
     const NozzleToolRef ref = this->nozzle_tool_ref(extruder);
@@ -3950,11 +4243,14 @@ PresetBundle::NozzleToolProcess PresetBundle::nozzle_tool_process_info(size_t ex
 bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfig &out) const
 {
     const DynamicPrintConfig &plate = this->plate_print_preset().config;
+    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
     if (m_tool_view.extruder == int(extruder)) {
         out = nozzle_tool_process(plate, this->prints.get_edited_preset().config, nullptr);
+        // The view shows the plate's layer height; the tool's chosen process (the selected one) keeps its own.
+        if (info.kind == NozzleToolProcessKind::Chosen && !m_tool_view.follows_plate)
+            set_nozzle_tool_layer_height(out, this->prints.get_selected_preset().config);
         return true;
     }
-    const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
     if (info.kind == NozzleToolProcessKind::Missing) {
         out = plate;
         return false;
@@ -3965,6 +4261,9 @@ bool PresetBundle::nozzle_tool_process_config(size_t extruder, DynamicPrintConfi
     const DynamicPrintConfig *own  = it != edits.end() ? &it->second : nullptr;
     const Preset *preset = info.kind == NozzleToolProcessKind::FollowsPlate ? nullptr : this->prints.find_preset(info.name, false);
     out = nozzle_tool_process(plate, preset != nullptr ? preset->config : plate, own);
+    // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate (an automatic pick's does not).
+    if (info.kind == NozzleToolProcessKind::Chosen && preset != nullptr)
+        set_nozzle_tool_layer_height(out, preset->config);
     return true;
 }
 
@@ -4017,7 +4316,7 @@ bool PresetBundle::begin_nozzle_tool_view(size_t extruder)
         return true;
     this->end_nozzle_tool_view();
     // P9: any tool, the rack slots past the extruders included.
-    if (!supports_nozzle_processes(this->printers.get_edited_preset().config) || extruder >= this->nozzle_tool_count() ||
+    if (!supports_nozzle_processes(this->nozzle_tool_config()) || extruder >= this->nozzle_tool_count() ||
         this->prints.get_selected_idx() == size_t(-1))
         return false;
     const NozzleToolProcess info = this->nozzle_tool_process_info(extruder);
@@ -4553,6 +4852,146 @@ void PresetBundle::restore_selection(const Selection &selection)
     this->mixed_filaments  = selection.mixed_filaments;
 }
 
+// ---- Project strip P4: each open project's presets, kept aside while another project is shown ----------------------------
+
+PresetBundle::ProjectPresetState PresetBundle::capture_project_presets(bool with_full_config) const
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    ProjectPresetState state;
+    auto capture = [](const PresetCollection &presets, ProjectPresetState::Collection &out) {
+        out.selected = presets.get_selected_preset_name();
+        out.edited   = presets.get_edited_preset().config;
+        out.saved    = presets.m_saved_preset.config;
+        out.preset   = presets.get_selected_preset().config;
+    };
+    capture(this->printers, state.printers);
+    capture(this->prints, state.prints);
+    capture(this->filaments, state.filaments);
+    state.filament_presets = this->filament_presets;
+    state.project_config   = this->project_config;
+    state.mixed_filaments  = this->mixed_filaments;
+    if (with_full_config)
+        state.full = this->full_config();
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) })
+        for (const Preset *preset : embedded_presets_of(*presets)) {
+            state.embedded.push_back(*preset);
+            state.embedded.back().loading_substitutions = nullptr;
+        }
+    state.valid = true;
+    return state;
+}
+
+bool PresetBundle::project_presets_current(const ProjectPresetState &state) const
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    if (!state.valid)
+        return true;
+    auto same = [](const PresetCollection &presets, const ProjectPresetState::Collection &s) {
+        return presets.get_selected_preset_name() == s.selected && presets.get_edited_preset().config.equals(s.edited) &&
+               presets.m_saved_preset.config.equals(s.saved) && presets.get_selected_preset().config.equals(s.preset);
+    };
+    if (!same(this->printers, state.printers) || !same(this->prints, state.prints) || !same(this->filaments, state.filaments))
+        return false;
+    if (this->filament_presets != state.filament_presets || !this->project_config.equals(state.project_config))
+        return false;
+    std::vector<const Preset *> loaded;
+    for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                             static_cast<const PresetCollection *>(&this->printers) }) {
+        const auto e = embedded_presets_of(*presets);
+        loaded.insert(loaded.end(), e.begin(), e.end());
+    }
+    if (loaded.size() != state.embedded.size())
+        return false;
+    for (size_t i = 0; i < loaded.size(); ++i)
+        if (loaded[i]->name != state.embedded[i].name || !loaded[i]->config.equals(state.embedded[i].config))
+            return false;
+    return true;
+}
+
+void PresetBundle::restore_project_presets(const ProjectPresetState &state, std::vector<std::string> *missing)
+{
+    auto embedded_presets_of = [](const PresetCollection &presets) {
+        std::vector<const Preset *> out;
+        for (const Preset &preset : presets.m_presets)
+            if (preset.is_project_embedded)
+                out.push_back(&preset);
+        return out;
+    };
+    if (!state.valid)
+        return;
+    // The project's own presets: the ones loaded are the shown project's.
+    bool same_embedded = true;
+    {
+        std::vector<const Preset *> loaded;
+        for (const PresetCollection *presets : { static_cast<const PresetCollection *>(&this->prints), static_cast<const PresetCollection *>(&this->filaments),
+                                                 static_cast<const PresetCollection *>(&this->printers) }) {
+            const auto e = embedded_presets_of(*presets);
+            loaded.insert(loaded.end(), e.begin(), e.end());
+        }
+        same_embedded = loaded.size() == state.embedded.size();
+        for (size_t i = 0; same_embedded && i < loaded.size(); ++i)
+            same_embedded = loaded[i]->name == state.embedded[i].name && loaded[i]->config.equals(state.embedded[i].config);
+    }
+    if (!same_embedded) {
+        this->reset_project_embedded_presets();
+        if (!state.embedded.empty()) {
+            // load_project_embedded_presets() rebuilds each preset's config in place: hand it copies.
+            std::vector<Preset>   copies = state.embedded;
+            std::vector<Preset *> ptrs;
+            for (Preset &preset : copies) {
+                preset.loading_substitutions = nullptr;
+                ptrs.push_back(&preset);
+            }
+            try {
+                this->load_project_embedded_presets(ptrs, ForwardCompatibilitySubstitutionRule::EnableSilent);
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << "project strip: the project's own presets did not all come back: " << e.what();
+            }
+        }
+    }
+    auto restore = [missing](PresetCollection &presets, const ProjectPresetState::Collection &s) {
+        // A preset the project uses may be hidden (another printer's, not installed): it is shown again, as opening the
+        // project's 3MF does.
+        const std::string name = Preset::remove_suffix_modified(s.selected);
+        if (Preset *preset = presets.find_preset(name, false, true); preset != nullptr && preset->name == name)
+            preset->is_visible = true;
+        presets.select_preset_by_name(name, true);
+        const Preset &selected = presets.get_selected_preset();
+        if (selected.name != name) {
+            BOOST_LOG_TRIVIAL(warning) << "project strip: the project's preset \"" << name << "\" is gone, its values go on \"" << selected.name << "\"";
+            if (missing != nullptr)
+                missing->push_back(name);
+        } else if (selected.config.equals(s.preset)) {
+            // Unchanged since: the exact baseline, so the project's dirty state is what it was.
+            presets.m_saved_preset.config = s.saved;
+        }
+        presets.get_edited_preset().config = s.edited;
+        presets.update_dirty();
+    };
+    restore(this->printers, state.printers);
+    restore(this->prints, state.prints);
+    restore(this->filaments, state.filaments);
+    this->update_compatible(PresetSelectCompatibleType::Never);
+    this->update_multi_material_filament_presets();
+    // Last, as update_multi_material_filament_presets() resizes filament_presets and the flush data in project_config.
+    this->filament_presets = state.filament_presets;
+    this->project_config   = state.project_config;
+    this->mixed_filaments  = state.mixed_filaments;
+}
+
 // Load a config file from a boost property_tree. This is a private method called from load_config_file.
 // is_external == false on if called from ConfigWizard
 void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config, Semver file_version, bool selected, bool is_custom_defined)
@@ -4866,6 +5305,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         this->project_config.apply_only(config, s_project_options);
         m_nozzle_process_printer = this->printers.get_selected_preset_name();
         m_nozzle_override_model  = nozzle_override_model_key(this->printers);
+        this->note_filament_routing_layout(); // the project's filament map belongs to its own printer
         EnsureFilamentColorFieldsAligned(this->project_config);
         EnsureFilamentVolumeTypesAligned(this->project_config, this->filament_presets.size());
         // Older projects can carry mixed_filament_definitions that no longer match the
@@ -6328,6 +6768,13 @@ bool print_carry_is_printer_coupled(const std::string &key)
            boost::starts_with(key, "wipe_tower_") || boost::starts_with(key, "prime_tower_");
 }
 
+bool print_carry_is_motion_key(const std::string &key)
+{
+    static const std::set<std::string> travel { "travel_speed", "travel_speed_z", "initial_layer_travel_speed", "travel_jerk",
+                                                "first_layer_travel_jerk" };
+    return boost::ends_with(key, "_acceleration") || travel.count(key) > 0;
+}
+
 bool print_carry_is_nozzle_geometry(const std::string &key)
 {
     return s_print_carry_nozzle_geometry_keys.count(key) > 0 || boost::ends_with(key, "line_width");
@@ -6527,7 +6974,8 @@ static const std::vector<PrintCarryConflict> &print_carry_conflicts()
 }
 
 std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const DynamicPrintConfig &src, bool same_nozzle_size,
-                                              const DynamicPrintConfig *printer, std::map<std::string, std::string> *kept)
+                                              const DynamicPrintConfig *printer, std::map<std::string, std::string> *kept,
+                                              bool same_printer_model)
 {
     const DynamicPrintConfig matched = dst;
     std::vector<std::string> changed;
@@ -6542,6 +6990,10 @@ std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const Dyn
             continue;
         if (print_carry_is_printer_coupled(key)) {
             keep(key, "printer-coupled (denylist)");
+            continue;
+        }
+        if (!same_printer_model && print_carry_is_motion_key(key)) {
+            keep(key, "printer-coupled (acceleration / travel, printer model changed)");
             continue;
         }
         if (!same_nozzle_size && print_carry_is_nozzle_geometry(key)) {
@@ -6640,6 +7092,8 @@ PrintSettingsCarry PresetBundle::capture_print_settings_carry() const
         return carry;
     carry.from_preset  = this->prints.get_edited_preset().name;
     carry.from_printer = printer.name;
+    if (const auto *model = printer.config.option<ConfigOptionString>("printer_model"))
+        carry.from_printer_model = model->value;
     // Still on the preset a previous carry was applied onto: the values came from further back.
     carry.origin_preset = !m_print_carry_origin.empty() && m_print_carry_applied_onto == carry.from_preset ? m_print_carry_origin :
                                                                                                              carry.from_preset;
@@ -6689,10 +7143,12 @@ std::vector<std::string> PresetBundle::apply_print_settings_carry(const PrintSet
     if (!carry.from_printer.empty())
         m_print_carry_last_by_printer[carry.from_printer] = carry.from_preset;
     const bool same_nozzle_size = print_carry_same_nozzle_size(carry.nozzle_diameters, print_carry_nozzles(printer));
+    const auto *model_opt        = printer.config.option<ConfigOptionString>("printer_model");
+    const bool  same_model       = carry.from_printer_model.empty() || (model_opt != nullptr && model_opt->value == carry.from_printer_model);
     std::map<std::string, std::string>  kept_local;
     std::map<std::string, std::string> &why     = kept != nullptr ? *kept : kept_local;
     std::vector<std::string>            changed = carry_print_settings(this->prints.get_edited_preset().config, carry.config, same_nozzle_size,
-                                                                       &printer.config, &why);
+                                                                       &printer.config, &why, same_model);
     this->prints.update_dirty();
     m_print_carry_origin       = carry.origin_preset;
     m_print_carry_applied_onto = this->prints.get_edited_preset().name;

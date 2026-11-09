@@ -7,6 +7,7 @@
 #include "enum_bitmask.hpp"
 #include "MixedFilament.hpp"
 #include "NozzleProcess.hpp"
+#include "NozzleRackMemory.hpp"
 
 #include <memory>
 #include <functional>
@@ -74,6 +75,7 @@ struct PrintSettingsCarry
 {
     std::string         from_preset;      // print preset name before the switch; empty = nothing to carry
     std::string         from_printer;     // printer preset name before the switch
+    std::string         from_printer_model; // its printer_model ("Bambu Lab H2C"); empty = unknown (treated as the same model)
     std::string         origin_preset;    // preset the carried values originally came from (A in A -> B -> C)
     DynamicPrintConfig  config;           // the edited (possibly modified) print config before the switch
     std::vector<double> nozzle_diameters; // nozzle_diameter of the (edited) printer before the switch
@@ -83,6 +85,11 @@ struct PrintSettingsCarry
 bool print_carry_is_printer_coupled(const std::string &key);
 // Key scales with the nozzle diameter (line widths, layer heights, Z gaps).
 bool print_carry_is_nozzle_geometry(const std::string &key);
+// Owner decision 2026-11-05 (#854): accelerations and travel speed / jerk belong to the printer model. Every key ending
+// in "_acceleration" (per-variant arrays and initial_layer_travel_acceleration included), travel_speed, travel_speed_z,
+// initial_layer_travel_speed, travel_jerk and first_layer_travel_jerk keep the matched profile's value when the printer
+// model changes; within one model (another nozzle size) they still carry.
+bool print_carry_is_motion_key(const std::string &key);
 // Every nozzle of both printers has the same diameter (within 1e-6). Empty lists never match.
 bool print_carry_same_nozzle_size(const std::vector<double> &old_nozzles, const std::vector<double> &new_nozzles);
 // Apply src onto dst following the rules above. Returns the keys whose value in dst changed.
@@ -91,7 +98,8 @@ bool print_carry_same_nozzle_size(const std::vector<double> &old_nozzles, const 
 // the reason why the matched profile's value was kept.
 std::vector<std::string> carry_print_settings(DynamicPrintConfig &dst, const DynamicPrintConfig &src, bool same_nozzle_size,
                                               const DynamicPrintConfig *printer = nullptr,
-                                              std::map<std::string, std::string> *kept = nullptr);
+                                              std::map<std::string, std::string> *kept = nullptr,
+                                              bool same_printer_model = true);
 
 // Auto-enable newly added printer variants of a filament the user already ticked on (see the
 // comment above PresetBundle::load_installed_filaments's use of this). Pulled out as a small pure
@@ -285,6 +293,38 @@ public:
     // Nothing while project-embedded presets exist: a restore drops them, which would lose a loaded project's presets.
     std::optional<Selection> selection() const;
     void                     restore_selection(const Selection &selection);
+
+    // Project strip P4 (one live Plater per open project): the presets are app-global, so each project's choice is kept
+    // aside while another project is shown and put back when it is shown again. Unlike Selection it keeps the project's
+    // embedded presets (and puts them back), and its edits ride with it: they come back as that project's unsaved changes.
+    struct ProjectPresetState
+    {
+        struct Collection
+        {
+            std::string        selected;
+            DynamicPrintConfig edited; // what the tab shows, edits included
+            DynamicPrintConfig saved;  // the baseline the project dirty state compares against
+            DynamicPrintConfig preset; // the selected preset as it was saved when captured
+        };
+        bool                     valid{ false };
+        Collection               prints, filaments, printers;
+        std::vector<std::string> filament_presets;
+        DynamicPrintConfig       project_config;
+        MixedFilamentManager     mixed_filaments;
+        std::vector<Preset>      embedded; // the project's own presets (3MF embedded), full copies
+        // What the project slices with (full_config()) when captured: after a switch, a key that differs from this is
+        // what made its slice invalid (diagnostics).
+        DynamicPrintConfig       full;
+    };
+    // with_full_config: also what the project slices with (ProjectPresetState::full), for the switch's diagnostics. It
+    // needs a complete bundle (printer, filament for every slot).
+    ProjectPresetState capture_project_presets(bool with_full_config = false) const;
+    // True when the bundle holds exactly that state already (the switch then skips the preset refresh).
+    bool               project_presets_current(const ProjectPresetState &state) const;
+    // Puts a captured state back. A preset that was deleted meanwhile cannot be selected again: its edited values are put
+    // on what is selected instead and the name is returned in `missing`. A preset that was saved meanwhile is the new
+    // saved one, the project's values show as its unsaved changes where they differ.
+    void               restore_project_presets(const ProjectPresetState &state, std::vector<std::string> *missing = nullptr);
 
     // Edge: any project-embedded preset loaded (print, filament or printer)?
     bool has_project_embedded_presets() const;
@@ -609,6 +649,14 @@ public:
     // currently defined in the vendor profile. Called from load_installed_printers; exposed for rare direct use.
     void                        install_missing_variants_for_enabled_models(AppConfig &config);
 
+    // Set the is_visible flag of the system process presets from the app config: hidden when listed in
+    // AppConfig::SECTION_HIDDEN_PROCESSES (the Process manager's "Enabled" column), shown otherwise.
+    void                        load_installed_prints(const AppConfig &config);
+    // The preset managers apply an "Enabled" change at once: the filament and process visibility is read
+    // again from the app config ([filaments], the hidden process presets) without reloading anything from
+    // disk, so unsaved edits stay. Selections are not changed.
+    void                        refresh_enabled_presets(AppConfig &config);
+
     const std::string&          get_preset_name_by_alias(const Preset::Type& preset_type, const std::string& alias) const;
 
     const int                   get_required_hrc_by_filament_type(const std::string& filament_type) const;
@@ -720,9 +768,31 @@ public:
     // Drop names that no longer exist or no longer fit their extruder (printer switched, nozzle changed).
     // Returns true when something was dropped.
     bool                        prune_nozzle_processes();
+
+    // ---- Preset manager: what a rename / delete of a preset touches in the project ----
+    struct PresetUsage
+    {
+        std::vector<size_t>      filament_slots; // filaments: 0-based slots of filament_presets that name it
+        bool                     selected{ false }; // the selected preset of its collection (filament tab / the plate's process)
+        std::vector<size_t>      nozzles;        // processes: 0-based extruders whose per-nozzle process it is
+        std::vector<std::string> nozzle_slots;   // processes: rack slot ids (nozzle_slot_process_presets) that name it
+        bool                     in_use() const { return !filament_slots.empty() || selected || !nozzles.empty() || !nozzle_slots.empty(); }
+    };
+    PresetUsage                 preset_usage(Preset::Type type, const std::string &name) const;
+    // Every project reference to `from` names `to` instead: filaments: the filament slots; processes: the
+    // per-nozzle choices (nozzle_process_presets, nozzle_slot_process_presets). An empty `to` clears the
+    // per-nozzle choices (that tool falls back to the plate's process, its edits go) and leaves filament
+    // slots to the caller (they move to the next visible preset). Returns true when anything changed.
+    bool                        repoint_preset_references(Preset::Type type, const std::string &from, const std::string &to);
     // After a printer switch or a printer settings change: a different printer brings its own remembered
     // selection (none: the plate's process everywhere); the same printer keeps its selection, pruned.
     void                        update_nozzle_processes_for_printer(AppConfig &config);
+    // After a printer switch or a printer settings change (owner bug 2026-11-08): a printer of another filament routing layout
+    // (filament_routing_layout: H3C -> H2C -> U1) starts from a fresh project's filament map, pins and tool assignment, not
+    // the old printer's. Returns true when the project's routing was reset (the caller resets the plates' maps too).
+    bool                        update_filament_routing_for_printer();
+    // A project was loaded or the presets were restored: its routing belongs to the selected printer.
+    void                        note_filament_routing_layout();
 
     // ---- Per-nozzle process P2: filament -> nozzle assignment (project_config "filament_nozzle_assignment") ----
     // Whether the edited printer takes an assignment (a toolchanger that is not a Bambu grouping machine).
@@ -753,11 +823,35 @@ public:
     bool                        set_tool_nozzle_diameter(size_t tool, double diameter);
     // Replace the whole override (stored form, NozzleOverride.hpp). Returns true when it changed.
     bool                        set_nozzle_diameter_override(const std::vector<double> &values);
-    // Remember the current override as the default of the edited printer's model.
+    // Remember the current override as the default of the edited printer's model. Not while another model's nozzles are
+    // in the project (update_nozzle_diameter_override_for_printer has not run for this one): they are the previous printer's.
     void                        remember_nozzle_diameter_override(AppConfig &config) const;
     // After a printer switch: another printer model brings its own remembered sizes (none: the preset's); the same
-    // model keeps the project's sizes, cut to its extruder count.
-    void                        update_nozzle_diameter_override_for_printer(AppConfig &config);
+    // model keeps the project's sizes, cut to its extruder count. Another model (startup included) also gets its remembered
+    // nozzles back (restore_nozzle_rack). Returns true when a remembered rack was put back.
+    bool                        update_nozzle_diameter_override_for_printer(AppConfig &config);
+
+    // ---- The project's nozzles remembered per printer (NozzleRackMemory.hpp, owner bugs 2026-11-06) ----
+    // The nozzles of this project now: each extruder's size, flow type and rack.
+    NozzleRackMemory            current_nozzle_rack_memory() const;
+    // Remember them for the selected printer preset (app config section "nozzle_rack", key = preset name) and its model
+    // (section "nozzle_rack_model", key = printer_model). Not before the model's memory was restored (startup).
+    void                        remember_nozzle_rack(AppConfig &config) const;
+    // Put the remembered nozzles of the selected printer back into the project when they still fit the printer model
+    // (nozzle_rack_limits). The entries are tried in nozzle_rack_memory_candidates() order: on a system variant the model's
+    // last rack comes first. Returns true when they were applied.
+    bool                        restore_nozzle_rack(const AppConfig &config);
+    // The system variant of the selected printer's model whose nozzle_diameter is the size every extruder carries now, when
+    // that is another variant than the selected one (#911: the extruder's own nozzle is the Plate's nozzle). Empty when the
+    // sizes are mixed, the selected variant already has that size, or no variant of the model has it.
+    std::string                 printer_variant_for_nozzle_sizes() const;
+    // Owner bug 2026-11-07 (H2S 0.8 -> H3C showed every rack slot 0.8): a switch to another printer model keeps the previous
+    // printer's nozzle variant (get_similar_printer_preset). When printer preset `target` has remembered nozzles of one size
+    // on every extruder, the system variant of its model with that size; otherwise `target`.
+    std::string                 printer_preset_for_remembered_nozzles(const AppConfig &config, const std::string &target) const;
+    // What the selected printer's model takes: every system variant of its printer_model with the same extruder count, and
+    // the selected preset itself (extruder_variant_list, default_nozzle_volume_type, sizes, rack capacity).
+    NozzleRackLimits            nozzle_rack_limits() const;
 
     // ---- Per-nozzle process P8: a whole process profile per tool (NozzleProcess.hpp "P8") ----
     // Every tool of a printer that takes per-nozzle processes has a process profile: the one chosen for it
@@ -830,6 +924,8 @@ private:
     std::string                 m_nozzle_process_printer;
     // The printer model the nozzle size override was last restored for or loaded with (a project).
     std::string                 m_nozzle_override_model;
+    // The filament routing layout the project's filament map and pins were made for (filament_routing_layout).
+    std::string                 m_filament_routing_layout;
     void                        fill_nozzle_processes(DynamicPrintConfig &out) const;
     // P9: the printer keys the tool list is read from, with the project's sizes (nozzle and rack) over them.
     DynamicPrintConfig          nozzle_tool_config() const;

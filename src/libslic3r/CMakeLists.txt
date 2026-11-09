@@ -332,6 +332,8 @@ set(lisbslic3r_sources
     Format/BambuExport.hpp
     Format/BambuKeyAliases.cpp
     Format/BambuKeyAliases.hpp
+    Format/BambuMultiDiameter.cpp
+    Format/BambuMultiDiameter.hpp
     Format/BambuKnownKeys.cpp
     Format/GLTF.cpp
     Format/GLTF.hpp
@@ -592,6 +594,8 @@ set(lisbslic3r_sources
     FilamentPresetExport.hpp
     ProcessPresetExport.cpp
     ProcessPresetExport.hpp
+    PresetManagerModel.cpp
+    PresetManagerModel.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp
@@ -603,6 +607,9 @@ set(lisbslic3r_sources
     NozzleOverride.hpp
     NozzleProcess.cpp
     NozzleProcess.hpp
+    NozzleRackMemory.cpp
+    NozzleRackMemory.hpp
+    ProjectSwapGuard.hpp
     NozzleStripModel.cpp
     NozzleStripModel.hpp
     ToolSlots.cpp
@@ -681,9 +688,12 @@ set(lisbslic3r_sources
     Support/SupportCommon.hpp
     Support/SupportInterlock.cpp
     Support/SupportInterlock.hpp
+    Support/SupportInterfaceRules.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp
+    Support/SupportMergePlan.cpp
+    Support/SupportMergePlan.hpp
     Support/SupportOverhangDetect.cpp
     Support/SupportOverhangDetect.hpp
     Support/SupportOverhangHighlight.cpp

@@ -107,6 +107,13 @@ bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const s
 
 size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height)
 {
+    return adaptive_layer_band_size(nozzle_diameter, min_nozzle_diameter, base_layer_height,
+                                    adaptive_layer_height_range(nozzle_diameter));
+}
+
+size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height,
+                                const AdaptiveLayerHeightRange &range)
+{
     if (nozzle_diameter <= EPSILON || min_nozzle_diameter <= EPSILON || base_layer_height <= EPSILON)
         return 1;
 
@@ -117,7 +124,6 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
     if (nozzle_diameter <= min_nozzle_diameter + EPSILON)
         return 1;
 
-    const AdaptiveLayerHeightRange range = adaptive_layer_height_range(nozzle_diameter);
     // The diameter ratio is how many of the user's base layers a larger nozzle covers with one extrusion.
     // The stack itself is sliced at object_config.layer_height; min_nozzle_diameter is only this ratio's
     // denominator, not a grid the layers sit on.
@@ -294,6 +300,26 @@ std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
     return bands;
 }
 
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops)
+{
+    if (layer_heights.size() < 2)
+        return {};
+    // band_tops is handed through as the step-3 planner did (it is relative to the cut stack); it is always
+    // empty on the live path, see compute_adaptive_merge_groups().
+    std::vector<AdaptiveLayerBand> bands =
+        build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
+                                   band_size, height_range, band_tops);
+    for (AdaptiveLayerBand &band : bands) {
+        ++ band.bottom_idx;
+        ++ band.top_idx;
+    }
+    return bands;
+}
+
 bool pull_adaptive_band_top_to_material(
     AdaptiveLayerBand                &band,
     const std::vector<double>        &layer_heights,
@@ -388,22 +414,84 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id)
 {
-    const AdaptiveLayerHeightRange window = adaptive_layer_height_range(nozzle_diameter_for_filament(print_config, filament_id));
+    return adaptive_layer_height_range_for_nozzle(print_config, filament_id, {});
+}
+
+AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfig               &print_config,
+                                                                unsigned int                     filament_id,
+                                                                const std::vector<unsigned int> &used_filament_ids)
+{
     // filament_id is 1-based. An unmapped mixed virtual id falls back to nozzle 0, so the
     // failure mode is a silently wrong nozzle rather than a crash.
-    const size_t extruder = physical_extruder_for_filament(print_config, filament_id);
+    const double                   diameter = nozzle_diameter_for_filament(print_config, filament_id);
+    const AdaptiveLayerHeightRange window   = adaptive_layer_height_range(diameter);
+    if (filament_id == 0 || diameter <= EPSILON)
+        return window;
+
+    const size_t extruder       = physical_extruder_for_filament(print_config, filament_id);
+    const size_t nozzle_count   = print_config.nozzle_diameter.values.size();
+    const size_t filament_count = print_config.filament_diameter.values.size();
+
+    // The extruder's limits were authored for the nozzle its preset carries. A rack slot (P4/P9) resolved for this
+    // filament is a different nozzle, so the preset's limits say nothing about it and the diameter window alone
+    // applies. This is what keeps an H3C 0.8 rack nozzle from inheriting the 0.4 preset's 0.28 ceiling.
+    const bool extruder_limits_apply = extruder < nozzle_count &&
+        std::abs(print_config.nozzle_diameter.values[extruder] - diameter) < EPSILON;
+
+    // The filaments sharing this physical nozzle: the one asked about and every used filament mapped to the same
+    // extruder at the same diameter. Where the limits are filament-sized vectors (Preset::normalize sizes them by
+    // filament under single_extruder_multi_material) each of them may carry its own pair, and the band this
+    // nozzle prints must satisfy all of them: the tightest wins.
+    std::vector<size_t> sharers { size_t(filament_id - 1) };
+    for (unsigned int used : used_filament_ids) {
+        const unsigned int id = used + 1;
+        if (id != filament_id && physical_extruder_for_filament(print_config, id) == extruder &&
+            std::abs(nozzle_diameter_for_filament(print_config, id) - diameter) < EPSILON)
+            sharers.emplace_back(size_t(used));
+    }
+
     AdaptiveLayerHeightRange out = window;
-    if (extruder < print_config.min_layer_height.values.size()) {
-        const double lo = print_config.min_layer_height.values[extruder];
-        if (lo > EPSILON)
-            out.min_height = std::max(out.min_height, lo);
-    }
-    if (extruder < print_config.max_layer_height.values.size()) {
-        const double hi = print_config.max_layer_height.values[extruder];
-        if (hi > EPSILON)
-            out.max_height = std::min(out.max_height, hi);
-    }
+    auto narrow = [&](const std::vector<double> &values, bool is_min) {
+        // Filament-sized only when the vector cannot be the extruder-sized one (or SEMM says so). A slot past the
+        // end of either layout is read nowhere, never through get_at()'s values.front() fallback.
+        const bool by_filament = values.size() == filament_count &&
+            (print_config.single_extruder_multi_material.value || values.size() != nozzle_count);
+        auto apply = [&](size_t idx) {
+            if (idx >= values.size() || values[idx] <= EPSILON)
+                return;
+            if (is_min)
+                out.min_height = std::max(out.min_height, values[idx]);
+            else
+                out.max_height = std::min(out.max_height, values[idx]);
+        };
+        if (by_filament) {
+            for (size_t idx : sharers)
+                apply(idx);
+        } else if (extruder_limits_apply) {
+            apply(extruder);
+        }
+    };
+    narrow(print_config.min_layer_height.values, true);
+    narrow(print_config.max_layer_height.values, false);
     return out.min_height <= out.max_height + EPSILON ? out : window;
+}
+
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height)
+{
+    if (adaptive_layer_band_size(nozzle_diameter, min_nozzle_diameter, base_layer_height, clamp) < 2)
+        return clamp;
+    // Two consecutive layer counts inside the window: every run of at least k * (k - 1) layers can be cut.
+    auto tiles = [base_layer_height](const AdaptiveLayerHeightRange &range) {
+        for (size_t k = 1; double(k + 1) * base_layer_height <= range.max_height + EPSILON; ++ k)
+            if (range.contains(double(k) * base_layer_height))
+                return true;
+        return false;
+    };
+    if (tiles(clamp))
+        return clamp;
+    const AdaptiveLayerHeightRange relaxed { clamp.min_height, std::max(clamp.max_height, nozzle_diameter) };
+    return tiles(relaxed) ? relaxed : adaptive_layer_height_range(nozzle_diameter);
 }
 
 } // namespace Slic3r

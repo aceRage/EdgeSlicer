@@ -5,6 +5,9 @@
     "from": "system",
     "filament_id": "GFU01",
     "instantiation": "false",
+    "fins_extrude_safe_temp": [
+        "60"
+    ],
     "description": "This filament is too soft and not compatible with the AMS. Printing it is of many requirements, and to get better printing quality, please refer to this wiki: TPU printing guide.",
     "filament_cost": [
         "41.99"

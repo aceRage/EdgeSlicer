@@ -287,6 +287,9 @@ protected:
     Label*                              m_st_txt_extra_info{nullptr};
     Label*                              m_ams_backup_tip{nullptr};
     wxHyperlinkCtrl*                    m_link_network_state{ nullptr };
+    // EdgeSlicer: "Re-enter access code" under the printer combo, shown while the selected LAN
+    // printer's last dial was refused (DeviceManager::lan_access_code_refused).
+    wxHyperlinkCtrl*                    m_link_access_code{ nullptr };
     wxSimplebook*                       m_rename_switch_panel{nullptr};
     wxSimplebook*                       m_simplebook{nullptr};
     wxStaticText*                       m_rename_text{nullptr};
