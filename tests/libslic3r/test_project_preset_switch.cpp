@@ -669,3 +669,34 @@ TEST_CASE("has_project_embedded_presets reports a project's own presets until th
     CHECK_FALSE(bundle.has_project_embedded_presets());
     CHECK(find_project_filament(bundle, slot_name) == nullptr);
 }
+
+// Bambu Studio #12582: update_system_preset_setting_ids() routed every type to the printers, so a
+// print or filament preset never received its setting id.
+TEST_CASE("System preset setting ids reach the print, filament and printer collections", "[Preset][Bundle][Regression]")
+{
+    PresetBundle bundle;
+    // Names, not references: a later load can move the presets.
+    auto add = [](PresetCollection &presets, const std::string &name) {
+        presets.load_preset(std::string(), name, DynamicPrintConfig(presets.default_preset().config), false).setting_id.clear();
+    };
+    add(bundle.prints, "W5C Print");
+    add(bundle.filaments, "W5C Filament");
+    add(bundle.printers, "W5C Printer");
+
+    std::map<std::string, std::map<std::string, std::string>> system_presets = {
+        { "W5C Print",    { { BBL_JSON_KEY_TYPE, PRESET_IOT_PRINT_TYPE },    { BBL_JSON_KEY_SETTING_ID, "GP-W5C" } } },
+        { "W5C Filament", { { BBL_JSON_KEY_TYPE, PRESET_IOT_FILAMENT_TYPE }, { BBL_JSON_KEY_SETTING_ID, "GF-W5C" } } },
+        { "W5C Printer",  { { BBL_JSON_KEY_TYPE, PRESET_IOT_PRINTER_TYPE },  { BBL_JSON_KEY_SETTING_ID, "GM-W5C" } } },
+    };
+    bundle.update_system_preset_setting_ids(system_presets);
+
+    const Preset *print    = bundle.prints.find_preset("W5C Print", false, true);
+    const Preset *filament = bundle.filaments.find_preset("W5C Filament", false, true);
+    const Preset *printer  = bundle.printers.find_preset("W5C Printer", false, true);
+    REQUIRE(print != nullptr);
+    REQUIRE(filament != nullptr);
+    REQUIRE(printer != nullptr);
+    CHECK(print->setting_id == "GP-W5C");
+    CHECK(filament->setting_id == "GF-W5C");
+    CHECK(printer->setting_id == "GM-W5C");
+}
