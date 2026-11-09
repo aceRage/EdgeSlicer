@@ -3111,6 +3111,11 @@ Points get_bed_shape(const SLAPrinterConfig &cfg);
 // validation, arrange, the plate's "object inside" check and the timelapse picker agree; see
 // bed_exclude_area_is_rectangles() in PrintConfig.cpp for the rule.
 bool bed_exclude_area_is_rectangles(const Pointfs &points);
+// OrcaSlicer #17209: whether a bed_exclude_area can be used at all. A rectangle list is valid; one
+// polygon must have finite points, a non-zero area and no crossing edges (edges may touch, so the
+// Kobra 3 ring with its zero-width connector stays valid). The readers below exclude nothing for
+// an invalid list, and the GUI refuses to take or load one.
+bool is_valid_bed_exclude_area(const Pointfs &points);
 // The excluded region as hole-free, counter-clockwise, scaled polygons (zero-area pieces dropped).
 Slic3r::Polygons bed_exclude_area_polygons(const Pointfs &points);
 // Unscaled boxes for the GUI, which works in boxes (PartPlate exclusion boxes, arrange's fixed

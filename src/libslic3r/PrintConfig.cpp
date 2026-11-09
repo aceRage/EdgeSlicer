@@ -14055,6 +14055,39 @@ bool bed_exclude_area_is_rectangles(const Pointfs &points)
     return true;
 }
 
+// OrcaSlicer #17209 rejects a bed exclusion polygon that is not simple (crossing edges, duplicate
+// points, zero area): a crossing outline such as "0x0,6x0,1x220,6x220" (a strip typed in the wrong
+// order) excluded the wrong region and cut supports. Upstream's test is "no two edges meet", which
+// would also reject the lists Edge reads on purpose: vendor rectangle lists with repeated padding
+// points (Bambu's cutter + rail, Qidi, Anycubic) and the Kobra 3 ring, whose connector runs there
+// and back. So: a rectangle list (bed_exclude_area_is_rectangles) is valid as it stands, and one
+// polygon is valid when its signed area equals the area it fills under the non-zero rule. Any
+// crossing of two edges leaves regions of three different winding numbers around the crossing
+// point, so the two areas differ; edges that only touch or run back along each other (the ring's
+// connector) leave every filled region at the same winding and keep them equal.
+bool is_valid_bed_exclude_area(const Pointfs &points)
+{
+    if (points.size() < 3)
+        return false;
+    for (const Vec2d &pt : points)
+        if (!std::isfinite(pt.x()) || !std::isfinite(pt.y()))
+            return false;
+    if (bed_exclude_area_is_rectangles(points))
+        return true;
+
+    Polygon poly;
+    poly.points.reserve(points.size());
+    for (const Vec2d &pt : points)
+        poly.points.emplace_back(scale_(pt.x()), scale_(pt.y()));
+    const double signed_area = std::abs(poly.area());
+    if (signed_area <= 0.)
+        return false;
+    double filled_area = 0.;
+    for (const ExPolygon &ex : union_ex(Polygons{ poly }, ClipperLib::pftNonZero))
+        filled_area += ex.area();
+    return std::abs(signed_area - filled_area) <= 1e-7 * filled_area;
+}
+
 static BoundingBoxf exclude_group_box(const Pointfs &points, size_t first)
 {
     BoundingBoxf bb;
@@ -14068,6 +14101,11 @@ Polygons bed_exclude_area_polygons(const Pointfs &points)
     Polygons out;
     if (points.size() < 3)
         return out;
+    // OrcaSlicer #17209: an invalid list excludes nothing rather than the wrong region.
+    if (!is_valid_bed_exclude_area(points)) {
+        BOOST_LOG_TRIVIAL(warning) << "bed_exclude_area is not a valid polygon, ignored";
+        return out;
+    }
 
     if (bed_exclude_area_is_rectangles(points)) {
         for (size_t i = 0; i + 4 <= points.size(); i += 4) {
@@ -14139,7 +14177,7 @@ Polygons bed_exclude_area_polygons(const Pointfs &points)
 std::vector<BoundingBoxf> bed_exclude_area_boxes(const Pointfs &points)
 {
     std::vector<BoundingBoxf> out;
-    if (points.size() < 3)
+    if (points.size() < 3 || !is_valid_bed_exclude_area(points))
         return out;
     if (bed_exclude_area_is_rectangles(points)) {
         // Unscaled and unfiltered, so a rectangle list gives exactly the boxes PartPlate always
