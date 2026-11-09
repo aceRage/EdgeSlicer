@@ -4905,12 +4905,22 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
         return result;
 
     const int filament_count = int(m_print->config().filament_diameter.size());
+    const MixedFilamentManager &mixed = m_print->mixed_filament_manager();
     auto add = [&](std::set<int> &into, int filament_1based) {
-        if (filament_1based > 0 && filament_1based <= filament_count)
+        if (filament_1based > 0 && filament_1based <= filament_count) {
             into.insert(filament_1based - 1);
+        } else if (filament_1based > filament_count) {
+            // A mixed filament prints with its physical components (upstream Orca #16947, for Edge's
+            // virtual mixed slots above the real count): those are what cannot leave the nozzle's reach.
+            std::vector<int> ids{ filament_1based };
+            mixed.expand_virtual_extruder_ids(ids, size_t(filament_count));
+            for (int id : ids)
+                if (id > 0 && id <= filament_count)
+                    into.insert(id - 1);
+        }
     };
-    // The filaments a region prints with, the same ones Bambu inspects (mixed-filament virtual slots above
-    // the real count are dropped by `add`).
+    // The filaments a region prints with, the same ones Bambu inspects; a mixed filament's virtual slot
+    // stands for its components.
     struct RegionFilaments { int wall; int outer_wall; int solid; int sparse; };
     auto region_filaments = [](const LayerRegion *layerm) {
         const PrintRegionConfig &c = layerm->region().config();
@@ -6257,6 +6267,11 @@ static std::vector<unsigned int> plate_wall_filament_ids(const Print &print)
     return ids;
 }
 
+double Print::adaptive_merge_reference_nozzle() const
+{
+    return adaptive_band_reference_nozzle(m_config, plate_wall_filament_ids(*this));
+}
+
 void PrintObject::compute_adaptive_merge_groups()
 {
     for (Layer *layer : m_layers)
@@ -6305,13 +6320,17 @@ void PrintObject::compute_adaptive_merge_groups()
         return;
 
     // Per-nozzle clamp: every region's window is the one of the nozzle that prints its walls, narrowed by
-    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it.
+    // that nozzle's configured min/max layer height, tightest over the used filaments sharing it. A clamp that
+    // leaves a single band height on this grid is widened (adaptive_ladder_height_range), or the ladder of an
+    // odd run comes back empty and the region loses every layer above the first.
     std::vector<unsigned int> used_filaments;
     this->print()->used_printing_filaments(used_filaments);
     std::vector<AdaptiveLayerHeightRange> region_ranges(region_count);
     for (size_t region_id = 0; region_id < region_count; ++ region_id)
-        region_ranges[region_id] = adaptive_layer_height_range_for_nozzle(
-            print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments);
+        region_ranges[region_id] = adaptive_ladder_height_range(
+            adaptive_layer_height_range_for_nozzle(
+                print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value, used_filaments),
+            region_nozzles[region_id], min_nozzle, m_slicing_params.layer_height);
 
     // A colour transition changes ownership inside a band, not the nozzle's Z ladder. The normalization
     // pass has already aligned painted ownership to each band's anchor contour.
@@ -6385,7 +6404,13 @@ void PrintObject::compute_adaptive_merge_groups()
         if (nozzle <= EPSILON)
             continue;
         const AdaptiveLayerHeightRange range = region_ranges[region_id];
-        const size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
+        size_t band_size = adaptive_layer_band_size(nozzle, min_nozzle, m_slicing_params.layer_height, range);
+        // H3C fix (2026-11-06): a process chosen for this coarser nozzle sets its slab height (its own layer height in whole
+        // base layers, in the same window) instead of the size ratio. The finest nozzle keeps printing the plate's layer height.
+        if (nozzle > min_nozzle + EPSILON)
+            band_size = nozzle_process_band_size(
+                nozzle_layer_height_for_filament(print_config, (unsigned int) this->printing_region(region_id).config().wall_filament.value),
+                band_size, m_slicing_params.layer_height, range.min_height, range.max_height);
 
         std::vector<unsigned char> has_material(layer_count, 0);
         for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx)
@@ -6406,13 +6431,9 @@ void PrintObject::compute_adaptive_merge_groups()
         // One diameter owns one ladder. Region/colour start layers do not create a new phase.
         // Edge: the ladder starts on layer 1; layer 0 is the bed contact and prints as sliced (a fixed-grid
         // event below), so no band is anchored at the object base and Bambu's first-band path never runs.
-        std::vector<AdaptiveLayerBand> bands =
-            build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
-                                       band_size, range, band_tops);
-        for (AdaptiveLayerBand &band : bands) {
-            ++ band.bottom_idx;
-            ++ band.top_idx;
-        }
+        // The support merge plan (SupportMergePlan.cpp) builds its fixed ladders through the same helper, so a
+        // support slab only ever ends on a band top the walls of that nozzle use.
+        std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_ladder(layer_heights, band_size, range, band_tops);
 
         std::vector<AdaptiveLayerBand> live_bands;
         std::vector<unsigned char>     covered(layer_count, 0);

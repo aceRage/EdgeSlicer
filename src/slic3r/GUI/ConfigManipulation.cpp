@@ -13,6 +13,7 @@
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/Support/SupportInterfaceRules.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
 
@@ -1175,8 +1176,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_field("preload_all_filaments", is_grouping_machine && have_prime_tower);
     }
 
+    // "Filament for Features": shown whenever the project has more than one filament, on every printer.
+    // It used to follow the printer's single_extruder_multi_material flag (Orca c719f5c95c), which every
+    // Bambu machine inherits, so the group was hidden on H2D/H3C/X1C even with several filaments loaded.
+    // A user may also be designing for another printer, so single-nozzle printers show it too.
+    const bool have_multiple_filaments = preset_bundle->filament_presets.size() > 1;
     for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
-        toggle_line(el, !bSEMM);
+        toggle_line(el, have_multiple_filaments);
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 
@@ -1280,8 +1286,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
     // EdgeSlicer: support interface interlock. The weave needs an interface filament that differs from
-    // the support body filament (design D4); its two knobs only matter while it is on, and none of it
-    // applies with support filament matching on (D6).
+    // the support body filament (design D4); its two knobs only matter while it is on. It cannot run
+    // with support filament matching (D6), but it is not greyed out for that: turning either on
+    // while the other is on asks which to keep (check_support_interlock_matching).
     {
         const int  iface_filament    = config->opt_int("support_interface_filament");
         const bool separate_iface    = iface_filament != 0 && iface_filament != config->opt_int("support_filament");
@@ -1290,7 +1297,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         const bool interlock_on = interlock_visible && config->opt_bool("support_interface_interlock");
         toggle_line("support_interface_interlock_layers", interlock_on);
         toggle_line("support_interface_interlock_beam_lines", interlock_on);
-        const bool interlock_editable = have_support_material && ! config->opt_bool("support_filament_matching");
+        const bool interlock_editable = have_support_material;
         for (auto el : { "support_interface_interlock", "support_interface_interlock_layers", "support_interface_interlock_beam_lines" })
             toggle_field(el, interlock_editable);
     }
@@ -1430,7 +1437,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("infill_overhang_angle", config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLateralHoneycomb);
 
-    bool lightning_options = config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLightning;
+    bool lightning_options = config->opt_enum<InfillPattern>("sparse_infill_pattern") == InfillPattern::ipLightning && have_infill;
     for (auto el : { "lightning_overhang_angle", "lightning_prune_angle", "lightning_straightening_angle" })
         toggle_line(el, lightning_options);
 }
@@ -1546,6 +1553,161 @@ bool ConfigManipulation::get_temperature_range(DynamicPrintConfig *config, int &
         range_high_exist       = true;
     }
     return range_low_exist && range_high_exist;
+}
+
+// EdgeSlicer: the interlock weaves the interface layers under the model-facing one, so it needs
+// 1 + woven layers top interface layers. Asked only on an interactive change to the interlock
+// switch or its woven layers (Tab::on_value_change), never while a preset or project loads, and
+// either answer leaves values that do not ask again (raised layers, or the interlock off). Where
+// the dialog never runs (a loaded project, the CLI) the slicer keeps its own fallback:
+// SupportParameters leaves the weave off when the interface layers are too few.
+bool ConfigManipulation::check_support_interlock_interface_layers(DynamicPrintConfig *config)
+{
+    if (is_msg_dlg_already_exist || config == nullptr)
+        return false;
+    for (const char *key : { "support_interface_interlock", "support_interface_interlock_layers", "support_interface_top_layers" })
+        if (! config->has(key))
+            return false;
+    const int bottom = config->has("support_interface_bottom_layers") ? config->opt_int("support_interface_bottom_layers") : -1;
+    const InterlockInterfaceRaise raise = interlock_interface_raise(config->opt_bool("support_interface_interlock"),
+                                                                    config->opt_int("support_interface_interlock_layers"),
+                                                                    config->opt_int("support_interface_top_layers"), bottom);
+    if (! raise.needed)
+        return false;
+
+    wxString msg_text = format_wxstr(_L("Interlock needs %1% interface layers: the top layer that touches the model and %2% woven layers. "
+                                        "Raise Top interface layers from %3% to %1%?"),
+                                     raise.top_to, raise.top_to - 1, raise.top_from);
+    if (raise.raise_bottom)
+        msg_text += "\n" + format_wxstr(_L("Bottom interface layers are raised from %1% to %2% as well."), raise.bottom_from, raise.bottom_to);
+    msg_text += "\n\n" + _L("Yes - Raise the interface layers\n"
+                            "No  - Turn the interlock off");
+    MessageDialog      dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    DynamicPrintConfig new_conf = *config;
+    is_msg_dlg_already_exist    = true;
+    if (dialog.ShowModal() == wxID_YES) {
+        new_conf.set_key_value("support_interface_top_layers", new ConfigOptionInt(raise.top_to));
+        if (raise.raise_bottom)
+            new_conf.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(raise.bottom_to));
+    } else {
+        new_conf.set_key_value("support_interface_interlock", new ConfigOptionBool(false));
+    }
+    apply(config, &new_conf);
+    is_msg_dlg_already_exist = false;
+    return true;
+}
+
+// EdgeSlicer: interlock and support filament matching both stay enabled (a greyed switch gave no
+// reason); turning one on while the other is on asks which to keep. Only called from
+// Tab::on_value_change for those two keys, so never during a preset or project load; a loaded
+// config with both on slices with matching and the weave off (SupportParameters).
+bool ConfigManipulation::check_support_interlock_matching(DynamicPrintConfig *config, const std::string &changed_key)
+{
+    if (is_msg_dlg_already_exist || config == nullptr ||
+        ! config->has("support_interface_interlock") || ! config->has("support_filament_matching"))
+        return false;
+    const bool interlock_on = config->opt_bool("support_interface_interlock");
+    const bool matching_on  = config->opt_bool("support_filament_matching");
+    if (! resolve_interlock_matching(changed_key, interlock_on, matching_on, true).ask)
+        return false;
+    // The interlock row is hidden while the interface shares the body's filament (it does nothing
+    // then); don't ask about a switch the user cannot see.
+    if (changed_key == "support_filament_matching" && config->has("support_interface_filament") && config->has("support_filament")) {
+        const int iface = config->opt_int("support_interface_filament");
+        if (iface == 0 || iface == config->opt_int("support_filament"))
+            return false;
+    }
+
+    const bool interlock_changed = changed_key == "support_interface_interlock";
+    wxString msg_text = interlock_changed ?
+        _L("Interlock and support filament matching cannot run together. Turn off matching and keep interlock?") :
+        _L("Support filament matching and interlock cannot run together. Turn off interlock and keep matching?");
+    msg_text += "\n\n" + (interlock_changed ?
+        _L("Yes - Turn off support filament matching and keep interlock\n"
+           "No  - Keep support filament matching and turn interlock off") :
+        _L("Yes - Turn off interlock and keep support filament matching\n"
+           "No  - Keep interlock and turn support filament matching off"));
+    MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    is_msg_dlg_already_exist = true;
+    const bool keep_changed = dialog.ShowModal() == wxID_YES;
+    const InterlockMatchingResolution r = resolve_interlock_matching(changed_key, interlock_on, matching_on, keep_changed);
+    DynamicPrintConfig new_conf = *config;
+    new_conf.set_key_value("support_interface_interlock", new ConfigOptionBool(r.interlock_on));
+    new_conf.set_key_value("support_filament_matching", new ConfigOptionBool(r.matching_on));
+    apply(config, &new_conf);
+    is_msg_dlg_already_exist = false;
+    return true;
+}
+
+// EdgeSlicer: the session's "No" answers to the top-Z-0 offer, shared by every tab (process,
+// plate, object, part) and cleared when a project is loaded or created (Plater::priv::reset).
+static TopZZeroPromptMemory &top_z_zero_prompt_memory()
+{
+    static TopZZeroPromptMemory memory;
+    return memory;
+}
+
+void ConfigManipulation::clear_session_prompts()
+{
+    top_z_zero_prompt_memory().clear();
+}
+
+// EdgeSlicer: the Bambu Studio "support material for the support interface" suggestion, minus its
+// trap. Bambu Studio asked on every change of the interface filament to a support material and had
+// no way to keep a top Z gap; this asks for any interface filament that differs from the print's,
+// remembers a No per filament pair, and stays quiet while the distance itself is edited, during
+// loads, at a distance of 0 and with supports off (rules: Support/SupportInterfaceRules.hpp).
+bool ConfigManipulation::offer_support_top_z_zero(DynamicPrintConfig *config, const std::string &changed_key)
+{
+    if (is_msg_dlg_already_exist || config == nullptr)
+        return false;
+    for (const char *key : { "support_interface_filament", "support_top_z_distance", "enable_support" })
+        if (! config->has(key))
+            return false;
+
+    TopZZeroPromptMemory::Inputs in;
+    in.changed_key        = changed_key;
+    in.supports_used      = config->opt_bool("enable_support") || (config->has("raft_layers") && config->opt_int("raft_layers") > 0);
+    in.filament_matching  = config->has("support_filament_matching") && config->opt_bool("support_filament_matching");
+    in.interface_filament = config->opt_int("support_interface_filament");
+    in.print_filament     = support_print_filament(config->has("wall_filament") ? config->opt_int("wall_filament") : 0,
+                                                   config->has("extruder") ? config->opt_int("extruder") : 0);
+    in.top_z_distance     = config->opt_float("support_top_z_distance");
+    if (! top_z_zero_prompt_memory().should_offer(in))
+        return false;
+
+    // A filament marked as support material gets the rest of Bambu Studio's soluble recipe too.
+    const bool support_material = is_support_filament(in.interface_filament - 1);
+    wxString   msg_text = _L("The support interface uses a different filament. "
+                             "Set the top Z distance to 0 for a soluble/breakaway-style interface?");
+    if (support_material)
+        msg_text += "\n" + _L("The interface filament is a support material, so 0 interface spacing, the interlaced rectilinear "
+                              "pattern and no independent support layer height are set as well.");
+    msg_text += "\n\n" + _L("Yes - Set the top Z distance to 0\n"
+                            "No  - Keep the current distance (not asked again for these filaments)");
+    MessageDialog      dialog(m_msg_dlg_parent, msg_text, _L("Suggestion"), wxICON_WARNING | wxYES | wxNO);
+    is_msg_dlg_already_exist = true;
+    const bool yes = dialog.ShowModal() == wxID_YES;
+    bool       changed = false;
+    if (yes) {
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value("support_top_z_distance", new ConfigOptionFloat(0));
+        if (support_material) {
+            if (config->has("support_interface_spacing"))
+                new_conf.set_key_value("support_interface_spacing", new ConfigOptionFloat(0));
+            if (config->has("support_interface_pattern"))
+                new_conf.set_key_value("support_interface_pattern",
+                                       new ConfigOptionEnum<SupportMaterialInterfacePattern>(SupportMaterialInterfacePattern::smipRectilinearInterlaced));
+            if (config->has("independent_support_layer_height"))
+                new_conf.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
+        }
+        apply(config, &new_conf);
+        changed = true;
+    } else {
+        top_z_zero_prompt_memory().remember_no(in.interface_filament, in.print_filament);
+    }
+    is_msg_dlg_already_exist = false;
+    return changed;
 }
 
 

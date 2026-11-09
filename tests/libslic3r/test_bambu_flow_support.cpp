@@ -446,7 +446,7 @@ std::map<int, double> max_volumetric_per_tool(const std::string &gcode, double f
 
 } // namespace
 
-TEST_CASE("Shipped BBL profiles: High Flow on H2D / H2D Pro / H2C / H2S / P2S only", "[BambuFlowSupport][BBLProfiles]")
+TEST_CASE("Shipped BBL profiles: High Flow on H2D / H2D Pro / H2C / H2S / P2S only", "[BambuFlowSupport][BBLProfiles][slow]")
 {
     PresetBundle &b = bbl_bundle();
     for (const char *name : { "Bambu Lab H2D 0.4 nozzle", "Bambu Lab H2D Pro 0.4 nozzle", "Bambu Lab H2C 0.4 nozzle", "Bambu Lab H2S 0.4 nozzle",
