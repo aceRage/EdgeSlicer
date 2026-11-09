@@ -1334,6 +1334,25 @@ static void modulate_extrusion_by_overlapping_layers(
         // The extrusions do not overlap with any other extrusion.
         return;
 
+    // Edge: only plain ExtrusionPaths can be split by height below. The organic tree's hollow base wraps every branch
+    // it double-walls into an ExtrusionEntityCollection (tree_supports_generate_paths), and since AdaptiveLayerMerge
+    // step 4 a base layer merged into a coarse nozzle's slab overlaps the top contacts inside its Z span, so such a
+    // collection reaches this point (H3C 0.4 + 0.8 with organic tree supports read a null ExtrusionPath and crashed).
+    // The contacts were cut out of the merged base already (merge_support_layers_multi_diameter), so those entities
+    // keep their full height and go back in front of the modulated paths. Without such entities nothing changes.
+    ExtrusionEntitiesPtr kept_whole;
+    if (std::any_of(extrusions_in_out.begin(), extrusions_in_out.end(),
+                    [](const ExtrusionEntity *ee) { return dynamic_cast<const ExtrusionPath *>(ee) == nullptr; })) {
+        ExtrusionEntitiesPtr paths;
+        for (ExtrusionEntity *ee : extrusions_in_out)
+            (dynamic_cast<ExtrusionPath *>(ee) != nullptr ? paths : kept_whole).emplace_back(ee);
+        extrusions_in_out = std::move(paths);
+        if (extrusions_in_out.empty()) {
+            extrusions_in_out = std::move(kept_whole);
+            return;
+        }
+    }
+
     // Get the initial extrusion parameters.
     ExtrusionPath *extrusion_path_template = dynamic_cast<ExtrusionPath*>(extrusions_in_out.front());
     assert(extrusion_path_template != nullptr);
@@ -1561,6 +1580,8 @@ static void modulate_extrusion_by_overlapping_layers(
     //FIXME this shall not happen, if the Clipper works as expected and all paths split to fragments could be re-connected.
     for (auto it_fragment = path_fragments.begin(); it_fragment != path_fragments.end(); ++ it_fragment)
         extrusion_entities_append_paths(extrusions_in_out, std::move(it_fragment->polylines), extrusion_role, it_fragment->mm3_per_mm, it_fragment->width, it_fragment->height);
+    // Edge: the entities that could not be split (see the top of this function).
+    extrusions_in_out.insert(extrusions_in_out.begin(), kept_whole.begin(), kept_whole.end());
 }
 
 // Support layer that is covered by some form of dense interface.
@@ -2464,8 +2485,18 @@ void generate_support_toolpaths(
                     //FIXME Bottom interfaces are extruded with the briding flow. Some bridging layers have its height slightly reduced, therefore
                     // the bridging flow does not quite apply. Reduce the flow to area of an ellipse? (A = pi * a * b)
                     auto *filler = raft_contact ? filler_raft_contact : filler_interface.get();
+                    // Mixed nozzle diameters (AdaptiveLayerMerge step 4): the nozzle the support merge plan picked for
+                    // this layer's contact/interface. 0 on every single-diameter plate, which keeps the flows below.
+                    const double planned_interface_nozzle = raft_contact ? 0. : support_layer.planned_interface_nozzle_diameter;
+                    const Flow   planned_interface_flow   = planned_interface_nozzle > EPSILON ?
+                        (interface_as_base ?
+                            support_params.support_material_flow_for_nozzle(planned_interface_nozzle, float(layer_ex.layer->height)) :
+                            support_params.support_material_interface_flow_for_nozzle(planned_interface_nozzle, float(layer_ex.layer->height))) :
+                        Flow();
                     auto interface_flow = layer_ex.layer->bridging ?
-                        Flow::bridging_flow(layer_ex.layer->height, support_params.support_material_bottom_interface_flow.nozzle_diameter()) :
+                        Flow::bridging_flow(layer_ex.layer->height, planned_interface_nozzle > EPSILON ? planned_interface_nozzle :
+                                                                    support_params.support_material_bottom_interface_flow.nozzle_diameter()) :
+                        planned_interface_nozzle > EPSILON ? planned_interface_flow :
                         (raft_contact ? &support_params.raft_interface_flow :
                          interface_as_base ? &support_params.support_material_flow : &support_params.support_material_interface_flow)
                             ->with_height(float(layer_ex.layer->height));
@@ -2481,6 +2512,7 @@ void generate_support_toolpaths(
                         interface_as_base ? support_params.support_density :
                         bottom_interface ? support_params.bottom_interface_density : support_params.top_interface_density;
                     filler->spacing = raft_contact ? support_params.raft_interface_flow.spacing() :
+                        planned_interface_nozzle > EPSILON ? planned_interface_flow.spacing() :
                         interface_as_base ? support_params.support_material_flow.spacing() : support_params.support_material_interface_flow.spacing();
                     filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     fill_expolygons_generate_paths(
@@ -2521,7 +2553,11 @@ void generate_support_toolpaths(
                 // At K == 1 params_g IS support_params and this is the code that was here before.
                 const SupportParameters &params_g = (group_mode && size_t(layer_ex.layer->support_group) < num_groups) ?
                     *(*groups)[layer_ex.layer->support_group].params : support_params;
-                Flow interface_flow = params_g.support_material_flow.with_height(float(layer_ex.layer->height));
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4): the transition prints with the support body
+                // filament, so it follows the nozzle the base was pinned to. Never set with support groups.
+                Flow interface_flow = support_layer.planned_nozzle_diameter > EPSILON ?
+                    params_g.support_material_flow_for_nozzle(support_layer.planned_nozzle_diameter, float(layer_ex.layer->height)) :
+                    params_g.support_material_flow.with_height(float(layer_ex.layer->height));
                 // ORCA #14678: the base interface follows the top interface density unless only bottom interfaces exist.
                 const double base_interface_density_g = params_g.num_top_interface_layers > 0 || params_g.num_bottom_interface_layers == 0 ?
                     params_g.top_interface_density : params_g.bottom_interface_density;
@@ -2592,8 +2628,14 @@ void generate_support_toolpaths(
                 // We don't use $base_flow->spacing because we need a constant spacing
                 // value that guarantees that all layers are correctly aligned.
                 assert(! base_layer.layer->bridging);
-                auto flow = support_params.support_material_flow.with_height(float(base_layer.layer->height));
-                filler->spacing = support_params.support_material_flow.spacing();
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4): a merged slab is extruded by the filament the
+                // support merge plan reserved for it, so its line width follows that nozzle instead of the
+                // support_filament default. planned_nozzle_diameter is 0 on every single-diameter plate.
+                const Flow base_flow_src = support_layer.planned_nozzle_diameter > EPSILON ?
+                    support_params.support_material_flow_for_nozzle(support_layer.planned_nozzle_diameter, float(support_params.support_material_flow.height())) :
+                    support_params.support_material_flow;
+                auto flow = base_flow_src.with_height(float(base_layer.layer->height));
+                filler->spacing = base_flow_src.spacing();
                 filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
                 float density = float(support_params.support_density);
                 bool  sheath  = support_params.with_sheath;
@@ -2732,7 +2774,9 @@ void generate_support_toolpaths(
                 f->layer_id        = support_layer.id();
                 f->z               = support_layer.print_z;
                 f->overlap         = 0;
-                f->angle           = angle;
+                // Bambu Studio 2.9.1 (SupportCommon.cpp:2833) sets the raw support_ironing_direction value as
+                // the angle; here it turns the lines from the interface direction, as its tooltip describes.
+                f->angle           = angle + params.ironing_direction;
                 f->spacing         = params.ironing_spacing;
                 f->link_max_length = (coord_t) scale_(3. * f->spacing);
 
@@ -2746,6 +2790,9 @@ void generate_support_toolpaths(
                         polys_to_iron = diff_ex(polys_to_iron, upper_layer->support_islands);
                     }
                 }
+                // Bambu Studio 2.9.1 (SupportCommon.cpp:2848-2849).
+                if (params.ironing_inset > EPSILON)
+                    polys_to_iron = union_ex(offset(polys_to_iron, -float(scale_(params.ironing_inset))));
 
                 fill_expolygons_generate_paths(
                     // Destination

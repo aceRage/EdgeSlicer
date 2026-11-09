@@ -6,6 +6,7 @@
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -18,6 +19,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/nowide/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/system/error_code.hpp>
 
@@ -373,6 +375,141 @@ TEST_CASE("A project 3MF keeps the prime tower rotation angle and position", "[3
     REQUIRE(dst_config.option<ConfigOptionFloats>("wipe_tower_x") != nullptr);
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_x")->get_at(0) == Approx(120.25));
     CHECK(dst_config.option<ConfigOptionFloats>("wipe_tower_y")->get_at(0) == Approx(80.5));
+}
+
+// A project or sliced-plate file whose name holds Chinese and accented characters (the default export
+// name is the project name). The exporter writes "<name>.tmp" and renames it into place; with
+// boost::filesystem narrow paths on Windows converted by the ANSI code page, that step failed and the
+// file vanished without a message. The path is UTF-8, as the application passes it.
+TEST_CASE("A project 3MF can be stored under a non-ASCII file name", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    // As the application does at startup (Snapmaker_Orca.cpp), so boost::filesystem paths are UTF-8.
+    boost::nowide::nowide_filesystem();
+    const std::string leaf     = u8"\u6CE3\u8840_\u00E9_test.3mf";
+    const std::string tmp_leaf = leaf + ".tmp";
+    const std::string test_dir = tmp_root.string();
+    const std::string test_file = test_dir + "/" + leaf;
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+    CHECK(store_params.error.empty());
+    CHECK(boost::filesystem::exists(test_file, ec));
+    CHECK_FALSE(boost::filesystem::exists(test_dir + "/" + tmp_leaf, ec));
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                         LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE(loaded);
+    CHECK(dst_model.objects.size() == 1);
+}
+
+// The reported failure: an auxiliary picture (Model Pictures / Profile Pictures) with a Chinese file
+// name, as WeChat names its images, made the whole export fail because the exporter handed the file to
+// miniz through the ANSI code page.
+TEST_CASE("A project 3MF packs and restores an auxiliary file with a non-ASCII name", "[3mf][Regression][Utf8Path]")
+{
+    boost::nowide::nowide_filesystem();
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    const std::string pic_leaf = u8"\u5FAE\u4FE1\u56FE\u7247_20261023_3.webp";
+    const std::string pic_dir  = src_model.get_auxiliary_file_temp_path() + "/Model Pictures";
+    boost::filesystem::create_directories(pic_dir);
+    const std::string pic_file = pic_dir + "/" + pic_leaf;
+    {
+        boost::nowide::ofstream out(pic_file, std::ios::binary);
+        out << "not really a webp, but bytes";
+    }
+    REQUIRE(boost::filesystem::exists(pic_file));
+
+    const std::string test_file = (tmp_root / "aux_utf8_project.3mf").string();
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    const bool stored = store_bbs_3mf(store_params);
+    INFO(store_params.error);
+    REQUIRE(stored);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets,
+                                     &is_bbl_3mf, &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::LoadAuxiliary |
+                                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    REQUIRE(loaded);
+    const std::string restored = dst_model.get_auxiliary_file_temp_path() + "/Model Pictures/" + pic_leaf;
+    CHECK(boost::filesystem::exists(restored));
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+}
+
+// A destination that cannot be written reports why instead of failing silently.
+TEST_CASE("A failed 3MF store reports the exporter's error text", "[3mf][Regression][Utf8Path]")
+{
+    Model src_model;
+    ModelObject *src_object = src_model.add_object();
+    src_object->name = "cube";
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    StoreParams store_params;
+    store_params.path     = (tmp_root / "no_such_folder_utf8" / "x.3mf").string();
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    CHECK_FALSE(store_bbs_3mf(store_params));
+    CHECK_FALSE(store_params.error.empty());
 }
 
 // Orca #16503: the exclude-object outline tolerance is an ordinary print setting, saved with the project.
@@ -2627,5 +2764,193 @@ TEST_CASE("A project loads without crashing when the temporary dir is not writab
         release_PlateData_list(plate_data);
         CHECK_FALSE(ok);
         model.set_backup_path("detach");
+    }
+}
+
+// Project strip (tests/design_multi_project_sidebar.md): session restore writes every open project at exit as a 3MF
+// (project_park_save_strategy) and brings it back at the next start as its 3MF is opened (project_park_load_strategy). P4
+// switches keep each project live and never use it. What a restart must not lose: objects, parts and modifiers with their
+// settings and transforms, colour / support / seam paint, the plates (names, the lock), the project settings that live
+// outside the presets, and the presets embedded in it.
+TEST_CASE("A session snapshot of a project comes back as it was", "[3mf][ProjectStrip]")
+{
+    prepare_3mf_temp_dir();
+    const std::string path    = make_temp_3mf_path("project_strip_park.3mf");
+    const ScopeGuard  cleanup = remove_file_guard(path);
+
+    Model        src;
+    ModelObject *a = src.add_object();
+    a->name        = "body";
+    ModelVolume *a_main = a->add_volume(make_cube(20., 20., 10.));
+    a_main->name        = "body";
+    ModelVolume *a_part = a->add_volume(make_cylinder(4., 12.));
+    a_part->name        = "peg";
+    a_part->set_offset(Vec3d(5., 5., 10.));
+    ModelVolume *a_mod = a->add_volume(make_cube(6., 6., 6.), ModelVolumeType::PARAMETER_MODIFIER);
+    a_mod->name        = "dense";
+    a_mod->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(60));
+    a->config.set_key_value("wall_loops", new ConfigOptionInt(4));
+    a->add_instance();
+    a->ensure_on_bed();
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(0, EnforcerBlockerType::Extruder2);
+        selector.set_facet(3, EnforcerBlockerType::Extruder3);
+        REQUIRE(a_main->mmu_segmentation_facets.set(selector));
+    }
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(1, EnforcerBlockerType::ENFORCER);
+        selector.set_facet(2, EnforcerBlockerType::BLOCKER);
+        REQUIRE(a_main->supported_facets.set(selector));
+    }
+    {
+        TriangleSelector selector(a_main->mesh());
+        selector.set_facet(5, EnforcerBlockerType::ENFORCER);
+        REQUIRE(a_main->seam_facets.set(selector));
+    }
+    ModelObject *b = src.add_object();
+    b->name        = "pillar";
+    b->add_volume(make_cylinder(5., 30.))->name = "pillar";
+    ModelInstance *b_inst = b->add_instance();
+    b_inst->set_offset(Vec3d(260., 40., 0.));
+    b_inst->set_rotation(Vec3d(0., 0., 0.5));
+    b->ensure_on_bed();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_key_value("filament_colour", new ConfigOptionStrings({ "#FF0000", "#00AE42", "#2850E0" }));
+    cfg.set_key_value("flush_volumes_matrix", new ConfigOptionFloats({ 0., 140., 230., 160., 0., 180., 210., 170., 0. }));
+    cfg.set_key_value("mixed_filament_definitions", new ConfigOptionString("1,2,50,0,1"));
+    cfg.set_key_value("extruder_rack_nozzle_override", new ConfigOptionStrings({ "", "0.4:high_flow,0.6" }));
+    cfg.set_key_value("layer_height", new ConfigOptionFloat(0.16));
+
+    // A filament preset saved into the project ("@project" presets travel with it).
+    Preset embedded(Preset::TYPE_FILAMENT, "Project PLA", false);
+    embedded.config = DynamicPrintConfig::full_print_config();
+    embedded.config.set_key_value("filament_settings_id", new ConfigOptionStrings({ "Project PLA" }));
+    embedded.config.set_key_value("nozzle_temperature", new ConfigOptionInts({ 213 }));
+
+    // Three plates: the first holds the body, the second (locked, named) the pillar, the third is empty.
+    std::vector<PlateData> plates(3);
+    for (int i = 0; i < 3; ++i) {
+        plates[i].plate_index = i;
+        plates[i].locked      = false;
+    }
+    plates[0].objects_and_instances.emplace_back(0, 0);
+    plates[1].objects_and_instances.emplace_back(1, 0);
+    plates[1].locked     = true;
+    plates[1].plate_name = "pillars";
+
+    StoreParams sp;
+    sp.path     = path;
+    sp.model    = &src;
+    sp.config   = &cfg;
+    sp.strategy = project_park_save_strategy() | SaveStrategy::Zip64; // as Plater::export_3mf adds it
+    sp.project_presets.push_back(&embedded);
+    for (PlateData &p : plates)
+        sp.plate_data_list.push_back(&p);
+    REQUIRE(store_bbs_3mf(sp));
+
+    Model                     dst;
+    DynamicPrintConfig        dst_cfg;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             dst_plates;
+    std::vector<Preset *>     presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    ScopeGuard                release([&dst_plates, &presets, &dst]() {
+        release_PlateData_list(dst_plates);
+        for (Preset *p : presets)
+            delete p;
+        dst.remove_backup_path_if_exist();
+    });
+    // As Plater::priv::load_files reads a project 3MF: the park load strategy plus the version check it adds.
+    REQUIRE(load_bbs_3mf(path.c_str(), &dst_cfg, &ctxt, &dst, &dst_plates, &presets, &is_bbl_3mf, &file_version, nullptr,
+                         project_park_load_strategy() | LoadStrategy::CheckVersion));
+
+    SECTION("objects, parts, modifiers, their settings and where they are")
+    {
+        REQUIRE(dst.objects.size() == 2);
+        for (size_t o = 0; o < 2; ++o) {
+            const ModelObject *s = src.objects[o];
+            const ModelObject *d = dst.objects[o];
+            INFO("object " << s->name);
+            CHECK(d->name == s->name);
+            REQUIRE(d->volumes.size() == s->volumes.size());
+            REQUIRE(d->instances.size() == s->instances.size());
+            for (size_t v = 0; v < s->volumes.size(); ++v) {
+                INFO("volume " << s->volumes[v]->name);
+                CHECK(d->volumes[v]->name == s->volumes[v]->name);
+                CHECK(d->volumes[v]->type() == s->volumes[v]->type());
+                CHECK(d->volumes[v]->mesh().its.indices.size() == s->volumes[v]->mesh().its.indices.size());
+                CHECK(d->volumes[v]->mesh().its.vertices.size() == s->volumes[v]->mesh().its.vertices.size());
+            }
+            const BoundingBoxf3 sb = s->instance_bounding_box(0);
+            const BoundingBoxf3 db = d->instance_bounding_box(0);
+            CHECK(db.min.isApprox(sb.min, 1e-4));
+            CHECK(db.max.isApprox(sb.max, 1e-4));
+        }
+        const ModelObject *d = dst.objects[0];
+        REQUIRE(d->config.has("wall_loops"));
+        CHECK(d->config.opt_int("wall_loops") == 4);
+        REQUIRE(d->volumes[2]->config.has("sparse_infill_density"));
+        CHECK(d->volumes[2]->config.get().option<ConfigOptionPercent>("sparse_infill_density")->value == 60.);
+    }
+
+    SECTION("colour, support and seam paint")
+    {
+        REQUIRE(dst.objects.size() == 2);
+        const ModelVolume *d = dst.objects[0]->volumes[0];
+        CHECK(d->mmu_segmentation_facets.equals(a_main->mmu_segmentation_facets));
+        CHECK(d->supported_facets.equals(a_main->supported_facets));
+        CHECK(d->seam_facets.equals(a_main->seam_facets));
+        CHECK_FALSE(d->mmu_segmentation_facets.empty());
+        CHECK(dst.objects[0]->volumes[1]->mmu_segmentation_facets.empty());
+    }
+
+    SECTION("plates and the lock")
+    {
+        REQUIRE(dst_plates.size() == 3);
+        CHECK_FALSE(dst_plates[0]->locked);
+        CHECK(dst_plates[1]->locked);
+        CHECK(dst_plates[1]->plate_name == "pillars");
+        CHECK_FALSE(dst_plates[2]->locked);
+    }
+
+    SECTION("the project settings outside the presets")
+    {
+        for (const char *key : { "filament_colour", "flush_volumes_matrix", "mixed_filament_definitions", "extruder_rack_nozzle_override",
+                                 "layer_height" }) {
+            INFO("option " << key);
+            REQUIRE(dst_cfg.has(key));
+            CHECK(*dst_cfg.option(key) == *cfg.option(key));
+        }
+    }
+
+    SECTION("the embedded preset")
+    {
+        REQUIRE(presets.size() == 1);
+        CHECK(presets[0]->type == Preset::TYPE_FILAMENT);
+        CHECK(presets[0]->name == "Project PLA");
+        CHECK(presets[0]->is_project_embedded);
+        REQUIRE(presets[0]->config.has("nozzle_temperature"));
+        CHECK(presets[0]->config.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{ 213 });
+    }
+
+    SECTION("the snapshot is a project file, not a backup: it holds its own meshes")
+    {
+        // A crash backup (SaveStrategy::Backup) leaves the meshes out of its .3mf; a parked project must not, or it would
+        // depend on the backup folder the next project's load removes.
+        mz_zip_archive archive;
+        mz_zip_zero_struct(&archive);
+        REQUIRE(open_zip_reader(&archive, path));
+        bool has_object_model = false;
+        for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&archive); ++i) {
+            mz_zip_archive_file_stat stat;
+            if (mz_zip_reader_file_stat(&archive, i, &stat) && boost::algorithm::starts_with(std::string(stat.m_filename), "3D/Objects/"))
+                has_object_model = true;
+        }
+        close_zip_reader(&archive);
+        CHECK(has_object_model);
     }
 }

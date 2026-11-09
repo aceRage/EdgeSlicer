@@ -735,7 +735,7 @@ public:
   private:
     // to be called from Print only.
     friend class Print;
-    // Test-only entry point to compute_adaptive_merge_groups(), which has no production caller in this PR.
+    // Test entry point to compute_adaptive_merge_groups(), so a unit test can re-plan a sliced object.
     friend struct AdaptiveMergePlanAccess;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
@@ -761,9 +761,12 @@ private:
     void make_perimeters();
     // Mixed-layer-height band merge (BambuStudio v02.09.01.70 PrintObject::compute_adaptive_merge_groups()).
     // Decides which layers each wall region keeps and records the decision in
-    // LayerRegion::adaptive_merge_patches. It mutates LayerRegion::slices, so it is only safe to call from the
-    // perimeter step; until the extrusion half lands it has no production caller and G-code is unchanged.
+    // LayerRegion::adaptive_merge_patches. It may mutate LayerRegion::slices, so it is only safe to call from the
+    // perimeter step, which calls it on every mixed-diameter plate before generating walls.
     void compute_adaptive_merge_groups();
+    // The fill half of the merge: lifts each merge span's fill onto its group top at the merged height and drops
+    // the swallowed steps' fill. Runs at the end of prepare_infill(), before combine_infill().
+    void combine_adaptive_infill();
     void prepare_infill();
     void infill();
     void ironing();
@@ -1222,7 +1225,16 @@ public:
     // empty and the grouper treats every filament as reachable on every nozzle. Setters exist so a later
     // input-population pass can fill them without touching the grouping code.
     const std::vector<std::vector<DynamicPrintConfig>>& get_extruder_filament_info() const { return m_extruder_filament_info; }
-    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& v) { m_extruder_filament_info = v; }
+    // Two-phase (upstream Orca #17195): the setter only stashes the payload; the next apply() installs it and
+    // invalidates the grouping steps when the loaded filaments actually changed.
+    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& filament_info)
+    {
+        m_pending_extruder_filament_info = filament_info;
+        m_extruder_filament_info_pending = true;
+    }
+    // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
+    // a pending payload there, the way apply() would. True when the grouping steps were taken back.
+    bool install_pending_extruder_filament_info();
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1303,6 +1315,10 @@ public:
     // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
     // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
     bool                uses_multiple_nozzle_diameters() const;
+    // The band reference nozzle compute_adaptive_merge_groups() sizes every band against: the smallest nozzle
+    // printing any object's gated walls on this plate. The support merge plan (SupportMergePlan.cpp) asks for it so
+    // its ladders are the ones the walls stack on. 0 when nothing resolves. Defined in PrintObject.cpp.
+    double              adaptive_merge_reference_nozzle() const;
     // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
     // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
     // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
@@ -1417,6 +1433,10 @@ public:
     //BBS: export gcode from previous gcode file from 3mf
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
+    // For the background thread that exported the G-code, when a step that then edits the file in place
+    // (post-processing scripts or plugins) failed and may have left it half edited: the next run exports
+    // the G-code again instead of reusing it.
+    void invalidate_gcode_export_from_worker() { this->invalidate_step_from_worker(psGCodeExport); }
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
     // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
     // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on
@@ -1533,6 +1553,11 @@ private:
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
+    // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
+    std::vector<std::vector<DynamicPrintConfig>>            m_pending_extruder_filament_info;
+    bool                                                    m_extruder_filament_info_pending { false };
+    // Installs the pending payload; the state mutex must be held. True when a grouping step was taken back.
+    bool                                                    install_pending_extruder_filament_info_unguarded();
     std::unordered_map<int, std::unordered_map<int, double>> m_filament_print_time;
     std::vector<std::set<int>>                             m_geometric_unprintable_filaments;
     // Ultra (Phase 10): AMS-aware grouping inputs kept out of the print config (see accessors).

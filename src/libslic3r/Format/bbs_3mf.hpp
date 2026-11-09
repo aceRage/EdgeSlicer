@@ -100,6 +100,9 @@ struct PlateData
     bool            toolpath_outside {false};
     bool            is_label_object_enabled {false};
     bool            support_material_on_wipe_tower {false};
+    // AdaptiveLayerMerge step 5: Print::uses_multiple_nozzle_diameters() of the sliced plate. With a single-extruder
+    // rack it is Bambu Studio's multi_nozzle_diameter_mode for the plate (Format/BambuMultiDiameter.hpp).
+    bool            uses_multiple_nozzle_diameters {false};
     int             timelapse_warning_code = 0; // 1<<0 sprial vase, 1<<1 by object
 
     // Ultra (H2C 3MF schema): the multi-nozzle payload BambuStudio carries on PlateData.
@@ -281,6 +284,8 @@ struct StoreParams
     // embedded printer presets (CostOverrides::strip_prices()).
     // Project saves never set it.
     bool strip_filament_prices = false;
+    // Output: the exporter's error text when store_bbs_3mf() returns false.
+    std::string error;
 
     StoreParams() {}
 };

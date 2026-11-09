@@ -198,69 +198,45 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
     update();
 }
 
+wxString preset_name_check_message(const PresetNameCheck &check, const std::string &name)
+{
+    using Issue = PresetNameCheck::Issue;
+    switch (check.issue) {
+    case Issue::None: return wxString();
+    case Issue::IllegalCharacters:
+        return _L("Name is invalid;") + "\n" + _L("illegal characters:") + " " + preset_name_illegal_characters();
+    case Issue::IllegalSuffix:
+        return _L("Name is invalid;") + "\n" + _L("illegal suffix:") + "\n\t" + from_u8(PresetCollection::get_suffix_modified());
+    case Issue::Reserved: return _L("Name is unavailable.");
+    case Issue::SystemExists: return _L("Overwriting a system profile is not allowed.");
+    case Issue::Exists:
+    case Issue::ExistsIncompatible: {
+        wxString info_line = check.issue == Issue::Exists ?
+                                 from_u8((boost::format(_u8L("Preset \"%1%\" already exists.")) % name).str()) :
+                                 from_u8((boost::format(_u8L("Preset \"%1%\" already exists and is incompatible with the current printer.")) % name).str());
+        if (check.level == PresetNameCheck::Level::Warning)
+            info_line += "\n" + _L("Please note that saving will overwrite this preset.");
+        return info_line;
+    }
+    case Issue::Empty: return _L("The name is not allowed to be empty.");
+    case Issue::LeadingSpace: return _L("The name is not allowed to start with space character.");
+    case Issue::TrailingSpace: return _L("The name is not allowed to end with space character.");
+    case Issue::AliasName: return _L("The name cannot be the same as a preset alias name.");
+    case Issue::PrinterSuffix: return _L("The printer part of the name (after \" @\") is kept; type the name without \"@\".");
+    }
+    return wxString();
+}
+
 void SavePresetDialog::Item::update()
 {
     m_preset_name = into_u8(m_input_ctrl->GetTextCtrl()->GetValue());
 
-    m_valid_type = Valid;
-    wxString info_line;
-
-    const char *unusable_symbols = "<>[]:/\\|?*\"";
-
-    const std::string unusable_suffix = PresetCollection::get_suffix_modified(); //"(modified)";
-    for (size_t i = 0; i < std::strlen(unusable_symbols); i++) {
-        if (m_preset_name.find_first_of(unusable_symbols[i]) != std::string::npos) {
-            info_line    = _L("Name is invalid;") + "\n" + _L("illegal characters:") + " " + unusable_symbols;
-            m_valid_type = NoValid;
-            break;
-        }
-    }
-
-    if (m_valid_type == Valid && m_preset_name.find(unusable_suffix) != std::string::npos) {
-        info_line    = _L("Name is invalid;") + "\n" + _L("illegal suffix:") + "\n\t" + from_u8(PresetCollection::get_suffix_modified());
-        m_valid_type = NoValid;
-    }
-
-    if (m_valid_type == Valid &&
-        (m_preset_name == "Default Setting" || m_preset_name == "Default Filament" || m_preset_name == "Default Printer")) {
-        info_line    = _L("Name is unavailable.");
-        m_valid_type = NoValid;
-    }
+    // The rules are shared with the preset managers' rename (validate_preset_name, libslic3r).
+    const PresetNameCheck check = validate_preset_name(*m_presets, m_preset_name, m_presets->get_selected_preset_name(), PresetNameUse::Save);
+    m_valid_type = check.level == PresetNameCheck::Level::Invalid ? NoValid : check.level == PresetNameCheck::Level::Warning ? Warning : Valid;
+    wxString info_line = preset_name_check_message(check, m_preset_name);
 
     const Preset *existing = m_presets->find_preset(m_preset_name, false);
-    if (m_valid_type == Valid && existing && (existing->is_default || existing->is_system)) {
-        info_line = _L("Overwriting a system profile is not allowed.");
-        m_valid_type = NoValid;
-    }
-
-    if (m_valid_type == Valid && existing && m_preset_name != m_presets->get_selected_preset_name()) {
-        if (existing->is_compatible)
-            info_line = from_u8((boost::format(_u8L("Preset \"%1%\" already exists.")) % m_preset_name).str());
-        else
-            info_line = from_u8((boost::format(_u8L("Preset \"%1%\" already exists and is incompatible with the current printer.")) % m_preset_name).str());
-        info_line += "\n" + _L("Please note that saving will overwrite this preset.");
-        m_valid_type = Warning;
-    }
-
-    if (m_valid_type == Valid && m_preset_name.empty()) {
-        info_line    = _L("The name is not allowed to be empty.");
-        m_valid_type = NoValid;
-    }
-
-    if (m_valid_type == Valid && m_preset_name.find_first_of(' ') == 0) {
-        info_line    = _L("The name is not allowed to start with space character.");
-        m_valid_type = NoValid;
-    }
-
-    if (m_valid_type == Valid && m_preset_name.find_last_of(' ') == m_preset_name.length() - 1) {
-        info_line    = _L("The name is not allowed to end with space character.");
-        m_valid_type = NoValid;
-    }
-
-    if (m_valid_type == Valid && m_presets->get_preset_name_by_alias(m_preset_name) != m_preset_name) {
-        info_line    = _L("The name cannot be the same as a preset alias name.");
-        m_valid_type = NoValid;
-    }
 
     // BBS: add project embedded presets logic
     if (existing) { // ORCA RadioGroup

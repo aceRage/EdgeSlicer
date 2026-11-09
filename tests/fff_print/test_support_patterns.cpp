@@ -357,7 +357,7 @@ bool is_classic_tree(const char *style)
 // first one above the branches) with its own filler; on this small overhang the perimeters are a
 // large share of the interface length, so these checks look at line directions with a loose
 // parallelism bound rather than at the exact share of parallel lines.
-TEST_CASE("Each support interface pattern reaches the interface fill of every support style", "[SupportPatterns][SupportInterface]")
+TEST_CASE("Each support interface pattern reaches the interface fill of every support style", "[SupportPatterns][SupportInterface][slow]")
 {
     auto [type, style] = GENERATE(table<const char *, const char *>({
         { "normal(auto)", "grid" },        { "normal(auto)", "snug" },

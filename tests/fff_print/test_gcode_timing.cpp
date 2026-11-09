@@ -640,6 +640,71 @@ TEST_CASE("Timed waits of the machine end G-code are not part of the estimate", 
     REQUIRE_THAT(t_without - t_with, WithinAbs(185.0, 1e-1));
 }
 
+TEST_CASE("A Bambu export without the end G-code marker still leaves the end G-code waits out", "[GCodeTiming][EndGCode]")
+{
+    // GCode.cpp writes MACHINE_END_GCODE_START only with a pre-cooling plan; for the other Bambu printers it calls
+    // start_machine_end_gcode() on the processor it streams the file through. The H3C's end G-code has two
+    // M400 S180 air filtration waits after the last move: they made a 20 mm cube read 14m40s instead of ~8m30s.
+    //
+    // Known limits: 1000 mm/s^2, 100 mm/s, no jerk and no junction deviation, so every move starts and ends at
+    // rest: 2 * v / a + (d - v^2 / a) / v = 0.2 + 0.9 = 1.1 s for each 100 mm move.
+    FullPrintConfig config = make_config(0.0, 0.0, 0.0);
+    config.gcode_flavor.value                             = gcfMarlinLegacy;
+    config.machine_max_acceleration_x.values              = {10000., 10000.};
+    config.machine_max_acceleration_y.values              = {10000., 10000.};
+    config.machine_max_acceleration_z.values              = {10000., 10000.};
+    config.machine_max_acceleration_e.values              = {10000., 10000.};
+    config.machine_max_acceleration_extruding.values      = {10000., 10000.};
+    config.machine_max_acceleration_retracting.values     = {10000., 10000.};
+    config.machine_max_acceleration_travel.values         = {10000., 10000.};
+    config.machine_max_speed_x.values                     = {500., 500.};
+    config.machine_max_speed_y.values                     = {500., 500.};
+    config.machine_max_speed_z.values                     = {500., 500.};
+    config.machine_max_speed_e.values                     = {500., 500.};
+    config.machine_max_jerk_x.values                      = {0., 0.};
+    config.machine_max_jerk_y.values                      = {0., 0.};
+    config.machine_max_jerk_z.values                      = {0., 0.};
+    config.machine_max_jerk_e.values                      = {0., 0.};
+    config.machine_max_junction_deviation.values          = {0., 0.};
+    config.machine_min_extruding_rate.values              = {0., 0.};
+    config.machine_min_travel_rate.values                 = {0., 0.};
+
+    const std::string print =
+        "M83\n"
+        "M204 S1000\n"
+        "; FEATURE: Outer wall\n"
+        "G1 X100 Y0 E5 F6000\n"
+        "G1 X100 Y100 E5\n"
+        "G1 X0 Y100 E5\n"
+        "G1 X0 Y0 E5\n"
+        "; FEATURE: Custom\n";
+    const std::string end_gcode =
+        "G1 X100 Y0 F6000\n"   // the end G-code still moves: that time counts
+        "M400 S180\n"          // air filtration
+        "M400 S180\n"
+        "M400 P5000\n";        // sound / last picture
+
+    auto estimate = [&](bool end_gcode_started) {
+        GCodeProcessor::s_IsBBLPrinter = true;
+        GCodeProcessor proc;
+        proc.apply_config(config);
+        proc.initialize("edge_end_gcode_stream.gcode");
+        proc.process_buffer(print);
+        if (end_gcode_started)
+            proc.start_machine_end_gcode();
+        proc.process_buffer(end_gcode);
+        proc.finalize(false);
+        return proc.get_time(PrintEstimatedStatistics::ETimeMode::Normal);
+    };
+
+    const double t_skip  = estimate(true);
+    const double t_count = estimate(false);
+    // Five 100 mm moves at 1.1 s each.
+    REQUIRE_THAT(t_skip, WithinAbs(5.5, 1e-2));
+    // The waits were counted before: 180 + 180 + 5 s.
+    REQUIRE_THAT(t_count - t_skip, WithinAbs(365.0, 1e-1));
+}
+
 // ---- G29 ----
 
 TEST_CASE("The fixed 260 s G29 time is only for Bambu printers", "[GCodeTiming][G29]")

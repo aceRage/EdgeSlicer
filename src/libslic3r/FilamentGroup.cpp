@@ -63,6 +63,21 @@ namespace Slic3r
         return filament_merge_map;
     }
 
+    // BBS 2.9.1 (FilamentGroup.cpp filament_diameter_matches_nozzle_volume): a 2.85 mm filament prints only on the TPU285
+    // path and a 1.75 mm one never does. Ours applies the first half only when the machine has a TPU285 nozzle at all, so a
+    // 2.85 mm filament on a machine without that path (H2D, H2C) groups as before; Print::validate reports the H3C case.
+    static bool filament_diameter_matches_nozzle_volume(const FilamentGroupUtils::FilamentInfo &filament, NozzleVolumeType volume_type,
+                                                        bool machine_has_tpu285)
+    {
+        if (filament.diameter <= 0.f)
+            return true;
+        const bool uses_285_filament = filament.diameter > 2.5f;
+        const bool uses_285_path     = volume_type == NozzleVolumeType::nvtTPU285;
+        if (uses_285_filament && !machine_has_tpu285)
+            return true;
+        return uses_285_filament == uses_285_path;
+    }
+
     static uint64_t fnv_hash_nozzle(int volume_type, int is_right_extruder, int loaded_filament = -1)
     {
         constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
@@ -1374,12 +1389,17 @@ namespace Slic3r
             }
 
             auto unprintable_volumes = ctx.model_info.unprintable_volumes[used_filaments[fidx]];
+            const bool machine_has_tpu285 = std::any_of(ctx.nozzle_info.nozzle_list.begin(), ctx.nozzle_info.nozzle_list.end(),
+                                                        [](const MultiNozzleUtils::NozzleInfo &n) { return n.volume_type == nvtTPU285; });
+            const unsigned int filament_id = used_filaments[fidx];
+            const bool has_info = filament_id < ctx.model_info.filament_info.size();
 
             std::vector<int> unprintable_nozzles;
             for(size_t nozzle_idx =0 ;nozzle_idx < ctx.nozzle_info.nozzle_list.size(); ++nozzle_idx){
                 auto nozzle_info = ctx.nozzle_info.nozzle_list[nozzle_idx];
 
                 if(std::find(unexpected_extruders.begin(), unexpected_extruders.end(), nozzle_info.extruder_id)!= unexpected_extruders.end() || (expected_volume!=nvtHybrid && expected_volume != nozzle_info.volume_type) ||
+                  (has_info && !filament_diameter_matches_nozzle_volume(ctx.model_info.filament_info[filament_id], nozzle_info.volume_type, machine_has_tpu285)) ||
                   (unprintable_volumes.count(nozzle_info.volume_type) != 0))
                     unprintable_nozzles.push_back(nozzle_idx);
             }

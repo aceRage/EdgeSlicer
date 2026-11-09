@@ -119,6 +119,13 @@ public:
     std::pair<int, std::string> monitor_printers();
     std::pair<int, std::string> monitor_control(const std::string& printer, const std::string& action, bool confirm);
     std::pair<int, std::string> monitor_job(int id);
+    // "Remove printer" (the Printers tab, and the phone's Forget through the hub): delete `row` at
+    // its source per PrintersMonitor::removal_plan. The AppConfig / device-manager part runs on the
+    // GUI thread, the files on the calling thread. 200 {ok, id, done[], logout, reason_kind};
+    // 409 {error, reason_kind} for a printer the slicer cannot remove (cloud-bound Bambu, the
+    // preset's own host, the Device tab connection). Worker threads only. The hub row is the
+    // caller's business (the Printers tab asks the hub; the hub drops its own).
+    std::pair<int, std::string> remove_printer(const nlohmann::json& row);
 
     // Send jobs (RemoteSend) report here from their worker thread.
     void update_job(int id, int percent, const std::string& text);
@@ -189,6 +196,9 @@ private:
     ApiResponse api_send(int plate, const std::string& form_body);
     ApiResponse api_send_preview(int plate, const std::string& form_body); // slice_v1 PR B
     ApiResponse api_printer_control(const std::string& printer, const std::string& form_body);
+    // POST /api/printers/<id>/remove: the row as api_printers lists it, then remove_printer. Asked
+    // by the hub (loopback) for the phone's Forget; not proxied for phones.
+    ApiResponse api_printer_remove(const std::string& printer);
     ApiResponse api_jobs(int id);
     // Ultra: the G-code archive (GcodeArchive). Local paths never leave the instance.
     ApiResponse api_archive(const std::string& printer);
