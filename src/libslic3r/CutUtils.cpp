@@ -7,6 +7,7 @@
 #include "FlexiJoint.hpp"
 #include "PushFit.hpp"
 #include "TacJoint.hpp"
+#include "TacJointBoolean.hpp"
 #include "CurvedCut.hpp"
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
@@ -1031,8 +1032,113 @@ Cut::SavedPaintings Cut::save_paintings(const ModelObject* object) const
     return saved;
 }
 
+// Bake only TAC operands, retaining each original body's settings and frame. In
+// particular, unioning the whole object would rejoin touching KeepAsParts halves.
+static Transform3d apply_tac_joint_meshes(ModelObject& object)
+{
+    std::vector<ModelVolume*>       bodies;
+    std::vector<const ModelVolume*> joints;
+    for (ModelVolume* volume : object.volumes) {
+        if (volume->is_model_part() && !volume->is_cut_connector())
+            bodies.push_back(volume);
+        else if (volume->cut_info.is_tac_joint() && (volume->is_model_part() || volume->is_negative_volume()))
+            joints.push_back(volume);
+    }
+    // A separate printable pin has no body to modify.
+    if (bodies.empty() || joints.empty())
+        return Transform3d::Identity();
+
+    Model operands;
+    for (const ModelVolume* body : bodies)
+        operands.add_object()->add_volume(*body);
+    for (const ModelVolume* joint : joints) {
+        if (joint->is_negative_volume()) {
+            for (ModelObject* part : operands.objects)
+                part->add_volume(*joint);
+        } else {
+            // A pin may span several parts. Assign it once, to the part with the
+            // largest actual overlap, rather than duplicating it or using only boxes.
+            TriangleMesh pin(joint->mesh());
+            pin.transform(joint->get_matrix(), true);
+            double best_overlap = 0.;
+            size_t owner        = bodies.size();
+            for (size_t i = 0; i < bodies.size(); ++i) {
+                TriangleMesh body(bodies[i]->mesh());
+                body.transform(bodies[i]->get_matrix(), true);
+                if (!body.bounding_box().intersects(pin.bounding_box()))
+                    continue;
+                std::vector<TriangleMesh> overlap;
+                if (!MeshBoolean::mfd::make_boolean(body, pin, overlap, "INTERSECTION"))
+                    throw std::runtime_error(L("Unable to find a body for an attached TAC Joint."));
+                double volume = 0.;
+                for (const TriangleMesh& piece : overlap)
+                    volume += std::abs(its_mass_properties(piece.its).volume);
+                if (volume > best_overlap) {
+                    best_overlap = volume;
+                    owner        = i;
+                }
+            }
+            if (owner == bodies.size())
+                throw std::runtime_error(L("The attached TAC Joint does not intersect its owning body."));
+            operands.objects[owner]->add_volume(*joint);
+        }
+    }
+
+    // Compute every result before changing volumes, so a failed Boolean cannot
+    // leave a mixture of applied and unapplied sockets in this object.
+    std::vector<TriangleMesh> meshes;
+    std::vector<Transform3d>  frames;
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        TriangleMesh mesh = bake_tac_joint_object(*operands.objects[i]);
+        if (mesh.empty() || its_num_open_edges(mesh.its) != 0)
+            throw std::runtime_error(L("Unable to apply TAC joints to a closed body mesh."));
+        mesh.transform(bodies[i]->get_matrix().inverse(), true);
+        // An attached pin can change the body's centre. Keep local meshes
+        // centred so a 3MF import will not introduce another frame change.
+        const Vec3d centre = mesh.bounding_box().center();
+        mesh.translate(-centre.cast<float>());
+        // restore_painting() and editable cuts use this local-to-source shift.
+        mesh.set_init_shift(bodies[i]->mesh().get_init_shift() + centre);
+        frames.push_back(bodies[i]->get_matrix() * translation_transform(centre));
+        meshes.push_back(std::move(mesh));
+    }
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        bodies[i]->reset_extra_facets();
+        bodies[i]->set_mesh(std::move(meshes[i]));
+        bodies[i]->set_transformation(frames[i]);
+        bodies[i]->calculate_convex_hull();
+    }
+    // delete_volume() folds the final body's volume transform into its print
+    // instances. Its object frame changes too, so carry that change into the
+    // assembled pose instead of stacking the centred halves at the cut plane.
+    const Transform3d to_previous_frame = object.volumes.size() == joints.size() + 1 ? bodies.front()->get_matrix() :
+                                                                                       Transform3d::Identity();
+    for (size_t i = object.volumes.size(); i-- > 0;)
+        if (std::find(joints.begin(), joints.end(), object.volumes[i]) != joints.end())
+            object.delete_volume(i);
+    object.invalidate_bounding_box();
+    return to_previous_frame;
+}
+
 void Cut::finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_paintings)
 {
+    // Own the results before any throwing Boolean work. A refusal is destroyed
+    // with this Cut, while the caller's source model is still untouched.
+    m_model.clear_objects();
+    m_model.objects = objects;
+    if (m_attributes.has(ModelObjectCutAttribute::ApplyTacJoints)) {
+        try {
+            for (ModelObject* object : objects)
+                if (object != nullptr) {
+                    const Transform3d to_previous_frame = apply_tac_joint_meshes(*object);
+                    const auto        it                = m_part_to_cut_frame.find(object);
+                    const Transform3d to_cut_frame      = it != m_part_to_cut_frame.end() ? it->second : m_halves_to_cut_frame;
+                    m_part_to_cut_frame[object]         = to_cut_frame * to_previous_frame;
+                }
+        } catch (const std::runtime_error& e) {
+            throw std::invalid_argument(e.what());
+        }
+    }
     // C1: every result knows where it sits when assembled - the halves (and "keep as parts") in
     // the halves' frame, dowels and pins through their own map.
     for (ModelObject* object : objects) {
@@ -1082,11 +1188,6 @@ void Cut::finalize(const ModelObjectPtrs& objects, const SavedPaintings& saved_p
         }
     }
 
-    //clear model from temporarry objects
-    m_model.clear_objects();
-
-    // add to model result objects
-    m_model.objects = objects;
 }
 
 
@@ -1211,7 +1312,10 @@ void cut_recipe_record_half_frame(ModelObject& half)
     half.cut_recipe->half_part_matrices.clear();
     for (const ModelVolume* v : half.volumes)
         if (v->is_model_part() && !v->is_cut_connector())
-            half.cut_recipe->half_part_matrices.push_back(v->get_matrix());
+            // Applied single-body cuts have folded their volume translation
+            // into the print instance. The mesh still records its source shift.
+            half.cut_recipe->half_part_matrices.push_back(
+                half.cut_recipe->apply_tac_joints ? translation_transform(v->mesh().get_init_shift()) : v->get_matrix());
 }
 
 bool has_flexi_joint(const ModelObject* mo)

@@ -49,7 +49,7 @@ ModelObjectCutAttributes tac_attrs()
 }
 } // namespace
 
-TEST_CASE("TAC Joint sockets can be baked by Mesh Boolean and STL export", "[TACJoint][TACJointCut][TACJointBoolean]")
+TEST_CASE("TAC Joint sockets can be baked by Mesh Boolean and STL export", "[TACJoint][TACJointCut][TACJointBoolean][slow]")
 {
     Model model;
     auto* object       = tac_cube(model);
@@ -414,4 +414,173 @@ TEST_CASE("TAC Joint on a curved sheet still refuses lost engagement before cutt
     Cut cut(object, 0, Transform3d::Identity(), tac_attrs());
     REQUIRE_THROWS_AS(cut.perform_with_curved_sheet(sheet, 12.), std::invalid_argument);
     REQUIRE(object->volumes.size() == 2);
+}
+
+TEST_CASE("Cut can apply TAC sockets directly to body meshes", "[TACJoint][TACApplyMesh]")
+{
+    const bool apply      = GENERATE(false, true);
+    const auto attachment = GENERATE(TacJointAttachment::Separate, TacJointAttachment::Upper, TacJointAttachment::Lower);
+    Model      model;
+    auto*      object      = tac_cube(model);
+    auto       c           = tac_connector();
+    c.tac_joint.attachment = attachment;
+    c.z_angle              = .7f;
+    c.tac_joint.offset     = .8f;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(), tac_attrs() | only_if(apply, ModelObjectCutAttribute::ApplyTacJoints));
+    const auto& result = cut.perform_with_plane(.4);
+    REQUIRE(result.size() == (attachment == TacJointAttachment::Separate ? 3 : 2));
+    for (size_t half = 0; half < 2; ++half) {
+        const bool owns = int(attachment) == int(half + 1);
+        if (!apply) {
+            REQUIRE((tac_hole(*result[half]) == nullptr) == owns);
+            continue;
+        }
+        REQUIRE(tac_hole(*result[half]) == nullptr);
+        REQUIRE(result[half]->volumes.size() == 1);
+        auto mesh = result[half]->raw_mesh();
+        REQUIRE(its_num_open_edges(mesh.its) == 0);
+        REQUIRE_FALSE(MeshBoolean::cgal::does_self_intersect(mesh));
+        REQUIRE(mesh.split().size() == 1);
+        if (owns)
+            REQUIRE(mesh.volume() > 13321.);
+        else
+            REQUIRE(mesh.volume() < 13319.);
+        auto assembled = mesh;
+        assembled.transform(result[half]->instances.front()->get_assemble_transformation().get_matrix(), true);
+        auto placed = mesh;
+        placed.transform(result[half]->instances.front()->get_matrix(), true);
+        REQUIRE((assembled.bounding_box().min - placed.bounding_box().min).norm() < 1e-5);
+        REQUIRE((assembled.bounding_box().max - placed.bounding_box().max).norm() < 1e-5);
+        // Check material at an independently chosen point inside the connector
+        // profile, in the original cut frame, rather than only comparing volumes.
+        TriangleMesh probe(its_make_cube(.2, .2, .2));
+        probe.translate(-.1f, -.1f, c.tac_joint.offset + (half == 0 ? 2.f : -2.f));
+        std::vector<TriangleMesh> intersections;
+        REQUIRE(MeshBoolean::mfd::make_boolean(assembled, probe, intersections, "INTERSECTION"));
+        double occupied = 0.;
+        for (const auto& piece : intersections)
+            occupied += std::abs(its_mass_properties(piece.its).volume);
+        if (owns)
+            REQUIRE(occupied == Approx(.008).epsilon(1e-5));
+        else
+            REQUIRE(occupied < 1e-9);
+        const auto path = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("tac-applied-%%%%.stl");
+        REQUIRE(store_stl(path.string().c_str(), &mesh, true));
+        Model      imported;
+        const bool loaded = load_stl(path.string().c_str(), &imported);
+        boost::filesystem::remove(path);
+        REQUIRE(loaded);
+        REQUIRE(its_mass_properties(imported.objects.front()->raw_mesh().its).volume ==
+                Approx(its_mass_properties(mesh.its).volume).epsilon(1e-6));
+    }
+    if (attachment == TacJointAttachment::Separate) {
+        REQUIRE(result[2]->volumes.size() == 1);
+        REQUIRE(result[2]->volumes.front()->cut_info.is_tac_joint());
+    }
+    // Cut works on a copy; applying or refusing must leave its source untouched.
+    REQUIRE(object->volumes.size() == 2);
+    REQUIRE(its_mass_properties(object->volumes.front()->mesh().its).volume == Approx(27000.));
+}
+
+TEST_CASE("Applying TAC sockets preserves separate touching cut parts", "[TACJoint][TACApplyMesh]")
+{
+    Model model;
+    auto* object = tac_cube(model);
+    add_tac_joint_volume(object, tac_connector(), "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(),
+            tac_attrs() | ModelObjectCutAttribute::KeepAsParts | ModelObjectCutAttribute::ApplyTacJoints);
+    const auto& result = cut.perform_with_plane();
+    REQUIRE(result.size() == 2);
+    REQUIRE(result.front()->volumes.size() == 2);
+    for (const auto* volume : result.front()->volumes) {
+        REQUIRE(volume->is_model_part());
+        REQUIRE(its_num_open_edges(volume->mesh().its) == 0);
+        REQUIRE(its_mass_properties(volume->mesh().its).volume < 13499.);
+        REQUIRE(its_mass_properties(volume->mesh().its).volume > 13200.);
+    }
+}
+
+TEST_CASE("Applying TAC joints preserves part settings and unrelated modifiers", "[TACJoint][TACApplyMesh]")
+{
+    Model model;
+    auto* object = tac_cube(model);
+    object->volumes.front()->config.set_key_value("extruder", new ConfigOptionInt(2));
+    TriangleMesh other(its_make_cube(10., 10., 30.));
+    other.translate(35.f, -5.f, -15.f);
+    auto* second = object->add_volume(std::move(other));
+    second->config.set_key_value("extruder", new ConfigOptionInt(3));
+    second->name = "other part";
+    TriangleMesh negative(its_make_cube(2., 2., 30.));
+    negative.translate(8.f, 8.f, -15.f);
+    auto* retained = object->add_volume(std::move(negative), ModelVolumeType::NEGATIVE_VOLUME);
+    retained->name = "editable hole";
+    retained->cut_info.set_processed();
+    auto c                 = tac_connector();
+    c.tac_joint.attachment = TacJointAttachment::Upper;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut         cut(object, 0, Transform3d::Identity(), tac_attrs() | ModelObjectCutAttribute::ApplyTacJoints);
+    const auto& result = cut.perform_with_plane();
+    REQUIRE(result.size() == 2);
+    for (const auto* half : result) {
+        REQUIRE(half->volumes.size() == 3);
+        size_t solids = 0, negatives = 0;
+        for (const auto* v : half->volumes) {
+            REQUIRE_FALSE(v->cut_info.is_tac_joint());
+            if (v->is_negative_volume()) {
+                ++negatives;
+                REQUIRE(v->name == "editable hole");
+                REQUIRE(its_mass_properties(v->mesh().its).volume == Approx(120.));
+            } else {
+                ++solids;
+                const bool other_part = v->name == "other part";
+                REQUIRE(v->config.opt_int("extruder") == (other_part ? 3 : 2));
+                if (other_part)
+                    REQUIRE(its_mass_properties(v->mesh().its).volume == Approx(1500.));
+            }
+        }
+        REQUIRE(solids == 2);
+        REQUIRE(negatives == 1);
+    }
+}
+
+TEST_CASE("An applied attached TAC joint without a body refuses the cut", "[TACJoint][TACApplyMesh]")
+{
+    Model model;
+    auto* object           = tac_cube(model);
+    auto  c                = tac_connector();
+    c.pos.x()              = 100.;
+    c.tac_joint.attachment = TacJointAttachment::Upper;
+    add_tac_joint_volume(object, c, "TAC Joint");
+    Cut cut(object, 0, Transform3d::Identity(), tac_attrs() | ModelObjectCutAttribute::ApplyTacJoints);
+    REQUIRE_THROWS_AS(cut.perform_with_plane(), std::invalid_argument);
+    REQUIRE(object->volumes.size() == 2);
+    REQUIRE(its_mass_properties(object->volumes.front()->mesh().its).volume == Approx(27000.));
+}
+
+TEST_CASE("Applying TAC joints retains painting in the original body frame", "[TACJoint][TACApplyMesh][CutPaint]")
+{
+    Model model;
+    auto* object = tac_cube(model);
+    auto* body   = object->volumes.front();
+    body->set_offset(Vec3d(3., -2., 2.));
+    TriangleSelector selector(body->mesh());
+    for (size_t i = 0; i < body->mesh().its.indices.size(); ++i)
+        if (its_face_normal(body->mesh().its, int(i)).x() > .9f)
+            selector.set_facet(int(i), EnforcerBlockerType::Extruder2);
+    body->mmu_segmentation_facets.set_data(selector.serialize());
+    add_tac_joint_volume(object, tac_connector(), "TAC Joint");
+    Cut cut(object, 0, Transform3d::Identity(), tac_attrs() | ModelObjectCutAttribute::ApplyTacJoints | ModelObjectCutAttribute::KeepPaint);
+    const auto& result = cut.perform_with_plane();
+    for (size_t half = 0; half < 2; ++half) {
+        REQUIRE(result[half]->volumes.size() == 1);
+        const auto* volume  = result[half]->volumes.front();
+        const auto  painted = volume->mmu_segmentation_facets.get_facets(*volume, EnforcerBlockerType::Extruder2);
+        double      area    = 0.;
+        for (const auto& f : painted.indices)
+            area += .5 * (painted.vertices[f[1]] - painted.vertices[f[0]]).cross(painted.vertices[f[2]] - painted.vertices[f[0]]).norm();
+        REQUIRE(area == Approx(half == 0 ? 510. : 390.).epsilon(.01));
+        for (const auto& p : painted.vertices)
+            REQUIRE((p.cast<double>() + volume->mesh().get_init_shift()).x() == Approx(18.).margin(1e-3));
+    }
 }

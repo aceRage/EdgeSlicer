@@ -3252,6 +3252,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             r.keep_upper         = rt.get<int>("<xmlattr>.keep_upper", 1) != 0;
             r.keep_lower         = rt.get<int>("<xmlattr>.keep_lower", 1) != 0;
             r.keep_as_parts      = rt.get<int>("<xmlattr>.keep_as_parts", 0) != 0;
+            r.apply_tac_joints   = rt.get<int>("<xmlattr>.apply_tac_joints", 0) != 0;
             r.place_on_cut_upper = rt.get<int>("<xmlattr>.place_on_cut_upper", 1) != 0;
             r.place_on_cut_lower = rt.get<int>("<xmlattr>.place_on_cut_lower", 0) != 0;
             r.rotate_upper       = rt.get<int>("<xmlattr>.rotate_upper", 0) != 0;
@@ -9946,6 +9947,7 @@ static void add_texture_displacement(std::stringstream &stream, const ModelVolum
             rt.put("<xmlattr>.keep_upper",         r.keep_upper ? 1 : 0);
             rt.put("<xmlattr>.keep_lower",         r.keep_lower ? 1 : 0);
             rt.put("<xmlattr>.keep_as_parts",      r.keep_as_parts ? 1 : 0);
+            rt.put("<xmlattr>.apply_tac_joints", r.apply_tac_joints ? 1 : 0);
             rt.put("<xmlattr>.place_on_cut_upper", r.place_on_cut_upper ? 1 : 0);
             rt.put("<xmlattr>.place_on_cut_lower", r.place_on_cut_lower ? 1 : 0);
             rt.put("<xmlattr>.rotate_upper",       r.rotate_upper ? 1 : 0);

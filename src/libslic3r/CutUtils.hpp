@@ -197,11 +197,22 @@ CutPaintCarry carry_cut_painting_to_uncut(const std::vector<const ModelObject*>&
 // right after the cut, while they still ARE the cut frame. No-op without a recipe.
 void cut_recipe_record_half_frame(ModelObject& half);
 
-enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo,
+enum class ModelObjectCutAttribute : int {
+    KeepUpper,
+    KeepLower,
+    KeepAsParts,
+    FlipUpper,
+    FlipLower,
+    PlaceOnCutUpper,
+    PlaceOnCutLower,
+    CreateDowels,
+    InvalidateCutInfo,
     // OrcaSlicer #13472: carry the support / seam / colour / fuzzy-skin painting of every model part
     // onto the halves (spatial remap, ModelVolume::restore_painting()). The gizmo always sets it
     // (owner, 2026-10-24: no preference); the contour / groove preview cuts leave it off.
-    KeepPaint };
+    KeepPaint,
+    ApplyTacJoints
+};
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
 
