@@ -316,6 +316,71 @@ TEST_CASE("A four-filament U1 project without filament self indices keeps each f
 
 namespace {
 
+// Every per-filament list of the project must follow the filament count, or slicing fails on the
+// flush matrix (OrcaSlicer #17330) and a later sync indexes past the end.
+void check_filament_lists_sized(const PresetBundle &bundle, size_t count)
+{
+    INFO("filament count " << count);
+    CHECK(bundle.filament_presets.size() == count);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values.size() == count);
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_multi_colors")->values.size() == count);
+    CHECK(bundle.project_config.opt<ConfigOptionInts>("filament_colour_mode")->values.size() == count);
+    CHECK(bundle.project_config.option<ConfigOptionEnumsGeneric>("filament_volume_type")->values.size() == count);
+    CHECK(bundle.project_config.opt<ConfigOptionFloats>("flush_volumes_vector")->values.size() == 2 * count);
+    CHECK(bundle.project_config.opt<ConfigOptionFloats>("flush_volumes_matrix")->values.size() == count * count);
+}
+
+} // namespace
+
+// OrcaSlicer #17330: a two-colour project on a four-tool printer (Snapmaker U1). Upstream pads the
+// filament list to one per tool and left the colour lists short; Edge keeps the project's own two
+// filaments, so every list must stay at two, and the U1 sync (set_num_filaments, as
+// Sidebar::sync_ams_list and the extruder-count change in Tab.cpp call it) must size them all.
+TEST_CASE("A two-filament project on a four-tool U1 keeps every filament list sized",
+          "[Preset][Bundle][ProjectPreset][Regression]")
+{
+    const size_t tool_count = 4;
+    const std::vector<std::string> colors = { "#FF0000", "#00FF00" };
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.opt<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.opt<ConfigOptionFloats>("nozzle_diameter")->values  = std::vector<double>(tool_count, 0.4);
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    REQUIRE_NOTHROW(bundle.load_config_model("u1_two_colours.3mf", std::move(config)));
+    check_filament_lists_sized(bundle, colors.size());
+    CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == colors);
+
+    SECTION("a sync that fills all four tools sizes every list to four and keeps the project's colours")
+    {
+        bundle.set_num_filaments(unsigned(tool_count), std::vector<std::string>{ "#0000FF", "#FFFF00" });
+        check_filament_lists_sized(bundle, tool_count);
+        const auto &now = bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values;
+        CHECK(now == std::vector<std::string>{ "#FF0000", "#00FF00", "#0000FF", "#FFFF00" });
+        const auto &matrix = bundle.project_config.opt<ConfigOptionFloats>("flush_volumes_matrix")->values;
+        for (size_t i = 0; i < tool_count; ++i)
+            CHECK(matrix[i * tool_count + i] == 0.);
+
+        SECTION("and a sync back to two tools shrinks them again")
+        {
+            bundle.set_num_filaments(unsigned(colors.size()), std::string());
+            check_filament_lists_sized(bundle, colors.size());
+            CHECK(bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values == colors);
+        }
+    }
+
+    SECTION("a sync with no new colours still fills the new slots")
+    {
+        bundle.set_num_filaments(unsigned(tool_count), std::vector<std::string>{});
+        check_filament_lists_sized(bundle, tool_count);
+        for (const std::string &color : bundle.project_config.opt<ConfigOptionStrings>("filament_colour")->values)
+            CHECK_FALSE(color.empty());
+    }
+}
+
+namespace {
+
 DynamicPrintConfig sender_gcode_config(size_t filament_count)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
