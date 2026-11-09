@@ -111,6 +111,12 @@ public:
     }
     int    show_spiral_mode_settings_dialog(bool is_object_config = false);
 
+    // EdgeSlicer: called when the user switches the support interface interlock on or changes its
+    // woven layers. When the top interface layers are too few for the weave, asks once to raise
+    // them to 1 + woven layers (Yes) or to turn the interlock off (No), so it cannot ask again for
+    // the same values. Returns true when the config was changed.
+    bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
+
 private:
     bool get_temperature_range(DynamicPrintConfig *config, int &range_low, int &range_high);
 };

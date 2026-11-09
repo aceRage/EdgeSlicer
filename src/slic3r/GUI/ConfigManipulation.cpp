@@ -13,6 +13,7 @@
 #include "PartPlate.hpp"
 #include "libslic3r/GCode/AdaptivePAProcessor.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/Support/SupportInterfaceRules.hpp"
 #include "FlowVariantEdit.hpp"
 #include "Plater.hpp"
 
@@ -1551,6 +1552,48 @@ bool ConfigManipulation::get_temperature_range(DynamicPrintConfig *config, int &
         range_high_exist       = true;
     }
     return range_low_exist && range_high_exist;
+}
+
+// EdgeSlicer: the interlock weaves the interface layers under the model-facing one, so it needs
+// 1 + woven layers top interface layers. Asked only on an interactive change to the interlock
+// switch or its woven layers (Tab::on_value_change), never while a preset or project loads, and
+// either answer leaves values that do not ask again (raised layers, or the interlock off). Where
+// the dialog never runs (a loaded project, the CLI) the slicer keeps its own fallback:
+// SupportParameters leaves the weave off when the interface layers are too few.
+bool ConfigManipulation::check_support_interlock_interface_layers(DynamicPrintConfig *config)
+{
+    if (is_msg_dlg_already_exist || config == nullptr)
+        return false;
+    for (const char *key : { "support_interface_interlock", "support_interface_interlock_layers", "support_interface_top_layers" })
+        if (! config->has(key))
+            return false;
+    const int bottom = config->has("support_interface_bottom_layers") ? config->opt_int("support_interface_bottom_layers") : -1;
+    const InterlockInterfaceRaise raise = interlock_interface_raise(config->opt_bool("support_interface_interlock"),
+                                                                    config->opt_int("support_interface_interlock_layers"),
+                                                                    config->opt_int("support_interface_top_layers"), bottom);
+    if (! raise.needed)
+        return false;
+
+    wxString msg_text = format_wxstr(_L("Interlock needs %1% interface layers: the top layer that touches the model and %2% woven layers. "
+                                        "Raise Top interface layers from %3% to %1%?"),
+                                     raise.top_to, raise.top_to - 1, raise.top_from);
+    if (raise.raise_bottom)
+        msg_text += "\n" + format_wxstr(_L("Bottom interface layers are raised from %1% to %2% as well."), raise.bottom_from, raise.bottom_to);
+    msg_text += "\n\n" + _L("Yes - Raise the interface layers\n"
+                            "No  - Turn the interlock off");
+    MessageDialog      dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    DynamicPrintConfig new_conf = *config;
+    is_msg_dlg_already_exist    = true;
+    if (dialog.ShowModal() == wxID_YES) {
+        new_conf.set_key_value("support_interface_top_layers", new ConfigOptionInt(raise.top_to));
+        if (raise.raise_bottom)
+            new_conf.set_key_value("support_interface_bottom_layers", new ConfigOptionInt(raise.bottom_to));
+    } else {
+        new_conf.set_key_value("support_interface_interlock", new ConfigOptionBool(false));
+    }
+    apply(config, &new_conf);
+    is_msg_dlg_already_exist = false;
+    return true;
 }
 
 

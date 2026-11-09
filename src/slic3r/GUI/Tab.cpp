@@ -2886,6 +2886,13 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
+    // EdgeSlicer: switching the interlock on (or raising its woven layers) offers once to raise the
+    // interface layers to 1 + woven layers; No turns the interlock off.
+    if (opt_key == "support_interface_interlock" || opt_key == "support_interface_interlock_layers") {
+        if (m_config_manipulation.check_support_interlock_interface_layers(m_config))
+            wxGetApp().plater()->update();
+    }
+
     if(opt_key == "make_overhang_printable"){
         if(m_config->opt_bool("make_overhang_printable")){
             wxString msg_text = _(

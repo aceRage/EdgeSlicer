@@ -23,6 +23,8 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/SupportInterfaceRules.hpp"
+#include "libslic3r/Support/SupportParameters.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
@@ -578,4 +580,27 @@ TEST_CASE("Woven layers do not lay two support fills over the same place", "[Sup
     }
     if (model_id == 0)
         CHECK(woven >= 1); // the other models may have no woven layer in some styles
+}
+
+// The GUI's interlock prompt (ConfigManipulation::check_support_interlock_interface_layers) raises
+// the top interface layers to interlock_needed_interface_layers(); the slicer's own fallback, used
+// for projects that never saw the prompt, leaves the weave off when they are fewer. Both must agree.
+TEST_CASE("The slicer weaves exactly when the interlock prompt's rule is satisfied", "[SupportInterlock][SupportInterface]")
+{
+    for (int woven = 2; woven <= 4; ++ woven)
+        for (int top = 0; top <= 6; ++ top) {
+            DynamicPrintConfig config = interlock_config("normal", true, top);
+            config.set_key_value("support_interface_interlock_layers", new ConfigOptionInt(woven));
+            Print print;
+            Model model;
+            init_print({ capped_stem() }, print, model, config);
+            REQUIRE(! print.objects().empty());
+            const SupportParameters params(*print.objects().front());
+            INFO("woven " << woven << " top " << top);
+            const bool satisfied = ! interlock_interface_raise(true, woven, top, 0).needed;
+            CHECK(satisfied == (top >= interlock_needed_interface_layers(woven)));
+            CHECK((params.interlock_layers != 0) == satisfied);
+            if (satisfied)
+                CHECK(params.interlock_layers == size_t(woven));
+        }
 }

@@ -13,6 +13,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Support/SupportInterfaceRules.hpp"
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
@@ -147,3 +148,72 @@ TEST_CASE("Interface layer counts above the old maximum survive a project 3MF ro
     CHECK(obj_config.opt_int("support_interface_top_layers") == 5);
     CHECK(obj_config.opt_int("support_interface_bottom_layers") == 9);
 }
+
+// ---------------------------------------------------------------------------------------------
+//   2. Switching the interlock on (or raising its woven layers) offers to raise the interface
+//      layers to 1 + woven layers. The rule is the pure helper in Support/SupportInterfaceRules.hpp;
+//      the slicer's own fallback (SupportParameters leaves the weave off when the layers are too
+//      few) is checked against it in tests/fff_print/test_support_interlock.cpp.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Interlock needs the model-facing layer plus the woven layers", "[SupportInterface][Interlock]")
+{
+    CHECK(interlock_needed_interface_layers(2) == 3);
+    CHECK(interlock_needed_interface_layers(3) == 4);
+    CHECK(interlock_needed_interface_layers(4) == 5);
+    // Clamped to 2-4 like SupportParameters.
+    CHECK(interlock_needed_interface_layers(0) == 3);
+    CHECK(interlock_needed_interface_layers(9) == 5);
+}
+
+TEST_CASE("Interlock raise: nothing to do when off or when there are enough layers", "[SupportInterface][Interlock]")
+{
+    CHECK_FALSE(interlock_interface_raise(false, 2, 0, 0).needed);
+    CHECK_FALSE(interlock_interface_raise(false, 4, 2, 2).needed);
+    CHECK_FALSE(interlock_interface_raise(true, 2, 3, 0).needed);
+    CHECK_FALSE(interlock_interface_raise(true, 3, 5, 1).needed); // bottom alone never asks
+    const InterlockInterfaceRaise r = interlock_interface_raise(true, 2, 3, 2);
+    CHECK_FALSE(r.needed);
+    CHECK(r.top_to == 3);
+    CHECK(r.bottom_to == 2);
+}
+
+TEST_CASE("Interlock raise: top layers go to 1 + woven layers", "[SupportInterface][Interlock]")
+{
+    SECTION("2 woven layers at 2 interface layers raise to 3, Same as top bottom is left alone") {
+        const InterlockInterfaceRaise r = interlock_interface_raise(true, 2, 2, -1);
+        CHECK(r.needed);
+        CHECK(r.top_from == 2);
+        CHECK(r.top_to == 3);
+        CHECK_FALSE(r.raise_bottom);
+        CHECK(r.bottom_to == -1);
+    }
+    SECTION("a bottom count of its own below the need is raised too") {
+        const InterlockInterfaceRaise r = interlock_interface_raise(true, 4, 3, 2);
+        CHECK(r.needed);
+        CHECK(r.top_to == 5);
+        CHECK(r.raise_bottom);
+        CHECK(r.bottom_from == 2);
+        CHECK(r.bottom_to == 5);
+    }
+    SECTION("no bottom interface (0) stays off") {
+        const InterlockInterfaceRaise r = interlock_interface_raise(true, 3, 1, 0);
+        CHECK(r.needed);
+        CHECK(r.top_to == 4);
+        CHECK_FALSE(r.raise_bottom);
+        CHECK(r.bottom_to == 0);
+    }
+    SECTION("a bottom count already deep enough is kept") {
+        const InterlockInterfaceRaise r = interlock_interface_raise(true, 2, 0, 6);
+        CHECK(r.needed);
+        CHECK(r.top_to == 3);
+        CHECK_FALSE(r.raise_bottom);
+        CHECK(r.bottom_to == 6);
+    }
+    SECTION("after the raise the rule is satisfied, so it cannot ask again") {
+        const InterlockInterfaceRaise r = interlock_interface_raise(true, 3, 2, 1);
+        REQUIRE(r.needed);
+        CHECK_FALSE(interlock_interface_raise(true, 3, r.top_to, r.bottom_to).needed);
+    }
+}
+
