@@ -80,8 +80,11 @@ struct NozzleStripPlace
 void place_nozzle_strip_filaments(std::vector<NozzleStripTile> &tiles, const NozzleStripInput &in, const std::vector<NozzleStripPlace> &places,
                                   const std::vector<unsigned int> &used_filaments);
 
-// "Std", "HF", "TPU", "E3D".
+// "Std", "HF", "TPU", "TPU285", "E3D".
 std::string nozzle_flow_short(NozzleVolumeType type);
+// Whether the printer declares nozzles of `type` (its default_nozzle_volume_type / nozzle_volume_type lists or its rack),
+// so the Extruder Settings type list offers it (the H3C's TPU285 slot).
+bool nozzle_strip_printer_has_type(const ConfigBase &printer, NozzleVolumeType type);
 // "R1-R5", "T3-T4", "R1, R3", "1-3": labels that share a prefix and run in sequence are shortened.
 std::string collapse_nozzle_strip_labels(const std::vector<std::string> &labels);
 

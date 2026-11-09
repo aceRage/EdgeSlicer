@@ -4,6 +4,9 @@
 #include <cctype>
 #include <set>
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+
 namespace Slic3r {
 namespace PrintersMonitor {
 
@@ -47,6 +50,28 @@ Message parse_message(const std::string& msg)
             return m;
         m.job  = std::stoi(n);
         m.kind = m.job > 0 ? Message::Kind::Job : Message::Kind::Invalid;
+        return m;
+    }
+    if (starts_with(msg, "printers_rename:")) {
+        std::string id, name;
+        if (!parse_rename(msg.substr(16), id, name)) return m;
+        m.id   = id;
+        m.name = name;
+        m.kind = Message::Kind::Rename;
+        return m;
+    }
+    if (starts_with(msg, "printers_remove:")) {
+        const std::string id = msg.substr(16);
+        if (!valid_printer_id(id)) return m;
+        m.id   = id;
+        m.kind = Message::Kind::Remove;
+        return m;
+    }
+    if (starts_with(msg, "printers_forget:")) {
+        const std::string id = msg.substr(16);
+        if (!valid_printer_id(id)) return m;
+        m.id   = id;
+        m.kind = Message::Kind::Forget;
         return m;
     }
     if (starts_with(msg, "printers_open:")) {
@@ -121,6 +146,302 @@ json page_payload(int status, const std::string& body, long long now_ms)
     out["ok"]    = false;
     out["error"] = "the printer list could not be read";
     return out;
+}
+
+void add_leftovers(json& payload, int hub_status, const std::string& hub_body)
+{
+    if (hub_status != 200 || !payload.is_object() || !payload.value("ok", false) || !payload.contains("printers") ||
+        !payload["printers"].is_array())
+        return;
+    json hub;
+    try { hub = json::parse(hub_body); } catch (...) { return; }
+    if (!hub.is_object() || !hub.contains("printers") || !hub["printers"].is_array()) return;
+    std::set<std::string> have;
+    for (const json& p : payload["printers"])
+        if (p.is_object() && p.contains("id") && p["id"].is_string()) have.insert(p["id"].get<std::string>());
+    for (const json& row : hub["printers"]) {
+        if (!row.is_object() || !row.contains("id") || !row["id"].is_string()) continue;
+        if (!(row.contains("configured") && row["configured"].is_boolean() && !row["configured"].get<bool>())) continue;
+        const std::string id = row["id"].get<std::string>();
+        if (!valid_printer_id(id) || have.count(id)) continue;
+        json p = row;
+        p["leftover"] = true;
+        p["online"]   = false;
+        for (const char* k : { "can_pause", "can_resume", "can_stop", "can_print", "can_upload", "controls", "print_error" })
+            p.erase(k);
+        if (row.contains("age_s") && row["age_s"].is_number()) p["seen_s"] = row["age_s"];
+        have.insert(id);
+        payload["printers"].push_back(std::move(p));
+    }
+}
+
+// ---- "Remove printer" ----
+
+static std::string str_field(const json& o, const char* k)
+{
+    return o.is_object() && o.contains(k) && o[k].is_string() ? o[k].get<std::string>() : std::string();
+}
+
+std::vector<std::string> RemovalPlan::stores() const
+{
+    std::vector<std::string> out;
+    if (!ph_device_id.empty()) out.push_back("print_host_devices");
+    if (!sm_id.empty() || !sm_ip.empty()) out.push_back("snapmaker_lan");
+    if (app_config_devices) out.push_back("app_config_devices");
+    if (!bambu_dev_id.empty()) out.push_back("bambu_lan");
+    if (tombstone) out.push_back("tombstone");
+    if (hub_row) out.push_back("hub_printers");
+    return out;
+}
+
+RemovalPlan removal_plan(const json& row)
+{
+    RemovalPlan plan;
+    const std::string id   = str_field(row, "id");
+    const std::string kind = str_field(row, "kind");
+    if (id.empty() || !valid_printer_id(id)) {
+        plan.hub_row = false;
+        plan.reason  = "This printer has no id the slicer can remove.";
+        return plan;
+    }
+    // A row only the hub remembers: the slicer has nothing of it any more, only the hub row is left.
+    if (row.is_object() && row.contains("leftover") && row["leftover"].is_boolean() && row["leftover"].get<bool>()) {
+        plan.mode        = RemovalPlan::Mode::Remove;
+        plan.reason_kind = "leftover";
+        return plan;
+    }
+    if (id == "host") {
+        plan.hub_row     = false;
+        plan.reason_kind = "preset_host";
+        plan.reason  = "This printer is the selected printer preset's own print host. Clear its address in the preset "
+                       "(the printer settings' connection / Physical Printer field) to remove it.";
+        return plan;
+    }
+    if (id == "connect" || kind == "connect") {
+        plan.hub_row     = false;
+        plan.reason_kind = "device_connection";
+        plan.reason  = "This is the Device tab's current connection. Disconnect it on the Device tab.";
+        return plan;
+    }
+    if (id.compare(0, 3, "ph:") == 0) {
+        plan.mode         = RemovalPlan::Mode::Remove;
+        plan.reason_kind  = "print_host_device";
+        plan.ph_device_id = str_field(row, "device_id");
+        if (plan.ph_device_id.empty()) plan.ph_device_id = id.substr(3);
+        plan.ph_model_key = str_field(row, "model_key");
+        // Nothing re-adds a print-host device by itself (the preset migration remembers what it
+        // imported), but the slicer's report skips a tombstoned id too, so a cache that still holds
+        // the device until its next read cannot show it again. By id only: a device added again
+        // gets a new id.
+        plan.tombstone    = true;
+        return plan;
+    }
+    if (id.compare(0, 3, "sm:") == 0) {
+        plan.mode               = RemovalPlan::Mode::Remove;
+        plan.reason_kind        = "lan_snapmaker";
+        plan.sm_id              = id.substr(3);
+        plan.sm_ip              = str_field(row, "ip");
+        plan.app_config_devices = true;
+        plan.tombstone          = true;
+        return plan;
+    }
+    if (kind == "bambu") {
+        const bool lan = row.contains("lan_mode") && row["lan_mode"].is_boolean() && row["lan_mode"].get<bool>();
+        if (!lan) {
+            plan.hub_row     = false;
+            plan.reason_kind = "bambu_cloud";
+            plan.reason  = "This printer is bound to your Bambu Lab account, which is where the list comes from. Unbind it "
+                           "on the Device tab (or in Bambu Handy) to remove it.";
+            return plan;
+        }
+        plan.mode         = RemovalPlan::Mode::Logout;
+        plan.reason_kind  = "bambu_lan";
+        plan.bambu_dev_id = id;
+        // A logged-out LAN printer that still announces itself on the LAN would otherwise be
+        // listed again as a discovered printer; the report skips it until it is logged in again.
+        plan.tombstone    = true;
+        return plan;
+    }
+    // Any other kind the slicer lists: nothing to delete but the remembered row.
+    plan.mode        = RemovalPlan::Mode::Remove;
+    plan.reason_kind = "other";
+    return plan;
+}
+
+json removal_json(const json& row)
+{
+    const RemovalPlan plan = removal_plan(row);
+    json r;
+    r["mode"] = plan.mode == RemovalPlan::Mode::Remove ? "remove" : plan.mode == RemovalPlan::Mode::Logout ? "logout" : "explain";
+    if (!plan.reason.empty()) r["reason"] = plan.reason;
+    if (!plan.reason_kind.empty()) r["kind"] = plan.reason_kind;
+    return r;
+}
+
+void annotate_removal(json& printers)
+{
+    if (!printers.is_array()) return;
+    for (json& p : printers)
+        if (p.is_object()) p["remove"] = removal_json(p);
+}
+
+static bool names(const json& e, const std::string& row_id, const std::string& ip)
+{
+    return (!row_id.empty() && str_field(e, "id") == row_id) || (!ip.empty() && str_field(e, "ip") == ip);
+}
+
+bool tombstoned(const json& store, const std::string& row_id, const std::string& ip)
+{
+    if (!store.is_object() || !store.contains("removed") || !store["removed"].is_array()) return false;
+    for (const json& e : store["removed"])
+        if (names(e, row_id, ip)) return true;
+    return false;
+}
+
+void add_tombstone(json& store, const std::string& row_id, const std::string& ip, long long now_s)
+{
+    if (!store.is_object()) store = json::object();
+    if (!store.contains("removed") || !store["removed"].is_array()) store["removed"] = json::array();
+    clear_tombstone(store, row_id, ip);
+    json e;
+    e["id"] = row_id;
+    if (!ip.empty()) e["ip"] = ip;
+    e["at"] = now_s;
+    store["removed"].push_back(e);
+    // A long-lived PC that removes printers for years keeps the newest few hundred.
+    while (store["removed"].size() > 256) store["removed"].erase(store["removed"].begin());
+}
+
+bool clear_tombstone(json& store, const std::string& row_id, const std::string& ip)
+{
+    if (!store.is_object() || !store.contains("removed") || !store["removed"].is_array()) return false;
+    json kept    = json::array();
+    bool removed = false;
+    for (const json& e : store["removed"]) {
+        if (names(e, row_id, ip)) { removed = true; continue; }
+        kept.push_back(e);
+    }
+    store["removed"] = kept;
+    return removed;
+}
+
+int filter_tombstoned(json& printers, const json& store)
+{
+    if (!printers.is_array() || !store.is_object() || !store.contains("removed") || !store["removed"].is_array() ||
+        store["removed"].empty())
+        return 0;
+    json kept = json::array();
+    int  gone = 0;
+    for (json& p : printers) {
+        const std::string id = str_field(p, "id");
+        // The address only counts for a LAN Snapmaker: that is what its discovery keys on.
+        const std::string ip = id.compare(0, 3, "sm:") == 0 ? str_field(p, "ip") : std::string();
+        if (!id.empty() && tombstoned(store, id, ip)) { ++gone; continue; }
+        kept.push_back(std::move(p));
+    }
+    printers = std::move(kept);
+    return gone;
+}
+
+json load_tombstones(const std::string& path) { return load_store_file(path); }
+bool save_tombstones(const std::string& path, const json& store) { return save_store_file(path, store); }
+
+json load_store_file(const std::string& path)
+{
+    try {
+        boost::nowide::ifstream in(path, std::ios::binary);
+        if (!in.good()) return json::object();
+        json j;
+        in >> j;
+        return j.is_object() ? j : json::object();
+    } catch (...) {}
+    return json::object();
+}
+
+bool save_store_file(const std::string& path, const json& store)
+{
+    try {
+        const std::string tmp = path + ".tmp";
+        {
+            boost::nowide::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            if (!out.good()) return false;
+            out << store.dump(1);
+        }
+        boost::system::error_code ec;
+        boost::filesystem::rename(tmp, path, ec); // replaces an existing file
+        return !ec;
+    } catch (...) {}
+    return false;
+}
+
+// ---- "Rename" ----
+
+std::string clean_alias(const std::string& name)
+{
+    std::string out;
+    for (unsigned char c : name)
+        if (c >= 0x20 && c != 0x7f) out += (char) c; // control characters go; UTF-8 bytes stay
+    size_t a = 0, b = out.size();
+    while (a < b && out[a] == ' ') ++a;
+    while (b > a && out[b - 1] == ' ') --b;
+    out = out.substr(a, b - a);
+    // At most 64 characters, counted as UTF-8 code points, and never more than 160 bytes.
+    size_t bytes = 0, chars = 0;
+    while (bytes < out.size() && chars < 64) {
+        size_t len = 1;
+        const unsigned char c = (unsigned char) out[bytes];
+        if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
+        if (bytes + len > out.size() || bytes + len > 160) break;
+        bytes += len;
+        ++chars;
+    }
+    out.resize(bytes);
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+bool set_alias(json& store, const std::string& row_id, const std::string& name)
+{
+    if (!valid_printer_id(row_id)) return false;
+    if (!store.is_object()) store = json::object();
+    if (!store.contains("aliases") || !store["aliases"].is_object()) store["aliases"] = json::object();
+    const std::string clean = clean_alias(name);
+    if (clean.empty()) store["aliases"].erase(row_id);
+    else store["aliases"][row_id] = clean;
+    return true;
+}
+
+std::string alias_of(const json& store, const std::string& row_id)
+{
+    if (!store.is_object() || !store.contains("aliases") || !store["aliases"].is_object()) return "";
+    const json& a = store["aliases"];
+    return a.contains(row_id) && a[row_id].is_string() ? a[row_id].get<std::string>() : std::string();
+}
+
+void apply_aliases(json& printers, const json& store)
+{
+    if (!printers.is_array()) return;
+    for (json& p : printers) {
+        if (!p.is_object() || !p.contains("id") || !p["id"].is_string()) continue;
+        const std::string alias = alias_of(store, p["id"].get<std::string>());
+        if (alias.empty()) continue;
+        if (!p.contains("reported_name")) p["reported_name"] = str_field(p, "name");
+        p["name"]        = alias;
+        p["custom_name"] = alias;
+    }
+}
+
+bool parse_rename(const std::string& payload, std::string& id, std::string& name)
+{
+    try {
+        const json j = json::parse(payload);
+        if (!j.is_object() || !j.contains("id") || !j["id"].is_string()) return false;
+        id = j["id"].get<std::string>();
+        if (!valid_printer_id(id)) return false;
+        name = j.contains("name") && j["name"].is_string() ? clean_alias(j["name"].get<std::string>()) : std::string();
+        return true;
+    } catch (...) {}
+    return false;
 }
 
 std::map<std::string, Target> targets_of(const json& printers)

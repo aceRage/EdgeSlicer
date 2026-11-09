@@ -75,5 +75,10 @@ bool counts_for_color_ranges(const PathVertex& v, const Settings& settings)
     return role >= settings.extrusion_roles_visibility.size() || settings.extrusion_roles_visibility[role];
 }
 
+bool counts_for_height_width_ranges(const PathVertex& v, const Settings& settings)
+{
+    return counts_for_color_ranges(v, settings) && !v.is_custom_gcode();
+}
+
 } // namespace libvgcode
 

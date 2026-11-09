@@ -67,12 +67,18 @@ struct SupportParameters {
         this->first_layer_flow = Slic3r::support_material_1st_layer_flow(&object, object_config, float(slicing_params.first_print_layer_height));
         this->support_material_flow = Slic3r::support_material_flow(&object, object_config, float(slicing_params.layer_height));
         this->support_material_interface_flow = Slic3r::support_material_interface_flow(&object, object_config, float(slicing_params.layer_height));
+        // The width option support_material_flow() / support_material_interface_flow() resolve, kept for the
+        // *_for_nozzle() flows below (mixed nozzle diameters, AdaptiveLayerMerge step 4).
+        this->support_base_width = (object_config.support_line_width.value > 0) ? object_config.support_line_width : object_config.line_width;
     	this->raft_interface_flow                = support_material_interface_flow;
 
         this->ironing = object_config.support_ironing;
         this->ironing_flow = support_material_interface_flow.with_height(support_material_interface_flow.height() * 0.01 * object_config.support_ironing_flow.value);
         this->ironing_spacing = float(std::max(IRONING_SPACING_MIN, object_config.support_ironing_spacing.value));
         this->ironing_pattern = object_config.support_ironing_pattern;
+        // Bambu Studio 2.9.1 (SupportParameters.hpp:185, 187).
+        this->ironing_inset     = float(std::max(0., object_config.support_ironing_inset.value));
+        this->ironing_direction = float(object_config.support_ironing_direction.value * M_PI / 180.);
 
         // Calculate a minimum support layer height as a minimum over all extruders, but not smaller than 10um.
         this->support_layer_height_min = scaled<coord_t>(0.01);
@@ -228,6 +234,10 @@ struct SupportParameters {
         // top contact layer (top interface layers >= woven layers + 1). Otherwise 0, and nothing
         // below reads any of the other interlock fields.
         this->interlock_layers = 0;
+        // The GUI no longer greys the interlock out under matching (it asks which one to keep), but a
+        // project or CLI config can still carry both: matching wins and the weave is left off.
+        if (object_config.support_interface_interlock.value && object_config.support_filament_matching.value)
+            BOOST_LOG_TRIVIAL(info) << "Support interface interlock ignored: Support Filament Matching is on and wins.";
         if (object_config.support_interface_interlock.value &&
             object_config.support_interface_filament.value != 0 &&
             object_config.support_interface_filament.value != object_config.support_filament.value &&
@@ -294,6 +304,17 @@ struct SupportParameters {
 	Flow 					support_material_bottom_interface_flow;
 	// Flow at raft interface & contact layers.
 	Flow    				raft_interface_flow;
+	// Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 SupportParameters.hpp:342-356):
+	// the base / interface flow for the nozzle the support merge plan pinned a slab to, at the given height. The
+	// width option is the one support_material_flow() resolves, so for a nozzle equal to the support filament's the
+	// result is support_material_flow.with_height(height).
+	ConfigOptionFloatOrPercent support_base_width;
+	Flow support_material_flow_for_nozzle(double nozzle_diameter, float layer_height) const {
+		return Flow::new_from_config_width(frSupportMaterial, support_base_width, float(nozzle_diameter), layer_height);
+	}
+	Flow support_material_interface_flow_for_nozzle(double nozzle_diameter, float layer_height) const {
+		return Flow::new_from_config_width(frSupportMaterialInterface, support_base_width, float(nozzle_diameter), layer_height);
+	}
     coordf_t support_extrusion_width;
 	// Is merging of regions allowed? Could the interface & base support regions be printed with the same extruder?
 	bool 					can_merge_support_regions;
@@ -373,6 +394,10 @@ struct SupportParameters {
     Flow          ironing_flow; // Flow at the interface ironing.
     InfillPattern ironing_pattern;
     float         ironing_spacing;
+    // Bambu Studio 2.9.1: the ironed area is shrunk by ironing_inset (mm); ironing_direction (radians)
+    // turns the ironing lines away from the interface lines.
+    float         ironing_inset     = 0.f;
+    float         ironing_direction = 0.f;
 };
 
 } // namespace Slic3r

@@ -38,10 +38,14 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_process_gcode.cpp
 	test_tool_slots_gcode.cpp
 	test_nozzle_widths_gcode.cpp
+	test_adaptive_layer_merge_live.cpp
+	test_adaptive_layer_merge_support.cpp
 	test_nozzle_override_gcode.cpp
 	test_nozzle_tool_process_gcode.cpp
 	test_nozzle_rack_slots_gcode.cpp
+	test_nozzle_layer_height_gcode.cpp
 	test_mixed_width_tower.cpp
+	test_bs29_keys.cpp
 	test_printobject.cpp
 	test_skirt_brim.cpp
 	test_support_material.cpp

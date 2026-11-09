@@ -111,6 +111,26 @@ public:
     }
     int    show_spiral_mode_settings_dialog(bool is_object_config = false);
 
+    // EdgeSlicer: called when the user switches the support interface interlock on or changes its
+    // woven layers. When the top interface layers are too few for the weave, asks once to raise
+    // them to 1 + woven layers (Yes) or to turn the interlock off (No), so it cannot ask again for
+    // the same values. Returns true when the config was changed.
+    bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
+
+    // EdgeSlicer: the interlock and support filament matching cannot run together. Called when the
+    // user changes one of them (changed_key); when both are now on, asks once whether to keep the
+    // one just turned on (Yes: the other goes off) or not (No: it is reverted). Either answer leaves
+    // only one on, so it cannot ask again. Returns true when the config was changed.
+    bool    check_support_interlock_matching(DynamicPrintConfig* config, const std::string& changed_key);
+
+    // EdgeSlicer: called when the user changes a filament selector (changed_key). When the support
+    // interface now uses a filament other than the print's and the top Z distance is above 0,
+    // offers once to set it to 0. A No is remembered for that filament pair for the session
+    // (cleared by clear_session_prompts() when a project is loaded or created). Returns true when
+    // the config was changed.
+    bool    offer_support_top_z_zero(DynamicPrintConfig* config, const std::string& changed_key);
+    static void clear_session_prompts();
+
 private:
     bool get_temperature_range(DynamicPrintConfig *config, int &range_low, int &range_high);
 };

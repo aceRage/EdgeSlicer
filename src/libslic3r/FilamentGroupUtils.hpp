@@ -34,6 +34,7 @@ namespace Slic3r
             std::string type;
             bool is_support;
             FilamentUsageType usage_type;
+            float diameter{0.f}; // BBS 2.9.1: the filament diameter (mm); 0 = unknown
         };
 
         struct MachineFilamentInfo: public FilamentInfo {
@@ -71,6 +72,17 @@ namespace Slic3r
         std::vector<int> calc_max_group_size(const std::vector<std::map<int, int>>& ams_counts,bool ignore_ext_filament);
 
         std::vector<std::vector<MachineFilamentInfo>> build_machine_filaments(const std::vector<std::vector<DynamicPrintConfig>>& filament_configs, const std::vector<std::map<int, int>>& ams_counts, bool ignore_ext_filament);
+
+        // Per-extruder projection of an AMS inventory payload: only the keys the grouping consumes
+        // (colour, type, tray_name, filament_is_support, filament_id); slots lacking colour, type or
+        // tray_name are dropped. At least two buckets, one per extruder of the payload.
+        std::vector<std::vector<MachineFilamentInfo>> build_full_machine_filaments(const std::vector<std::vector<DynamicPrintConfig>>& filament_configs);
+
+        // Compares two AMS inventory payloads by that projection, so volatile keys (remaining amount,
+        // temperatures, filament_changed) never count as a change. A payload carrying no tray configs at
+        // all is "unknown" (AMS not connected) and reports no change.
+        bool machine_filaments_changed(const std::vector<std::vector<DynamicPrintConfig>>& old_configs,
+                                       const std::vector<std::vector<DynamicPrintConfig>>& new_configs);
 
         bool collect_unprintable_limits(const std::vector<std::set<int>>& physical_unprintables, const std::vector<std::set<int>>& geometric_unprintables, std::vector<std::set<int>>& unprintable_limits);
 

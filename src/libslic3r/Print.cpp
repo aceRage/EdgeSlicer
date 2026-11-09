@@ -680,10 +680,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Only the cost statistics read it (machine time cost); not a slicing input.
         "time_cost",
         "filament_notes",
+        // BBS 2.9.1: read only by custom G-code (H3C start / change templates).
+        "fins_extrude_safe_temp",
         "outer_wall_acceleration",
         "inner_wall_acceleration",
         "initial_layer_acceleration",
         "first_layer_travel_acceleration",
+        "initial_layer_travel_acceleration",
         "first_layer_travel_jerk",
         "top_surface_acceleration",
         "bridge_acceleration",
@@ -760,6 +763,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "seam_gap",
         "role_based_wipe_speed",
         "wipe_speed",
+        // Bambu Studio 2.9.1: the wipe before a tool change (Wipe::wipe).
+        "prime_tower_wipe_speed",
+        "prime_tower_wipe_distance",
         "use_relative_e_distances",
         "accel_to_decel_enable",
         "accel_to_decel_factor",
@@ -871,6 +877,19 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "nozzle_diameter"
             || opt_key == "filament_shrink"
             || opt_key == "filament_shrinkage_compensation_z"
+            // Bambu Studio 2.9.1 auto circle compensation coefficients (Print.cpp:273-284).
+            || opt_key == "circle_compensation_speed"
+            || opt_key == "counter_coef_1"
+            || opt_key == "counter_coef_2"
+            || opt_key == "counter_coef_3"
+            || opt_key == "hole_coef_1"
+            || opt_key == "hole_coef_2"
+            || opt_key == "hole_coef_3"
+            || opt_key == "counter_limit_min"
+            || opt_key == "counter_limit_max"
+            || opt_key == "hole_limit_min"
+            || opt_key == "hole_limit_max"
+            || opt_key == "diameter_limit"
             || opt_key == "resolution"
             || opt_key == "precise_z_height"
             || opt_key == "dithering_z_step_size"
@@ -960,6 +979,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
+            || opt_key == "prime_tower_acceleration"
+            || opt_key == "prime_tower_line_width"
             || opt_key == "wipe_tower_wall_type"
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
@@ -1025,6 +1046,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
                opt_key == "initial_layer_line_width"
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
             || opt_key == "nozzle_line_width" // per-nozzle process P6
+            || opt_key == "nozzle_layer_height" // H3C fix: a chosen process's layer height sizes the coarse nozzles' slabs
             || opt_key == "min_layer_height"
             || opt_key == "max_layer_height"
             //|| opt_key == "resolution"
@@ -1551,9 +1573,12 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
             });
 
-        auto by_object_index = [&](size_t l, size_t r) {
-            return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
-        };
+        // Every instance of an object shares its object_index, so order by place in the list instead,
+        // which tells instances apart and keeps copies of one object in their list order.
+        std::vector<size_t> list_position(n);
+        for (size_t k = 0; k < n; ++k)
+            list_position[fallback_order[k]] = k;
+        auto by_list_position = [&list_position](size_t l, size_t r) { return list_position[l] < list_position[r]; };
 
         // Mirrors the vertical-clearance check below: only the part of the potentially-too-tall
         // instance that reaches above the rod can be hit, so that Y extent (shrunk by the same
@@ -1604,13 +1629,13 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
             }
 
             if (!infeasible) {
-                // Kahn's algorithm; ties are broken by original object_index so the result is
+                // Kahn's algorithm; ties are broken by place in the list so the result is
                 // the minimal perturbation of the incoming order, not an arbitrary one.
                 std::vector<size_t> ready;
                 for (size_t i = 0; i < n; ++i)
                     if (i != last_idx && indegree[i] == 0)
                         ready.push_back(i);
-                std::sort(ready.begin(), ready.end(), by_object_index);
+                std::sort(ready.begin(), ready.end(), by_list_position);
 
                 std::vector<size_t> order;
                 order.reserve(n);
@@ -1620,7 +1645,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     order.push_back(cur);
                     for (size_t nxt : adj[cur]) {
                         if (--indegree[nxt] == 0) {
-                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_object_index);
+                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_list_position);
                             ready.insert(pos, nxt);
                         }
                     }
@@ -2699,6 +2724,25 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject *object : m_objects)
             if (object->object_extruders().size() > 1)
                 return {L("The spiral vase mode does not work when an object contains more than one materials."), object, "spiral_mode"};
+        // Orca #17240: enabling spiral vase mode in the GUI resets these keys in the global config only, so an
+        // object, part or height range can still override them. Layers with infill or more than one wall are
+        // printed without spiralizing.
+        for (const PrintObject *object : m_objects) {
+            for (size_t region_id = 0; region_id < object->num_printing_regions(); ++region_id) {
+                const PrintRegionConfig &cfg = object->printing_region(region_id).config();
+                const char *opt_key = cfg.sparse_infill_density.value > 0. ? "sparse_infill_density" :
+                                      cfg.wall_loops.value > 1             ? "wall_loops" :
+                                      cfg.top_shell_layers.value > 0       ? "top_shell_layers" : nullptr;
+                if (opt_key != nullptr) {
+                    // TRN %1% is the object name.
+                    warn(Slic3r::format(_u8L("Spiral vase mode needs no sparse infill, one wall loop and no top shell layers, "
+                                             "but the object %1% uses other values, so it will not print as a continuous spiral."),
+                                        object->model_object()->name),
+                         opt_key, object);
+                    break;
+                }
+            }
+        }
     }
 
     // Cache of layer height profiles for checking:
@@ -3005,7 +3049,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // knows which of the two to change.
         // Per-nozzle process P8 (owner design E): on a printer with several nozzles a width error names the tool and its size,
         // and its jump link ("key@T2") opens that tool's process.
-        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2;
+        // H3C: a single extruder whose rack holds several sizes names its size tools ("T1 0.8") too.
+        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2 || supports_nozzle_processes(m_config);
         // P9: a filament on a rack slot names the slot ("Right slot 3") and jumps to it ("key@T2.3").
         auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_filament_tool_name(m_config, std::max(filament_id, 1u)); };
         auto tool_opt_key = [this, several_nozzles](const char *opt_key, unsigned int filament_id) {
@@ -5749,6 +5794,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     auto is_print_object_the_same = [this](const PrintObject* object1, const PrintObject* object2) -> bool{
         if (object1->trafo().matrix() != object2->trafo().matrix())
             return false;
+        // Layers are stored relative to center_offset(), which comes from the first instance of each ModelObject, so it
+        // can differ between objects with the same trafo. Sharing the layers would then print the object in the wrong place.
+        if (object1->center_offset() != object2->center_offset())
+            return false;
         const ModelObject* model_obj1 = object1->model_object();
         const ModelObject* model_obj2 = object2->model_object();
         if (model_obj1->volumes.size() != model_obj2->volumes.size())
@@ -7076,6 +7125,10 @@ void Print::_make_wipe_tower()
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
         // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
         wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
+        // Bambu Studio 2.9.1 prime_tower_acceleration: travels inside the tower go back to the travel
+        // acceleration (an object setting in this fork, read like the G-code writer does).
+        wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
+                                                        unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();

@@ -3,6 +3,7 @@
 
 #include "GUI_App.hpp"
 #include "RemoteHub.hpp" // hub_dir
+#include "slic3r/Utils/PrintersMonitor.hpp" // the "Remove printer" tombstones
 #include "libslic3r/AppConfig.hpp"
 #include "slic3r/Utils/Bonjour.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -334,6 +335,13 @@ static void store_device(const Device& d)
 {
     if (d.ip.empty())
         return;
+    // Removed on the Printers tab ("Remove printer"): discovery, the Device tab's saved devices and
+    // the camera list must not bring it back. Adding it by hand clears the tombstone (add()).
+    if (d.added_by != "manual") {
+        const json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        if (PrintersMonitor::tombstoned(removed, "sm:" + d.id, d.ip))
+            return;
+    }
     std::lock_guard<std::mutex> lock(s_store_mutex);
     json                        store = load_store();
     const std::vector<Device>   raw   = stored_devices(store);
@@ -440,6 +448,12 @@ bool add(const std::string& ip_in, int port, Device& out, std::string& error)
         return false;
     }
     out.added_by = "manual";
+    // Added again by hand: whatever "Remove printer" said about it no longer holds.
+    {
+        json removed = PrintersMonitor::load_tombstones(RemoteHub::removed_printers_path());
+        if (PrintersMonitor::clear_tombstone(removed, "sm:" + out.id, out.ip))
+            PrintersMonitor::save_tombstones(RemoteHub::removed_printers_path(), removed);
+    }
     store_device(out);
     return true;
 }

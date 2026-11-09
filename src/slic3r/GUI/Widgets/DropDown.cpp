@@ -1,5 +1,6 @@
 #include "DropDown.hpp"
 #include "Label.hpp"
+#include "../I18N.hpp"
 
 #include <algorithm>
 
@@ -70,6 +71,9 @@ void DropDown::Create(wxWindow *     parent,
     if ((style & DD_NO_CHECK_ICON) == 0)
         check_bitmap = ScalableBitmap(this, "checked", 16);
     text_off = style & DD_NO_TEXT;
+    // On macOS / GTK the popup can own the keyboard focus; the ComboBox forwards the same keys when it
+    // keeps focus (always the case on Windows).
+    Bind(wxEVT_CHAR, &DropDown::charEvent, this);
 
     // BBS set default font
     SetFont(Label::Body_14);
@@ -85,6 +89,11 @@ void DropDown::Invalidate(bool clear)
     if (clear) {
         selection = hover_item = -1;
         offset = wxPoint();
+    }
+    if (!filter_text.empty()) { // the item list changed under an active filter: start over
+        filter_text.clear();
+        visible_items.clear();
+        kb_hover = false;
     }
     assert(selection < (int) texts.size());
     need_sync = true;
@@ -220,7 +229,7 @@ std::pair<int, int> DropDown::actionColumn() const
     if (actionIconWidth <= 0)
         return {0, 0};
     int right = rowSize.x;
-    if (rowSize.y * int(texts.size()) > GetSize().y) // position bar
+    if (rowSize.y * rowCount() > GetSize().y - headerH()) // position bar
         right -= 6;
     return {right - actionIconWidth - FromDIP(16), right};
 }
@@ -246,23 +255,30 @@ void DropDown::render(wxDC &dc)
     else
         dc.DrawRoundedRectangle(0, 0, size.x, size.y, radius);
 
+    const int  header_h    = headerH();
+    const int  top_y       = offset.y + header_h;
+    const int  row_count   = rowCount();
+    const bool hover_shown = (states & StateColor::Hovered) || kb_hover;
+    const int  hover_row   = rowOf(hover_item);
+    const int  sel_row     = rowOf(selection);
+
     // draw hover rectangle
-    wxRect rcContent = {{0, offset.y}, rowSize};
-    if (hover_item >= 0 && (states & StateColor::Hovered) && !IsItemDisabled(hover_item)) {
-        rcContent.y += rowSize.y * hover_item;
+    wxRect rcContent = {{0, top_y}, rowSize};
+    if (hover_row >= 0 && hover_shown && !IsItemDisabled(hover_item)) {
+        rcContent.y += rowSize.y * hover_row;
         if (rcContent.GetBottom() > 0 && rcContent.y < size.y) {
             if (selection == hover_item)
                 dc.SetBrush(wxBrush(selector_background_color.colorForStates(states | StateColor::Checked)));
-            dc.SetPen(wxPen(selector_border_color.colorForStates(states)));
+            dc.SetPen(wxPen(selector_border_color.colorForStates(states | StateColor::Hovered)));
             rcContent.Deflate(4, 1);
             dc.DrawRectangle(rcContent);
             rcContent.Inflate(4, 1);
         }
-        rcContent.y = offset.y;
+        rcContent.y = top_y;
     }
     // draw checked rectangle
-    if (selection >= 0 && (selection != hover_item || (states & StateColor::Hovered) == 0)) {
-        rcContent.y += rowSize.y * selection;
+    if (sel_row >= 0 && (selection != hover_item || !hover_shown)) {
+        rcContent.y += rowSize.y * sel_row;
         if (rcContent.GetBottom() > 0 && rcContent.y < size.y) {
             dc.SetBrush(wxBrush(selector_background_color.colorForStates(states | StateColor::Checked)));
             dc.SetPen(wxPen(selector_background_color.colorForStates(states)));
@@ -270,7 +286,7 @@ void DropDown::render(wxDC &dc)
             dc.DrawRectangle(rcContent);
             rcContent.Inflate(4, 1);
         }
-        rcContent.y = offset.y;
+        rcContent.y = top_y;
     }
     dc.SetBrush(*wxTRANSPARENT_BRUSH);
     {
@@ -279,10 +295,11 @@ void DropDown::render(wxDC &dc)
     }
 
     // draw position bar
-    if (rowSize.y * texts.size() > size.y) {
-        int    height = rowSize.y * texts.size();
-        wxRect rect = {size.x - 6, -offset.y * size.y / height, 4,
-                       size.y * size.y / height};
+    const int viewport_h = size.y - header_h;
+    if (row_count > 0 && rowSize.y * row_count > viewport_h) {
+        int    height = rowSize.y * row_count;
+        wxRect rect = {size.x - 6, header_h - offset.y * viewport_h / height, 4,
+                       viewport_h * viewport_h / height};
         dc.SetPen(wxPen(border_color.defaultColor()));
         dc.SetBrush(wxBrush(*wxLIGHT_GREY));
         dc.DrawRoundedRectangle(rect, 2);
@@ -294,10 +311,10 @@ void DropDown::render(wxDC &dc)
     rcContent.width -= 5;
     if (check_bitmap.bmp().IsOk()) {
         auto szBmp = check_bitmap.GetBmpSize();
-        if (selection >= 0) {
+        if (sel_row >= 0) {
             wxPoint pt = rcContent.GetLeftTop();
             pt.y += (rcContent.height - szBmp.y) / 2;
-            pt.y += rowSize.y * selection;
+            pt.y += rowSize.y * sel_row;
             if (pt.y + szBmp.y > 0 && pt.y < size.y)
                 dc.DrawBitmap(check_bitmap.bmp(), pt);
         }
@@ -312,7 +329,9 @@ void DropDown::render(wxDC &dc)
     // Header rows (favourites / all filaments) in a mid grey that reads on both themes.
     const wxColour disabled_text(144, 144, 144);
     dc.SetTextForeground(normal_text);
-    for (int i = 0; i < texts.size(); ++i) {
+    for (int row = 0; row < row_count; ++row) {
+        const int i = itemAt(row);
+        if (i < 0) break;
         if (rcContent.GetBottom() < 0) {
             rcContent.y += rowSize.y;
             continue;
@@ -365,6 +384,31 @@ void DropDown::render(wxDC &dc)
         }
         rcContent.y += rowSize.y;
     }
+
+    // Filter strip on top of the rows (drawn last so scrolled rows slide under it).
+    if (header_h > 0) {
+        dc.SetFont(GetFont());
+        if (row_count == 0) {
+            dc.SetTextForeground(disabled_text);
+            dc.DrawText(_L("No matches"), wxPoint(FromDIP(12), header_h + (rowSize.y - textSize.y) / 2));
+        }
+        dc.SetPen(wxPen(border_color.colorForStates(states)));
+        dc.SetBrush(wxBrush(StateColor::darkModeColorFor(GetBackgroundColour())));
+        dc.DrawRectangle(0, 0, size.x, header_h);
+        const bool has_text = !filter_text.empty();
+        dc.SetTextForeground(has_text ? normal_text : disabled_text);
+        wxString label = has_text ? filter_text : _L("Type to filter");
+        const int max_w = size.x - FromDIP(20);
+        if (dc.GetTextExtent(label).x > max_w)
+            label = wxControl::Ellipsize(label, dc, has_text ? wxELLIPSIZE_START : wxELLIPSIZE_END, max_w);
+        const wxSize ext = dc.GetTextExtent(label);
+        dc.DrawText(label, wxPoint(FromDIP(10), (header_h - ext.y) / 2));
+        if (has_text) { // caret
+            dc.SetPen(wxPen(normal_text));
+            const int cx = FromDIP(10) + ext.x + 1;
+            dc.DrawLine(cx, (header_h - ext.y) / 2, cx, (header_h + ext.y) / 2);
+        }
+    }
 }
 
 void DropDown::messureSize()
@@ -416,8 +460,7 @@ void DropDown::messureSize()
             szContent = rowSize;
         }
     }
-    szContent.y *= std::min((size_t)15, texts.size());
-    szContent.y += texts.size() > 15 ? rowSize.y / 2 : 0;
+    szContent.y = popupHeight();
     wxWindow::SetSize(szContent);
 #ifdef __WXGTK__
     // Gtk has a wrapper window for popup widget
@@ -433,6 +476,7 @@ void DropDown::messureSize()
 
 void DropDown::autoPosition()
 {
+    resetFilterState();
     messureSize();
     wxPoint pos = GetParent()->ClientToScreen(wxPoint(0, -6));
     wxPoint old = GetPosition();
@@ -440,8 +484,7 @@ void DropDown::autoPosition()
     Position(pos, {0, GetParent()->GetSize().y + 12});
     if (old != GetPosition()) {
         size = rowSize;
-        size.y *= std::min((size_t)15, texts.size());
-        size.y += texts.size() > 15 ? rowSize.y / 2 : 0;
+        size.y = popupHeight();
 #ifdef __WXGTK__
         if (size.x < 1) size.x = 1;
         if (size.y < 1) size.y = 1;
@@ -464,8 +507,8 @@ void DropDown::autoPosition()
 #endif
             wxWindow::SetSize(size);
             if (selection >= 0) {
-                if (offset.y + rowSize.y * (selection + 1) > size.y)
-                    offset.y = size.y - rowSize.y * (selection + 1);
+                if (offset.y + rowSize.y * (selection + 1) > size.y - headerH())
+                    offset.y = size.y - headerH() - rowSize.y * (selection + 1);
                 else if (offset.y + rowSize.y * selection < 0)
                     offset.y = -rowSize.y * selection;
             }
@@ -564,14 +607,19 @@ void DropDown::mouseCaptureLost(wxMouseCaptureLostEvent &event)
 void DropDown::mouseMove(wxMouseEvent &event)
 {
     wxPoint pt  = event.GetPosition();
+    if (filter_enabled && event.GetEventType() == wxEVT_MOTION && !pressedDown) {
+        // The list resizes while typing; Windows then reports a motion event for a mouse that did not
+        // move, which would steal the keyboard highlight. Only a real move counts.
+        const wxPoint screen = ClientToScreen(pt);
+        if (screen == last_motion_screen)
+            return;
+        last_motion_screen = screen;
+    }
+    kb_hover = false;
     if (pressedDown) {
         wxPoint pt2 = offset + pt - dragStart;
-        wxSize  size = GetSize();
         dragStart    = pt;
-        if (pt2.y > 0)
-            pt2.y = 0;
-        else if (pt2.y + rowSize.y * int(texts.size()) < size.y)
-            pt2.y = size.y - rowSize.y * int(texts.size());
+        clampOffsetY(pt2.y);
         if (pt2.y != offset.y) {
             offset = pt2;
             hover_item = -1; // moved
@@ -580,8 +628,7 @@ void DropDown::mouseMove(wxMouseEvent &event)
         }
     }
     if (!pressedDown || hover_item >= 0) {
-        int hover = (pt.y - offset.y) / rowSize.y;
-        if (hover >= (int) texts.size()) hover = -1;
+        int hover = itemAtY(pt.y);
         if (hover == hover_item) return;
         hover_item = hover;
         if (hover >= 0) SetToolTip(tips[hover]);
@@ -592,19 +639,14 @@ void DropDown::mouseMove(wxMouseEvent &event)
 void DropDown::mouseWheelMoved(wxMouseEvent &event)
 {
     auto delta = event.GetWheelRotation();
-    wxSize  size  = GetSize();
     wxPoint pt2   = offset + wxPoint{0, delta};
-    if (pt2.y > 0)
-        pt2.y = 0;
-    else if (pt2.y + rowSize.y * int(texts.size()) < size.y)
-        pt2.y = size.y - rowSize.y * int(texts.size());
+    clampOffsetY(pt2.y);
     if (pt2.y != offset.y) {
         offset = pt2;
     } else {
         return;
     }
-    int hover = (event.GetPosition().y - offset.y) / rowSize.y;
-    if (hover >= (int) texts.size()) hover = -1;
+    int hover = itemAtY(event.GetPosition().y);
     if (hover != hover_item) {
         hover_item = hover;
         if (hover >= 0) SetToolTip(tips[hover]);
@@ -637,6 +679,231 @@ void DropDown::OnDismiss()
 {
     dismissTime = boost::posix_time::microsec_clock::universal_time();
     hover_item  = -1;
+    kb_hover    = false;
+    last_motion_screen = wxPoint(-1, -1);
+    resetFilterState();
     wxCommandEvent e(EVT_DISMISS);
     GetEventHandler()->ProcessEvent(e);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Type-to-filter
+// ---------------------------------------------------------------------------------------------
+
+void DropDown::EnableTypeToFilter(bool on)
+{
+    if (filter_enabled == on)
+        return;
+    filter_enabled = on;
+    resetFilterState();
+    need_sync = true;
+}
+
+int DropDown::headerH() const { return filter_enabled ? FromDIP(28) : 0; }
+
+int DropDown::itemAt(int row) const
+{
+    if (row < 0 || row >= rowCount())
+        return -1;
+    return filter_text.empty() ? row : visible_items[row];
+}
+
+int DropDown::rowOf(int item) const
+{
+    if (item < 0)
+        return -1;
+    if (filter_text.empty())
+        return item < int(texts.size()) ? item : -1;
+    auto it = std::find(visible_items.begin(), visible_items.end(), item);
+    return it == visible_items.end() ? -1 : int(std::distance(visible_items.begin(), it));
+}
+
+// The item under a y coordinate of the popup, -1 for the filter strip or empty space.
+int DropDown::itemAtY(int y) const
+{
+    const int rel = y - offset.y - headerH();
+    if (rel < 0 || rowSize.y <= 0 || y < headerH())
+        return -1;
+    return itemAt(rel / rowSize.y);
+}
+
+int DropDown::popupHeight() const
+{
+    const size_t rows = filter_text.empty() ? texts.size() : std::max<size_t>(1, visible_items.size());
+    int h = rowSize.y * int(std::min<size_t>(15, rows));
+    if (rows > 15)
+        h += rowSize.y / 2;
+    return h + headerH();
+}
+
+void DropDown::clampOffsetY(int &y) const
+{
+    const int viewport = GetSize().y - headerH();
+    const int total    = rowSize.y * rowCount();
+    if (y > 0 || total <= viewport)
+        y = 0;
+    else if (y + total < viewport)
+        y = viewport - total;
+}
+
+// Forget the filter (the list is closed or being reopened). The next open re-measures, because the
+// window may still have the shrunken size of the last filtered view.
+void DropDown::resetFilterState()
+{
+    if (!filter_enabled)
+        return;
+    filter_text.clear();
+    visible_items.clear();
+    kb_hover = false;
+    offset   = wxPoint();
+    need_sync = true;
+}
+
+void DropDown::applyFilter()
+{
+    visible_items.clear();
+    hover_item = -1;
+    kb_hover   = false;
+    if (!filter_text.empty()) {
+        const wxString needle = filter_text.Lower();
+        std::vector<wxString> seen; // the same preset listed under Favorites and again below: show it once
+        for (int i = 0; i < int(texts.size()); ++i) {
+            if (IsItemDisabled(i) || !texts[i].Lower().Contains(needle))
+                continue;
+            auto dup = std::find(seen.begin(), seen.end(), texts[i]);
+            if (dup != seen.end()) {
+                if (i == selection) // keep the row that carries the check mark
+                    visible_items[std::distance(seen.begin(), dup)] = i;
+                continue;
+            }
+            seen.push_back(texts[i]);
+            visible_items.push_back(i);
+        }
+        if (!visible_items.empty()) {
+            hover_item = visible_items.front();
+            kb_hover   = true;
+            SetToolTip(tips[hover_item]);
+        }
+    }
+    offset = wxPoint();
+    relayoutForFilter();
+}
+
+// Resize and re-position the open popup for the current number of rows.
+void DropDown::relayoutForFilter()
+{
+    if (!IsShown() || !GetParent()) {
+        Refresh();
+        return;
+    }
+    wxSize size(rowSize.x, popupHeight());
+    wxWindow::SetSize(size);
+    const wxPoint pos = GetParent()->ClientToScreen(wxPoint(0, -6));
+    Position(pos, {0, GetParent()->GetSize().y + 12});
+    if (GetPosition().y > pos.y) { // below the box: keep it on the screen
+        auto drect = wxDisplay(GetParent()).GetGeometry();
+        if (GetPosition().y + size.y + 10 > drect.GetBottom()) {
+            size.y = drect.GetBottom() - GetPosition().y - 10;
+            if (size.y < headerH() + rowSize.y)
+                size.y = headerH() + rowSize.y;
+            wxWindow::SetSize(size);
+        }
+    }
+    Refresh();
+}
+
+void DropDown::moveHighlight(int step)
+{
+    const int rows = rowCount();
+    if (rows <= 0)
+        return;
+    int row = rowOf(hover_item);
+    if (row < 0)
+        row = rowOf(selection);
+    if (row < 0)
+        row = step > 0 ? -1 : rows;
+    int n = row + step;
+    while (n >= 0 && n < rows && IsItemDisabled(itemAt(n)))
+        n += step;
+    if (n < 0 || n >= rows)
+        return;
+    hover_item = itemAt(n);
+    kb_hover   = true;
+    // scroll the row into view
+    const int viewport = GetSize().y - headerH();
+    const int row_top  = n * rowSize.y;
+    if (row_top + offset.y < 0)
+        offset.y = -row_top;
+    else if (row_top + rowSize.y + offset.y > viewport)
+        offset.y = viewport - row_top - rowSize.y;
+    SetToolTip(tips[hover_item]);
+    paintNow();
+}
+
+bool DropDown::IsPrintableKey(const wxKeyEvent &event)
+{
+    // Ctrl / Alt / Cmd shortcuts are not text (AltGr arrives as Ctrl+Alt on Windows and is text).
+    if (event.MetaDown() || (event.ControlDown() && !event.AltDown()) || (event.AltDown() && !event.ControlDown()))
+        return false;
+    const wxChar c = event.GetUnicodeKey();
+    return c >= 32 && c != 127;
+}
+
+bool DropDown::HandlePrintableKey(wxKeyEvent &event)
+{
+    if (!filter_enabled || !IsShown() || !IsPrintableKey(event))
+        return false;
+    const wxChar c = event.GetUnicodeKey();
+    if (c == ' ' && filter_text.empty())
+        return false; // Space on an empty filter keeps its old meaning (close)
+    if (filter_text.length() < 64) {
+        filter_text += c;
+        applyFilter();
+    }
+    return true;
+}
+
+bool DropDown::HandleSpecialKey(wxKeyEvent &event)
+{
+    if (!filter_enabled || !IsShown())
+        return false;
+    switch (event.GetKeyCode()) {
+    case WXK_ESCAPE:
+        if (filter_text.empty()) {
+            DismissAndNotify();
+        } else {
+            filter_text.clear();
+            applyFilter();
+        }
+        return true;
+    case WXK_BACK:
+        if (!filter_text.empty()) {
+            filter_text.RemoveLast();
+            applyFilter();
+        }
+        return true;
+    case WXK_UP:
+        moveHighlight(-1);
+        return true;
+    case WXK_DOWN:
+        moveHighlight(1);
+        return true;
+    case WXK_RETURN:
+    case WXK_NUMPAD_ENTER:
+        if (hover_item >= 0 && !IsItemDisabled(hover_item) && (kb_hover || !filter_text.empty())) {
+            sendDropDownEvent();
+            DismissAndNotify();
+            return true;
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
+void DropDown::charEvent(wxKeyEvent &event)
+{
+    if (HandleSpecialKey(event) || HandlePrintableKey(event))
+        return;
+    event.Skip();
 }

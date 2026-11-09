@@ -83,6 +83,7 @@ void ExtrusionCalibration::create()
     m_comboBox_filament = new wxComboBox(m_step_1_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, EXTRUSION_CALIBRATION_BED_COMBOX, 0, nullptr, wxCB_READONLY);
 #else
     m_comboBox_filament = new ComboBox(m_step_1_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, EXTRUSION_CALIBRATION_BED_COMBOX, 0, nullptr, wxCB_READONLY);
+    m_comboBox_filament->EnableTypeToFilter();
 #endif
     select_sizer->Add(m_comboBox_filament, 0, wxEXPAND);
     select_sizer->Add(0, EXTRUSION_CALIBRATION_WIDGET_GAP, 0, 0);

@@ -1,0 +1,11 @@
+{
+	"type": "process",
+	"name": "fdm_process_n_xsmart5_common",
+	"inherits": "fdm_process_n_common",
+	"from": "system",
+	"instantiation": "false",
+	"accel_to_decel_enable": "0",
+	"small_perimeter_threshold": [
+		"0"
+	]
+}

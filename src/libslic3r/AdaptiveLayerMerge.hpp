@@ -2,10 +2,10 @@
 #define slic3r_AdaptiveLayerMerge_hpp_
 
 // Mixed-layer-height band planner, ported from BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.{hpp,cpp}
-// (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Nothing in the slicer
-// calls the planner yet, so G-code is unchanged. The extrusion half (combine_adaptive_infill(), the group-top
-// perimeter pass, and the G-code / ToolOrdering / SeamPlacer / Brim readers of LayerRegion::adaptive_merge_patches)
-// is the follow-up PR.
+// (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Since step 3 the planner
+// runs from PrintObject::make_perimeters() on plates whose used filaments print through more than one nozzle
+// diameter; Layer::make_perimeters() and PrintObject::combine_adaptive_infill() consume the patches. Since step 4
+// the supports follow the same ladders (Support/SupportMergePlan.cpp). The Bambu 3MF keys (step 5) still ignore them.
 
 #include "ExPolygon.hpp"
 
@@ -126,6 +126,10 @@ bool has_multiple_used_nozzle_diameters(const PrintConfig &print_config, const s
 // falls outside what the nozzle can actually extrude. Returns 1 when the nozzle has to print every
 // layer on its own.
 size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height);
+// The same, walked into `range` instead of the plain diameter window: the live planner passes the per-nozzle clamp
+// (adaptive_layer_height_range_for_nozzle) so a band never exceeds the configured min/max layer height of its nozzle.
+size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diameter, double base_layer_height,
+                                const AdaptiveLayerHeightRange &range);
 
 // Split the complete layer stack into bands of band_size layers. The first band starts at the object base
 // and is extruded on its top layer with the complete merged height, so it rests on the bed or on the
@@ -142,6 +146,16 @@ size_t adaptive_layer_band_size(double nozzle_diameter, double min_nozzle_diamet
 // as 5 + 3 (a full band from the base, then the short tail as its own band; Bambu's upstream comment says 4 + 4,
 // which the code does not do). Returns an empty plan when band_size is 1, i.e. when this nozzle merges nothing.
 std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops = {});
+
+// Edge: one nozzle's fixed ladder over a whole object layer stack, the way the live planner builds it. Layer 0 is
+// never merged (it prints as sliced), so the bands are cut from layer 1 up and the returned indices refer to the
+// full stack. compute_adaptive_merge_groups() and the support merge plan both go through this, which is what keeps
+// a support slab on a band top the walls of the same nozzle use.
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
     const std::vector<double>      &layer_heights,
     size_t                          band_size,
     const AdaptiveLayerHeightRange &height_range,
@@ -191,9 +205,32 @@ double adaptive_band_reference_nozzle(const PrintConfig &print_config, const std
 // one shared grid the wipe tower syncs to.
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintConfig &print_config, unsigned int filament_id);
 
-// Test-only accessor for PrintObject::compute_adaptive_merge_groups(). The planner has no production caller yet
-// (it is wired into the perimeter step by the follow-up PR), so a unit test reaching it through this friend is the
-// only way to exercise it.
+// The per-nozzle clamp the live planner sizes every band with. The window of the nozzle
+// that prints 1-based `filament_id`, narrowed by min_layer_height / max_layer_height as follows:
+//   * extruder-sized vectors (the normal layout): the slot of the physical extruder the filament maps to, and only
+//     when that extruder's preset nozzle IS the resolved diameter. A rack slot of another size (H3C P4/P9) is a
+//     different nozzle, so the preset's pair does not apply to it.
+//   * filament-sized vectors (Preset::normalize under single_extruder_multi_material): the tightest pair over the
+//     filament asked about and every filament of `used_filament_ids` (0-based) on the same nozzle - an AMS whose
+//     filaments 1 and 5 share a nozzle with different limits gets the larger minimum and the smaller maximum.
+//   * a slot past the end of the vector is ignored, never read through get_at()'s values.front() fallback.
+// adaptive_layer_height_range_for_filament() is this with no other filament on the nozzle.
+AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfig               &print_config,
+                                                                unsigned int                     filament_id,
+                                                                const std::vector<unsigned int> &used_filament_ids);
+
+// The window a merging nozzle's ladder is actually cut in. The per-nozzle clamp above is kept when it holds two
+// consecutive band heights on the base grid (k and k + 1 layers), which is what lets any long enough run be cut.
+// A clamp that holds one only - a 0.8 with min_layer_height 0.24 at 0.2 layers takes 0.4 slabs and nothing else -
+// cannot cut an odd run, and the ladder would come back empty: every layer of the region above the first would be
+// suppressed. Then the ceiling is relaxed to the nozzle diameter (the 1.0D ceiling orphan absorption already
+// allows, keeping the configured minimum), and if that still does not tile, Bambu's plain diameter window is used.
+// A clamp under which the nozzle does not merge at all (band size 1) is returned unchanged.
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height);
+
+// Test accessor for PrintObject::compute_adaptive_merge_groups(). The planner runs from PrintObject::make_perimeters()
+// since step 3; this lets a unit test re-run it on a sliced object without the perimeter step.
 struct AdaptiveMergePlanAccess
 {
     static void compute(PrintObject &object);
