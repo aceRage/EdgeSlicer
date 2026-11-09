@@ -7893,6 +7893,10 @@ LayerResult GCode::process_layer(const Print& print,
         size_t                  base_clip_leak_warnings { 0 };
         // A Ratio (mixed color sublayer) pass is on this layer: its passes cover infill too.
         bool                    has_ratio_pass { false };
+        // P3: a Subdivide (or other non-Ratio) pass shares the layer with a Ratio one. Each row keeps its own infill
+        // policy then: only the Ratio passes take the infill, and the base infill only gives up the Ratio region.
+        bool                    has_non_ratio_pass { false };
+        ExPolygons              ratio_masks_union_for_base_exclude;
         std::vector<LocalZPassBucket> pass_buckets;
     };
 
@@ -7996,8 +8000,13 @@ LayerResult GCode::process_layer(const Print& print,
                     ++split_plan_with_raw_masks;
                 if (pass_has_compensated_masks) {
                     ++split_plan_with_compensated_masks;
-                    if (plan.ratio_pass)
+                    if (plan.ratio_pass) {
                         ctx.has_ratio_pass = true;
+                        for (const ExPolygons &masks : plan.painted_masks_by_extruder)
+                            if (!masks.empty())
+                                append(ctx.ratio_masks_union_for_base_exclude, masks);
+                    } else
+                        ctx.has_non_ratio_pass = true;
                     ctx.pass_buckets.emplace_back(std::move(bucket));
 
                     const LocalZPassBucket& appended_bucket = ctx.pass_buckets.back();
@@ -8022,6 +8031,11 @@ LayerResult GCode::process_layer(const Print& print,
                 ctx.mixed_masks_union_for_base_exclude =
                     local_z_compensate_masks(base_exclude_source, local_z_base_mask_expand, true);
             }
+            if (ctx.has_ratio_pass && ctx.has_non_ratio_pass && !ctx.ratio_masks_union_for_base_exclude.empty())
+                ctx.ratio_masks_union_for_base_exclude =
+                    local_z_compensate_masks(union_ex(ctx.ratio_masks_union_for_base_exclude), local_z_base_mask_expand, true);
+            else
+                ctx.ratio_masks_union_for_base_exclude.clear();
             if (ctx.pass_buckets.empty() || ctx.mixed_masks_union.empty()) {
                 ctx.enabled = false;
                 if (local_z_rejected_context_logs < 50) {
@@ -8549,9 +8563,17 @@ LayerResult GCode::process_layer(const Print& print,
                             (local_z_infill_for_layer && entity_type == ObjectByExtruder::Island::Region::INFILL);
                         const bool local_z_entity_is_ironing =
                             entity_type == ObjectByExtruder::Island::Region::INFILL && extrusions->role() == erIroning;
+                        // P3: infill split only for the Ratio rows of a layer that also has Subdivide passes (each row
+                        // keeps its own infill policy, Subdivide's infill stays whole unless "Local-Z infill" is on).
+                        const bool local_z_infill_ratio_only = entity_type == ObjectByExtruder::Island::Region::INFILL &&
+                                                               !local_z_infill_enabled && local_z_ctx != nullptr &&
+                                                               local_z_ctx->has_ratio_pass && local_z_ctx->has_non_ratio_pass &&
+                                                               !local_z_ctx->ratio_masks_union_for_base_exclude.empty();
                         if (local_z_entity_enabled && local_z_ctx != nullptr && !local_z_ctx->mixed_masks_union.empty()) {
                             for (LocalZPassBucket& pass_bucket : local_z_ctx->pass_buckets) {
                                 if (pass_bucket.plan == nullptr)
+                                    continue;
+                                if (local_z_infill_ratio_only && !pass_bucket.plan->ratio_pass)
                                     continue;
                                 // D6: ironing in a Ratio region prints once, after the last pass, at its own flow.
                                 if (local_z_entity_is_ironing && pass_bucket.plan->ratio_pass && !pass_bucket.plan->ratio_last_pass)
@@ -8608,6 +8630,7 @@ LayerResult GCode::process_layer(const Print& print,
                             }
 
                             const ExPolygons* base_exclude_masks =
+                                local_z_infill_ratio_only ? &local_z_ctx->ratio_masks_union_for_base_exclude :
                                 local_z_ctx->mixed_masks_union_for_base_exclude.empty() ? &local_z_ctx->mixed_masks_union
                                                                                         : &local_z_ctx->mixed_masks_union_for_base_exclude;
                             auto clipped_base = clip_extrusion_collection_for_local_z(*extrusions,

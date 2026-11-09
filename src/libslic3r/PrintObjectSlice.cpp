@@ -18,6 +18,7 @@
 #include "FDMHollowing.hpp"
 #include "MixedFilament.hpp"
 #include "MixedSublayer.hpp"
+#include "LocalZOrderOptimizer.hpp"
 #include "AdaptiveLayerMerge.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "Airbrush/AirbrushBake.hpp"
@@ -3830,7 +3831,20 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                 std::vector<SubLayerPlan> isolated_plans;
                 isolated_plans.reserve(std::max<size_t>(2, active_mixed_rows * 2));
 
-                for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx) {
+                // P3: Ratio rows are laid out after the layer's other split rows, so a Ratio row sharing the layer with
+                // a Subdivide row can start with the filament that row starts with: the pass scheduler then serves both
+                // in one phase (one tool change fewer). Without a Ratio row the order is the planner's own.
+                std::vector<size_t> emission_rows;
+                emission_rows.reserve(row_active_this_layer.size());
+                for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx)
+                    if (!row_is_ratio(row_idx))
+                        emission_rows.push_back(row_idx);
+                for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx)
+                    if (row_is_ratio(row_idx))
+                        emission_rows.push_back(row_idx);
+                unsigned int other_rows_first_extruder = 0;
+
+                for (const size_t row_idx : emission_rows) {
                     if (row_active_this_layer[row_idx] == 0)
                         continue;
                     const ExPolygons &state_masks = row_state_masks[row_idx];
@@ -3840,7 +3854,9 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                     if (row_is_ratio(row_idx)) {
                         // Mixed color sublayer: one pass per component at its sub-Z, the whole row mask each time, the
                         // flow scaled by pass height / layer height (Bambu Studio GCode.cpp:6046-6048).
-                        const std::vector<MixedRatioPass> &ratio_passes = ratio_row_passes[row_idx];
+                        std::vector<MixedRatioPass> &ratio_passes = ratio_row_passes[row_idx];
+                        if (ratio_row_ascending[row_idx] == 0 && other_rows_first_extruder != 0 && ratio_passes.size() > 1)
+                            reorder_mixed_ratio_passes_to_start(ratio_passes, other_rows_first_extruder, row_ratio_state[row_idx]);
                         double z_cursor = interval.z_lo;
                         for (size_t pass_i = 0; pass_i < ratio_passes.size(); ++pass_i) {
                             const bool   last_pass   = pass_i + 1 == ratio_passes.size();
@@ -3968,6 +3984,8 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                             append(plan.painted_masks_by_extruder[target_extruder - 1], state_masks);
                             ++split_passes_with_painted_masks;
                             interval_has_split_painted_masks = true;
+                            if (other_rows_first_extruder == 0 && pass_i == 0)
+                                other_rows_first_extruder = target_extruder;
                         }
                         for (ExPolygons &masks : plan.painted_masks_by_extruder)
                             if (masks.size() > 1)

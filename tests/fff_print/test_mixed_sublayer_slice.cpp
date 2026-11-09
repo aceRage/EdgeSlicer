@@ -366,3 +366,77 @@ TEST_CASE("Mixed sublayer: Ratio passes split AdaptiveLayerMerge bands (D9)", "[
     mutable_object->adapt_local_z_ratio_plan_to_merge_bands();
     CHECK(object->local_z_sublayer_plan().size() == before);
 }
+
+TEST_CASE("Mixed sublayer: Ratio and Subdivide rows on one layer", "[MixedSublayer][Slice][P3]")
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    DynamicPrintConfig config = mixed_sublayer_config(false, false, { 0.4, 0.4, 0.4 });
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF", "#00FF00" };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4, 0.4 };
+    config.option<ConfigOptionFloats>("min_layer_height")->values  = { 0.04, 0.04, 0.04 };
+    // Row 4 = 1 + 2 at 30 % as Ratio, row 5 = 2 + 3 at 50 % as Subdivide (per-row methods, process keys off).
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 30, { "#FF0000", "#0000FF", "#00FF00" });
+    mgr.add_custom_filament(2, 3, 50, { "#FF0000", "#0000FF", "#00FF00" });
+    REQUIRE(mgr.mixed_filaments().size() == 2);
+    mgr.mixed_filaments()[0].sublayer_method = int(MixedSublayerMethod::Ratio);
+    mgr.mixed_filaments()[1].sublayer_method = int(MixedSublayerMethod::Subdivide);
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    Print        print;
+    Model        model;
+    ModelObject *object_m = model.add_object();
+    object_m->name        = "two_rows";
+    ModelVolume *v        = object_m->add_volume(TriangleMesh(its_make_cube(10., 10., 3.)));
+    v->config.set("extruder", 1);
+    TriangleSelector selector(v->mesh());
+    const indexed_triangle_set &its = v->mesh().its;
+    for (int f = 0; f < int(its.indices.size()); ++f) {
+        const stl_triangle_vertex_indices &tri = its.indices[size_t(f)];
+        const Vec3f n = (its.vertices[tri[1]] - its.vertices[tri[0]]).cross(its.vertices[tri[2]] - its.vertices[tri[0]]).normalized();
+        // The -X half of the side walls takes the Ratio row, everything else the Subdivide row.
+        selector.set_facet(f, EnforcerBlockerType(n.x() < -0.5f ? 4 : 5));
+    }
+    REQUIRE(v->mmu_segmentation_facets.set(selector));
+    object_m->add_instance();
+    object_m->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const PrintObject *object = print.objects().front();
+    const auto        &intervals = object->local_z_intervals();
+    const auto        &plans     = object->local_z_sublayer_plan();
+
+    size_t shared_layers = 0;
+    for (const LocalZInterval &interval : intervals) {
+        if (!local_z_interval_has_passes(interval, plans))
+            continue;
+        bool has_ratio = false, has_other = false;
+        double ratio_sum = 0.;
+        for (size_t i = interval.first_sublayer_idx; i < interval.first_sublayer_idx + interval.sublayer_count; ++i) {
+            if (plans[i].ratio_pass) {
+                has_ratio = true;
+                ratio_sum += plans[i].flow_height;
+            } else
+                has_other = true;
+        }
+        if (has_ratio)
+            CHECK_THAT(ratio_sum, WithinAbs(interval.base_height, 1e-9));
+        if (has_ratio && has_other)
+            ++shared_layers;
+    }
+    INFO("layers with both rows split: " << shared_layers);
+    CHECK(shared_layers > 0);
+
+    // Both rows print through the pass scheduler on one layer, with one layer change per layer.
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(!gcode.empty());
+    const std::string layer_tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
+    size_t            layer_changes = 0;
+    for (size_t pos = gcode.find(layer_tag); pos != std::string::npos; pos = gcode.find(layer_tag, pos + 1))
+        ++layer_changes;
+    CHECK(layer_changes == object->layer_count());
+}

@@ -1,6 +1,7 @@
 #include "MixedSublayer.hpp"
 
 #include "MixedFilament.hpp"
+#include "LocalZOrderOptimizer.hpp"
 #include "MixedFilamentConfigRemap.hpp"
 #include "PrintConfig.hpp"
 #include "Preset.hpp"
@@ -179,6 +180,31 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
     if (!passes.empty())
         state.last_extruder = passes.back().extruder;
     return passes;
+}
+
+bool reorder_mixed_ratio_passes_to_start(std::vector<MixedRatioPass> &passes, unsigned int first_extruder, MixedRatioRowState &state)
+{
+    if (passes.size() < 2 || first_extruder == 0 || passes.front().extruder == first_extruder)
+        return false;
+    std::vector<unsigned int> extruders;
+    for (const MixedRatioPass &p : passes)
+        extruders.push_back(p.extruder);
+    const std::vector<unsigned int> ordered = LocalZOrderOptimizer::order_bucket_extruders(extruders, int(first_extruder));
+    if (ordered.size() != passes.size() || ordered.front() != first_extruder)
+        return false;
+    std::vector<MixedRatioPass> out;
+    out.reserve(passes.size());
+    for (unsigned int e : ordered)
+        for (const MixedRatioPass &p : passes)
+            if (p.extruder == e) {
+                out.push_back(p);
+                break;
+            }
+    if (out.size() != passes.size())
+        return false;
+    passes              = std::move(out);
+    state.last_extruder = passes.back().extruder;
+    return true;
 }
 
 MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,

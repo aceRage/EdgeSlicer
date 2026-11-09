@@ -512,3 +512,36 @@ TEST_CASE("Mixed sublayer: AdaptiveLayerMerge band split (D9)", "[MixedSublayer]
         CHECK(a.last_extruder == b.last_extruder);
     }
 }
+
+TEST_CASE("Mixed sublayer: a Ratio row starts with the filament a Subdivide row on its layer starts with", "[MixedSublayer][P3]")
+{
+    MixedRatioRowState state;
+    std::vector<MixedRatioPass> passes { { 1, 0.14 }, { 2, 0.06 } };
+    SECTION("rotated to the shared filament, heights kept")
+    {
+        CHECK(reorder_mixed_ratio_passes_to_start(passes, 2, state));
+        REQUIRE(passes.size() == 2);
+        CHECK(passes[0].extruder == 2);
+        CHECK_THAT(passes[0].height, WithinAbs(0.06, 1e-12));
+        CHECK(passes[1].extruder == 1);
+        CHECK_THAT(passes[1].height, WithinAbs(0.14, 1e-12));
+        CHECK(state.last_extruder == 1);
+    }
+    SECTION("already first, or not a component: unchanged")
+    {
+        state.last_extruder = 2;
+        CHECK_FALSE(reorder_mixed_ratio_passes_to_start(passes, 1, state));
+        CHECK_FALSE(reorder_mixed_ratio_passes_to_start(passes, 3, state));
+        CHECK(passes[0].extruder == 1);
+        CHECK(state.last_extruder == 2);
+    }
+    SECTION("three components keep their cyclic order")
+    {
+        std::vector<MixedRatioPass> three { { 1, 0.1 }, { 2, 0.05 }, { 3, 0.05 } };
+        CHECK(reorder_mixed_ratio_passes_to_start(three, 2, state));
+        CHECK(three[0].extruder == 2);
+        CHECK(three[1].extruder == 3);
+        CHECK(three[2].extruder == 1);
+        CHECK(state.last_extruder == 1);
+    }
+}

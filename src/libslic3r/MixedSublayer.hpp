@@ -90,6 +90,12 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
                                                    bool                                     ascending_order,
                                                    MixedRatioRowState                      &state);
 
+// P3: a Ratio row sharing its layer with another split row (Subdivide) starts with the filament that row's first
+// pass uses, when it is one of its components, so the Local-Z pass scheduler serves both rows in one phase. The
+// rotation keeps the cyclic order and every pass height (LocalZOrderOptimizer::order_bucket_extruders); the row's
+// state then records the new last component, so the next layer alternates from it. Returns true when it changed.
+bool reorder_mixed_ratio_passes_to_start(std::vector<MixedRatioPass> &passes, unsigned int first_extruder, MixedRatioRowState &state);
+
 // P3, D9: the Ratio passes of one AdaptiveLayerMerge band. A band of height `band_height` is printed on its top
 // layer and swallows the layers below it, so the passes start at the band bottom, below the layer the G-code is
 // on. `swallowed_height` (band height - the top layer's own height) is how far below that layer's bottom they
