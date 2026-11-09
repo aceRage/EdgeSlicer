@@ -15,6 +15,9 @@
 //	   Slic3r::GUI::Tab::Preset;
 //	       - Single preset item: name, file is default or external.
 
+// wx/weakref.h (via wx/meta/convertible.h) uses std::is_base_of without including <type_traits>;
+// GCC 15 (the Flatpak SDK) rejects it when nothing has pulled that header in first.
+#include <type_traits>
 #include <wx/weakref.h>
 #include <wx/panel.h>
 #include <wx/notebook.h>
