@@ -12829,6 +12829,8 @@ struct Plater::priv
     // Return the active Undo/Redo stack. It may be either the main stack or the Gimzo stack.
     Slic3r::UndoRedo::Stack& undo_redo_stack() { assert(m_undo_redo_stack_active != nullptr); return *m_undo_redo_stack_active; }
     Slic3r::UndoRedo::Stack& undo_redo_stack_main() { return m_undo_redo_stack_main; }
+    size_t                   project_generation_count() const { return project_generation; }
+    void                     bump_project_generation() { ++project_generation; }
     void enter_gizmos_stack();
     bool leave_gizmos_stack();
 
@@ -21936,7 +21938,7 @@ bool Plater::is_slicing_in_background() const { return p->background_process.sta
 // Untitled one (a load clears the undo stack), so its tile kept the empty plate's picture. The reset count tells them apart.
 size_t Plater::project_change_marker() const
 {
-    return p->project_generation * size_t(1000003) + p->undo_redo_stack().active_snapshot_time();
+    return p->project_generation_count() * size_t(1000003) + p->undo_redo_stack().active_snapshot_time();
 }
 
 bool Plater::current_plate_has_objects() const
@@ -31403,7 +31405,7 @@ const UndoRedo::Stack& Plater::undo_redo_stack_main() const { return p->undo_red
 void Plater::clear_undo_redo_stack_main()
 {
     p->undo_redo_stack_main().clear();
-    ++p->project_generation;
+    p->bump_project_generation();
 }
 void Plater::enter_gizmos_stack() { p->enter_gizmos_stack(); }
 bool Plater::leave_gizmos_stack() { return p->leave_gizmos_stack(); } // BBS: return false if not changed
