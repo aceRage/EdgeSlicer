@@ -236,7 +236,7 @@ bool fits_every_printer(const Preset *preset) { return preset != nullptr && Pres
 
 } // namespace
 
-TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("Project presets come back when the project is re-opened, again and again", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string first = make_project("roundtrip.3mf");
 
@@ -404,7 +404,7 @@ TEST_CASE("A printer saved to the project comes back and keeps its project on it
 // in the Save Preset dialog. The project preset then has no printer list and no condition of its
 // own, so it is listed for every printer and a printer switch keeps it selected. Not ticked, nothing
 // changes.
-TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset]")
+TEST_CASE("A project preset saved for every printer stays selected across printer switches and re-opens", "[Preset][Bundle][ProjectPreset][slow]")
 {
     const std::string path = make_project("every_printer.3mf", ProjectPresetPrinters::EveryPrinter);
 
