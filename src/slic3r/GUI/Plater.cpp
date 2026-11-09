@@ -21721,6 +21721,7 @@ void Plater::calib_pa(const Calib_Params& params)
         default: break;
     }
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config->set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
     p->background_process.fff_print()->set_calib_params(params);
 }
 
@@ -22416,6 +22417,7 @@ void Plater::calib_retraction(const Calib_Params& params)
     auto obj = model().objects[0];
 
     print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
+    print_config->set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
 
     // Orca #11835: a layer height the nozzle can print.
     const double nozzle_diameter = printer_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);

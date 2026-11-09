@@ -3432,6 +3432,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     case CalibMode::Calib_Retraction_tower:
     case CalibMode::Calib_Temp_Retract_Grid:
         m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+        m_calib_config.set_key_value("retract_after_outer_wall", new ConfigOptionBool(false));
         break;
     default:
         break;

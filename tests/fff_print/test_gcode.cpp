@@ -1025,14 +1025,14 @@ TEST_CASE("Z hop follows the lift settings of the filament printing", "[GCode][R
     if (filament == 1) {
         CHECK(first < 0.2 + EPSILON);
         CHECK(last > 1.);
-    }     else if (key == "filament_retract_lift_above")
+    } else if (key == "filament_retract_lift_above")
         CHECK(first > 1. - EPSILON);
     else
         CHECK(last < 0.2 + EPSILON);
 }
 
 // Orca #16982: a travel shorter than retraction_minimum_travel still retracts after an outer wall
-// when retract_after_outer_wall is on (the default). Inner-outer-inner puts that short travel
+// when retract_after_outer_wall is on (off by default in EdgeSlicer). Inner-outer-inner puts that short travel
 // between the outer wall and the next inner wall.
 TEST_CASE("Retract after outer wall retracts on a travel shorter than the threshold", "[GCode][Retraction]")
 {
@@ -1088,10 +1088,11 @@ TEST_CASE("Retract after outer wall retracts on a travel shorter than the thresh
     REQUIRE(transitions == 5);
 }
 
-TEST_CASE("Retract after outer wall is on by default", "[GCode][Retraction]")
+// EdgeSlicer keeps it off by default (owner, 2026-11-09); Orca #16982 turns it on.
+TEST_CASE("Retract after outer wall is off by default", "[GCode][Retraction]")
 {
     const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    CHECK(config.opt_bool("retract_after_outer_wall"));
+    CHECK_FALSE(config.opt_bool("retract_after_outer_wall"));
 }
 
 TEST_CASE("Retract after outer wall only invalidates G-code export", "[GCode][Retraction]")

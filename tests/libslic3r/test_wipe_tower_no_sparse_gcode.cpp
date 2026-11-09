@@ -367,7 +367,7 @@ FinalPurgeSlice slice_final_purge(const DynamicPrintConfig &config, double size_
 // After the last per-layer ;Z: comment, a descent below that layer's print height must not start
 // with XY still over the object. That is the final-unload drop (object top → tower).
 //
-// retract_after_outer_wall (default on, Orca #16982) retracts and Z-hops on a short travel off the
+// retract_after_outer_wall (Orca #16982; off by default in EdgeSlicer) retracts and Z-hops on a short travel off the
 // last outer wall. The hop restore is a small Z drop back to the last layer height, still over the
 // object, and is not mid-air. Only a drop that goes below last-layer Z is the unload.
 struct FinalZDropScan

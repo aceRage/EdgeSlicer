@@ -7514,9 +7514,10 @@ void PrintConfigDef::init_fff_params()
                      "travel distance threshold.\n\n"
                      "Without a retraction, a very short travel, for example to gap infill inside a thin wall, can drag "
                      "the end of the outer wall inward and leave a visible dent at the seam.");
-    // Orca #16982: on for everyone, hidden from the regular UI until long-term tests settle it.
-    def->mode = comDevelop;
-    def->set_default_value(new ConfigOptionBool(true));
+    // Orca #16982 turns this on for everyone and hides it (comDevelop). EdgeSlicer keeps it off by default
+    // (owner, 2026-11-09), so default G-code is unchanged, and shows it as an advanced option to turn on.
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("wipe_speed", coFloatOrPercent);
     def->label = L("Wipe speed");
