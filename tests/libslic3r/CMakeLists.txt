@@ -67,6 +67,7 @@ add_executable(${_TEST_NAME}_tests
 	test_clipper_utils.cpp
 	test_config.cpp
 	test_config_range.cpp
+	test_support_interface_settings.cpp
 	test_contour_z.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp

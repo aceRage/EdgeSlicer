@@ -8244,35 +8244,34 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    auto support_interface_top_layers = def = this->add("support_interface_top_layers", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    // EdgeSlicer: a plain number (spin box) rather than the 0-3 drop-down, so 4, 5 or more
+    // interface layers can be entered (the support interface interlock needs woven layers + 1).
+    def = this->add("support_interface_top_layers", coInt);
     def->label = L("Top interface layers");
     def->category = L("Support");
     def->tooltip = L("Number of top interface layers.");
     def->sidetext = L("layers");
     def->min = 0;
-    def->enum_values.push_back("0");
-    def->enum_values.push_back("1");
-    def->enum_values.push_back("2");
-    def->enum_values.push_back("3");
-    def->enum_labels.push_back("0");
-    def->enum_labels.push_back("1");
-    def->enum_labels.push_back("2");
-    def->enum_labels.push_back("3");
+    def->max = 20;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(3));
 
+    // EdgeSlicer: stays an editable drop-down for its "Same as top" (-1) entry; the list runs to
+    // 10 and any other number up to the maximum can be typed.
     def = this->add("support_interface_bottom_layers", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Bottom interface layers");
     def->category = L("Support");
-    def->tooltip = L("Number of bottom interface layers.");
+    def->tooltip = L("Number of bottom interface layers. \"Same as top\" (-1) uses the top interface layer count.");
     def->sidetext = L("layers");
     def->min = -1;
+    def->max = 20;
     def->enum_values.push_back("-1");
-    append(def->enum_values, support_interface_top_layers->enum_values);
     def->enum_labels.push_back(L("Same as top"));
-    append(def->enum_labels, support_interface_top_layers->enum_labels);
+    for (int i = 0; i <= 10; ++ i) {
+        def->enum_values.push_back(std::to_string(i));
+        def->enum_labels.push_back(std::to_string(i));
+    }
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
