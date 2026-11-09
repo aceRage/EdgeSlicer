@@ -667,7 +667,7 @@ TEST_CASE("Nearest-wall brim is not printed twice by the instance brims", "[Skir
 // layer with a draft shield, even at height 0), and per-object skirts print with their own object.
 // Upstream arranges the cubes; Edge places them: 5 mm apart by layer (per-object skirts join), and
 // 60 mm apart by object, past the extruder clearance, where each object keeps its own skirt.
-TEST_CASE("Skirt is emitted once per layer it spans", "[SkirtBrim][Orca14333]")
+TEST_CASE("Skirt is emitted once per layer it spans", "[SkirtBrim][Orca14333][slow]")
 {
     const int object_layers = 100; // 20mm cube at 0.2mm layers
     const char *skirt_type   = GENERATE("combined", "perobject");

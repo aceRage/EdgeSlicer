@@ -310,7 +310,7 @@ void check_walk(const Walk &w)
 
 } // namespace
 
-SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool]")
+SCENARIO("H2D: the idle hotend is pre-cooled and pre-heated in time", "[BambuPreCool][slow]")
 {
     for (const bool tower : { true, false }) {
         GIVEN(std::string("filament 1 on the left, 2 and 3 on the right, by layer, prime tower ") + (tower ? "on" : "off"))

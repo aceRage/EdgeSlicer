@@ -2255,7 +2255,7 @@ static Polygons centered_square(double half)
     return {Polygon({Point::new_scale(-half, -half), Point::new_scale(half, -half), Point::new_scale(half, half), Point::new_scale(-half, half)})};
 }
 
-TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill][TpmsAdaptive]")
+TEST_CASE("Adaptive TPMS infill thins out from the surface to the interior density", "[Fill][TpmsAdaptive][slow]")
 {
     // The modes following the distance print more lines than their target where its levels meet: along the shells, or
     // where the patterns blend.
@@ -2415,7 +2415,7 @@ TEST_CASE("Adaptive TPMS infill is sparse at the center of both of two united sp
     }
 }
 
-TEST_CASE("Adaptive TPMS gradients keep the surface density deeper in the order quadratic, linear, exponential", "[Fill][TpmsAdaptive]")
+TEST_CASE("Adaptive TPMS gradients keep the surface density deeper in the order quadratic, linear, exponential", "[Fill][TpmsAdaptive][slow]")
 {
     // With a denser surface, t^2 <= t and the geometric interpolation is below the linear one at every depth.
     auto length_for = [](const std::string &gradient) {

@@ -37,6 +37,18 @@ bool supports_nozzle_processes(const ConfigBase &printer_config);
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config);
 // The stored assignment for `filaments` filaments, 0 = the filament's own nozzle; an all-0 list is stored empty.
 std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
+// The filament_nozzle_assignment entry for 0-based `filament` put on 1-based `tool`. 0 (unassigned) only when that reads back
+// as `tool`: the filament's own tool while there are no more filaments than tools. With more filaments than tools an
+// unassigned filament follows filament_map, so its own tool is stored as itself (owner bug 2026-11-08: a U1 with six
+// filaments could not put filament 3 on T3, the 0 read back as filament_map's T2).
+int filament_nozzle_assignment_value(size_t filament, int tool, size_t filament_count, size_t nozzle_count);
+
+// The printer's filament routing layout: extruder count, rack sizes, one nozzle fed by many filaments. The project's
+// filament -> extruder state (filament_map, side and rack pins, tool assignment, the synced device state) belongs to one
+// layout; a printer of another layout (H3C one extruder + rack, H2C two extruders, U1 four toolheads) must not inherit it.
+std::string filament_routing_layout(const ConfigBase &printer_config);
+// Back to the defaults for `filament_count` filaments: what a fresh project has on any printer. Returns whether anything changed.
+bool reset_filament_routing(DynamicConfig &project_config, size_t filament_count);
 
 // Copy each extruder's chosen process into that extruder's slots of per_nozzle_process_options() in
 // `config` (a full print config). sources[e] is extruder e's process, nullptr for the plate's process.

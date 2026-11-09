@@ -106,7 +106,7 @@ std::shared_ptr<const BRep::CadBody> body_of(const TopoDS_Shape &shape, BRep::Ca
 
 } // namespace
 
-TEST_CASE("CAD body of a STEP-imported cube takes an exact fillet, stacks and exports exactly", "[CadEdit]")
+TEST_CASE("CAD body of a STEP-imported cube takes an exact fillet, stacks and exports exactly", "[CadEdit][slow]")
 {
     TempFile source(".step");
     write_occt_step(BRepPrimAPI_MakeBox(gp_Pnt(0., 0., 0.), 20., 20., 20.).Shape(), source.str());
@@ -243,7 +243,7 @@ TEST_CASE("CAD body of a STEP-imported cube takes an exact fillet, stacks and ex
     }
 }
 
-TEST_CASE("CAD body converted from a mesh cube takes an exact chamfer", "[CadEdit]")
+TEST_CASE("CAD body converted from a mesh cube takes an exact chamfer", "[CadEdit][slow]")
 {
     const indexed_triangle_set   cube = its_make_cube(20., 20., 20.);
     BRep::MeshConversionReport   report;
@@ -594,7 +594,7 @@ void require_shell_works(const BRep::CadBody &body, double thickness, double min
 
 // Owner hand test on PR #218: Shell failed with Standard_NoSuchObject on every face of a part,
 // while fillet and chamfer worked. These are the three ways a part reaches the gizmo.
-TEST_CASE("Shell works on converted, STEP-sourced and filleted bodies", "[CadEdit]")
+TEST_CASE("Shell works on converted, STEP-sourced and filleted bodies", "[CadEdit][slow]")
 {
     SECTION("a mesh cube converted to a CAD body")
     {
