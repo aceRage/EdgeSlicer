@@ -207,6 +207,30 @@ public:
         return ret;
     }
 
+    // Project strip P4 (one Plater per open project): every page showing `from` (the Prepare, Preview and Showcase tabs
+    // all show the Plater) shows `to` instead, without changing the selection or sending page events.
+    bool ReplacePageWindow(wxWindow *from, wxWindow *to)
+    {
+        if (from == nullptr || to == nullptr || from == to)
+            return false;
+        bool replaced = false, selected = false;
+        for (size_t i = 0; i < m_pages.size(); ++i)
+            if (m_pages[i] == from) {
+                m_pages[i] = to;
+                replaced   = true;
+                selected   = selected || int(i) == GetSelection();
+            }
+        if (!replaced)
+            return false;
+        from->Hide();
+        if (selected) {
+            to->SetSize(GetPageRect());
+            to->Show();
+        } else
+            to->Hide();
+        return true;
+    }
+
     virtual int ChangeSelection(size_t n) override
     {
         GetBtnsListCtrl()->SetSelection(n);

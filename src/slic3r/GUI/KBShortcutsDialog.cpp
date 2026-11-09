@@ -200,6 +200,9 @@ void KBShortcutsDialog::fill_shortcuts()
 
             // Switch table page
             { ctrl + L("Tab"), L("Switch table page")},
+            // Project strip (Ctrl+Tab is taken by the table pages)
+            { ctrl + L("PgDn"), L("Next open project")},
+            { ctrl + L("PgUp"), L("Previous open project")},
             //DEL
             #ifdef __APPLE__
                 {"fn+⌫", L("Delete selected")},

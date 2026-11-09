@@ -1,6 +1,7 @@
 // Per-nozzle process P7 - see NozzleOverride.hpp.
 
 #include "NozzleOverride.hpp"
+#include "LocalesUtils.hpp"
 
 #include "PrintConfig.hpp"
 #include "ToolSlots.hpp"
@@ -131,7 +132,7 @@ std::vector<double> printer_variant_sizes(const std::string &printer_variant)
         if (end == std::string::npos)
             end = printer_variant.size();
         try {
-            const double d = std::stod(printer_variant.substr(start, end - start));
+            const double d = string_to_double_decimal_point(printer_variant.substr(start, end - start));
             if (plausible_size(d))
                 out.push_back(d);
         } catch (...) {
@@ -185,7 +186,7 @@ std::vector<double> parse_nozzle_diameter_override(const std::string &text)
         item = item.substr(a, b - a + 1);
         try {
             size_t      used = 0;
-            const double d   = std::stod(item, &used);
+            const double d   = string_to_double_decimal_point(item, &used);
             if (used != item.size() || !(d == 0. || plausible_size(d)))
                 return {};
             out.push_back(d);
@@ -255,7 +256,7 @@ std::vector<double> reported_extruder_nozzle_sizes(const DualNozzleSync::Printer
         if (logical < 0 || size_t(logical) >= extruders)
             continue;
         try {
-            const double d = std::stod(nozzle.diameter);
+            const double d = string_to_double_decimal_point(nozzle.diameter); // "0.4" in any UI locale
             if (plausible_size(d))
                 out[size_t(logical)] = d;
         } catch (...) {
@@ -274,7 +275,7 @@ std::vector<std::vector<double>> reported_available_nozzle_sizes(const DualNozzl
         if (logical < 0 || size_t(logical) >= extruders)
             continue;
         try {
-            const double d = std::stod(nozzle.diameter);
+            const double d = string_to_double_decimal_point(nozzle.diameter); // "0.4" in any UI locale
             if (plausible_size(d))
                 out[size_t(logical)].push_back(d);
         } catch (...) {
@@ -302,10 +303,10 @@ std::vector<NozzleSizeMismatch> rack_nozzle_size_mismatches(const std::vector<do
     return out;
 }
 
-std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders)
+std::vector<std::vector<RackNozzle>> reported_rack_nozzles(const DualNozzleSync::PrinterState &state, size_t extruders)
 {
-    // Per logical extruder: (order key, size); the mounted nozzle sorts first, rack positions after it in their order.
-    std::vector<std::vector<std::pair<int, double>>> found(extruders);
+    // Per logical extruder: (order key, nozzle); the mounted nozzle sorts first, rack positions after it in their order.
+    std::vector<std::vector<std::pair<int, RackNozzle>>> found(extruders);
     for (const DualNozzleSync::PrinterNozzle &nozzle : state.nozzles) {
         if (nozzle.on_rack() && !nozzle.normal)
             continue;
@@ -313,13 +314,18 @@ std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::Prin
         if (logical < 0 || size_t(logical) >= extruders)
             continue;
         try {
-            const double d = std::stod(nozzle.diameter);
-            if (plausible_size(d))
-                found[size_t(logical)].emplace_back(nozzle.on_rack() ? 1 + nozzle.rack_slot() : 0, d);
+            const double d = string_to_double_decimal_point(nozzle.diameter); // "0.4" in any UI locale
+            if (!plausible_size(d))
+                continue;
+            RackNozzle n;
+            n.diameter     = d;
+            n.volume_type  = nozzle.volume;
+            n.volume_given = true;
+            found[size_t(logical)].emplace_back(nozzle.on_rack() ? 1 + nozzle.rack_slot() : 0, n);
         } catch (...) {
         }
     }
-    std::vector<std::vector<double>> out(extruders);
+    std::vector<std::vector<RackNozzle>> out(extruders);
     for (size_t e = 0; e < extruders; ++e) {
         std::stable_sort(found[e].begin(), found[e].end(), [](const auto &a, const auto &b) { return a.first < b.first; });
         // Only an extruder with rack nozzles has a rack to describe.
@@ -328,6 +334,16 @@ std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::Prin
         for (const auto &n : found[e])
             out[e].push_back(n.second);
     }
+    return out;
+}
+
+std::vector<std::vector<double>> reported_rack_layout(const DualNozzleSync::PrinterState &state, size_t extruders)
+{
+    const std::vector<std::vector<RackNozzle>> nozzles = reported_rack_nozzles(state, extruders);
+    std::vector<std::vector<double>>           out(nozzles.size());
+    for (size_t e = 0; e < nozzles.size(); ++e)
+        for (const RackNozzle &n : nozzles[e])
+            out[e].push_back(n.diameter);
     return out;
 }
 

@@ -11,12 +11,14 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "test_data.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <regex>
 #include <set>
@@ -84,6 +86,19 @@ const PrintObject *object_named(const Print &print, const std::string &name)
         if (object->model_object()->name == name)
             return object;
     return nullptr;
+}
+
+// The 0.8's ladder next to a 0.4 at the given window, as compute_adaptive_merge_groups() cuts it: layer 0 prints as
+// sliced, the bands start on layer 1.
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder_for_test(const std::vector<double> &stack, AdaptiveLayerHeightRange range)
+{
+    std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_bands(std::vector<double>(stack.begin() + 1, stack.end()),
+                                                                      adaptive_layer_band_size(0.8, 0.4, stack.back(), range), range);
+    for (AdaptiveLayerBand &band : bands) {
+        ++band.bottom_idx;
+        ++band.top_idx;
+    }
+    return bands;
 }
 
 // Heights of every extrusion path of a layer (walls, overhang walls, gap fill and infill). Bridge infill is left out:
@@ -318,6 +333,89 @@ TEST_CASE("Adaptive layer merge live: an H2D-like 0.2 L / 0.4 R plate stacks two
     check_mixed_plate(h2d_like_02_04(), 6., { 0.1, 0.2, 2 });
 }
 
+// The preview's Layer height legend on a mixed plate (owner report, 2026-11-06: 0.20 to 5.80 mm, every layer dark
+// blue). The G-code's ;HEIGHT: tags and the processor's heights are only ever the base or the slab height, the
+// prime tower's included. The 5.8 came from the start G-code: the H3C load line extrudes 0.8 mm above a Z5 move,
+// before any height tag, so the processor guesses its height from Z. The legend now skips custom G-code extrusions
+// for its height and width ranges, as BambuStudio does (tests/slic3rutils/libvgcode_input_tests.cpp).
+TEST_CASE("Adaptive layer merge live: a 0.4 + 0.8 plate's height tags are the base and slab heights", "[AdaptiveLayerMergeLive]")
+{
+    const bool tower = GENERATE(false, true);
+    CAPTURE(tower);
+    DynamicPrintConfig config = h3c_like_04_08();
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values = { 15. };
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values = { 15. };
+    config.set_deserialize_strict({
+        { "enable_prime_tower", tower ? "1" : "0" },
+        { "prime_tower_width", "35" },
+        // the H3C start G-code's nozzle load line, with no height tag ahead of it
+        { "machine_start_gcode", "G90\nM83\nG1 Z5 F1200\nG91\nG1 Z0.8 F1200\nG90\nG1 X10 Y0 F6000\nG1 X50 E10 F600\n" },
+    });
+    Model model;
+    add_cubes(model, 10.);
+    Print print;
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+    GCodeProcessorResult result;
+    const std::string    gcode = Test::gcode(print, result);
+    REQUIRE(! gcode.empty());
+
+    const double                base = 0.2, slab = 0.4;
+    const std::set<double>      allowed{ base, slab };
+    auto                        rounded = [](double v) { return std::round(v * 1000.) / 1000.; };
+
+    // Every ;HEIGHT: tag from the first layer on: layer changes, paths and the prime tower.
+    std::set<double>        tags;
+    std::istringstream      in(gcode);
+    std::string             line;
+    bool                    in_layers = false;
+    static const std::regex height_re(R"(^;HEIGHT:([0-9.]+))");
+    while (std::getline(in, line)) {
+        if (! line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind(";LAYER_CHANGE", 0) == 0)
+            in_layers = true;
+        std::smatch m;
+        if (in_layers && std::regex_search(line, m, height_re))
+            tags.insert(rounded(std::stod(m[1].str())));
+    }
+    REQUIRE(! tags.empty());
+    CHECK(*tags.rbegin() == slab);
+    for (double h : tags) {
+        CAPTURE(h);
+        CHECK(allowed.count(h) == 1);
+    }
+
+    // The processor's heights, which the legend reads: base to slab for everything but custom G-code.
+    float            min_h = std::numeric_limits<float>::max(), max_h = 0.f, custom_max = 0.f;
+    std::set<double> move_heights;
+    bool             tower_seen = false;
+    for (const GCodeProcessorResult::MoveVertex &move : result.moves) {
+        if (move.type != EMoveType::Extrude)
+            continue;
+        if (move.extrusion_role == erCustom) {
+            custom_max = std::max(custom_max, move.height);
+            continue;
+        }
+        tower_seen |= move.extrusion_role == erWipeTower;
+        min_h = std::min(min_h, move.height);
+        max_h = std::max(max_h, move.height);
+        if (! move.internal_only)
+            move_heights.insert(rounded(move.height));
+    }
+    CHECK(tower_seen == tower);
+    CHECK_THAT(min_h, WithinAbs(base, 1e-4));
+    CHECK_THAT(max_h, WithinAbs(slab, 1e-4));
+    for (double h : move_heights) {
+        CAPTURE(h);
+        CHECK(allowed.count(h) == 1);
+    }
+    // The load line is what reached 5.8: kept out of the legend by the viewer, not by the processor.
+    CHECK(custom_max > 1.f);
+}
+
 TEST_CASE("Adaptive layer merge live: a configured max layer height keeps the coarse nozzle on the base grid", "[AdaptiveLayerMergeLive]")
 {
     // The 0.8's own ceiling of 0.3 rules out a 0.4 slab: the per-nozzle clamp leaves it printing every layer.
@@ -337,6 +435,71 @@ TEST_CASE("Adaptive layer merge live: a configured max layer height keeps the co
             CHECK(layerm->adaptive_merge_patches.empty());
         CHECK(layer->has_extrusions());
     }
+}
+
+// #907 report: the 0.8's own min_layer_height of 0.24 at 0.20 layers leaves the clamp [0.24, 0.56] one band height
+// only (0.4). The 49 layers above the bed contact of a 10 mm cube cannot be cut into 0.4 slabs, the ladder came
+// back empty and the 0.8 printed layer 0 and nothing else. The ceiling is now relaxed to the nozzle diameter:
+// 0.4 slabs with one 0.6 slab, every slab at or above the configured minimum.
+TEST_CASE("Adaptive layer merge live: a configured min layer height that leaves one slab height still prints the whole object", "[AdaptiveLayerMergeLive]")
+{
+    const DynamicPrintConfig config = two_nozzles("0.4,0.8", "0.2", "0.08,0.24", "0.28,0.56");
+    check_mixed_plate(config, 10., { 0.2, 0.4, 2 });
+
+    Model model;
+    add_cubes(model, 10.);
+    Print print;
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(! gcode.empty());
+    const PrintObject *coarse = object_named(print, "cube-2");
+    REQUIRE(coarse != nullptr);
+    const size_t layers = coarse->layer_count();
+    REQUIRE(layers == 50);
+    // The cube's top layer is a slab top: the object reaches its full height.
+    const AdaptiveMergePatch *last = group_top_patch(*coarse->layers().back());
+    REQUIRE(last != nullptr);
+    CHECK(coarse->layers().back()->has_extrusions());
+    double printed = coarse->layers().front()->height;
+    for (size_t idx = 1; idx < layers; ++idx) {
+        CAPTURE(idx);
+        if (const AdaptiveMergePatch *top = group_top_patch(*coarse->layers()[idx]); top != nullptr) {
+            CHECK(top->merged_height >= 0.24 - EPSILON);
+            CHECK(top->merged_height <= 0.8 + EPSILON);
+            printed += top->merged_height;
+        }
+    }
+    CHECK_THAT(printed, WithinAbs(10., 1e-6));
+}
+
+TEST_CASE("Adaptive layer merge: the ladder window widens only a clamp that holds a single band height", "[AdaptiveLayerMergeLive]")
+{
+    auto check = [](AdaptiveLayerHeightRange clamp, double nozzle, double reference, double base, double min_h, double max_h) {
+        const AdaptiveLayerHeightRange out = adaptive_ladder_height_range(clamp, nozzle, reference, base);
+        CHECK_THAT(out.min_height, WithinAbs(min_h, 1e-9));
+        CHECK_THAT(out.max_height, WithinAbs(max_h, 1e-9));
+    };
+    // The plain 0.8 window holds 0.2 and 0.4 at 0.2 layers: unchanged.
+    check({ 0.16, 0.56 }, 0.8, 0.4, 0.2, 0.16, 0.56);
+    // min 0.24: 0.4 only. The ceiling goes to 0.8, the minimum stays.
+    check({ 0.24, 0.56 }, 0.8, 0.4, 0.2, 0.24, 0.8);
+    // max 0.3: the 0.8 does not merge at all (band size 1), so nothing is widened.
+    check({ 0.16, 0.3 }, 0.8, 0.4, 0.2, 0.16, 0.3);
+    // min 0.5 at 0.27 layers: 0.54 only, and 0.81 is past the nozzle too. Bambu's diameter window.
+    check({ 0.5, 0.56 }, 0.8, 0.4, 0.27, 0.16, 0.56);
+
+    // The cause: under the raw clamp the 49 layers above a 10 mm cube's bed contact have no cover at all, so the
+    // ladder is empty. The widened window cuts them into 23 slabs of 0.4 and one of 0.6.
+    const std::vector<double> stack(50, 0.2);
+    CHECK(build_adaptive_layer_ladder_for_test(stack, { 0.24, 0.56 }).empty());
+    const std::vector<AdaptiveLayerBand> bands = build_adaptive_layer_ladder_for_test(stack, { 0.24, 0.8 });
+    REQUIRE(bands.size() == 24);
+    CHECK(bands.front().bottom_idx == 1);
+    CHECK(bands.back().top_idx == 49);
+    for (size_t i = 1; i < bands.size(); ++i)
+        CHECK(bands[i].bottom_idx == bands[i - 1].top_idx + 1);
 }
 
 TEST_CASE("Adaptive layer merge live: a single-diameter plate plans nothing and prints every layer as sliced", "[AdaptiveLayerMergeLive]")

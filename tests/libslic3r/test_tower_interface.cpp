@@ -326,7 +326,7 @@ TEST_CASE("A run-in start is kept on the printable bed", "[TowerInterface]")
 // Off: nothing changes
 // ---------------------------------------------------------------------------------------------------
 
-TEST_CASE("With the tower interface options off, the per-filament values change nothing", "[TowerInterface]")
+TEST_CASE("With the tower interface options off, the per-filament values change nothing", "[TowerInterface][slow]")
 {
     for (const Machine *m : all_machines) {
         DYNAMIC_SECTION(m->name)

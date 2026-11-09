@@ -8,6 +8,7 @@
 #include "I18N.hpp"
 #include "GCode.hpp"
 #include "ToolSlots.hpp"
+#include "AdaptiveLayerMerge.hpp"
 #include "GCodeReader.hpp"
 #include "CostEstimate.hpp"
 #include "LocalZOrderOptimizer.hpp"
@@ -2444,8 +2445,14 @@ std::vector<GCode::LayerToPrint> GCode::collect_layers_to_print(const PrintObjec
             // Mixed nozzle diameters (BambuStudio v02.09.01.70 GCode.cpp:1703-1730): a merge group top lays one bead
             // over its whole band, so the steps below it carry no extrusions on purpose. effective_print_height() is
             // the band's height there and the plain layer height everywhere else.
+            // A merged support slab (AdaptiveLayerMerge step 4) covers its own span the same way, also where it shares
+            // its print_z with an object layer, which layer() would answer for.
+            double effective_height = layer_to_print.layer()->effective_print_height();
+            if (layer_to_print.support_layer != nullptr &&
+                (layer_to_print.support_layer->base_slab_height > EPSILON || layer_to_print.support_layer->interface_slab_height > EPSILON))
+                effective_height = std::max(effective_height, layer_to_print.support_layer->effective_print_height());
             double maximal_print_z = (last_extrusion_layer ? last_extrusion_layer->print_z() : 0.) +
-                                     layer_to_print.layer()->effective_print_height() + std::max(0., extra_gap);
+                                     effective_height + std::max(0., extra_gap);
             // Negative support_contact_z is not taken into account, it can result in false positives in cases
 
             // A gap made only of merged-out steps is covered by the merged extrusion above it, even where the group
@@ -4585,6 +4592,13 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         m_filament_change_sequence.emplace_back(initial_extruder_id);
         m_nozzle_change_sequence.emplace_back(first_nozzle ? first_nozzle->group_id : 0);
         file.write_format(";VT%d H%d\n", int(initial_extruder_id), initial_nozzle_id);
+        // Once per plate: a two-extruder rack machine (H2C) that must swap between rack hotends of different diameters.
+        // Only a warning, so a firmware that allows it later (and the H3C) is not blocked.
+        if (rack_group_mixes_nozzle_diameters(print.config(), *group_result)) {
+            print.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                                          L("This plate uses two nozzle diameters on the same extruder rack. H2C firmware currently refuses to change nozzle diameter during a print. Split the plate by nozzle diameter or print the objects separately."),
+                                          PrintStateBase::SlicingRackMixedDiameter);
+        }
     }
 
     // flush FanMover buffer to avoid modifying the start gcode if it's manual.
@@ -4687,8 +4701,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         CalibPressureAdvanceLine pa_test(this);
 
+        // Orca #16882: cap the speed by the volumetric speed of the filament the test prints with, selected above.
+        const Extruder *pa_filament = m_writer.extruder();
         auto fast_speed = CalibPressureAdvance::find_optimal_PA_speed(print.full_print_config(), pa_test.line_width(),
-                                                                      pa_test.height_layer());
+                                                                      pa_test.height_layer(), pa_filament ? int(pa_filament->id()) : 0);
         auto slow_speed = std::max(10.0, fast_speed / 10.0);
         if (fast_speed < slow_speed + 5)
             fast_speed = slow_speed + 5;
@@ -8195,6 +8211,57 @@ LayerResult GCode::process_layer(const Print& print,
                     }
                 }
 
+                // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 GCode.cpp:5281-5288): a
+                // "don't care" support slab the merge plan made thicker than the object layers, or a contact/interface
+                // layer it planned, can only be extruded by the nozzle it was planned for. 0 on every single-diameter
+                // plate. ToolOrdering::collect_extruders() schedules the same filament, and flush into support leaves
+                // such a layer alone, so the wiping override above never fires for it.
+                if (object.config().support_filament.value == 0 && support_layer.planned_filament_id > 0) {
+                    const unsigned int planned = resolve_mixed_filament_0based(support_layer.planned_filament_id);
+                    if (planned != (unsigned int) -1) {
+                        support_extruder = planned;
+                        support_dontcare = false;
+                    }
+                }
+                if (object.config().support_interface_filament.value == 0 && support_layer.planned_interface_filament_id > 0) {
+                    const unsigned int planned = resolve_mixed_filament_0based(support_layer.planned_interface_filament_id);
+                    if (planned != (unsigned int) -1) {
+                        interface_extruder = planned;
+                        interface_dontcare = false;
+                    }
+                }
+
+                // Mixed nozzle diameters (AdaptiveLayerMerge, BambuStudio v02.09.01.70 GCode.cpp:5310-5330
+                // nozzle_can_print_height): the printable layer height window of a filament's nozzle. Only used to
+                // correct a "don't care" choice whose nozzle cannot extrude this support layer height at all, and only
+                // when another filament of this layer can, so the pick never gets worse than it was. The window is
+                // Edge's per-nozzle clamp (adaptive_layer_height_range_for_nozzle, the one the merge plan sizes its
+                // candidates with) instead of Bambu's bare diameter window. The tree generators keep base and roof on
+                // one SupportLayer and record a merged thickness in base_slab_height / interface_slab_height, so those
+                // are checked where set. Off on every single-diameter plate, which therefore picks exactly as before.
+                const bool check_nozzle_height = (support_dontcare || interface_dontcare) && print.uses_multiple_nozzle_diameters();
+                std::vector<unsigned int> used_filaments;
+                if (check_nozzle_height)
+                    print.used_printing_filaments(used_filaments);
+                const coordf_t support_slab_height   = support_layer.base_slab_height > EPSILON ? support_layer.base_slab_height : support_layer.height;
+                const coordf_t interface_slab_height = support_layer.interface_slab_height > EPSILON ? support_layer.interface_slab_height : support_layer.height;
+                // The same widened window the merge plan cuts this nozzle's slabs in (adaptive_ladder_height_range).
+                auto nozzle_can_print_height = [&print, &object, &used_filaments](unsigned int extruder_id, coordf_t height) {
+                    const double nozzle = nozzle_diameter_for_filament(print.config(), extruder_id + 1);
+                    return nozzle <= EPSILON ||
+                           adaptive_ladder_height_range(
+                               adaptive_layer_height_range_for_nozzle(print.config(), extruder_id + 1, used_filaments), nozzle,
+                               print.adaptive_merge_reference_nozzle(), object.slicing_parameters().layer_height).contains(height);
+                };
+                // Only the roles still resolved here constrain the choice: a filament already pinned above (merge plan,
+                // wiping override, Chameleon) is not picked by the code below.
+                auto nozzle_can_print_layer = [&nozzle_can_print_height, check_nozzle_height, support_dontcare, interface_dontcare,
+                                               support_slab_height, interface_slab_height](unsigned int extruder_id) {
+                    return ! check_nozzle_height ||
+                           ((! support_dontcare || nozzle_can_print_height(extruder_id, support_slab_height)) &&
+                            (! interface_dontcare || nozzle_can_print_height(extruder_id, interface_slab_height)));
+                };
+
                 // BBS: try to print support base with a filament other than interface filament
                 if (support_dontcare && !interface_dontcare) {
                     unsigned int dontcare_extruder = first_extruder_id;
@@ -8212,6 +8279,28 @@ LayerResult GCode::process_layer(const Print& print,
 
                         dontcare_extruder = extruder_id;
                         break;
+                    }
+                    if (! nozzle_can_print_layer(dontcare_extruder)) {
+                        bool found = false;
+                        for (unsigned int extruder_id : layer_tools.extruders) {
+                            if (print.config().filament_soluble.get_at(extruder_id) || extruder_id == interface_extruder ||
+                                is_group_pinned(extruder_id))
+                                continue;
+                            if (nozzle_can_print_layer(extruder_id)) {
+                                dontcare_extruder = extruder_id;
+                                found             = true;
+                                break;
+                            }
+                        }
+                        // Edge: Bambu stops here and keeps the unprintable pick. On a two-filament 0.4 + 0.8 plate whose
+                        // 0.4 object has its interface pinned to the 0.4 by the merge plan, that leaves the base on the
+                        // 0.8 at a height it cannot extrude. Printing the base with the interface filament is what this
+                        // branch does anyway when no other filament is on the layer, so it is the last resort.
+                        if (! found && dontcare_extruder != interface_extruder &&
+                            std::find(layer_tools.extruders.begin(), layer_tools.extruders.end(), interface_extruder) != layer_tools.extruders.end() &&
+                            ! print.config().filament_soluble.get_at(interface_extruder) && ! is_group_pinned(interface_extruder) &&
+                            nozzle_can_print_layer(interface_extruder))
+                            dontcare_extruder = interface_extruder;
                     }
 #if 0
                     //BBS: not found a suitable extruder in current layer ,dontcare_extruider==first_extruder_id==interface_extruder
@@ -8236,6 +8325,15 @@ LayerResult GCode::process_layer(const Print& print,
                         // Try to find a non-soluble extruder on the same layer.
                         for (unsigned int extruder_id : layer_tools.extruders)
                             if (!print.config().filament_soluble.get_at(extruder_id) && !is_group_pinned(extruder_id)) {
+                                dontcare_extruder = extruder_id;
+                                break;
+                            }
+                    }
+                    if (! nozzle_can_print_layer(dontcare_extruder)) {
+                        // The active filament's nozzle cannot extrude this support layer height.
+                        for (unsigned int extruder_id : layer_tools.extruders)
+                            if (! print.config().filament_soluble.get_at(extruder_id) && ! is_group_pinned(extruder_id) &&
+                                nozzle_can_print_layer(extruder_id)) {
                                 dontcare_extruder = extruder_id;
                                 break;
                             }
@@ -10121,7 +10219,9 @@ static bool per_nozzle_p4_key_unused(const DynamicPrintConfig &cfg, const std::s
         return opt == nullptr || std::all_of(opt->values.begin(), opt->values.end(), [](int v) { return v <= 0; });
     }
     // Chip-scope fix: the tool each filament's per-nozzle values were filled for is internal too.
-    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing" || key == "nozzle_filament_tool")
+    // H3C fix: so is the chosen processes' layer height per filament (the slabs are in the moves).
+    if (key == "nozzle_filament_process_slot" || key == "nozzle_slot_process_missing" || key == "nozzle_filament_tool" ||
+        key == "nozzle_layer_height")
         return true;
     return false;
 }

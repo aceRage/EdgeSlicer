@@ -1365,30 +1365,35 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
                 contained_min_one |= !volume->is_outside;
             }
 
-            ModelInstanceEPrintVolumeState volume_state;
-            // if (volume->is_outside && (plate_build_volume.bounding_volume().intersects(volume->bounding_box())))
-            if (volume->is_outside && (state == BuildVolume::ObjectState::Colliding))
-                volume_state = ModelInstancePVS_Partly_Outside;
-            else if (volume->is_outside)
-                volume_state = ModelInstancePVS_Fully_Outside;
-            else
-                volume_state = ModelInstancePVS_Inside;
+            // Orca #16564: track each instance across its printable model-part volumes only. A multipart
+            // instance with one volume inside and another outside is partly outside; a volume completely
+            // below the bed is intentionally ignored when deciding whether an instance is printable.
+            if (volume->printable && state != BuildVolume::ObjectState::Below) {
+                ModelInstanceEPrintVolumeState volume_state;
+                // if (volume->is_outside && (plate_build_volume.bounding_volume().intersects(volume->bounding_box())))
+                if (volume->is_outside && (state == BuildVolume::ObjectState::Colliding))
+                    volume_state = ModelInstancePVS_Partly_Outside;
+                else if (volume->is_outside)
+                    volume_state = ModelInstancePVS_Fully_Outside;
+                else
+                    volume_state = ModelInstancePVS_Inside;
 
-            if (model_state.find(comp_id) != model_state.end()) {
-                if (model_state[comp_id] != ModelInstancePVS_Partly_Outside) {
-                    if (volume_state == ModelInstancePVS_Partly_Outside)
-                        model_state[comp_id] = ModelInstancePVS_Partly_Outside;
-                    else if (model_state[comp_id] != volume_state) {
-                        model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                if (model_state.find(comp_id) != model_state.end()) {
+                    if (model_state[comp_id] != ModelInstancePVS_Partly_Outside) {
+                        if (volume_state == ModelInstancePVS_Partly_Outside)
+                            model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                        else if (model_state[comp_id] != volume_state) {
+                            model_state[comp_id] = ModelInstancePVS_Partly_Outside;
+                        }
                     }
+                } else {
+                    model_state[comp_id] = volume_state;
                 }
-            } else {
-                model_state[comp_id] = volume_state;
-            }
 
-            if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
-                overall_state = ModelInstancePVS_Partly_Outside;
-                BOOST_LOG_TRIVIAL(debug) << "instance includes " << volume->name << " is partially outside of bed";
+                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
+                    overall_state = ModelInstancePVS_Partly_Outside;
+                    BOOST_LOG_TRIVIAL(debug) << "instance includes " << volume->name << " is partially outside of bed";
+                }
             }
         }
     }
@@ -1398,7 +1403,8 @@ bool GLVolumeCollection::check_outside_state(const BuildVolume& build_volume, Mo
             (volume->shader_outside_printer_detection_enabled || (!volume->is_wipe_tower && volume->composite_id.volume_id >= 0))) {
             int64_t comp_id = ((int64_t) volume->composite_id.object_id << 32) | ((int64_t) volume->composite_id.instance_id);
             if (model_state.find(comp_id) != model_state.end()) {
-                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside) {
+                // Highlight only the printable parts of a partly-outside instance (Orca #16564).
+                if (model_state[comp_id] == ModelInstancePVS_Partly_Outside && volume->printable && !volume_below(*volume)) {
                     volume->partly_inside = true;
                 } else
                     volume->partly_inside = false;
