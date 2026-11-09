@@ -409,6 +409,10 @@ void PartPlate::calc_exclude_triangles(const ExPolygon &poly)
 {
     m_exclude_triangles.reset();
 
+    // A plate with no excluded area (most printers) has nothing to draw: that is the normal state, not a failure.
+    // Only a real polygon that cannot be triangulated is an error.
+    if (poly.empty())
+        return;
     if (!init_model_from_poly(m_exclude_triangles, poly, GROUND_Z))
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":Unable to create exclude triangles\n";
 }
@@ -600,7 +604,9 @@ void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int ind
     poly.contour.append({ scale_(p(0) + width), scale_(p(1) + height) });
     poly.contour.append({ scale_(p(0)        ), scale_(p(1) + height) });
 
-    if (!init_model_from_poly(model.model, poly, GROUND_Z))
+    // A plate that has no bed shape yet (a new project's Plater before its printer's bed is applied) gives a zero-size
+    // icon that cannot be triangulated; the icon is rebuilt once the shape is set. Only a failure with a shape is an error.
+    if (!init_model_from_poly(model.model, poly, GROUND_Z) && icon_sz > 0.f)
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 
     init_raycaster_from_model(model);

@@ -18216,8 +18216,15 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
         // and current_panel would stay null forever (is_preview_shown(), the do_reslice branch
         // and bind_event_handlers() would all be dead). The panels are Show()n / Hide()n normally
         // either way, so Preview::IsShown() keeps its usual meaning.
-        if (!panel->IsShownOnScreen() && !wxGetApp().is_hub_managed())
+        if (!panel->IsShownOnScreen() && !wxGetApp().is_hub_managed()) {
+            // A project strip slot's new Plater is built hidden, so it stops here with current_panel still null. Its panels
+            // all sit side by side in the 3D area's sizer, and until the first real switch they were all shown: the owner
+            // saw the main canvas next to the assembly view for a moment when the project came on screen. Show only this one.
+            for (wxPanel* other : panels)
+                if (other != panel)
+                    other->Hide();
             return;
+        }
     }
 //#endif
     current_panel = panel;
