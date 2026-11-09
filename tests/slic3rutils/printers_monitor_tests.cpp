@@ -2,6 +2,11 @@
 
 #include "slic3r/Utils/PrintersMonitor.hpp"
 
+#include <boost/filesystem.hpp>
+
+#include <string>
+#include <vector>
+
 using namespace Slic3r;
 using namespace Slic3r::PrintersMonitor;
 using json = nlohmann::json;
@@ -254,4 +259,231 @@ TEST_CASE("printers monitor: the shared device page (owner D6)", "[PrintersMonit
     CHECK(device_page_id("http://127.0.0.1:1/web/orca/monitor.html?id=host").empty());
     CHECK(device_page_id("http://192.168.1.40/web/orca/device.html?id=%22%3E").empty()); // decodes to a refused id
     CHECK(device_page_id("http://127.0.0.1:1/web/orca/device.html?embed=1").empty());
+}
+
+TEST_CASE("printers monitor: printers_forget names one printer", "[PrintersMonitor]")
+{
+    Message m = parse_message("printers_forget:sm:U1-0042");
+    CHECK(m.kind == Message::Kind::Forget);
+    CHECK(m.id == "sm:U1-0042");
+    CHECK(parse_message("printers_forget:").kind == Message::Kind::Invalid);
+    CHECK(parse_message("printers_forget:a b").kind == Message::Kind::Invalid);
+    CHECK(parse_message("printers_forget:<x>").kind == Message::Kind::Invalid);
+}
+
+TEST_CASE("printers monitor: leftovers from the hub are added, marked and stripped of controls", "[PrintersMonitor]")
+{
+    json payload = page_payload(200, R"({"printers":[{"id":"sm:U1-0042","kind":"snapmaker","online":false}]})", 1);
+    const std::string hub = R"({"printers":[
+        {"id":"sm:U1-0042","kind":"snapmaker","configured":true,"age_s":5},
+        {"id":"sm:TEST-MOCK","kind":"snapmaker","name":"Mock U1","configured":false,"stale":true,"age_s":7200,
+         "can_pause":true,"controls":{"light":{"on":true}}},
+        {"id":"ph:old","kind":"printhost"},
+        {"id":"bad id","kind":"printhost","configured":false}
+    ]})";
+    add_leftovers(payload, 200, hub);
+    REQUIRE(payload["printers"].size() == 2);
+    const json& p = payload["printers"][1];
+    CHECK(p["id"] == "sm:TEST-MOCK");
+    CHECK(p["leftover"] == true);
+    CHECK(p["online"] == false);
+    CHECK(p["seen_s"] == 7200);
+    CHECK_FALSE(p.contains("can_pause"));
+    CHECK_FALSE(p.contains("controls"));
+    CHECK_FALSE(payload["printers"][0].contains("leftover")); // the slicer's own row is untouched
+}
+
+TEST_CASE("printers monitor: no leftovers without an ok payload or an ok hub", "[PrintersMonitor]")
+{
+    const std::string hub = R"({"printers":[{"id":"sm:TEST-MOCK","configured":false}]})";
+    json failed = page_payload(503, "", 1);
+    add_leftovers(failed, 200, hub);
+    CHECK(failed["printers"].empty());
+    json ok = page_payload(200, R"({"printers":[]})", 1);
+    add_leftovers(ok, 503, hub);
+    CHECK(ok["printers"].empty());
+    add_leftovers(ok, 200, "not json");
+    CHECK(ok["printers"].empty());
+}
+
+// ---- "Remove printer": which stores a row id touches --------------------------------------------
+
+TEST_CASE("printers monitor: Remove plan per kind of row", "[PrintersMonitor][remove]")
+{
+    using S = std::vector<std::string>;
+    // A saved print-host device (Qidi / Elegoo / Creality / FlashForge / Klipper).
+    RemovalPlan ph = removal_plan(json{ { "id", "ph:abc123" }, { "kind", "printhost" }, { "model_key", "Qidi X-Max 4" },
+                                        { "device_id", "abc123" }, { "ip", "127.0.0.32" } });
+    CHECK(ph.mode == RemovalPlan::Mode::Remove);
+    CHECK(ph.ph_model_key == "Qidi X-Max 4");
+    CHECK(ph.ph_device_id == "abc123");
+    CHECK(ph.stores() == S{ "print_host_devices", "tombstone", "hub_printers" });
+    // An id with no device_id field still names the device.
+    CHECK(removal_plan(json{ { "id", "ph:zzz" }, { "kind", "printhost" } }).ph_device_id == "zzz");
+
+    // A LAN Snapmaker: its list, the Device tab's saved devices, a tombstone, the hub row.
+    RemovalPlan sm = removal_plan(json{ { "id", "sm:U1-8110026" }, { "kind", "snapmaker" }, { "ip", "192.168.1.40" } });
+    CHECK(sm.mode == RemovalPlan::Mode::Remove);
+    CHECK(sm.sm_id == "U1-8110026");
+    CHECK(sm.sm_ip == "192.168.1.40");
+    CHECK(sm.stores() == S{ "snapmaker_lan", "app_config_devices", "tombstone", "hub_printers" });
+
+    // Bambu in LAN mode: Log out. Bound to the cloud: explained, nothing touched.
+    RemovalPlan lan = removal_plan(json{ { "id", "01P00A000000001" }, { "kind", "bambu" }, { "lan_mode", true } });
+    CHECK(lan.mode == RemovalPlan::Mode::Logout);
+    CHECK(lan.stores() == S{ "bambu_lan", "tombstone", "hub_printers" });
+    RemovalPlan cloud = removal_plan(json{ { "id", "01P00A000000002" }, { "kind", "bambu" }, { "lan_mode", false } });
+    CHECK(cloud.mode == RemovalPlan::Mode::Explain);
+    CHECK(cloud.stores().empty());
+    CHECK(cloud.reason.find("Bambu Lab account") != std::string::npos);
+
+    // The preset's own host and the Device tab connection are explained, not removed.
+    CHECK(removal_plan(json{ { "id", "host" }, { "kind", "printhost" } }).mode == RemovalPlan::Mode::Explain);
+    CHECK(removal_plan(json{ { "id", "connect" }, { "kind", "connect" } }).mode == RemovalPlan::Mode::Explain);
+
+    // A leftover (only the hub remembers it): the hub row and nothing else, whatever its kind says.
+    RemovalPlan left = removal_plan(json{ { "id", "sm:GONE" }, { "kind", "snapmaker" }, { "leftover", true } });
+    CHECK(left.mode == RemovalPlan::Mode::Remove);
+    CHECK(left.stores() == S{ "hub_printers" });
+
+    // No id: nothing at all.
+    CHECK(removal_plan(json{ { "kind", "snapmaker" } }).stores().empty());
+}
+
+TEST_CASE("printers monitor: every card is told what Remove will do", "[PrintersMonitor][remove]")
+{
+    json rows = json::array({ json{ { "id", "sm:U1" }, { "kind", "snapmaker" } },
+                              json{ { "id", "01P00A000000001" }, { "kind", "bambu" }, { "lan_mode", true } },
+                              json{ { "id", "01P00A000000002" }, { "kind", "bambu" } } });
+    annotate_removal(rows);
+    CHECK(rows[0]["remove"]["mode"] == "remove");
+    CHECK(rows[1]["remove"]["mode"] == "logout");
+    CHECK(rows[2]["remove"]["mode"] == "explain");
+    CHECK(rows[2]["remove"].contains("reason"));
+}
+
+TEST_CASE("printers monitor: printers_remove and printers_rename messages", "[PrintersMonitor][remove]")
+{
+    Message m = parse_message("printers_remove:sm:U1-0042");
+    CHECK(m.kind == Message::Kind::Remove);
+    CHECK(m.id == "sm:U1-0042");
+    CHECK(parse_message("printers_remove:").kind == Message::Kind::Invalid);
+    m = parse_message(R"(printers_rename:{"id":"sm:U1-0042","name":"  Left U1  "})");
+    CHECK(m.kind == Message::Kind::Rename);
+    CHECK(m.id == "sm:U1-0042");
+    CHECK(m.name == "Left U1");
+    m = parse_message(R"(printers_rename:{"id":"sm:U1-0042","name":""})");
+    CHECK(m.kind == Message::Kind::Rename);
+    CHECK(m.name.empty());
+    CHECK(parse_message(R"(printers_rename:{"id":"a b","name":"x"})").kind == Message::Kind::Invalid);
+    CHECK(parse_message("printers_rename:not json").kind == Message::Kind::Invalid);
+}
+
+// ---- the tombstone ---------------------------------------------------------------------------
+
+TEST_CASE("printers monitor: a removed printer is tombstoned by id or address until it is added again", "[PrintersMonitor][remove]")
+{
+    json store = json::object();
+    CHECK_FALSE(tombstoned(store, "sm:U1-0042", "192.168.1.40"));
+    add_tombstone(store, "sm:U1-0042", "192.168.1.40", 1000);
+    CHECK(tombstoned(store, "sm:U1-0042", ""));            // discovery by serial
+    CHECK(tombstoned(store, "sm:OTHER", "192.168.1.40"));  // a source that only knows the address
+    CHECK_FALSE(tombstoned(store, "sm:OTHER", "192.168.1.41"));
+    add_tombstone(store, "sm:U1-0042", "192.168.1.40", 2000); // removed twice: still one entry
+    CHECK(store["removed"].size() == 1);
+    CHECK(clear_tombstone(store, "sm:U1-0042", "192.168.1.40"));
+    CHECK_FALSE(tombstoned(store, "sm:U1-0042", "192.168.1.40"));
+    CHECK_FALSE(clear_tombstone(store, "sm:U1-0042", ""));
+    for (int i = 0; i < 300; ++i) add_tombstone(store, "sm:T" + std::to_string(i), "", i);
+    CHECK(store["removed"].size() == 256);
+    CHECK(tombstoned(store, "sm:T299", ""));
+    CHECK_FALSE(tombstoned(store, "sm:T0", ""));
+}
+
+TEST_CASE("printers monitor: the tombstone and alias files survive a restart", "[PrintersMonitor][remove]")
+{
+    const std::string path = (boost::filesystem::temp_directory_path() /
+                              boost::filesystem::unique_path("pm_store_%%%%%%%%.json")).string();
+    CHECK(load_tombstones(path).empty()); // missing file: no tombstones
+    json store = json::object();
+    add_tombstone(store, "sm:U1-0042", "192.168.1.40", 1000);
+    REQUIRE(save_tombstones(path, store));
+    REQUIRE(save_tombstones(path, store)); // over an existing file
+    CHECK(tombstoned(load_tombstones(path), "sm:U1-0042", ""));
+    json aliases = json::object();
+    REQUIRE(set_alias(aliases, "sm:U1-0042", "Left U1"));
+    REQUIRE(save_store_file(path, aliases));
+    CHECK(alias_of(load_store_file(path), "sm:U1-0042") == "Left U1");
+    boost::system::error_code ec;
+    boost::filesystem::remove(path, ec);
+}
+
+// ---- "Rename" --------------------------------------------------------------------------------
+
+TEST_CASE("printers monitor: aliases are cleaned, set, cleared and put on the rows", "[PrintersMonitor][rename]")
+{
+    CHECK(clean_alias("  Left U1  ") == "Left U1");
+    CHECK(clean_alias(std::string("A") + char(7) + "B") == "AB");
+    CHECK(clean_alias(std::string(100, 'x')).size() == 64);
+    CHECK(clean_alias("   ").empty());
+
+    json store;
+    CHECK_FALSE(set_alias(store, "bad id", "x"));
+    REQUIRE(set_alias(store, "sm:U1-8110026", "Left U1"));
+    REQUIRE(set_alias(store, "ph:abc", "Qidi in the shed"));
+    json rows = json::array({ json{ { "id", "sm:U1-8110026" }, { "name", "U1-8110026" } },
+                              json{ { "id", "ph:abc" }, { "name", "Test" }, { "alias", "Test" } },
+                              json{ { "id", "01P00A000000001" }, { "name", "X1C" } } });
+    apply_aliases(rows, store);
+    CHECK(rows[0]["name"] == "Left U1");
+    CHECK(rows[0]["custom_name"] == "Left U1");
+    CHECK(rows[0]["reported_name"] == "U1-8110026");
+    CHECK(rows[1]["name"] == "Qidi in the shed");
+    CHECK(rows[1]["alias"] == "Test"); // the device's own alias field is left alone
+    CHECK(rows[2]["name"] == "X1C");
+    CHECK_FALSE(rows[2].contains("custom_name"));
+
+    // An empty name: back to the printer's own.
+    REQUIRE(set_alias(store, "sm:U1-8110026", ""));
+    CHECK(alias_of(store, "sm:U1-8110026").empty());
+    json again = json::array({ json{ { "id", "sm:U1-8110026" }, { "name", "U1-8110026" } } });
+    apply_aliases(again, store);
+    CHECK(again[0]["name"] == "U1-8110026");
+    CHECK_FALSE(again[0].contains("custom_name"));
+}
+
+TEST_CASE("printers monitor: the remove kind a client words its button by", "[PrintersMonitor][remove]")
+{
+    CHECK(removal_json(json{ { "id", "ph:a" }, { "kind", "printhost" } })["kind"] == "print_host_device");
+    CHECK(removal_json(json{ { "id", "sm:a" }, { "kind", "snapmaker" } })["kind"] == "lan_snapmaker");
+    CHECK(removal_json(json{ { "id", "01P00A000000001" }, { "kind", "bambu" }, { "lan_mode", true } })["kind"] == "bambu_lan");
+    const json cloud = removal_json(json{ { "id", "01P00A000000002" }, { "kind", "bambu" } });
+    CHECK(cloud["mode"] == "explain");
+    CHECK(cloud["kind"] == "bambu_cloud");
+    CHECK(removal_json(json{ { "id", "host" } })["kind"] == "preset_host");
+    CHECK(removal_json(json{ { "id", "connect" }, { "kind", "connect" } })["kind"] == "device_connection");
+    CHECK(removal_json(json{ { "id", "sm:x" }, { "leftover", true } })["kind"] == "leftover");
+}
+
+TEST_CASE("printers monitor: the report leaves tombstoned printers out", "[PrintersMonitor][remove]")
+{
+    json store = json::object();
+    add_tombstone(store, "ph:qidi1", "", 1);
+    add_tombstone(store, "sm:U1-8110026", "192.168.1.40", 1);
+    add_tombstone(store, "01P00A000000001", "", 1);
+    json rows = json::array({ json{ { "id", "ph:qidi1" }, { "ip", "127.0.0.32" } },
+                              json{ { "id", "ph:keep" }, { "ip", "127.0.0.33" } },
+                              json{ { "id", "sm:U1-8110026" }, { "ip", "192.168.1.40" } },
+                              // the same U1 under an address-derived id (discovery without its serial)
+                              json{ { "id", "sm:192.168.1.40" }, { "ip", "192.168.1.40" } },
+                              json{ { "id", "01P00A000000001" }, { "kind", "bambu" } },
+                              // a print host on the removed U1's old address is a different printer
+                              json{ { "id", "ph:other" }, { "ip", "192.168.1.40" } } });
+    CHECK(filter_tombstoned(rows, store) == 4);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0]["id"] == "ph:keep");
+    CHECK(rows[1]["id"] == "ph:other");
+    json none = json::array({ json{ { "id", "a" } } });
+    CHECK(filter_tombstoned(none, json::object()) == 0);
+    CHECK(none.size() == 1);
 }

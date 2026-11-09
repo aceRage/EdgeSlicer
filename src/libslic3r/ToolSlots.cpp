@@ -2,6 +2,7 @@
 
 #include "ToolSlots.hpp"
 
+#include "LocalesUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "NozzleOverride.hpp"
 #include "Preset.hpp"
@@ -13,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <set>
 #include <sstream>
@@ -83,9 +85,10 @@ bool parse_positive_number(const std::string &text, double &out)
 {
     if (text.empty())
         return false;
-    char        *end   = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || *end != '\0' || !(value > 0.) || !std::isfinite(value))
+    // Nozzle diameters are written with a decimal point; strtod reads "0.4" as 0 under a comma locale.
+    size_t       used  = 0;
+    const double value = string_to_double_decimal_point(text, &used);
+    if (used != text.size() || !(value > 0.) || !std::isfinite(value))
         return false;
     out = value;
     return true;
@@ -511,6 +514,38 @@ bool rack_nozzle_groups(const ConfigBase &config, size_t extruder, std::vector<s
     return true;
 }
 
+std::vector<MultiNozzleUtils::NozzleInfo> grouping_nozzle_list(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleGroupInfo> &nozzle_groups)
+{
+    using namespace MultiNozzleUtils;
+    const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
+    if (std::all_of(racks.begin(), racks.end(), [](const std::vector<RackNozzle> &rack) { return rack.empty(); }))
+        return build_nozzle_list(nozzle_groups);
+    // Owner report 2026-11-05 (tests/h2c_mixedslice.gcode.3mf): on a rack of L 0.4, R1-R4 0.4, R5 0.8, R6 0.6 the sorted list numbered
+    // the 0.6 as 5 and the 0.8 as 6, the H2C checked group 5 against its slot-5 hotend (a 0.8) and refused the job ("replace the
+    // hotend in slot 5"). Bambu Studio 2.9.x numbers by physical slot.
+    size_t extruders = racks.size();
+    for (const NozzleGroupInfo &group : nozzle_groups)
+        extruders = std::max(extruders, size_t(std::max(0, group.extruder_id)) + 1);
+    std::vector<std::vector<SlotNozzle>> slots(extruders);
+    for (size_t e = 0; e < extruders; ++e) {
+        if (e < racks.size() && !racks[e].empty()) {
+            for (const RackNozzle &nozzle : racks[e])
+                slots[e].push_back({ format_diameter_to_str(nozzle.diameter), nozzle.volume_type });
+            continue;
+        }
+        // An extruder without a rack: its nozzles as build_nozzle_list numbers them (its groups sorted).
+        std::vector<NozzleGroupInfo> own;
+        for (const NozzleGroupInfo &group : nozzle_groups)
+            if (group.extruder_id == int(e))
+                own.push_back(group);
+        std::sort(own.begin(), own.end());
+        for (const NozzleGroupInfo &group : own)
+            for (int i = 0; i < group.nozzle_count; ++i)
+                slots[e].push_back({ group.diameter, group.volume_type });
+    }
+    return build_nozzle_list_from_extruder_nozzles(slots);
+}
+
 int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list,
                               const std::vector<unsigned int> &used_filaments, std::vector<int> &filament_nozzle_map)
 {
@@ -584,6 +619,28 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
         }
     }
     return {};
+}
+
+bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group)
+{
+    if (config.nozzle_diameter.values.size() != 2)
+        return false;
+    for (int extruder = 0; extruder < 2; ++extruder) {
+        if (!extruder_has_nozzle_rack(config, size_t(extruder)))
+            continue;
+        // get_used_nozzles_in_extruder(extruder) covers every layer's mapping, for the filaments the plate uses.
+        std::vector<double> diameters;
+        for (const MultiNozzleUtils::NozzleInfo &nozzle : group.get_used_nozzles_in_extruder(extruder)) {
+            double d = 0.;
+            if (!parse_positive_number(nozzle.diameter, d))
+                continue;
+            if (std::none_of(diameters.begin(), diameters.end(), [d](double o) { return same_nozzle_diameter(o, d); }))
+                diameters.push_back(d);
+        }
+        if (diameters.size() >= 2)
+            return true;
+    }
+    return false;
 }
 
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)
@@ -793,7 +850,22 @@ int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozz
     const std::vector<RackNozzle> &rack = racks[extruder];
     const RackNozzle              &want = rack[size_t(slot - 1)];
     auto same_kind = [&want](double d, NozzleVolumeType v) { return same_nozzle_diameter(d, want.diameter) && v == want.volume_type; };
-    // build_nozzle_groups makes one group per kind of rack nozzle and build_nozzle_list lists each group's nozzles together, so
+    // A list in physical slot order (grouping_nozzle_list): the extruder's nozzles are its rack, entry by entry.
+    std::vector<int> own;
+    for (size_t n = 0; n < nozzle_list.size(); ++n)
+        if (nozzle_list[n].extruder_id == int(extruder))
+            own.push_back(int(n));
+    if (own.size() == rack.size()) {
+        bool physical = true;
+        for (size_t k = 0; k < rack.size() && physical; ++k) {
+            double d = 0.;
+            physical = parse_positive_number(nozzle_list[size_t(own[k])].diameter, d) && same_nozzle_diameter(d, rack[k].diameter) &&
+                       nozzle_list[size_t(own[k])].volume_type == rack[k].volume_type;
+        }
+        if (physical)
+            return own[size_t(slot - 1)];
+    }
+    // A list sorted by kind (build_nozzle_list): build_nozzle_groups makes one group per kind of rack nozzle and build_nozzle_list lists each group's nozzles together, so
     // the n-th rack nozzle of a kind is the n-th nozzle of that kind in the list.
     int ordinal = 0;
     for (size_t k = 0; k + 1 < size_t(slot); ++k)
@@ -890,6 +962,40 @@ std::vector<std::string> rack_override_from_reported(const std::vector<std::vect
         std::string text;
         for (double d : mounted_then_rack[e])
             text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(d);
+        out[e] = text;
+    }
+    if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))
+        out.clear();
+    return out;
+}
+
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity)
+{
+    std::vector<std::string> out = current;
+    if (out.size() < mounted_then_rack.size())
+        out.resize(mounted_then_rack.size());
+    for (size_t e = 0; e < mounted_then_rack.size(); ++e) {
+        const int slots = e < capacity.size() ? capacity[e] : std::numeric_limits<int>::max();
+        // One nozzle (or an extruder without a rack) is no rack to choose from: leave the extruder as it was.
+        if (mounted_then_rack[e].size() < 2 || slots < 2)
+            continue;
+        // What an unannotated slot means on this extruder (extruder_rack_nozzles): the extruder's type, Standard for Hybrid.
+        NozzleVolumeType bare = e < extruder_types.size() ? NozzleVolumeType(extruder_types[e]) : nvtStandard;
+        if (bare == nvtHybrid)
+            bare = nvtStandard;
+        std::string text;
+        size_t      written = 0;
+        for (const RackNozzle &n : mounted_then_rack[e]) {
+            if (written == size_t(slots))
+                break; // more nozzles than the printer profile has slots: the rack cannot list them
+            const NozzleVolumeType type = n.volume_given && n.volume_type != nvtHybrid ? n.volume_type : bare;
+            text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(n.diameter);
+            if (type != bare)
+                text += std::string(":") + nozzle_volume_word(type);
+            ++written;
+        }
         out[e] = text;
     }
     if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))

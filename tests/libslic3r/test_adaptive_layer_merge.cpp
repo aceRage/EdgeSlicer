@@ -33,6 +33,17 @@ PrintConfig two_nozzle_config(double d0, double d1)
     pc.apply(cfg, true);
     return pc;
 }
+PrintConfig nozzle_config(size_t extruders, size_t filaments,
+                          std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> items)
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_extruders(unsigned(extruders));
+    cfg.set_num_filaments(unsigned(filaments));
+    cfg.set_deserialize_strict(items);
+    PrintConfig pc;
+    pc.apply(cfg, true);
+    return pc;
+}
 } // namespace
 
 TEST_CASE("Adaptive layer merge: height window and support gap", "[AdaptiveLayerMerge]")
@@ -144,4 +155,99 @@ TEST_CASE("Adaptive layer merge: Edge nozzle mapping", "[AdaptiveLayerMerge]")
     const AdaptiveLayerHeightRange r0 = adaptive_layer_height_range_for_filament(pc, 1);
     CHECK(r0.min_height == Approx(0.08));
     CHECK(r0.max_height == Approx(0.28));
+}
+
+// Per-nozzle clamp: adaptive_layer_height_range_for_nozzle() narrows a nozzle's window by the configured min/max
+// layer height of the nozzle that prints the band, the tightest pair where used filaments share it, and never
+// reads values.front() for a missing slot.
+using Catch::Matchers::WithinAbs;
+
+TEST_CASE("Adaptive layer merge: clamp resolves to the nozzle that prints the band", "[AdaptiveLayerMerge]")
+{
+    // Two nozzles with their own limits; three filaments, the third on nozzle 2 through filament_map.
+    PrintConfig pc = nozzle_config(2, 3, { { "nozzle_diameter", "0.4,0.8" },
+                                           { "filament_map", "1,2,2" },
+                                           { "single_extruder_multi_material", "0" },
+                                           { "min_layer_height", "0.1,0.2" },
+                                           { "max_layer_height", "0.25,0.5" } });
+    REQUIRE(physical_extruder_for_filament(pc, 3) == 1);
+    const AdaptiveLayerHeightRange r3 = adaptive_layer_height_range_for_nozzle(pc, 3, { 0, 1, 2 });
+    // 0.8 window [0.16, 0.56] narrowed by nozzle 2's own pair, never nozzle 1's (values.front()).
+    CHECK_THAT(r3.min_height, WithinAbs(0.2, 1e-9));
+    CHECK_THAT(r3.max_height, WithinAbs(0.5, 1e-9));
+    const AdaptiveLayerHeightRange r1 = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1, 2 });
+    CHECK_THAT(r1.min_height, WithinAbs(0.1, 1e-9));
+    CHECK_THAT(r1.max_height, WithinAbs(0.25, 1e-9));
+    // The band size walks into the clamped window: 0.8 over a 0.4 reference at 0.2 is 2 layers (0.4 <= 0.5),
+    // and at a 0.3 base the ratio's 0.6 exceeds 0.5, so it falls back to one layer.
+    CHECK(adaptive_layer_band_size(0.8, 0.4, 0.2, r3) == 2);
+    CHECK(adaptive_layer_band_size(0.8, 0.4, 0.3, r3) == 1);
+    CHECK(adaptive_layer_band_size(0.8, 0.4, 0.3) == 1);
+}
+
+TEST_CASE("Adaptive layer merge: clamp takes the tightest limits of filaments sharing a nozzle (AMS)", "[AdaptiveLayerMerge]")
+{
+    // Five AMS filaments on two nozzles; filaments 1 and 5 share nozzle 1. The limits are filament-sized
+    // vectors (the layout Preset::normalize gives them under SEMM), and filaments 1 and 5 disagree.
+    PrintConfig pc = nozzle_config(2, 5, { { "nozzle_diameter", "0.4,0.8" },
+                                           { "filament_map", "1,2,2,2,1" },
+                                           { "single_extruder_multi_material", "0" },
+                                           { "min_layer_height", "0.08,0.2,0.2,0.2,0.12" },
+                                           { "max_layer_height", "0.3,0.5,0.5,0.5,0.24" } });
+    REQUIRE(pc.min_layer_height.values.size() == 5);
+    REQUIRE(physical_extruder_for_filament(pc, 1) == physical_extruder_for_filament(pc, 5));
+
+    // Both used: the band nozzle 1 prints must satisfy both pairs, so the larger minimum and the smaller maximum.
+    const AdaptiveLayerHeightRange both = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1, 4 });
+    CHECK_THAT(both.min_height, WithinAbs(0.12, 1e-9));
+    CHECK_THAT(both.max_height, WithinAbs(0.24, 1e-9));
+    // Asked from filament 5's side, the same nozzle gets the same window.
+    const AdaptiveLayerHeightRange from5 = adaptive_layer_height_range_for_nozzle(pc, 5, { 0, 1, 4 });
+    CHECK_THAT(from5.min_height, WithinAbs(both.min_height, 1e-9));
+    CHECK_THAT(from5.max_height, WithinAbs(both.max_height, 1e-9));
+    // Filament 5 not on the plate: filament 1's own pair only (window [0.08, 0.28], max 0.3 is a no-op).
+    const AdaptiveLayerHeightRange alone = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1 });
+    CHECK_THAT(alone.min_height, WithinAbs(0.08, 1e-9));
+    CHECK_THAT(alone.max_height, WithinAbs(0.28, 1e-9));
+    // Filaments 2-4 on nozzle 2 are not mixed into nozzle 1's limits.
+    const AdaptiveLayerHeightRange coarse = adaptive_layer_height_range_for_nozzle(pc, 2, { 0, 1, 4 });
+    CHECK_THAT(coarse.min_height, WithinAbs(0.2, 1e-9));
+    CHECK_THAT(coarse.max_height, WithinAbs(0.5, 1e-9));
+}
+
+TEST_CASE("Adaptive layer merge: clamp never falls back to values.front()", "[AdaptiveLayerMerge]")
+{
+    // The limits carry one slot for a two-nozzle printer: nozzle 2 has no pair of its own. get_at() would hand it
+    // nozzle 1's 0.25 ceiling; the clamp must leave nozzle 2 on its diameter window instead.
+    PrintConfig pc = nozzle_config(2, 2, { { "nozzle_diameter", "0.4,0.8" },
+                                           { "single_extruder_multi_material", "0" } });
+    pc.min_layer_height.values = { 0.1 };
+    pc.max_layer_height.values = { 0.25 };
+    const AdaptiveLayerHeightRange r2 = adaptive_layer_height_range_for_nozzle(pc, 2, { 0, 1 });
+    CHECK_THAT(r2.min_height, WithinAbs(0.16, 1e-9));
+    CHECK_THAT(r2.max_height, WithinAbs(0.56, 1e-9));
+    // Nozzle 1 still gets its own slot.
+    const AdaptiveLayerHeightRange r1 = adaptive_layer_height_range_for_nozzle(pc, 1, { 0, 1 });
+    CHECK_THAT(r1.min_height, WithinAbs(0.1, 1e-9));
+    CHECK_THAT(r1.max_height, WithinAbs(0.25, 1e-9));
+
+    // An H3C-style rack: one extruder whose preset carries a 0.4 and 0.28 ceiling, filament 2 pinned to the rack's
+    // 0.8. The preset's pair belongs to the 0.4, so the 0.8 keeps its own window instead of the 0.28 ceiling.
+    DynamicPrintConfig rack = DynamicPrintConfig::full_print_config();
+    rack.set_num_extruders(1);
+    rack.set_num_filaments(2);
+    rack.set_deserialize_strict({ { "nozzle_diameter", "0.4" },
+                                  { "min_layer_height", "0.08" },
+                                  { "max_layer_height", "0.28" } });
+    rack.option<ConfigOptionStrings>("extruder_rack_nozzle_diameter", true)->values = { "0.4,0.8" };
+    rack.option<ConfigOptionFloats>("filament_rack_nozzle_diameter", true)->values  = { 0., 0.8 };
+    PrintConfig rack_pc;
+    rack_pc.apply(rack, true);
+    REQUIRE_THAT(nozzle_diameter_for_filament(rack_pc, 2), WithinAbs(0.8, 1e-9));
+    const AdaptiveLayerHeightRange on_rack = adaptive_layer_height_range_for_nozzle(rack_pc, 2, { 0, 1 });
+    CHECK_THAT(on_rack.min_height, WithinAbs(0.16, 1e-9));
+    CHECK_THAT(on_rack.max_height, WithinAbs(0.56, 1e-9));
+    const AdaptiveLayerHeightRange own = adaptive_layer_height_range_for_nozzle(rack_pc, 1, { 0, 1 });
+    CHECK_THAT(own.min_height, WithinAbs(0.08, 1e-9));
+    CHECK_THAT(own.max_height, WithinAbs(0.28, 1e-9));
 }

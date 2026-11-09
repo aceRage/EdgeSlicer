@@ -32,6 +32,7 @@ class DynamicPrintConfig;
 
 namespace MultiNozzleUtils {
 struct NozzleInfo;
+struct NozzleGroupInfo;
 class LayeredNozzleGroupResult;
 } // namespace MultiNozzleUtils
 
@@ -123,6 +124,14 @@ double nozzle_diameter_for_filament_on_layer(const PrintConfig &config, const Mu
 // Nozzle groups of an extruder with declared rack diameters: one (diameter, volume type) group per kind of nozzle.
 // Returns false (groups untouched) when the extruder declares none.
 bool rack_nozzle_groups(const ConfigBase &config, size_t extruder, std::vector<std::pair<std::string, std::pair<NozzleVolumeType, int>>> &groups);
+// The grouping's nozzle list (ToolOrdering's build_filament_group_context) from its nozzle groups (build_nozzle_groups). When
+// some extruder declares a rack (rack text: extruder_rack_nozzle_override over extruder_rack_nozzle_diameter), the nozzles are
+// listed by physical slot, as Bambu Studio 2.9.x does (build_nozzle_list_from_extruder_nozzles): an extruder's rack nozzles in
+// rack order, any other extruder's nozzles as its groups give them, extruder 0 first. group_id == index == the global slot (H2C:
+// left 0, right rack slots 1..6), which slice_info's <filament group_id> / <nozzle id>, the G-code header's filament_nozzle_map
+// and the printer's get_auto_nozzle_mapping request all carry; the printer checks the hotend in that slot. Without a rack the
+// sorted build_nozzle_list order as before. A rack of one kind of nozzle numbers the same either way.
+std::vector<MultiNozzleUtils::NozzleInfo> grouping_nozzle_list(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleGroupInfo> &nozzle_groups);
 // Makes a filament -> nozzle map (0-based nozzle ids into `nozzle_list`) honour the rack sizes: a used filament on a
 // nozzle of another diameter than nozzle_diameter_for_filament() moves to a nozzle of its extruder with that
 // diameter (the same volume type when there is one). Returns the number of filaments moved.
@@ -131,6 +140,11 @@ int pin_rack_nozzle_diameters(const PrintConfig &config, const std::vector<Multi
 // Per layer, whether every filament prints on a nozzle of the diameter it was sliced for. Empty when it does,
 // else a message naming the first filament, layer and diameters that do not match.
 std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group);
+// Whether the grouping puts the plate's filaments on two or more different nozzle diameters of ONE extruder's rack, on a
+// two-extruder rack machine (H2C: nozzle_diameter.size() == 2 and extruder_max_nozzle_count > 1). H2C firmware refuses an
+// in-job swap between rack hotends of different diameters ("Hotend type mismatch detected during printing"). A single-extruder
+// rack (H3C), a machine without a rack and a plate with one diameter per extruder give false.
+bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group);
 // Configuration errors of the rack keys (an extruder's nozzle_diameter missing from its rack, a pin no rack nozzle
 // has, a slot pin past the end of the rack), or empty.
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments);
@@ -146,7 +160,8 @@ std::string validate_tpu285_nozzles(const PrintConfig &config, const std::vector
 // slots as tools of their own on the Process tab (each with its own size and process profile). A filament can be pinned
 // to a slot (filament_rack_nozzle_slot): it then prints with that slot's size and on that slot's nozzle of the
 // grouping, so a change to a filament on another slot of the same extruder is a rack nozzle change (M632 / M633).
-// The slot numbers are the slicer's: the printer maps them to its rack positions by size when the job is sent.
+// Slot k of an extruder is its k-th rack position: the grouping numbers its nozzles by physical slot (grouping_nozzle_list), so
+// the job's nozzle ids name the rack positions the printer checks.
 
 // Whether extruder `extruder` has a nozzle rack (extruder_max_nozzle_count > 1; a config without that key: any).
 bool extruder_has_nozzle_rack(const ConfigBase &config, size_t extruder);
@@ -174,8 +189,9 @@ std::vector<int> manual_filament_map_from_pins(const std::vector<int> &pins, con
 // The slot whose process 1-based `filament_id` prints with: its pin, else the first slot of its extruder's rack with the size
 // it prints with (two slots of one size print alike). 0 when its extruder shows no slots or no slot has that size.
 int filament_rack_slot(const ConfigBase &config, unsigned int filament_id);
-// The index into `nozzle_list` (the grouping's nozzles, build_nozzle_list order) of extruder `extruder`'s rack slot `slot`,
-// -1 when there is none.
+// The index into `nozzle_list` (the grouping's nozzles) of extruder `extruder`'s rack slot `slot`, -1 when there is none. On a
+// list in physical slot order (grouping_nozzle_list) that is the slot's own nozzle; on a list sorted by kind (build_nozzle_list)
+// the n-th nozzle of the slot's kind.
 int rack_slot_nozzle_index(const ConfigBase &config, const std::vector<MultiNozzleUtils::NozzleInfo> &nozzle_list, size_t extruder, int slot);
 
 // Send-time check (the printer's reported rack).
@@ -198,6 +214,13 @@ std::vector<std::string> rack_slot_send_problems(const ConfigBase &config, const
 // extruder the mounted nozzle first and then the rack positions in order. An extruder that reports fewer than two nozzles
 // keeps its `current` text; an all-empty result is returned empty.
 std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<double>> &mounted_then_rack, const std::vector<std::string> &current);
+// The same with each nozzle's type (owner bug 2026-11-07, H3C: size AND type per slot). `extruder_types` is the project's
+// nozzle_volume_type per extruder: a slot without ":<type>" takes it (extruder_rack_nozzles), so a slot of that type is written
+// bare and every other slot names its type. `capacity` (extruder_max_nozzle_count per extruder; missing = no limit) caps an
+// extruder's slots, and an extruder of capacity 1 (no rack) keeps its `current` text.
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity);
 
 // ---- 4. Per-nozzle filament values ------------------------------------------------------------------------------
 

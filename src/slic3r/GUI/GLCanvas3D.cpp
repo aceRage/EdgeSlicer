@@ -3668,6 +3668,13 @@ void GLCanvas3D::render(bool only_init)
     //BBS: add enable_render
     if (!m_enable_render)
         return;
+    // Project strip P4 (owner crash 2026-11-07, two Recent projects back to back): a Plater is built with no app Plater
+    // set (MainFrame::create_project_plater, as at startup), and its constructor's update() renders the Assemble canvas.
+    // At startup GL is not ready yet so that render returned early; with GL up it reached init() ->
+    // on_change_color_mode() -> wxGetApp().plater()->get_notification_manager() on null. Nothing renders until a Plater
+    // is the app's (the canvas initialises at its first render once shown).
+    if (wxGetApp().plater() == nullptr)
+        return;
 
     // ensures this canvas is current and initialized
     if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
@@ -9598,7 +9605,9 @@ bool GLCanvas3D::_set_shown_canvas_current()
     // can be current. Prefer the on-screen canvas so GTK hidden/unrealized SetCurrent does not fail,
     // and so a frame already in render() does not switch drawables. Canvases share one wxGLContext.
     // Fall back to this canvas (CLI / unit / shown-canvas SetCurrent failed).
-    Plater* plater = wxGetApp().plater();
+    // Project strip P4: the Plater on screen (MainFrame's); wxGetApp().plater() may be a hidden project rendering its
+    // slice thumbnails.
+    Plater* plater = wxGetApp().mainframe != nullptr && wxGetApp().mainframe->plater() != nullptr ? wxGetApp().mainframe->plater() : wxGetApp().plater();
     if (plater != nullptr) {
         GLCanvas3D* shown = plater->get_current_canvas3D();
         if (shown != nullptr && shown != this && shown->_set_current())
@@ -10179,13 +10188,10 @@ RealisticRenderSettings GLCanvas3D::_render_settings() const
 
 bool GLCanvas3D::_is_realistic_view_enabled() const
 {
-    if (!_render_settings().realistic)
-        return false;
-    // Edge: Orca switches the realistic view off in the app config while the seam, support or fuzzy
-    // skin painting gizmo is open and back on when it closes. Here it is just not applied then, so
-    // the setting is never rewritten behind the user's back (nor left off by a crash mid-gizmo).
-    const GLGizmosManager::EType gizmo = m_gizmos.get_current_type();
-    return gizmo != GLGizmosManager::Seam && gizmo != GLGizmosManager::FdmSupports && gizmo != GLGizmosManager::FuzzySkin;
+    // Orca #17317: the realistic view stays on while the seam, support or fuzzy skin painting gizmo
+    // is open. (Orca used to switch it off in the app config for the duration; Edge only skipped it
+    // in this check, so the setting was never rewritten. Neither is done any more.)
+    return _render_settings().realistic;
 }
 
 bool GLCanvas3D::_is_realistic_shadows_enabled() const
@@ -10458,13 +10464,31 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
 
             // Showcase S5: during a layer build-up only what is laid casts a shadow.
             GLShaderProgram* caster = shader;
+            bool             caster_clipped = false;
             if (render_settings.has_clip_top()) {
                 if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
                     caster = clip;
             }
+            // Orca #16942: clipped as _render_objects() clips the volumes, so a part cut away by
+            // the cut gizmo (or outside the SLA z range) casts no shadow.
+            if (caster == shader) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("flat_clip"); clip != nullptr) {
+                    caster         = clip;
+                    caster_clipped = true;
+                }
+            }
             caster->start_using();
             caster->set_uniform("projection_matrix", Transform3d(light_proj));
-            if (caster != shader)
+            if (caster_clipped) {
+                GLGizmoBase* current_gizmo = m_gizmos.get_current();
+                const ClippingPlane clipping_plane = (!current_gizmo || current_gizmo->apply_clipping_plane()) ? m_gizmos.get_clipping_plane() :
+                                                                                                                 ClippingPlane::ClipsNothing();
+                caster->set_uniform("clipping_plane", clipping_plane.get_data());
+                if (m_use_clipping_planes)
+                    caster->set_uniform("z_range", std::array<float, 2>{ float(-m_clipping_planes[0].get_data()[3]), float(m_clipping_planes[1].get_data()[3]) });
+                else
+                    caster->set_uniform("z_range", std::array<float, 2>{ -FLT_MAX, FLT_MAX });
+            } else if (caster != shader)
                 caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
@@ -10472,7 +10496,8 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
                 caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
                 if (caster != shader) {
                     caster->set_uniform("volume_world_matrix", volume->world_matrix());
-                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                    if (!caster_clipped)
+                        caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
                 }
                 volume->model.render();
             }

@@ -82,7 +82,6 @@ private:
     bool        m_show_edit{false};
     bool        m_show_bind{false};
     bool        m_hover {false};
-    bool        m_is_macos_special_version{false};
 
 
     PrinterBindState   m_bind_state;
@@ -239,15 +238,26 @@ public:
     EditDevNameDialog(Plater *plater = nullptr);
     ~EditDevNameDialog();
 
+    // A LAN-mode printer also gets an access code field (pre-filled with the saved code): its name
+    // is kept locally and a changed code is saved and redialled at once. A cloud-bound printer
+    // keeps the name-only edit (the name is renamed through the account).
     void set_machine_obj(MachineObject *obj);
     void on_dpi_changed(const wxRect &suggested_rect) override;
     void on_edit_name(wxCommandEvent &e);
 
     Button*             m_button_confirm{nullptr};
     TextInput*          m_textCtr{nullptr};
+    wxStaticText*       m_name_label{nullptr};
+    wxStaticText*       m_code_label{nullptr};
+    TextInput*          m_codeCtr{nullptr};
     wxStaticText*       m_static_valid{nullptr};
     MachineObject*      m_info{nullptr};
 };
+
+// EdgeSlicer: open the name / access code dialog for the printer with this serial (the Device
+// page's pencil icon, the refused-access-code notice and the Send dialog's link all land here).
+// GUI thread. Does nothing when the printer is not known.
+void open_printer_edit_dialog(const std::string &dev_id);
 
 }} // namespace Slic3r::GUI
 

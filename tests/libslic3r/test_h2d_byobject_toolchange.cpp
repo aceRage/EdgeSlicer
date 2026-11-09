@@ -255,7 +255,7 @@ void check_flushes_follow_the_nozzle_contents(const std::vector<Change> &changes
 
 } // namespace
 
-SCENARIO("H2D print by object: tool changes and temperatures name the real hotend and nozzle contents", "[H2DByObject]")
+SCENARIO("H2D print by object: tool changes and temperatures name the real hotend and nozzle contents", "[H2DByObject][slow]")
 {
     GIVEN("three objects: filament 1 (right), filament 2 (left), filament 3 (right), printed one after another")
     {
