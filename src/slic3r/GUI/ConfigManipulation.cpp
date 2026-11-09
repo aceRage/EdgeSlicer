@@ -1596,6 +1596,77 @@ bool ConfigManipulation::check_support_interlock_interface_layers(DynamicPrintCo
     return true;
 }
 
+// EdgeSlicer: the session's "No" answers to the top-Z-0 offer, shared by every tab (process,
+// plate, object, part) and cleared when a project is loaded or created (Plater::priv::reset).
+static TopZZeroPromptMemory &top_z_zero_prompt_memory()
+{
+    static TopZZeroPromptMemory memory;
+    return memory;
+}
+
+void ConfigManipulation::clear_session_prompts()
+{
+    top_z_zero_prompt_memory().clear();
+}
+
+// EdgeSlicer: the Bambu Studio "support material for the support interface" suggestion, minus its
+// trap. Bambu Studio asked on every change of the interface filament to a support material and had
+// no way to keep a top Z gap; this asks for any interface filament that differs from the print's,
+// remembers a No per filament pair, and stays quiet while the distance itself is edited, during
+// loads, at a distance of 0 and with supports off (rules: Support/SupportInterfaceRules.hpp).
+bool ConfigManipulation::offer_support_top_z_zero(DynamicPrintConfig *config, const std::string &changed_key)
+{
+    if (is_msg_dlg_already_exist || config == nullptr)
+        return false;
+    for (const char *key : { "support_interface_filament", "support_top_z_distance", "enable_support" })
+        if (! config->has(key))
+            return false;
+
+    TopZZeroPromptMemory::Inputs in;
+    in.changed_key        = changed_key;
+    in.supports_used      = config->opt_bool("enable_support") || (config->has("raft_layers") && config->opt_int("raft_layers") > 0);
+    in.filament_matching  = config->has("support_filament_matching") && config->opt_bool("support_filament_matching");
+    in.interface_filament = config->opt_int("support_interface_filament");
+    in.print_filament     = support_print_filament(config->has("wall_filament") ? config->opt_int("wall_filament") : 0,
+                                                   config->has("extruder") ? config->opt_int("extruder") : 0);
+    in.top_z_distance     = config->opt_float("support_top_z_distance");
+    if (! top_z_zero_prompt_memory().should_offer(in))
+        return false;
+
+    // A filament marked as support material gets the rest of Bambu Studio's soluble recipe too.
+    const bool support_material = is_support_filament(in.interface_filament - 1);
+    wxString   msg_text = _L("The support interface uses a different filament. "
+                             "Set the top Z distance to 0 for a soluble/breakaway-style interface?");
+    if (support_material)
+        msg_text += "\n" + _L("The interface filament is a support material, so 0 interface spacing, the interlaced rectilinear "
+                              "pattern and no independent support layer height are set as well.");
+    msg_text += "\n\n" + _L("Yes - Set the top Z distance to 0\n"
+                            "No  - Keep the current distance (not asked again for these filaments)");
+    MessageDialog      dialog(m_msg_dlg_parent, msg_text, _L("Suggestion"), wxICON_WARNING | wxYES | wxNO);
+    is_msg_dlg_already_exist = true;
+    const bool yes = dialog.ShowModal() == wxID_YES;
+    bool       changed = false;
+    if (yes) {
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value("support_top_z_distance", new ConfigOptionFloat(0));
+        if (support_material) {
+            if (config->has("support_interface_spacing"))
+                new_conf.set_key_value("support_interface_spacing", new ConfigOptionFloat(0));
+            if (config->has("support_interface_pattern"))
+                new_conf.set_key_value("support_interface_pattern",
+                                       new ConfigOptionEnum<SupportMaterialInterfacePattern>(SupportMaterialInterfacePattern::smipRectilinearInterlaced));
+            if (config->has("independent_support_layer_height"))
+                new_conf.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
+        }
+        apply(config, &new_conf);
+        changed = true;
+    } else {
+        top_z_zero_prompt_memory().remember_no(in.interface_filament, in.print_filament);
+    }
+    is_msg_dlg_already_exist = false;
+    return changed;
+}
+
 
 } // GUI
 } // Slic3r

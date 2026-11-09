@@ -2863,27 +2863,12 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         m_config_manipulation.apply(m_config, &new_conf);
     }
 
-    // BBS popup a message to ask the user to set optimum parameters for support interface if support materials are used
-    if (opt_key == "support_interface_filament") {
-        int interface_filament_id = m_config->opt_int("support_interface_filament") - 1; // the displayed id is based from 1, while internal id is based from 0
-        if (is_support_filament(interface_filament_id) && !(m_config->opt_float("support_top_z_distance") == 0 && m_config->opt_float("support_interface_spacing") == 0 &&
-                                                            m_config->opt_enum<SupportMaterialInterfacePattern>("support_interface_pattern") == SupportMaterialInterfacePattern::smipRectilinearInterlaced)) {
-            wxString msg_text = _L("When using support material for the support interface, we recommend the following settings:\n"
-                                   "0 top Z distance, 0 interface spacing, interlaced rectilinear pattern and disable independent support layer height");
-            msg_text += "\n\n" + _L("Change these settings automatically?\n"
-                                    "Yes - Change these settings automatically\n"
-                                    "No  - Do not change these settings for me");
-            MessageDialog      dialog(wxGetApp().plater(), msg_text, "Suggestion", wxICON_WARNING | wxYES | wxNO);
-            DynamicPrintConfig new_conf = *m_config;
-            if (dialog.ShowModal() == wxID_YES) {
-                new_conf.set_key_value("support_top_z_distance", new ConfigOptionFloat(0));
-                new_conf.set_key_value("support_interface_spacing", new ConfigOptionFloat(0));
-                new_conf.set_key_value("support_interface_pattern", new ConfigOptionEnum<SupportMaterialInterfacePattern>(SupportMaterialInterfacePattern::smipRectilinearInterlaced));
-                new_conf.set_key_value("independent_support_layer_height", new ConfigOptionBool(false));
-                m_config_manipulation.apply(m_config, &new_conf);
-            }
+    // BBS popup a message to ask the user to set optimum parameters for support interface if support materials are used.
+    // EdgeSlicer: offered for any interface filament other than the print's, once per filament pair
+    // per session (a No is remembered), and never while the top Z distance itself is edited.
+    if (opt_key == "support_interface_filament" || opt_key == "wall_filament") {
+        if (m_config_manipulation.offer_support_top_z_zero(m_config, opt_key))
             wxGetApp().plater()->update();
-        }
     }
 
     // EdgeSlicer: switching the interlock on (or raising its woven layers) offers once to raise the

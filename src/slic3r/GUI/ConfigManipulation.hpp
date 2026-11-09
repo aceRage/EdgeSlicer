@@ -117,6 +117,14 @@ public:
     // the same values. Returns true when the config was changed.
     bool    check_support_interlock_interface_layers(DynamicPrintConfig* config);
 
+    // EdgeSlicer: called when the user changes a filament selector (changed_key). When the support
+    // interface now uses a filament other than the print's and the top Z distance is above 0,
+    // offers once to set it to 0. A No is remembered for that filament pair for the session
+    // (cleared by clear_session_prompts() when a project is loaded or created). Returns true when
+    // the config was changed.
+    bool    offer_support_top_z_zero(DynamicPrintConfig* config, const std::string& changed_key);
+    static void clear_session_prompts();
+
 private:
     bool get_temperature_range(DynamicPrintConfig *config, int &range_low, int &range_high);
 };

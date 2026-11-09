@@ -217,3 +217,108 @@ TEST_CASE("Interlock raise: top layers go to 1 + woven layers", "[SupportInterfa
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+//   3. The "top Z distance 0" offer for an interface in another filament, without the trap:
+//      once per (interface, print) filament pair per session, only on a filament selector change.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+TopZZeroPromptMemory::Inputs different_interface_inputs()
+{
+    TopZZeroPromptMemory::Inputs in;
+    in.changed_key        = "support_interface_filament";
+    in.supports_used      = true;
+    in.filament_matching  = false;
+    in.interface_filament = 2;
+    in.print_filament     = 1;
+    in.top_z_distance     = 0.2;
+    return in;
+}
+} // namespace
+
+TEST_CASE("Print filament: wall filament, else the object's, else filament 1", "[SupportInterface][TopZPrompt]")
+{
+    CHECK(support_print_filament(3, 2) == 3);
+    CHECK(support_print_filament(0, 2) == 2);
+    CHECK(support_print_filament(0, 0) == 1);
+}
+
+TEST_CASE("Interface filament differs only when set, not the print's and not matched", "[SupportInterface][TopZPrompt]")
+{
+    CHECK(support_interface_filament_differs(2, 1, false));
+    CHECK_FALSE(support_interface_filament_differs(0, 1, false)); // Default = current filament
+    CHECK_FALSE(support_interface_filament_differs(1, 1, false));
+    CHECK_FALSE(support_interface_filament_differs(2, 1, true));  // Chameleon picks the filament
+}
+
+TEST_CASE("Top Z 0 offer: when it is made", "[SupportInterface][TopZPrompt]")
+{
+    TopZZeroPromptMemory memory;
+    TopZZeroPromptMemory::Inputs in = different_interface_inputs();
+    CHECK(memory.should_offer(in));
+    in.changed_key = "wall_filament";
+    CHECK(memory.should_offer(in));
+    SECTION("a raft alone counts as supports used") {
+        in.supports_used = true; // enable_support off, raft_layers > 0 is folded in by the caller
+        CHECK(memory.should_offer(in));
+    }
+}
+
+TEST_CASE("Top Z 0 offer: when it is never made", "[SupportInterface][TopZPrompt]")
+{
+    TopZZeroPromptMemory memory;
+    TopZZeroPromptMemory::Inputs in = different_interface_inputs();
+    SECTION("while the top Z distance itself is edited") {
+        in.changed_key = "support_top_z_distance";
+        CHECK_FALSE(memory.should_offer(in));
+    }
+    SECTION("for an unrelated setting") {
+        in.changed_key = "layer_height";
+        CHECK_FALSE(memory.should_offer(in));
+        in.changed_key = "";
+        CHECK_FALSE(memory.should_offer(in));
+    }
+    SECTION("when the distance already is 0") {
+        in.top_z_distance = 0.;
+        CHECK_FALSE(memory.should_offer(in));
+    }
+    SECTION("when supports and raft are off") {
+        in.supports_used = false;
+        CHECK_FALSE(memory.should_offer(in));
+    }
+    SECTION("with Support Filament Matching on") {
+        in.filament_matching = true;
+        CHECK_FALSE(memory.should_offer(in));
+    }
+    SECTION("when the interface uses the print's filament or Default") {
+        in.interface_filament = 1;
+        CHECK_FALSE(memory.should_offer(in));
+        in.interface_filament = 0;
+        CHECK_FALSE(memory.should_offer(in));
+    }
+}
+
+TEST_CASE("Top Z 0 offer: a No is remembered per filament pair until cleared", "[SupportInterface][TopZPrompt]")
+{
+    TopZZeroPromptMemory memory;
+    TopZZeroPromptMemory::Inputs in = different_interface_inputs();
+    REQUIRE(memory.should_offer(in));
+    memory.remember_no(in.interface_filament, in.print_filament);
+    CHECK(memory.declined(2, 1));
+    CHECK_FALSE(memory.should_offer(in));
+    // Changing something else (another selector, same pair) does not ask again.
+    in.changed_key = "wall_filament";
+    CHECK_FALSE(memory.should_offer(in));
+    // A different pair is a new question.
+    in.interface_filament = 3;
+    CHECK(memory.should_offer(in));
+    in.interface_filament = 2;
+    in.print_filament     = 4;
+    CHECK(memory.should_offer(in));
+    // The pair is ordered: (1, 2) is not (2, 1).
+    CHECK_FALSE(memory.declined(1, 2));
+    // A new or loaded project clears the memory.
+    memory.clear();
+    in = different_interface_inputs();
+    CHECK(memory.should_offer(in));
+}
