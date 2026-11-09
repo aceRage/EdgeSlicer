@@ -23005,7 +23005,14 @@ void Plater::load_gcode(const wxString& filename)
     // GCodeViewer::init() then calls uninitialized GL function pointers and
     // crashes. Defer until the canvas is ready; the pending paint event is
     // already queued ahead of the CallAfter, so this converges immediately.
+    // Bounded: a hub started hidden in the tray may never paint the canvas.
+    static int s_deferred_gcode_attempts = 0;
     if (p->get_current_canvas3D() == nullptr || !p->get_current_canvas3D()->is_initialized()) {
+        if (++s_deferred_gcode_attempts > 200) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " canvas not initialized after 200 deferred attempts, giving up on " << into_u8(filename);
+            s_deferred_gcode_attempts = 0;
+            return;
+        }
         wxGetApp().CallAfter([this, filename] {
             // Do not keep retrying while the app shuts down.
             if (!wxGetApp().is_closing())
@@ -23013,6 +23020,7 @@ void Plater::load_gcode(const wxString& filename)
         });
         return;
     }
+    s_deferred_gcode_attempts = 0;
     if (! is_gcode_file(into_u8(filename)))
         return;
 
