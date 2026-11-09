@@ -186,6 +186,33 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
 // Apply a BambuMixedImportResult::id_remap to a 1-based id (0 and out-of-range ids map to 0).
 unsigned int bambu_mixed_remap_id(const BambuMixedImportResult &result, int old_id);
 
+// ---- Bambu Studio 3MF export (P3, D12) -------------------------------------------------------------------
+//
+// The reverse of convert_bambu_mixed_slots(): every enabled Edge mixed row becomes a Bambu Studio mixed filament
+// slot appended after the physical ones, in virtual id order, so slot k is exactly the row's Edge virtual id and
+// the model's painted states and filament settings need no remap. The slot copies its first component's entry in
+// every per-filament array (its preset, temperatures, flush row and column; Bambu Studio syncs the nozzle from the
+// components itself) and takes the row's blended colour. The Bambu keys come back in `slots`, aligned with all
+// physical + mixed slots, ready for project_settings.config; Edge never stores them (D3).
+//   * A two-component row writes "a,b" and its mix as "0.7,0.3"; three or more write the gradient ids and weights.
+//   * A Z gradient row writes filament_mixed_gradient and its linear range "start,end" (A's share, bottom to top).
+//   * Bambu Studio has one switch for all mixed slots: `sublayer` is true when an exported row prints as Ratio.
+//     Rows that print otherwise (Subdivide, cadence while another row is Ratio, pattern / pointillism / image rows)
+//     are exported with their components and mix and reported in `notes` (D12: Subdivide exports as cadence).
+// Rows above `max_used_id` (the highest filament id the project uses) are left out, so unused rows (auto-generated
+// pairs) never become Bambu slots; the ids of the rows written stay aligned. Does nothing (any = false) without an
+// enabled mixed row at or below it.
+struct BambuMixedExport
+{
+    bool                     any { false };
+    size_t                   physical_count { 0 };
+    size_t                   mixed_count { 0 };
+    bool                     sublayer { false };
+    BambuMixedSlots          slots;
+    std::vector<std::string> notes;
+};
+BambuMixedExport expand_bambu_mixed_slots(DynamicPrintConfig &config, unsigned int max_used_id = 0xFFFFFFFFu);
+
 } // namespace Slic3r
 
 #endif // slic3r_MixedSublayer_hpp_

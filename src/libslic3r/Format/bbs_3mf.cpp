@@ -860,6 +860,35 @@ static std::string join_int_list_comma(const std::vector<int>& values)
     return stream.str();
 }
 
+// Mixed color sublayer P3 (D12): the highest 1-based filament id the project uses - painted states, object, part and
+// height-range filaments and every *_filament feature setting of the project, objects, parts and ranges. The Bambu
+// export writes mixed slots up to it only.
+static unsigned int bambu_mixed_max_used_filament_id(const Model &model, const DynamicPrintConfig &project)
+{
+    unsigned int max_id = 0;
+    auto from_config = [&max_id](const ConfigBase &config) {
+        for (const std::string &key : config.keys()) {
+            if (key != "extruder" && !boost::algorithm::ends_with(key, "_filament"))
+                continue;
+            if (const auto *opt = dynamic_cast<const ConfigOptionInt *>(config.option(key)); opt != nullptr && opt->value > 0)
+                max_id = std::max(max_id, unsigned(opt->value));
+        }
+    };
+    from_config(project);
+    for (const ModelObject *object : model.objects) {
+        from_config(object->config.get());
+        for (const ModelVolume *volume : object->volumes) {
+            from_config(volume->config.get());
+            for (int id : volume->get_extruders())
+                if (id > 0)
+                    max_id = std::max(max_id, unsigned(id));
+        }
+        for (const auto &range : object->layer_config_ranges)
+            from_config(range.second.get());
+    }
+    return max_id;
+}
+
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
 {
     if (!result) return;
@@ -7289,15 +7318,58 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_bambu_report = BambuExport::Report();
         m_bambu_project.clear();
         if (m_bambu_compat && store_params.config != nullptr) {
-            m_bambu_ctx     = BambuExport::Context::from_project(*store_params.config);
-            m_bambu_project = BambuExport::convert_project(*store_params.config, m_bambu_ctx, m_bambu_report);
+            // Mixed color sublayer P3 (D12): the project's mixed rows become Bambu Studio mixed filament slots, appended
+            // after the physical ones in virtual id order, so the model's ids need no remap (MixedSublayer.hpp).
+            std::unique_ptr<DynamicPrintConfig> expanded;
+            BambuMixedExport                    mixed;
+            if (const auto *defs = store_params.config->option<ConfigOptionString>("mixed_filament_definitions");
+                defs != nullptr && !defs->value.empty() && store_params.model != nullptr) {
+                expanded = std::make_unique<DynamicPrintConfig>(*store_params.config);
+                mixed    = expand_bambu_mixed_slots(*expanded, bambu_mixed_max_used_filament_id(*store_params.model, *store_params.config));
+                if (!mixed.any)
+                    expanded.reset();
+            }
+            const DynamicPrintConfig &project = expanded ? *expanded : *store_params.config;
+            m_bambu_ctx     = BambuExport::Context::from_project(project);
+            m_bambu_project = BambuExport::convert_project(project, m_bambu_ctx, m_bambu_report);
+            if (mixed.any) {
+                auto bools = [](const std::vector<bool> &v) {
+                    BambuExport::Value out;
+                    out.vector = true;
+                    for (bool b : v)
+                        out.values.push_back(b ? "1" : "0");
+                    return out;
+                };
+                auto strings = [](const std::vector<std::string> &v) {
+                    BambuExport::Value out;
+                    out.vector  = true;
+                    out.strings = true;
+                    out.values  = v;
+                    return out;
+                };
+                m_bambu_project["filament_is_mixed"]                = bools(mixed.slots.is_mixed);
+                m_bambu_project["filament_mixed_components"]        = strings(mixed.slots.components);
+                m_bambu_project["filament_mixed_sublayer_ratios"]   = strings(mixed.slots.ratios);
+                m_bambu_project["filament_mixed_gradient"]          = bools(mixed.slots.gradient);
+                m_bambu_project["filament_mixed_gradient_range"]    = strings(mixed.slots.gradient_range);
+                m_bambu_project["filament_mixed_gradient_curve"]    = strings(mixed.slots.gradient_curve);
+                m_bambu_project["filament_mixed_gradient_per_part"] = bools(mixed.slots.gradient_per_part);
+                BambuExport::Value sublayer;
+                sublayer.values = { mixed.sublayer ? "1" : "0" };
+                m_bambu_project["enable_mixed_color_sublayer"] = sublayer;
+                m_bambu_report.converted.insert("filament_is_mixed");
+                m_bambu_report.notes.push_back("project: " + std::to_string(mixed.mixed_count) +
+                                               " EdgeSlicer mixed filament(s) written as Bambu Studio mixed filament slots");
+                for (const std::string &note : mixed.notes)
+                    m_bambu_report.notes.push_back("project: " + note);
+            }
             if (m_bambu_multi_diameter) {
                 BambuExport::Value mode;
                 mode.values = { "1" };
                 BambuExport::Value map;
                 map.vector  = true;
                 map.strings = true;
-                map.values  = BambuMultiDiameter::filament_diameter_map(*store_params.config);
+                map.values  = BambuMultiDiameter::filament_diameter_map(project);
                 m_bambu_project[BambuMultiDiameter::MODE_KEY]         = mode;
                 m_bambu_project[BambuMultiDiameter::DIAMETER_MAP_KEY] = map;
             }

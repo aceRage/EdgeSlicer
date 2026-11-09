@@ -3,12 +3,25 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/Format/BambuExport.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedSublayer.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/miniz_extension.hpp"
+
+#include <boost/filesystem.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -544,4 +557,273 @@ TEST_CASE("Mixed sublayer: a Ratio row starts with the filament a Subdivide row 
         CHECK(three[2].extruder == 1);
         CHECK(state.last_extruder == 1);
     }
+}
+
+// ---- Phase 3: Bambu Studio export (D12) -------------------------------------------------------------------
+
+namespace {
+
+void check_same_mixed_keys(const BambuMixedExport &a, const BambuMixedExport &b)
+{
+    CHECK(a.slots.is_mixed == b.slots.is_mixed);
+    CHECK(a.slots.components == b.slots.components);
+    CHECK(a.slots.ratios == b.slots.ratios);
+    CHECK(a.slots.gradient == b.slots.gradient);
+    CHECK(a.slots.gradient_range == b.slots.gradient_range);
+    CHECK(a.slots.gradient_curve == b.slots.gradient_curve);
+    CHECK(a.slots.gradient_per_part == b.slots.gradient_per_part);
+    CHECK(a.sublayer == b.sublayer);
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: Bambu Studio export round trip (D12)", "[MixedSublayer][BambuExport][P3]")
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    // A Bambu Studio project [P1, P2, M(1,2), P3] as Edge has it after the import: physical 1-3 plus virtual 4.
+    DynamicPrintConfig first = bambu_mixed_project_config();
+    REQUIRE(convert_bambu_mixed_slots(first, bambu_slots()).converted);
+
+    DynamicPrintConfig     exported = first;
+    const BambuMixedExport e1       = expand_bambu_mixed_slots(exported);
+    REQUIRE(e1.any);
+    CHECK(e1.physical_count == 3);
+    CHECK(e1.mixed_count == 1);
+    // The row is slot 4: its Edge virtual id, so painted states and filament settings need no remap.
+    CHECK((e1.slots.is_mixed == std::vector<bool>{ false, false, false, true }));
+    CHECK(e1.slots.components[3] == "1,2");
+    CHECK(e1.slots.ratios[3] == "0.7,0.3");
+    CHECK_FALSE(e1.slots.gradient[3]);
+    // The slot copies its first component's entries; the flush matrix gains a row and a column.
+    const auto &colours = exported.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colours.size() == 4);
+    CHECK((exported.option<ConfigOptionStrings>("filament_settings_id")->values ==
+           std::vector<std::string>{ "PLA red", "PLA blue", "PLA green", "PLA red" }));
+    CHECK((exported.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>{ 210, 220, 230, 210 }));
+    const std::vector<double> flush = exported.option<ConfigOptionFloats>("flush_volumes_matrix")->values;
+    REQUIRE(flush.size() == 16);
+    CHECK(flush[1 * 4 + 3] == 21.); // 2 -> mixed = 2 -> 1
+    CHECK(flush[3 * 4 + 1] == 12.); // mixed -> 2 = 1 -> 2
+    CHECK(flush[3 * 4 + 3] == 0.);
+    CHECK(exported.opt_string("mixed_filament_definitions").empty());
+    CHECK(exported.opt_int("wall_filament") == 3);
+
+    // Importing the export gives the same EdgeSlicer project, and exporting that again the same Bambu keys.
+    DynamicPrintConfig second = exported;
+    const auto         r2     = convert_bambu_mixed_slots(second, e1.slots);
+    REQUIRE(r2.converted);
+    CHECK(bambu_mixed_remap_id(r2, 4) == 4);
+    CHECK(second.opt_string("mixed_filament_definitions") == first.opt_string("mixed_filament_definitions"));
+    CHECK(second.option<ConfigOptionStrings>("filament_colour")->values == first.option<ConfigOptionStrings>("filament_colour")->values);
+    CHECK(second.option<ConfigOptionStrings>("filament_settings_id")->values ==
+          first.option<ConfigOptionStrings>("filament_settings_id")->values);
+    CHECK(second.option<ConfigOptionInts>("nozzle_temperature")->values == first.option<ConfigOptionInts>("nozzle_temperature")->values);
+    CHECK(second.option<ConfigOptionFloats>("flush_volumes_matrix")->values == first.option<ConfigOptionFloats>("flush_volumes_matrix")->values);
+    CHECK(second.opt_int("wall_filament") == 3);
+    DynamicPrintConfig     again = second;
+    const BambuMixedExport e2    = expand_bambu_mixed_slots(again);
+    check_same_mixed_keys(e1, e2);
+
+    SECTION("rows above the highest used id are not written")
+    {
+        DynamicPrintConfig cfg = first;
+        CHECK_FALSE(expand_bambu_mixed_slots(cfg, 3).any);
+        CHECK(cfg.option<ConfigOptionStrings>("filament_colour")->values.size() == 3);
+    }
+}
+
+TEST_CASE("Mixed sublayer: Bambu Studio export of gradient, three-colour and Subdivide rows", "[MixedSublayer][BambuExport][P3]")
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(3);
+    const std::vector<std::string> colours { "#FF0000", "#0000FF", "#00FF00" };
+    config.option<ConfigOptionStrings>("filament_colour", true)->values = colours;
+    config.set_key_value("enable_mixed_color_sublayer", new ConfigOptionBool(true));
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 30, colours); // Z gradient 80 % -> 20 % of filament 1
+    mgr.add_custom_filament(1, 2, 50, colours); // three colours 50 / 25 / 25
+    mgr.add_custom_filament(2, 3, 40, colours); // Subdivide
+    REQUIRE(mgr.mixed_filaments().size() == 3);
+    MixedFilament &gradient = mgr.mixed_filaments()[0];
+    gradient.gradient_enabled = true;
+    gradient.gradient_start   = 0.8f;
+    gradient.gradient_end     = 0.2f;
+    MixedFilament &three             = mgr.mixed_filaments()[1];
+    three.gradient_component_ids     = MixedFilamentManager::encode_gradient_component_ids({ 1, 2, 3 });
+    three.gradient_component_weights = "50/25/25";
+    mgr.mixed_filaments()[2].sublayer_method = int(MixedSublayerMethod::Subdivide);
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    DynamicPrintConfig     exported = config;
+    const BambuMixedExport e1       = expand_bambu_mixed_slots(exported);
+    REQUIRE(e1.any);
+    REQUIRE(e1.mixed_count == 3);
+    CHECK(e1.slots.components[3] == "1,2");
+    CHECK(e1.slots.ratios[3] == "0.7,0.3");
+    CHECK(e1.slots.gradient[3]);
+    CHECK(e1.slots.gradient_range[3] == "0.8,0.2");
+    CHECK(e1.slots.components[4] == "1,2,3");
+    CHECK(e1.slots.ratios[4] == "0.5,0.25,0.25");
+    CHECK_FALSE(e1.slots.gradient[4]);
+    CHECK(e1.slots.components[5] == "2,3");
+    CHECK(e1.slots.ratios[5] == "0.6,0.4");
+    CHECK(e1.sublayer);
+    // Subdivide has no Bambu Studio equivalent; Bambu Studio splits all mixed slots or none.
+    CHECK(std::any_of(e1.notes.begin(), e1.notes.end(), [](const std::string &n) { return n.find("Subdivide") != std::string::npos; }));
+    CHECK(exported.option<ConfigOptionStrings>("filament_colour")->values.size() == 6);
+
+    // Re-import and re-export: the same keys.
+    DynamicPrintConfig back = exported;
+    REQUIRE(convert_bambu_mixed_slots(back, e1.slots).converted);
+    MixedFilamentManager back_mgr;
+    back_mgr.load_custom_entries(back.opt_string("mixed_filament_definitions"), back.option<ConfigOptionStrings>("filament_colour")->values);
+    REQUIRE(back_mgr.mixed_filaments().size() == 3);
+    CHECK(back_mgr.mixed_filaments()[0].gradient_enabled);
+    CHECK_THAT(double(back_mgr.mixed_filaments()[0].gradient_start), WithinAbs(0.8, 1e-4));
+    CHECK(back_mgr.mixed_filaments()[1].gradient_component_weights == "50/25/25");
+    DynamicPrintConfig     again = back;
+    const BambuMixedExport e2    = expand_bambu_mixed_slots(again);
+    check_same_mixed_keys(e1, e2);
+}
+
+namespace {
+
+std::string mixsub_zip_entry(const std::string &zip_path, const std::string &entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path))
+        return {};
+    size_t      size = 0;
+    void       *data = mz_zip_reader_extract_file_to_heap(&archive, entry_name.c_str(), &size, 0);
+    std::string result;
+    if (data != nullptr) {
+        result.assign(static_cast<const char *>(data), size);
+        mz_free(data);
+    }
+    close_zip_reader(&archive);
+    return result;
+}
+
+std::string mixsub_temp_file(const std::string &name)
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / ("snorca_tests_mixsub_" + std::to_string(get_current_pid()));
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    return (tmp_root / name).string();
+}
+
+DynamicPrintConfig mixsub_project_config()
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    for (const std::string &key : cfg.keys())
+        if (const ConfigOption *opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+            cfg.erase(key);
+            cfg.option(key, true);
+        }
+    cfg.set_num_extruders(1);
+    cfg.set_num_filaments(2);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values  = { 0.4 };
+    cfg.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#0000FF" };
+    cfg.set_key_value("printer_model", new ConfigOptionString("Bambu Lab P1S"));
+    cfg.set_key_value("enable_mixed_color_sublayer", new ConfigOptionBool(true));
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 30, { "#FF0000", "#0000FF" });
+    cfg.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+    return cfg;
+}
+
+// project_settings.config's mixed keys as text, for a byte comparison.
+std::map<std::string, std::string> mixsub_bambu_keys(const std::string &path)
+{
+    const nlohmann::json project = nlohmann::json::parse(mixsub_zip_entry(path, "Metadata/project_settings.config"));
+    std::map<std::string, std::string> out;
+    for (const char *key : { "filament_is_mixed", "filament_mixed_components", "filament_mixed_sublayer_ratios", "filament_mixed_gradient",
+                             "filament_mixed_gradient_range", "enable_mixed_color_sublayer", "filament_colour" })
+        out[key] = project.contains(key) ? project[key].dump() : std::string("<missing>");
+    return out;
+}
+
+bool mixsub_store(const std::string &path, Model &model, DynamicPrintConfig &cfg, BambuExport::Report &report)
+{
+    PlateData *plate   = new PlateData();
+    plate->plate_index = 0;
+    plate->objects_and_instances.emplace_back(0, 0);
+    StoreParams sp;
+    sp.path            = path.c_str();
+    sp.model           = &model;
+    sp.config          = &cfg;
+    sp.plate_data_list = { plate };
+    sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    sp.bambu_compat    = true;
+    sp.bambu_report    = &report;
+    const bool ok      = store_bbs_3mf(sp);
+    PlateDataPtrs plates { plate };
+    release_PlateData_list(plates);
+    return ok;
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: a mixed row survives Export Bambu 3MF and its re-import", "[MixedSublayer][BambuExport][3mf][P3]")
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "mixed_cube";
+    TriangleMesh cube   = make_cube(20., 20., 20.);
+    ModelVolume *part   = object->add_volume(cube);
+    part->config.set("extruder", 1);
+    object->add_instance();
+    object->ensure_on_bed();
+    TriangleSelector selector(cube);
+    for (int facet = 0; facet < 4; ++facet)
+        selector.set_facet(facet, EnforcerBlockerType(3)); // the mixed row, virtual filament 3
+    REQUIRE(part->mmu_segmentation_facets.set(selector));
+    DynamicPrintConfig cfg = mixsub_project_config();
+
+    const std::string   path = mixsub_temp_file("mixsub_bambu.3mf");
+    BambuExport::Report report;
+    REQUIRE(mixsub_store(path, model, cfg, report));
+    const std::map<std::string, std::string> keys = mixsub_bambu_keys(path);
+    INFO("filament_is_mixed " << keys.at("filament_is_mixed"));
+    CHECK(keys.at("filament_mixed_components") == R"(["","","1,2"])");
+    CHECK(keys.at("filament_mixed_sublayer_ratios") == R"(["","","0.7,0.3"])");
+    CHECK(keys.at("filament_is_mixed").find("1") != std::string::npos);
+    CHECK(keys.at("enable_mixed_color_sublayer").find("1") != std::string::npos);
+
+    // Re-import: two physical filaments plus the row as virtual filament 3; the paint still points at it.
+    DynamicPrintConfig        back_cfg;
+    Model                     back_model;
+    PlateDataPtrs             back_plates;
+    std::vector<Preset *>     back_presets;
+    bool                      is_bbl = false;
+    Semver                    version;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    REQUIRE(load_bbs_3mf(path.c_str(), &back_cfg, &ctxt, &back_model, &back_plates, &back_presets, &is_bbl, &version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances | LoadStrategy::Silence | LoadStrategy::LoadConfig));
+    CHECK(back_cfg.option<ConfigOptionStrings>("filament_colour")->values.size() == 2);
+    MixedFilamentManager back_mgr;
+    back_mgr.load_custom_entries(back_cfg.opt_string("mixed_filament_definitions"), back_cfg.option<ConfigOptionStrings>("filament_colour")->values);
+    REQUIRE(back_mgr.mixed_filaments().size() == 1);
+    CHECK(back_mgr.mixed_filaments().front().component_a == 1);
+    CHECK(back_mgr.mixed_filaments().front().component_b == 2);
+    CHECK(back_mgr.mixed_filaments().front().mix_b_percent == 30);
+    CHECK(back_cfg.opt_bool("enable_mixed_color_sublayer"));
+    REQUIRE(back_model.objects.size() == 1);
+    const std::vector<int> painted = back_model.objects.front()->volumes.front()->get_extruders();
+    CHECK(std::find(painted.begin(), painted.end(), 3) != painted.end());
+
+    // Export again: byte-identical mixed keys.
+    const std::string   path2 = mixsub_temp_file("mixsub_bambu_again.3mf");
+    BambuExport::Report report2;
+    REQUIRE(mixsub_store(path2, back_model, back_cfg, report2));
+    CHECK(mixsub_bambu_keys(path2) == keys);
+
+    release_PlateData_list(back_plates);
+    for (Preset *p : back_presets)
+        delete p;
+    boost::filesystem::remove(path);
+    boost::filesystem::remove(path2);
 }
