@@ -1179,7 +1179,7 @@ TEST_CASE("colorsplit: a paint state above the printer's filament count stays in
 // a third of the 100k the spike calls for - so this uses PI/158: 316 * 314 = 99224, inside the 80k..120k band.
 static constexpr double SPIKE_SPHERE_FA = PI / 158.;
 
-TEST_CASE("colorsplit spike: S1 self-intersecting fixtures and S3 timing", "[colorsplit_spike]")
+TEST_CASE("colorsplit spike: S1 self-intersecting fixtures and S3 timing", "[colorsplit_spike][slow]")
 {
     using clock = std::chrono::steady_clock;
     // S3: ~100k-triangle sphere, one colour cap and three colour bands.

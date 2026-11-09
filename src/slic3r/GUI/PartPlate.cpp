@@ -3707,6 +3707,21 @@ void PartPlate::clear_manual_filament_map()
     clear_filament_map();
 }
 
+bool PartPlate::reset_filament_routing()
+{
+    bool changed = m_config.has("filament_map") || !m_dual_nozzle_confirm.empty();
+    // getInt(): a mode loaded from a 3MF is a ConfigOptionEnumGeneric.
+    if (const ConfigOption *mode = m_config.option("filament_map_mode");
+        mode != nullptr && (mode->getInt() == int(FilamentMapMode::fmmManual) || mode->getInt() == int(FilamentMapMode::fmmNozzleManual))) {
+        m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
+        changed = true;
+    }
+    clear_filament_map();
+    m_dual_nozzle_confirm.clear();
+    clear_dual_nozzle_sliced_for();
+    return changed;
+}
+
 std::vector<int> PartPlate::get_manual_filament_map() const
 {
     // getInt(): a plate config filled by apply() (3MF load) holds the mode as ConfigOptionEnumGeneric.

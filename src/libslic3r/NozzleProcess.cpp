@@ -85,6 +85,56 @@ std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment)
     return assignment;
 }
 
+int filament_nozzle_assignment_value(size_t filament, int tool, size_t filament_count, size_t nozzle_count)
+{
+    if (tool <= 0)
+        return 0;
+    return size_t(tool) == filament + 1 && filament_count <= nozzle_count ? 0 : tool;
+}
+
+std::string filament_routing_layout(const ConfigBase &printer_config)
+{
+    std::string out = "n=";
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(printer_config.option("nozzle_diameter"));
+    out += std::to_string(nozzles != nullptr ? nozzles->size() : 0);
+    out += ";rack=";
+    if (const auto *racks = dynamic_cast<const ConfigOptionInts *>(printer_config.option("extruder_max_nozzle_count")))
+        for (size_t i = 0; i < racks->values.size(); ++i)
+            out += (i > 0 ? "," : "") + std::to_string(racks->values[i]);
+    const auto *semm = dynamic_cast<const ConfigOptionBool *>(printer_config.option("single_extruder_multi_material"));
+    if (semm != nullptr && semm->value)
+        out += ";semm";
+    return out;
+}
+
+bool reset_filament_routing(DynamicConfig &project_config, size_t filament_count)
+{
+    bool changed = false;
+    const auto set = [&project_config, &changed](const char *key, ConfigOption *value) {
+        std::unique_ptr<ConfigOption> owned(value);
+        if (const ConfigOption *old = project_config.option(key); old != nullptr && *old == *owned)
+            return;
+        project_config.set_key_value(key, owned.release());
+        changed = true;
+    };
+    // Every filament on the first extruder, as in a new project; Auto grouping spreads them on a printer that has several.
+    set("filament_map", new ConfigOptionInts(std::max<size_t>(filament_count, 1), 1));
+    set("filament_side_pin", new ConfigOptionInts{ 0 });
+    set("filament_rack_nozzle_slot", new ConfigOptionInts{ 0 });
+    set("filament_rack_nozzle_diameter", new ConfigOptionFloats{ 0. });
+    set("filament_nozzle_assignment", new ConfigOptionInts());
+    // The device state synced for the old printer (Bambu two-extruder sync); the next sync writes the new printer's.
+    set("extruder_ams_count", new ConfigOptionStrings());
+    set("extruder_nozzle_stats", new ConfigOptionStrings());
+    // A manual map was made for the old printer's extruders. getInt(): a mode loaded from a 3MF is a ConfigOptionEnumGeneric.
+    if (const ConfigOption *mode = project_config.option("filament_map_mode");
+        mode != nullptr && (mode->getInt() == int(FilamentMapMode::fmmManual) || mode->getInt() == int(FilamentMapMode::fmmNozzleManual))) {
+        project_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
+        changed = true;
+    }
+    return changed;
+}
+
 namespace {
 
 // The layout half of a config, copied before the config is rewritten.

@@ -3685,6 +3685,13 @@ void GLCanvas3D::render(bool only_init)
     //BBS: add enable_render
     if (!m_enable_render)
         return;
+    // Project strip P4 (owner crash 2026-11-07, two Recent projects back to back): a Plater is built with no app Plater
+    // set (MainFrame::create_project_plater, as at startup), and its constructor's update() renders the Assemble canvas.
+    // At startup GL is not ready yet so that render returned early; with GL up it reached init() ->
+    // on_change_color_mode() -> wxGetApp().plater()->get_notification_manager() on null. Nothing renders until a Plater
+    // is the app's (the canvas initialises at its first render once shown).
+    if (wxGetApp().plater() == nullptr)
+        return;
 
     // ensures this canvas is current and initialized
     if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
@@ -9615,7 +9622,9 @@ bool GLCanvas3D::_set_shown_canvas_current()
     // can be current. Prefer the on-screen canvas so GTK hidden/unrealized SetCurrent does not fail,
     // and so a frame already in render() does not switch drawables. Canvases share one wxGLContext.
     // Fall back to this canvas (CLI / unit / shown-canvas SetCurrent failed).
-    Plater* plater = wxGetApp().plater();
+    // Project strip P4: the Plater on screen (MainFrame's); wxGetApp().plater() may be a hidden project rendering its
+    // slice thumbnails.
+    Plater* plater = wxGetApp().mainframe != nullptr && wxGetApp().mainframe->plater() != nullptr ? wxGetApp().mainframe->plater() : wxGetApp().plater();
     if (plater != nullptr) {
         GLCanvas3D* shown = plater->get_current_canvas3D();
         if (shown != nullptr && shown != this && shown->_set_current())
