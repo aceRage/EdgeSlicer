@@ -16,6 +16,7 @@
 
 #include "test_data.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -62,8 +63,8 @@ DynamicPrintConfig mixed_sublayer_config(bool enable_ratio, bool local_z, const 
     return config;
 }
 
-// A 10 x 10 x 3 mm cube painted all over with the mixed row (filament 3).
-const PrintObject *slice_painted_cube(Print &print, Model &model, const DynamicPrintConfig &config, bool process = true)
+// A 10 x 10 x 3 mm cube painted all over with the mixed row (filament 3 unless told otherwise).
+const PrintObject *slice_painted_cube(Print &print, Model &model, const DynamicPrintConfig &config, bool process = true, int painted_state = 3)
 {
     ModelObject *object = model.add_object();
     object->name        = "mixed_cube";
@@ -71,7 +72,7 @@ const PrintObject *slice_painted_cube(Print &print, Model &model, const DynamicP
     v->config.set("extruder", 1);
     TriangleSelector selector(v->mesh());
     for (int f = 0; f < int(v->mesh().its.indices.size()); ++f)
-        selector.set_facet(f, EnforcerBlockerType(3));
+        selector.set_facet(f, EnforcerBlockerType(painted_state));
     REQUIRE(v->mmu_segmentation_facets.set(selector));
     object->add_instance();
     object->ensure_on_bed();
@@ -248,4 +249,120 @@ TEST_CASE("Mixed sublayer: a mix across nozzle diameters is refused", "[MixedSub
     Model model_off;
     slice_painted_cube(print_off, model_off, mixed_sublayer_config(false, false, { 0.4, 0.6 }), false);
     CHECK(print_off.validate().string.find("same nozzle diameter") == std::string::npos);
+}
+
+// ---- Phase 3 ----------------------------------------------------------------------------------------------
+
+namespace {
+
+// Four heads, 0.4 0.4 0.8 0.8 (an H3C-like mixed-diameter plate), one filament each, 0.2 mm layers. The mixed row
+// 3 + 4 at 30 % (virtual filament 5) prints through the two 0.8 nozzles, so AdaptiveLayerMerge bands its region.
+DynamicPrintConfig alm_mixed_config()
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(4);
+    config.set_num_filaments(4);
+    config.set_deserialize_strict({
+        { "nozzle_diameter", "0.4,0.4,0.8,0.8" },
+        { "filament_diameter", "1.75,1.75,1.75,1.75" },
+        { "filament_map", "1,2,3,4" },
+        { "single_extruder_multi_material", "0" },
+        { "enable_prime_tower", "0" },
+        { "enable_support", "0" },
+        { "enable_arc_fitting", "0" },
+        { "wall_generator", "classic" },
+        { "layer_height", "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "min_layer_height", "0.08,0.08,0.1,0.1" },
+        { "max_layer_height", "0.28,0.28,0.56,0.56" },
+        { "brim_type", "no_brim" },
+        { "skirt_loops", "0" },
+        { "use_relative_e_distances", "1" },
+        { "enable_mixed_color_sublayer", "1" },
+        { "dithering_local_z_mode", "0" },
+    });
+    config.option<ConfigOptionStrings>("filament_colour")->values = { "#FF0000", "#00FF00", "#0000FF", "#FFFF00" };
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(3, 4, 30, { "#FF0000", "#00FF00", "#0000FF", "#FFFF00" });
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+    return config;
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: Ratio passes split AdaptiveLayerMerge bands (D9)", "[MixedSublayer][Slice][P3]")
+{
+    Print print;
+    Model model;
+    // A plain 0.4 cube makes the plate print through two nozzle diameters, so the merge is live.
+    ModelObject *plain = model.add_object();
+    plain->name        = "plain_04";
+    plain->add_volume(TriangleMesh(its_make_cube(10., 10., 3.)));
+    plain->volumes.front()->config.set("extruder", 1);
+    plain->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    plain->ensure_on_bed();
+    const PrintObject *object = slice_painted_cube(print, model, alm_mixed_config(), false, 5);
+    for (const PrintObject *po : print.objects())
+        if (po->model_object()->name == "mixed_cube")
+            object = po;
+    print.process();
+    REQUIRE(print.uses_multiple_nozzle_diameters());
+    REQUIRE(object->model_object()->name == "mixed_cube");
+
+    const auto &intervals = object->local_z_intervals();
+    const auto &plans     = object->local_z_sublayer_plan();
+    REQUIRE(!intervals.empty());
+    size_t banded = 0, swallowed = 0, unbanded = 0;
+    for (const LocalZInterval &interval : intervals) {
+        INFO("layer " << interval.layer_id << " z_lo " << interval.z_lo << " z_hi " << interval.z_hi);
+        if (interval.layer_id == 0)
+            continue;
+        double span = 0., first_top = -1., lowest = interval.z_hi;
+        size_t ratio_passes = 0;
+        for (size_t i = interval.first_sublayer_idx; i < interval.first_sublayer_idx + interval.sublayer_count && i < plans.size(); ++i) {
+            const SubLayerPlan &plan = plans[i];
+            if (!plan.ratio_pass)
+                continue;
+            ++ratio_passes;
+            span += plan.flow_height;
+            lowest = std::min(lowest, plan.z_lo);
+            if (first_top < 0.)
+                first_top = plan.z_hi;
+            CHECK_THAT(plan.flow_height, WithinAbs(plan.z_hi - plan.z_lo, 1e-9));
+        }
+        if (ratio_passes == 0) {
+            if (interval.has_mixed_paint)
+                ++swallowed;
+            continue;
+        }
+        CHECK_THAT(lowest, WithinAbs(interval.z_hi - span, 1e-6));
+        if (span > interval.base_height + 1e-6) {
+            ++banded;
+            // The passes reach down to the band bottom, but the first one ends above this layer's bottom: the nozzle
+            // never drops under what the layer below printed next to the region.
+            CHECK(first_top >= interval.z_lo - 1e-6);
+        } else {
+            ++unbanded;
+            CHECK_THAT(span, WithinAbs(interval.base_height, 1e-6));
+        }
+    }
+    INFO("banded " << banded << " swallowed " << swallowed << " unbanded " << unbanded);
+    CHECK(banded > 0);
+    CHECK(swallowed > 0);
+
+    // The G-code exports with the band passes and keeps one layer change per layer.
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(!gcode.empty());
+    const std::string layer_tag = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change);
+    size_t            layer_changes = 0;
+    for (size_t pos = gcode.find(layer_tag); pos != std::string::npos; pos = gcode.find(layer_tag, pos + 1))
+        ++layer_changes;
+    CHECK(layer_changes == object->layer_count());
+
+    // Planning again (a perimeter-only re-run) gives the same plan: the band split starts from the slice-time plan.
+    PrintObject *mutable_object = const_cast<PrintObject *>(object);
+    const size_t before         = plans.size();
+    mutable_object->adapt_local_z_ratio_plan_to_merge_bands();
+    CHECK(object->local_z_sublayer_plan().size() == before);
 }

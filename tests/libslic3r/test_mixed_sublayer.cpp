@@ -7,6 +7,7 @@
 #include "libslic3r/MixedSublayer.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <string>
@@ -440,5 +441,74 @@ TEST_CASE("Mixed sublayer: Bambu Studio import edge cases", "[MixedSublayer][Bam
         REQUIRE(comps.size() == 3);
         CHECK(comps[2].extruder == 3); // old slot 4
         CHECK_THAT(comps[0].ratio, WithinAbs(0.5, 1e-9));
+    }
+}
+
+// ---- Phase 3 ----------------------------------------------------------------------------------------------
+
+TEST_CASE("Mixed sublayer: AdaptiveLayerMerge band split (D9)", "[MixedSublayer][P3]")
+{
+    SECTION("a 0.4 band of two 0.2 layers splits 70/30, the first pass reaching above the swallowed layer")
+    {
+        MixedRatioRowState state;
+        const MixedRatioBandPlan plan = plan_mixed_ratio_band(two_components(0.7, 0.04), 0.4, 0.2, false, state);
+        REQUIRE(plan.split);
+        REQUIRE(plan.passes.size() == 2);
+        CHECK_THAT(pass_sum(plan.passes), WithinAbs(0.4, 1e-9));
+        CHECK_THAT(height_of(plan.passes, 1), WithinAbs(0.28, 1e-9));
+        CHECK_THAT(height_of(plan.passes, 2), WithinAbs(0.12, 1e-9));
+        CHECK(plan.passes.front().height >= 0.2 - 1e-9);
+        CHECK(state.last_extruder == plan.passes.back().extruder);
+    }
+    SECTION("the preferred start is too thin: the order rotates to the first tall enough pass")
+    {
+        MixedRatioRowState state;
+        state.last_extruder = 2; // alternating order would start with filament 2 (0.12 of 0.4)
+        const MixedRatioBandPlan plan = plan_mixed_ratio_band(two_components(0.7, 0.04), 0.4, 0.2, false, state);
+        REQUIRE(plan.split);
+        REQUIRE(plan.passes.size() == 2);
+        CHECK(plan.passes.front().extruder == 1);
+        CHECK(plan.passes.back().extruder == 2);
+        CHECK(state.last_extruder == 2);
+    }
+    SECTION("ascending order keeps the higher id on top when the lower one is tall enough")
+    {
+        MixedRatioRowState state;
+        const MixedRatioBandPlan plan = plan_mixed_ratio_band(two_components(0.7, 0.04), 0.4, 0.2, true, state);
+        REQUIRE(plan.passes.size() == 2);
+        CHECK(plan.passes.front().extruder == 1);
+        CHECK(plan.passes.back().extruder == 2);
+    }
+    SECTION("no pass is tall enough: the band prints whole by the component owed the most")
+    {
+        // Three even components on a 0.6 band of three 0.2 layers: 0.2 each, the swallowed part is 0.4.
+        const std::vector<MixedRatioComponent> comps { { 1, 1. / 3., 0.04 }, { 2, 1. / 3., 0.04 }, { 3, 1. / 3., 0.04 } };
+        MixedRatioRowState state;
+        const MixedRatioBandPlan plan = plan_mixed_ratio_band(comps, 0.6, 0.4, false, state);
+        CHECK_FALSE(plan.split);
+        REQUIRE(plan.passes.size() == 1);
+        CHECK_THAT(plan.passes.front().height, WithinAbs(0.6, 1e-9));
+        // The carry still balances: the printed one owes the others 0.2 each.
+        REQUIRE(state.carry.size() == 3);
+        CHECK_THAT(std::accumulate(state.carry.begin(), state.carry.end(), 0.), WithinAbs(0., 1e-9));
+        // Over three bands every component prints one whole band.
+        std::vector<unsigned int> printed { plan.passes.front().extruder };
+        for (int band = 0; band < 2; ++band)
+            printed.push_back(plan_mixed_ratio_band(comps, 0.6, 0.4, false, state).passes.front().extruder);
+        std::sort(printed.begin(), printed.end());
+        CHECK(printed == std::vector<unsigned int>{ 1, 2, 3 });
+    }
+    SECTION("an unmerged layer (no swallowed height) plans exactly as plan_mixed_ratio_layer")
+    {
+        MixedRatioRowState a, b;
+        a.last_extruder = b.last_extruder = 2;
+        const MixedRatioBandPlan          band  = plan_mixed_ratio_band(two_components(0.7, 0.04), 0.2, 0., false, a);
+        const std::vector<MixedRatioPass> layer = plan_mixed_ratio_layer(two_components(0.7, 0.04), 0.2, false, b);
+        REQUIRE(band.passes.size() == layer.size());
+        for (size_t i = 0; i < layer.size(); ++i) {
+            CHECK(band.passes[i].extruder == layer[i].extruder);
+            CHECK_THAT(band.passes[i].height, WithinAbs(layer[i].height, 1e-12));
+        }
+        CHECK(a.last_extruder == b.last_extruder);
     }
 }

@@ -2676,8 +2676,7 @@ static std::vector<unsigned int> used_mixed_filament_ids(const Print &print)
 }
 
 // Mixed color sublayer checks (design_mixed_color_sublayer.md D7-D9): a Ratio row's components share one nozzle
-// diameter; the plate merging layers of different diameters makes Ratio rows print whole layers; a single-nozzle
-// printer is told what the sub-layers cost. Returns an error, or adds warnings.
+// diameter; a single-nozzle printer is told what the sub-layers cost. Returns an error, or adds warnings.
 static StringObjectException validate_mixed_color_sublayer(const Print &print, const std::function<void(std::string, std::string)> &warn)
 {
     const PrintConfig          &cfg     = print.config();
@@ -2691,8 +2690,6 @@ static StringObjectException validate_mixed_color_sublayer(const Print &print, c
     for (size_t i = 0; i < num_physical; ++i)
         nozzle_by_filament[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
     const bool single_nozzle = cfg.nozzle_diameter.size() == 1 || cfg.single_extruder_multi_material.value;
-    bool       alm_checked   = false;
-    bool       alm_live      = false;
 
     double max_object_height = 0.;
     for (const PrintObject *object : print.objects())
@@ -2721,16 +2718,9 @@ static StringObjectException validate_mixed_color_sublayer(const Print &print, c
             err.opt_key = "enable_mixed_color_sublayer";
             return err;
         }
-        if (!alm_checked) {
-            alm_live    = print.uses_multiple_nozzle_diameters();
-            alm_checked = true;
-        }
-        if (alm_live) {
-            warn(Slic3r::format(L("Mixed filament %1% prints whole layers one colour at a time: mixed color sublayers are not "
-                                  "split yet on a plate that uses different nozzle diameters."), id),
-                 "enable_mixed_color_sublayer");
-            continue;
-        }
+        // P3 (D9): on a plate that merges layers of different nozzle diameters the passes split the merged band
+        // heights (PrintObject::adapt_local_z_ratio_plan_to_merge_bands); a band no pass can split is reported by
+        // the perimeter step.
         if (single_nozzle && components.size() >= 2) {
             const size_t per_layer = mixed_ratio_toolchanges_per_layer(components.size(), mf->sublayer_bs_order, print.has_wipe_tower());
             const size_t changes   = per_layer * layers;

@@ -90,6 +90,24 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
                                                    bool                                     ascending_order,
                                                    MixedRatioRowState                      &state);
 
+// P3, D9: the Ratio passes of one AdaptiveLayerMerge band. A band of height `band_height` is printed on its top
+// layer and swallows the layers below it, so the passes start at the band bottom, below the layer the G-code is
+// on. `swallowed_height` (band height - the top layer's own height) is how far below that layer's bottom they
+// reach: the first pass is chosen so its top is not under it (the nozzle never drops below the material the
+// previous layer printed next to the mixed region). Plans as plan_mixed_ratio_layer() over the band height, then
+// starts with the first component in that order whose pass is tall enough. When none is (three or more even
+// components on a deep band), the band prints whole with the component owed the most (cadence): `split` is false.
+struct MixedRatioBandPlan
+{
+    std::vector<MixedRatioPass> passes;
+    bool                        split { false };
+};
+MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,
+                                         double                                   band_height,
+                                         double                                   swallowed_height,
+                                         bool                                     ascending_order,
+                                         MixedRatioRowState                      &state);
+
 // D8: the components of a Ratio row must print through one nozzle diameter, on every printer. `nozzle_for` gives
 // the nozzle diameter of a 1-based physical filament id. Returns the 1-based ids of two components that differ
 // (first pair found), or {0, 0} when they all match.

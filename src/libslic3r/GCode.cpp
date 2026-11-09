@@ -3713,7 +3713,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
-        this->set_extruders(tool_ordering.all_extruders());
+        // Mixed color sublayer: a Ratio pass can print a component that never is a layer's nominal extruder (on an
+        // AdaptiveLayerMerge band the pass order is fixed, or a filament used by nothing else), so ToolOrdering does
+        // not list it; register every Ratio pass filament too. Without Ratio passes the list is unchanged.
+        std::vector<unsigned int> writer_extruders = tool_ordering.all_extruders();
+        for (const PrintObject *object : print.objects())
+            for (const SubLayerPlan &plan : object->local_z_sublayer_plan())
+                if (plan.ratio_pass)
+                    for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e)
+                        if (!plan.painted_masks_by_extruder[e].empty() &&
+                            std::find(writer_extruders.begin(), writer_extruders.end(), unsigned(e)) == writer_extruders.end())
+                            writer_extruders.push_back(unsigned(e));
+        this->set_extruders(writer_extruders);
         print_object_instances_ordering =
             // By default, order object instances using a nearest neighbor search.
             print.config().print_order == PrintOrder::Default ? chain_print_object_instances(print)
@@ -6111,10 +6122,22 @@ inline GCode::ObjectByExtruder& object_by_extruder(std::map<unsigned int, std::v
     return objects_by_extruder[object_idx];
 }
 
-static inline void apply_local_z_flow_height_override(ExtrusionPath& path, const double flow_height_override)
+// `flow_reference_height` > 0 (a Ratio pass, mixed color sublayer): the pass prints that share of the layer (or merged
+// band) height, so every path keeps that share of its own flow and height, as Bambu Studio scales mm3/mm by
+// sub_h / lh (GCode.cpp:7694). This matters for paths whose height is not the layer height (bridges, a thick bridge is
+// as tall as its nozzle), which the plain override would cut down to the pass height. Subdivide passes keep the
+// plain override.
+static inline void apply_local_z_flow_height_override(ExtrusionPath& path, const double flow_height_override,
+                                                      const double flow_reference_height = 0.)
 {
     if (flow_height_override <= EPSILON)
         return;
+    if (flow_reference_height > EPSILON) {
+        const double ratio = flow_height_override / flow_reference_height;
+        path.mm3_per_mm *= ratio;
+        path.height = float(path.height > EPSILON ? path.height * ratio : flow_height_override);
+        return;
+    }
     if (path.height > EPSILON) {
         const double ratio = flow_height_override / path.height;
         path.mm3_per_mm *= ratio;
@@ -6126,7 +6149,8 @@ static inline void append_clipped_path(const ExtrusionPath& src_path,
                                        const ExPolygons*    include_masks,
                                        const ExPolygons*    exclude_masks,
                                        const double         flow_height_override,
-                                       std::vector<ExtrusionPath>& dst)
+                                       std::vector<ExtrusionPath>& dst,
+                                       const double         flow_reference_height = 0.)
 {
     Polylines segments{src_path.polyline};
     if (include_masks != nullptr && !include_masks->empty())
@@ -6138,7 +6162,7 @@ static inline void append_clipped_path(const ExtrusionPath& src_path,
         if (!segment.is_valid())
             continue;
         ExtrusionPath clipped(segment, src_path);
-        apply_local_z_flow_height_override(clipped, flow_height_override);
+        apply_local_z_flow_height_override(clipped, flow_height_override, flow_reference_height);
         dst.emplace_back(std::move(clipped));
     }
 }
@@ -6354,7 +6378,8 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
     const ExPolygons*                include_masks,
     const ExPolygons*                exclude_masks,
     const double                     flow_height_override,
-    const LocalZLoopSeamPlacer*      seam_placer = nullptr)
+    const LocalZLoopSeamPlacer*      seam_placer = nullptr,
+    const double                     flow_reference_height = 0.)
 {
     if (source.entities.empty())
         return nullptr;
@@ -6372,12 +6397,12 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
     for (const ExtrusionEntity* entity : flattened.entities) {
         if (const auto* path = dynamic_cast<const ExtrusionPath*>(entity)) {
             std::vector<ExtrusionPath> clipped_paths;
-            append_clipped_path(*path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+            append_clipped_path(*path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             append_clipped_paths(std::move(clipped_paths), *out);
         } else if (const auto* multipath = dynamic_cast<const ExtrusionMultiPath*>(entity)) {
             std::vector<ExtrusionPath> clipped_paths;
             for (const ExtrusionPath& path : multipath->paths)
-                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             append_clipped_paths(std::move(clipped_paths), *out);
         } else if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(entity)) {
             ExtrusionLoop seam_loop = *loop;
@@ -6386,7 +6411,7 @@ static std::unique_ptr<ExtrusionEntityCollection> clip_extrusion_collection_for_
                 seam_placer != nullptr && (*seam_placer)(*loop, seam_loop, seam_anchor);
             std::vector<ExtrusionPath> clipped_paths;
             for (const ExtrusionPath& path : seam_loop.paths)
-                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths);
+                append_clipped_path(path, include_masks, exclude_masks, flow_height_override, clipped_paths, flow_reference_height);
             if (seam_ready)
                 local_z_order_clipped_paths_for_seam(clipped_paths, seam_anchor);
             append_clipped_paths(std::move(clipped_paths), *out);
@@ -8544,7 +8569,8 @@ LayerResult GCode::process_layer(const Print& print,
                                                                                                &pass_masks,
                                                                                                nullptr,
                                                                                                pass_flow_height,
-                                                                                               &local_z_loop_seam_placer);
+                                                                                               &local_z_loop_seam_placer,
+                                                                                               pass_bucket.plan->ratio_pass ? pass_bucket.plan->ratio_layer_height : 0.);
                                     if (!clipped_local)
                                         continue;
 

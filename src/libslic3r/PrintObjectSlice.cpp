@@ -3170,9 +3170,6 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
     bool any_row_sublayer_split = false;
     if (!sublayer_legacy) {
         const size_t num_physical_cfg = print_cfg.filament_colour.size();
-        // D9 interim: a plate that merges layers of different nozzle diameters (AdaptiveLayerMerge) plans its
-        // band heights after this step, so Ratio rows fall back to whole-layer cadence until the band split (P3).
-        const bool alm_live = print->uses_multiple_nozzle_diameters();
         std::vector<double> nozzle_by_filament(num_physical_cfg, 0.);
         for (size_t i = 0; i < num_physical_cfg; ++i)
             nozzle_by_filament[i] = nozzle_diameter_for_filament(print_cfg, unsigned(i + 1));
@@ -3191,11 +3188,6 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                     method = MixedSublayerMethod::Cadence;
                 } else if (mismatch.mismatch()) {
                     // Print::validate refuses this; never plan a diameter swap inside a layer (D8).
-                    method = MixedSublayerMethod::Cadence;
-                } else if (alm_live) {
-                    BOOST_LOG_TRIVIAL(warning) << "Mixed color sublayer: row " << (row_idx + 1)
-                                               << " falls back to whole-layer cadence, the plate merges layers of different nozzle diameters"
-                                               << " object=" << object_name;
                     method = MixedSublayerMethod::Cadence;
                 }
             }
@@ -3604,6 +3596,8 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
         // Ratio rows plan their own passes (one per component, ratio x layer height) and always take the
         // isolated per-row path below, even alone on the layer.
         std::vector<std::vector<MixedRatioPass>> ratio_row_passes(mixed_rows.size());
+        std::vector<uint8_t>                     ratio_row_ascending(mixed_rows.size(), uint8_t(0));
+        std::vector<double>                      ratio_row_gradient_a(mixed_rows.size(), -1.);
         bool layer_has_ratio_row = false;
         for (size_t row_idx = 0; row_idx < row_active_this_layer.size(); ++row_idx)
             if (row_active_this_layer[row_idx] != 0 && row_is_ratio(row_idx) && !row_state_masks[row_idx].empty())
@@ -3639,8 +3633,10 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                         const ExPolygons exposed = diff_ex(row_state_masks[row_idx], next_masks);
                         top_surface = std::abs(area(exposed)) > scale_(1.) * scale_(1.);
                     }
+                    ratio_row_ascending[row_idx]  = mf.sublayer_bs_order || top_surface;
+                    ratio_row_gradient_a[row_idx] = gradient_ratio_a;
                     ratio_row_passes[row_idx] = plan_mixed_ratio_layer(components, interval.base_height,
-                                                                       mf.sublayer_bs_order || top_surface, row_ratio_state[row_idx]);
+                                                                       ratio_row_ascending[row_idx], row_ratio_state[row_idx]);
                     if (!ratio_row_passes[row_idx].empty()) {
                         ++isolated_rows_with_split;
                         ++ratio_layers_planned;
@@ -3864,6 +3860,9 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                             plan.dependency_order = pass_i;
                             plan.ratio_pass       = true;
                             plan.ratio_last_pass  = last_pass;
+                            plan.ratio_ascending  = ratio_row_ascending[row_idx] != 0;
+                            plan.ratio_gradient_a = ratio_row_gradient_a[row_idx];
+                            plan.ratio_layer_height = interval.base_height;
                             plan.painted_masks_by_extruder.assign(num_physical, ExPolygons());
                             plan.fixed_painted_masks_by_extruder.assign(num_physical, ExPolygons());
                             const unsigned int target_extruder = ratio_passes[pass_i].extruder;
@@ -4386,6 +4385,207 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                                    << " plans=" << plans.size()
                                    << " mixed_intervals=" << mixed_intervals;
     }
+}
+
+// Mixed color sublayer P3 (design_mixed_color_sublayer.md 3d, D9). On a plate that prints through more than one
+// nozzle diameter, AdaptiveLayerMerge (compute_adaptive_merge_groups, which runs after the slice-time Local-Z plan)
+// bands a Ratio row's region on its components' nozzle: the band's paths are extruded once, on the band top, at the
+// band height, and the swallowed layers below carry none. Bambu Studio 2.9.1 splits that band height
+// (ToolOrdering.cpp:899-910 m_mixed_layer_heights, :1040-1060 swallowed layers). Here the row's passes are planned
+// again along the object: a band top gets ratio x band height passes starting at the band bottom, a swallowed layer
+// gets none, and every other layer of the row is planned as before (so the carry-over stays continuous).
+size_t PrintObject::adapt_local_z_ratio_plan_to_merge_bands()
+{
+    if (m_local_z_plan_before_merge) {
+        m_local_z_intervals     = std::move(m_local_z_plan_before_merge->first);
+        m_local_z_sublayer_plan = std::move(m_local_z_plan_before_merge->second);
+        m_local_z_plan_before_merge.reset();
+    }
+    const Print *print = this->print();
+    if (print == nullptr || m_local_z_sublayer_plan.empty() || m_layers.empty())
+        return 0;
+    if (std::none_of(m_local_z_sublayer_plan.begin(), m_local_z_sublayer_plan.end(), [](const SubLayerPlan &p) { return p.ratio_pass; }))
+        return 0;
+    if (!print->uses_multiple_nozzle_diameters())
+        return 0;
+
+    const PrintConfig          &print_cfg    = print->config();
+    const MixedFilamentManager &mixed_mgr    = print->mixed_filament_manager();
+    const size_t                num_physical = print_cfg.filament_colour.size();
+    const auto                 &rows         = mixed_mgr.mixed_filaments();
+    const size_t                layer_count  = m_layers.size();
+
+    // Per Ratio row: the band height on each band-top layer (0 = not a band top) and the swallowed layers.
+    struct RowBands
+    {
+        bool                 adapted { false };
+        std::vector<double>  band_height;
+        std::vector<uint8_t> swallowed;
+    };
+    std::vector<RowBands> row_bands(rows.size());
+    for (const SubLayerPlan &plan : m_local_z_sublayer_plan) {
+        if (!plan.ratio_pass || plan.dependency_group == 0 || plan.dependency_group > rows.size())
+            continue;
+        RowBands &rb = row_bands[plan.dependency_group - 1];
+        if (!rb.band_height.empty())
+            continue;
+        rb.band_height.assign(layer_count, 0.);
+        rb.swallowed.assign(layer_count, uint8_t(0));
+        const unsigned int virtual_id = mixed_mgr.filament_id_from_mixed_index(plan.dependency_group - 1, num_physical);
+        if (virtual_id == 0)
+            continue;
+        std::vector<size_t> region_ids;
+        for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
+            if (this->printing_region(region_id).config().wall_filament.value == int(virtual_id))
+                region_ids.push_back(region_id);
+        for (size_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
+            const Layer *layer    = m_layers[layer_idx];
+            double       top      = 0.;
+            bool         lower    = false;
+            for (size_t region_id : region_ids) {
+                if (region_id >= layer->regions().size())
+                    continue;
+                for (const AdaptiveMergePatch &patch : layer->get_region(int(region_id))->adaptive_merge_patches) {
+                    if (patch.group_top) {
+                        if (patch.merged_height > layer->height + EPSILON)
+                            top = std::max(top, patch.merged_height);
+                    } else
+                        lower = true;
+                }
+            }
+            if (top > 0.) {
+                rb.band_height[layer_idx] = top;
+                rb.adapted                = true;
+            } else if (lower) {
+                rb.swallowed[layer_idx] = uint8_t(1);
+                rb.adapted              = true;
+            }
+        }
+    }
+    if (std::none_of(row_bands.begin(), row_bands.end(), [](const RowBands &rb) { return rb.adapted; }))
+        return 0;
+
+    const DynamicPrintConfig &full_cfg    = print->full_print_config();
+    const coordf_t            mixed_lower = std::max<coordf_t>(
+        0.01f, float_from_full_config(full_cfg, "mixed_filament_height_lower_bound", coordf_t(print_cfg.mixed_filament_height_lower_bound.value)));
+
+    m_local_z_plan_before_merge = std::make_unique<std::pair<std::vector<LocalZInterval>, std::vector<SubLayerPlan>>>(
+        m_local_z_intervals, m_local_z_sublayer_plan);
+    const std::vector<SubLayerPlan> &old_plans = m_local_z_plan_before_merge->second;
+
+    std::vector<SubLayerPlan>       new_plans;
+    std::vector<MixedRatioRowState> row_state(rows.size());
+    std::vector<uint8_t>            row_active_prev(rows.size(), uint8_t(0));
+    size_t                          whole_bands = 0;
+    size_t                          split_bands = 0;
+    for (LocalZInterval &interval : m_local_z_intervals) {
+        const size_t first = interval.first_sublayer_idx;
+        const size_t end   = std::min(old_plans.size(), first + interval.sublayer_count);
+        std::vector<SubLayerPlan> kept;
+        ExPolygons                base_masks;
+        std::vector<uint8_t>      row_active_now(rows.size(), uint8_t(0));
+        // The adapted rows' passes on this layer, by row: the first pass is the template (masks, group).
+        std::vector<const SubLayerPlan *> row_template(rows.size(), nullptr);
+        for (size_t idx = first; idx < end; ++idx) {
+            const SubLayerPlan &plan = old_plans[idx];
+            if (!plan.base_masks.empty())
+                base_masks = plan.base_masks;
+            const size_t row = plan.dependency_group - 1;
+            if (plan.ratio_pass && plan.dependency_group >= 1 && row < rows.size() && row_bands[row].adapted) {
+                if (row_template[row] == nullptr)
+                    row_template[row] = &plan;
+                continue;
+            }
+            kept.push_back(plan);
+        }
+        const size_t layer_idx = interval.layer_id;
+        for (size_t row = 0; row < rows.size(); ++row) {
+            const SubLayerPlan *tpl = row_template[row];
+            if (tpl == nullptr)
+                continue;
+            row_active_now[row] = uint8_t(1);
+            if (row_active_prev[row] == 0)
+                row_state[row].reset();
+            if (layer_idx < layer_count && row_bands[row].swallowed[layer_idx] != 0)
+                continue; // AdaptiveLayerMerge printed nothing of this region here; the band top prints it.
+            ExPolygons masks;
+            for (const ExPolygons &m : tpl->painted_masks_by_extruder)
+                if (!m.empty())
+                    append(masks, m);
+            if (masks.empty())
+                continue;
+            const double band = layer_idx < layer_count && row_bands[row].band_height[layer_idx] > 0. ? row_bands[row].band_height[layer_idx]
+                                                                                                         : interval.base_height;
+            std::vector<MixedRatioComponent> components = mixed_ratio_components(rows[row], num_physical, tpl->ratio_gradient_a);
+            for (MixedRatioComponent &c : components)
+                c.min_height = std::max<double>(adaptive_layer_height_range_for_filament(print_cfg, c.extruder).min_height, double(mixed_lower));
+            const MixedRatioBandPlan planned =
+                plan_mixed_ratio_band(components, band, std::max(0., band - interval.base_height), tpl->ratio_ascending, row_state[row]);
+            if (band > interval.base_height + EPSILON) {
+                if (planned.split)
+                    ++split_bands;
+                else if (components.size() >= 2)
+                    ++whole_bands;
+            }
+            double z_cursor = interval.z_hi - band;
+            for (size_t pass_i = 0; pass_i < planned.passes.size(); ++pass_i) {
+                const bool   last_pass   = pass_i + 1 == planned.passes.size();
+                const double z_next      = last_pass ? interval.z_hi : std::min<double>(interval.z_hi, z_cursor + planned.passes[pass_i].height);
+                const double pass_height = z_next - z_cursor;
+                if (pass_height <= EPSILON)
+                    continue;
+                SubLayerPlan plan;
+                plan.layer_id         = tpl->layer_id;
+                plan.split_interval   = true;
+                plan.z_lo             = z_cursor;
+                plan.z_hi             = z_next;
+                plan.print_z          = z_next;
+                plan.flow_height      = pass_height;
+                plan.dependency_group = tpl->dependency_group;
+                plan.dependency_order = pass_i;
+                plan.ratio_pass       = true;
+                plan.ratio_last_pass  = last_pass;
+                plan.ratio_ascending  = tpl->ratio_ascending;
+                plan.ratio_gradient_a = tpl->ratio_gradient_a;
+                plan.ratio_layer_height = band;
+                plan.painted_masks_by_extruder.assign(num_physical, ExPolygons());
+                plan.fixed_painted_masks_by_extruder.assign(num_physical, ExPolygons());
+                const unsigned int extruder = planned.passes[pass_i].extruder;
+                if (extruder >= 1 && extruder <= num_physical)
+                    plan.painted_masks_by_extruder[extruder - 1] = masks;
+                kept.emplace_back(std::move(plan));
+                z_cursor = z_next;
+            }
+        }
+        row_active_prev = std::move(row_active_now);
+
+        std::stable_sort(kept.begin(), kept.end(), [](const SubLayerPlan &lhs, const SubLayerPlan &rhs) {
+            if (std::abs(lhs.print_z - rhs.print_z) > EPSILON)
+                return lhs.print_z < rhs.print_z;
+            return lhs.z_lo < rhs.z_lo - EPSILON;
+        });
+        interval.first_sublayer_idx = new_plans.size();
+        interval.sublayer_count     = kept.size();
+        if (!kept.empty()) {
+            double min_flow = kept.front().flow_height;
+            for (size_t k = 0; k < kept.size(); ++k) {
+                kept[k].pass_index = k;
+                kept[k].base_masks.clear();
+                min_flow = std::min(min_flow, kept[k].flow_height);
+            }
+            kept.back().base_masks   = std::move(base_masks);
+            interval.sublayer_height = min_flow;
+        } else {
+            interval.sublayer_height = interval.base_height;
+        }
+        for (SubLayerPlan &plan : kept)
+            new_plans.emplace_back(std::move(plan));
+    }
+    m_local_z_sublayer_plan = std::move(new_plans);
+    BOOST_LOG_TRIVIAL(info) << "Mixed color sublayer: Ratio passes re-planned over AdaptiveLayerMerge bands"
+                            << " object=" << (this->model_object() ? this->model_object()->name : std::string())
+                            << " split_bands=" << split_bands << " whole_bands=" << whole_bands;
+    return whole_bands;
 }
 
 template<typename ThrowOnCancel>

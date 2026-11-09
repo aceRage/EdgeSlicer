@@ -181,6 +181,49 @@ std::vector<MixedRatioPass> plan_mixed_ratio_layer(const std::vector<MixedRatioC
     return passes;
 }
 
+MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,
+                                         double                                   band_height,
+                                         double                                   swallowed_height,
+                                         bool                                     ascending_order,
+                                         MixedRatioRowState                      &state)
+{
+    MixedRatioBandPlan out;
+    const MixedRatioRowState saved = state;
+    out.passes = plan_mixed_ratio_layer(components, band_height, ascending_order, state);
+    if (out.passes.empty())
+        return out;
+    if (swallowed_height <= k_mixsub_eps || out.passes.front().height + k_mixsub_eps >= swallowed_height) {
+        out.split = out.passes.size() > 1;
+        return out;
+    }
+    // Start with the first pass, in the planned (cyclic) order, that reaches above the swallowed layers.
+    for (size_t k = 1; k < out.passes.size(); ++k)
+        if (out.passes[k].height + k_mixsub_eps >= swallowed_height) {
+            std::rotate(out.passes.begin(), out.passes.begin() + std::ptrdiff_t(k), out.passes.end());
+            state.last_extruder = out.passes.back().extruder;
+            out.split           = true;
+            return out;
+        }
+    // No pass is tall enough: the band prints whole, by the component owed the most.
+    state = saved;
+    const size_t n = components.size();
+    if (state.carry.size() != n)
+        state.carry.assign(n, 0.);
+    size_t              best = 0;
+    std::vector<double> want(n);
+    for (size_t i = 0; i < n; ++i) {
+        want[i] = components[i].ratio * band_height + state.carry[i];
+        if (want[i] > want[best] + k_mixsub_eps)
+            best = i;
+    }
+    for (size_t i = 0; i < n; ++i)
+        state.carry[i] = want[i] - (i == best ? band_height : 0.);
+    state.last_extruder = components[best].extruder;
+    out.passes          = { MixedRatioPass{ components[best].extruder, band_height } };
+    out.split           = false;
+    return out;
+}
+
 MixedDiameterMismatch mixed_ratio_diameter_mismatch(const std::vector<unsigned int> &components, const std::vector<double> &nozzle_by_filament)
 {
     MixedDiameterMismatch out;
