@@ -3625,13 +3625,12 @@ static void build_local_z_plan(PrintObject &print_object, const std::vector<std:
                         c.min_height = ratio_component_floor(c.extruder);
                     // D4: Bambu Studio's ascending order on request, and always where this region is a top surface,
                     // so the higher id is the visible colour there.
-                    bool top_surface = layer_id + 1 >= segmentation.size();
+                    // P3 (P1 review follow-up): the region is a top surface where nothing of the object, in any colour,
+                    // covers it on the next layer; a region under another colour is not exposed.
+                    bool top_surface = layer_id + 1 >= segmentation.size() || layer_id + 1 >= print_object.layer_count();
                     if (!top_surface) {
-                        ExPolygons next_masks;
-                        for (size_t channel_idx = 0; channel_idx < segmentation[layer_id + 1].size(); ++channel_idx)
-                            if (segmentation_channel_filament_id(channel_idx) == row_state_ids[row_idx])
-                                append(next_masks, segmentation[layer_id + 1][channel_idx]);
-                        const ExPolygons exposed = diff_ex(row_state_masks[row_idx], next_masks);
+                        const ExPolygons next_masks = collect_layer_region_slices(*print_object.get_layer(int(layer_id + 1)));
+                        const ExPolygons exposed    = diff_ex(row_state_masks[row_idx], next_masks);
                         top_surface = std::abs(area(exposed)) > scale_(1.) * scale_(1.);
                     }
                     ratio_row_ascending[row_idx]  = mf.sublayer_bs_order || top_surface;

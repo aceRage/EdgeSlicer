@@ -827,3 +827,25 @@ TEST_CASE("Mixed sublayer: a mixed row survives Export Bambu 3MF and its re-impo
     boost::filesystem::remove(path);
     boost::filesystem::remove(path2);
 }
+
+TEST_CASE("Mixed sublayer: Bambu Studio import renumbers filament_self_index", "[MixedSublayer][BambuImport][P3]")
+{
+    MixedFilamentManager::set_auto_generate_enabled(false);
+    SECTION("one entry per filament")
+    {
+        DynamicPrintConfig config = bambu_mixed_project_config();
+        config.option<ConfigOptionInts>("filament_self_index", true)->values = { 1, 2, 3, 4 };
+        REQUIRE(convert_bambu_mixed_slots(config, bambu_slots()).converted);
+        CHECK((config.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{ 1, 2, 3 }));
+    }
+    SECTION("one entry per filament and extruder variant")
+    {
+        DynamicPrintConfig config = bambu_mixed_project_config();
+        config.option<ConfigOptionInts>("filament_self_index", true)->values = { 1, 1, 2, 2, 3, 3, 4, 4 };
+        config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = { "L1", "R1", "L2", "R2", "LM", "RM", "L4", "R4" };
+        REQUIRE(convert_bambu_mixed_slots(config, bambu_slots()).converted);
+        CHECK((config.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{ 1, 1, 2, 2, 3, 3 }));
+        CHECK((config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
+               std::vector<std::string>{ "L1", "R1", "L2", "R2", "L4", "R4" }));
+    }
+}

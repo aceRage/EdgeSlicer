@@ -543,6 +543,21 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
 
     // 3. Remove the mixed slots from every per-filament array.
     std::vector<size_t> keep = physical_slots;
+    // Per extruder-variant arrays (Bambu Studio's filament_extruder_variant layout) hold one entry per (filament,
+    // variant); filament_self_index names the 1-based filament of each entry (P3, P1 review follow-up).
+    std::vector<size_t> keep_by_self;
+    size_t              self_size = 0;
+    if (const auto *self = config.option<ConfigOptionInts>("filament_self_index"); self != nullptr && self->values.size() != n) {
+        bool valid = !self->values.empty();
+        for (int v : self->values)
+            valid &= v >= 1 && size_t(v) <= n;
+        if (valid) {
+            self_size = self->values.size();
+            for (size_t i = 0; i < self_size; ++i)
+                if (!slots.is_mixed[size_t(self->values[i] - 1)])
+                    keep_by_self.push_back(i);
+        }
+    }
     for (const std::string &key : config.keys()) {
         ConfigOption *raw = config.optptr(key);
         auto         *vec = dynamic_cast<ConfigOptionVectorBase *>(raw);
@@ -579,8 +594,24 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
             mixsub_keep_vector_entries(*vec, keep_presets);
         } else if (size == n && mixsub_is_per_filament_key(key)) {
             mixsub_keep_vector_entries(*vec, keep);
+        } else if (self_size > 0 && size == self_size && mixsub_is_per_filament_key(key)) {
+            mixsub_keep_vector_entries(*vec, keep_by_self);
+        } else if (size > n && size % n == 0 && mixsub_is_per_filament_key(key)) {
+            // g consecutive entries per filament.
+            const size_t        g = size / n;
+            std::vector<size_t> keep_groups;
+            for (size_t s : physical_slots)
+                for (size_t j = 0; j < g; ++j)
+                    keep_groups.push_back(s * g + j);
+            mixsub_keep_vector_entries(*vec, keep_groups);
         }
     }
+    // filament_self_index names filaments by their 1-based id: renumber it to the new physical ids.
+    if (auto *self = config.option<ConfigOptionInts>("filament_self_index"))
+        for (int &v : self->values)
+            if (v >= 1 && size_t(v) < result.id_remap.size() && result.id_remap[size_t(v)] != 0 &&
+                result.id_remap[size_t(v)] <= result.new_physical_count)
+                v = int(result.id_remap[size_t(v)]);
 
     config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
     // Process-level feature filaments (wall_filament, support_filament, ...) follow the same remap.
