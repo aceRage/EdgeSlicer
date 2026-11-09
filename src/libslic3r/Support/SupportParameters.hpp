@@ -234,6 +234,10 @@ struct SupportParameters {
         // top contact layer (top interface layers >= woven layers + 1). Otherwise 0, and nothing
         // below reads any of the other interlock fields.
         this->interlock_layers = 0;
+        // The GUI no longer greys the interlock out under matching (it asks which one to keep), but a
+        // project or CLI config can still carry both: matching wins and the weave is left off.
+        if (object_config.support_interface_interlock.value && object_config.support_filament_matching.value)
+            BOOST_LOG_TRIVIAL(info) << "Support interface interlock ignored: Support Filament Matching is on and wins.";
         if (object_config.support_interface_interlock.value &&
             object_config.support_interface_filament.value != 0 &&
             object_config.support_interface_filament.value != object_config.support_filament.value &&

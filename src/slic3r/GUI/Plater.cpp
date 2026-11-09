@@ -16014,6 +16014,9 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     this->background_process.stop();
 
     clear_warnings();
+    // EdgeSlicer: a new or loaded project asks the per-session setting questions afresh (the
+    // remembered "No" answers to the support top Z distance offer).
+    ConfigManipulation::clear_session_prompts();
     // The nozzle-HRC toast manages its own lifecycle (its type is not part of
     // the slicing warning sweep) and must not outlive the project it described.
     notification_manager->close_notification_of_type(NotificationType::NozzleHrcWarning);
