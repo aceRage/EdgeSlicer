@@ -4,8 +4,8 @@
 // Mixed-layer-height band planner, ported from BambuStudio v02.09.01.70 src/libslic3r/AdaptiveLayerMerge.{hpp,cpp}
 // (AGPL-3.0). Pure planning functions plus the patch record a planned band is stored as. Since step 3 the planner
 // runs from PrintObject::make_perimeters() on plates whose used filaments print through more than one nozzle
-// diameter; Layer::make_perimeters() and PrintObject::combine_adaptive_infill() consume the patches. Supports
-// (step 4) and the Bambu 3MF keys (step 5) still ignore them.
+// diameter; Layer::make_perimeters() and PrintObject::combine_adaptive_infill() consume the patches. Since step 4
+// the supports follow the same ladders (Support/SupportMergePlan.cpp). The Bambu 3MF keys (step 5) still ignore them.
 
 #include "ExPolygon.hpp"
 
@@ -151,6 +151,16 @@ std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
     const AdaptiveLayerHeightRange &height_range,
     const std::vector<uint8_t>     &band_tops = {});
 
+// Edge: one nozzle's fixed ladder over a whole object layer stack, the way the live planner builds it. Layer 0 is
+// never merged (it prints as sliced), so the bands are cut from layer 1 up and the returned indices refer to the
+// full stack. compute_adaptive_merge_groups() and the support merge plan both go through this, which is what keeps
+// a support slab on a band top the walls of the same nozzle use.
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops = {});
+
 // Tail recovery may pin a band top on a layer this nozzle never owns (the geometric stack top after
 // a colour disappears). Pull top_idx down to the last layer in the band that still has material,
 // and recompute merged_height. Returns false when no such layer exists, the leftover is a single
@@ -208,6 +218,16 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_filament(const PrintCon
 AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfig               &print_config,
                                                                 unsigned int                     filament_id,
                                                                 const std::vector<unsigned int> &used_filament_ids);
+
+// The window a merging nozzle's ladder is actually cut in. The per-nozzle clamp above is kept when it holds two
+// consecutive band heights on the base grid (k and k + 1 layers), which is what lets any long enough run be cut.
+// A clamp that holds one only - a 0.8 with min_layer_height 0.24 at 0.2 layers takes 0.4 slabs and nothing else -
+// cannot cut an odd run, and the ladder would come back empty: every layer of the region above the first would be
+// suppressed. Then the ceiling is relaxed to the nozzle diameter (the 1.0D ceiling orphan absorption already
+// allows, keeping the configured minimum), and if that still does not tile, Bambu's plain diameter window is used.
+// A clamp under which the nozzle does not merge at all (band size 1) is returned unchanged.
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height);
 
 // Test accessor for PrintObject::compute_adaptive_merge_groups(). The planner runs from PrintObject::make_perimeters()
 // since step 3; this lets a unit test re-run it on a sliced object without the perimeter step.

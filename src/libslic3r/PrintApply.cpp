@@ -1,3 +1,4 @@
+#include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
@@ -1581,6 +1582,32 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
         set_compensation(extruders.front());
 }
 
+bool Print::install_pending_extruder_filament_info_unguarded()
+{
+    if (!m_extruder_filament_info_pending)
+        return false;
+    bool invalidated = false;
+    if (FilamentGroupUtils::machine_filaments_changed(m_extruder_filament_info, m_pending_extruder_filament_info)) {
+        // Both steps are attempted on purpose, and the result is true only when one was actually
+        // taken back, so a print that is already invalid stays unchanged.
+        const bool wipe_tower_invalidated = this->invalidate_step(psWipeTower);
+        const bool skirt_brim_invalidated = this->invalidate_step(psSkirtBrim);
+        invalidated = wipe_tower_invalidated || skirt_brim_invalidated;
+        if (invalidated)
+            BOOST_LOG_TRIVIAL(warning) << "Print: plate " << m_plate_index + 1 << " filament grouping invalidated: the printer's loaded filaments changed";
+    }
+    m_extruder_filament_info         = std::move(m_pending_extruder_filament_info);
+    m_pending_extruder_filament_info = {};
+    m_extruder_filament_info_pending = false;
+    return invalidated;
+}
+
+bool Print::install_pending_extruder_filament_info()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return this->install_pending_extruder_filament_info_unguarded();
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1763,6 +1790,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // Grab the lock for the Print / PrintObject milestones.
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
+
+    // The device-owned AMS inventory only feeds filament grouping, so a changed payload invalidates
+    // the grouping steps (upstream Orca #17195).
+    if (m_extruder_filament_info_pending && this->install_pending_extruder_filament_info_unguarded())
+        update_apply_status(true);
 
     // The following call may stop the background processing.
     if (! print_diff.empty())

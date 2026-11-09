@@ -33,6 +33,10 @@ public:
 
     DropDown & GetDropDown() { return drop; }
 
+    // Opt-in, off by default: while the list is open, typing narrows it to the rows that contain the
+    // typed text; a key typed while it is closed opens it and starts the filter.
+    void EnableTypeToFilter(bool on = true) { drop.EnableTypeToFilter(on); }
+
     virtual bool SetFont(wxFont const & font) override;
 
 public:
@@ -102,6 +106,8 @@ private:
     void mouseDown(wxMouseEvent &event);
     void mouseWheelMoved(wxMouseEvent &event);
     void keyDown(wxKeyEvent &event);
+    void charEvent(wxKeyEvent &event);
+    void openDropdown();
     void onMove(wxMoveEvent &event);
 
     DECLARE_EVENT_TABLE()

@@ -195,6 +195,9 @@ PresetComboBox::PresetComboBox(wxWindow* parent, Preset::Type preset_type, const
     m_em_unit(em_unit(this)),
     m_preset_bundle(preset_bundle ? preset_bundle : wxGetApp().preset_bundle)
 {
+    // Type to filter the (often long) preset lists: sidebar printer / process / filament rows, the tab
+    // preset boxes and the calibration filament box all derive from this class.
+    EnableTypeToFilter();
 #ifdef __WXMSW__
     if (preset_type == Preset::TYPE_FILAMENT)
         SetFont(Label::Body_13);
