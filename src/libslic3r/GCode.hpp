@@ -552,6 +552,9 @@ private:
             struct Region {
             	// Non-owned references to LayerRegion::perimeters::entities
                 ConstExtrusionEntitiesPtr perimeters;
+                // One id per entity of perimeters. Entities with the same id come from one island level collection,
+                // so they hold one wall sequence and have to stay together in their order.
+                std::vector<unsigned int> perimeter_groups;
             	// Non-owned references to LayerRegion::fills::entities
                 ConstExtrusionEntitiesPtr infills;
 
