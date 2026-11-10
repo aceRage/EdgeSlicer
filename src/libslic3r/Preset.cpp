@@ -1083,6 +1083,21 @@ void Preset::set_visible_from_appconfig(const AppConfig &app_config)
 	    	for (auto it = this->renamed_from.begin(); ! is_visible && it != this->renamed_from.end(); ++ it)
 	    		is_visible = has(*it);
 	    }
+    } else if (type == TYPE_PRINT) {
+        // The Process manager's "Enabled" column: a system process preset is shown unless the user hid it
+        // (by its name, or a name it was renamed from). Only instantiable system presets are in the
+        // collection, so every other one starts visible.
+        is_visible = true;
+        if (app_config.has_section(AppConfig::SECTION_HIDDEN_PROCESSES)) {
+            const std::map<std::string, std::string> &hidden = app_config.get_section(AppConfig::SECTION_HIDDEN_PROCESSES);
+            auto has = [&hidden](const std::string &name) {
+                auto it = hidden.find(name);
+                return it != hidden.end() && !it->second.empty() && it->second != "false";
+            };
+            is_visible = !has(this->name);
+            for (auto it = this->renamed_from.begin(); is_visible && it != this->renamed_from.end(); ++it)
+                is_visible = !has(*it);
+        }
     }
     //BBS: add config related log
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": name %1%, is_visible set to %2%")%name % is_visible;
@@ -1210,7 +1225,7 @@ static std::vector<std::string> s_Preset_print_options {
     "minimum_sparse_infill_area", "reduce_infill_retraction","internal_solid_infill_pattern","gap_fill_target",
     "ironing_type", "ironing_pattern", "ironing_flow", "ironing_speed", "ironing_spacing", "ironing_angle", "ironing_angle_fixed", "ironing_inset",
     "zaa_enabled", "zaa_minimize_perimeter_height", "zaa_dont_alternate_fill_direction", "zaa_min_z", "zaa_speed_scaling",
-    "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing",
+    "support_ironing", "support_ironing_pattern", "support_ironing_flow", "support_ironing_spacing", "support_ironing_inset", "support_ironing_speed", "support_ironing_direction",
     "over_support_surfaces", "over_support_flow", "over_support_speed",
     "max_travel_detour_distance",
     "fuzzy_skin", "fuzzy_skin_thickness", "fuzzy_skin_point_distance", "fuzzy_skin_first_layer", "fuzzy_skin_noise_type", "fuzzy_skin_mode", "fuzzy_skin_scale", "fuzzy_skin_octaves", "fuzzy_skin_persistence", "fuzzy_skin_ripples_per_layer", "fuzzy_skin_ripple_offset", "fuzzy_skin_layers_between_ripple_offset",
@@ -1233,7 +1248,7 @@ static std::vector<std::string> s_Preset_print_options {
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
     "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "bridge_line_width", "bridge_expansion_extra", "internal_bridge_flow",
-    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
+    "elefant_foot_compensation", "elefant_foot_compensation_layers", "elefant_foot_layers_density", "xy_contour_compensation", "xy_hole_compensation", "enable_circle_compensation", "circle_compensation_manual_offset", "apply_scarf_seam_on_circles", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
     "wipe_tower_no_sparse_layers", "wipe_tower_sparse_layers_combination", "compatible_printers", "compatible_printers_condition", "inherits",
     "flush_into_infill", "flush_into_objects", "flush_into_support",
@@ -1251,7 +1266,7 @@ static std::vector<std::string> s_Preset_print_options {
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
      "wall_distribution_count", "min_feature_size", "min_bead_width", "post_process", "process_change_extrusion_role_gcode", "min_length_factor", "wall_maximum_resolution", "wall_maximum_deviation",
-     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
+     "small_perimeter_speed", "small_perimeter_threshold", "small_support_perimeter_speed", "small_support_perimeter_threshold","bridge_angle","internal_bridge_angle", "relative_bridge_angle", "filter_out_gap_fill", "travel_acceleration","first_layer_travel_acceleration","initial_layer_travel_acceleration","inner_wall_acceleration", "min_width_top_surface",
      "default_jerk", "outer_wall_jerk", "inner_wall_jerk", "infill_jerk", "top_surface_jerk", "initial_layer_jerk","travel_jerk","first_layer_travel_jerk","default_junction_deviation",
      "top_solid_infill_flow_ratio","bottom_solid_infill_flow_ratio","only_one_wall_first_layer", "print_flow_ratio", "seam_gap",
      "role_based_wipe_speed", "wipe_speed", "accel_to_decel_enable", "accel_to_decel_factor", "wipe_on_loops", "wipe_inward", "wipe_inward_distance", "wipe_before_external_loop",
@@ -1261,6 +1276,7 @@ static std::vector<std::string> s_Preset_print_options {
      "initial_layer_travel_speed", "exclude_object", "exclude_object_tolerance", "slow_down_layers", "infill_anchor", "infill_anchor_max","initial_layer_min_bead_width",
      "make_overhang_printable", "make_overhang_printable_angle", "make_overhang_printable_hole_size" ,"notes",
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
+     "prime_tower_acceleration", "prime_tower_line_width", "prime_tower_wipe_speed", "prime_tower_wipe_distance",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
      "toolchange_ordering",
@@ -1276,6 +1292,7 @@ static std::vector<std::string> s_Preset_print_options {
      "seam_slope_type", "seam_slope_conditional", "scarf_angle_threshold", "scarf_joint_speed", "scarf_joint_flow_ratio", "seam_slope_start_height", "seam_slope_entire_loop", "seam_slope_min_length", "seam_slope_steps", "seam_slope_inner_walls", "scarf_overhang_threshold",
      "interlocking_beam", "interlocking_orientation", "interlocking_beam_layer_count", "interlocking_depth", "interlocking_boundary_avoidance", "interlocking_beam_width",
      "dithering_local_z_mode",
+     "enable_mixed_color_sublayer",
      "dithering_local_z_whole_objects",
      "dithering_local_z_infill",
      "calib_flowrate_topinfill_special_order",
@@ -1296,7 +1313,7 @@ static std::vector<std::string> s_Preset_filament_options {
     "graphic_effect_plate_temp", "graphic_effect_plate_temp_initial_layer",
     // "bed_type",
     //BBS:temperature_vitrification
-    "temperature_vitrification", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
+    "temperature_vitrification", "fins_extrude_safe_temp", "filament_is_high_temperature", "reduce_fan_stop_start_freq", "dont_slow_down_outer_wall",
     "slow_down_for_layer_cooling", "fan_min_speed",
     "fan_max_speed", "enable_overhang_bridge_fan", "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers", "full_fan_speed_layer", "initial_layer_fan_speed", "fan_cooling_layer_time", "slow_down_layer_time", "slow_down_min_speed",
     "filament_start_gcode", "filament_end_gcode", "filament_change_extrusion_role_gcode",
@@ -1325,6 +1342,9 @@ static std::vector<std::string> s_Preset_filament_options {
     "long_retractions_when_ec", "retraction_distances_when_ec",
     "filament_tower_ironing_area",
     "filament_tower_interface_print_temp", "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length",
+    // Bambu Studio 2.9.1: auto circle compensation coefficients.
+    "circle_compensation_speed", "counter_coef_1", "counter_coef_2", "counter_coef_3", "hole_coef_1", "hole_coef_2", "hole_coef_3",
+    "counter_limit_min", "counter_limit_max", "hole_limit_min", "hole_limit_max", "diameter_limit",
     // Ultra (H2C rack): the nozzle-change pre-cool target. The BBL H2C filament profiles in
     // this tree already carry it; without it here the loader drops it off the preset.
     "filament_pre_cooling_temperature_nc",
@@ -3337,10 +3357,163 @@ bool PresetCollection::delete_preset(const std::string& name)
     }
     //BBS: add lock logic for sync preset in background
     lock();
+    const size_t erased = size_t(it - m_presets.begin());
     m_presets.erase(it);
+    // The selected preset stays the selected one (it moved up by one); deleting the selected preset
+    // itself leaves the caller to select another one, as before.
+    if (m_idx_selected != size_t(-1) && erased < m_idx_selected)
+        --m_idx_selected;
     unlock();
 
     return true;
+}
+
+std::vector<std::string> PresetCollection::user_presets_inheriting(const std::string &name) const
+{
+    std::vector<std::string> out;
+    if (name.empty())
+        return out;
+    for (const Preset &preset : m_presets)
+        if (preset.is_user() && preset.inherits() == name)
+            out.push_back(preset.name);
+    return out;
+}
+
+// The "<type>_settings_id" option of a preset config: the preset's own name.
+static void set_preset_settings_id(Preset::Type type, DynamicPrintConfig &config, const std::string &name)
+{
+    if (type == Preset::TYPE_PRINT) {
+        config.option<ConfigOptionString>("print_settings_id", true)->value = name;
+    } else if (type == Preset::TYPE_FILAMENT) {
+        auto *ids = config.option<ConfigOptionStrings>("filament_settings_id", true);
+        if (ids->values.empty())
+            ids->values.push_back(name);
+        else
+            ids->values.front() = name;
+    } else if (type == Preset::TYPE_PRINTER) {
+        config.option<ConfigOptionString>("printer_settings_id", true)->value = name;
+    }
+}
+
+bool PresetCollection::rename_user_preset(const std::string &old_name, const std::string &new_name, std::string *error)
+{
+    auto fail = [error, &old_name](const std::string &why) {
+        BOOST_LOG_TRIVIAL(warning) << "rename_user_preset: " << old_name << ": " << why;
+        if (error != nullptr)
+            *error = why;
+        return false;
+    };
+    if (new_name.empty() || old_name == new_name)
+        return fail("the new name is empty or the same");
+    auto it = this->find_preset_internal(old_name);
+    if (it == m_presets.end() || it->name != old_name)
+        return fail("no such preset");
+    if (!it->is_user() || it->is_external)
+        return fail("not a user preset");
+    if (this->find_preset(new_name, false) != nullptr)
+        return fail("a preset named \"" + new_name + "\" exists");
+
+    const bool        has_selection = m_idx_selected != size_t(-1) && m_idx_selected < m_presets.size();
+    const std::string selected_name = has_selection ? m_presets[m_idx_selected].name : std::string();
+    const bool        was_selected  = has_selection && selected_name == old_name;
+
+    Preset renamed = *it;
+    renamed.name   = new_name;
+    set_preset_settings_id(m_type, renamed.config, new_name);
+    renamed.file         = this->path_for_preset(renamed);
+    renamed.updated_time = (long long) Slic3r::Utils::get_current_time_utc();
+    if (!renamed.setting_id.empty() && renamed.sync_info.empty())
+        renamed.sync_info = "update"; // as a save would mark it
+    const Preset *parent = renamed.inherits().empty() ? nullptr : this->find_preset2(renamed.inherits(), false);
+    DynamicPrintConfig parent_config;
+    if (parent != nullptr)
+        parent_config = parent->config;
+
+    // A rename that only changes letter case keeps the same file on a case-insensitive disk: drop the
+    // old file first there, or removing it afterwards would remove the new one.
+    const bool same_file = boost::iequals(fs::path(it->file).make_preferred().string(), fs::path(renamed.file).make_preferred().string());
+    Preset     old_copy  = *it;
+    if (same_file)
+        old_copy.remove_files();
+    if (!renamed.save(parent != nullptr ? &parent_config : nullptr)) {
+        if (same_file)
+            old_copy.save(parent != nullptr ? &parent_config : nullptr); // put it back
+        else
+            renamed.remove_files();
+        return fail("could not write " + renamed.file);
+    }
+    if (!same_file)
+        old_copy.remove_files();
+
+    lock();
+    m_presets.erase(it);
+    auto pos      = this->find_preset_internal(new_name);
+    Preset &added = *m_presets.insert(pos, std::move(renamed));
+    DynamicPrintConfig new_parent_config = added.config;
+    // The selection by name: indices moved.
+    if (has_selection) {
+        auto sel = this->find_preset_internal(was_selected ? new_name : selected_name);
+        if (sel != m_presets.end())
+            m_idx_selected = size_t(sel - m_presets.begin());
+    }
+    unlock();
+
+    if (was_selected) {
+        for (Preset *copy : {&m_edited_preset, &m_saved_preset}) {
+            copy->name = new_name;
+            copy->file = added.file;
+            set_preset_settings_id(m_type, copy->config, new_name);
+        }
+    }
+
+    // User presets built on it follow the new name.
+    for (Preset &child : m_presets) {
+        if (!child.is_user() || child.inherits() != old_name)
+            continue;
+        child.inherits() = new_name;
+        if (!child.save(&new_parent_config))
+            BOOST_LOG_TRIVIAL(error) << "rename_user_preset: could not save " << child.name << " (now inheriting " << new_name << ")";
+        if (has_selection && m_idx_selected < m_presets.size() && &m_presets[m_idx_selected] == &child) {
+            m_edited_preset.inherits() = new_name;
+            m_saved_preset.inherits()  = new_name;
+        }
+    }
+    BOOST_LOG_TRIVIAL(info) << "rename_user_preset: " << old_name << " -> " << new_name;
+    return true;
+}
+
+const char *preset_name_illegal_characters() { return "<>[]:/\\|?*\""; }
+
+PresetNameCheck validate_preset_name(const PresetCollection &presets, const std::string &name, const std::string &current_name, PresetNameUse use)
+{
+    using Level = PresetNameCheck::Level;
+    using Issue = PresetNameCheck::Issue;
+    auto result = [](Level level, Issue issue) {
+        PresetNameCheck c;
+        c.level = level;
+        c.issue = issue;
+        return c;
+    };
+    if (name.find_first_of(preset_name_illegal_characters()) != std::string::npos)
+        return result(Level::Invalid, Issue::IllegalCharacters);
+    if (name.find(PresetCollection::get_suffix_modified()) != std::string::npos)
+        return result(Level::Invalid, Issue::IllegalSuffix);
+    if (name == "Default Setting" || name == "Default Filament" || name == "Default Printer")
+        return result(Level::Invalid, Issue::Reserved);
+    const Preset *existing = presets.find_preset(name, false);
+    if (existing != nullptr && (existing->is_default || existing->is_system))
+        return result(Level::Invalid, Issue::SystemExists);
+    if (existing != nullptr && name != current_name)
+        return result(use == PresetNameUse::Rename ? Level::Invalid : Level::Warning, existing->is_compatible ? Issue::Exists : Issue::ExistsIncompatible);
+    if (name.empty())
+        return result(Level::Invalid, Issue::Empty);
+    if (name.front() == ' ')
+        return result(Level::Invalid, Issue::LeadingSpace);
+    if (name.back() == ' ')
+        return result(Level::Invalid, Issue::TrailingSpace);
+    if (presets.get_preset_name_by_alias(name) != name)
+        return result(Level::Invalid, Issue::AliasName);
+    return PresetNameCheck();
 }
 
 const Preset* PresetCollection::get_selected_preset_parent() const

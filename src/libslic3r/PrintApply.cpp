@@ -1,3 +1,4 @@
+#include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
@@ -398,10 +399,12 @@ public:
     };
 
     LayerRanges() = default;
-    LayerRanges(const t_layer_config_ranges &in) { this->assign(in); }
+    LayerRanges(const t_layer_config_ranges &in, double shrinkage_compensation_z) { this->assign(in, shrinkage_compensation_z); }
 
     // Convert input config ranges into continuous non-overlapping sorted vector of intervals and their configs.
-    void assign(const t_layer_config_ranges &in) {
+    // Orca #16491: the input ranges are uncompensated print heights, the intervals are scaled by the Z shrinkage
+    // compensation like the PrintObject trafo the regions are generated in.
+    void assign(const t_layer_config_ranges &in, double shrinkage_compensation_z) {
         m_ranges.clear();
         m_ranges.reserve(in.size());
         // Input ranges are sorted lexicographically. First range trims the other ranges.
@@ -425,6 +428,11 @@ public:
             m_ranges.back().layer_height_range.second = DBL_MAX;
         else
             m_ranges.push_back({ t_layer_height_range(m_ranges.back().layer_height_range.second, DBL_MAX) });
+        for (LayerRange &range : m_ranges) {
+            range.layer_height_range.first *= shrinkage_compensation_z;
+            if (range.layer_height_range.second != DBL_MAX)
+                range.layer_height_range.second *= shrinkage_compensation_z;
+        }
     }
 
     const DynamicPrintConfig* config(const t_layer_height_range &range) const {
@@ -1122,6 +1130,12 @@ static PrintObjectRegions* generate_print_object_regions(
     all_regions.clear();
 
     bool reuse_old = print_object_regions_old && !print_object_regions_old->layer_ranges.empty();
+    if (reuse_old && ! std::equal(model_layer_ranges.begin(), model_layer_ranges.end(), layer_ranges_regions.begin(), layer_ranges_regions.end(),
+            [](const LayerRanges::LayerRange &range, const PrintObjectRegions::LayerRangeRegions &r) { return range.layer_height_range == r.layer_height_range; })) {
+        // Orca #16491: the ranges carry the Z shrinkage compensation, which may have changed together with the volumes.
+        out->clear();
+        reuse_old = false;
+    }
 
     if (reuse_old) {
         // Reuse old bounding boxes of some ModelVolumes and their ranges.
@@ -1529,6 +1543,32 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
         set_compensation(extruders.front());
 }
 
+bool Print::install_pending_extruder_filament_info_unguarded()
+{
+    if (!m_extruder_filament_info_pending)
+        return false;
+    bool invalidated = false;
+    if (FilamentGroupUtils::machine_filaments_changed(m_extruder_filament_info, m_pending_extruder_filament_info)) {
+        // Both steps are attempted on purpose, and the result is true only when one was actually
+        // taken back, so a print that is already invalid stays unchanged.
+        const bool wipe_tower_invalidated = this->invalidate_step(psWipeTower);
+        const bool skirt_brim_invalidated = this->invalidate_step(psSkirtBrim);
+        invalidated = wipe_tower_invalidated || skirt_brim_invalidated;
+        if (invalidated)
+            BOOST_LOG_TRIVIAL(warning) << "Print: plate " << m_plate_index + 1 << " filament grouping invalidated: the printer's loaded filaments changed";
+    }
+    m_extruder_filament_info         = std::move(m_pending_extruder_filament_info);
+    m_pending_extruder_filament_info = {};
+    m_extruder_filament_info_pending = false;
+    return invalidated;
+}
+
+bool Print::install_pending_extruder_filament_info()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return this->install_pending_extruder_filament_info_unguarded();
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1569,6 +1609,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Ensure newly introduced dithering keys are present so in-session updates are detected.
     new_full_config.option("dithering_z_step_size", true);
     new_full_config.option("dithering_local_z_mode", true);
+    new_full_config.option("enable_mixed_color_sublayer", true);
     new_full_config.option("dithering_local_z_whole_objects", true);
     new_full_config.option("dithering_local_z_infill", true);
     new_full_config.option("dithering_local_z_direct_multicolor", true);
@@ -1585,6 +1626,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("mixed_filament_definitions", true);
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
+    m_config.option("enable_mixed_color_sublayer", true);
     m_config.option("dithering_local_z_whole_objects", true);
     m_config.option("dithering_local_z_infill", true);
     m_config.option("dithering_local_z_direct_multicolor", true);
@@ -1601,6 +1643,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("mixed_filament_definitions", true);
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
+    m_default_object_config.option("enable_mixed_color_sublayer", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
     m_default_object_config.option("dithering_local_z_infill", true);
     m_default_object_config.option("dithering_local_z_direct_multicolor", true);
@@ -1711,6 +1754,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // Grab the lock for the Print / PrintObject milestones.
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
+
+    // The device-owned AMS inventory only feeds filament grouping, so a changed payload invalidates
+    // the grouping steps (upstream Orca #17195).
+    if (m_extruder_filament_info_pending && this->install_pending_extruder_filament_info_unguarded())
+        update_apply_status(true);
 
     // The following call may stop the background processing.
     if (! print_diff.empty())
@@ -2368,7 +2416,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             print_object_regions = generate_print_object_regions(
                 print_object_regions,
                 print_object.model_object()->volumes,
-                LayerRanges(print_object.model_object()->layer_config_ranges),
+                // Orca #16491: the ranges follow the Z shrinkage compensation (upstream skips it on belt printers, which we lack).
+                LayerRanges(print_object.model_object()->layer_config_ranges, this->shrinkage_compensation().z()),
                 m_default_region_config,
                 model_object_status.print_instances.front().trafo,
                 num_total_filaments ,

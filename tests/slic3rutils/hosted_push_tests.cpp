@@ -899,7 +899,7 @@ struct DebugRoutes
 
 } // namespace
 
-TEST_CASE("integration: real Http against a local mock forwarder", "[HostedPush][socket]")
+TEST_CASE("integration: real Http against a local mock forwarder", "[HostedPush][socket][slow]")
 {
     DebugRoutes   dbg; // http:// to loopback is only accepted with the debug routes on
     MockForwarder mock;

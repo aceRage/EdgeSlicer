@@ -17,6 +17,7 @@
 #include "Geometry/ConvexHull.hpp"
 #include "I18N.hpp"
 #include "LocalZOrderOptimizer.hpp"
+#include "MixedSublayer.hpp"
 #include "ShortestPath.hpp"
 #include "Thread.hpp"
 #include "Time.hpp"
@@ -68,6 +69,35 @@ template class PrintState<PrintObjectStep, posCount>;
 
 PrintRegion::PrintRegion(const PrintRegionConfig &config) : PrintRegion(config, config.hash()) {}
 PrintRegion::PrintRegion(PrintRegionConfig &&config) : PrintRegion(std::move(config), config.hash()) {}
+
+bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans)
+{
+    if (!interval.has_mixed_paint || interval.first_sublayer_idx >= plans.size())
+        return false;
+    if (interval.sublayer_count > 1)
+        return true;
+    const SubLayerPlan &first = plans[interval.first_sublayer_idx];
+    return interval.sublayer_count == 1 && first.ratio_pass && first.split_interval;
+}
+
+unsigned int local_z_ratio_last_extruder(const std::vector<LocalZInterval> &intervals, const std::vector<SubLayerPlan> &plans,
+                                         size_t row_idx, double print_z)
+{
+    for (const LocalZInterval &interval : intervals) {
+        if (std::abs(interval.z_hi - print_z) > 1e-4 || !local_z_interval_has_passes(interval, plans))
+            continue;
+        const size_t end_idx = std::min(plans.size(), interval.first_sublayer_idx + interval.sublayer_count);
+        for (size_t plan_idx = interval.first_sublayer_idx; plan_idx < end_idx; ++plan_idx) {
+            const SubLayerPlan &plan = plans[plan_idx];
+            if (!plan.ratio_pass || !plan.ratio_last_pass || plan.dependency_group != row_idx + 1)
+                continue;
+            for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e)
+                if (!plan.painted_masks_by_extruder[e].empty())
+                    return unsigned(e + 1);
+        }
+    }
+    return 0;
+}
 
 namespace {
 
@@ -175,6 +205,31 @@ static inline int shared_local_z_extruder_for_wipe_tower(const std::vector<unsig
     return -1;
 }
 
+// True when a Ratio (mixed color sublayer) pass prints on one of these layers.
+static bool local_z_layers_have_ratio_pass(const std::vector<GCode::LayerToPrint> &layers)
+{
+    for (const GCode::LayerToPrint &layer_to_print : layers) {
+        if (layer_to_print.object_layer == nullptr)
+            continue;
+        const PrintObject *print_object =
+            layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+        if (print_object == nullptr)
+            continue;
+        const size_t layer_id  = size_t(layer_to_print.object_layer->id());
+        const auto  &intervals = print_object->local_z_intervals();
+        const auto  &plans     = print_object->local_z_sublayer_plan();
+        for (const LocalZInterval &interval : intervals) {
+            if (interval.layer_id != layer_id || !local_z_interval_has_passes(interval, plans))
+                continue;
+            const size_t end_idx = std::min(plans.size(), interval.first_sublayer_idx + interval.sublayer_count);
+            for (size_t plan_idx = interval.first_sublayer_idx; plan_idx < end_idx; ++plan_idx)
+                if (plans[plan_idx].ratio_pass)
+                    return true;
+        }
+    }
+    return false;
+}
+
 static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolchanges(
     const Print                              &print,
     const std::vector<GCode::LayerToPrint>   &layers,
@@ -201,10 +256,8 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
         const auto interval_it = std::find_if(intervals.begin(), intervals.end(), [layer_id](const LocalZInterval &interval) {
             return interval.layer_id == layer_id;
         });
-        if (interval_it == intervals.end() || !interval_it->has_mixed_paint || interval_it->sublayer_count <= 1 ||
-            interval_it->first_sublayer_idx >= plans.size()) {
+        if (interval_it == intervals.end() || !local_z_interval_has_passes(*interval_it, plans))
             continue;
-        }
 
         const size_t first_idx = interval_it->first_sublayer_idx;
         const size_t end_idx   = std::min(plans.size(), first_idx + interval_it->sublayer_count);
@@ -264,7 +317,7 @@ static std::vector<LocalZWipeTowerToolchange> collect_local_z_wipe_tower_toolcha
                 const ExPolygons &pass_masks = compensated_masks_by_extruder[extruder_id];
                 if (pass_masks.empty())
                     continue;
-                if (layer_has_local_z_extrusions(*layer_to_print.object_layer, pass_masks, local_z_infill_enabled))
+                if (layer_has_local_z_extrusions(*layer_to_print.object_layer, pass_masks, local_z_infill_enabled || plan.ratio_pass))
                     pass_ref.extruders.push_back(unsigned(extruder_id));
             }
 
@@ -680,10 +733,13 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         // Only the cost statistics read it (machine time cost); not a slicing input.
         "time_cost",
         "filament_notes",
+        // BBS 2.9.1: read only by custom G-code (H3C start / change templates).
+        "fins_extrude_safe_temp",
         "outer_wall_acceleration",
         "inner_wall_acceleration",
         "initial_layer_acceleration",
         "first_layer_travel_acceleration",
+        "initial_layer_travel_acceleration",
         "first_layer_travel_jerk",
         "top_surface_acceleration",
         "bridge_acceleration",
@@ -760,6 +816,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "seam_gap",
         "role_based_wipe_speed",
         "wipe_speed",
+        // Bambu Studio 2.9.1: the wipe before a tool change (Wipe::wipe).
+        "prime_tower_wipe_speed",
+        "prime_tower_wipe_distance",
         "use_relative_e_distances",
         "accel_to_decel_enable",
         "accel_to_decel_factor",
@@ -871,10 +930,24 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "nozzle_diameter"
             || opt_key == "filament_shrink"
             || opt_key == "filament_shrinkage_compensation_z"
+            // Bambu Studio 2.9.1 auto circle compensation coefficients (Print.cpp:273-284).
+            || opt_key == "circle_compensation_speed"
+            || opt_key == "counter_coef_1"
+            || opt_key == "counter_coef_2"
+            || opt_key == "counter_coef_3"
+            || opt_key == "hole_coef_1"
+            || opt_key == "hole_coef_2"
+            || opt_key == "hole_coef_3"
+            || opt_key == "counter_limit_min"
+            || opt_key == "counter_limit_max"
+            || opt_key == "hole_limit_min"
+            || opt_key == "hole_limit_max"
+            || opt_key == "diameter_limit"
             || opt_key == "resolution"
             || opt_key == "precise_z_height"
             || opt_key == "dithering_z_step_size"
             || opt_key == "dithering_local_z_mode"
+            || opt_key == "enable_mixed_color_sublayer"
             || opt_key == "dithering_local_z_whole_objects"
             || opt_key == "dithering_local_z_direct_multicolor"
             || opt_key == "dithering_step_painted_zones_only"
@@ -960,6 +1033,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_cone_angle"
             || opt_key == "wipe_tower_extra_spacing"
             || opt_key == "wipe_tower_max_purge_speed"
+            || opt_key == "prime_tower_acceleration"
+            || opt_key == "prime_tower_line_width"
             || opt_key == "wipe_tower_wall_type"
             || opt_key == "wipe_tower_extra_rib_length"
             || opt_key == "wipe_tower_rib_width"
@@ -1025,6 +1100,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
                opt_key == "initial_layer_line_width"
             || opt_key == "nozzle_initial_layer_line_width" // per-nozzle process P5
             || opt_key == "nozzle_line_width" // per-nozzle process P6
+            || opt_key == "nozzle_layer_height" // H3C fix: a chosen process's layer height sizes the coarse nozzles' slabs
             || opt_key == "min_layer_height"
             || opt_key == "max_layer_height"
             //|| opt_key == "resolution"
@@ -1551,9 +1627,12 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
             });
 
-        auto by_object_index = [&](size_t l, size_t r) {
-            return print_instance_with_bounding_box[l].object_index < print_instance_with_bounding_box[r].object_index;
-        };
+        // Every instance of an object shares its object_index, so order by place in the list instead,
+        // which tells instances apart and keeps copies of one object in their list order.
+        std::vector<size_t> list_position(n);
+        for (size_t k = 0; k < n; ++k)
+            list_position[fallback_order[k]] = k;
+        auto by_list_position = [&list_position](size_t l, size_t r) { return list_position[l] < list_position[r]; };
 
         // Mirrors the vertical-clearance check below: only the part of the potentially-too-tall
         // instance that reaches above the rod can be hit, so that Y extent (shrunk by the same
@@ -1604,13 +1683,13 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
             }
 
             if (!infeasible) {
-                // Kahn's algorithm; ties are broken by original object_index so the result is
+                // Kahn's algorithm; ties are broken by place in the list so the result is
                 // the minimal perturbation of the incoming order, not an arbitrary one.
                 std::vector<size_t> ready;
                 for (size_t i = 0; i < n; ++i)
                     if (i != last_idx && indegree[i] == 0)
                         ready.push_back(i);
-                std::sort(ready.begin(), ready.end(), by_object_index);
+                std::sort(ready.begin(), ready.end(), by_list_position);
 
                 std::vector<size_t> order;
                 order.reserve(n);
@@ -1620,7 +1699,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     order.push_back(cur);
                     for (size_t nxt : adj[cur]) {
                         if (--indegree[nxt] == 0) {
-                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_object_index);
+                            auto pos = std::upper_bound(ready.begin(), ready.end(), nxt, by_list_position);
                             ready.insert(pos, nxt);
                         }
                     }
@@ -2562,6 +2641,122 @@ static std::string extruder_reach_error(const Print &print, const ModelObject **
     return text;
 }
 
+// Mixed color sublayer: the 1-based virtual (mixed) filament ids the plate's objects use - painted, per part or
+// object, or as a feature filament of a region.
+static std::vector<unsigned int> used_mixed_filament_ids(const Print &print)
+{
+    const size_t                num_physical = print.config().filament_diameter.size();
+    const MixedFilamentManager &mgr          = print.mixed_filament_manager();
+    std::vector<unsigned int>   ids;
+    auto add = [&](int id) {
+        if (id > 0 && mgr.is_mixed(unsigned(id), num_physical))
+            ids.push_back(unsigned(id));
+    };
+    for (const PrintObject *object : print.objects()) {
+        const ModelObject *mo = object->model_object();
+        if (mo == nullptr)
+            continue;
+        if (mo->config.has("extruder"))
+            add(mo->config.extruder());
+        for (const ModelVolume *mv : mo->volumes)
+            for (int id : mv->get_extruders())
+                add(id);
+        for (const auto &range : mo->layer_config_ranges)
+            if (range.second.has("extruder"))
+                add(range.second.option("extruder")->getInt());
+        for (size_t region_id = 0; region_id < object->num_printing_regions(); ++region_id) {
+            const PrintRegionConfig &rc = object->printing_region(region_id).config();
+            add(rc.wall_filament.value);
+            add(rc.sparse_infill_filament.value);
+            add(rc.solid_infill_filament.value);
+        }
+    }
+    sort_remove_duplicates(ids);
+    return ids;
+}
+
+// Mixed color sublayer checks (design_mixed_color_sublayer.md D7-D9): a Ratio row's components share one nozzle
+// diameter; the plate merging layers of different diameters makes Ratio rows print whole layers; a single-nozzle
+// printer is told what the sub-layers cost. Returns an error, or adds warnings.
+static StringObjectException validate_mixed_color_sublayer(const Print &print, const std::function<void(std::string, std::string)> &warn)
+{
+    const PrintConfig          &cfg     = print.config();
+    const MixedFilamentManager &mgr     = print.mixed_filament_manager();
+    if (mixed_sublayer_legacy_mode(mgr.mixed_filaments(), cfg.enable_mixed_color_sublayer.value))
+        return {};
+    const size_t num_physical = cfg.filament_diameter.size();
+    if (num_physical < 2)
+        return {};
+    std::vector<double> nozzle_by_filament(num_physical, 0.);
+    for (size_t i = 0; i < num_physical; ++i)
+        nozzle_by_filament[i] = nozzle_diameter_for_filament(cfg, unsigned(i + 1));
+    const bool single_nozzle = cfg.nozzle_diameter.size() == 1 || cfg.single_extruder_multi_material.value;
+    bool       alm_checked   = false;
+    bool       alm_live      = false;
+
+    double max_object_height = 0.;
+    for (const PrintObject *object : print.objects())
+        max_object_height = std::max(max_object_height, unscale<double>(object->height()));
+    const double layer_height = std::max(0.01, print.default_object_config().layer_height.value);
+    const size_t layers       = size_t(std::ceil(max_object_height / layer_height));
+
+    for (unsigned int id : used_mixed_filament_ids(print)) {
+        const MixedFilament *mf = mgr.mixed_filament_from_id(id, num_physical);
+        if (mf == nullptr)
+            continue;
+        const bool gradient = mf->gradient_enabled && mf->component_a != mf->component_b;
+        if (mixed_sublayer_effective_method(mf->sublayer_method, cfg.enable_mixed_color_sublayer.value,
+                                            cfg.dithering_local_z_mode.value, gradient) != MixedSublayerMethod::Ratio)
+            continue;
+        const std::vector<MixedRatioComponent> components = mixed_ratio_components(*mf, num_physical);
+        std::vector<unsigned int>              comp_ids;
+        for (const MixedRatioComponent &c : components)
+            comp_ids.push_back(c.extruder);
+        const MixedDiameterMismatch mismatch = mixed_ratio_diameter_mismatch(comp_ids, nozzle_by_filament);
+        if (mismatch.mismatch()) {
+            StringObjectException err;
+            err.string  = Slic3r::format(L("Mixed filament %1% mixes filaments %2% (%3% mm nozzle) and %4% (%5% mm nozzle). "
+                                           "The filaments of a mixed color sublayer must print through the same nozzle diameter."),
+                                         id, mismatch.filament_a, mismatch.diameter_a, mismatch.filament_b, mismatch.diameter_b);
+            err.opt_key = "enable_mixed_color_sublayer";
+            return err;
+        }
+        if (!alm_checked) {
+            alm_live    = print.uses_multiple_nozzle_diameters();
+            alm_checked = true;
+        }
+        if (alm_live) {
+            warn(Slic3r::format(L("Mixed filament %1% prints whole layers one colour at a time: mixed color sublayers are not "
+                                  "split yet on a plate that uses different nozzle diameters."), id),
+                 "enable_mixed_color_sublayer");
+            continue;
+        }
+        if (single_nozzle && components.size() >= 2) {
+            const size_t per_layer = mixed_ratio_toolchanges_per_layer(components.size(), mf->sublayer_bs_order, print.has_wipe_tower());
+            const size_t changes   = per_layer * layers;
+            double       flush     = 0.;
+            size_t       pairs     = 0;
+            const auto  &matrix    = cfg.flush_volumes_matrix.values;
+            for (size_t a = 0; a < components.size(); ++a)
+                for (size_t b = 0; b < components.size(); ++b) {
+                    if (a == b)
+                        continue;
+                    const size_t ia = components[a].extruder - 1, ib = components[b].extruder - 1;
+                    if (ia * num_physical + ib < matrix.size()) {
+                        flush += matrix[ia * num_physical + ib];
+                        ++pairs;
+                    }
+                }
+            const double flush_per_change = pairs > 0 ? flush / double(pairs) * cfg.flush_multiplier.value : 0.;
+            warn(Slic3r::format(L("Mixed filament %1% prints a sub-layer per filament on a single-nozzle printer: up to about %2% "
+                                  "extra filament changes (%3% per layer) and %4% mm3 of flush. Expect a much longer print."),
+                                id, changes, per_layer, int(std::lround(flush_per_change * double(changes)))),
+                 "enable_mixed_color_sublayer");
+        }
+    }
+    return {};
+}
+
 StringObjectException Print::validate(std::vector<StringObjectException> *warnings, Polygons* collison_polygons, std::vector<std::pair<Polygon, float>>* height_polygons) const
 {
     // ORCA #14112: every check that finds a problem adds its own entry, so the plater can show all of them.
@@ -2586,6 +2781,10 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    if (StringObjectException err = validate_mixed_color_sublayer(*this, [&warn](std::string msg, std::string key) { warn(std::move(msg), std::move(key)); });
+        !err.string.empty())
+        return err;
 
     // A height range (or a height colour pattern band) naming a filament the project does not have
     // is not printed with that filament (object_extruders() drops it). The slice is unchanged; the user is told.
@@ -2699,6 +2898,25 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         for (const PrintObject *object : m_objects)
             if (object->object_extruders().size() > 1)
                 return {L("The spiral vase mode does not work when an object contains more than one materials."), object, "spiral_mode"};
+        // Orca #17240: enabling spiral vase mode in the GUI resets these keys in the global config only, so an
+        // object, part or height range can still override them. Layers with infill or more than one wall are
+        // printed without spiralizing.
+        for (const PrintObject *object : m_objects) {
+            for (size_t region_id = 0; region_id < object->num_printing_regions(); ++region_id) {
+                const PrintRegionConfig &cfg = object->printing_region(region_id).config();
+                const char *opt_key = cfg.sparse_infill_density.value > 0. ? "sparse_infill_density" :
+                                      cfg.wall_loops.value > 1             ? "wall_loops" :
+                                      cfg.top_shell_layers.value > 0       ? "top_shell_layers" : nullptr;
+                if (opt_key != nullptr) {
+                    // TRN %1% is the object name.
+                    warn(Slic3r::format(_u8L("Spiral vase mode needs no sparse infill, one wall loop and no top shell layers, "
+                                             "but the object %1% uses other values, so it will not print as a continuous spiral."),
+                                        object->model_object()->name),
+                         opt_key, object);
+                    break;
+                }
+            }
+        }
     }
 
     // Cache of layer height profiles for checking:
@@ -3005,7 +3223,8 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         // knows which of the two to change.
         // Per-nozzle process P8 (owner design E): on a printer with several nozzles a width error names the tool and its size,
         // and its jump link ("key@T2") opens that tool's process.
-        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2;
+        // H3C: a single extruder whose rack holds several sizes names its size tools ("T1 0.8") too.
+        const bool several_nozzles = m_config.nozzle_diameter.values.size() >= 2 || supports_nozzle_processes(m_config);
         // P9: a filament on a rack slot names the slot ("Right slot 3") and jumps to it ("key@T2.3").
         auto tool_of_filament = [this](unsigned int filament_id) { return nozzle_filament_tool_name(m_config, std::max(filament_id, 1u)); };
         auto tool_opt_key = [this, several_nozzles](const char *opt_key, unsigned int filament_id) {
@@ -5749,6 +5968,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     auto is_print_object_the_same = [this](const PrintObject* object1, const PrintObject* object2) -> bool{
         if (object1->trafo().matrix() != object2->trafo().matrix())
             return false;
+        // Layers are stored relative to center_offset(), which comes from the first instance of each ModelObject, so it
+        // can differ between objects with the same trafo. Sharing the layers would then print the object in the wrong place.
+        if (object1->center_offset() != object2->center_offset())
+            return false;
         const ModelObject* model_obj1 = object1->model_object();
         const ModelObject* model_obj2 = object2->model_object();
         if (model_obj1->volumes.size() != model_obj2->volumes.size())
@@ -7076,6 +7299,10 @@ void Print::_make_wipe_tower()
         // the way the export's GCodeProcessor reads it (";TYPE:" rather than "; FEATURE: "), or the
         // preview and the statistics lose the tower. Bambu Lab printers keep the Bambu tags.
         wipe_tower.set_bbl_gcode_tags(is_BBL_printer());
+        // Bambu Studio 2.9.1 prime_tower_acceleration: travels inside the tower go back to the travel
+        // acceleration (an object setting in this fork, read like the G-code writer does).
+        wipe_tower.set_travel_acceleration(get_value_at(m_config, m_default_object_config.travel_acceleration, ConfigFlowDomain::Process,
+                                                        unsigned(m_wipe_tower_data.tool_ordering.first_extruder())));
 
         // wipe_tower.set_retract();
         // wipe_tower.set_zhop();
@@ -7257,9 +7484,17 @@ void Print::_make_wipe_tower()
                                                  << " local_z_toolchanges=" << local_z_toolchanges.size()
                                                  << " sequence=" << local_z_sequence.str();
                     }
+                    // D10 (mixed color sublayer): a Ratio pass on a shared nozzle gets the full flush, as a filament change
+                    // does; across heads it only primes. Subdivide passes keep the prime volume.
+                    const bool ratio_layer = !local_z_toolchanges.empty() && local_z_layers_have_ratio_pass(*layers_with_same_print_z);
+                    const bool shared_nozzle = m_config.purge_in_prime_tower && m_config.single_extruder_multi_material;
                     for (const LocalZWipeTowerToolchange &toolchange : local_z_toolchanges) {
+                        float volume = (float) m_config.prime_volume;
+                        if (ratio_layer && toolchange.old_tool < wipe_volumes.size() && toolchange.new_tool < wipe_volumes[toolchange.old_tool].size())
+                            volume = mixed_ratio_toolchange_purge_volume(shared_nozzle, wipe_volumes[toolchange.old_tool][toolchange.new_tool],
+                                                                         float(m_config.flush_multiplier), volume);
                         wipe_tower.plan_local_z_toolchange((float) layer_tools.print_z, (float) layer_tools.wipe_tower_layer_height,
-                                                           toolchange.old_tool, toolchange.new_tool, (float) m_config.prime_volume);
+                                                           toolchange.old_tool, toolchange.new_tool, volume);
                     }
                     if (!local_z_toolchanges.empty())
                         current_extruder_id = local_z_toolchanges.back().new_tool;

@@ -124,6 +124,7 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
 #dialog h2 { font-size: 16px; }
 #dialog p { line-height: 1.45; color: var(--fg2); }
 #dialog .row { display: flex; justify-content: flex-end; gap: 8px; }
+#dlgname { width: 100%; background: var(--ctl); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font: inherit; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
 @media (max-width: 520px) { header { padding: 8px 10px; } main { padding: 10px; } #grid { grid-template-columns: 1fr; } }
 </style>
@@ -152,6 +153,7 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
     <div id="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgtitle" aria-describedby="dlgtext">
         <h2 id="dlgtitle">Stop the print</h2>
         <p id="dlgtext"></p>
+        <label id="dlgnamerow" hidden><span class="sr">New name</span><input type="text" id="dlgname" maxlength="64" autocomplete="off" spellcheck="false"></label>
         <div class="row">
             <button type="button" class="pbtn danger" id="dlgstop">Stop print</button>
             <button type="button" class="pbtn" id="dlgkeep">Keep printing</button>
@@ -221,9 +223,16 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
         b.style.display = text ? 'block' : 'none';
     }
 
+    // Printers removed from this page, and when. A read that was asked for BEFORE the removal was
+    // answered from the slicer's state before it: it may still list the printer, and must not
+    // bring the card back (Remove is one step). A read asked afterwards is the truth.
+    var removedAt = {};
     window.__printers = function(payload) {
+        var asked = readingSince;
         readingSince = 0;
         payload = payload || {};
+        if (payload.ok && Array.isArray(payload.printers) && asked)
+            payload.printers = payload.printers.filter(function(p) { return !(removedAt[p.id] && removedAt[p.id] >= asked); });
         if (!payload.ok) {
             // Keep the last cards; say why they are not fresh.
             showBanner('Could not read the printers: ' + (payload.error || 'no answer') + (loaded ? '. Showing the last known state.' : '.'));
@@ -289,7 +298,7 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
         var list = visibleRows();
         renderCounts(list);
         PrinterCards.render($('grid'), list, { jobs: jobs, onAction: onAction, onOpen: onOpen, showOpen: false,
-                                               thumbFor: thumbFor, isDismissed: isDismissed, onDismiss: onDismiss });
+                                               thumbFor: thumbFor, isDismissed: isDismissed, onDismiss: onDismiss, onRemove: onRemove, onRename: onRename });
         var empty = $('empty');
         if (!loaded) { empty.hidden = false; empty.textContent = 'Reading the printers…'; }
         else if (!rows.length) { empty.hidden = false; empty.textContent = 'No printers yet. Bambu Lab printers appear once they are bound or found on the LAN (Device tab), Snapmaker printers once they are found or added on the LAN, and Klipper / Moonraker printers once a printer preset or a saved device has their address.'; }
@@ -350,14 +359,101 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
 
     // The Stop confirmation: the safe answer has the focus; Escape keeps printing.
     // The card under the dialog is redrawn by every read, so the focus goes back by its key.
-    var askFor = null, askReturn = '';
-    function askStop(p) {
+    // The same dialog asks before a Remove / Log out / Forget (askMode 'remove'), says why a printer
+    // cannot be removed here ('explain', one OK button) and takes a new name ('rename').
+    var askFor = null, askReturn = '', askMode = 'stop';
+    function openAsk(p, mode, ret, title, text, go, keep, goClass) {
         askFor = p;
-        askReturn = 'act:' + p.id + ':stop';
-        $('dlgtext').textContent = 'Stop the print on ' + (p.name || p.id) + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.';
+        askMode = mode;
+        askReturn = ret;
+        $('dlgtitle').textContent = title;
+        $('dlgtext').textContent = text;
+        $('dlgstop').textContent = go;
+        $('dlgstop').hidden = !go;
+        $('dlgstop').className = 'pbtn ' + (goClass || 'danger');
+        $('dlgkeep').textContent = keep;
+        $('dlgnamerow').hidden = mode !== 'rename';
         $('scrim').classList.add('open');
-        $('dlgkeep').focus();
+        if (mode === 'rename') { $('dlgname').focus(); $('dlgname').select(); }
+        else $('dlgkeep').focus();
     }
+    function askStop(p) {
+        openAsk(p, 'stop', 'act:' + p.id + ':stop', 'Stop the print',
+            'Stop the print on ' + (p.name || p.id) + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.',
+            'Stop print', 'Keep printing');
+    }
+
+    // ---- Remove printer (and Forget, a leftover's remove) ----
+    function onRemove(p) {
+        var cur = jobs[p.id];
+        if (cur && cur.phase === 'running') return;
+        var name = p.name || p.id, mode = p.remove && p.remove.mode ? p.remove.mode : 'remove';
+        var ret = 'remove:' + p.id;
+        if (mode === 'explain') {
+            openAsk(p, 'explain', ret, 'This printer cannot be removed here', (p.remove && p.remove.reason) || 'This printer comes from somewhere the slicer does not own.', '', 'OK');
+        } else if (p.leftover) {
+            openAsk(p, 'remove', ret, 'Forget this printer',
+                'Forget ' + name + '? EdgeSlicer no longer has this printer; the hub only remembers its last status. Forgetting it removes it from this tab and from the phone app.',
+                'Forget', 'Keep it');
+        } else if (mode === 'logout') {
+            openAsk(p, 'remove', ret, 'Log out of this printer',
+                'Log out of ' + name + '? EdgeSlicer forgets its LAN access code, as the Device tab’s Log out does. It leaves this tab and the phone app; to use it again, connect to it on the Device tab with its access code.',
+                'Log out', 'Keep it');
+        } else {
+            openAsk(p, 'remove', ret, 'Remove this printer',
+                'Remove ' + name + '? EdgeSlicer deletes it where it was saved (its saved address, and anything that would find it again by itself), and it leaves this tab and the phone app. ' +
+                'It stays gone after a restart; add it again by hand to get it back.',
+                'Remove printer', 'Keep it');
+        }
+    }
+    function removePrinter(p) {
+        removedAt[p.id] = Date.now();
+        jobs[p.id] = { action: 'remove', phase: 'running', text: 'Removing…', error: '', job: 0 };
+        render();
+        post('printers_remove:' + p.id);
+    }
+    window.__printerRemove = function(r) {
+        if (!r || !r.id) return;
+        if (r.ok) {
+            delete jobs[r.id];
+            rows = rows.filter(function(x) { return x.id !== r.id; });
+            announce(r.logout ? 'Logged out of the printer.' : 'Printer removed.');
+            render();
+            return;
+        }
+        delete removedAt[r.id]; // it was not removed: the next read shows it as it is
+        if (jobs[r.id]) finish(r.id, 'error', r.error || 'The printer could not be removed.');
+        else if (r.error) { showBanner(r.error); announce(r.error); }
+    };
+    // The older Forget answer (a leftover), still understood.
+    window.__printerForget = function(r) { if (r) window.__printerRemove({ id: r.id, ok: r.ok, error: r.error }); };
+
+    // ---- Rename ----
+    function onRename(p) {
+        var cur = jobs[p.id];
+        if (cur && cur.phase === 'running') return;
+        $('dlgname').value = p.custom_name || p.name || '';
+        openAsk(p, 'rename', 'rename:' + p.id, 'Rename this printer',
+            'A name of your own for ' + (p.reported_name || p.name || p.id) + ', shown here and in the phone app. Leave it empty to use the printer’s own name again.',
+            'Save', 'Cancel', 'primary');
+    }
+    function renamePrinter(p, name) {
+        post('printers_rename:' + JSON.stringify({ id: p.id, name: name }));
+    }
+    window.__printerRename = function(r) {
+        if (!r || !r.id) return;
+        if (!r.ok) { showBanner(r.error || 'The name could not be saved.'); return; }
+        rows.forEach(function(x) {
+            if (x.id !== r.id) return;
+            if (!x.reported_name) x.reported_name = x.name;
+            if (r.name) { x.name = r.name; x.custom_name = r.name; }
+            else { x.name = x.reported_name; delete x.custom_name; }
+        });
+        announce(r.name ? 'Renamed to ' + r.name + '.' : 'Back to the printer’s own name.');
+        render();
+        readingSince = 0; requestPrinters();
+    };
+
     function closeAsk() {
         askFor = null;
         $('scrim').classList.remove('open');
@@ -365,16 +461,30 @@ main { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
         for (var i = 0; i < nodes.length; i++)
             if (nodes[i].getAttribute('data-fk') === askReturn) { try { nodes[i].focus(); } catch (e) {} break; }
     }
+    function confirmAsk() {
+        var p = askFor, mode = askMode, name = $('dlgname').value;
+        closeAsk();
+        if (!p) return;
+        if (mode === 'remove') removePrinter(p);
+        else if (mode === 'rename') renamePrinter(p, name);
+        else if (mode === 'stop') run(p, 'stop', true);
+    }
     $('dlgkeep').addEventListener('click', closeAsk);
-    $('dlgstop').addEventListener('click', function() { var p = askFor; closeAsk(); if (p) run(p, 'stop', true); });
+    $('dlgstop').addEventListener('click', confirmAsk);
+    $('dlgname').addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); confirmAsk(); } });
     $('scrim').addEventListener('click', function(e) { if (e.target === $('scrim')) closeAsk(); });
     document.addEventListener('keydown', function(e) {
         if (!askFor) return;
         if (e.key === 'Escape') { e.preventDefault(); closeAsk(); return; }
         if (e.key === 'Tab') { // keep the focus inside the dialog
-            var a = $('dlgstop'), b = $('dlgkeep');
-            if (e.shiftKey && document.activeElement === a) { e.preventDefault(); b.focus(); }
-            else if (!e.shiftKey && document.activeElement === b) { e.preventDefault(); a.focus(); }
+            var order = [];
+            if (!$('dlgnamerow').hidden) order.push($('dlgname'));
+            if (!$('dlgstop').hidden) order.push($('dlgstop'));
+            order.push($('dlgkeep'));
+            var i = order.indexOf(document.activeElement);
+            var next = e.shiftKey ? (i <= 0 ? order.length - 1 : i - 1) : (i < 0 || i >= order.length - 1 ? 0 : i + 1);
+            e.preventDefault();
+            order[next].focus();
         }
     });
 

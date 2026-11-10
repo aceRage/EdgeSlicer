@@ -1,5 +1,6 @@
 #include "BambuDualNozzleSync.hpp"
 #include "BambuExtruderMap.hpp"
+#include "LocalesUtils.hpp"
 
 #include "nlohmann/json.hpp"
 
@@ -51,9 +52,9 @@ bool same_diameter(const std::string &reported, double preset)
 {
     if (reported.empty() || preset <= 0.)
         return true; // nothing to compare against
-    char *end = nullptr;
-    const double d = std::strtod(reported.c_str(), &end);
-    if (end == reported.c_str())
+    size_t       used = 0;
+    const double d    = string_to_double_decimal_point(reported, &used); // the printer's "0.4", in any UI locale
+    if (used == 0)
         return true;
     return std::abs(d - preset) < 0.01;
 }

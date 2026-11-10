@@ -180,9 +180,24 @@ std::string nozzle_flow_short(NozzleVolumeType type)
     switch (type) {
     case nvtHighFlow: return "HF";
     case nvtTPUHighFlow: return "TPU";
+    case nvtTPU285: return "TPU285"; // Bambu Studio 2.9.1's short name (H3C rack slot)
     case nvtE3DHighFlow: return "E3D";
     default: return "Std";
     }
+}
+
+bool nozzle_strip_printer_has_type(const ConfigBase &printer, NozzleVolumeType type)
+{
+    for (const char *key : { "default_nozzle_volume_type", "nozzle_volume_type" })
+        if (const auto *opt = dynamic_cast<const ConfigOptionEnumsGeneric *>(printer.option(key)))
+            for (int v : opt->values)
+                if (v == int(type))
+                    return true;
+    for (const std::vector<RackNozzle> &rack : extruder_rack_nozzles(printer))
+        for (const RackNozzle &n : rack)
+            if (n.volume_type == type)
+                return true;
+    return false;
 }
 
 std::string collapse_nozzle_strip_labels(const std::vector<std::string> &labels)
@@ -243,6 +258,7 @@ static const char *strip_volume_word(NozzleVolumeType type)
     switch (type) {
     case nvtHighFlow: return "high_flow";
     case nvtTPUHighFlow: return "tpu_high_flow";
+    case nvtTPU285: return "tpu285";
     case nvtE3DHighFlow: return "e3d_high_flow";
     default: return "standard";
     }

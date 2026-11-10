@@ -133,7 +133,10 @@ public:
         SlicingModifierSameFilamentPainted,
         // A modifier with a different filament overlapping colour-painted volumes: the painted areas
         // win where they overlap. Appended; own id.
-        SlicingModifierOverriddenByPaint
+        SlicingModifierOverriddenByPaint,
+        // H2C (two-extruder rack): the plate's nozzle grouping uses two or more nozzle diameters on one extruder's rack,
+        // which the firmware refuses to swap mid-print. Raised during export_gcode; appended, own id.
+        SlicingRackMixedDiameter
     };
 
     typedef size_t TimeStamp;
@@ -770,6 +773,10 @@ protected:
         { return m_state.invalidate_multiple(il.begin(), il.end(), this->cancel_callback()); }
     bool            invalidate_all_steps()
         { return m_state.invalidate_all(this->cancel_callback()); }
+    // invalidate_step() for the background processing thread, about a step it finished itself. It skips the
+    // cancel callback, which stops the background processing and so would wait for this very thread.
+    bool            invalidate_step_from_worker(PrintStepEnum step)
+        { std::scoped_lock<std::mutex> lock(this->state_mutex()); return m_state.invalidate(step, []() {}); }
 
 	bool            is_step_started_unguarded(PrintStepEnum step) const { return m_state.is_started_unguarded(step); }
 	bool            is_step_done_unguarded(PrintStepEnum step) const { return m_state.is_done_unguarded(step); }

@@ -9,6 +9,7 @@ EVT_LEFT_DOWN(ComboBox::mouseDown)
 EVT_LEFT_DCLICK(ComboBox::mouseDown)
 //EVT_MOUSEWHEEL(ComboBox::mouseWheelMoved)
 EVT_KEY_DOWN(ComboBox::keyDown)
+EVT_CHAR(ComboBox::charEvent)
 
 // catch paint events
 END_EVENT_TABLE()
@@ -299,6 +300,29 @@ void ComboBox::mouseDown(wxMouseEvent &event)
     }
 }
 
+void ComboBox::openDropdown()
+{
+    if (drop_down || texts.empty() || !drop.HasDismissLongTime())
+        return;
+    drop.autoPosition();
+    drop_down = true;
+    drop.Popup();
+    wxCommandEvent e(wxEVT_COMBOBOX_DROPDOWN);
+    GetEventHandler()->ProcessEvent(e);
+}
+
+void ComboBox::charEvent(wxKeyEvent &event)
+{
+    if (drop.IsTypeToFilterEnabled() && DropDown::IsPrintableKey(event)) {
+        // A key typed on the closed box opens the list and starts the filter.
+        if (!drop_down && event.GetUnicodeKey() != ' ')
+            openDropdown();
+        if (drop_down && drop.HandlePrintableKey(event))
+            return;
+    }
+    event.Skip();
+}
+
 void ComboBox::mouseWheelMoved(wxMouseEvent &event)
 {
     event.Skip();
@@ -313,6 +337,19 @@ void ComboBox::mouseWheelMoved(wxMouseEvent &event)
 
 void ComboBox::keyDown(wxKeyEvent& event)
 {
+    if (drop.IsTypeToFilterEnabled() && drop_down) {
+        // Space belongs to the filter once text was typed ("Bambu PLA"); it arrives as a char event.
+        if (event.GetKeyCode() == WXK_SPACE && !drop.GetFilterText().empty()) {
+            event.Skip();
+            return;
+        }
+        if (drop.HandleSpecialKey(event))
+            return;
+        if (event.GetKeyCode() == WXK_ESCAPE) { // the open list takes Esc (the dialog stays)
+            drop.DismissAndNotify();
+            return;
+        }
+    }
     switch (event.GetKeyCode()) {
         case WXK_RETURN:
         case WXK_SPACE:

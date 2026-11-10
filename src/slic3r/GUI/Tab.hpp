@@ -15,6 +15,9 @@
 //	   Slic3r::GUI::Tab::Preset;
 //	       - Single preset item: name, file is default or external.
 
+// wx/weakref.h (via wx/meta/convertible.h) uses std::is_base_of without including <type_traits>;
+// GCC 15 (the Flatpak SDK) rejects it when nothing has pulled that header in first.
+#include <type_traits>
 #include <wx/weakref.h>
 #include <wx/panel.h>
 #include <wx/notebook.h>
@@ -404,7 +407,9 @@ public:
 	                        ProjectPresetPrinters project_printers = ProjectPresetPrinters::Keep);
 	//void		save_preset(std::string name = std::string(), bool detach = false);
 
-	void		delete_preset();
+	// confirmed: the caller asked the user already (the preset managers' "Used by..." prompt); presets
+	// other presets inherit are still refused.
+	void		delete_preset(bool confirmed = false);
 	void		toggle_show_hide_incompatible();
 	void		update_show_hide_incompatible_button();
 	void		update_ui_from_settings();
@@ -619,6 +624,9 @@ private:
 	bool					m_tools_expanded    = false; // the user opened the selector on a printer whose tools all match
 	bool					m_tool_marks_shown  = false; // the plate-wide fields carry the "(Plate)" mark
 	void					create_tool_selector();
+	// Lays the selector out; with header_changed (something shown or hidden, the chips' height changed) the ParamsPanel and
+	// the sidebar too, as the Global / Objects switch does.
+	void					relayout_tool_selector(bool header_changed);
 	std::vector<wxString>	tool_selector_labels() const;
 	bool					tool_selector_expanded() const;
 	// On Plate (selector open): the per-tool fields are greyed out. On a tool: the plate-wide fields carry "(Plate)".
@@ -937,6 +945,13 @@ public:
 	void		clear_pages() override;
 	bool 		supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptSLA; }
 };
+
+// Deletes a user preset that is not the selected one of its collection (the selected one goes through
+// Tab::delete_preset): cloud sync flag, discards edits when it was the edited one, removes its files.
+// When it is the selected preset, selected_preset_name becomes the next visible preset for the caller
+// to select. Filament and process presets (moved out of CreatePresetsDialog.cpp, where the filament
+// editor uses it). Returns false when it was not deleted.
+bool delete_user_preset_by_name(Preset::Type type, std::string delete_preset_name, std::string &selected_preset_name);
 
 } // GUI
 } // Slic3r

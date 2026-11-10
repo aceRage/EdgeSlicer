@@ -40,6 +40,8 @@ using namespace nlohmann;
 
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "sentry_wrapper/LocalMinidumpPolicy.hpp"
+#include <tbb/parallel_for.h>
 #include "common_func/common_func.hpp"
 
 
@@ -1471,6 +1473,14 @@ int CLI::run(int argc, char **argv)
     if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "startup") == 0) {
         volatile int* p = nullptr;
         *p = 42; // the test crash (access violation / SIGSEGV)
+    }
+    // EDGESLICER_TEST_CRASH=workers is the slicing-crash shape: an access violation in several TBB worker threads at
+    // once (a parallel_for whose every item faults), which is what left 0-byte local dumps before fix/crash-dump-writer.
+    if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "workers") == 0) {
+        tbb::parallel_for(tbb::blocked_range<int>(0, 256, 1), [](const tbb::blocked_range<int>&) {
+            volatile int* p = nullptr;
+            *p = 42; // the test crash, on whichever worker runs this item
+        });
     }
 
 #ifdef __WXGTK__
@@ -4064,6 +4074,7 @@ int CLI::run(int argc, char **argv)
         auto resolve_tool = [&](const std::string &id, double diameter, std::string name, DynamicPrintConfig &store) {
             DynamicPrintConfig base;
             bool               has_base = false;
+            const bool         chosen   = !name.empty(); // named in the project / on the command line, not picked for its size
             std::string        filament_id_unused;
             if (name.empty() && plate_claim > 0. && std::abs(plate_claim - diameter) > EPSILON && plate_bundle != nullptr) {
                 name = PresetBundle::auto_nozzle_process_in(plate_bundle->prints, plate_bundle->printers, config_string("printer_model"),
@@ -4089,6 +4100,9 @@ int CLI::run(int argc, char **argv)
             }
             const auto it = edits.find(id);
             store = nozzle_tool_process(m_print_config, has_base ? base : m_print_config, it != edits.end() ? &it->second : nullptr);
+            // H3C fix: a chosen process's layer height sizes its nozzle's slabs on a mixed-diameter plate, as in the GUI.
+            if (chosen && has_base)
+                set_nozzle_tool_layer_height(store, base);
             return true;
         };
 
@@ -6805,7 +6819,7 @@ int CLI::run(int argc, char **argv)
                                             ++i;
                                             continue;
                                         }
-                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning) {
+                                        if (status.message_type == PrintStateBase::SlicingPreciseSeamWarning || status.message_type == PrintStateBase::SlicingRackMixedDiameter) {
                                             sliced_plate_info.warning_message = status.text;
                                             sliced_plate_info.warnings.push_back(status.text);
                                             cli_record_warning(sliced_info, "slicing_warning_non_critical",
@@ -8251,43 +8265,145 @@ static std::atomic<bool> g_dump_in_progress{false};
 // Opt-in, Windows, no network: when EDGESLICER_LOCAL_MINIDUMP=1, or when the exe runs from a C:/Dev/EdgeSlicerTest test copy, an
 // unhandled crash (access violation, abort, std::terminate, pure call, invalid CRT parameter) writes
 // <exe folder>/crash/EdgeSlicer_<pid>_<time>.dmp, to open with cdb / Visual Studio and the build tree's PDBs. Release builds
-// that do not opt in are unchanged; Sentry, when it is set up, still installs its own handler after this one.
+// that do not opt in are unchanged.
+//
+// How it runs (fix/crash-dump-writer, 2026-11-07: every dump of a slicing crash used to come out 0 bytes):
+//  - A crash in parallel slicing usually faults several TBB workers at once. The first one claims the dump; the others used
+//    to fall straight through to crashpad (or Windows Error Reporting), which terminated the process while the first was
+//    still inside MiniDumpWriteDump - so the file had been created but nothing was written. Later crashing threads now wait
+//    (bounded) until the dump is finished before they hand on.
+//  - The dump is written by a helper thread started here, as MiniDumpWriteDump's documentation recommends: the crashing
+//    thread's stack may be exhausted or corrupt, and dbghelp is loaded up front, not under a crash.
+//  - A failed write leaves no empty .dmp: the file is removed and <name>.failed.txt records the error instead.
+//  - The folder keeps at most local_minidump::kMaxFiles of these files (pruned at startup, oldest first; 0-byte leftovers go).
+//
+// With Sentry: the exe starts crashpad (initSentry) before it calls into this DLL, so this filter is installed on top of
+// crashpad's and runs FIRST. It writes the local dump, then hands the same exception to crashpad's filter, which writes its
+// own dump under <datadir>/SentryData/reports (or %LOCALAPPDATA%) and ends the process. abort() is chained the same way to
+// crashpad's SIGABRT handler. Heap corruption is the one case crashpad takes alone (its vectored handler runs before any
+// unhandled-exception filter), so it has no local dump. Without Sentry (or with it built out) the local dump is the only one,
+// and Windows Error Reporting ends the process afterwards.
 namespace {
-std::wstring g_local_dump_dir;
-std::atomic<bool> g_local_dump_written{false};
-LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+using Slic3r::local_minidump::kMaxFiles;
 
 typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
                                           PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
 
-void write_local_minidump(EXCEPTION_POINTERS *pointers)
+// How long a crashing thread waits for the dump before it gives up and lets the crash go on.
+constexpr DWORD kDumpWaitMs = 120 * 1000;
+
+std::wstring                 g_local_dump_dir;
+MiniDumpWriteDumpFn          g_minidump_write   = nullptr;
+HANDLE                       g_dump_request     = nullptr; // auto-reset: the crashing thread asks the helper for a dump
+HANDLE                       g_dump_finished    = nullptr; // manual-reset: the dump is written (or failed); stays set
+HANDLE                       g_dump_thread      = nullptr;
+std::atomic<DWORD>           g_dump_owner{0};             // id of the thread whose crash is being dumped; 0 = none yet
+EXCEPTION_POINTERS          *g_dump_pointers    = nullptr;
+LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter  = nullptr;
+void (*g_previous_abort_handler)(int)           = SIG_DFL;
+
+// Plain C: __try below cannot sit in a function that unwinds C++ objects.
+BOOL call_minidump_write(HANDLE file, MINIDUMP_TYPE type, MINIDUMP_EXCEPTION_INFORMATION *info, DWORD *error)
 {
-    if (g_local_dump_dir.empty() || g_local_dump_written.exchange(true))
+    BOOL ok = FALSE;
+    __try {
+        ok = g_minidump_write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, info, nullptr, nullptr);
+        *error = ok ? 0 : ::GetLastError();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok     = FALSE;
+        *error = GetExceptionCode();
+    }
+    return ok;
+}
+
+void write_failure_note(const wchar_t *dump_path, DWORD error)
+{
+    wchar_t note[MAX_PATH + 32];
+    if (swprintf(note, MAX_PATH + 32, L"%ls.failed.txt", dump_path) < 0)
         return;
-    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
-    if (dbghelp == nullptr)
+    HANDLE file = ::CreateFileW(note, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
         return;
-    auto write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
-    if (write == nullptr)
-        return;
+    char  text[96];
+    const int n = std::snprintf(text, sizeof(text), "MiniDumpWriteDump failed: 0x%08lX\r\n", static_cast<unsigned long>(error));
+    DWORD written = 0;
+    if (n > 0)
+        ::WriteFile(file, text, DWORD(n), &written, nullptr);
+    ::CloseHandle(file);
+}
+
+// Runs on the helper thread. Writes the dump of the thread recorded in g_dump_owner / g_dump_pointers.
+void write_dump_now()
+{
     ::CreateDirectoryW(g_local_dump_dir.c_str(), nullptr);
     SYSTEMTIME t;
     ::GetLocalTime(&t);
     wchar_t name[96];
-    swprintf(name, 96, L"\\EdgeSlicer_%lu_%04d%02d%02d_%02d%02d%02d.dmp", ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour,
-             t.wMinute, t.wSecond);
-    const std::wstring path = g_local_dump_dir + name;
-    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (Slic3r::local_minidump::format_name(name, 96, ::GetCurrentProcessId(), t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                                            t.wSecond) == 0)
+        return;
+    wchar_t path[MAX_PATH];
+    if (swprintf(path, MAX_PATH, L"%ls\\%ls", g_local_dump_dir.c_str(), name) < 0)
+        return;
+    HANDLE file = ::CreateFileW(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
         return;
     MINIDUMP_EXCEPTION_INFORMATION info;
-    info.ThreadId          = ::GetCurrentThreadId();
-    info.ExceptionPointers = pointers;
+    info.ThreadId          = g_dump_owner.load();
+    info.ExceptionPointers = g_dump_pointers;
     info.ClientPointers    = FALSE;
-    const MINIDUMP_TYPE type = MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithThreadInfo |
-                                             MiniDumpWithUnloadedModules | MiniDumpWithHandleData);
-    write(::GetCurrentProcess(), ::GetCurrentProcessId(), file, type, pointers != nullptr ? &info : nullptr, nullptr, nullptr);
+    MINIDUMP_EXCEPTION_INFORMATION *pinfo = g_dump_pointers != nullptr ? &info : nullptr;
+    DWORD error = 0;
+    BOOL  ok    = call_minidump_write(file, MINIDUMP_TYPE(MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs |
+                                                          MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                          MiniDumpWithHandleData),
+                                      pinfo, &error);
+    if (!ok) {
+        // Retry with the smallest useful dump (stacks, registers, modules) before giving up.
+        ::SetFilePointer(file, 0, nullptr, FILE_BEGIN);
+        ::SetEndOfFile(file);
+        DWORD error2 = 0;
+        ok = call_minidump_write(file, MiniDumpNormal, pinfo, &error2);
+    }
     ::CloseHandle(file);
+    if (!ok) {
+        ::DeleteFileW(path);
+        write_failure_note(path, error);
+    }
+}
+
+DWORD WINAPI dump_thread_main(LPVOID)
+{
+    for (;;) {
+        if (::WaitForSingleObject(g_dump_request, INFINITE) != WAIT_OBJECT_0)
+            return 0;
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
+}
+
+void write_local_minidump(EXCEPTION_POINTERS *pointers)
+{
+    if (g_local_dump_dir.empty() || g_minidump_write == nullptr)
+        return;
+    const DWORD self  = ::GetCurrentThreadId();
+    DWORD       owner = 0;
+    if (!g_dump_owner.compare_exchange_strong(owner, self)) {
+        // Already dumped (or dumping) this thread's own crash, e.g. terminate -> abort: never wait on ourselves.
+        if (owner == self || self == ::GetThreadId(g_dump_thread))
+            return;
+        // Another thread crashed first and its dump is being written: do not let this crash end the process under it.
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+        return;
+    }
+    g_dump_pointers = pointers;
+    if (g_dump_thread != nullptr && ::SetEvent(g_dump_request)) {
+        ::WaitForSingleObject(g_dump_finished, kDumpWaitMs);
+    } else {
+        // No helper thread: write from here, the way the first version did.
+        write_dump_now();
+        ::SetEvent(g_dump_finished);
+    }
 }
 
 LONG WINAPI local_minidump_filter(EXCEPTION_POINTERS *pointers)
@@ -8305,6 +8421,38 @@ void dump_without_exception()
     }
 }
 
+void local_abort_handler(int sig)
+{
+    dump_without_exception();
+    // Hand abort() on to crashpad's handler (it dumps and ends the process) when Sentry installed one.
+    void (*previous)(int) = g_previous_abort_handler;
+    if (previous != SIG_DFL && previous != SIG_IGN && previous != SIG_ERR && previous != nullptr && previous != local_abort_handler)
+        previous(sig);
+}
+
+// Startup: drop empty dumps and keep the newest kMaxFiles - 1, so this run's dump still fits. Each file is deleted by its
+// own full path; nothing but our EdgeSlicer_*.dmp / *.dmp.failed.txt files is touched.
+void prune_local_minidumps(const std::wstring &dir)
+{
+    std::vector<Slic3r::local_minidump::FileEntry> files;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = ::FindFirstFileW((dir + L"\\EdgeSlicer_*").c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            continue;
+        Slic3r::local_minidump::FileEntry e;
+        e.name  = fd.cFileName;
+        e.size  = (std::uint64_t(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+        e.mtime = (std::uint64_t(fd.ftLastWriteTime.dwHighDateTime) << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        files.push_back(std::move(e));
+    } while (::FindNextFileW(find, &fd));
+    ::FindClose(find);
+    for (const std::wstring &name : Slic3r::local_minidump::files_to_remove(std::move(files), kMaxFiles - 1))
+        ::DeleteFileW((dir + L"\\" + name).c_str());
+}
+
 void install_local_minidumps()
 {
     wchar_t exe[MAX_PATH] = {};
@@ -8320,13 +8468,27 @@ void install_local_minidumps()
     const bool  test_copy = lower.find(L"/dev/edgeslicertest/") != std::wstring::npos;
     if ((!opted_in && !test_copy) || (env != nullptr && std::strcmp(env, "0") == 0))
         return;
-    g_local_dump_dir  = folder + L"\\crash";
+    // Load dbghelp now, not in a crashing process (where the loader lock may be held).
+    HMODULE dbghelp = ::LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr)
+        return;
+    g_minidump_write = reinterpret_cast<MiniDumpWriteDumpFn>(::GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (g_minidump_write == nullptr)
+        return;
+    g_dump_request  = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    g_dump_finished = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_dump_request == nullptr || g_dump_finished == nullptr)
+        return;
+    // Small stack: it only waits, then calls MiniDumpWriteDump. If it cannot start, the crashing thread writes the dump itself.
+    g_dump_thread = ::CreateThread(nullptr, 256 * 1024, dump_thread_main, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    g_local_dump_dir = folder + L"\\crash";
+    prune_local_minidumps(g_local_dump_dir);
     g_previous_filter = ::SetUnhandledExceptionFilter(local_minidump_filter);
     std::set_terminate([]() {
         dump_without_exception();
         std::abort();
     });
-    std::signal(SIGABRT, [](int) { dump_without_exception(); });
+    g_previous_abort_handler = std::signal(SIGABRT, local_abort_handler);
     _set_purecall_handler([]() {
         dump_without_exception();
         std::abort();

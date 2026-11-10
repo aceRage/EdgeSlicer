@@ -165,7 +165,7 @@ TEST_CASE("A failing packed-G-code script throws and does not keep a copy", "[Po
     plate.config     = &cfg;
     std::vector<PackedGcodePlate> plates(1, plate);
     std::vector<std::string>      tmp;
-    REQUIRE_THROWS_AS(post_process_packed_gcodes(plates, (dir.path / "out.gcode.3mf").string(), tmp), Slic3r::RuntimeError);
+    REQUIRE_THROWS_AS(post_process_packed_gcodes(plates, (dir.path / "out.gcode.3mf").string(), tmp), Slic3r::ExportError);
     CHECK(path == raw);
     CHECK(tmp.empty());
     CHECK(read_file(raw) == "; RAW\n");
@@ -383,7 +383,7 @@ TEST_CASE("A failing script aborts before a .gcode.3mf is written", "[PostProces
     std::vector<PackedGcodePlate> plates(1, item);
     std::vector<std::string>      tmp;
     // Plater::export_3mf catches this, shows the error and returns -1 before opening the zip.
-    CHECK_THROWS_AS(post_process_packed_gcodes(plates, out_3mf, tmp), Slic3r::RuntimeError);
+    CHECK_THROWS_AS(post_process_packed_gcodes(plates, out_3mf, tmp), Slic3r::ExportError);
     CHECK_FALSE(boost::filesystem::exists(out_3mf));
     CHECK(tmp.empty());
     CHECK(path == raw);

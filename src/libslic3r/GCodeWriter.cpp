@@ -1069,7 +1069,10 @@ std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, c
     const double speed  = this->z_travel_speed_uncapped();
     const double head_z = this->physical_z();
 
-    if (!this->config.enable_arc_fitting) { // Orca: if arc fitting is disabled, approximate the arc with small linear segments
+    // Orca: if arc fitting is disabled, approximate the arc with small linear segments. Bambu Studio 2.9.1 writes the
+    // spiral lift as one G3 on its printers whatever enable_arc_fitting says (the H3C/A2L/P2S presets turn it off), and
+    // the segmented spiral cost about 24 short Z-climbing moves per lift (owner decision 2026-11-05, #854).
+    if (!this->config.enable_arc_fitting && !m_is_bbl_printers) {
         const double z_start = m_pos(2); // starting Z height
 
         const double px = m_pos(0) - m_x_offset;        // take plate offset into consideration

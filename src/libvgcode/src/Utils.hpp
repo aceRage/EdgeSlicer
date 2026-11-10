@@ -35,6 +35,12 @@ extern Vec3 operator * (float f, const Vec3& v);
 // one feature makes the ranges, and so the gradient, cover that feature alone.
 extern bool counts_for_color_ranges(const PathVertex& v, const Settings& settings);
 
+// Whether an extrusion vertex counts towards the Layer height and Line width ranges: as
+// counts_for_color_ranges(), minus custom G-code extrusions. The start G-code's purge and load lines carry
+// no height tag, so the processor derives their height from Z (5.8 mm for the H3C load line), which
+// would stretch the legend far past every real layer height (BambuStudio skips them the same way).
+extern bool counts_for_height_width_ranges(const PathVertex& v, const Settings& settings);
+
 } // namespace libvgcode
 
 #endif // VGCODE_UTILS_HPP

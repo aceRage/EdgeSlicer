@@ -237,7 +237,7 @@ std::string safe_spot(const std::string &m9711)
 
 } // namespace
 
-SCENARIO("H2D timelapse photographs right-nozzle layers like left-nozzle layers", "[H2DTimelapse]")
+SCENARIO("H2D timelapse photographs right-nozzle layers like left-nozzle layers", "[H2DTimelapse][slow]")
 {
     for (const bool tower : { false, true }) {
         GIVEN(std::string("traditional timelapse, farthest point off (Bambu Studio's picker alone), prime tower ") + (tower ? "on" : "off"))

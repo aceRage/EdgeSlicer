@@ -36,7 +36,7 @@ constexpr int NS_MAX_DOTS       = 4;
 constexpr double NS_DIM_ALPHA   = 0.3;
 
 // Owner hand test 2026-11-04: about 20 % taller than the design's 24 DIP, text one step larger.
-constexpr int NS_CHIP_H         = 29;
+constexpr int NS_CHIP_H         = 32; // drawn about 30 DIP tall (the outline is inset): the filament combos' height
 constexpr int NS_CHIP_RADIUS    = 7;
 constexpr int NS_CHIP_PAD       = 10;
 constexpr int NS_CHIP_GAP       = 6;
@@ -71,8 +71,8 @@ wxFont label_font() { return strip_bold_font(Label::Body_9); }
 wxFont tile_label_font() { return strip_bold_font(Label::Body_12); }
 wxFont size_font() { return Label::Body_14; }
 wxFont flow_font() { return Label::Body_12; }
-wxFont chip_font() { return strip_bold_font(Label::Body_13); }
-wxFont chip_pill_font() { return Label::Body_11; }
+wxFont chip_font() { return Label::Body_14; } // the preset combos' text size, regular weight: bold distorts our font (owner, 2026-11-06)
+wxFont chip_pill_font() { return Label::Body_12; }
 } // namespace NozzleStyle
 
 // ---- NozzleTileRow --------------------------------------------------------------------------------------------------

@@ -590,6 +590,7 @@ enum NozzleVolumeType {
     nvtHighFlow,
     nvtHybrid,
     nvtTPUHighFlow,
+    nvtTPU285 = 4,     // BBS 2.9.1: 2.85 mm TPU path (H3C rack slot); value matches Bambu's
     nvtE3DHighFlow = 5,
     nvtMaxNozzleVolumeType = nvtE3DHighFlow
 };
@@ -1712,12 +1713,20 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
     ((ConfigOptionFloat,               support_ironing_spacing))
+    // Bambu Studio 2.9.1.
+    ((ConfigOptionFloat,               support_ironing_inset))
+    ((ConfigOptionFloat,               support_ironing_speed))
+    ((ConfigOptionFloat,               support_ironing_direction))
     // Ultra (over-support surfaces): over_support_surfaces / _flow / _speed used to live here.
     // Stage 5 of the support-sets plan moved them to PrintRegionConfig so a PART can carry them:
     // they describe the OBJECT's own bottom shell, not the support, and a part's own region is
     // where the fork already puts such a value. See the block in PrintRegionConfig below.
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
+    // Bambu Studio 2.9.1: auto circle contour-hole compensation (coefficients are per filament, PrintConfig).
+    ((ConfigOptionBool,                enable_circle_compensation))
+    ((ConfigOptionFloat,               circle_compensation_manual_offset))
+    ((ConfigOptionBool,                apply_scarf_seam_on_circles))
     ((ConfigOptionBool,                flush_into_objects))
     // BBS
     ((ConfigOptionBool,                flush_into_infill))
@@ -1785,6 +1794,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              travel_acceleration))
     // Snapmaker #937 / #980: first-layer travel override; 0 keeps the initial layer acceleration.
     ((ConfigOptionFloatOrPercent,      first_layer_travel_acceleration))
+    ((ConfigOptionFloats,              initial_layer_travel_acceleration)) // BBS 2.9.1, per process variant; 0 = unset
     ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
     ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
@@ -2144,6 +2154,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_z_offset))
     ((ConfigOptionStrings,             default_filament_colour))
     ((ConfigOptionInts,                temperature_vitrification))  //BBS
+    ((ConfigOptionInts,                fins_extrude_safe_temp))  //BBS 2.9.1: per-filament, read by custom G-code (H3C)
     ((ConfigOptionBools,               filament_is_high_temperature))
     ((ConfigOptionFloats,              filament_max_volumetric_speed))
     // BBS: flush settings and the pre-tower cooling of the BBL change_filament templates; nullable,
@@ -2359,6 +2370,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                nozzle_filament_process_slot))
     // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
     ((ConfigOptionStrings,             nozzle_filament_tool))
+    // H3C fix: per filament, the layer height of the process chosen for its nozzle, 0 = none (internal, NozzleProcess.hpp).
+    ((ConfigOptionFloatsOrPercents,    nozzle_layer_height))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))
@@ -2489,6 +2502,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
     ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))
@@ -2547,6 +2561,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_cone_angle))
     ((ConfigOptionPercent,            wipe_tower_extra_spacing))
     ((ConfigOptionFloat,              wipe_tower_max_purge_speed))
+    // Bambu Studio 2.9.1 prime tower options honoured by the Type 1 tower (0 = off).
+    ((ConfigOptionFloat,              prime_tower_acceleration))
+    ((ConfigOptionFloat,              prime_tower_line_width))
+    ((ConfigOptionFloat,              prime_tower_wipe_speed))
+    ((ConfigOptionFloat,              prime_tower_wipe_distance))
     ((ConfigOptionEnum<WipeTowerWallType>,    wipe_tower_wall_type))
     ((ConfigOptionFloat,              wipe_tower_extra_rib_length))
     ((ConfigOptionFloat,              wipe_tower_rib_width))
@@ -2564,6 +2583,19 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               filament_tower_interface_print_temp))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))
     ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_length))
+    // Bambu Studio 2.9.1: auto circle compensation coefficients, one value per filament.
+    ((ConfigOptionFloats,             circle_compensation_speed))
+    ((ConfigOptionFloats,             diameter_limit))
+    ((ConfigOptionFloats,             counter_coef_1))
+    ((ConfigOptionFloats,             counter_coef_2))
+    ((ConfigOptionFloats,             counter_coef_3))
+    ((ConfigOptionFloats,             hole_coef_1))
+    ((ConfigOptionFloats,             hole_coef_2))
+    ((ConfigOptionFloats,             hole_coef_3))
+    ((ConfigOptionFloats,             counter_limit_min))
+    ((ConfigOptionFloats,             counter_limit_max))
+    ((ConfigOptionFloats,             hole_limit_min))
+    ((ConfigOptionFloats,             hole_limit_max))
     ((ConfigOptionInt,                wipe_tower_filament))
     ((ConfigOptionFloats,             wiping_volumes_extruders))
     ((ConfigOptionInts,       idle_temperature))

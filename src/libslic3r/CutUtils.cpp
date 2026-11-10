@@ -456,29 +456,31 @@ static void apply_tolerance(ModelVolume* vol)
     if (!cut_info.is_processed)
         return;
 
+    // The connector mesh is a unit shape, so the scaling factor is its size.
     Vec3d sf = vol->get_scaling_factor();
 
     // make a "hole" wider
     sf[X] += double(cut_info.radius_tolerance);
     sf[Y] += double(cut_info.radius_tolerance);
 
-    // make a "hole" dipper
+    // make a "hole" deeper
     sf[Z] += double(cut_info.height_tolerance);
 
-    vol->set_scaling_factor(sf);
-
-    // OrcaSlicer #16020 (fixes Orca #14299): only a Plug or a Snap, which sits on ONE side of the
-    // cut, is shifted along its normal to put the extra depth into its hole. A Dowel straddles the
-    // plane at z = 0, so it is NOT shifted: the extra depth then splits evenly between the two
-    // holes, instead of all of it landing in one and none in the other.
+    // OrcaSlicer #16020 (fixes Orca #14299) + #16893: a Dowel straddles the plane at z = 0 and stays
+    // there, so the extra depth splits evenly between its two holes. A Plug or a Snap sits on ONE
+    // side of the cut: its hole grows by the tolerance away from the cut face and by the overlap
+    // through it (so the face is open, not skinned), and its center moves by half the difference.
     if (cut_info.connector_type == CutConnectorType::Plug || cut_info.connector_type == CutConnectorType::Snap) {
+        sf[Z] += CONNECTOR_HOLE_OVERLAP;
         Vec3d rot_norm = rotation_transform(vol->get_rotation()) * Vec3d::UnitZ();
         if (rot_norm.norm() != 0.0)
             rot_norm.normalize();
 
-        const double z_offset = 0.5 * static_cast<double>(cut_info.height_tolerance) - 0.05; // small Z offset for a better preview
+        const double z_offset = 0.5 * (static_cast<double>(cut_info.height_tolerance) - CONNECTOR_HOLE_OVERLAP);
         vol->set_offset(vol->get_offset() + rot_norm * z_offset);
     }
+
+    vol->set_scaling_factor(sf);
 }
 
 // ImageMap phase 5c: what process_volume_cut() and its curved / drawn siblings do to a volume's
@@ -526,7 +528,8 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
 // the no-kerf output is not "equivalent to" today's - it IS today's.
 static void process_volume_cut( ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
                                 ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh,
-                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
+                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred,
+                                float cut_z = 0.f)
 {
     const auto volume_matrix = volume->get_matrix();
 
@@ -546,7 +549,7 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
         cut_mesh(mesh.its, float(face_hi), &upper_its, nullptr);
     }
     else
-        cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);
+        cut_mesh(mesh.its, cut_z, &upper_its, &lower_its);
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))
@@ -797,13 +800,14 @@ static void process_connector_cut(  ModelVolume* volume, const Transform3d& inst
             return;
         }
 
-        // Perform cut
-        TriangleMesh upper_mesh, lower_mesh;
-        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, upper_mesh, lower_mesh);
-
-        // add small Z offset to better preview
-        upper_mesh.translate((-0.05 * Vec3d::UnitZ()).cast<float>());
-        lower_mesh.translate((0.05 * Vec3d::UnitZ()).cast<float>());
+        // Orca #16893: cut each hole just past the plane, so it breaks through its cut face (and
+        // leaves the face open) without getting shorter, as translating each half would.
+        const float  overlap = static_cast<float>(CONNECTOR_HOLE_OVERLAP);
+        TriangleMesh upper_mesh, lower_mesh, discarded;
+        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, upper_mesh, discarded, 0.0,
+                           CutThicknessOffset::Centred, -overlap);
+        process_volume_cut(volume, Transform3d::Identity(), cut_matrix, attributes, discarded, lower_mesh, 0.0,
+                           CutThicknessOffset::Centred, overlap);
 
         // Add cut parts to the related objects
         add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A", volume->type());

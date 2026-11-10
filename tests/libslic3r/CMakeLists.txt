@@ -3,12 +3,14 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
+	test_model_rotate_center.cpp
 	test_plate_print_history.cpp
 	test_bambu_3mf_export.cpp
 	test_multicolour_filament.cpp
 	test_multicolour_glsl.cpp
 	test_glow_filament.cpp
 	test_connect_filament_maps.cpp
+	test_bambu_multi_diameter.cpp
 	test_bambu_flow_support.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
@@ -66,6 +68,7 @@ add_executable(${_TEST_NAME}_tests
 	test_clipper_utils.cpp
 	test_config.cpp
 	test_config_range.cpp
+	test_support_interface_settings.cpp
 	test_contour_z.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp
@@ -81,6 +84,8 @@ add_executable(${_TEST_NAME}_tests
 	test_default_bed_type.cpp
 	test_u1c_pack.cpp
 	test_dual_nozzle_group.cpp
+	test_filament_inventory.cpp
+	test_nozzle_locale.cpp
 	test_ec_retraction.cpp
 	test_bed_exclude_area.cpp
 	test_cut_retraction_range.cpp
@@ -125,6 +130,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_output.cpp
 	test_mixed_nozzle.cpp
@@ -135,7 +141,9 @@ add_executable(${_TEST_NAME}_tests
 	test_nozzle_override.cpp
 	test_nozzle_tool_process.cpp
 	test_nozzle_rack_slots.cpp
+	test_h2c_rack_group_id.cpp
 	test_nozzle_strip_model.cpp
+	test_nozzle_rack_memory.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_trianglemesh_slicer.cpp
@@ -154,6 +162,7 @@ add_executable(${_TEST_NAME}_tests
 	test_preset_load_full_set.cpp
 	test_preset_variant_load.cpp
 	test_preset_renamed_parent.cpp
+	test_preset_extra_extruders.cpp
 	test_preset_detached_children.cpp
 	test_u1_tag_filament_match.cpp
 	test_preset_user_load_prefetch.cpp
@@ -165,7 +174,10 @@ add_executable(${_TEST_NAME}_tests
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
 	test_process_preset_export.cpp
+	test_preset_manager_model.cpp
+	test_preset_rename.cpp
 	test_project_preset_switch.cpp
+	test_project_preset_state.cpp
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
@@ -195,9 +207,12 @@ add_executable(${_TEST_NAME}_tests
 	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
+    test_parameter_utils.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
+    test_bbl_h3c.cpp
+    test_bs29_keys_import.cpp
     test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
