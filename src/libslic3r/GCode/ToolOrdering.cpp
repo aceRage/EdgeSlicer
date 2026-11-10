@@ -1497,6 +1497,45 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         }
     }
 
+    // Mixed color sublayer: a Ratio pass prints its filament inside a layer whose nominal extruder may be another one
+    // (a component that never ends a layer, or keeps printing passes after its last nominal layer). Count those
+    // filaments as used, up to the layer of their last pass, so the writer, the start G-code placeholders, the
+    // adaptive PA tables and the "last use" heater shut-off (ooze prevention) all know them. Nothing changes without
+    // a Ratio pass.
+    {
+        std::vector<const PrintObject *> objects;
+        if (m_print != nullptr)
+            for (const PrintObject *object : static_cast<const Print *>(m_print)->objects())
+                objects.push_back(object);
+        else if (m_print_object_ptr != nullptr)
+            objects.push_back(m_print_object_ptr);
+        bool added = false;
+        for (const PrintObject *object : objects) {
+            const std::vector<SubLayerPlan> &plans = object->local_z_sublayer_plan();
+            for (const SubLayerPlan &plan : plans) {
+                if (!plan.ratio_pass || plan.layer_id >= object->layer_count())
+                    continue;
+                const coordf_t layer_z = object->get_layer(int(plan.layer_id))->print_z;
+                for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e) {
+                    if (plan.painted_masks_by_extruder[e].empty())
+                        continue;
+                    const unsigned int ext = unsigned(e);
+                    if (std::find(m_all_printing_extruders.begin(), m_all_printing_extruders.end(), ext) == m_all_printing_extruders.end()) {
+                        m_all_printing_extruders.push_back(ext);
+                        added = true;
+                    }
+                    auto it = m_last_layer_per_extruder.find(ext);
+                    if (it == m_last_layer_per_extruder.end())
+                        m_last_layer_per_extruder.emplace(ext, layer_z);
+                    else
+                        it->second = std::max(it->second, layer_z);
+                }
+            }
+        }
+        if (added)
+            sort_remove_duplicates(m_all_printing_extruders);
+    }
+
     if (prime_multi_material && ! m_all_printing_extruders.empty()) {
         // Reorder m_all_printing_extruders in the sequence they will be primed, the last one will be m_first_printing_extruder.
         // Then set m_first_printing_extruder to the 1st extruder primed.

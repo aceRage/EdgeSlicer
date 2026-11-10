@@ -3713,18 +3713,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
-        // Mixed color sublayer: a Ratio pass can print a component that never is a layer's nominal extruder (on an
-        // AdaptiveLayerMerge band the pass order is fixed, or a filament used by nothing else), so ToolOrdering does
-        // not list it; register every Ratio pass filament too. Without Ratio passes the list is unchanged.
-        std::vector<unsigned int> writer_extruders = tool_ordering.all_extruders();
-        for (const PrintObject *object : print.objects())
-            for (const SubLayerPlan &plan : object->local_z_sublayer_plan())
-                if (plan.ratio_pass)
-                    for (size_t e = 0; e < plan.painted_masks_by_extruder.size(); ++e)
-                        if (!plan.painted_masks_by_extruder[e].empty() &&
-                            std::find(writer_extruders.begin(), writer_extruders.end(), unsigned(e)) == writer_extruders.end())
-                            writer_extruders.push_back(unsigned(e));
-        this->set_extruders(writer_extruders);
+        // (Mixed color sublayer: ToolOrdering lists every Ratio pass filament too, see collect_extruder_statistics.)
+        this->set_extruders(tool_ordering.all_extruders());
         print_object_instances_ordering =
             // By default, order object instances using a nearest neighbor search.
             print.config().print_order == PrintOrder::Default ? chain_print_object_instances(print)
@@ -8599,7 +8589,9 @@ LayerResult GCode::process_layer(const Print& print,
                                     const ExtrusionEntityCollection* clipped_ptr = clipped_local.get();
                                     const LocalZPathHeightStats local_height_stats = collect_local_z_path_height_stats(*clipped_ptr);
                                     ++local_z_ctx->local_clipped_collections;
-                                    if (pass_flow_height > 0. && local_height_stats.count > 0 &&
+                                    // A Ratio pass scales every path's own height (bridges keep theirs), so only Subdivide
+                                    // passes are expected to carry exactly the pass height.
+                                    if (pass_flow_height > 0. && !pass_bucket.plan->ratio_pass && local_height_stats.count > 0 &&
                                         (std::abs(local_height_stats.min - pass_bucket.plan->flow_height) > 1e-3 ||
                                          std::abs(local_height_stats.max - pass_bucket.plan->flow_height) > 1e-3)) {
                                         BOOST_LOG_TRIVIAL(warning) << "Local-Z local pass height mismatch"
