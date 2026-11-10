@@ -483,6 +483,10 @@ public:
     // nothing to lean on until this layer is bridged, so the G-code writer holds it back until the
     // infill is down. See defer_unsupported_loops() in PerimeterGenerator.cpp.
     bool print_after_infill = false;
+    // Bambu Studio 2.9.1 (CustomizeFlag::cfCircleCompensation): a wall of a circle offset by the auto
+    // circle compensation below its diameter limit. GCode::extrude_loop prints it at the filament's
+    // circle_compensation_speed and, with apply_scarf_seam_on_circles, with a scarf seam.
+    bool circle_compensation = false;
 
     ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : m_loop_role(role) {}
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : paths(paths), m_loop_role(role)

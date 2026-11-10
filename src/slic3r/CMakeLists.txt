@@ -304,6 +304,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Preview.cpp
     GUI/GUI_Preview.hpp
     GUI/MainTabs.hpp
+    GUI/ProjectSessions.hpp
+    GUI/ProjectStrip.cpp
+    GUI/ProjectStrip.hpp
     GUI/Showcase/ShowcaseBlenderExport.cpp
     GUI/Showcase/ShowcaseCallouts.cpp
     GUI/Showcase/ShowcaseCallouts.hpp
@@ -493,6 +496,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MixedFilamentColorMapPanel.cpp
     GUI/MixedFilamentBadge.cpp
     GUI/MixedFilamentBadge.hpp
+    GUI/MixedSublayerUi.cpp
+    GUI/MixedSublayerUi.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp
@@ -577,6 +582,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
     GUI/LanReconnectLadder.hpp
+    GUI/LanAccessCodeWatch.hpp
+    GUI/PopupRowIcons.hpp
     GUI/BambuCloudWatch.hpp
     GUI/FirstRequestGate.hpp
     GUI/SsdpConnectType.hpp
@@ -1171,6 +1178,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/LayerlingBrowserGtk.cpp
     GUI/LayerlingServer.cpp
     GUI/LayerlingServer.hpp
+    GUI/PresetManagerDialog.cpp
+    GUI/PresetManagerDialog.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)

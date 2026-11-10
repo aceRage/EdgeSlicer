@@ -354,6 +354,8 @@ class GLCanvas3D
         Drag drag;
         bool ignore_left_up;
         bool ignore_right_up;
+        // ORCA a button was pressed on toolbar empty areas, swallow events until it is released
+        bool down_on_toolbar{ false };
 
         Mouse();
 
@@ -1092,6 +1094,9 @@ public:
     void select_plate();
     //BBS: GUI refactor: GLToolbar&&gizmo
     int get_main_toolbar_offset() const;
+    // ORCA the top toolbar row: main toolbar, separator, gizmo bar and assemble view toolbar (not the collapse toolbar)
+    float get_top_toolbar_width() const;
+    float get_top_toolbar_height() const;
     int get_main_toolbar_height() const { return m_main_toolbar.get_height(); }
     int get_main_toolbar_width() const { return m_main_toolbar.get_width(); }
     float get_assemble_view_toolbar_width() const { return m_assemble_view_toolbar.get_width(); }
@@ -1559,6 +1564,7 @@ private:
     void _render_return_toolbar() const;
     void _render_separator_toolbar_right() const;
     void _render_separator_toolbar_left() const;
+    bool _is_mouse_over_top_toolbar(const Vec2d& mouse_pos) const;
     void _render_collapse_toolbar() const;
     // BBS
     //void _render_view_toolbar() const;

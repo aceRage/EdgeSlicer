@@ -41,7 +41,8 @@ public:
     // differs from the configured one. WipeTower reports it with half a spacing of line width
     // added, WipeTower2 reports the loops alone; an estimate has to round like the generator
     // whose G-code it stands in for.
-    static float estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2);
+    // line_width > 0: Bambu Studio's prime_tower_line_width instead of the nozzle-derived width (Type1).
+    static float estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2, float line_width = 0.f);
     // Orca #15841: the tallest layer filament idx's nozzle can lay down, the cap of the sparse layer
     // combination. max_layer_height is per nozzle, so it is read through the filament->nozzle map
     // rather than by filament id; zero means three quarters of the nozzle diameter, as in Slicing.cpp.
@@ -61,13 +62,13 @@ public:
     // Depth of the Type1 purge stack at the given width (also the rectangle-wall depth): each
     // purge is whole lines at the block infill gap, one block per adhesiveness category sized by
     // its worst layer, stacked behind one perimeter width.
-    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing);
+    static float estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float line_width = 0.f);
     // Side of the square bounding a rib-wall tower's first layer, brim excluded: the body plus the
     // rib bulge, with the ribs extended to the height-based minimum as both generators do.
     static float rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height);
     // Type1 rib tower: plan_tower_new() squares the tower from the depth at the configured width,
     // then re-plans the depth at the squared width.
-    static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height);
+    static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height, float line_width = 0.f);
     static TriangleMesh its_make_rib_brim(const Polygon &brim, float layer_height);
     // Fillets the corners of a rib wall (Bambu Studio WipeTower.cpp:128 rounding_polygon()).
     static Polygon rounding_polygon(Polygon &polygon, double rounding = 2., double angle_tol = 30. / 180. * PI);
@@ -331,6 +332,9 @@ public:
     // tower is unchanged.
     float tool_line_width(size_t tool) const
     {
+        // Bambu Studio 2.9.1 prime_tower_line_width (WipeTower.cpp:2054-2063): one width for every tool.
+        if (m_tower_line_width > 0.f)
+            return m_tower_line_width;
         if (tool < m_filpar.size() && m_filpar[tool].nozzle_diameter > 0.f)
             return m_filpar[tool].nozzle_diameter * Width_To_Nozzle_Ratio;
         return m_perimeter_width;
@@ -425,6 +429,17 @@ private:
 	size_t m_max_color_changes 	= 0; 	// Maximum number of color changes per layer.
     int    m_old_temperature    = -1;   // To keep track of what was the last temp that we set (so we don't issue the command when not neccessary)
     float  m_travel_speed       = 0.f;
+    // Bambu Studio 2.9.1 prime_tower_acceleration and the travel acceleration the tower returns to
+    // between extrusions; 0 = no M204 from the tower (the default). Not used on the first layer.
+    unsigned int m_tower_acceleration        = 0;
+    // Bambu Studio 2.9.1 prime_tower_line_width; 0 = the nozzle diameter x Width_To_Nozzle_Ratio.
+    float        m_tower_line_width          = 0.f;
+    unsigned int m_tower_travel_acceleration = 0;
+    unsigned int writer_tower_acceleration() const { return is_first_layer() ? 0 : m_tower_acceleration; }
+public:
+    // Travel acceleration between the tower's extrusions when prime_tower_acceleration is set.
+    void set_travel_acceleration(double acceleration) { m_tower_travel_acceleration = acceleration > 0. ? (unsigned int) std::floor(acceleration + 0.5) : 0; }
+private:
     float  m_first_layer_speed  = 0.f;
     size_t m_first_layer_idx    = size_t(-1);
     size_t m_cur_layer_id;

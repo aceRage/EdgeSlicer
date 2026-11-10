@@ -197,8 +197,13 @@ TEST_CASE("Adaptive region merge: mixed 0.4/0.8 cube bands the coarse region onl
     heights.reserve(object->layer_count());
     for (const Layer *layer : object->layers())
         heights.emplace_back(layer->height);
-    const std::vector<AdaptiveLayerBand> expected_bands =
-        build_adaptive_layer_bands(heights, expected_band, window08);
+    // Step 3: the ladder starts on layer 1; layer 0 (the bed contact) prints as sliced.
+    std::vector<AdaptiveLayerBand> expected_bands =
+        build_adaptive_layer_bands(std::vector<double>(heights.begin() + 1, heights.end()), expected_band, window08);
+    for (AdaptiveLayerBand &band : expected_bands) {
+        ++ band.bottom_idx;
+        ++ band.top_idx;
+    }
 
     size_t fine_region   = size_t(-1);
     size_t coarse_region = size_t(-1);
@@ -222,7 +227,10 @@ TEST_CASE("Adaptive region merge: mixed 0.4/0.8 cube bands the coarse region onl
         const LayerRegion *fine   = layer->get_region(int(fine_region));
         const LayerRegion *coarse = layer->get_region(int(coarse_region));
         fine_patches += fine->adaptive_merge_patches.size();
+        if (layer_id == 0)
+            CHECK(coarse->adaptive_merge_patches.empty());
         for (const AdaptiveMergePatch &patch : coarse->adaptive_merge_patches) {
+            CHECK(patch.bottom_idx >= 1);
             if (! patch.group_top)
                 continue;
             ++ coarse_group_tops;

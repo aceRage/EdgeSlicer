@@ -32,7 +32,7 @@ std::regex perimeters_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; perimeter");
 std::regex infill_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; infill");
 std::regex skirt_regex("G1 X[-0-9.]* Y[-0-9.]* E[-0-9.]* ; skirt");
 
-SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
+SCENARIO( "PrintGCode basic functionality", "[PrintGCode][slow]") {
     GIVEN("A default configuration and a print test object") {
         WHEN("the output is executed with no support material") {
             Slic3r::Print print;

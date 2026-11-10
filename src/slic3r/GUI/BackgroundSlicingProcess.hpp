@@ -54,8 +54,12 @@ public:
 	bool		error() 	const { return m_status == Error; }
 	// Unhandled error produced by stdlib or a Win32 structured exception, or unhandled Slic3r's own critical exception.
 	bool 		critical_error() const;
-	// Critical errors does invalidate plater except CopyFileError.
+	// A critical error that leaves the sliced data unusable. A failed export (export_failed()) is critical too,
+	// but leaves the sliced data usable.
 	bool        invalidate_plater() const;
+	// Exporting or uploading the G-code failed (a copy, a post-processing script or plugin: an ExportError);
+	// the slice itself is intact.
+	bool        export_failed() const;
 	// Only valid if error()
 	void 		rethrow_exception() const { assert(this->error()); assert(m_exception); std::rethrow_exception(m_exception); }
 	// Produce a human readable message to be displayed by a notification or a message box.
@@ -110,6 +114,10 @@ public:
 
 	// BBS
 	void set_export_finished_event(int event_id) { m_event_export_finished_id = event_id; }
+	// Project strip P4 (one Plater per open project): the Plater this process belongs to gets its events, also while
+	// another project is shown. Null: the window's Plater (as before).
+	void set_owner(GUI::Plater *owner) { m_owner = owner; }
+	GUI::Plater *owner() const;
 
 	// Activate either m_fff_print or m_sla_print.
 	// Return true if changed.
@@ -304,6 +312,7 @@ private:
 	int                         m_event_export_began_id         = 0;
 	// wxWidgets command ID to be sent to the plater to inform that the G-code is exported end.
 	int							m_event_export_finished_id		= 0;
+	GUI::Plater                *m_owner                         = nullptr;
 
 };
 

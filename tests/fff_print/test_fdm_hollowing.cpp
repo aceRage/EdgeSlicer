@@ -126,7 +126,7 @@ PrintStateBase::Warning hollowing_warning(const PrintObject &po)
 
 } // namespace
 
-TEST_CASE("Hollowing leaves an even shell around an empty cavity", "[Hollowing]")
+TEST_CASE("Hollowing leaves an even shell around an empty cavity", "[Hollowing][slow]")
 {
     SECTION("off: a solid cube")
     {
@@ -262,7 +262,7 @@ TEST_CASE("Hollowing warns about a part it cannot hollow", "[Hollowing]")
 }
 
 // hollow_interior / hollow_shell_thickness per part.
-TEST_CASE("Hollowing per part", "[Hollowing]")
+TEST_CASE("Hollowing per part", "[Hollowing][slow]")
 {
     SECTION("the object's setting applies to every part when none overrides it")
     {
