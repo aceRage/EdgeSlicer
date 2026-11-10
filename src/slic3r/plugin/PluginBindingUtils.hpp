@@ -3,7 +3,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include "libslic3r/Config.hpp"   // ConfigBase
-#include "libslic3r/Point.hpp"    // Point/Point3 packing asserts, Vec3d, Transform3d
+#include "libslic3r/Point.hpp"    // Point/Vec3crd packing asserts, Vec3d, Transform3d
 #include <pybind11/pytypes.h>
 #include <pybind11/cast.h>
 #include <string>
@@ -12,9 +12,9 @@
 
 namespace Slic3r {
 
-// Point/Point3 must be tightly packed for zero-copy views. coord_t = int64_t.
+// Point/Vec3crd (Edge has no Point3) must be tightly packed for zero-copy views. coord_t = int64_t.
 static_assert(sizeof(Point)  == 2 * sizeof(coord_t), "Point must be 2 packed coord_t");
-static_assert(sizeof(Point3) == 3 * sizeof(coord_t), "Point3 must be 3 packed coord_t");
+static_assert(sizeof(Vec3crd) == 3 * sizeof(coord_t), "Vec3crd must be 3 packed coord_t");
 
 // Run a builder that constructs numpy objects, translating the "numpy missing"
 // ImportError into an actionable message (plugins must declare numpy as a dep).

@@ -2337,8 +2337,16 @@ void ScriptAsyncRuntime::Impl::run_invocation(const std::shared_ptr<Run>& run)
                     completion.cancelled = true;
                 } else {
                     try {
-                        pybind11::module_ asyncio = pybind11::module_::import("asyncio");
-                        pybind11::object  loop    = asyncio.attr("new_event_loop")();
+                        pybind11::module_ asyncio;
+                        pybind11::object  loop;
+                        {
+                            // Loop setup is host-owned work: the selector loop's self-pipe is a
+                            // socketpair, which the plugin's audit scope refuses (socket.__new__).
+                            // The coroutine itself still runs under the plugin's scope below.
+                            ScopedPluginAuditContext host_scope("");
+                            asyncio = pybind11::module_::import("asyncio");
+                            loop    = asyncio.attr("new_event_loop")();
+                        }
                         asyncio.attr("set_event_loop")(loop);
 
                         tl_script_loop = loop.ptr();
