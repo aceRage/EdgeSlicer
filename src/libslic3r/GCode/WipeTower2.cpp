@@ -842,7 +842,7 @@ public:
 
     WipeTowerWriter2& switch_filament_monitoring(bool enable)
     {
-        flush_planner_queue();
+        m_gcode += flush_planner_queue_command(m_gcode_flavor);
         m_gcode += enable ? "M591 R\n" : "M591 S0\n";
         return *this;
     }
@@ -1102,7 +1102,10 @@ public:
     // Set extruder temperature, don't wait by default.
     WipeTowerWriter2& set_extruder_temp(int temperature, bool wait = false)
     {
-        flush_planner_queue();
+        // Sync the temperature change with motion. Edge has no comment/sync args on this helper
+        // (Orca #17246 added those for unsynced interface cooldowns); interface_after_wipe already
+        // writes GCodeWriter::set_temperature without a planner flush.
+        m_gcode += flush_planner_queue_command(m_gcode_flavor);
         m_gcode += "M" + std::to_string(wait ? 109 : 104) + " S" + std::to_string(temperature) + "\n";
         return *this;
     }
@@ -1159,7 +1162,9 @@ public:
 
     WipeTowerWriter2& flush_planner_queue()
     {
-        m_gcode += flush_planner_queue_command(m_gcode_flavor);
+        // Toolchange boundaries: on Klipper M400 here only stalls the toolhead over the tower.
+        if (m_gcode_flavor != gcfKlipper)
+            m_gcode += flush_planner_queue_command(m_gcode_flavor);
         return *this;
     }
 
@@ -2428,7 +2433,8 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     } else
         writer.set_position(pos);
 
-    writer.resume_preview().flush_planner_queue();
+    // Sync even on Klipper: [change_filament_gcode] and Tn must not run while the unload is still queued.
+    writer.resume_preview().append(flush_planner_queue_command(m_gcode_flavor));
 }
 
 // Orca #15144: tower-local X of the heat-up park beside the tower. Nearest x side first, then that
@@ -2510,7 +2516,7 @@ std::optional<float> WipeTower2::wait_for_temp_park_x(const WipeTowerWriter2& wr
 // temperatures (RepRapFirmware G10 + M116), where upstream always writes M109.
 void WipeTower2::wait_for_temp_on_tower(WipeTowerWriter2& writer, int temperature) const
 {
-    writer.flush_planner_queue();
+    writer.append(flush_planner_queue_command(m_gcode_flavor));
     writer.append(GCodeWriter::set_temperature(unsigned(temperature), m_gcode_flavor, true, -1, wait_for_temp_tag()));
 }
 
@@ -2561,7 +2567,7 @@ void WipeTower2::toolchange_Change(
     if (wait_for_temp_here && !wait_beside_tower)
         wait_for_temp_on_tower(writer, wait_for_temp);
 
-    writer.append("[deretraction_from_wipe_tower_generator]");
+    writer.append("[deretraction_from_wipe_tower_generator]\n");
 
     // The toolchange Tn command will be inserted later, only in case that the user does
     // not provide a custom toolchange gcode.
