@@ -2534,6 +2534,176 @@ TEST_CASE("Adaptive TPMS infill of a region matches the infill of a larger regio
     }
 }
 
+// OrcaSlicer #17334, extended by #17341. [slow]: about 2,000 fills of a 60 mm square.
+// EdgeSlicer: the multiline rows (#17341) pass without its join_cut_outlines(): our multiline_fill() shifts each line
+// sideways instead of drawing closed Clipper outlines around it (#11435 is not in this tree), so only rings that are
+// closed already (Gyroid and TPMS above) can be cut at their start, and #17334 joins those.
+TEST_CASE("Infill lines do not end where the rings of the pattern start", "[Fill][Regression][slow]")
+{
+    // Marching squares patterns and multiline outlines are closed rings, starting anywhere along their lines.
+    const auto [pattern, mode, optimized, first_multiline] = GENERATE(table<InfillPattern, AdaptiveInfillMode, bool, int>(
+        {{ipGyroid, AdaptiveInfillMode::DistanceWarp, false, 1},
+         {ipTpmsD, AdaptiveInfillMode::DistanceWarp, false, 1},
+         {ipTpmsFK, AdaptiveInfillMode::DistanceWarp, false, 1},
+         {ipTpmsFK, AdaptiveInfillMode::Disabled, false, 1},
+         {ipGyroid, AdaptiveInfillMode::Disabled, true, 1},
+         {ipGyroid, AdaptiveInfillMode::Disabled, false, 2},
+         {ipTpmsD, AdaptiveInfillMode::Disabled, false, 2},
+         {ipHoneycomb, AdaptiveInfillMode::Disabled, false, 2},
+         {ipQuarterCubic, AdaptiveInfillMode::Disabled, false, 2},
+         {ipLateralLattice, AdaptiveInfillMode::Disabled, false, 2},
+         {ipLateralHoneycomb, AdaptiveInfillMode::Disabled, false, 2},
+         {ipRectilinear, AdaptiveInfillMode::Disabled, false, 2},
+         {ipAlignedRectilinear, AdaptiveInfillMode::Disabled, false, 2},
+         {ipGrid, AdaptiveInfillMode::Disabled, false, 2},
+         {ipTriangles, AdaptiveInfillMode::Disabled, false, 2},
+         {ipStars, AdaptiveInfillMode::Disabled, false, 2},
+         {ipCubic, AdaptiveInfillMode::Disabled, false, 2},
+         {ipCrossHatch, AdaptiveInfillMode::Disabled, false, 2},
+         {ipHilbertCurve, AdaptiveInfillMode::Disabled, false, 2}}));
+    const int   multiline = GENERATE(1, 2, 3);
+    const float density   = GENERATE(0.1f, 0.3f);
+    const bool  with_hole = GENERATE(false, true);
+    // A single line of the other patterns is not a ring, and the center line of these two may stop short of the boundary.
+    if (multiline < first_multiline || (multiline == 3 && (pattern == ipCrossHatch || pattern == ipHilbertCurve)))
+        return;
+    // EdgeSlicer: our multiline_fill() shifts each Cross Hatch line sideways, so every copy stops short where its center
+    // line does (what the multiline 3 exclusion above is for upstream). Those ends are not cut rings; check the rings only.
+    const bool ends_on_wall = !(pattern == ipCrossHatch && multiline > 1);
+    CAPTURE(pattern, mode, optimized, multiline, density, with_hole);
+
+    // A 60 mm cube, filled with lines connected along the boundary of its 0.45 mm narrower section.
+    const double     spacing = 0.45;
+    const ExPolygons box{ExPolygon(Points{Point::new_scale(0., 0.), Point::new_scale(60., 0.), Point::new_scale(60., 60.), Point::new_scale(0., 60.)})};
+    ExPolygon        region = box.front();
+    if (with_hole) {
+        Polygon hole = make_circle_num_segments(scale_(10.), 60);
+        hole.translate(Point::new_scale(30., 30.));
+        hole.reverse();
+        region.holes.emplace_back(std::move(hole));
+    }
+    std::unique_ptr<AdaptiveInfillField> field;
+    if (mode != AdaptiveInfillMode::Disabled) {
+        std::vector<AdaptiveInfillField::Slice> slices;
+        for (int i = 0; i < 300; ++i)
+            slices.push_back({0.2 * i, 0.2 * (i + 1), &box});
+        field = std::make_unique<AdaptiveInfillField>(slices, get_extents(box), AdaptiveInfillMode::DistanceWarp, [] {});
+    }
+    const AABBTreeLines::LinesDistancer<Line> walls(to_lines(offset_ex(region, -float(scale_(0.5 * spacing)))));
+    auto on_wall = [&walls](const Point &point) { return walls.distance_from_lines<false>(point) < scale_(0.01); };
+    auto runs_between_walls = [&on_wall](const Polyline &path) {
+        for (size_t i = 1; i < path.size(); ++i)
+            if (path.points[i - 1].distance_to(path.points[i]) > scale_(0.1) && on_wall(path.points[i - 1]) && on_wall(path.points[i]))
+                return true;
+        return false;
+    };
+
+    for (const double z : {5.1, 12.3, 20.1, 25.3, 28.7, 34.7, 40.1, 47.9, 54.9}) {
+        CAPTURE(z);
+        std::unique_ptr<Fill> filler(Fill::new_from_type(pattern));
+        filler->spacing  = spacing;
+        filler->angle    = float(M_PI / 4.);
+        filler->z        = z;
+        filler->layer_id = size_t(std::lround(z / 0.2));
+        filler->adaptive_infill_field = field.get();
+
+        FillParams params;
+        params.pattern                          = pattern;
+        params.density                          = density;
+        params.multiline                        = multiline;
+        params.gyroid_optimized                 = optimized;
+        params.adaptive_infill_mode             = mode;
+        params.adaptive_infill_interior_density = 0.05f;
+        params.adaptive_infill_gradient         = AdaptiveInfillGradient::Linear;
+        params.layer_height                     = 0.2;
+        params.dont_adjust                      = true;
+        Surface surface(stInternal, region);
+        const Polylines paths = filler->fill_surface(&surface, params);
+        REQUIRE_FALSE(paths.empty());
+
+        for (const Polyline &path : paths)
+            if (path.first_point() == path.last_point()) {
+                // Not a line joined with its duplicate.
+                CHECK(path.size() > 3);
+                // The anchors of a line may meet on the boundary. Away from it this is an island of the pattern, unless
+                // it runs along the boundary, which means a ring cut at its start.
+                if (!on_wall(path.first_point()))
+                    CHECK_FALSE(runs_between_walls(path));
+            } else if (ends_on_wall) {
+                CHECK(on_wall(path.first_point()));
+                CHECK(on_wall(path.last_point()));
+            }
+    }
+}
+
+TEST_CASE("join_close_ends rejoins a ring cut at its first point and leaves islands alone", "[Fill][Regression]")
+{
+    // EdgeSlicer: the function comes from OrcaSlicer #16492 without its sparse infill call; check it on its own.
+    const Polygon square{Point::new_scale(0., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.), Point::new_scale(0., 10.)};
+    // A ring starting in the middle of its bottom side, clipped by a band that cuts off its right side.
+    Polyline ring;
+    ring.points = {Point::new_scale(5., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.), Point::new_scale(0., 10.),
+                   Point::new_scale(0., 0.), Point::new_scale(5., 0.)};
+    const Polygons band{Polygon{Point::new_scale(-1., -1.), Point::new_scale(8., -1.), Point::new_scale(8., 11.), Point::new_scale(-1., 11.)}};
+    Polylines pieces = intersection_pl(Polylines{ring}, band);
+    // Clipping leaves the piece before the first point apart from the one after it.
+    REQUIRE(pieces.size() == 2);
+    const double length_before = total_length(pieces);
+    join_close_ends(pieces, SCALED_EPSILON, true);
+    REQUIRE(pieces.size() == 1);
+    CHECK(pieces.front().first_point() != pieces.front().last_point());
+    CHECK(std::abs(pieces.front().length() - length_before) < SCALED_EPSILON);
+
+    // An island ring away from the boundary and an open line apart from it do not change.
+    Polyline island = Polyline(square.points);
+    island.points.push_back(island.points.front());
+    Polyline line;
+    line.points = {Point::new_scale(20., 0.), Point::new_scale(30., 0.)};
+    Polylines apart{island, line};
+    join_close_ends(apart, SCALED_EPSILON, true);
+    REQUIRE(apart.size() == 2);
+    CHECK(apart[0] == island);
+    CHECK(apart[1] == line);
+}
+
+TEST_CASE("Clipping the paths of a Locked Zag band keeps each cut ring in one piece", "[Fill][Regression]")
+{
+    // EdgeSlicer: FillLockedZag clips the finished paths of a band by its flow regions; with Gyroid, TPMS or Concentric
+    // in a band, those paths include closed rings.
+    const ExPolygons band{ExPolygon(Points{Point::new_scale(-1., -1.), Point::new_scale(8., -1.), Point::new_scale(8., 11.), Point::new_scale(-1., 11.)})};
+    Polyline ring;
+    ring.points = {Point::new_scale(5., 0.), Point::new_scale(10., 0.), Point::new_scale(10., 10.), Point::new_scale(0., 10.),
+                   Point::new_scale(0., 0.), Point::new_scale(5., 0.)};
+    Polyline line;
+    line.points = {Point::new_scale(0., 5.), Point::new_scale(12., 5.)};
+
+    SECTION("Without a ring it is intersection_pl()") {
+        Polyline zigzag;
+        zigzag.points = {Point::new_scale(0., 2.), Point::new_scale(12., 2.), Point::new_scale(12., 4.), Point::new_scale(0., 4.)};
+        const Polylines paths{line, zigzag};
+        CHECK(intersection_pl_rejoining_rings(paths, band) == intersection_pl(paths, band));
+    }
+    SECTION("A ring cut by the region boundary is one path between the two cuts") {
+        const Polylines pieces = intersection_pl_rejoining_rings(Polylines{line, ring}, band);
+        REQUIRE(pieces.size() == 2);
+        CHECK(pieces[0] == intersection_pl(Polylines{line}, band).front());
+        const Polyline &cut = pieces[1];
+        // From one cut at x = 8 to the other, through the start of the ring.
+        CHECK(cut.first_point() != cut.last_point());
+        CHECK(std::abs(cut.first_point().x() - scale_(8.)) <= SCALED_EPSILON);
+        CHECK(std::abs(cut.last_point().x() - scale_(8.)) <= SCALED_EPSILON);
+        CHECK(std::abs(cut.length() - scale_(8. + 10. + 5. + 3.)) < scale_(0.01));
+    }
+    SECTION("A ring inside the region stays a closed ring") {
+        Polyline island = ring;
+        island.translate(Point::new_scale(-0.5, 0.));
+        island.scale(0.5);
+        const Polylines pieces = intersection_pl_rejoining_rings(Polylines{island}, band);
+        REQUIRE(pieces.size() == 1);
+        CHECK(pieces.front().first_point() == pieces.front().last_point());
+    }
+}
+
 TEST_CASE("Adaptive TPMS anchors match the printed infill", "[Fill][TpmsAdaptive][InternalBridge]")
 {
     const std::string pattern = GENERATE("tpmsd", "tpmsfk", "gyroid");
