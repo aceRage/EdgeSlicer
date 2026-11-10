@@ -1603,6 +1603,17 @@ float GCodeProcessor::get_prepare_time(PrintEstimatedStatistics::ETimeMode mode)
     return (mode < PrintEstimatedStatistics::ETimeMode::Count) ? m_time_processor.machines[static_cast<size_t>(mode)].prepare_time : 0.0f;
 }
 
+// Orca #17328: time of the first layer, as upstream's TimeMachine::first_layer_time sums it (every block of layer 1,
+// which includes the start G-code before the first layer change). Our moves carry layer_id - 1, so that is the
+// first entry of the layer time table; valid once update_estimated_times_stats() has filled the tables.
+float GCodeProcessor::get_first_layer_time(PrintEstimatedStatistics::ETimeMode mode) const
+{
+    if (mode >= PrintEstimatedStatistics::ETimeMode::Count)
+        return 0.0f;
+    const std::vector<float> &layers_times = m_result.print_statistics.modes[static_cast<size_t>(mode)].layers_times;
+    return layers_times.empty() ? 0.0f : layers_times.front();
+}
+
 std::string GCodeProcessor::get_time_dhm(PrintEstimatedStatistics::ETimeMode mode) const
 {
     return (mode < PrintEstimatedStatistics::ETimeMode::Count) ? short_time(get_time_dhms(float(m_time_processor.machines[static_cast<size_t>(mode)].time))) : std::string("N/A");
@@ -4702,7 +4713,7 @@ void GCodeProcessor::run_post_process()
                         char buf[128];
                         sprintf(buf, "; estimated first layer printing time (%s mode) = %s\n",
                                 (mode == PrintEstimatedStatistics::ETimeMode::Normal) ? "normal" : "silent",
-                                get_time_dhms(machine.prepare_time).c_str());
+                                get_time_dhms(get_first_layer_time(mode)).c_str()); // Orca #17328: not prepare_time
                         export_lines.append_line(buf);
                         processed = true;
                     }
