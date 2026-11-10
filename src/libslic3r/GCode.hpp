@@ -138,6 +138,14 @@ public:
                             bool local_z_unplanned = false,
                             double local_z_nominal_layer_z = -1.);
     bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
+    // The filament the next planned tool change of this layer starts from, or -1 when none is left.
+    int planned_current_tool() const
+    {
+        if (m_layer_idx < 0 || size_t(m_layer_idx) >= m_tool_changes.size())
+            return -1;
+        const std::vector<WipeTower::ToolChangeResult> &layer = m_tool_changes[size_t(m_layer_idx)];
+        return size_t(m_tool_change_idx) < layer.size() ? int(layer[size_t(m_tool_change_idx)].initial_tool) : -1;
+    }
     std::string finalize(GCode &gcodegen);
     std::vector<float> used_filament_length() const;
 

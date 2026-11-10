@@ -422,6 +422,35 @@ static bool use_component_b_advanced_dither(int layer_index, int ratio_a, int ra
     return b_after > b_before;
 }
 
+// Mixed color sublayer: the row's "sm<n>" (sublayer method) and "so<0|1>" (BS order) tokens. Kept out of
+// parse_row_definition's long parameter list; that parser only skips them.
+static void parse_row_sublayer_tokens(const std::string &row, int &sublayer_method, bool &sublayer_bs_order)
+{
+    sublayer_method   = 0;
+    sublayer_bs_order = false;
+    std::stringstream ss(row);
+    std::string       tok;
+    while (std::getline(ss, tok, ',')) {
+        size_t lo = 0;
+        while (lo < tok.size() && std::isspace(static_cast<unsigned char>(tok[lo])))
+            ++lo;
+        tok = tok.substr(lo);
+        while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))
+            tok.pop_back();
+        if (tok.size() < 3 || (tok[0] != 's' && tok[0] != 'S'))
+            continue;
+        const char kind = char(std::tolower(static_cast<unsigned char>(tok[1])));
+        const std::string body = tok.substr(2);
+        if (body.empty() || body.find_first_not_of("0123456789") != std::string::npos)
+            continue;
+        const int v = std::atoi(body.c_str());
+        if (kind == 'm')
+            sublayer_method = clamp_int(v, 0, 3);
+        else if (kind == 'o')
+            sublayer_bs_order = v != 0;
+    }
+}
+
 static bool parse_row_definition(const std::string &row,
                                  unsigned int      &a,
                                  unsigned int      &b,
@@ -629,6 +658,11 @@ static bool parse_row_definition(const std::string &row,
             uint64_t parsed_stable_id = stable_id;
             if (parse_uint64_token(tok.substr(1), parsed_stable_id))
                 stable_id = parsed_stable_id;
+            continue;
+        }
+        if ((tok[0] == 's' || tok[0] == 'S') && tok.size() >= 3 &&
+            (tok[1] == 'm' || tok[1] == 'M' || tok[1] == 'o' || tok[1] == 'O')) {
+            // Mixed color sublayer tokens, read by parse_row_sublayer_tokens().
             continue;
         }
         if ((tok[0] == 'c' || tok[0] == 'C') && tok.size() >= 3 && (tok[1] == 'm' || tok[1] == 'M')) {
@@ -2454,6 +2488,10 @@ std::string MixedFilamentManager::serialize_custom_entries()
            << 'd' << (mf.deleted ? 1 : 0) << ','
            << 'o' << (mf.origin_auto ? 1 : 0) << ','
            << 'u' << mf.stable_id;
+        if (mf.sublayer_method > 0)
+            ss << ",sm" << clamp_int(mf.sublayer_method, 0, 3);
+        if (mf.sublayer_bs_order)
+            ss << ",so1";
         if (mf.ui_mode >= 0)
             ss << ",cm" << mf.ui_mode;
         if (!mf.image_fill_ref.empty())
@@ -2615,6 +2653,7 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
             mf.gradient_enabled = gradient_enabled;
             mf.gradient_start   = gradient_start;
             mf.gradient_end     = gradient_end;
+            parse_row_sublayer_tokens(row, mf.sublayer_method, mf.sublayer_bs_order);
             disable_pointillism_mode(mf);
 
             rebuilt.push_back(std::move(mf));
@@ -2652,6 +2691,7 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
         mf.gradient_enabled = gradient_enabled;
         mf.gradient_start   = gradient_start;
         mf.gradient_end     = gradient_end;
+        parse_row_sublayer_tokens(row, mf.sublayer_method, mf.sublayer_bs_order);
         disable_pointillism_mode(mf);
         rebuilt.push_back(std::move(mf));
         ++loaded_rows;

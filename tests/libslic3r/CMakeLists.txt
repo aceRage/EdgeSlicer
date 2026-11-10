@@ -130,6 +130,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
+	test_mixed_sublayer.cpp
 	test_cli_preset_slots.cpp
 	test_cli_output.cpp
 	test_mixed_nozzle.cpp

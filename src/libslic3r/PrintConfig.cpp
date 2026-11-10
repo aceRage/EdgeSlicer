@@ -6951,6 +6951,20 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Bambu Studio 2.9.1 (v02.09.01.70 PrintConfig.cpp:6902): same key, default and category, so Bambu Studio
+    // process presets and projects carry it over. In Edge it is the process default for mixed rows whose
+    // sub-layer method is Auto: one pass per component, each ratio x layer height (MixedSublayer.hpp).
+    // Subdivide Mix Layer wins when both are on. design_mixed_color_sublayer.md D1/D3.
+    def = this->add("enable_mixed_color_sublayer", coBool);
+    def->label = L("Mixed color sublayer");
+    def->category = L("Quality");
+    def->tooltip = L("Enable mixed color sublayer splitting. When enabled, layers containing mixed color "
+                     "filaments will be split into sub-layers to achieve color mixing effects: one pass per "
+                     "component filament, each as thick as that filament's share of the layer height.\n\n"
+                     "Subdivide Mix Layer takes precedence when both are enabled.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("dithering_local_z_whole_objects", coBool);
     def->label = L("Full domain");
     def->category = L("Others");
