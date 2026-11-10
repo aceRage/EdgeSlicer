@@ -22274,7 +22274,10 @@ void Plater::import_model_id(wxString download_info)
 
         auto filesize = 0;
         bool size_limit = false;
+        // Same rule as the Downloader path: the address above was checked, a redirect out of it
+        // was not. MakerWorld's own links are signed storage URLs, so they do redirect.
         auto http = Http::get(download_url.ToStdString());
+        http.restrict_redirects(10);
 
         while (cont && retry_count < max_retries) {
             retry_count++;
@@ -22309,7 +22312,14 @@ void Plater::import_model_id(wxString download_info)
                         http_status,
                         error);
 
-                    if (retry_count == max_retries) {
+                    // A refusal is a decision about where the redirects went, not a flaky transfer:
+                    // re-sending the same request would be refused in exactly the same way, and each
+                    // try is another blind request to a host that already sent us somewhere we would
+                    // not go. So it ends the loop here rather than after max_retries.
+                    // error_is_redirect_refusal() matches REDIRECT_REFUSAL_PREFIX in Http.cpp.
+                    // That exact text is asserted in tests/slic3rutils/http_body_redirect_tests.cpp,
+                    // so rewording the prefix breaks the test rather than silently restoring retries.
+                    if (Http::error_is_redirect_refusal(error) || retry_count == max_retries) {
                         boost::system::error_code ec;
                         fs::remove(tmp_path, ec);
                         msg = _L("Importing to EdgeSlicer failed. Please download the file and manually import it.");
@@ -23803,6 +23813,28 @@ void Plater::load_gcode(const wxString& filename)
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " entry and filename: " << filename;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
+    // A G-code passed on the command line reaches this point from
+    // GUI_App::post_init() on the first idle event, which can run before the
+    // 3D canvas has rendered (and initialized OpenGL) for the first time.
+    // GCodeViewer::init() then calls uninitialized GL function pointers and
+    // crashes. Defer until the canvas is ready; the pending paint event is
+    // already queued ahead of the CallAfter, so this converges immediately.
+    // Bounded: a hub started hidden in the tray may never paint the canvas.
+    static int s_deferred_gcode_attempts = 0;
+    if (p->get_current_canvas3D() == nullptr || !p->get_current_canvas3D()->is_initialized()) {
+        if (++s_deferred_gcode_attempts > 200) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " canvas not initialized after 200 deferred attempts, giving up on " << into_u8(filename);
+            s_deferred_gcode_attempts = 0;
+            return;
+        }
+        wxGetApp().CallAfter([this, filename] {
+            // Do not keep retrying while the app shuts down.
+            if (!wxGetApp().is_closing())
+                this->load_gcode(filename);
+        });
+        return;
+    }
+    s_deferred_gcode_attempts = 0;
     if (! is_gcode_file(into_u8(filename)))
         return;
 

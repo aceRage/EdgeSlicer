@@ -891,7 +891,7 @@ void ModelBrowserPanel::Impl::carry_out(const NavDecision& d, const std::string&
         if (!user_visible)
             return;
         const wxString text = (web && is_blocked_host(u.host)) ?
-                                  _L("The model browser does not open addresses on this computer or your local network.") :
+                                  _L("The model browser does not open addresses on this computer or a private network.") :
                                   format_wxstr(_L("The model browser did not open this link: %1%"), from_u8(d.reason));
         owner->CallAfter([this, text]() { show_notice(text, NoticeKind::Warning); });
         return;
