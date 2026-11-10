@@ -689,6 +689,11 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     if (retraction_length_remaining <= EPSILON)
         return {0., 0., 0.};
 
+    // Orca: the firmware owns the length of a firmware retraction, and its unretract restores only
+    // what it retracted, so the whole retraction happens before the wipe and the wipe moves no filament.
+    if (config.use_firmware_retraction)
+        return { retraction_length_remaining, 0., 0. };
+
     // Calculate retraction before and after wipe distances from the user setting (OrcaSlicer #11015).
     // Keep adding to the retraction before wipe variable any excess retraction needed to be performed
     // before the wipe. The after-wipe share is reserved here and retracted by the regular retract()

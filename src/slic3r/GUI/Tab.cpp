@@ -8491,7 +8491,7 @@ void TabPrinter::toggle_options()
 
         // when using firmware retraction, firmware decides retraction length
         bool use_firmware_retraction = m_config->opt_bool("use_firmware_retraction");
-        toggle_option("retract_length", !use_firmware_retraction, i);
+        toggle_option("retraction_length", !use_firmware_retraction, at("retraction_length"));
 
         // user can customize travel length if we have retraction length or we"re using
         // firmware retraction
@@ -8512,49 +8512,21 @@ void TabPrinter::toggle_options()
 
         // some options only apply when not using firmware retraction
         vec.resize(0);
-        vec = {"retraction_speed", "deretraction_speed", "retract_before_wipe", "retract_after_wipe",
-               "retract_length", "retract_restart_extra", "wipe_distance"};
+        vec = {"retraction_speed", "deretraction_speed", "retract_restart_extra", "wipe_distance"};
         for (auto el : vec)
             //BBS
             toggle_option(el, retraction && !use_firmware_retraction, at(el.c_str()));
 
         bool wipe = retraction && m_config->opt_bool("wipe", at("wipe"));
         // Orca (#11015): before and after shares add up to at most 100%.
+        // Orca #17302: a firmware retraction happens entirely before the wipe, whatever the split is set to.
         {
             const auto percent_at = [this, &at](const char *key) {
                 const auto *opt = m_config->option<ConfigOptionPercents>(key);
                 return opt == nullptr || opt->values.empty() ? 0. : opt->get_at(size_t(at(key)));
             };
-            toggle_option("retract_before_wipe", wipe && !is_approx(percent_at("retract_after_wipe"), 100.), at("retract_before_wipe"));
-            toggle_option("retract_after_wipe", wipe && !is_approx(percent_at("retract_before_wipe"), 100.), at("retract_after_wipe"));
-        }
-        // Orca (#13812): wiping with firmware retraction is fine as long as the whole retraction is done before the wipe.
-        const auto* retract_before_wipe_opt = static_cast<const ConfigOptionPercents*>(m_config->option("retract_before_wipe"));
-        const size_t retract_before_wipe_idx = size_t(at("retract_before_wipe"));
-        const double retract_before_wipe = retract_before_wipe_opt->values.empty() ? 100. :
-            retract_before_wipe_opt->values[std::min(retract_before_wipe_idx, retract_before_wipe_opt->values.size() - 1)];
-        if (use_firmware_retraction && wipe && retract_before_wipe < 100.0) {
-            //wxMessageDialog dialog(parent(),
-            MessageDialog dialog(parent(),
-                _(L("The Retract before wipe option could be only 100% when using the Firmware Retraction mode.\n"
-                    "\nShall I set it to 100% in order to enable Firmware Retraction?")),
-                _(L("Firmware Retraction")), wxICON_WARNING | wxYES | wxNO);
-
-            DynamicPrintConfig new_conf = *m_config;
-            if (dialog.ShowModal() == wxID_YES) {
-                auto wipe = static_cast<ConfigOptionBools*>(m_config->option("wipe")->clone());
-                auto retract_before_wipe = static_cast<ConfigOptionPercents*>(m_config->option("retract_before_wipe")->clone());
-                for (size_t w = 0; w < wipe->values.size(); w++)
-                    wipe->values[w] = false;
-                for (size_t w = 0; w < retract_before_wipe->values.size(); w++)
-                    retract_before_wipe->values[w] = 100.0;
-                new_conf.set_key_value("wipe", wipe);
-                new_conf.set_key_value("retract_before_wipe", retract_before_wipe);
-            }
-            else {
-                new_conf.set_key_value("use_firmware_retraction", new ConfigOptionBool(false));
-            }
-            load_config(new_conf);
+            toggle_option("retract_before_wipe", wipe && !use_firmware_retraction && !is_approx(percent_at("retract_after_wipe"), 100.), at("retract_before_wipe"));
+            toggle_option("retract_after_wipe", wipe && !use_firmware_retraction && !is_approx(percent_at("retract_before_wipe"), 100.), at("retract_after_wipe"));
         }
         // BBS
         toggle_option("wipe_distance", wipe, at("wipe_distance"));

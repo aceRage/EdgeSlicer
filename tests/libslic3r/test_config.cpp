@@ -473,9 +473,9 @@ TEST_CASE("Float options read a subnormal on every platform and still reject gar
     }
 }
 
-// Orca #13812: the printer tab keeps Wipe on with firmware retraction when the whole retraction is done before
-// the wipe, so the config check that the CLI and the 3MF loader run has to accept that state too.
-TEST_CASE("Firmware retraction allows wipe only with the whole retraction before the wipe", "[Config]")
+// Orca #17302: firmware retraction plus wipe is always valid. The whole retraction is a G10
+// before the wipe, so G11 restores it; the old 100%-before-wipe exception is no longer needed.
+TEST_CASE("Firmware retraction allows wipe at any retract-before-wipe split", "[Config]")
 {
     Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -487,7 +487,7 @@ TEST_CASE("Firmware retraction allows wipe only with the whole retraction before
     CHECK(config.validate(true).count("use_firmware_retraction") == 0);
 
     config.set_deserialize_strict("retract_before_wipe", "70%");
-    CHECK(config.validate(true).count("use_firmware_retraction") == 1);
+    CHECK(config.validate(true).count("use_firmware_retraction") == 0);
 
     config.set_deserialize_strict("wipe", "0");
     CHECK(config.validate(true).count("use_firmware_retraction") == 0);
