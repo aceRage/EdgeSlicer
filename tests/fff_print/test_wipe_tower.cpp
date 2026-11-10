@@ -1078,6 +1078,10 @@ TEST_CASE("The wipe tower's flow tags keep a decimal point in a comma-decimal lo
     }
     CHECK(heights > 0);
     CHECK(widths > 0);
+    // Six decimals match std::to_string / "%.6f". A later switch to default
+    // float_to_string_decimal_point (six significant digits) would still pass
+    // the comma scan on "0.3" and break C-locale G-code identity.
+    CHECK(tower_gcode.find(height_tag + "0.300000") != std::string::npos);
 }
 
 TEST_CASE("Tower consumption is classified separately for each printer kind", "[WipeTower][Regression]")
