@@ -5883,7 +5883,7 @@ void GLGizmoCut3D::on_load(cereal::BinaryInputArchive& ar)
     int   groove_count = m_groove_count;
     float groove_gap   = m_groove_gap;
     ar(groove_count, groove_gap);
-    ar(m_tac_joint, m_connector_angle, m_connector_type);
+    ar(m_tac_joint, m_connector_angle, m_connector_type, m_apply_tac_joints);
 
     m_start_dragging_m = m_rotation_m;
 
@@ -5924,7 +5924,7 @@ void GLGizmoCut3D::on_save(cereal::BinaryOutputArchive& ar) const
         m_ar_plane_center, m_start_dragging_m,
         m_groove.depth, m_groove.width, m_groove.flaps_angle, m_groove.angle, m_groove.depth_tolerance, m_groove.width_tolerance);
     ar(m_groove_count, m_groove_gap);
-    ar(m_tac_joint, m_connector_angle, m_connector_type);
+    ar(m_tac_joint, m_connector_angle, m_connector_type, m_apply_tac_joints);
 }
 
 std::string GLGizmoCut3D::on_get_name() const
@@ -5969,6 +5969,7 @@ void GLGizmoCut3D::on_set_state()
     // cuts, which is the sticky-m_keep_as_parts bug in a new place.
     m_cut_thickness        = 0.f;
     m_cut_thickness_offset = int(CutThicknessOffset::Centred);
+    m_apply_tac_joints     = false;
     m_curved_res_user_set  = false;
     m_curved_upper_empty = m_curved_lower_empty = false;
     // The drawn stroke goes the same way: on_set_state() runs on open AND on
@@ -8122,6 +8123,28 @@ void GLGizmoCut3D::sync_tac_joint_params(CutConnectors& connectors, unsigned fie
     m_parent.set_as_dirty();
 }
 
+void GLGizmoCut3D::render_tac_joint_mesh_checkbox()
+{
+    bool apply = m_apply_tac_joints;
+    if (m_imgui->bbl_checkbox(_L("Apply TAC joints to mesh"), apply)) {
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Apply TAC joints to mesh"), UndoRedo::SnapshotType::GizmoAction);
+        m_apply_tac_joints = apply;
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Apply all TAC sockets directly to the body meshes when cutting, and unite attached joints with their "
+                            "owning parts. Separate joints stay on the build plate. Other negative volumes remain editable."),
+                         m_control_width * 2.f);
+
+    const ModelObject* object = m_c && m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!m_reedit_active && object && object->has_cut_recipe()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              _L("This is an existing cut half. Cutting here splits this object again. To update both original halves, "
+                                 "close this tool and choose \"Edit cut...\" on a half."));
+        ImGui::PopTextWrapPos();
+    }
+}
+
 void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
 {
     // Read the selected model every frame, including after undo/redo of the same index.
@@ -8209,6 +8232,8 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
     if (changed || changed_fields != 0)
         sync_tac_joint_params(connectors, changed_fields);
 
+    render_tac_joint_mesh_checkbox();
+
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
     if (m_part_selection.valid())
         m_imgui->text_colored(
@@ -8221,9 +8246,11 @@ void GLGizmoCut3D::render_tac_joint_inputs(CutConnectors& connectors)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L(validation.message));
     if (m_tac_joint.attachment == TacJointAttachment::Separate)
         m_imgui->text(_L("The connector is printed as a separate object. The blue outline shows its matching cutter."));
-    else
+    else if (!m_apply_tac_joints)
         m_imgui->text(_L("The connector belongs to the selected half. Only the opposite half gets a socket. Use Mesh Boolean after cutting "
                          "to merge the connector into the body."));
+    else
+        m_imgui->text(_L("The connector will be united with the selected half. The opposite socket will be applied directly to its mesh."));
     ImGui::PopTextWrapPos();
 }
 
@@ -9124,6 +9151,10 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
                 m_rotate_upper = m_rotate_lower = false;
             }
         m_imgui->disabled_end();
+
+        if (std::any_of(connectors.begin(), connectors.end(),
+                        [](const CutConnector& c) { return c.attribs.type == CutConnectorType::TacJoint; }))
+            render_tac_joint_mesh_checkbox();
 
         // RE-EDITABLE CUTS. With this on, the cut records how it was made - the
         // surface, its parameters, the connectors - and, crucially, the object's
@@ -10161,6 +10192,7 @@ CutRecipe GLGizmoCut3D::build_recipe_from_gizmo(const ModelObject* mo, const Tri
     r.keep_upper         = m_keep_upper;
     r.keep_lower         = m_keep_lower;
     r.keep_as_parts      = m_keep_as_parts;
+    r.apply_tac_joints   = m_apply_tac_joints;
     r.place_on_cut_upper = m_place_on_cut_upper;
     r.place_on_cut_lower = m_place_on_cut_lower;
     r.rotate_upper       = m_rotate_upper;
@@ -10190,6 +10222,7 @@ void GLGizmoCut3D::apply_recipe_to_gizmo(const CutRecipe& recipe)
     m_keep_upper           = recipe.keep_upper;
     m_keep_lower           = recipe.keep_lower;
     m_keep_as_parts        = recipe.keep_as_parts;
+    m_apply_tac_joints     = recipe.apply_tac_joints;
     m_place_on_cut_upper   = recipe.place_on_cut_upper;
     m_place_on_cut_lower   = recipe.place_on_cut_lower;
     m_rotate_upper         = recipe.rotate_upper;
@@ -10531,8 +10564,20 @@ void GLGizmoCut3D::begin_reedit()
     // assign_clone() (which asserts the new id DIFFERS from the old). Copying the
     // transformation out now sidesteps both problems.
     const bool             first_has_instance = !first->instances.empty();
-    const Geometry::Transformation first_instance_trafo =
-        first_has_instance ? first->instances.front()->get_transformation() : Geometry::Transformation();
+    Geometry::Transformation first_instance_trafo = first_has_instance ? first->instances.front()->get_transformation() :
+                                                                         Geometry::Transformation();
+    if (first_has_instance && first->has_cut_recipe() && first->cut_recipe->apply_tac_joints && first->volumes.size() == 1 &&
+        first->cut_recipe->half_part_matrices.size() == 1) {
+        // Applying TAC meshes removes the last helper volume, which folds the
+        // body's translation into its print instance. Recover the original
+        // object frame before placing the saved uncut mesh with that instance.
+        // Each half has its own frame. The selected recipe can belong to B
+        // while the first surviving object used for placement is A.
+        const Transform3d& frame = first->cut_recipe->half_part_matrices.front();
+        if (frame.matrix().allFinite() && std::abs(frame.linear().determinant()) > 1e-12)
+            first_instance_trafo = Geometry::Transformation(first_instance_trafo.get_matrix() * first->volumes.front()->get_matrix() *
+                                                            frame.inverse());
+    }
     const bool             first_printable    = first_has_instance ? first->instances.front()->printable : true;
 
     m_reedit_recipe = m_reedit_pending_recipe;
@@ -10777,6 +10822,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     // closes the gizmo. Take it first.
     const double         cut_thickness  = CutMode(m_mode) == CutMode::cutTongueAndGroove ? 0.0 : double(m_cut_thickness);
     const CutThicknessOffset thickness_offset = cut_thickness_offset();
+    const bool               apply_tac_joints = m_apply_tac_joints;
 
     // RE-EDITABLE CUTS. Build the recipe NOW, for exactly the same reason every
     // other line above does: reset_all_gizmos() below closes the gizmo, and
@@ -10811,9 +10857,17 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     m_reedit_one_half_missing = false;
     m_reedit_object_ids.clear();
     m_reedit_proxy_id         = ObjectID();
-    // The stashed halves are being REPLACED, not restored, so they go now: holding
-    // them past this point would keep a whole object's meshes alive for nothing.
-    m_reedit_stash.clear_objects();
+    // Applying TAC meshes can refuse after the gizmo has closed. Retain the
+    // original halves until replacement succeeds, and use the normal deferred
+    // Cancel path to restore both the model and its object-list rows on failure.
+    bool       cut_applied = false;
+    ScopeGuard restore_failed_reedit([this, was_reedit, reedit_proxy_id, &cut_applied]() {
+        if (was_reedit && !cut_applied) {
+            m_reedit_proxy_id = reedit_proxy_id;
+            m_reedit_active   = true;
+            cancel_reedit();
+        }
+    });
 
     // 2026-10-31: the connectors' frames on the curved / drawn surface, and that cut's kerf
     // faces, taken while the surface still exists - reset_all_gizmos() below flattens the sheet
@@ -10893,13 +10947,16 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
 
         ModelObjectCutAttributes attributes = only_if(has_connectors ? true : m_keep_upper, ModelObjectCutAttribute::KeepUpper) |
                                               only_if(has_connectors ? true : m_keep_lower, ModelObjectCutAttribute::KeepLower) |
-                                              only_if(has_flexi ? true : (has_connectors ? false : m_keep_as_parts), ModelObjectCutAttribute::KeepAsParts) |
+                                              only_if(has_flexi ? true : (has_connectors ? false : m_keep_as_parts),
+                                                      ModelObjectCutAttribute::KeepAsParts) |
                                               only_if(m_place_on_cut_upper, ModelObjectCutAttribute::PlaceOnCutUpper) |
                                               only_if(m_place_on_cut_lower, ModelObjectCutAttribute::PlaceOnCutLower) |
                                               only_if(m_rotate_upper, ModelObjectCutAttribute::FlipUpper) |
                                               only_if(m_rotate_lower, ModelObjectCutAttribute::FlipLower) |
                                               only_if(dowels_count > 0, ModelObjectCutAttribute::CreateDowels) |
-                                              only_if(!has_connectors && !cut_with_groove && cut_mo->cut_id.id().invalid(), ModelObjectCutAttribute::InvalidateCutInfo) |
+                                              only_if(apply_tac_joints, ModelObjectCutAttribute::ApplyTacJoints) |
+                                              only_if(!has_connectors && !cut_with_groove && cut_mo->cut_id.id().invalid(),
+                                                      ModelObjectCutAttribute::InvalidateCutInfo) |
                                               // OrcaSlicer #13472: painting survives a cut, always (owner, 2026-10-24).
                                               ModelObjectCutAttribute::KeepPaint;
 
@@ -11030,6 +11087,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
 
         // update cut results on plater and in the model
         plater->apply_cut_object_to_model(object_idx, new_objects);
+        cut_applied = true;
+        if (was_reedit)
+            m_reedit_stash.clear_objects();
 
         synchronize_model_after_cut(plater->model(), cut_id);
 

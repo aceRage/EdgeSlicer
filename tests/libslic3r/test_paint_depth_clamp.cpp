@@ -416,6 +416,67 @@ size_t first_layer_above_z(const PrintObject &object, double target_z)
     return 0;
 }
 
+// Orca #17314: three physical filaments so an explicit sparse infill filament (3) can differ from
+// both the unpainted base (1) and the paint (2).
+DynamicPrintConfig three_filament_paint_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(3);
+    config.set_num_filaments(3);
+    config.option<ConfigOptionFloats>("filament_diameter")->values         = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values          = {"#FFFFFF", "#804020", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values           = {0.4, 0.4, 0.4};
+    config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->value   = 0.45;
+    config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->percent = false;
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"gcode_comments", "1"},
+    });
+    return config;
+}
+
+struct PaintedFilaments
+{
+    int wall   = -1;
+    int solid  = -1;
+    int sparse = -1;
+};
+
+// Paints every facet of a cube with filament 2. `setup` runs after the model is painted.
+template<class Setup>
+PaintedFilaments painted_region_filaments(const DynamicPrintConfig &base, Setup setup)
+{
+    DynamicPrintConfig config = base;
+    Print              print;
+    Model              model;
+    ModelObject       *object = model.add_object();
+    object->name              = "painted-sparse.stl";
+    ModelVolume *volume       = object->add_volume(make_cube(12., 12., 4.));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    TriangleSelector selector(volume->mesh());
+    for (int i = 0; i < int(volume->mesh().its.indices.size()); ++i)
+        selector.set_facet(i, EnforcerBlockerType::Extruder2);
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    setup(config, *object, *volume);
+
+    print.set_status_silent();
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 1);
+
+    PaintedFilaments result;
+    for (const auto &range : print.objects().front()->shared_regions()->layer_ranges)
+        for (const auto &painted : range.painted_regions)
+            if (painted.extruder_id == 2) {
+                result.wall   = painted.region->config().wall_filament.value;
+                result.solid  = painted.region->config().solid_infill_filament.value;
+                result.sparse = painted.region->config().sparse_infill_filament.value;
+            }
+    return result;
+}
+
 } // namespace
 
 TEST_CASE("multi_material_segmentation_by_painting: walls mode clamps a full-height painted face to the wall band", "[paintdepth]")
@@ -635,6 +696,94 @@ TEST_CASE("multi_material_segmentation_by_painting: paint_infill_override is a n
 
     const PrintRegionConfig &painted_cfg = extruder2_region_config(*object);
     CHECK(painted_cfg.sparse_infill_filament.value == 2);
+}
+
+// Orca #17314: painting used to replace sparse infill filament even when the user had chosen one
+// on the print, object or part. Edge's print-level default is filament 1 (not Orca's 0 = Default),
+// so a process value of 1 is treated as unset; object/part 0 still means Default and restores painting.
+TEST_CASE("Painted regions keep an explicitly chosen sparse infill filament", "[paintdepth][MultiMaterialSegmentation]")
+{
+    const DynamicPrintConfig base = three_filament_paint_config();
+    using Config = DynamicPrintConfig;
+
+    SECTION("Default follows the paint") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &, ModelVolume &) {});
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("A global choice is kept") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &c, ModelObject &, ModelVolume &) {
+            c.option<ConfigOptionInt>("sparse_infill_filament")->value = 3;
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 3);
+    }
+    SECTION("An object choice is kept") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &) {
+            o.config.set("sparse_infill_filament", 3);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 3);
+    }
+    SECTION("A part choice overrides the object choice") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &v) {
+            o.config.set("sparse_infill_filament", 1);
+            v.config.set("sparse_infill_filament", 3);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 3);
+    }
+    SECTION("An object Default restores painting over a global choice") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &c, ModelObject &o, ModelVolume &) {
+            c.option<ConfigOptionInt>("sparse_infill_filament")->value = 3;
+            o.config.set("sparse_infill_filament", 0);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("A part Default restores painting over an object choice") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &v) {
+            o.config.set("sparse_infill_filament", 3);
+            v.config.set("sparse_infill_filament", 0);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    // Edge: an object/part filament ("extruder") replaces the sparse infill filament of the levels
+    // above it, so it also replaces a global choice and painting follows again (as before #17314).
+    SECTION("An object filament replaces a global choice and painting follows") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &c, ModelObject &o, ModelVolume &) {
+            c.option<ConfigOptionInt>("sparse_infill_filament")->value = 3;
+            o.config.set("extruder", 1);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("A part filament replaces an object choice and painting follows") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &v) {
+            o.config.set("sparse_infill_filament", 3);
+            v.config.set("extruder", 1);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("An object choice next to the object filament is kept") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &) {
+            o.config.set("extruder", 1);
+            o.config.set("sparse_infill_filament", 3);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 3);
+    }
 }
 
 // Paint Depth Stage 2, plan Task 3 item 1 (docs/superpowers/plans/2026-08-31-paint-depth.md,
