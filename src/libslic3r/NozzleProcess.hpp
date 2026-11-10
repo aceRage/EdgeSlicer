@@ -26,7 +26,9 @@ std::vector<std::string> nozzle_process_preset_names(const ConfigBase &config);
 bool has_nozzle_process_presets(const ConfigBase &config);
 
 // Whether the printer can take a process per nozzle: two or more physical extruders and not a single
-// nozzle fed by several filaments (single_extruder_multi_material).
+// nozzle fed by several filaments (single_extruder_multi_material), or (H3C, 2026-11-06) one extruder whose
+// nozzle rack holds nozzles of two or more sizes (each other size is a P9 size tool, "T1:0.8"). Pass a config
+// with the project's rack (extruder_rack_nozzle_override) when there is one.
 bool supports_nozzle_processes(const ConfigBase &printer_config);
 
 // Per-nozzle process P2: whether filaments can be put on a nozzle of the user's choosing
@@ -35,6 +37,18 @@ bool supports_nozzle_processes(const ConfigBase &printer_config);
 bool supports_filament_nozzle_assignment(const DynamicPrintConfig &printer_config);
 // The stored assignment for `filaments` filaments, 0 = the filament's own nozzle; an all-0 list is stored empty.
 std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
+// The filament_nozzle_assignment entry for 0-based `filament` put on 1-based `tool`. 0 (unassigned) only when that reads back
+// as `tool`: the filament's own tool while there are no more filaments than tools. With more filaments than tools an
+// unassigned filament follows filament_map, so its own tool is stored as itself (owner bug 2026-11-08: a U1 with six
+// filaments could not put filament 3 on T3, the 0 read back as filament_map's T2).
+int filament_nozzle_assignment_value(size_t filament, int tool, size_t filament_count, size_t nozzle_count);
+
+// The printer's filament routing layout: extruder count, rack sizes, one nozzle fed by many filaments. The project's
+// filament -> extruder state (filament_map, side and rack pins, tool assignment, the synced device state) belongs to one
+// layout; a printer of another layout (H3C one extruder + rack, H2C two extruders, U1 four toolheads) must not inherit it.
+std::string filament_routing_layout(const ConfigBase &printer_config);
+// Back to the defaults for `filament_count` filaments: what a fresh project has on any printer. Returns whether anything changed.
+bool reset_filament_routing(DynamicConfig &project_config, size_t filament_count);
 
 // Copy each extruder's chosen process into that extruder's slots of per_nozzle_process_options() in
 // `config` (a full print config). sources[e] is extruder e's process, nullptr for the plate's process.
@@ -56,7 +70,7 @@ std::vector<int> filament_nozzle_assignment_stored(std::vector<int> assignment);
 //   right after that extruder's slots; nozzle_filament_process_slot points the filament at it (process_config_idx).
 //   Without it the result is exactly P8's.
 // Returns false (config untouched but for an empty nozzle_filament_process_slot, nozzle_filament_tool and per-filament width
-// and region arrays) when no extruder has a source or the printer has fewer than two extruders.
+// and region arrays) when no extruder has a source or the printer takes no process per nozzle (supports_nozzle_processes).
 bool fill_nozzle_process_slots(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
                                const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
 
@@ -257,6 +271,29 @@ DynamicPrintConfig       nozzle_process_diff(const DynamicPrintConfig &edited, c
 // A tool's effective process: `base` (its profile) with `edits` applied to its per-tool keys, and the plate-wide keys from
 // `plate`.
 DynamicPrintConfig       nozzle_tool_process(const DynamicPrintConfig &plate, const DynamicPrintConfig &base, const DynamicPrintConfig *edits);
+
+// ---- Layer height per nozzle (H3C fix 2026-11-06, on top of the AdaptiveLayerMerge band planner) ----
+//
+// layer_height stays plate-wide: the plate's layer height is the grid every object is sliced on, and the finest nozzle prints
+// it. On a plate whose filaments print through nozzles of different sizes a coarser nozzle stacks several grid layers into one
+// slab (PrintObject::compute_adaptive_merge_groups); by default as many as its size is to the finest nozzle's. A process CHOSEN
+// for that nozzle (not one picked automatically for its size) sets the slab height instead: its own layer_height, in whole grid
+// layers, held to the nozzle's printable window. So a 0.40 mm process on the 0.8 nozzle of a 0.2 mm plate prints 0.4 mm slabs,
+// and a 0.24 mm one prints every 0.2 mm layer.
+//
+// Records the layer height of `chosen` (the tool's chosen process) in `tool` (its effective process, nozzle_tool_process) as
+// nozzle_layer_height (one value) when it differs from the plate's layer height `tool` holds; removes it otherwise.
+void   set_nozzle_tool_layer_height(DynamicPrintConfig &tool, const ConfigBase &chosen);
+// Writes nozzle_layer_height of a full config: per filament the value its source process recorded, 0 = none; empty when no
+// filament's source has one. Called by fill_nozzle_process_slots(). Returns whether any entry is set.
+bool   fill_nozzle_layer_heights(DynamicPrintConfig &config, const std::vector<const DynamicPrintConfig *> &sources,
+                                 const std::vector<const DynamicPrintConfig *> *filament_sources = nullptr);
+// The layer height 1-based `filament_id`'s chosen process asks for, 0 when none.
+double nozzle_layer_height_for_filament(const ConfigBase &config, unsigned int filament_id);
+// The band size of a nozzle coarser than the plate's finest one: `target_height` in whole `base_layer_height` layers, grown to
+// `min_height` and held to `max_height` as adaptive_layer_band_size() does; `ratio_band_size` (the size rule) when there is
+// no target. 1 = the nozzle prints every layer.
+size_t nozzle_process_band_size(double target_height, size_t ratio_band_size, double base_layer_height, double min_height, double max_height);
 
 // A process that may be picked automatically for a tool (one cut for its nozzle size and printer).
 struct NozzleProcessCandidate

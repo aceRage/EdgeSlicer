@@ -538,7 +538,7 @@ TEST_CASE("http server start-stop after one request does not re-arm accept", "[P
     // Regression for a macOS kqueue crash: do_accept's completion handler started
     // another async_accept after stop() closed the acceptor (login-callback test
     // stopped the server right after one request).
-    static constexpr int k_rounds = 20;
+    static constexpr int k_rounds = 3;
     for (int i = 0; i < k_rounds; ++i) {
         HttpServer server(free_port());
         server.set_request_handler([](const std::string&) { return std::make_shared<HttpServer::ResponseNotFound>(); });

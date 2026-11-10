@@ -56,6 +56,21 @@ unsigned int resolve_mixed_with_layer_heights(const MixedFilamentManager *mixed_
 
     const MixedFilament *mixed_row = mixed_mgr->mixed_filament_from_id(filament_id_1based, num_physical);
 
+    // Mixed color sublayer: a layer whose row prints as Ratio passes is filed under the pass that ends it, so no
+    // nominal tool change follows the passes. Only without a prime tower: with one, the tower's tool-change plan
+    // and the G-code's nominal sequence must keep the ordinary resolve (as Subdivide does), or the planned and
+    // the requested tool changes no longer match (seen on the X1C tower).
+    if (current_object != nullptr && !current_object->local_z_intervals().empty() &&
+        current_object->print() != nullptr && !current_object->print()->has_wipe_tower()) {
+        const int mixed_idx = mixed_mgr->mixed_index_from_filament_id(filament_id_1based, num_physical);
+        if (mixed_idx >= 0)
+            if (const unsigned int ratio_last = local_z_ratio_last_extruder(current_object->local_z_intervals(),
+                                                                            current_object->local_z_sublayer_plan(), size_t(mixed_idx),
+                                                                            double(layer_print_z));
+                ratio_last != 0)
+                return ratio_last;
+    }
+
     // Z-direction gradient short-circuits the legacy A/B layer cycle below: the
     // gradient path needs the per-(object, layer) run lookup performed inside
     // MixedFilamentManager::resolve.
@@ -406,6 +421,14 @@ static double calc_max_layer_height(const PrintConfig &config, double max_object
     // The Prusa3D Fast (0.35mm layer height) print profile sets a higher layer height than what is normally allowed
     // by the nozzle. This is a hack and it works by increasing extrusion width. See GH #3919.
     return std::max(max_layer_height, max_object_layer_height);
+}
+
+static double calc_min_layer_height(const PrintConfig &config)
+{
+    double min_layer_height = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < config.nozzle_diameter.values.size(); ++ i)
+        min_layer_height = std::min(min_layer_height, config.min_layer_height.get_at(i));
+    return config.nozzle_diameter.values.empty() ? 0. : min_layer_height;
 }
 
 // For the use case when each object is printed separately
@@ -819,6 +842,15 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             if (object.config().support_interface_filament.value == 0 || support_layer->chameleon_residual_all_roles)
                 extruder_interface = pinned;
         }
+        // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70 ToolOrdering.cpp:1144-1147):
+        // the filament the support merge plan pinned a "don't care" slab / interface to. Mirrors GCode::process_layer.
+        // 0 on every single-diameter plate.
+        if (object.config().support_filament.value == 0 && support_layer->planned_filament_id > 0)
+            extruder_support = resolve_mixed(unsigned(support_layer->planned_filament_id), layer_tools.layer_index,
+                                             float(support_layer->print_z), float(support_layer->height), &object);
+        if (object.config().support_interface_filament.value == 0 && support_layer->planned_interface_filament_id > 0)
+            extruder_interface = resolve_mixed(unsigned(support_layer->planned_interface_filament_id), layer_tools.layer_index,
+                                               float(support_layer->print_z), float(support_layer->height), &object);
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
@@ -1313,13 +1345,52 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             }
     }
 
-    // Calculate the wipe_tower_layer_height values.
-    coordf_t wipe_tower_print_z_last = 0.;
-    for (LayerTools &lt : m_layer_tools)
-        if (lt.has_wipe_tower) {
+    // Calculate the wipe_tower_layer_height values. Precise Z height ends each object at its exact
+    // top, so another object's layers can sit above these by less than the printer's minimum layer
+    // height. A tower layer that thin cannot be printed, and a purge sized for it runs up to hundreds
+    // of mm long, so it joins the tower layer below. The floor matches the towers' own WT_EPSILON
+    // merge, which would otherwise size the joined tool changes with the sliver's height. The EPSILON
+    // margin keeps layers sliced at exactly the minimum height, whose sums round below it, apart.
+    //
+    // The gap is measured from the tower layer below, as in Orca #17204: that is the height the
+    // joined purges print at, so a run of joined layers can never add up to more than the minimum.
+    // Layers without a tower (support-only layers between object layers) do not move it.
+    const double min_tower_layer_height = std::max(calc_min_layer_height(config), 1e-3);
+    coordf_t     wipe_tower_print_z_last = 0.;
+    // The layer that finishes the current tower layer, and whether any layer of it changes tools.
+    LayerTools  *tower_layer_end         = nullptr;
+    bool         tower_layer_changes     = false;
+    unsigned int current_extruder        = (unsigned int) -1;
+    for (LayerTools &lt : m_layer_tools) {
+        lt.wipe_tower_layer_ends = true;
+        // The G-code takes one tower result per tool change, so a layer that changes tools always
+        // takes one; a layer that does not takes one only when it finishes the tower layer.
+        const bool changes = ! lt.extruders.empty() &&
+            (current_extruder == (unsigned int) -1 || lt.extruders.size() > 1 || lt.extruders.front() != current_extruder);
+        if (! lt.extruders.empty())
+            current_extruder = lt.extruders.back();
+        if (! lt.has_wipe_tower)
+            continue;
+        // Only a layer that prints joins, so the tower layer is always finished by a printing layer.
+        if (tower_layer_end != nullptr && ! lt.extruders.empty() && lt.print_z - wipe_tower_print_z_last + EPSILON < min_tower_layer_height) {
+            lt.wipe_tower_print_z      = tower_layer_end->wipe_tower_print_z;
+            lt.wipe_tower_layer_height = tower_layer_end->wipe_tower_layer_height;
+            // The finish rides on the last tool change of the joined layers, as it does on its own
+            // layer: one that takes over after the last result is gone has nothing left to print.
+            if (changes || ! tower_layer_changes) {
+                tower_layer_end->wipe_tower_layer_ends = false;
+                tower_layer_end                        = &lt;
+            } else
+                lt.wipe_tower_layer_ends = false;
+            tower_layer_changes |= changes;
+        } else {
+            lt.wipe_tower_print_z      = lt.print_z;
             lt.wipe_tower_layer_height = lt.print_z - wipe_tower_print_z_last;
-            wipe_tower_print_z_last = lt.print_z;
+            wipe_tower_print_z_last    = lt.print_z;
+            tower_layer_end            = &lt;
+            tower_layer_changes        = changes;
         }
+    }
 }
 
 // H2 preload (preload_all_filaments): the layer-1 ordering rule. See ToolOrdering.hpp for the
@@ -2594,6 +2665,13 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, unsigned int 
                     // body of a layer with woven stripes. Always false with the feature off.
                     if (this_support_layer->interlock_woven)
                         support_overriddable = false;
+                    // Mixed nozzle diameters (AdaptiveLayerMerge step 4, BambuStudio v02.09.01.70
+                    // ToolOrdering.cpp:4011-4014): a support layer the merge plan pinned to a filament is printed by
+                    // that nozzle only, so it takes no purge. 0 on every single-diameter plate.
+                    if (this_support_layer->planned_filament_id > 0)
+                        support_overriddable = false;
+                    if (this_support_layer->planned_interface_filament_id > 0)
+                        support_intf_overriddable = false;
                     if (support_overriddable && !is_support_overridden(object) && !(object_config.support_interface_not_for_body.value && !support_intf_overriddable &&(new_extruder==object_config.support_interface_filament-1||old_extruder==object_config.support_interface_filament-1))) {
                         set_support_extruder_override(object, copy, new_extruder, num_of_copies);
                         for (const ExtrusionEntity* ee : entities) {

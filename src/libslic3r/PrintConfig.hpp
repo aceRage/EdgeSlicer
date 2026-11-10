@@ -2013,6 +2013,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 wipe_inward))
     ((ConfigOptionFloatOrPercent,        wipe_inward_distance))
     ((ConfigOptionBool,                 wipe_before_external_loop))
+    ((ConfigOptionBool,                 retract_after_outer_wall))
     ((ConfigOptionEnum<WallInfillOrder>, wall_infill_order))
     ((ConfigOptionBool,                 precise_outer_wall))
     ((ConfigOptionPercent,              bridge_density))
@@ -2370,6 +2371,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                nozzle_filament_process_slot))
     // Chip-scope fix: per filament, the tool its per-nozzle values were filled for (internal, realign_nozzle_filament_values).
     ((ConfigOptionStrings,             nozzle_filament_tool))
+    // H3C fix: per filament, the layer height of the process chosen for its nozzle, 0 = none (internal, NozzleProcess.hpp).
+    ((ConfigOptionFloatsOrPercents,    nozzle_layer_height))
     // Per-nozzle process P7: the nozzle size each extruder carries in this project (0 = the preset's). NozzleOverride.hpp.
     ((ConfigOptionFloats,              nozzle_diameter_override))
     ((ConfigOptionStrings,             filament_nozzle_variants))
@@ -2500,6 +2503,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
     ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))

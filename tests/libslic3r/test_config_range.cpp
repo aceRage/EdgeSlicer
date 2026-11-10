@@ -173,7 +173,7 @@ TEST_CASE("Fuzzy skin has a Disabled state; the default stays None (Orca #10312,
 
 // Every instantiable preset under resources/profiles, resolved through "inherits" within its vendor
 // folder (filaments may also inherit from OrcaFilamentLibrary). Numeric values only; "nil" skipped.
-TEST_CASE("No shipped preset value is newly out of range with float bounds", "[ConfigRange][Profiles]")
+TEST_CASE("No shipped preset value is newly out of range with float bounds", "[ConfigRange][Profiles][slow]")
 {
     namespace fs = boost::filesystem;
     const fs::path profiles = fs::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles";

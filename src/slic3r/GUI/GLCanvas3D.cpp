@@ -31,6 +31,7 @@
 #include "Plater.hpp"
 #include "MainFrame.hpp"
 #include "GUI_App.hpp"
+#include "MixedSublayerUi.hpp"
 #include "Theme.hpp"
 #include "GUI_ObjectList.hpp"
 #include "ParamsPanel.hpp"
@@ -727,6 +728,22 @@ void GLCanvas3D::LayersEditing::render_variable_layer_height_dialog(const GLCanv
     ImGui::SameLine();
     if (imgui.button(_L("Reset")))
         wxPostEvent((wxEvtHandler*)canvas.get_wxglcanvas(), SimpleEvent(EVT_GLCANVAS_RESET_LAYER_HEIGHT_PROFILE));
+
+    // Mixed color sublayer P2 (Bambu Studio GLCanvas3D.cpp:484): an object with mixed color sublayers (Ratio rows)
+    // splits each of its variable layers by the mix, so very thin layers give very thin passes.
+    if (m_model_object != nullptr && wxGetApp().preset_bundle != nullptr) {
+        const PresetBundle &bundle = *wxGetApp().preset_bundle;
+        if (MixedSublayerUi::object_uses_ratio_rows(*m_model_object, bundle.mixed_filaments, bundle.filament_presets.size(),
+                                                    MixedSublayerUi::process_defaults(bundle))) {
+            ImGui::Separator();
+            const float wrap = std::max(ImGui::GetWindowContentRegionMax().x - ImGui::GetCursorPosX(), imgui.scaled(10.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_ORANGE_LIGHT);
+            imgui.text_wrapped(_L("Mixed color sublayer is on for this object. With variable layer height each pass is a share of "
+                                  "a thinner or thicker layer, which may affect print quality."),
+                               wrap);
+            ImGui::PopStyleColor();
+        }
+    }
 
     GLCanvas3D::LayersEditing::s_overlay_window_width = ImGui::GetWindowSize().x;
     imgui.end();
@@ -3668,6 +3685,13 @@ void GLCanvas3D::render(bool only_init)
     //BBS: add enable_render
     if (!m_enable_render)
         return;
+    // Project strip P4 (owner crash 2026-11-07, two Recent projects back to back): a Plater is built with no app Plater
+    // set (MainFrame::create_project_plater, as at startup), and its constructor's update() renders the Assemble canvas.
+    // At startup GL is not ready yet so that render returned early; with GL up it reached init() ->
+    // on_change_color_mode() -> wxGetApp().plater()->get_notification_manager() on null. Nothing renders until a Plater
+    // is the app's (the canvas initialises at its first render once shown).
+    if (wxGetApp().plater() == nullptr)
+        return;
 
     // ensures this canvas is current and initialized
     if (!_is_shown_on_screen() || !_set_current() || !wxGetApp().init_opengl())
@@ -5116,6 +5140,7 @@ void GLCanvas3D::bind_event_handlers()
                         down = false;
                 }
                 m_navigator_dragging = false;
+                m_mouse.down_on_toolbar = false;
                 render();
             });
         m_event_handlers_bound = true;
@@ -6161,6 +6186,12 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
     m_dirty = true;
 }
 
+// ORCA true when the pressed button is the only one held, so no other drag is in progress
+static bool is_only_one_button_down(const wxMouseEvent& evt)
+{
+    return int(evt.LeftIsDown()) + int(evt.MiddleIsDown()) + int(evt.RightIsDown()) + int(evt.Aux1IsDown()) + int(evt.Aux2IsDown()) == 1;
+}
+
 void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 {
     if (!m_initialized || !_set_current())
@@ -6304,6 +6335,26 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         }
         m_dirty = true;
     };
+
+    // ORCA a press on toolbar empty areas must not reach the 3D scene (selection, camera, painting...).
+    // Swallow it with the drags and the release that follow, wherever the mouse goes.
+    if (m_mouse.down_on_toolbar) {
+        const bool button_event = evt.ButtonDown() || evt.ButtonUp() || evt.ButtonDClick();
+        // all buttons released, also covers a release that never reached this handler. Clears down_on_toolbar
+        if (!evt.ButtonIsDown(wxMOUSE_BTN_ANY) && !evt.ButtonDown() && !evt.ButtonDClick())
+            mouse_up_cleanup();
+        if (button_event || evt.Dragging())
+            return;
+    }
+    else if (!mouse_in_layer_editing && (evt.ButtonDown() || evt.ButtonDClick()) && is_only_one_button_down(evt) &&
+             !m_gizmos.is_mouse_over_toolbar_icon(pos.cast<double>()) && _is_mouse_over_top_toolbar(pos.cast<double>())) {
+        m_mouse.down_on_toolbar = true;
+        m_mouse.set_start_position_2D_as_invalid();
+        m_mouse.set_start_position_3D_as_invalid();
+        if (!has_mouse_capture()) // keep getting the release when it happens outside the canvas
+            m_canvas->CaptureMouse();
+        return;
+    }
 
     if (!mouse_in_layer_editing && m_gizmos.on_mouse(evt)) {
         if (m_gizmos.is_running()) {
@@ -7692,6 +7743,7 @@ void GLCanvas3D::mouse_up_cleanup()
     m_mouse.dragging = false;
     m_mouse.ignore_left_up = false;
     m_mouse.ignore_right_up = false;
+    m_mouse.down_on_toolbar = false;
     m_dirty = true;
 
     if (m_canvas->HasCapture())
@@ -9598,7 +9650,9 @@ bool GLCanvas3D::_set_shown_canvas_current()
     // can be current. Prefer the on-screen canvas so GTK hidden/unrealized SetCurrent does not fail,
     // and so a frame already in render() does not switch drawables. Canvases share one wxGLContext.
     // Fall back to this canvas (CLI / unit / shown-canvas SetCurrent failed).
-    Plater* plater = wxGetApp().plater();
+    // Project strip P4: the Plater on screen (MainFrame's); wxGetApp().plater() may be a hidden project rendering its
+    // slice thumbnails.
+    Plater* plater = wxGetApp().mainframe != nullptr && wxGetApp().mainframe->plater() != nullptr ? wxGetApp().mainframe->plater() : wxGetApp().plater();
     if (plater != nullptr) {
         GLCanvas3D* shown = plater->get_current_canvas3D();
         if (shown != nullptr && shown != this && shown->_set_current())
@@ -10179,13 +10233,10 @@ RealisticRenderSettings GLCanvas3D::_render_settings() const
 
 bool GLCanvas3D::_is_realistic_view_enabled() const
 {
-    if (!_render_settings().realistic)
-        return false;
-    // Edge: Orca switches the realistic view off in the app config while the seam, support or fuzzy
-    // skin painting gizmo is open and back on when it closes. Here it is just not applied then, so
-    // the setting is never rewritten behind the user's back (nor left off by a crash mid-gizmo).
-    const GLGizmosManager::EType gizmo = m_gizmos.get_current_type();
-    return gizmo != GLGizmosManager::Seam && gizmo != GLGizmosManager::FdmSupports && gizmo != GLGizmosManager::FuzzySkin;
+    // Orca #17317: the realistic view stays on while the seam, support or fuzzy skin painting gizmo
+    // is open. (Orca used to switch it off in the app config for the duration; Edge only skipped it
+    // in this check, so the setting was never rewritten. Neither is done any more.)
+    return _render_settings().realistic;
 }
 
 bool GLCanvas3D::_is_realistic_shadows_enabled() const
@@ -10458,13 +10509,31 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
 
             // Showcase S5: during a layer build-up only what is laid casts a shadow.
             GLShaderProgram* caster = shader;
+            bool             caster_clipped = false;
             if (render_settings.has_clip_top()) {
                 if (GLShaderProgram* clip = wxGetApp().get_shader("showcase_shadow_clip"); clip != nullptr)
                     caster = clip;
             }
+            // Orca #16942: clipped as _render_objects() clips the volumes, so a part cut away by
+            // the cut gizmo (or outside the SLA z range) casts no shadow.
+            if (caster == shader) {
+                if (GLShaderProgram* clip = wxGetApp().get_shader("flat_clip"); clip != nullptr) {
+                    caster         = clip;
+                    caster_clipped = true;
+                }
+            }
             caster->start_using();
             caster->set_uniform("projection_matrix", Transform3d(light_proj));
-            if (caster != shader)
+            if (caster_clipped) {
+                GLGizmoBase* current_gizmo = m_gizmos.get_current();
+                const ClippingPlane clipping_plane = (!current_gizmo || current_gizmo->apply_clipping_plane()) ? m_gizmos.get_clipping_plane() :
+                                                                                                                 ClippingPlane::ClipsNothing();
+                caster->set_uniform("clipping_plane", clipping_plane.get_data());
+                if (m_use_clipping_planes)
+                    caster->set_uniform("z_range", std::array<float, 2>{ float(-m_clipping_planes[0].get_data()[3]), float(m_clipping_planes[1].get_data()[3]) });
+                else
+                    caster->set_uniform("z_range", std::array<float, 2>{ -FLT_MAX, FLT_MAX });
+            } else if (caster != shader)
                 caster->set_uniform("clip_z", float(render_settings.clip_top));
             for (GLVolume* volume : m_volumes.volumes) {
                 if (volume == nullptr || !volume->is_active || !volume->printable || volume->is_modifier || volume->is_wipe_tower)
@@ -10472,7 +10541,8 @@ void GLCanvas3D::_render_shadows(const Transform3d& view_matrix, const Transform
                 caster->set_uniform("view_model_matrix", Transform3d(Transform3d(light_view) * volume->world_matrix()));
                 if (caster != shader) {
                     caster->set_uniform("volume_world_matrix", volume->world_matrix());
-                    caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
+                    if (!caster_clipped)
+                        caster->set_uniform("world_normal_matrix", Matrix3d(Matrix3d::Identity()));
                 }
                 volume->model.render();
             }
@@ -11592,14 +11662,21 @@ void GLCanvas3D::_render_gizmos_overlay()
     }
 }
 
+float GLCanvas3D::get_top_toolbar_width() const
+{
+    return m_main_toolbar.get_width() + m_separator_toolbar.get_width() + m_gizmos.get_scaled_total_width() + m_assemble_view_toolbar.get_width();
+}
+
+float GLCanvas3D::get_top_toolbar_height() const
+{
+    return std::max({ (float)m_main_toolbar.get_height(), m_gizmos.get_scaled_total_height(), (float)m_assemble_view_toolbar.get_height() });
+}
+
 int GLCanvas3D::get_main_toolbar_offset() const
 {
     const float cnv_width              = get_canvas_size().get_width();
     const float collapse_toolbar_width = get_collapse_toolbar_width() * 2;
-    const float gizmo_width            = m_gizmos.get_scaled_total_width();
-    const float assemble_width         = m_assemble_view_toolbar.get_width();
-    const float separator_width        = m_separator_toolbar.get_width();
-    const float toolbar_total_width    = m_main_toolbar.get_width() + separator_width + gizmo_width + assemble_width + collapse_toolbar_width;
+    const float toolbar_total_width    = get_top_toolbar_width() + collapse_toolbar_width;
 
     if (cnv_width < toolbar_total_width) {
         return is_collapse_toolbar_on_left() ? collapse_toolbar_width : 0;
@@ -12122,6 +12199,29 @@ void GLCanvas3D::_render_separator_toolbar_left() const
 
     m_separator_toolbar.set_position(top, left);
     m_separator_toolbar.render(*this,GLToolbarItem::SeparatorLine);
+}
+
+// ORCA is mouse over the top toolbar area
+bool GLCanvas3D::_is_mouse_over_top_toolbar(const Vec2d& mouse_pos) const
+{
+    float left, width, height;
+    if (m_canvas_type == ECanvasType::CanvasAssembleView) {
+        if (!m_gizmos.is_enabled() || m_gizmos.get_selectable_icons_cnt() == 0)
+            return false;
+        // same as GLGizmosManager::do_render_overlay()
+        left   = 0.5f * (float)get_canvas_size().get_width() + 0.5f * m_paint_toolbar_width;
+        width  = m_gizmos.get_scaled_total_width();
+        height = m_gizmos.get_scaled_total_height();
+    } else {
+        if (!m_main_toolbar.is_enabled())
+            return false;
+        left   = (float)get_main_toolbar_offset();
+        width  = get_top_toolbar_width();
+        height = get_top_toolbar_height();
+    }
+
+    return left <= (float)mouse_pos.x() && (float)mouse_pos.x() <= left + width &&
+           0.f  <= (float)mouse_pos.y() && (float)mouse_pos.y() <= height;
 }
 
 void GLCanvas3D::_render_collapse_toolbar() const
