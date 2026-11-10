@@ -169,6 +169,23 @@ TEST_CASE("which addresses are LAN addresses", "[SnapmakerProbe]")
     CHECK_FALSE(is_local_address("300.1.1.1"));
 }
 
+TEST_CASE("Snapmaker discovery does not share the download local-suffix list", "[SnapmakerProbe]")
+{
+    // is_local_address gates which Device-tab records may be imported as printers (the Device
+    // tab's ip can hold the cloud broker's MQTT endpoint), and it accepts IP literals first,
+    // so it cannot share a host-suffix list with the download checks. The narrow list is
+    // deliberate: .local and .lan are accepted, ts.net is not. A future "unify the lists"
+    // cleanup that pulled in untrusted::local_host_suffixes() would start accepting tailnet
+    // names here, which is a product question, not a cleanup.
+    CHECK(is_local_address("u1.local"));
+    CHECK(is_local_address("u1.lan"));
+    CHECK_FALSE(is_local_address("u1.ts.net"));
+    // Discovery is the permissive predicate (is_lan_host, which only refuses the cloud), so a
+    // tailnet printer still arrives from mDNS. Only the Device-tab import path above is narrow.
+    // This is the assertion a future "unify the lists" change would break.
+    CHECK(is_lan_host("u1.ts.net"));
+}
+
 static Device dev(const std::string& id, const std::string& name, const std::string& ip, const std::string& by = "discovery")
 {
     Device d;
