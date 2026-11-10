@@ -1361,3 +1361,48 @@ TEST_CASE("Smooth timelapse prints each tower layer's wall once when a layer joi
     slice_precise_z_pair(config, "type1", 10.004, print);
     CHECK(count_joined_layers(print) > 0);
 }
+
+TEST_CASE("The final purge travel lifts before moving even with z_hop_when_prime off", "[WipeTower]")
+{
+    // Snapmaker #1150: z_hop_when_prime gates the lift on a normal tower approach. The final
+    // purge is not a tool change (new_extruder_id < 0), so with that flag off the nozzle used
+    // to travel to the tower at print height. Type2 is the path that still emits the purge.
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({
+        {"wipe_tower_type", "type2"},
+        {"z_hop_when_prime", "0,0"},
+        {"z_hop_types", "Normal Lift,Normal Lift"},
+        {"z_hop", "0.4,0.4"},
+        // travel_to() and retract()'s "lift Z" comments are omitted unless this is on.
+        {"gcode_comments", "1"},
+        {"enable_filament_ramming", "1"},
+    });
+    Print print;
+    Model model;
+    ModelObject *first = model.add_object();
+    first->name        = "cube-a.stl";
+    first->add_volume(mesh(TestMesh::cube_20x20x20));
+    first->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    first->ensure_on_bed();
+    ModelObject *second = model.add_object();
+    second->name        = "cube-b.stl";
+    second->add_volume(mesh(TestMesh::cube_20x20x20));
+    second->add_instance()->set_offset(Vec3d(120., 40., 0.));
+    second->ensure_on_bed();
+    second->volumes.front()->config.set("extruder", 2);
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    print.apply(model, config);
+    print.set_status_silent();
+    REQUIRE(print.has_wipe_tower());
+    const std::string out = gcode(print);
+    REQUIRE_FALSE(out.empty());
+
+    const size_t last_travel = out.rfind("Travel to a Wipe Tower");
+    REQUIRE(last_travel != std::string::npos);
+    // retract() only arms the hop; the dedicated Z move is written on the next travel as
+    // "lift Z" / "normal lift Z", immediately before this comment.
+    const size_t from   = last_travel > 400 ? last_travel - 400 : 0;
+    const std::string window = out.substr(from, last_travel - from);
+    CHECK(window.find("lift Z") != std::string::npos);
+}
