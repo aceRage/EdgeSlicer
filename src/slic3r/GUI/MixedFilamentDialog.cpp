@@ -5,7 +5,11 @@
 #include "MixedGradientSelector.hpp"
 #include "MixedColorMatchPanel.hpp"
 #include "MixedFilamentBadge.hpp"
+#include "MixedSublayerUi.hpp"
+#include "Plater.hpp"
+#include "PartPlate.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/Model.hpp"
 #include "PresetBundle.hpp"
 #include "wxExtensions.hpp"
 #include "Widgets/Label.hpp"
@@ -13,6 +17,7 @@
 #include "Widgets/Button.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/StaticBox.hpp"
+#include "Widgets/CheckBox.hpp"
 
 #include <wx/dcbuffer.h>
 #include <wx/statline.h>
@@ -1118,6 +1123,9 @@ void MixedFilamentDialog::build_ui()
         m_cycle_card->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& evt) { this->SetFocus(); evt.Skip(); });
         scroll_sizer->Add(m_cycle_card, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
     }
+
+    // ======== Card: Sub-layers (mixed color sublayer P2), every mode ========
+    build_sublayer_card(m_scrolled_content, scroll_sizer);
 
     // ======== Card C: Recommended Swatches ========
     {
@@ -2233,6 +2241,7 @@ void MixedFilamentDialog::update_compatibility_warning()
         m_warning_panel->Hide();
         m_btn_confirm->Enable();
     }
+    update_sublayer_card();
     Layout();
 }
 
@@ -3411,6 +3420,194 @@ void MixedFilamentDialog::collect_result()
         break;
     }
     m_result.custom = true;
+}
+
+// ---------------------------------------------------------------------------
+// Sub-layers card (mixed color sublayer P2, design_mixed_color_sublayer.md 3g)
+// ---------------------------------------------------------------------------
+
+static wxString sublayer_method_name(MixedSublayerMethod method)
+{
+    switch (method) {
+    case MixedSublayerMethod::Ratio:     return _L("Ratio");
+    case MixedSublayerMethod::Subdivide: return _L("Subdivide");
+    default: break;
+    }
+    return _L("Cadence");
+}
+
+void MixedFilamentDialog::build_sublayer_card(wxWindow* parent, wxSizer* sizer)
+{
+    // The cost line counts the layers of the tallest object on the plate (none yet: per layer).
+    if (PresetBundle* pb = wxGetApp().preset_bundle; pb != nullptr && wxGetApp().plater() != nullptr) {
+        double height = 0.;
+        if (PartPlate* plate = wxGetApp().plater()->get_partplate_list().get_curr_plate())
+            for (const ModelObject* mo : plate->get_objects_on_this_plate())
+                if (mo != nullptr)
+                    height = std::max(height, mo->max_z());
+        const DynamicPrintConfig& print = pb->prints.get_edited_preset().config;
+        const double layer_height = print.has("layer_height") ? print.opt_float("layer_height") : 0.2;
+        m_sublayer_layers = MixedSublayerUi::estimate_layers(height, layer_height);
+    }
+
+    const wxColour card_bg = StateColor::darkModeColorFor(wxColour("#FFFFFF"));
+    m_sublayer_card = new StaticBox(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    m_sublayer_card->SetCornerRadius(FromDIP(4));
+    m_sublayer_card->SetMinSize(wxSize(FromDIP(325), -1));
+    m_sublayer_card->SetMaxSize(wxSize(FromDIP(325), -1));
+    m_sublayer_card->SetBackgroundColor(StateColor(std::pair(wxColour("#FFFFFF"), (int)StateColor::Normal)));
+    m_sublayer_card->SetBorderWidth(FromDIP(1));
+    m_sublayer_card->SetBorderColorNormal(wxColour("#F0F0F0"));
+    auto* card_sizer = new wxBoxSizer(wxVERTICAL);
+
+    auto* title = new wxStaticText(m_sublayer_card, wxID_ANY, _L("Sub-layers"));
+    title->SetFont(Label::Body_14);
+    title->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+    title->SetBackgroundColour(card_bg);
+    card_sizer->Add(title, 0, wxTOP | wxLEFT | wxRIGHT, FromDIP(16));
+    card_sizer->AddSpacer(FromDIP(12));
+
+    // Method: Auto (what the process gives) / Cadence / Subdivide / Ratio = MixedFilament::sublayer_method.
+    auto* method_row = new wxBoxSizer(wxHORIZONTAL);
+    auto* method_label = new wxStaticText(m_sublayer_card, wxID_ANY, _L("Method"));
+    method_label->SetFont(Label::Body_12);
+    method_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+    method_label->SetBackgroundColour(card_bg);
+    method_row->Add(method_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    m_sublayer_method_combo = new ComboBox(m_sublayer_card, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                                           wxSize(FromDIP(200), FromDIP(30)), 0, nullptr, wxCB_READONLY);
+    m_sublayer_method_combo->SetMinSize(wxSize(-1, FromDIP(30)));
+    m_sublayer_method_combo->SetMaxSize(wxSize(-1, FromDIP(30)));
+    m_sublayer_method_combo->Append(_L("Auto"));
+    m_sublayer_method_combo->Append(_L("Cadence (whole layers)"));
+    m_sublayer_method_combo->Append(_L("Subdivide (thin passes)"));
+    m_sublayer_method_combo->Append(_L("Ratio (one pass per filament)"));
+    m_sublayer_method_combo->SetSelection(MixedSublayerUi::method_to_choice(m_result.sublayer_method));
+    m_sublayer_method_combo->SetToolTip(
+        _L("How this mixed filament splits a layer. Auto follows Process > Color Mixing: \"Mixed color sublayer (Bambu ratio)\" "
+           "gives Ratio, \"Subdivide Mix Layer\" gives Subdivide, neither gives whole layers (a gradient always subdivides)."));
+    m_sublayer_method_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
+        m_result.sublayer_method = MixedSublayerUi::choice_to_method(m_sublayer_method_combo->GetSelection());
+        update_sublayer_card();
+    });
+    method_row->Add(m_sublayer_method_combo, 1, wxALIGN_CENTER_VERTICAL);
+    card_sizer->Add(method_row, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(16));
+
+    // D4: Bambu Studio's fixed order (ascending filament, the higher one on top) instead of alternating.
+    m_sublayer_order_row = new wxPanel(m_sublayer_card, wxID_ANY);
+    m_sublayer_order_row->SetBackgroundColour(card_bg);
+    auto* order_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_sublayer_bs_order = new ::CheckBox(m_sublayer_order_row);
+    m_sublayer_bs_order->SetValue(m_result.sublayer_bs_order);
+    m_sublayer_bs_order->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent& e) {
+        e.Skip();
+        m_result.sublayer_bs_order = m_sublayer_bs_order->GetValue();
+        update_sublayer_card();
+    });
+    order_sizer->Add(m_sublayer_bs_order, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+    auto* order_label = new wxStaticText(m_sublayer_order_row, wxID_ANY, _L("Bambu Studio order (higher filament on top)"));
+    order_label->SetFont(Label::Body_12);
+    order_label->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#242424")));
+    order_label->SetBackgroundColour(card_bg);
+    order_label->SetToolTip(_L("Off: the filament that ended a layer starts the next one, which saves a tool change per layer. "
+                               "On: every layer prints in ascending filament order, so the top colour never changes. "
+                               "Exposed top surfaces always use this order."));
+    order_sizer->Add(order_label, 0, wxALIGN_CENTER_VERTICAL);
+    m_sublayer_order_row->SetSizer(order_sizer);
+    card_sizer->Add(m_sublayer_order_row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+
+    auto make_text = [this, card_bg](const char* colour) {
+        auto* text = new Label(m_sublayer_card, Label::Body_12, wxEmptyString, LB_AUTO_WRAP);
+        text->SetForegroundColour(StateColor::darkModeColorFor(wxColour(colour)));
+        text->SetBackgroundColour(card_bg);
+        text->SetMinSize(wxSize(FromDIP(293), -1));
+        text->SetMaxSize(wxSize(FromDIP(293), -1));
+        return text;
+    };
+    m_sublayer_info   = make_text("#8F8F8F");
+    m_sublayer_cost   = make_text("#242424");
+    m_sublayer_broken = make_text("#D32F2F");
+    m_sublayer_broken->Hide();
+    card_sizer->Add(m_sublayer_info, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+    card_sizer->Add(m_sublayer_cost, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+    card_sizer->Add(m_sublayer_broken, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(16));
+    card_sizer->AddSpacer(FromDIP(16));
+
+    m_sublayer_card->SetSizer(card_sizer);
+    m_sublayer_card->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& evt) { this->SetFocus(); evt.Skip(); });
+    sizer->Add(m_sublayer_card, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(16));
+}
+
+Slic3r::MixedFilament MixedFilamentDialog::preview_result()
+{
+    const Slic3r::MixedFilament saved = m_result;
+    collect_result();
+    Slic3r::MixedFilament out = m_result;
+    m_result = saved;
+    return out;
+}
+
+void MixedFilamentDialog::update_sublayer_card()
+{
+    if (m_sublayer_card == nullptr || m_sublayer_method_combo == nullptr || m_btn_confirm == nullptr)
+        return;
+    PresetBundle* pb = wxGetApp().preset_bundle;
+    if (pb == nullptr)
+        return;
+    const size_t                           n        = m_filament_colours.size();
+    const Slic3r::MixedFilament            row      = preview_result();
+    const MixedSublayerUi::ProcessDefaults defaults = MixedSublayerUi::process_defaults(*pb);
+    Slic3r::MixedFilament                  as_auto  = row;
+    as_auto.sublayer_method = int(MixedSublayerMethod::Auto);
+
+    m_sublayer_method_combo->SetString(0, wxString::Format(_L("Auto (%s)"), sublayer_method_name(MixedSublayerUi::effective_method(as_auto, defaults))));
+    const int choice = MixedSublayerUi::method_to_choice(row.sublayer_method);
+    if (m_sublayer_method_combo->GetSelection() != choice)
+        m_sublayer_method_combo->SetSelection(choice);
+
+    const MixedSublayerMethod method = MixedSublayerUi::effective_method(row, defaults);
+    const bool                ratio  = method == MixedSublayerMethod::Ratio;
+    m_sublayer_order_row->Show(ratio);
+    if (m_sublayer_bs_order->GetValue() != row.sublayer_bs_order)
+        m_sublayer_bs_order->SetValue(row.sublayer_bs_order);
+
+    wxString info;
+    if (!MixedSublayerUi::row_can_sublayer(row))
+        info = _L("Cycle patterns keep their own order and print whole layers.");
+    else if (ratio)
+        info = _L("Each layer prints once per filament, each pass as thick as that filament's share of the mix. The first layer "
+                  "prints whole. Every pass is a tool change.");
+    else if (method == MixedSublayerMethod::Subdivide)
+        info = _L("Each layer prints in thin passes within the mixed filament height bounds (Subdivide Mix Layer).");
+    else
+        info = _L("The filaments alternate whole layers.");
+    m_sublayer_info->SetLabel(info);
+
+    wxString cost;
+    if (ratio) {
+        const MixedSublayerUi::CostLineTemplates templates { _u8L("About %1% tool changes, %2% g flush"), _u8L("About %1% tool changes"),
+                                                             _u8L("About %1% tool changes and %2% g flush per layer"),
+                                                             _u8L("About %1% tool changes per layer") };
+        cost = from_u8(MixedSublayerUi::format_cost_line(
+            MixedSublayerUi::estimate_cost(MixedSublayerUi::cost_input(*pb, row, n, m_sublayer_layers)), templates));
+    }
+    m_sublayer_cost->SetLabel(cost);
+    m_sublayer_cost->Show(!cost.empty());
+
+    const MixedDiameterMismatch broken =
+        MixedSublayerUi::broken_ratio_row(row, defaults, n, MixedSublayerUi::nozzle_by_filament(*pb, n));
+    if (broken.mismatch())
+        m_sublayer_broken->SetLabel(wxString::Format(_L("Broken: filament %u (%.2f mm nozzle) and filament %u (%.2f mm nozzle) cannot be "
+                                                        "printed as mixed color sublayers. Use filaments on the same nozzle diameter, or "
+                                                        "choose another sub-layer method."),
+                                                     broken.filament_a, broken.diameter_a, broken.filament_b, broken.diameter_b));
+    m_sublayer_broken->Show(broken.mismatch());
+
+    m_sublayer_card->Layout();
+    if (m_scrolled_content) {
+        m_scrolled_content->Layout();
+        m_scrolled_content->FitInside();
+    }
 }
 
 void MixedFilamentDialog::on_dpi_changed(const wxRect& /*suggested_rect*/)

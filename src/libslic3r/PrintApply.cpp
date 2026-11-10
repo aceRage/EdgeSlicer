@@ -1609,6 +1609,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Ensure newly introduced dithering keys are present so in-session updates are detected.
     new_full_config.option("dithering_z_step_size", true);
     new_full_config.option("dithering_local_z_mode", true);
+    new_full_config.option("enable_mixed_color_sublayer", true);
     new_full_config.option("dithering_local_z_whole_objects", true);
     new_full_config.option("dithering_local_z_infill", true);
     new_full_config.option("dithering_local_z_direct_multicolor", true);
@@ -1625,6 +1626,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("mixed_filament_definitions", true);
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
+    m_config.option("enable_mixed_color_sublayer", true);
     m_config.option("dithering_local_z_whole_objects", true);
     m_config.option("dithering_local_z_infill", true);
     m_config.option("dithering_local_z_direct_multicolor", true);
@@ -1641,6 +1643,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("mixed_filament_definitions", true);
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
+    m_default_object_config.option("enable_mixed_color_sublayer", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
     m_default_object_config.option("dithering_local_z_infill", true);
     m_default_object_config.option("dithering_local_z_direct_multicolor", true);

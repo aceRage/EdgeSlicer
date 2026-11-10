@@ -70,7 +70,11 @@ void OAuthJob::process(Ctl& ctl)
             OAuthResult r;
             // Request the access token from the authorization server.
             auto http = Http::post(_data.params.token_url);
-            http.timeout_connect(5)
+            // The body holds the authorization code and the PKCE verifier, so a redirect
+            // would hand both to whatever host the response names. Http sets
+            // CURLOPT_POSTREDIR = CURL_REDIR_POST_ALL, so following would replay the POST.
+            http.follow_redirects(false)
+                .timeout_connect(5)
                 .timeout_max(5)
                 .form_add("client_id", _data.params.client_id)
                 .form_add("redirect_uri", _data.params.callback_url)

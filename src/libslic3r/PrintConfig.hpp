@@ -2502,6 +2502,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
+    ((ConfigOptionBool,               enable_mixed_color_sublayer))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))
     ((ConfigOptionBool,               dithering_local_z_infill))
     ((ConfigOptionBool,               dithering_local_z_direct_multicolor))

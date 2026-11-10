@@ -171,6 +171,11 @@ enum class NotificationType
     // EdgeSlicer: a Bambu LAN printer keeps refusing its saved access code (LanAccessCodeWatch.hpp);
     // the hyperlink opens the printer's name / access code dialog. Closed when the code works again.
     LanAccessCodeRejected,
+    // EdgeSlicer: mixed color sublayer P2. An object prints mixed color sublayers (Ratio rows) on a variable layer
+    // height profile (post-slice, Bambu Studio's BBLMixedSublayerVariableLayerHeight). Appended.
+    MixedSublayerVariableLayerHeight,
+    // EdgeSlicer: a Bambu Studio project's mixed filament slots were converted to mixed rows on open. Appended.
+    MixedSublayerBambuImport,
 };
 
 class NotificationManager

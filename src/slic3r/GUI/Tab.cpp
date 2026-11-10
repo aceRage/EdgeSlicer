@@ -2,6 +2,7 @@
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
 #include "BambuSetupNoticeDialog.hpp"
+#include "MixedSublayerUi.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -3039,6 +3040,9 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     const bool refresh_mixed_filament_panel =
         (m_type == Preset::TYPE_PRINT && opt_key == "mixed_filament_component_bias_enabled") ||
+        // Mixed color sublayer P2: the sidebar's sub-layer badges and broken-row marks follow the two process
+        // defaults (refreshed below, after dithering_local_z_mode reached project_config).
+        (m_type == Preset::TYPE_PRINT && (opt_key == "enable_mixed_color_sublayer" || opt_key == "dithering_local_z_mode")) ||
         (m_type == Preset::TYPE_FILAMENT && opt_key == "filament_type");
 
     // Keep Mixed Filaments global settings in sync with project_config. In
@@ -3982,6 +3986,20 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Color Mixing (Experimental)"), L"param_mixed_color");
         optgroup->append_single_option_line("dithering_local_z_mode");
+        {
+            // Mixed color sublayer P2 (design_mixed_color_sublayer.md 3g): Bambu Studio's toggle (Quality > Layer height
+            // there), kept in one place only, next to Subdivide Mix Layer. It is the default for mixed rows whose
+            // sub-layer method is Auto; the row's own method (Edit Mix > Sub-layers) wins.
+            Option sublayer = optgroup->get_option("enable_mixed_color_sublayer");
+            sublayer.opt.label   = L("Mixed color sublayer (Bambu ratio)");
+            sublayer.opt.tooltip = L("Print every layer of a mixed filament once per filament: Ratio makes one pass per colour, "
+                                     "each as thick as that colour's share of the mix (Bambu Studio's mixed color sublayer). "
+                                     "Subdivide Mix Layer instead prints thin passes clamped to the mixed filament height bounds.\n\n"
+                                     "This is the default for mixed filaments whose sub-layer method is Auto. Subdivide Mix Layer "
+                                     "takes precedence when both are enabled. On a single-nozzle printer every pass is a filament "
+                                     "change with a flush.");
+            optgroup->append_single_option_line(sublayer);
+        }
         optgroup->append_single_option_line("dithering_local_z_whole_objects");
         optgroup->append_single_option_line("dithering_local_z_infill");
 
@@ -4800,6 +4818,12 @@ void TabPrint::toggle_options()
         // (Edge: the U1 takes its three plates).
         toggle_option("curr_bed_type", PlateBedTypes::supports_bed_type_choice(PlateBedTypes::allowed_bed_types(
                                            m_preset_bundle->printers.get_edited_preset().config, m_preset_bundle->is_bbl_vendor())));
+        // Mixed color sublayer P2 (Bambu Studio TabPrintPlate::update_mixed_filament_seq_state, Tab.cpp:4227): a Ratio
+        // row orders its own passes inside every layer, so the plate's first / other layer sequences are locked while
+        // any mixed row prints as Ratio.
+        const bool ratio_rows = MixedSublayerUi::any_ratio_row(m_preset_bundle->mixed_filaments, MixedSublayerUi::process_defaults(*m_preset_bundle));
+        toggle_option("first_layer_sequence_choice", !ratio_rows);
+        toggle_option("other_layers_sequence_choice", !ratio_rows);
     }
 
     Field *field = m_active_page->get_field("support_style");
