@@ -597,15 +597,8 @@ BambuMixedImportResult convert_bambu_mixed_slots(DynamicPrintConfig &config, con
             mixsub_keep_vector_entries(*vec, keep);
         } else if (self_size > 0 && size == self_size && mixsub_is_per_filament_key(key)) {
             mixsub_keep_vector_entries(*vec, keep_by_self);
-        } else if (size > n && size % n == 0 && mixsub_is_per_filament_key(key)) {
-            // g consecutive entries per filament.
-            const size_t        g = size / n;
-            std::vector<size_t> keep_groups;
-            for (size_t s : physical_slots)
-                for (size_t j = 0; j < g; ++j)
-                    keep_groups.push_back(s * g + j);
-            mixsub_keep_vector_entries(*vec, keep_groups);
         }
+        // Other per-variant arrays are left alone without a valid filament_self_index to name their filaments.
     }
     // filament_self_index names filaments by their 1-based id: renumber it to the new physical ids.
     if (auto *self = config.option<ConfigOptionInts>("filament_self_index"))
@@ -689,7 +682,18 @@ BambuMixedExport expand_bambu_mixed_slots(DynamicPrintConfig &config, unsigned i
             return BambuMixedExport();
         }
         const MixedFilament &row = mgr.mixed_filaments()[idx];
-        mixed.push_back({ &row, row.component_a >= 1 && row.component_a <= n ? row.component_a : 1u });
+        // A row Bambu Studio cannot take (a damaged two-colour row, or fewer than two usable components) ends the
+        // export of mixed slots: the rows after it would land on the wrong slot ids.
+        const bool multi = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, n).size() >= 3;
+        const bool valid = multi ? mixed_ratio_components(row, n).size() >= 2
+                                 : (row.component_a >= 1 && row.component_a <= n && row.component_b >= 1 && row.component_b <= n &&
+                                    row.component_a != row.component_b);
+        if (!valid) {
+            out.notes.push_back("mixed filament " + std::to_string(vid) +
+                                " has no valid filament pair; it and the mixed filaments after it are not written");
+            break;
+        }
+        mixed.push_back({ &row, row.component_a });
     }
     if (mixed.empty())
         return out;
@@ -717,14 +721,11 @@ BambuMixedExport expand_bambu_mixed_slots(DynamicPrintConfig &config, unsigned i
         std::vector<unsigned int> ids = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, n);
         std::string               components, ratios;
         if (ids.size() >= 3) {
-            std::vector<double> weights;
-            for (const MixedRatioComponent &c : mixed_ratio_components(row, n))
-                weights.push_back(c.ratio);
-            if (weights.size() != ids.size())
-                weights.assign(ids.size(), 1. / double(ids.size()));
-            for (size_t i = 0; i < ids.size(); ++i) {
-                components += (i ? "," : "") + std::to_string(ids[i]);
-                ratios += (i ? "," : "") + mixsub_format_share(weights[i]);
+            // The components as the planner sees them: repeated ids merged, zero shares dropped.
+            const std::vector<MixedRatioComponent> comps = mixed_ratio_components(row, n);
+            for (size_t i = 0; i < comps.size(); ++i) {
+                components += (i ? "," : "") + std::to_string(comps[i].extruder);
+                ratios += (i ? "," : "") + mixsub_format_share(comps[i].ratio);
             }
         } else {
             const int mix_b = std::clamp(row.mix_b_percent, 0, 100);

@@ -886,6 +886,11 @@ static unsigned int bambu_mixed_max_used_filament_id(const Model &model, const D
         for (const auto &range : object->layer_config_ranges)
             from_config(range.second.get());
     }
+    // Per-plate custom G-code: a tool change can name a mixed filament.
+    for (const auto &plate : model.plates_custom_gcodes)
+        for (const CustomGCode::Item &item : plate.second.gcodes)
+            if (item.type == CustomGCode::ToolChange && item.extruder > 0)
+                max_id = std::max(max_id, unsigned(item.extruder));
     return max_id;
 }
 
@@ -7324,10 +7329,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             BambuMixedExport                    mixed;
             if (const auto *defs = store_params.config->option<ConfigOptionString>("mixed_filament_definitions");
                 defs != nullptr && !defs->value.empty() && store_params.model != nullptr) {
+                const unsigned int max_used = bambu_mixed_max_used_filament_id(*store_params.model, *store_params.config);
                 expanded = std::make_unique<DynamicPrintConfig>(*store_params.config);
-                mixed    = expand_bambu_mixed_slots(*expanded, bambu_mixed_max_used_filament_id(*store_params.model, *store_params.config));
-                if (!mixed.any)
+                mixed    = expand_bambu_mixed_slots(*expanded, max_used);
+                if (!mixed.any) {
                     expanded.reset();
+                    const auto *colours = store_params.config->option<ConfigOptionStrings>("filament_colour");
+                    if (colours != nullptr && max_used > colours->values.size())
+                        m_bambu_report.notes.push_back("project: filament " + std::to_string(max_used) +
+                                                       " is a mixed filament that could not be written as a Bambu Studio slot");
+                    for (const std::string &note : mixed.notes)
+                        m_bambu_report.notes.push_back("project: " + note);
+                }
             }
             const DynamicPrintConfig &project = expanded ? *expanded : *store_params.config;
             m_bambu_ctx     = BambuExport::Context::from_project(project);
@@ -7362,6 +7375,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                                " EdgeSlicer mixed filament(s) written as Bambu Studio mixed filament slots");
                 for (const std::string &note : mixed.notes)
                     m_bambu_report.notes.push_back("project: " + note);
+                // Bambu Studio's AMS layouts take at most 16 filaments on most printers; the slots are still written.
+                if (mixed.physical_count + mixed.mixed_count > 16)
+                    m_bambu_report.notes.push_back("project: " + std::to_string(mixed.physical_count + mixed.mixed_count) +
+                                                   " filaments including mixed slots; Bambu Studio may not load more than 16");
             }
             if (m_bambu_multi_diameter) {
                 BambuExport::Value mode;
