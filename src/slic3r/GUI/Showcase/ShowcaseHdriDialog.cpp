@@ -187,6 +187,12 @@ void ShowcaseHdriDialog::on_download(const Showcase::HdriInfo &hdri)
     auto state = std::make_shared<State>();
     BOOST_LOG_TRIVIAL(info) << "Showcase: downloading the HDRI " << hdri.id << " from " << url;
     Http::Ptr request = Http::get(url)
+                            // The catalogue names the file, the mirror serves it, and the mirror is
+                            // whatever EDGESLICER_HDRI_MIRROR (a local mock, a staging mirror) or the
+                            // built-in URL says. Capping only the redirects leaves a plain-http
+                            // mirror's own request alone while refusing to be sent off to http or
+                            // into this machine's network from there.
+                            .restrict_redirects(10)
                             .clear_headers()
                             .header("User-Agent", "EdgeSlicer")
                             .tls_policy(Http::TlsPolicy::Verify)

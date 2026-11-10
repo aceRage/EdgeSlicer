@@ -233,6 +233,17 @@ bool host_is_or_under(const std::string &host, const std::string &domain)
     return h.size() > d.size() + 1 && h.compare(h.size() - d.size(), d.size(), d) == 0 && h[h.size() - d.size() - 1] == '.';
 }
 
+const std::vector<std::string> &local_host_suffixes()
+{
+    // localhost / *.local / *.lan / *.home / *.internal / *.intranet / *.localdomain /
+    // *.home.arpa / *.ts.net (Tailscale MagicDNS). "home" is a consumer suffix, distinct
+    // from "home.arpa".
+    static const std::vector<std::string> suffixes = {
+        "localhost", "local", "lan", "home", "internal", "intranet", "localdomain", "home.arpa", "ts.net",
+    };
+    return suffixes;
+}
+
 bool is_local_or_ip_host(const std::string &host_in)
 {
     const std::string host = to_lower(host_in);
@@ -242,7 +253,7 @@ bool is_local_or_ip_host(const std::string &host_in)
         return true; // any IPv6 literal
     if (looks_like_ipv4(host))
         return true;
-    for (const char *local : {"localhost", "local", "lan", "home.arpa", "internal", "intranet", "localdomain"})
+    for (const std::string &local : local_host_suffixes())
         if (host_is_or_under(host, local))
             return true;
     return host.find('.') == std::string::npos; // single-label names resolve on the LAN
@@ -445,7 +456,7 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
         return r;
     }
     if (is_local_or_ip_host(u.host)) {
-        r.reason = "the file is on this computer or the local network, not on a model site";
+        r.reason = "the file is on this computer or a private network, not on a model site";
         return r;
     }
     // Model type: the last path segment must carry a model extension, unless the URL has none at
@@ -476,6 +487,26 @@ DownloadCheck check_model_download(const std::string &file_url, const std::strin
     r.verdict = DownloadVerdict::Ask;
     r.reason  = u.host + " is not one of the model sites EdgeSlicer knows";
     return r;
+}
+
+std::string redirect_target_refusal(const std::string &url)
+{
+    Url u;
+    if (!parse_url(url, u))
+        return "where the download was redirected to is not a valid web address";
+    if (u.scheme != "https")
+        return "the download was redirected to " + u.scheme + ":, which is not secure";
+    if (u.has_userinfo)
+        return "the download was redirected to an address that hides its real host behind a user name";
+    if (is_local_or_ip_host(u.host)) {
+        // This also covers a public IP literal, which is refused for a different reason: a Location
+        // header has no business naming an address instead of a host name, and that is exactly how a
+        // redirect gets bounced past a check that only reads names. Say which of the two it was.
+        if (u.host.front() == '[' || looks_like_ipv4(u.host))
+            return "the download was redirected to the IP address " + u.host + ", not a host name";
+        return "the download was redirected to " + u.host + ", which is on this computer or a private network";
+    }
+    return std::string();
 }
 
 std::string sanitize_download_filename(const std::string &name_in)

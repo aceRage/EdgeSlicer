@@ -1,3 +1,4 @@
+#include "FilamentGroupUtils.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
@@ -852,6 +853,55 @@ static bool solid_infill_filament_is_image_row(const MixedFilamentManager &mixed
            ! mf->image_fill_ref.empty();
 }
 
+// Whether the sparse infill filament of a region was chosen explicitly rather than left at Default.
+// The resolved region config cannot tell: it clamps Default to filament 1. This follows the override
+// precedence of region_config_from_model_volume(): print default, object, part, material, layer range;
+// Default (0) clears an earlier choice. A modifier inherits the choice of its parent region unless it
+// sets its own.
+// Edge's print-level PrintRegionConfig default is filament 1 (Orca's sparse_infill_filament_id uses
+// 0 for Default), so a process value of 1 is not treated as an explicit pick.
+// Edge's apply_to_print_region_config() also lets an object/part/modifier filament ("extruder" != 0)
+// replace the sparse infill filament before that config's own feature keys are applied (Orca keeps an
+// explicit feature filament over the base extruder instead). So an "extruder" clears an earlier
+// explicit choice here too; otherwise a process choice would keep the object's filament, which is
+// neither the choice nor the paint.
+static bool has_explicit_sparse_infill_filament(const PrintObjectRegions::LayerRangeRegions &layer_range, int region_id,
+                                               const PrintRegionConfig &default_region_config)
+{
+    static constexpr const char *key = "sparse_infill_filament";
+    const auto sets_base_filament = [](const DynamicPrintConfig &config) {
+        const auto *extruder = config.opt<ConfigOptionInt>("extruder");
+        return extruder != nullptr && extruder->value != 0;
+    };
+    while (region_id >= 0) {
+        const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[region_id];
+        const ModelVolume &volume = *region.model_volume;
+        if (volume.is_model_part()) {
+            bool explicit_choice = default_region_config.sparse_infill_filament.value > 1;
+            const auto apply = [&explicit_choice, &sets_base_filament](const DynamicPrintConfig *config) {
+                if (config == nullptr)
+                    return;
+                if (sets_base_filament(*config))
+                    explicit_choice = false;
+                if (const auto *choice = config->opt<ConfigOptionInt>(key))
+                    explicit_choice = choice->value > 0;
+            };
+            apply(&volume.get_object()->config.get());
+            apply(&volume.config.get());
+            if (! volume.material_id().empty())
+                apply(&volume.material()->config.get());
+            apply(layer_range.config);
+            return explicit_choice;
+        }
+        if (const auto *choice = volume.config.get().opt<ConfigOptionInt>(key))
+            return choice->value > 0;
+        if (sets_base_filament(volume.config.get()))
+            return false;
+        region_id = region.parent;
+    }
+    return false;
+}
+
 // Verify whether the PrintRegions of a PrintObject are still valid, possibly after updating the region configs.
 // Before region configs are updated, callback_invalidate() is called to possibly stop background processing.
 // Returns false if this object needs to be resliced because regions were merged or split.
@@ -964,7 +1014,8 @@ bool verify_update_print_object_regions(
                 cfg.solid_infill_filament.value = region.extruder_id;
             // Paint Depth Stage 2 (Task 3 item 2): mirrors generate_print_object_regions() -
             // sparse infill only follows the painted claim when paint_sparse_infill is active.
-            if (paint_sparse_infill)
+            // Orca #17314: an explicitly chosen sparse infill filament is kept; painting then only colors the surfaces.
+            if (paint_sparse_infill && !has_explicit_sparse_infill_filament(layer_range, region.parent, default_region_config))
                 cfg.sparse_infill_filament.value = region.extruder_id;
             if (cfg != region.region->config()) {
                 // Region configuration changed.
@@ -1309,9 +1360,12 @@ static PrintObjectRegions* generate_print_object_regions(
                     // whatever cfg already inherited from the parent (base) region above -
                     // walls and solid infill (which can be visible on top surfaces) always
                     // stay painted regardless.
+                    // Orca #17314: keep an explicit sparse infill filament even when paint_sparse_infill is on.
+                    const bool paint_this_sparse = paint_sparse_infill &&
+                        !has_explicit_sparse_infill_filament(layer_range, parent_region_id, default_region_config);
                     const unsigned int expected_sparse_infill_filament =
-                        paint_sparse_infill ? painted_extruder_id : cfg.sparse_infill_filament.value;
-                    if (paint_sparse_infill)
+                        paint_this_sparse ? painted_extruder_id : cfg.sparse_infill_filament.value;
+                    if (paint_this_sparse)
                         cfg.sparse_infill_filament.value = painted_extruder_id;
                     // Keep PrintRegion config-interned. If a painted target resolves to the same
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
@@ -1542,6 +1596,32 @@ void Print::update_shrinkage_compensation(size_t num_extruders)
         set_compensation(extruders.front());
 }
 
+bool Print::install_pending_extruder_filament_info_unguarded()
+{
+    if (!m_extruder_filament_info_pending)
+        return false;
+    bool invalidated = false;
+    if (FilamentGroupUtils::machine_filaments_changed(m_extruder_filament_info, m_pending_extruder_filament_info)) {
+        // Both steps are attempted on purpose, and the result is true only when one was actually
+        // taken back, so a print that is already invalid stays unchanged.
+        const bool wipe_tower_invalidated = this->invalidate_step(psWipeTower);
+        const bool skirt_brim_invalidated = this->invalidate_step(psSkirtBrim);
+        invalidated = wipe_tower_invalidated || skirt_brim_invalidated;
+        if (invalidated)
+            BOOST_LOG_TRIVIAL(warning) << "Print: plate " << m_plate_index + 1 << " filament grouping invalidated: the printer's loaded filaments changed";
+    }
+    m_extruder_filament_info         = std::move(m_pending_extruder_filament_info);
+    m_pending_extruder_filament_info = {};
+    m_extruder_filament_info_pending = false;
+    return invalidated;
+}
+
+bool Print::install_pending_extruder_filament_info()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return this->install_pending_extruder_filament_info_unguarded();
+}
+
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1582,6 +1662,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     // Ensure newly introduced dithering keys are present so in-session updates are detected.
     new_full_config.option("dithering_z_step_size", true);
     new_full_config.option("dithering_local_z_mode", true);
+    new_full_config.option("enable_mixed_color_sublayer", true);
     new_full_config.option("dithering_local_z_whole_objects", true);
     new_full_config.option("dithering_local_z_infill", true);
     new_full_config.option("dithering_local_z_direct_multicolor", true);
@@ -1598,6 +1679,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("mixed_filament_definitions", true);
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
+    m_config.option("enable_mixed_color_sublayer", true);
     m_config.option("dithering_local_z_whole_objects", true);
     m_config.option("dithering_local_z_infill", true);
     m_config.option("dithering_local_z_direct_multicolor", true);
@@ -1614,6 +1696,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("mixed_filament_definitions", true);
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
+    m_default_object_config.option("enable_mixed_color_sublayer", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
     m_default_object_config.option("dithering_local_z_infill", true);
     m_default_object_config.option("dithering_local_z_direct_multicolor", true);
@@ -1724,6 +1807,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 
     // Grab the lock for the Print / PrintObject milestones.
 	std::scoped_lock<std::mutex> lock(this->state_mutex());
+
+    // The device-owned AMS inventory only feeds filament grouping, so a changed payload invalidates
+    // the grouping steps (upstream Orca #17195).
+    if (m_extruder_filament_info_pending && this->install_pending_extruder_filament_info_unguarded())
+        update_apply_status(true);
 
     // The following call may stop the background processing.
     if (! print_diff.empty())

@@ -73,6 +73,18 @@ TEST_CASE("TLS policy: which URLs verify the certificate", "[Http][TlsPolicy]")
         }
     }
 
+    SECTION("a bare suffix apex keeps its certificate checked")
+    {
+        // Pins the F11 fix: the predicate must not match a bare suffix, because matching it would silently skip verification for a public name.
+        CHECK(Http::tls_verify_for("https://ts.net/", Policy::Auto));
+        CHECK(Http::tls_verify_for("https://home.arpa/", Policy::Auto));
+        CHECK_FALSE(Http::tls_verify_for("https://u1.ts.net/", Policy::Auto));
+        CHECK_FALSE(Http::tls_verify_for("https://nas.home.arpa/", Policy::Auto));
+        CHECK_FALSE(Http::tls_host_is_private("ts.net"));
+        CHECK_FALSE(Http::tls_host_is_private("home.arpa"));
+        CHECK(Http::tls_host_is_private("u1.ts.net"));
+    }
+
     SECTION("plain http never verifies; Verify and PrintHost override the host")
     {
         CHECK_FALSE(Http::tls_verify_for("http://api.github.com/", Policy::Auto));

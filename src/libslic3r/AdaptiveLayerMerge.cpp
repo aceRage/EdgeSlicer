@@ -300,6 +300,26 @@ std::vector<AdaptiveLayerBand> build_adaptive_layer_bands(
     return bands;
 }
 
+std::vector<AdaptiveLayerBand> build_adaptive_layer_ladder(
+    const std::vector<double>      &layer_heights,
+    size_t                          band_size,
+    const AdaptiveLayerHeightRange &height_range,
+    const std::vector<uint8_t>     &band_tops)
+{
+    if (layer_heights.size() < 2)
+        return {};
+    // band_tops is handed through as the step-3 planner did (it is relative to the cut stack); it is always
+    // empty on the live path, see compute_adaptive_merge_groups().
+    std::vector<AdaptiveLayerBand> bands =
+        build_adaptive_layer_bands(std::vector<double>(layer_heights.begin() + 1, layer_heights.end()),
+                                   band_size, height_range, band_tops);
+    for (AdaptiveLayerBand &band : bands) {
+        ++ band.bottom_idx;
+        ++ band.top_idx;
+    }
+    return bands;
+}
+
 bool pull_adaptive_band_top_to_material(
     AdaptiveLayerBand                &band,
     const std::vector<double>        &layer_heights,
@@ -454,6 +474,24 @@ AdaptiveLayerHeightRange adaptive_layer_height_range_for_nozzle(const PrintConfi
     narrow(print_config.min_layer_height.values, true);
     narrow(print_config.max_layer_height.values, false);
     return out.min_height <= out.max_height + EPSILON ? out : window;
+}
+
+AdaptiveLayerHeightRange adaptive_ladder_height_range(const AdaptiveLayerHeightRange &clamp, double nozzle_diameter,
+                                                      double min_nozzle_diameter, double base_layer_height)
+{
+    if (adaptive_layer_band_size(nozzle_diameter, min_nozzle_diameter, base_layer_height, clamp) < 2)
+        return clamp;
+    // Two consecutive layer counts inside the window: every run of at least k * (k - 1) layers can be cut.
+    auto tiles = [base_layer_height](const AdaptiveLayerHeightRange &range) {
+        for (size_t k = 1; double(k + 1) * base_layer_height <= range.max_height + EPSILON; ++ k)
+            if (range.contains(double(k) * base_layer_height))
+                return true;
+        return false;
+    };
+    if (tiles(clamp))
+        return clamp;
+    const AdaptiveLayerHeightRange relaxed { clamp.min_height, std::max(clamp.max_height, nozzle_diameter) };
+    return tiles(relaxed) ? relaxed : adaptive_layer_height_range(nozzle_diameter);
 }
 
 } // namespace Slic3r

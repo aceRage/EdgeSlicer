@@ -2,6 +2,7 @@
 
 #include "ToolSlots.hpp"
 
+#include "LocalesUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "NozzleOverride.hpp"
 #include "Preset.hpp"
@@ -13,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <set>
 #include <sstream>
@@ -83,9 +85,10 @@ bool parse_positive_number(const std::string &text, double &out)
 {
     if (text.empty())
         return false;
-    char        *end   = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || *end != '\0' || !(value > 0.) || !std::isfinite(value))
+    // Nozzle diameters are written with a decimal point; strtod reads "0.4" as 0 under a comma locale.
+    size_t       used  = 0;
+    const double value = string_to_double_decimal_point(text, &used);
+    if (used != text.size() || !(value > 0.) || !std::isfinite(value))
         return false;
     out = value;
     return true;
@@ -618,6 +621,28 @@ std::string check_rack_nozzle_diameters(const PrintConfig &config, const MultiNo
     return {};
 }
 
+bool rack_group_mixes_nozzle_diameters(const PrintConfig &config, const MultiNozzleUtils::LayeredNozzleGroupResult &group)
+{
+    if (config.nozzle_diameter.values.size() != 2)
+        return false;
+    for (int extruder = 0; extruder < 2; ++extruder) {
+        if (!extruder_has_nozzle_rack(config, size_t(extruder)))
+            continue;
+        // get_used_nozzles_in_extruder(extruder) covers every layer's mapping, for the filaments the plate uses.
+        std::vector<double> diameters;
+        for (const MultiNozzleUtils::NozzleInfo &nozzle : group.get_used_nozzles_in_extruder(extruder)) {
+            double d = 0.;
+            if (!parse_positive_number(nozzle.diameter, d))
+                continue;
+            if (std::none_of(diameters.begin(), diameters.end(), [d](double o) { return same_nozzle_diameter(o, d); }))
+                diameters.push_back(d);
+        }
+        if (diameters.size() >= 2)
+            return true;
+    }
+    return false;
+}
+
 std::string validate_rack_nozzle_diameters(const PrintConfig &config, const std::vector<unsigned int> &used_filaments)
 {
     const std::vector<std::vector<RackNozzle>> racks = extruder_rack_nozzles(config);
@@ -937,6 +962,40 @@ std::vector<std::string> rack_override_from_reported(const std::vector<std::vect
         std::string text;
         for (double d : mounted_then_rack[e])
             text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(d);
+        out[e] = text;
+    }
+    if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))
+        out.clear();
+    return out;
+}
+
+std::vector<std::string> rack_override_from_reported(const std::vector<std::vector<RackNozzle>> &mounted_then_rack,
+                                                     const std::vector<std::string> &current, const std::vector<int> &extruder_types,
+                                                     const std::vector<int> &capacity)
+{
+    std::vector<std::string> out = current;
+    if (out.size() < mounted_then_rack.size())
+        out.resize(mounted_then_rack.size());
+    for (size_t e = 0; e < mounted_then_rack.size(); ++e) {
+        const int slots = e < capacity.size() ? capacity[e] : std::numeric_limits<int>::max();
+        // One nozzle (or an extruder without a rack) is no rack to choose from: leave the extruder as it was.
+        if (mounted_then_rack[e].size() < 2 || slots < 2)
+            continue;
+        // What an unannotated slot means on this extruder (extruder_rack_nozzles): the extruder's type, Standard for Hybrid.
+        NozzleVolumeType bare = e < extruder_types.size() ? NozzleVolumeType(extruder_types[e]) : nvtStandard;
+        if (bare == nvtHybrid)
+            bare = nvtStandard;
+        std::string text;
+        size_t      written = 0;
+        for (const RackNozzle &n : mounted_then_rack[e]) {
+            if (written == size_t(slots))
+                break; // more nozzles than the printer profile has slots: the rack cannot list them
+            const NozzleVolumeType type = n.volume_given && n.volume_type != nvtHybrid ? n.volume_type : bare;
+            text += (text.empty() ? "" : ",") + format_nozzle_diameter_word(n.diameter);
+            if (type != bare)
+                text += std::string(":") + nozzle_volume_word(type);
+            ++written;
+        }
         out[e] = text;
     }
     if (std::all_of(out.begin(), out.end(), [](const std::string &s) { return s.empty(); }))

@@ -79,6 +79,15 @@ struct LocalZInterval
     size_t sublayer_count { 0 };
 };
 
+struct SubLayerPlan;
+// The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
+bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
+// The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
+// that row has no Ratio pass there. ToolOrdering files the row's layer under it, so the layer's nominal extruder
+// is the one the Ratio passes end with and no extra tool change follows them.
+unsigned int local_z_ratio_last_extruder(const std::vector<LocalZInterval> &intervals, const std::vector<SubLayerPlan> &plans,
+                                         size_t row_idx, double print_z);
+
 struct SubLayerPlan
 {
     size_t layer_id { 0 };
@@ -90,6 +99,11 @@ struct SubLayerPlan
     double flow_height { 0.0 };
     size_t dependency_group { 0 };
     size_t dependency_order { 0 };
+    // Mixed color sublayer (MixedSublayer.hpp): a pass of a Ratio row. Ratio passes cover the whole mixed region,
+    // infill included, and may be the only plan of their layer (a layer whose minor component carried over).
+    bool   ratio_pass { false };
+    // The top pass of its Ratio row on this layer: ironing prints here only, once (D6).
+    bool   ratio_last_pass { false };
     std::vector<ExPolygons> painted_masks_by_extruder;
     std::vector<ExPolygons> fixed_painted_masks_by_extruder;
     ExPolygons              base_masks;
@@ -1225,7 +1239,16 @@ public:
     // empty and the grouper treats every filament as reachable on every nozzle. Setters exist so a later
     // input-population pass can fill them without touching the grouping code.
     const std::vector<std::vector<DynamicPrintConfig>>& get_extruder_filament_info() const { return m_extruder_filament_info; }
-    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& v) { m_extruder_filament_info = v; }
+    // Two-phase (upstream Orca #17195): the setter only stashes the payload; the next apply() installs it and
+    // invalidates the grouping steps when the loaded filaments actually changed.
+    void set_extruder_filament_info(const std::vector<std::vector<DynamicPrintConfig>>& filament_info)
+    {
+        m_pending_extruder_filament_info = filament_info;
+        m_extruder_filament_info_pending = true;
+    }
+    // Edge: Plater sets the live AMS inventory in restart_background_process(), after apply(). This installs
+    // a pending payload there, the way apply() would. True when the grouping steps were taken back.
+    bool install_pending_extruder_filament_info();
     std::unordered_map<int, std::unordered_map<int, double>> get_filament_print_time() const { return m_filament_print_time; }
     void set_filament_print_time(const std::unordered_map<int, std::unordered_map<int, double>>& v) { m_filament_print_time = v; }
     const std::vector<std::set<int>>& get_geometric_unprintable_filaments() const { return m_geometric_unprintable_filaments; }
@@ -1306,6 +1329,10 @@ public:
     // adaptive_band_reference_nozzle() returns the smallest nonzero diameter over the list it is given, so
     // "some filament uses a nozzle larger than D" cannot be true of that list. See the definition for details.
     bool                uses_multiple_nozzle_diameters() const;
+    // The band reference nozzle compute_adaptive_merge_groups() sizes every band against: the smallest nozzle
+    // printing any object's gated walls on this plate. The support merge plan (SupportMergePlan.cpp) asks for it so
+    // its ladders are the ones the walls stack on. 0 when nothing resolves. Defined in PrintObject.cpp.
+    double              adaptive_merge_reference_nozzle() const;
     // The 0-based filament ids the plate prints with, from print regions and object configs only (never from the
     // model volumes, so it is safe inside the parallel slicing steps). Mixed virtual filaments are expanded to
     // their physical components. This plate-wide list feeds the mixed-diameter gate above; the band planner's
@@ -1420,6 +1447,10 @@ public:
     //BBS: export gcode from previous gcode file from 3mf
     void set_gcode_file_ready();
     void set_gcode_file_invalidated();
+    // For the background thread that exported the G-code, when a step that then edits the file in place
+    // (post-processing scripts or plugins) failed and may have left it half edited: the next run exports
+    // the G-code again instead of reusing it.
+    void invalidate_gcode_export_from_worker() { this->invalidate_step_from_worker(psGCodeExport); }
     void export_gcode_from_previous_file(const std::string& file, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
     // Re-reads the moves and line offsets of `result` from its G-code file after the file was rewritten in
     // place (post-processing scripts or plugins), so the preview and its G-code window follow the file on
@@ -1536,6 +1567,11 @@ private:
     std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> m_nozzle_group_result;
     // Ultra (dual-nozzle): grouping inputs (see getters). Empty until an input-population pass fills them.
     std::vector<std::vector<DynamicPrintConfig>>            m_extruder_filament_info;
+    // Payload handed to set_extruder_filament_info(), installed by apply() or install_pending_extruder_filament_info().
+    std::vector<std::vector<DynamicPrintConfig>>            m_pending_extruder_filament_info;
+    bool                                                    m_extruder_filament_info_pending { false };
+    // Installs the pending payload; the state mutex must be held. True when a grouping step was taken back.
+    bool                                                    install_pending_extruder_filament_info_unguarded();
     std::unordered_map<int, std::unordered_map<int, double>> m_filament_print_time;
     std::vector<std::set<int>>                             m_geometric_unprintable_filaments;
     // Ultra (Phase 10): AMS-aware grouping inputs kept out of the print config (see accessors).

@@ -2,7 +2,6 @@
 #include "I18N.hpp"
 #include "ParamsPanel.hpp"
 #include "GUI_App.hpp"
-#include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
 
@@ -70,6 +69,11 @@ ParamsDialog::ParamsDialog(wxWindow * parent)
         }
 #endif
         wxGetApp().sidebar().finish_param_edit();
+        if (m_on_close_once) {
+            std::function<void()> cb = std::move(m_on_close_once);
+            m_on_close_once          = nullptr;
+            wxGetApp().CallAfter(cb);
+        }
     });
 
     //wxGetApp().UpdateDlgDarkUI(this);
@@ -78,9 +82,6 @@ ParamsDialog::ParamsDialog(wxWindow * parent)
 void ParamsDialog::Popup()
 {
     wxGetApp().UpdateDlgDarkUI(this);
-#ifdef __WIN32__
-    Reparent(wxGetApp().mainframe);
-#endif
     Center();
     if (m_panel && m_panel->get_current_tab()) {
         bool just_edit = false;

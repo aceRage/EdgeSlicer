@@ -80,6 +80,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+enum class PresetManagerKind; // libslic3r/PresetManagerModel.hpp
 
 namespace GUI{
 
@@ -897,6 +898,8 @@ public:
     // Makes the theme app_config "ui_theme" names the running look without a restart: colours,
     // corner radii, icons, title bar, 3D view and Home page. Fonts still need one (Theme::fonts_pending()).
     void            apply_theme_live();
+    // Project strip P4: the theme's colour pass for a window made after the main window was themed (a new project's Plater).
+    void            theme_new_window(wxWindow *window);
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
@@ -997,6 +1000,9 @@ public:
     void            open_web_page_localized(const std::string &http_address);
     bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
+    // The Filament manager (the Filaments row gear, "Add/Remove filaments") or the Process manager (the
+    // process row gear). Returns true when the presets were reloaded on the way out.
+    bool            run_preset_manager(PresetManagerKind kind);
     void            show_desktop_integration_dialog();
 
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG

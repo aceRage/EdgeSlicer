@@ -136,6 +136,10 @@ struct ArrangeParams {
     float object_skirt_offset = 0;
     float nozzle_height = 0;
     float printable_height = 256.0;
+    // Orca: how far (scaled) the polygon of a prime tower compacted by "No sparse layers" was grown
+    // past the tower itself, or negative when the tower is not compacted.
+    coord_t compacted_tower_growth = -1;
+    float   clearance_dist_to_rod  = 0;
     Vec2d align_center{ 0.5,0.5 };
 
     ArrangePolygons excluded_regions;   // regions cant't be used
