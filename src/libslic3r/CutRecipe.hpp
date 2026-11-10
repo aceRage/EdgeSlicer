@@ -139,7 +139,9 @@ class ModelObject;
 //     Older readers must refuse the recipe rather than re-cutting TAC as a Plug.
 //  8  TAC Joint attachment to A/B. Older readers must not re-cut an attached
 //     connector as a separate pin. Saved result meshes remain readable.
-static constexpr int CutRecipeVersion = 8;
+//  9  Optional cut-time TAC mesh application. Older builds retain the saved
+//     meshes but must not re-cut them with unapplied socket modifiers.
+static constexpr int CutRecipeVersion = 9;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -386,6 +388,7 @@ struct CutRecipe
     bool keep_upper{ true };
     bool keep_lower{ true };
     bool keep_as_parts{ false };
+    bool apply_tac_joints{false};
     bool place_on_cut_upper{ true };
     bool place_on_cut_lower{ false };
     bool rotate_upper{ false };
@@ -452,6 +455,7 @@ struct CutRecipe
         ar(thickness);
         ar(keep_upper, keep_lower, keep_as_parts, place_on_cut_upper, place_on_cut_lower,
            rotate_upper, rotate_lower);
+        ar(apply_tac_joints);
         ar(upper_visibility, lower_visibility);
         ar(connectors);
         ar(mesh, mesh_hash);
