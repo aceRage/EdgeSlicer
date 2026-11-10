@@ -1135,7 +1135,7 @@ TEST_CASE("Tower consumption is classified separately for each printer kind", "[
 // every off-grid layer has a wipe tower and join_layer can fire. A second apply after the volume
 // filament stamp is what keeps enable_prime_tower: the first apply from init_print still sees one
 // volume extruder and normalize_fdm_2 would otherwise clear it.
-static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *tower_type, double short_height, Print &print)
+static std::string slice_precise_z_objects(DynamicPrintConfig config, const char *tower_type, const std::vector<double> &heights, Print &print)
 {
     config.set_deserialize_strict({
         {"precise_z_height", "1"},
@@ -1152,7 +1152,10 @@ static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *t
     });
     const bool is_bbl = std::string(tower_type) == "type1";
     Model model;
-    init_print({make_cube(20., 20., 20.), make_cube(20., 20., short_height)}, print, model, config);
+    std::vector<TriangleMesh> meshes;
+    for (double height : heights)
+        meshes.emplace_back(TriangleMesh(make_cube(20., 20., height)));
+    init_print(std::move(meshes), print, model, config);
     set_both_filaments(model);
     print.is_BBL_printer() = is_bbl;
     print.apply(model, config);
@@ -1161,6 +1164,11 @@ static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *t
     REQUIRE_NOTHROW(out = gcode(print));
     CHECK_FALSE(out.empty());
     return out;
+}
+
+static std::string slice_precise_z_pair(DynamicPrintConfig config, const char *tower_type, double short_height, Print &print)
+{
+    return slice_precise_z_objects(std::move(config), tower_type, {20., short_height}, print);
 }
 
 static std::vector<double> tower_extrusion_z(const std::string &gcode)
@@ -1236,6 +1244,32 @@ TEST_CASE("A layer less than the minimum layer height above another prints its t
     });
     CHECK(descents > 0);
     CHECK(off_tower == 0);
+}
+
+TEST_CASE("A run of joined layers never spans more than the minimum layer height", "[WipeTower]")
+{
+    // Three cubes with precise Z height: near the top the 10.05 and 10.1 mm cubes' layers sit 0.04 to
+    // 0.05 mm apart, each under the 0.07 mm minimum but together over it. Measuring each gap from the
+    // layer just below instead of from the tower layer chained them all onto one tower layer, and the
+    // next tower layer came out up to a whole layer too thick. The gap counts from the tower layer.
+    const char *tower_type = GENERATE("type1", "type2");
+    CAPTURE(tower_type);
+    DynamicPrintConfig config = wipe_tower_prime_config();
+    config.set_deserialize_strict({{"min_layer_height", "0.07"}, {"layer_height", "0.2"}, {"initial_layer_print_height", "0.2"}});
+
+    Print print;
+    slice_precise_z_objects(config, tower_type, {20., 10.05, 10.1}, print);
+
+    CHECK(count_joined_layers(print) > 0);
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering) {
+        if (lt.joins_wipe_tower_layer_below()) {
+            INFO("joined layer at " << lt.print_z << " onto the tower layer at " << lt.wipe_tower_print_z);
+            CHECK(lt.print_z - lt.wipe_tower_print_z < 0.07);
+        } else if (lt.has_wipe_tower) {
+            INFO("tower layer at " << lt.print_z);
+            CHECK(lt.wipe_tower_layer_height < 0.2 + 0.07);
+        }
+    }
 }
 
 TEST_CASE("Layers sliced at the printer's minimum layer height keep their own tower layers", "[WipeTower]")
