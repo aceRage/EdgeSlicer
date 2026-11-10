@@ -32,6 +32,8 @@
 #include "MsgDialog.hpp"
 #include "Gizmos/GizmoObjectManipulation.hpp"
 #include "CostsDialog.hpp"
+#include "MixedSublayerUi.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/CostOverrides.hpp"
 #include "libslic3r/Support/SupportOverhangHighlight.hpp"
 
@@ -4862,6 +4864,66 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 columns_offsets.push_back({ buf, color_print_offsets[_u8L("Total")] });
             }
             append_item(EItemType::None, tool_colors.empty() ? ColorRGBA::GRAY() : libvgcode::convert(tool_colors[0]), columns_offsets);
+        }
+
+        // Mixed color sublayer P2 (design_mixed_color_sublayer.md 3g): the mixed filaments the plate's objects use, each
+        // as a blended chip with its sub-layer method, then its component filaments as chips with their shares. The
+        // G-code (and so the rows above) only knows physical filaments.
+        if (wxGetApp().is_editor() && wxGetApp().preset_bundle != nullptr && wxGetApp().plater() != nullptr) {
+            const PresetBundle &bundle   = *wxGetApp().preset_bundle;
+            const Print        &print    = wxGetApp().plater()->fff_print();
+            const size_t        physical = print.config().filament_diameter.size();
+            std::vector<unsigned int> used;
+            for (const PrintObject *object : print.objects())
+                if (object != nullptr && object->model_object() != nullptr) {
+                    const std::vector<unsigned int> ids = MixedSublayerUi::mixed_ids_used_by_object(*object->model_object(), bundle.mixed_filaments, physical);
+                    used.insert(used.end(), ids.begin(), ids.end());
+                }
+            const std::vector<MixedSublayerUi::LegendRow> mixed_rows =
+                MixedSublayerUi::legend_rows(bundle.mixed_filaments, used, physical, MixedSublayerUi::process_defaults(bundle));
+            if (!mixed_rows.empty()) {
+                const auto *colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+                auto colour_of = [colours](unsigned int id) {
+                    ColorRGBA c = ColorRGBA::GRAY();
+                    if (colours != nullptr && id >= 1 && id <= colours->values.size())
+                        decode_color(colours->values[id - 1], c);
+                    return c;
+                };
+                const ImU32 border = ImGui::GetColorU32(ImGuiCol_Border);
+                auto chip = [&draw_list, border, this](const ImVec2 &at, float size, const ColorRGBA &colour) {
+                    const ImVec2 lo(at.x + 1.0f * m_scale, at.y + 3.0f * m_scale), hi(lo.x + size, lo.y + size);
+                    draw_list->AddRectFilled(lo, hi, ImGuiWrapper::to_ImU32(colour));
+                    draw_list->AddRect(lo, hi, border);
+                };
+                ImGui::Dummy({ window_padding, window_padding });
+                ImGui::SameLine();
+                imgui.text(_u8L("Mixed filaments") + ":");
+                for (const MixedSublayerUi::LegendRow &row : mixed_rows) {
+                    ColorRGBA blended = ColorRGBA::GRAY();
+                    if (const MixedFilament *mf = bundle.mixed_filaments.mixed_filament_from_id(row.virtual_id, physical);
+                        mf != nullptr && !mf->display_color.empty())
+                        decode_color(mf->display_color, blended);
+                    const ImVec2 start = ImGui::GetCursorScreenPos();
+                    const float  x0    = start.x + window_padding * 3;
+                    chip({ x0, start.y }, icon_size, blended);
+                    std::string label = std::to_string(row.virtual_id);
+                    switch (row.method) {
+                    case MixedSublayerMethod::Ratio:     label += "  " + _u8L("Ratio"); break;
+                    case MixedSublayerMethod::Subdivide: label += "  " + _u8L("Subdivide"); break;
+                    default:                             label += "  " + _u8L("Layers"); break;
+                    }
+                    ImGui::SetCursorScreenPos({ x0 + icon_size + ImGui::GetStyle().ItemSpacing.x, start.y });
+                    imgui.text(label);
+                    for (const MixedSublayerUi::LegendComponent &c : row.components) {
+                        ImGui::SameLine(0.f, 10.0f * m_scale);
+                        const ImVec2 at = ImGui::GetCursorScreenPos();
+                        chip(at, 0.8f * icon_size, colour_of(c.filament));
+                        ImGui::Dummy({ 0.8f * icon_size + 2.0f * m_scale, icon_size });
+                        ImGui::SameLine(0.f, 3.0f * m_scale);
+                        imgui.text(std::to_string(c.filament) + " " + std::to_string(c.percent) + "%");
+                    }
+                }
+            }
         }
 
         //BBS display filament change times

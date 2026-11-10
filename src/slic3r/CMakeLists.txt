@@ -496,6 +496,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/MixedFilamentColorMapPanel.cpp
     GUI/MixedFilamentBadge.cpp
     GUI/MixedFilamentBadge.hpp
+    GUI/MixedSublayerUi.cpp
+    GUI/MixedSublayerUi.hpp
     GUI/ObjColorDialog.cpp
     GUI/ObjColorDialog.hpp
     GUI/FilamentColorDialog.cpp

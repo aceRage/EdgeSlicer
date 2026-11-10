@@ -8,6 +8,7 @@
 #include "MixedFilamentBadge.hpp"
 #include "MixedFilamentColorMapPanel.hpp"
 #include "MixedColorMatchHelpers.hpp"
+#include "MixedSublayerUi.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
 #include "libslic3r/NozzleSync.hpp"
@@ -8322,6 +8323,8 @@ void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
             mfs.back().gradient_end                = r.gradient_end;
             mfs.back().display_color             = r.display_color;
             mfs.back().ui_mode                       = r.ui_mode;
+            mfs.back().sublayer_method               = r.sublayer_method;
+            mfs.back().sublayer_bs_order             = r.sublayer_bs_order;
             mfs.back().custom                  = true;
         }
         if (auto* opt = pb->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
@@ -8411,6 +8414,11 @@ void Sidebar::update_color_mix_panel()
     };
     preset_bundle->mixed_filaments.set_display_context(display_context);
 
+    // Mixed color sublayer P2: each row's sub-layer method badge, and the "broken" mark of a Ratio row whose
+    // filaments print through different nozzle diameters (D8; slicing refuses it).
+    const MixedSublayerUi::ProcessDefaults sublayer_defaults = MixedSublayerUi::process_defaults(*preset_bundle);
+    const std::vector<double>              nozzle_by_filament = MixedSublayerUi::nozzle_by_filament(*preset_bundle, num_physical);
+
     auto& mfs = preset_bundle->mixed_filaments.mixed_filaments();
     bool any_visible = false;
     for (const MixedFilament& mf : mfs)
@@ -8494,7 +8502,19 @@ void Sidebar::update_color_mix_panel()
         }
         
         bool has_error = !is_filament_compatible(mf);
-        
+        wxString row_tip = lbl;
+        const MixedDiameterMismatch diameter_mismatch =
+            MixedSublayerUi::broken_ratio_row(mf, sublayer_defaults, num_physical, nozzle_by_filament);
+        if (diameter_mismatch.mismatch()) {
+            has_error = true;
+            row_tip += "\n" + wxString::Format(_L("Broken: filament %u (%.2f mm nozzle) and filament %u (%.2f mm nozzle) cannot be "
+                                                  "printed as mixed color sublayers. Use filaments on the same nozzle diameter, or "
+                                                  "choose another sub-layer method."),
+                                               diameter_mismatch.filament_a, diameter_mismatch.diameter_a,
+                                               diameter_mismatch.filament_b, diameter_mismatch.diameter_b);
+        }
+        const MixedSublayerUi::Badge sublayer_badge = MixedSublayerUi::badge_for_row(mf, sublayer_defaults);
+
         // Create a panel with border for the text
         auto* name_panel = new wxPanel(p->m_panel_color_mix_content, wxID_ANY);
         name_panel->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
@@ -8517,6 +8537,31 @@ void Sidebar::update_color_mix_panel()
 
         int name_flags = wxEXPAND | (has_error ? (wxTOP | wxBOTTOM | wxRIGHT) : wxALL);
         name_sizer->Add(name_btn, 1, name_flags, FromDIP(8));
+        // Mixed color sublayer P2: a small tag naming how the row splits a layer (Ratio / Subdivide / Layers).
+        if (sublayer_badge != MixedSublayerUi::Badge::Hidden) {
+            wxString badge_text, badge_tip;
+            switch (sublayer_badge) {
+            case MixedSublayerUi::Badge::Ratio:
+                badge_text = _L("Ratio");
+                badge_tip  = _L("Sub-layers: Ratio. Each layer prints once per filament, each pass as thick as its share of the mix.");
+                break;
+            case MixedSublayerUi::Badge::Subdivide:
+                badge_text = _L("Subdivide");
+                badge_tip  = _L("Sub-layers: Subdivide. Each layer prints in thin passes within the mixed filament height bounds.");
+                break;
+            default:
+                badge_text = _L("Layers");
+                badge_tip  = _L("Sub-layers: whole layers. The filaments alternate layer by layer.");
+                break;
+            }
+            auto* badge_lbl = new wxStaticText(name_panel, wxID_ANY, badge_text);
+            badge_lbl->SetFont(::Label::Body_10);
+            badge_lbl->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
+            badge_lbl->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#009688")));
+            badge_lbl->SetToolTip(badge_tip);
+            row_tip += "\n" + badge_tip;
+            name_sizer->Add(badge_lbl, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        }
         name_panel->SetSizer(name_sizer);
         name_panel->SetMinSize(wxSize(name_panel->FromDIP(100), name_panel->FromDIP(30)));
         name_panel->SetMaxSize(wxSize(-1, name_panel->FromDIP(30)));
@@ -8548,7 +8593,7 @@ void Sidebar::update_color_mix_panel()
             dc.DrawRectangle(rect);
         });
 
-        name_btn->SetToolTip(lbl);
+        name_btn->SetToolTip(row_tip);
         name_btn->Bind(wxEVT_LEFT_DOWN, [this, i](wxMouseEvent&) {
             auto* co = wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
             const std::vector<std::string> colors = co ? co->values : std::vector<std::string>{};
@@ -8574,6 +8619,8 @@ void Sidebar::update_color_mix_panel()
             mfs2[i].gradient_end               = r.gradient_end;
             mfs2[i].display_color               = r.display_color;
             mfs2[i].ui_mode                       = r.ui_mode;
+            mfs2[i].sublayer_method               = r.sublayer_method;
+            mfs2[i].sublayer_bs_order             = r.sublayer_bs_order;
             mfs2[i].custom                      = true;
             if (auto* opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
                 opt->value = mgr.serialize_custom_entries();
@@ -8622,6 +8669,8 @@ void Sidebar::update_color_mix_panel()
                 mfs2[i].gradient_start             = r.gradient_start;
                 mfs2[i].gradient_end               = r.gradient_end;
                 mfs2[i].ui_mode                       = r.ui_mode;
+                mfs2[i].sublayer_method               = r.sublayer_method;
+                mfs2[i].sublayer_bs_order             = r.sublayer_bs_order;
                 mfs2[i].custom                      = true;
                 if (auto* opt = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
                     opt->value = mgr.serialize_custom_entries();
@@ -14174,6 +14223,34 @@ static void log_substitutions(const PresetsConfigSubstitutions &substitutions, c
         log_substitutions(preset.substitutions, source + " (preset " + preset.preset_name + ")");
 }
 
+// Mixed color sublayer P2 (design_mixed_color_sublayer.md 3b, D3/D11): a Bambu Studio project never carries Edge's
+// mixed_filament_definitions, so rows in it mean the load converted Bambu Studio mixed filament slots (bbs_3mf.cpp).
+// Bambu Studio projects only log their substitutions, so the dropped-gradient notices (D11) are repeated here.
+static void notify_bambu_mixed_import(NotificationManager *notifications, const DynamicPrintConfig &loaded,
+                                      const ConfigSubstitutions &substitutions)
+{
+    if (notifications == nullptr)
+        return;
+    const auto  *defs = loaded.option<ConfigOptionString>("mixed_filament_definitions");
+    const size_t rows = defs != nullptr ? MixedSublayerUi::count_mixed_definition_rows(defs->value) : 0;
+    if (rows == 0)
+        return;
+    const bool ratio_on = loaded.has("enable_mixed_color_sublayer") && loaded.opt_bool("enable_mixed_color_sublayer");
+    std::string text = format(_L("This Bambu Studio project's mixed filaments were converted to %1% EdgeSlicer mixed filament(s)."), rows);
+    text += "\n";
+    text += ratio_on ? _u8L("\"Mixed color sublayer (Bambu ratio)\" is on: they print one pass per filament on every layer.")
+                     : _u8L("\"Mixed color sublayer (Bambu ratio)\" is off: they print whole layers, one colour at a time.");
+    for (const ConfigSubstitution &s : substitutions)
+        if (s.opt_def != nullptr && s.opt_def->opt_key == "mixed_filament_definitions" && !s.old_value.empty())
+            text += "\n" + s.old_value;
+    notifications->close_notification_of_type(NotificationType::MixedSublayerBambuImport);
+    notifications->push_notification(NotificationType::MixedSublayerBambuImport, NotificationManager::NotificationLevel::ImportantNotificationLevel,
+                                     text, _u8L("Show setting"), [](wxEvtHandler *) {
+                                         wxGetApp().sidebar().jump_to_option("enable_mixed_color_sublayer", Preset::TYPE_PRINT, L"");
+                                         return true;
+                                     });
+}
+
 // BBS: backup & restore
 std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_files, LoadStrategy strategy, bool ask_multi,
                                              bool* config_loaded_out)
@@ -14340,6 +14417,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     // so an older BambuStudio-stamped file may be an Orca project and keeps the dialog. The stamp test
                     // (not From_BBS) is the Edge adaptation, because Edge stamps its own projects From_BBS too.
                     const bool is_bambu_studio_project = from_bambu_studio && file_version > Semver(2, 3, 2);
+                    // Mixed color sublayer P2: once per open, say that the project's Bambu Studio mixed filament slots
+                    // became EdgeSlicer mixed rows (P1, bbs_3mf.cpp) and whether its mixed color sublayer key is on.
+                    if (from_bambu_studio && load_config)
+                        notify_bambu_mixed_import(notification_manager.get(), config_loaded, config_substitutions.substitutions);
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__
                                             << boost::format(", plate_data.size %1%, project_preset.size %2%, is_bbs_3mf %3%, file_version %4% \n") % plate_data.size() %
                                                    project_presets.size() % (en_3mf_file_type == En3mfType::From_BBS) % file_version.to_string();
@@ -18951,6 +19032,36 @@ bool Plater::priv::warnings_dialog()
 
 }
 
+// Mixed color sublayer P2 (Bambu Studio Plater.cpp:16739 update_mixed_sublayer_variable_layer_warning): after a slice,
+// name the objects that print mixed color sublayers (Ratio rows) on a variable layer height profile.
+static void notify_mixed_sublayer_variable_layer_height(const Print *print, NotificationManager *notifications)
+{
+    if (notifications == nullptr)
+        return;
+    notifications->close_notification_of_type(NotificationType::MixedSublayerVariableLayerHeight);
+    if (print == nullptr || wxGetApp().preset_bundle == nullptr)
+        return;
+    const PresetBundle &bundle   = *wxGetApp().preset_bundle;
+    const auto          defaults = MixedSublayerUi::process_defaults(bundle);
+    const size_t        physical = print->config().filament_diameter.size();
+    std::vector<std::string> names;
+    for (const PrintObject *object : print->objects()) {
+        const ModelObject *mo = object != nullptr ? object->model_object() : nullptr;
+        // A profile of more than two (z, height) pairs is a real variable layer height (Bambu Studio: size > 4).
+        if (mo == nullptr || mo->layer_height_profile.get().size() <= 4 ||
+            !MixedSublayerUi::object_uses_ratio_rows(*mo, bundle.mixed_filaments, physical, defaults))
+            continue;
+        if (std::find(names.begin(), names.end(), mo->name) == names.end())
+            names.push_back(mo->name);
+    }
+    if (names.empty())
+        return;
+    notifications->push_notification(NotificationType::MixedSublayerVariableLayerHeight,
+                                     NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                     format(_L("\"%1%\" uses both mixed color sublayer and variable layer height, which may affect print quality."),
+                                            boost::algorithm::join(names, ", ")));
+}
+
 //BBS: add project slice logic
 // Owner decision D4: a filament the slice maps to High Flow but whose preset has no High Flow values
 // slices its Standard values. Say so once per filament per session (Bambu printers, where the High
@@ -19135,6 +19246,8 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         wxGetApp().app_config->set("preferred_printer", wxGetApp().preset_bundle->printers.get_selected_preset_name());
         q->record_preferred_print_profile();
         notify_high_flow_standard_fallback(this->background_process.fff_print(), notification_manager.get());
+        if (printer_technology == ptFFF)
+            notify_mixed_sublayer_variable_layer_height(this->background_process.fff_print(), notification_manager.get());
     }
 
     //BBS: update the action button according to the current plate's status
