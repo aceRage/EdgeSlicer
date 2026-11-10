@@ -3626,7 +3626,9 @@ void FillLockedZag::fill_surface_locked_zag (const Surface *                    
         while (it != flow_params.end()) {
             ExPolygons region_exp = union_safety_offset_ex(it->second);
 
-            Polylines polys = intersection_pl(polylines, region_exp);
+            // EdgeSlicer: a band filled with Gyroid, TPMS or Concentric has closed rings, which clipping would cut at
+            // their first point, anywhere along a line (the defect of OrcaSlicer #17334).
+            Polylines polys = intersection_pl_rejoining_rings(polylines, region_exp);
             multi_width_polyline.emplace_back(polys, it->first);
             it++;
         }
