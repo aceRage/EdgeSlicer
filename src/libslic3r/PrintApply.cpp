@@ -860,19 +860,31 @@ static bool solid_infill_filament_is_image_row(const MixedFilamentManager &mixed
 // sets its own.
 // Edge's print-level PrintRegionConfig default is filament 1 (Orca's sparse_infill_filament_id uses
 // 0 for Default), so a process value of 1 is not treated as an explicit pick.
+// Edge's apply_to_print_region_config() also lets an object/part/modifier filament ("extruder" != 0)
+// replace the sparse infill filament before that config's own feature keys are applied (Orca keeps an
+// explicit feature filament over the base extruder instead). So an "extruder" clears an earlier
+// explicit choice here too; otherwise a process choice would keep the object's filament, which is
+// neither the choice nor the paint.
 static bool has_explicit_sparse_infill_filament(const PrintObjectRegions::LayerRangeRegions &layer_range, int region_id,
                                                const PrintRegionConfig &default_region_config)
 {
     static constexpr const char *key = "sparse_infill_filament";
+    const auto sets_base_filament = [](const DynamicPrintConfig &config) {
+        const auto *extruder = config.opt<ConfigOptionInt>("extruder");
+        return extruder != nullptr && extruder->value != 0;
+    };
     while (region_id >= 0) {
         const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[region_id];
         const ModelVolume &volume = *region.model_volume;
         if (volume.is_model_part()) {
             bool explicit_choice = default_region_config.sparse_infill_filament.value > 1;
-            const auto apply = [&explicit_choice](const DynamicPrintConfig *config) {
-                if (config != nullptr)
-                    if (const auto *choice = config->opt<ConfigOptionInt>(key))
-                        explicit_choice = choice->value > 0;
+            const auto apply = [&explicit_choice, &sets_base_filament](const DynamicPrintConfig *config) {
+                if (config == nullptr)
+                    return;
+                if (sets_base_filament(*config))
+                    explicit_choice = false;
+                if (const auto *choice = config->opt<ConfigOptionInt>(key))
+                    explicit_choice = choice->value > 0;
             };
             apply(&volume.get_object()->config.get());
             apply(&volume.config.get());
@@ -883,6 +895,8 @@ static bool has_explicit_sparse_infill_filament(const PrintObjectRegions::LayerR
         }
         if (const auto *choice = volume.config.get().opt<ConfigOptionInt>(key))
             return choice->value > 0;
+        if (sets_base_filament(volume.config.get()))
+            return false;
         region_id = region.parent;
     }
     return false;

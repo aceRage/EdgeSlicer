@@ -755,6 +755,35 @@ TEST_CASE("Painted regions keep an explicitly chosen sparse infill filament", "[
         CHECK(f.solid == 2);
         CHECK(f.sparse == 2);
     }
+    // Edge: an object/part filament ("extruder") replaces the sparse infill filament of the levels
+    // above it, so it also replaces a global choice and painting follows again (as before #17314).
+    SECTION("An object filament replaces a global choice and painting follows") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &c, ModelObject &o, ModelVolume &) {
+            c.option<ConfigOptionInt>("sparse_infill_filament")->value = 3;
+            o.config.set("extruder", 1);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("A part filament replaces an object choice and painting follows") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &v) {
+            o.config.set("sparse_infill_filament", 3);
+            v.config.set("extruder", 1);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 2);
+    }
+    SECTION("An object choice next to the object filament is kept") {
+        const PaintedFilaments f = painted_region_filaments(base, [](Config &, ModelObject &o, ModelVolume &) {
+            o.config.set("extruder", 1);
+            o.config.set("sparse_infill_filament", 3);
+        });
+        CHECK(f.wall == 2);
+        CHECK(f.solid == 2);
+        CHECK(f.sparse == 3);
+    }
 }
 
 // Paint Depth Stage 2, plan Task 3 item 1 (docs/superpowers/plans/2026-08-31-paint-depth.md,
