@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <map>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -895,15 +896,21 @@ TEST_CASE("Mixed sublayer: Bambu export writes a three-colour row as the planner
     check.load_custom_entries(config.opt_string("mixed_filament_definitions"), colours);
     REQUIRE(check.mixed_filaments().size() == 1);
     const std::vector<MixedRatioComponent> comps = mixed_ratio_components(check.mixed_filaments()[0], 3);
-    std::string components, ratios;
-    for (size_t i = 0; i < comps.size(); ++i) {
+    std::string components;
+    for (size_t i = 0; i < comps.size(); ++i)
         components += (i ? "," : "") + std::to_string(comps[i].extruder);
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%g", comps[i].ratio);
-        ratios += (i ? "," : "") + std::string(buf);
-    }
     CHECK(e.slots.components[3] == components);
-    CHECK(e.slots.ratios[3] == ratios);
+    // The shares, written with four decimals.
+    std::vector<double> written;
+    {
+        std::stringstream ss(e.slots.ratios[3]);
+        std::string       tok;
+        while (std::getline(ss, tok, ','))
+            written.push_back(std::atof(tok.c_str()));
+    }
+    REQUIRE(written.size() == comps.size());
+    for (size_t i = 0; i < comps.size(); ++i)
+        CHECK_THAT(written[i], WithinAbs(comps[i].ratio, 1e-4));
     // No component is written twice.
     CHECK(e.slots.components[3].find("1,2,1") == std::string::npos);
 }
