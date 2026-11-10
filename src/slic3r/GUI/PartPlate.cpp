@@ -6367,6 +6367,11 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		if (index < 0) {
+			// create_plate() stops at MAX_PLATES_COUNT. The objects of the remaining plates stay in the model, off the plates.
+			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": the project has %1% plates, only %2% can be loaded") % plate_data_list.size() % MAX_PLATES_COUNT;
+			break;
+		}
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
@@ -6494,6 +6499,10 @@ void PartPlateList::print() const
 	flush_logs();
 	return;
 }
+
+// ODR-used by boost::format in load_from_3mf_structure(); in-class
+// initialization of a static const integral is not a definition.
+const unsigned int PartPlateList::MAX_PLATES_COUNT;
 
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_cali_texture = false;
