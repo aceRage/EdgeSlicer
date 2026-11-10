@@ -70,8 +70,8 @@ bool CutRecipe::operator==(const CutRecipe& o) const
     if (thickness != o.thickness || thickness_offset != o.thickness_offset)
         return false;
     if (keep_upper != o.keep_upper || keep_lower != o.keep_lower || keep_as_parts != o.keep_as_parts ||
-        place_on_cut_upper != o.place_on_cut_upper || place_on_cut_lower != o.place_on_cut_lower ||
-        rotate_upper != o.rotate_upper || rotate_lower != o.rotate_lower)
+        apply_tac_joints != o.apply_tac_joints || place_on_cut_upper != o.place_on_cut_upper ||
+        place_on_cut_lower != o.place_on_cut_lower || rotate_upper != o.rotate_upper || rotate_lower != o.rotate_lower)
         return false;
     if (upper_visibility != o.upper_visibility || lower_visibility != o.lower_visibility)
         return false;

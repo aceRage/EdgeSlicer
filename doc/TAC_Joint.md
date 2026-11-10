@@ -19,7 +19,26 @@ Choose **Placement** for each connector:
   part of that half, with no socket there. Only the opposite half gets a socket.
   Discarding the selected half also discards its attached connector.
 
-The blue preview represents the matching cutter. After cutting, use the object's
+Enable **Apply TAC joints to mesh** to subtract all TAC sockets directly from
+the body meshes during the cut and unite attached connectors with their owning
+parts. This per-cut checkbox is initially off and applies to every TAC connector
+in that cut. Separate connectors remain printable objects on the build plate.
+Other negative volumes and modifiers stay editable, and the original body parts
+retain their settings. **Cut to parts** keeps its two bodies as separate parts.
+If applying a joint fails, the cut is refused and the source object is preserved.
+
+![Exported body meshes with applied TAC sockets and the original separate pin](images/tac_joint_mesh_application.png)
+
+Rendered from the exported STL meshes: both 15 mm halves of a 30 mm cube contain
+their sockets, and the separate pin retains its reference profile.
+
+For a model that is already cut, close the Cut tool, right-click either half and
+choose **Edit cut...**. Enable **Apply TAC joints to mesh** there and perform the
+cut again. This rebuilds both original halves from the saved uncut shape.
+Opening `C` on a half instead makes a new cut through only that selected object;
+the other original half and its separate connector remain in the project.
+
+The blue preview represents the matching cutter. With the checkbox off, use the object's
 **Mesh Boolean** action on each half to bake its sockets into the body and merge
 any attached connectors. The resulting mesh can be exported as STL with its
 cutouts. A and B refer to the labelled cut halves, regardless of print placement.
@@ -50,9 +69,10 @@ Flat cuts support kerf, which reduces engagement without lengthening the pin.
 With separate connectors both halves may be kept as parts of one object.
 Attached connectors require separate A/B objects, since a negative volume acts
 on all positive parts of its object. Parameters, placement and rotation survive
-project save/load, cut recipes, copying, and undo. Older TAC projects default to
-separate connectors. Recipe version 8 prevents older builds from silently
-re-cutting an attached connector as a separate one.
+project save/load, cut recipes, copying, and undo. The mesh application checkbox
+is also remembered by editable cuts and undo. Older TAC projects default to
+separate connectors with mesh application off. Recipe version 9 prevents older
+builds from silently re-cutting an applied result with different behavior.
 
 Curved and drawn cuts use the full socket on the local surface frame. Groove
 cuts, mixing with Flexi joints, individual part assignment, and mirroring are
