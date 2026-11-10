@@ -15,6 +15,7 @@
 #include "test_utils.hpp"
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <pybind11/cast.h>
 #include <pybind11/gil.h>
 #include <pybind11/pybind11.h>
@@ -1216,7 +1217,8 @@ TEST_CASE("Waiting for Python threads at shutdown ends idle concurrent.futures w
 #ifndef _WIN32 // Windows adds its system store whatever SSL_CERT_FILE names.
 TEST_CASE("SSL_CERT_FILE still overrides the bundled Python's default CA certificates", "[PluginLifecycle][Python]")
 {
-    // Existing but empty: Linux's CurlGlobalInit replaces an SSL_CERT_FILE that names a missing file.
+    // Existing but empty PEM: create_default_context() trusts nothing. A user-set SSL_CERT_FILE
+    // is not replaced by a system bundle, even when the named file is empty.
     ScopedTemporaryFile empty_bundle(".pem");
     std::ofstream(empty_bundle.string()).close();
     ScopedEnvVar ssl_cert_file{"SSL_CERT_FILE", empty_bundle.string()};
@@ -1225,6 +1227,46 @@ TEST_CASE("SSL_CERT_FILE still overrides the bundled Python's default CA certifi
     if (!plugin_system.initialized)
         SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
 
+    CHECK(default_context_ca_count() == 0);
+    {
+        pybind11::gil_scoped_acquire gil;
+        const pybind11::object ctx = pybind11::module_::import("ssl").attr("create_default_context")();
+        CHECK(ctx.attr("verify_mode").cast<int>() == pybind11::module_::import("ssl").attr("CERT_REQUIRED").cast<int>());
+    }
+}
+
+TEST_CASE("an empty SSL_CERT_FILE is left alone for the bundled Python", "[PluginLifecycle][Python]")
+{
+    ScopedEnvVar ssl_cert_file{"SSL_CERT_FILE", ""};
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    const char* env = boost::nowide::getenv("SSL_CERT_FILE");
+    REQUIRE(env != nullptr);
+    CHECK(std::string(env).empty());
+    CHECK(Http::ssl_cert_file_fallback_path(env).empty());
+    CHECK(Http::ensure_ssl_cert_file_if_unset().empty());
+    REQUIRE(boost::nowide::getenv("SSL_CERT_FILE") != nullptr);
+    CHECK(std::string(boost::nowide::getenv("SSL_CERT_FILE")).empty());
+    CHECK(default_context_ca_count() == 0);
+}
+
+TEST_CASE("a missing SSL_CERT_FILE path is left alone for the bundled Python", "[PluginLifecycle][Python]")
+{
+    const std::string missing = "/no/such/edgeslicer-ca-bundle.pem";
+    ScopedEnvVar ssl_cert_file{"SSL_CERT_FILE", missing};
+
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+
+    REQUIRE(boost::nowide::getenv("SSL_CERT_FILE") != nullptr);
+    CHECK(std::string(boost::nowide::getenv("SSL_CERT_FILE")) == missing);
+    CHECK(Http::ssl_cert_file_fallback_path(boost::nowide::getenv("SSL_CERT_FILE")).empty());
+    CHECK(Http::ensure_ssl_cert_file_if_unset().empty());
+    CHECK(std::string(boost::nowide::getenv("SSL_CERT_FILE")) == missing);
     CHECK(default_context_ca_count() == 0);
 }
 #endif

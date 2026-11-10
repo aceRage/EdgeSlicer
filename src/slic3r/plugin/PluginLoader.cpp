@@ -23,6 +23,7 @@
 #include <boost/filesystem/file_status.hpp>
 #include <boost/log/trivial.hpp>
 #include <slic3r/Utils/BoostProcessCompat.hpp>
+#include <boost/process/env.hpp>
 #include "slic3r/plugin/PluginDescriptor.hpp"
 #include <optional>
 #include <vector>
@@ -33,7 +34,10 @@
 #include <system_error>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -226,7 +230,421 @@ std::string plugin_module_name(const PluginDescriptor& descriptor)
     return boost::filesystem::path(descriptor.entry_path).stem().string();
 }
 
+bool is_ws(char c) { return c == ' ' || c == '\t'; }
+
+void skip_ws(const std::string& s, size_t& i)
+{
+    while (i < s.size() && is_ws(s[i]))
+        ++i;
+}
+
+bool is_letter_or_digit(char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; }
+
+bool starts_with_at(const std::string& s, size_t i, const char* lit)
+{
+    const size_t n = std::strlen(lit);
+    return i + n <= s.size() && s.compare(i, n, lit) == 0;
+}
+
+// PEP 508 identifier = letterOrDigit identifier_end*, identifier_end = letterOrDigit | (('.'|'_'|'-')* letterOrDigit)
+bool parse_identifier(const std::string& s, size_t& i)
+{
+    if (i >= s.size() || !is_letter_or_digit(s[i]))
+        return false;
+    ++i;
+    while (i < s.size()) {
+        if (is_letter_or_digit(s[i])) {
+            ++i;
+            continue;
+        }
+        if (s[i] != '.' && s[i] != '_' && s[i] != '-')
+            break;
+        size_t j = i;
+        while (j < s.size() && (s[j] == '.' || s[j] == '_' || s[j] == '-'))
+            ++j;
+        if (j >= s.size() || !is_letter_or_digit(s[j]))
+            break;
+        i = j + 1;
+    }
+    return true;
+}
+
+bool parse_extras(const std::string& s, size_t& i)
+{
+    if (i >= s.size() || s[i] != '[')
+        return true;
+    ++i;
+    skip_ws(s, i);
+    if (!parse_identifier(s, i))
+        return false;
+    for (;;) {
+        skip_ws(s, i);
+        if (i < s.size() && s[i] == ',') {
+            ++i;
+            skip_ws(s, i);
+            if (!parse_identifier(s, i))
+                return false;
+            continue;
+        }
+        break;
+    }
+    skip_ws(s, i);
+    if (i >= s.size() || s[i] != ']')
+        return false;
+    ++i;
+    return true;
+}
+
+bool parse_version_cmp(const std::string& s, size_t& i)
+{
+    static const char* const ops[] = {"===", "<=", ">=", "==", "~=", "!=", "<", ">"};
+    for (const char* op : ops) {
+        if (starts_with_at(s, i, op)) {
+            i += std::strlen(op);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_version(const std::string& s, size_t& i)
+{
+    auto is_ver_char = [](char c) {
+        return is_letter_or_digit(c) || c == '-' || c == '_' || c == '.' || c == '*' || c == '+' || c == '!';
+    };
+    if (i >= s.size() || !is_ver_char(s[i]))
+        return false;
+    while (i < s.size() && is_ver_char(s[i]))
+        ++i;
+    return true;
+}
+
+bool parse_version_one(const std::string& s, size_t& i)
+{
+    if (!parse_version_cmp(s, i))
+        return false;
+    skip_ws(s, i);
+    return parse_version(s, i);
+}
+
+bool parse_version_many(const std::string& s, size_t& i)
+{
+    if (!parse_version_one(s, i))
+        return false;
+    for (;;) {
+        const size_t save = i;
+        skip_ws(s, i);
+        if (i < s.size() && s[i] == ',') {
+            ++i;
+            skip_ws(s, i);
+            if (!parse_version_one(s, i))
+                return false;
+            continue;
+        }
+        i = save;
+        return true;
+    }
+}
+
+bool parse_versionspec(const std::string& s, size_t& i)
+{
+    const size_t save = i;
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == '(') {
+        ++i;
+        skip_ws(s, i);
+        if (!parse_version_many(s, i))
+            return false;
+        skip_ws(s, i);
+        if (i >= s.size() || s[i] != ')')
+            return false;
+        ++i;
+        return true;
+    }
+    if (parse_version_cmp(s, i)) {
+        i = save;
+        skip_ws(s, i);
+        return parse_version_many(s, i);
+    }
+    i = save;
+    return true;
+}
+
+bool parse_quoted(const std::string& s, size_t& i)
+{
+    if (i >= s.size() || (s[i] != '"' && s[i] != '\''))
+        return false;
+    const char q = s[i++];
+    while (i < s.size()) {
+        if (s[i] == q) {
+            ++i;
+            return true;
+        }
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            i += 2;
+            continue;
+        }
+        if (s[i] == '\n' || s[i] == '\r')
+            return false;
+        ++i;
+    }
+    return false;
+}
+
+bool parse_marker_var(const std::string& s, size_t& i)
+{
+    // Longest match; dotted names (os.name) before the un-dotted form.
+    static const char* const vars[] = {
+        "python_full_version",
+        "python_version",
+        "platform_python_implementation",
+        "platform.python_implementation",
+        "python_implementation",
+        "implementation_version",
+        "implementation_name",
+        "platform_release",
+        "platform_system",
+        "platform_version",
+        "platform.version",
+        "platform_machine",
+        "platform.machine",
+        "sys_platform",
+        "sys.platform",
+        "os_name",
+        "os.name",
+        "extra",
+    };
+    size_t best = 0;
+    for (const char* v : vars) {
+        const size_t n = std::strlen(v);
+        if (n > best && starts_with_at(s, i, v) && (i + n == s.size() || !is_letter_or_digit(s[i + n])))
+            best = n;
+    }
+    if (best == 0)
+        return false;
+    i += best;
+    return true;
+}
+
+bool parse_marker_op(const std::string& s, size_t& i)
+{
+    skip_ws(s, i);
+    if (starts_with_at(s, i, "not") && (i + 3 == s.size() || !is_letter_or_digit(s[i + 3]))) {
+        size_t j = i + 3;
+        skip_ws(s, j);
+        if (starts_with_at(s, j, "in") && (j + 2 == s.size() || !is_letter_or_digit(s[j + 2]))) {
+            i = j + 2;
+            return true;
+        }
+        return false;
+    }
+    if (starts_with_at(s, i, "in") && (i + 2 == s.size() || !is_letter_or_digit(s[i + 2]))) {
+        i += 2;
+        return true;
+    }
+    static const char* const ops[] = {"===", "<=", ">=", "==", "~=", "!=", "<", ">"};
+    for (const char* op : ops) {
+        if (starts_with_at(s, i, op)) {
+            i += std::strlen(op);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_marker(const std::string& s, size_t& i);
+
+bool parse_marker_atom(const std::string& s, size_t& i)
+{
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == '(') {
+        ++i;
+        if (!parse_marker(s, i))
+            return false;
+        skip_ws(s, i);
+        if (i >= s.size() || s[i] != ')')
+            return false;
+        ++i;
+        return true;
+    }
+    const size_t save = i;
+    if (parse_marker_var(s, i)) {
+        if (!parse_marker_op(s, i))
+            return false;
+        skip_ws(s, i);
+        return parse_quoted(s, i);
+    }
+    i = save;
+    if (!parse_quoted(s, i))
+        return false;
+    if (!parse_marker_op(s, i))
+        return false;
+    skip_ws(s, i);
+    return parse_marker_var(s, i);
+}
+
+bool parse_marker_and(const std::string& s, size_t& i)
+{
+    if (!parse_marker_atom(s, i))
+        return false;
+    for (;;) {
+        const size_t save = i;
+        skip_ws(s, i);
+        if (starts_with_at(s, i, "and") && (i + 3 == s.size() || !is_letter_or_digit(s[i + 3]))) {
+            i += 3;
+            if (!parse_marker_atom(s, i))
+                return false;
+            continue;
+        }
+        i = save;
+        return true;
+    }
+}
+
+bool parse_marker(const std::string& s, size_t& i)
+{
+    if (!parse_marker_and(s, i))
+        return false;
+    for (;;) {
+        const size_t save = i;
+        skip_ws(s, i);
+        if (starts_with_at(s, i, "or") && (i + 2 == s.size() || !is_letter_or_digit(s[i + 2]))) {
+            i += 2;
+            if (!parse_marker_and(s, i))
+                return false;
+            continue;
+        }
+        i = save;
+        return true;
+    }
+}
+
+boost::process::environment uv_child_environment()
+{
+    namespace process = boost::process;
+    // Default-constructed environment copies the parent; drop it so uv sees only the keep-list.
+    process::environment env;
+    env.clear();
+
+    // uv and the bundled python need a working PATH, TLS, temp, and locale. Drop the rest of the
+    // parent environment so plugin-declared install does not inherit tokens, AWS keys, PYTHONPATH,
+    // VIRTUAL_ENV, or similar.
+    static const char* const keep[] = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+#ifdef _WIN32
+        "SYSTEMROOT",
+        "SystemRoot",
+        "WINDIR",
+        "windir",
+        "COMSPEC",
+        "ComSpec",
+        "PATHEXT",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "USERNAME",
+        "SystemDrive",
+#endif
+    };
+    for (const char* key : keep) {
+        if (const char* v = std::getenv(key))
+            env[key] = v;
+    }
+    return env;
+}
+
 } // namespace
+
+bool is_pep508_requirement(const std::string& requirement)
+{
+    if (requirement.find('\0') != std::string::npos || requirement.find('\n') != std::string::npos ||
+        requirement.find('\r') != std::string::npos)
+        return false;
+
+    size_t start = 0;
+    size_t end   = requirement.size();
+    while (start < end && is_ws(requirement[start]))
+        ++start;
+    while (end > start && is_ws(requirement[end - 1]))
+        --end;
+    if (start == end)
+        return false;
+
+    const std::string s = requirement.substr(start, end - start);
+    if (s.front() == '-')
+        return false;
+
+    size_t i = 0;
+    if (!parse_identifier(s, i))
+        return false;
+    skip_ws(s, i);
+    if (!parse_extras(s, i))
+        return false;
+    skip_ws(s, i);
+    if (!parse_versionspec(s, i))
+        return false;
+    skip_ws(s, i);
+    if (i < s.size() && s[i] == ';') {
+        ++i;
+        if (!parse_marker(s, i))
+            return false;
+        skip_ws(s, i);
+    }
+    return i == s.size();
+}
+
+bool validate_pep508_requirements(const std::vector<std::string>& pkgs, std::string& error)
+{
+    for (const std::string& pkg : pkgs) {
+        if (is_pep508_requirement(pkg))
+            continue;
+
+        size_t start = 0;
+        size_t end   = pkg.size();
+        while (start < end && is_ws(pkg[start]))
+            ++start;
+        while (end > start && is_ws(pkg[end - 1]))
+            --end;
+        if (start == end) {
+            error = "Refused Python dependency: empty requirement";
+            return false;
+        }
+        const std::string trimmed = pkg.substr(start, end - start);
+        if (trimmed.front() == '-') {
+            error = "Refused Python dependency '" + trimmed + "': installer options are not allowed";
+            return false;
+        }
+        error = "Refused Python dependency '" + trimmed +
+                "': not a valid PEP 508 requirement (name, optional extras, version specifiers, markers)";
+        return false;
+    }
+    return true;
+}
 
 void unload(Plugin& plugin)
 {
@@ -491,6 +909,9 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
     if (pkgs.empty())
         return true;
 
+    if (!validate_pep508_requirements(pkgs, error))
+        return false;
+
     const std::string uv_path = PythonInterpreter::bundled_uv_path();
     if (uv_path.empty()) {
         error = "Bundled uv executable not found. Python package installation is unavailable.";
@@ -522,8 +943,9 @@ bool install_packages(const std::vector<std::string>& pkgs, std::string& error)
     try {
         namespace process = boost::process;
 
-        process::ipstream std_err;
-        process::child    child(uv_path, process::args(args),
+        process::ipstream     std_err;
+        process::environment  uv_env = uv_child_environment();
+        process::child        child(uv_path, process::args(args), uv_env,
 #ifdef _WIN32
                                 // uv.exe (and the python.exe it spawns) are console-subsystem programs.
                                 // OrcaSlicer is a GUI app with no console of its own, so without this flag

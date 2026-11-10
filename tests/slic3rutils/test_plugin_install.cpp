@@ -130,6 +130,94 @@ class DeclaringPackage(orca.base):
 
 } // namespace
 
+TEST_CASE("PEP 723 / Requires-Dist entries that look like uv installer options are refused", "[PluginInstall]")
+{
+    using plugin_loader::is_pep508_requirement;
+    using plugin_loader::validate_pep508_requirements;
+    using plugin_loader::install_packages;
+
+    const auto refused = [](const std::string& req) {
+        CHECK_FALSE(is_pep508_requirement(req));
+        std::string error;
+        REQUIRE_FALSE(validate_pep508_requirements({req}, error));
+        REQUIRE_FALSE(error.empty());
+        std::string install_error;
+        REQUIRE_FALSE(install_packages({req}, install_error));
+        CHECK(install_error == error);
+        return error;
+    };
+
+    SECTION("empty entries")
+    {
+        CHECK(refused("").find("empty") != std::string::npos);
+        CHECK(refused("   ").find("empty") != std::string::npos);
+        CHECK(refused("\t").find("empty") != std::string::npos);
+    }
+
+    SECTION("leading-dash installer options")
+    {
+        for (const char* inj : {
+                 "--index-url=https://evil.example/simple",
+                 "--index-url",
+                 "-r",
+                 "-r/tmp/requirements.txt",
+                 "--target",
+                 "--target=/tmp/evil",
+                 "--python",
+                 "--find-links=https://evil.example",
+                 "-c",
+                 "--no-deps",
+             }) {
+            INFO(inj);
+            CHECK(refused(inj).find("installer options") != std::string::npos);
+        }
+    }
+
+    SECTION("non-requirement forms")
+    {
+        for (const char* inj : {
+                 "numpy --index-url=https://evil.example/simple",
+                 "foo @ https://evil.example/foo.whl",
+                 "pip @ file:///etc/passwd",
+                 "http://evil.example/foo.whl",
+                 "numpy>=1.0; extra == 'x'\n--index-url=https://evil.example",
+             }) {
+            INFO(inj);
+            CHECK_FALSE(is_pep508_requirement(inj));
+            std::string error;
+            REQUIRE_FALSE(validate_pep508_requirements({inj}, error));
+            CHECK(error.find("PEP 508") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("valid PEP 508 requirements are accepted for uv install", "[PluginInstall]")
+{
+    using plugin_loader::is_pep508_requirement;
+    using plugin_loader::validate_pep508_requirements;
+
+    for (const char* req : {
+             "numpy",
+             "Pillow",
+             "package-name",
+             "numpy>=1.20,<2",
+             "requests[security]>=2.8.1",
+             "requests[security,socks]>=2.8.1,<3",
+             "pillow ; python_version >= \"3.8\"",
+             "foo>=1.0; extra == 'bar' and os_name == \"posix\"",
+             "bar (==1.2.3)",
+             "  Baz.Quux[extra]~=1.0  ",
+         }) {
+        INFO(req);
+        CHECK(is_pep508_requirement(req));
+    }
+
+    std::string error;
+    REQUIRE(validate_pep508_requirements(
+        {"numpy>=1.20,<2", "requests[security]>=2.8.1", "pillow ; python_version >= \"3.8\""}, error));
+    CHECK(error.empty());
+}
+
 TEST_CASE("install_plugin rejects a cloud UUID containing path traversal", "[PluginInstall]")
 {
     ScopedDataDir data_dir_guard("cor2");
