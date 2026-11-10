@@ -2464,6 +2464,19 @@ void TreeSupport::draw_circles()
                 //Draw the support areas and add the roofs appropriately to the support roof instead of normal areas.
                 ts_layer->lslices.reserve(curr_layer_nodes.size());
                 ExPolygons area_poly;  // the polygon node area which will be printed as normal support
+                // OrcaSlicer #17248: every node sampled from an overhang carries a copy of it, so a roof list would
+                // get the same overhang once per node. Merge each overhang into each list only once.
+                std::vector<std::pair<const ExPolygons*, const ExPolygon*>> merged_overhangs;
+                auto append_overhang_once = [&merged_overhangs, this](ExPolygons &dst, const ExPolygon &overhang) {
+                    for (const auto &[list, merged] : merged_overhangs)
+                        if (list == &dst && *merged == overhang)
+                            return;
+                    merged_overhangs.emplace_back(&dst, &overhang);
+                    if (overhang.contour.size() > 100 || overhang.holes.size() > 1)
+                        dst.emplace_back(overhang);
+                    else
+                        append(dst, offset_ex({ overhang }, scale_(m_ts_data->m_xy_distance)));
+                };
                 for (const SupportNode* p_node : curr_layer_nodes)
                 {
                     if (print->canceled())
@@ -2471,6 +2484,7 @@ void TreeSupport::draw_circles()
 
                     const SupportNode& node = *p_node;
                     ExPolygons area;
+                    bool merge_overhang = false;
                     // Generate directly from overhang polygon if one of the following is true:
                     // 1) node is a normal part of hybrid support
                     // 2) node is virtual
@@ -2519,27 +2533,31 @@ void TreeSupport::draw_circles()
 
                         // merge overhang to get a smoother interface surface
                         // Do not merge when buildplate_only is on, because some underneath nodes may have been deleted.
-                        if (top_interface_layers > 0 && node.support_roof_layers_below > 0 && !on_buildplate_only && !node.is_sharp_tail) {
-                            ExPolygons overhang_expanded;
-                            if (node.overhang.contour.size() > 100 || node.overhang.holes.size()>1)
-                                overhang_expanded.emplace_back(node.overhang);
-                            else {
-                                overhang_expanded = offset_ex({ node.overhang }, scale_(m_ts_data->m_xy_distance));
-                            }
-                            append(area, overhang_expanded);
-                        }
+                        // The overhang is merged into each destination list below, once per list (OrcaSlicer #17248).
+                        merge_overhang = top_interface_layers > 0 && node.support_roof_layers_below > 0 && !on_buildplate_only && !node.is_sharp_tail;
                     }
 
                     // Use the Pythagorean theorem to compare movement magnitude (dx² + dy²) without a square root.
-                    if (node.is_processed && node.movement.cast<double>().squaredNorm() > max_move_sq)
+                    if (node.is_processed && node.movement.cast<double>().squaredNorm() > max_move_sq) {
                         append(extra_wall_areas, area);
+                        if (merge_overhang)
+                            append_overhang_once(extra_wall_areas, node.overhang);
+                    }
 
+                    // Edge: the support interlock lists take the node area together with its merged overhang, as the
+                    // roof lists do.
+                    auto append_with_overhang = [&](ExPolygons &dst) {
+                        append(dst, area);
+                        if (merge_overhang)
+                            append_overhang_once(dst, node.overhang);
+                    };
                     if (! interlock_by_depth.empty() && obj_layer_nr > 0 &&
                         (node.is_sharp_tail || (node.support_roof_layers_below > 0 && node.distance_to_top >= 0 &&
                                                 int(top_interface_layers) - node.support_roof_layers_below <= 0)))
-                        append(interlock_keep, area);
+                        append_with_overhang(interlock_keep);
+                    ExPolygons *dst;
                     if (obj_layer_nr>0 && node.distance_to_top < 0)
-                        append(roof_gap_areas, area);
+                        dst = &roof_gap_areas;
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 &&
                              node.is_sharp_tail == false)
                     {
@@ -2547,8 +2565,8 @@ void TreeSupport::draw_circles()
                         // touching the model) to 1 (roof_1st_layer): its depth under the top is the difference.
                         if (const int depth = int(top_interface_layers) - node.support_roof_layers_below;
                             depth >= 1 && depth < int(interlock_by_depth.size()))
-                            append(interlock_by_depth[depth], area);
-                        append(roof_1st_layer, area);
+                            append_with_overhang(interlock_by_depth[depth]);
+                        dst = &roof_1st_layer;
                         max_layers_above_roof1 = std::max(max_layers_above_roof1, node.dist_mm_to_top);
                     }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below > 1 &&
@@ -2556,15 +2574,18 @@ void TreeSupport::draw_circles()
                     {
                         if (const int depth = int(top_interface_layers) - node.support_roof_layers_below;
                             depth >= 1 && depth < int(interlock_by_depth.size()))
-                            append(interlock_by_depth[depth], area);
-                        append(node.support_roof_layers_below <= top_base_interface_layers ? roof_base_areas : roof_areas, area);
+                            append_with_overhang(interlock_by_depth[depth]);
+                        dst = node.support_roof_layers_below <= top_base_interface_layers ? &roof_base_areas : &roof_areas;
                         max_layers_above_roof = std::max(max_layers_above_roof, node.dist_mm_to_top);
                     }
                     else
                     {
-                        append(base_areas, area);
+                        dst = &base_areas;
                         max_layers_above_base = std::max(max_layers_above_base, node.dist_mm_to_top);
                     }
+                    append(*dst, std::move(area));
+                    if (merge_overhang)
+                        append_overhang_once(*dst, node.overhang);
 
                 }
 
