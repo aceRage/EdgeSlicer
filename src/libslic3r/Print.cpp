@@ -1452,7 +1452,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
         // one PrintObject per distinct transformation, so print.objects() does not list them in order.
         std::pair<int, int>  model_position;
         double         arrange_score;
-        double               height;
+        double               height; // top above the bed, raft included (object_top below)
         // Y extent (scaled) of the geometry that reaches above extruder_clearance_height_to_rod.
         // The X rod sits that far above the nozzle and spans the whole X axis, so this is the only
         // part of an already-printed instance it can collide with while a later instance prints.
@@ -1464,7 +1464,17 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
     // bounding boxes below. Conservative: any triangle with a vertex above the rod contributes all
     // three of its vertices. Modifiers, blockers and negative volumes are not printed and are skipped.
     const double rod_height = print.config().extruder_clearance_height_to_rod.value;
-    auto above_rod_y_range = [rod_height](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
+    // Top of an instance above the bed, scaled. object_print_z_max includes the raft and the Z shrinkage
+    // compensation, like the printable-height check in validate() (OrcaSlicer #17235).
+    auto object_top = [](const PrintInstance &instance) -> double {
+        return scale_(instance.print_object->slicing_parameters().object_print_z_max);
+    };
+    auto above_rod_y_range = [rod_height, &object_top](const PrintInstance &instance, coord_t &min_y, coord_t &max_y) -> bool {
+        // Skip the mesh walk for the common case of an object whose top, raft included, doesn't reach the rod.
+        if (object_top(instance) <= scale_(rod_height))
+            return false;
+        // Mesh Z this far below the rod prints above it once the raft lifts the object.
+        const double rod_z = rod_height - instance.print_object->slicing_parameters().object_print_z_min;
         double ymin = std::numeric_limits<double>::max();
         double ymax = std::numeric_limits<double>::lowest();
         bool   any  = false;
@@ -1481,7 +1491,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                 zs[i] = p.z();
             }
             for (const auto &f : its.indices) {
-                if (zs[f(0)] <= rod_height && zs[f(1)] <= rod_height && zs[f(2)] <= rod_height)
+                if (zs[f(0)] <= rod_z && zs[f(1)] <= rod_z && zs[f(2)] <= rod_z)
                     continue;
                 for (int j = 0; j < 3; ++j) {
                     ymin = std::min(ymin, ys[f(j)]);
@@ -1592,7 +1602,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     }
                 }
                 struct print_instance_info print_info {&instance, convex_hull.bounding_box(), convex_hull};
-                print_info.height = instance.print_object->height();
+                print_info.height = object_top(instance);
                 print_info.model_position = model_position_of(print.model(), instance.model_instance);
                 print_info.has_above_rod = above_rod_y_range(instance, print_info.above_rod_min_y, print_info.above_rod_max_y);
                 print_instance_with_bounding_box.push_back(std::move(print_info));
@@ -1814,7 +1824,7 @@ StringObjectException Print::sequential_print_clearance_valid(const Print &print
                     break;
                 }
             }
-            if (height < inst->print_object->max_z())
+            if (height < info_k.height)
                 too_tall_instances[inst] = std::make_pair(print_instance_with_bounding_box[k].hull_polygon, unscaled<double>(height));
         }
 

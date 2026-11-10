@@ -3031,3 +3031,97 @@ TEST_CASE("Sequential printing keeps rotated copies of one object in their list 
     for (size_t k = 0; k < copies.size(); ++k)
         REQUIRE(ordered[k]->model_instance == copies[k]);
 }
+
+namespace {
+// Edge: init_print always arranges. The by-object cases below need the objects where they put them, so they add
+// one box per position, each as its own object, and put it on the bed like init_print does.
+ModelObject *add_box_at(Model &model, Print &print, double sx, double sy, double sz, const Vec2d &position)
+{
+    ModelObject *object = model.add_object();
+    object->name += "object.stl";
+    object->add_volume(make_cube(sx, sy, sz));
+    ModelInstance *instance = object->add_instance();
+    instance->set_offset(Vec3d(position.x(), position.y(), 0.));
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    return object;
+}
+} // namespace
+
+TEST_CASE("Sequential printing prints last a raised object that only clears the lid there", "[Print][Orca17235]")
+{
+    // A raised object (snap to the bed turned off) whose own height is below the lid but whose top is above
+    // it. Only the last object may reach above the lid, so it has to print last, although it comes first in
+    // the object list.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",                   "by object" },
+        { "extruder_clearance_height_to_lid", 30 },
+        { "extruder_clearance_height_to_rod", 25 },
+        { "skirt_loops",                      0 },
+        { "layer_change_gcode",               "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    ModelObject *raised = add_box_at(model, print, 10., 10., 10., Vec2d(40., 40.));
+    add_box_at(model, print, 10., 10., 5., Vec2d(140., 140.));
+    ModelInstance *instance = raised->instances.front();
+    instance->set_offset(instance->get_offset() + Vec3d(0., 0., 25.));
+    print.apply(model, config);
+    REQUIRE(print.objects().front()->height() <= scale_(30.));
+    REQUIRE(print.objects().front()->max_z() > scale_(30.));
+
+    const std::string error = print.validate().string;
+    INFO(error);
+    CHECK(error.empty());
+    // validate() records the print order on the print's own copy of the model.
+    const ModelObjectPtrs &objects = print.model().objects;
+    CHECK(objects[0]->instances.front()->arrange_order > objects[1]->instances.front()->arrange_order);
+}
+
+TEST_CASE("Sequential printing counts a raft toward the height checked against the rod", "[Print][Orca17235]")
+{
+    // Two 24.8 mm boxes that share a Y band, on a 3 layer raft. The boxes alone stay below the 25 mm rod,
+    // but the raft lifts their tops above it, so whichever prints first is in the rod's way while the other
+    // one prints.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",                   "by object" },
+        { "extruder_clearance_height_to_rod", 25 },
+        { "skirt_loops",                      0 },
+        { "raft_layers",                      3 },
+        { "layer_change_gcode",               "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    for (double x : { 40., 150. })
+        add_box_at(model, print, 20., 20., 24.8, Vec2d(x, 80.));
+    print.apply(model, config);
+    REQUIRE(24.8 + print.objects().front()->slicing_parameters().object_print_z_min > 25.);
+
+    const std::string error = print.validate().string;
+    INFO(error);
+    CHECK(error.find("too tall") != std::string::npos);
+}
+
+TEST_CASE("Sequential printing without a raft keeps boxes just below the rod", "[Print][Orca17235]")
+{
+    // Edge regression for the case above: the same boxes without a raft stay below the rod and validate.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",                   "by object" },
+        { "extruder_clearance_height_to_rod", 25 },
+        { "skirt_loops",                      0 },
+        { "raft_layers",                      0 },
+        { "layer_change_gcode",               "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    for (double x : { 40., 150. })
+        add_box_at(model, print, 20., 20., 24.8, Vec2d(x, 80.));
+    print.apply(model, config);
+
+    const std::string error = print.validate().string;
+    INFO(error);
+    CHECK(error.empty());
+}
