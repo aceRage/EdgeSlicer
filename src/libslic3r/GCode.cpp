@@ -1878,7 +1878,14 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         if (extruder_id < 0 || !gcodegen.writer().need_toolchange(extruder_id))
             return "";
         const double current_z          = gcodegen.writer().get_position().z();
-        const double tower_z            = local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
+        // A layer joined to the tower layer below (Orca #17204) prints its Local-Z purges down on that
+        // tower layer, where they were planned, like its nominal tool changes. Type1 changes filament
+        // directly below and keeps the object's z for change_filament_gcode.
+        const bool   joined_tower_layer = m_layer_joined && gcodegen.wipe_tower_type() != WipeTowerType::Type1 &&
+                                        m_layer_idx >= 0 && size_t(m_layer_idx) < m_tool_changes.size() &&
+                                        ! m_tool_changes[size_t(m_layer_idx)].empty();
+        const double tower_z            = joined_tower_layer ? joined_tower_z() :
+                                          local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
         const double toolchange_print_z = tower_z - gcodegen.config().z_offset.value;
 
         // A Bambu Lab (Type1) tower never takes the WipeTower2 tool changes below: those are planned and laid out
