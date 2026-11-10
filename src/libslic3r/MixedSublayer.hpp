@@ -107,6 +107,8 @@ struct MixedRatioBandPlan
 {
     std::vector<MixedRatioPass> passes;
     bool                        split { false };
+    // The planned order had to start with another component so the first pass reaches above the swallowed layers.
+    bool                        rotated { false };
 };
 MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> &components,
                                          double                                   band_height,

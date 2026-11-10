@@ -80,6 +80,13 @@ struct LocalZInterval
 };
 
 struct SubLayerPlan;
+// Mixed color sublayer P3: what PrintObject::adapt_local_z_ratio_plan_to_merge_bands() did.
+struct MixedRatioMergeStats
+{
+    size_t split_bands { 0 };         // band tops split into passes
+    size_t whole_bands { 0 };         // band tops printed in one colour: no pass reached above the swallowed layers
+    size_t reordered_top_bands { 0 }; // Bambu Studio order asked for (or a top surface), but the first pass had to change
+};
 // The Local-Z interval prints through sub-layer passes: two or more, or a single Ratio pass.
 bool local_z_interval_has_passes(const LocalZInterval &interval, const std::vector<SubLayerPlan> &plans);
 // The 1-based filament of the top Ratio pass of mixed row `row_idx` on the layer printed at `print_z`, or 0 when
@@ -532,10 +539,9 @@ public:
         m_local_z_plan_before_merge.reset();
     }
     // Mixed color sublayer P3 (D9): re-plan the Ratio rows whose region AdaptiveLayerMerge merged into bands, so
-    // their passes split the band height on each band top and skip the swallowed layers. Runs right after
-    // compute_adaptive_merge_groups(); idempotent (the slice-time plan is kept and restored first). Returns the
-    // number of bands that had to print whole because no pass reached above the swallowed layers.
-    size_t                              adapt_local_z_ratio_plan_to_merge_bands();
+    // their passes split each band patch's height on its top and skip the swallowed footprint. Runs right after
+    // compute_adaptive_merge_groups(); idempotent (the slice-time plan is kept and restored first).
+    MixedRatioMergeStats                adapt_local_z_ratio_plan_to_merge_bands();
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();

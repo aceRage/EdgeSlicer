@@ -403,11 +403,17 @@ void PrintObject::make_perimeters()
     this->compute_adaptive_merge_groups();
     m_print->throw_if_canceled();
     // Mixed color sublayer P3 (D9): Ratio rows split the band heights the merge just chose.
-    if (const size_t whole_bands = this->adapt_local_z_ratio_plan_to_merge_bands(); whole_bands > 0)
+    const MixedRatioMergeStats merge_stats = this->adapt_local_z_ratio_plan_to_merge_bands();
+    if (merge_stats.whole_bands > 0)
         this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
             Slic3r::format(L("Object %1%: %2% merged layer bands of a mixed color sublayer print in one colour each: no sub-layer "
                              "of the mix is tall enough to start above the layers the band merges."),
-                           this->model_object()->name, whole_bands));
+                           this->model_object()->name, merge_stats.whole_bands));
+    if (merge_stats.reordered_top_bands > 0)
+        this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+            Slic3r::format(L("Object %1%: on %2% merged layer bands of a mixed color sublayer the Bambu Studio colour order could not be "
+                             "kept, so the top colour there may differ: the first sub-layer must reach above the layers the band merges."),
+                           this->model_object()->name, merge_stats.reordered_top_bands));
 
     // Ultra (over-support walls): the per-layer "there is support under here" region the wall
     // classifier needs, built once here and dropped again below. When the feature is off this

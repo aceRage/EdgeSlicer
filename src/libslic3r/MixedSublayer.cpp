@@ -229,6 +229,7 @@ MixedRatioBandPlan plan_mixed_ratio_band(const std::vector<MixedRatioComponent> 
             std::rotate(out.passes.begin(), out.passes.begin() + std::ptrdiff_t(k), out.passes.end());
             state.last_extruder = out.passes.back().extruder;
             out.split           = true;
+            out.rotated         = true;
             return out;
         }
     // No pass is tall enough: the band prints whole, by the component owed the most.
