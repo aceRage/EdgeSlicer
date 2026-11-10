@@ -22,6 +22,7 @@
 #include <windows.h>
 #endif
 
+#include "OrcaApiVersion.hpp"
 #include "PluginAuditManager.hpp"
 #include "PythonInterpreter.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -247,6 +248,10 @@ void scan_plugin_directory(const std::string& dir_path, std::vector<PluginDescri
             descriptor.entry_path = entry_path.string();
             descriptor.set_metadata_valid(true);
             descriptor.clear_error();
+
+            std::string api_error;
+            if (!orca_api_version_supported(descriptor.required_orca_api, api_error))
+                descriptor.set_error(api_error);
 
             // Cloud identity and the package-level auto-load flag. plugin_key is always derived
             // below, never read from the sidecar.
@@ -506,6 +511,7 @@ bool parse_pep723_toml(const std::string& toml_content,
                        std::string& out_description,
                        std::string& out_author,
                        std::string& out_version,
+                       std::string& out_orca_api,
                        std::string& error)
 {
     out_deps.clear();
@@ -514,6 +520,7 @@ bool parse_pep723_toml(const std::string& toml_content,
     out_description.clear();
     out_author.clear();
     out_version.clear();
+    out_orca_api.clear();
 
     TomlSection section = TomlSection::Root;
 
@@ -573,6 +580,9 @@ bool parse_pep723_toml(const std::string& toml_content,
         if (section == TomlSection::Root) {
             if (key == "requires-python") {
                 out_requires_python = unquote_toml_string(val);
+            } else if (key == "requires-orca-api" || key == "min_orca_api") {
+                if (out_orca_api.empty())
+                    out_orca_api = unquote_toml_string(val);
             } else if (key == "dependencies") {
                 // The array may close on this line or run on over the following ones.
                 out_deps.clear();
@@ -585,6 +595,10 @@ bool parse_pep723_toml(const std::string& toml_content,
             else if (key == "description")  out_description = unquote_toml_string(val);
             else if (key == "author")       out_author = unquote_toml_string(val);
             else if (key == "version")      out_version = unquote_toml_string(val);
+            else if (key == "requires-orca-api" || key == "min_orca_api") {
+                if (out_orca_api.empty())
+                    out_orca_api = unquote_toml_string(val);
+            }
         }
     }
 
@@ -621,6 +635,7 @@ void parse_metadata_rfc822(const std::string& content,
                            std::string& out_requires_python,
                            std::string& out_import_name,
                            std::vector<std::string>& out_requires_dist,
+                           std::string& out_orca_api,
                            std::string& error)
 {
     std::istringstream stream(content);
@@ -645,6 +660,8 @@ void parse_metadata_rfc822(const std::string& content,
             out_author = current_value;
         else if (lower == "requires-python")
             out_requires_python = current_value;
+        else if (lower == "requires-orca-api" || lower == "min-orca-api")
+            out_orca_api = current_value;
         else if (lower == "import-name")
             out_import_name = current_value;
         else if (lower == "requires-dist")
@@ -1166,7 +1183,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
     if (!pep723_content.empty()) {
         std::string pep723_error;
         std::string requires_python;
-        std::string pep_name, pep_desc, pep_author, pep_version;
+        std::string pep_name, pep_desc, pep_author, pep_version, pep_orca_api;
         if (!parse_pep723_toml(pep723_content,
                                descriptor.dependencies,
                                requires_python,
@@ -1174,6 +1191,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
                                pep_desc,
                                pep_author,
                                pep_version,
+                               pep_orca_api,
                                pep723_error)) {
             error = "Failed to parse PEP 723 metadata: " + pep723_error;
             return false;
@@ -1188,6 +1206,7 @@ bool read_python_plugin_metadata(const boost::filesystem::path& py_path, PluginD
         if (!pep_desc.empty())            descriptor.description = pep_desc;
         if (!pep_author.empty())          descriptor.author     = pep_author;
         if (!pep_version.empty())         descriptor.version    = pep_version;
+        if (!pep_orca_api.empty())        descriptor.required_orca_api = pep_orca_api;
     }
 
     // Validate that required identity fields are present (either from PEP 723 or
@@ -1266,9 +1285,10 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
 
     std::string meta_name, meta_version, meta_summary, meta_author, meta_requires_python, meta_import_name;
     std::vector<std::string> requires_dist;
+    std::string meta_orca_api;
     std::string meta_error;
     parse_metadata_rfc822(meta_content, meta_name, meta_version, meta_summary, meta_author,
-                          meta_requires_python, meta_import_name, requires_dist, meta_error);
+                          meta_requires_python, meta_import_name, requires_dist, meta_orca_api, meta_error);
 
     if (meta_name.empty()) {
         error = "Wheel METADATA missing required Name field";
@@ -1398,6 +1418,8 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
     descriptor.version    = meta_version;
     descriptor.description = meta_summary;
     descriptor.author     = meta_author;
+    if (!meta_orca_api.empty())
+        descriptor.required_orca_api = meta_orca_api;
 
     return true;
 }

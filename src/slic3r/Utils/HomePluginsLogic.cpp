@@ -42,6 +42,11 @@ json plugin_card(const PluginView& view)
     card["trust"]               = view.trust; // Phase 5 placeholder
     card["in_process_pipeline"] = view.in_process_pipeline;
     card["can_run"]             = false;
+    card["run_state"]           = (view.run_state == "running" || view.run_state == "success" ||
+                         view.run_state == "failure") ?
+                             view.run_state :
+                             "";
+    card["run_message"]         = view.run_message.size() > 400 ? view.run_message.substr(0, 400) : view.run_message;
 
     std::vector<std::string> types = view.types;
     types.erase(std::remove(types.begin(), types.end(), std::string()), types.end());

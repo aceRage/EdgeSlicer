@@ -10,9 +10,11 @@
 #include <optional>
 #include <pybind11/embed.h>
 
+#include "OrcaApiVersion.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginHooks.hpp"
 #include "PluginAuditManager.hpp"
+#include "host/PluginHostUi.hpp"
 #include "PyPluginTrampoline.hpp"
 #include "PythonInterpreter.hpp"
 #include "PythonPluginBridge.hpp"
@@ -870,6 +872,11 @@ void PluginManager::load_plugin(const std::string& plugin_key, bool skip_deps, s
             invalid        = plugin->descriptor.is_invalid_package();
             already_loaded = plugin->is_loaded();
             invalid_error  = plugin->descriptor.normalized_error();
+            std::string api_error;
+            if (!invalid && !orca_api_version_supported(plugin->descriptor.required_orca_api, api_error)) {
+                invalid       = true;
+                invalid_error = api_error;
+            }
             if (already_loaded) {
                 for (const auto& capability : plugin->capabilities)
                     if (capability)
@@ -1096,6 +1103,8 @@ bool PluginManager::unload_plugin(const std::string& plugin_key)
     }
 
     notify_unload_complete();
+
+    PluginHostUi::close_windows_for_plugin(plugin_key);
 
     cancel_and_wait_for_capabilities(removed.capabilities);
 

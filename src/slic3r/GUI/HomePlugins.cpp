@@ -127,7 +127,13 @@ void HomePlugins::send_state()
         if (d.plugin_key.empty() || !HomeTab::is_listed_plugin_key(d.plugin_key, { d.plugin_key }))
             continue;
         m_keys.push_back(d.plugin_key);
-        items.push_back(view_of(mgr, d));
+        HomeTab::PluginView v = view_of(mgr, d);
+        auto it = m_run.find(d.plugin_key);
+        if (it != m_run.end()) {
+            v.run_state   = it->second.state;
+            v.run_message = it->second.message;
+        }
+        items.push_back(std::move(v));
     }
     m_send(HomeTab::plugins_message(items, false, mgr.get_discovery_error()));
 }
@@ -161,8 +167,10 @@ bool HomePlugins::handle(const json& msg)
     } else if (command == "plugin_reveal") {
         if (listed(key))
             reveal(key);
-    } else if (command == "plugin_run")
-        stub(_u8L("Running a script from Home lands in a later phase."));
+    } else if (command == "plugin_run") {
+        if (listed(key))
+            run(key);
+    }
     else if (command == "plugin_configure" || command == "plugin_config_get" || command == "plugin_config_save" ||
              command == "plugin_config_restore")
         stub(_u8L("Configure opens in the Plugins inspector in a later phase."));
@@ -276,6 +284,60 @@ void HomePlugins::reveal(const std::string& key)
     fs::path p = root;
     p.make_preferred();
     desktop_open_any_folderEx(p.string());
+}
+
+void HomePlugins::run(const std::string& key)
+{
+    PluginManager& mgr = PluginManager::instance();
+    auto           running = m_run.find(key);
+    if (running != m_run.end() && running->second.state == "running")
+        return;
+
+    if (!mgr.is_plugin_loaded(key) && !mgr.is_plugin_load_in_progress(key))
+        mgr.load_plugin(key);
+
+    auto caps = mgr.get_plugin_capabilities(key, PluginCapabilityType::Script, true);
+    if (caps.empty())
+        caps = mgr.get_plugin_capabilities(key, PluginCapabilityType::Script, false);
+    if (caps.empty() || !caps.front()) {
+        m_run[key] = { "failure", _u8L("This plugin has no script capability to run.") };
+        notice(m_run[key].message, true);
+        send_state();
+        return;
+    }
+
+    m_run[key] = { "running", {} };
+    send_state();
+
+    const std::string cap_name = caps.front()->name();
+    auto launch = mgr.launch_script_capability(key, cap_name,
+        [this, alive = m_alive, key](const ScriptCompletion& completion) {
+            wxGetApp().CallAfter([this, alive, key, completion]() {
+                if (!*alive)
+                    return;
+                if (completion.cancelled) {
+                    m_run.erase(key);
+                } else if (!completion.error.empty() ||
+                           (completion.result.status != PluginResult::Success &&
+                            completion.result.status != PluginResult::Skipped)) {
+                    const std::string msg = !completion.error.empty() ? completion.error : completion.result.message;
+                    m_run[key] = { "failure", msg };
+                    if (!msg.empty())
+                        notice(msg, true);
+                } else {
+                    m_run[key] = { "success", completion.result.message };
+                }
+                send_state();
+            });
+        });
+
+    if (!launch.launched_async) {
+        const std::string msg = launch.outcome.error.empty() ? _u8L("The script could not be started.") :
+                                                               launch.outcome.error;
+        m_run[key] = { "failure", msg };
+        notice(msg, true);
+        send_state();
+    }
 }
 
 } // namespace GUI

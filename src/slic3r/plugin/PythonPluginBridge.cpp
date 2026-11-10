@@ -20,7 +20,9 @@
 #include "PythonInterpreter.hpp"
 #include "PluginFsUtils.hpp"
 #include "PluginConfig.hpp"
+#include "OrcaApiVersion.hpp"
 #include "host/PluginHost.hpp"
+#include "host/PluginHostBindings.hpp"
 #include "PyPluginPackage.hpp"
 #include "PyPluginTrampoline.hpp"
 #include "pluginTypes/script/ScriptPluginCapability.hpp"
@@ -366,6 +368,8 @@ void PythonPluginBridge::clear_pending_captures()
 void bind_python_api(pybind11::module_& m)
 {
     m.doc() = "OrcaSlicer plugin API";
+    m.attr("api_version") = k_orca_api_version;
+    m.attr("__version__") = k_orca_api_version;
 
     py::enum_<PluginCapabilityType>(m, "PluginType", "Available plugin capability groups")
         .value("PrinterConnection", PluginCapabilityType::PrinterConnection)
@@ -528,6 +532,7 @@ void bind_python_api(pybind11::module_& m)
     // Make sure you register your bindings here
     ScriptPluginCapability::RegisterBindings(m);
     PluginHost::RegisterBindings(m);
+    register_unported_capability_types(m);
     BOOST_LOG_TRIVIAL(debug) << "Registered ScriptPluginCapability Python bindings";
 
     m.def(

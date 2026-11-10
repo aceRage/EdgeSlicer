@@ -56,6 +56,40 @@ TEST_CASE("home plugins: a card carries display fields only", "[HomePlugins]")
     CHECK_FALSE(card.contains("path"));
     CHECK_FALSE(card.contains("thumbnail_url"));
     CHECK_FALSE(card.contains("sharing_token"));
+    CHECK(card["run_state"] == "");
+    CHECK(card["run_message"] == "");
+}
+
+TEST_CASE("home plugins: run_state is only running, success, or failure", "[HomePlugins]")
+{
+    PluginView running = sample_view();
+    running.run_state  = "running";
+    json card          = plugin_card(running);
+    CHECK(card["run_state"] == "running");
+    CHECK(card["run_message"] == "");
+
+    PluginView ok     = sample_view();
+    ok.run_state      = "success";
+    ok.run_message    = "sync-ok";
+    card              = plugin_card(ok);
+    CHECK(card["run_state"] == "success");
+    CHECK(card["run_message"] == "sync-ok");
+
+    PluginView fail  = sample_view();
+    fail.run_state   = "failure";
+    fail.run_message = "boom";
+    card             = plugin_card(fail);
+    CHECK(card["run_state"] == "failure");
+    CHECK(card["run_message"] == "boom");
+
+    PluginView junk = sample_view();
+    junk.run_state  = "queued";
+    junk.run_message = std::string(500, 'x');
+    card            = plugin_card(junk);
+    CHECK(card["run_state"] == "");
+    CHECK(card["run_message"].get<std::string>().size() == 400);
+
+    CHECK_FALSE(plugin_card_leaks_path(card));
 }
 
 TEST_CASE("home plugins: sanitize strips host paths", "[HomePlugins]")
@@ -133,4 +167,14 @@ TEST_CASE("home plugins: the page may only name keys the host listed", "[HomePlu
     CHECK_FALSE(is_listed_plugin_key("hello/../../plugins", listed));
     // A path-shaped key is refused even if the host list were wrong.
     CHECK_FALSE(is_listed_plugin_key("a/b", { "a/b" }));
+}
+
+TEST_CASE("home plugins: plugin_run only accepts a plugin_key the host listed", "[HomePlugins]")
+{
+    // GUI/HomePlugins.cpp ignores plugin_run unless listed(key), which is is_listed_plugin_key.
+    const std::vector<std::string> listed{ "hello_script" };
+    CHECK(is_listed_plugin_key("hello_script", listed));
+    CHECK_FALSE(is_listed_plugin_key("not_listed", listed));
+    CHECK_FALSE(is_listed_plugin_key("{data_dir}/plugins/hello", listed));
+    CHECK_FALSE(is_listed_plugin_key("C:\\Users\\me\\plugins\\hello", listed));
 }

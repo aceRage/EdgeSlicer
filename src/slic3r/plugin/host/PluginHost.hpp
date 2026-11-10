@@ -4,9 +4,10 @@
 
 namespace Slic3r {
 
-// Entry point of the `orca.host` Python API surface. Phase 1 registers only
-// `orca.host.plugin.storage`; geometry/mesh/presets/model/app/slicing/UI
-// registrars land in later phases.
+// Entry point of the `orca.host` Python API surface. Each domain of the
+// surface (geometry, mesh, presets, model, app access, ui, slicing graph)
+// lives in its own translation unit in this directory; RegisterBindings
+// creates the submodule and runs the per-domain registrars.
 class PluginHost
 {
 public:

@@ -41,6 +41,9 @@ struct PluginView
     std::string                        trust;
     // Phase 6/8 label: early slicing-pipeline steps stay in-process.
     bool                               in_process_pipeline { false };
+    // Phase 3: Home > Plugins Run. Empty, "running", "success", or "failure".
+    std::string                        run_state;
+    std::string                        run_message;
 };
 
 // One card for the page. Display fields only: never entry_path, plugin_root, or path.
