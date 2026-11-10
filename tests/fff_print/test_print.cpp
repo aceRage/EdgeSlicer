@@ -2983,3 +2983,51 @@ TEST_CASE("Sequential printing keeps copies of one object in their list order", 
     CHECK(std::is_sorted(copies.begin(), copies.end(),
                          [](const ModelInstance *l, const ModelInstance *r) { return l->arrange_order < r->arrange_order; }));
 }
+
+TEST_CASE("Sequential printing keeps rotated copies of one object in their list order", "[Print][Orca17286]")
+{
+    // Copies of one object that differ in rotation get one PrintObject each, and print.objects() lists
+    // those groups by transformation. Ordering by the object index alone therefore follows that
+    // grouping instead of the object list, and every second copy here prints out of place.
+    // The mesh is centred on the object origin, so the rotation turns the footprint in place instead
+    // of moving it, and the grid spacing below stays clear of the clearance radius.
+    // Edge: init_print always arranges, so the copies are placed by hand as in the case above.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",     "by object" },
+        { "skirt_loops",        0 },
+        { "layer_change_gcode", "G92 E0\n" } // validate() relative-E reset
+    });
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    TriangleMesh cube = make_cube(5., 5., 2.);
+    cube.translate(-2.5f, -2.5f, 0.f);
+    object->add_volume(std::move(cube));
+    for (int k = 0; k < 200; ++k) {
+        ModelInstance *inst = object->add_instance();
+        inst->set_offset(Vec3d(10. + 12. * double(k % 15), 10. + 12. * double(k / 15), 0.));
+        if (k % 2 != 0)
+            inst->set_rotation(Vec3d(0., 0., PI / 2));
+    }
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    REQUIRE(print.objects().size() == 2); // one PrintObject per distinct rotation
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException error = print.validate(&warnings);
+    INFO(error.string);
+    REQUIRE(error.string.empty());
+
+    // validate() numbered the instances it ordered; the copies must be numbered in list order.
+    const ModelInstancePtrs &copies = print.model().objects.front()->instances;
+    for (size_t k = 0; k < copies.size(); ++k)
+        REQUIRE(copies[k]->arrange_order == int(k + 1));
+
+    // The G-code export orders the instances from those numbers.
+    const std::vector<const PrintInstance *> ordered = sort_object_instances_by_model_order(print);
+    REQUIRE(ordered.size() == copies.size());
+    for (size_t k = 0; k < copies.size(); ++k)
+        REQUIRE(ordered[k]->model_instance == copies[k]);
+}
