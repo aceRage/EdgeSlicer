@@ -12,6 +12,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <nlohmann/json.hpp>
 
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -305,6 +306,74 @@ TEST_CASE("Print validation accepts a centred cube on the Kobra 3 ring and strip
             const StringObjectException err = print.validate();
             INFO(err.string);
             CHECK(err.string.empty());
+        }
+    }
+}
+
+// OrcaSlicer #17209: a crossing exclusion polygon is rejected (the GUI refuses it, a project drops
+// it) and the readers exclude nothing for it. Edge adaptation: rectangle lists, padding points and
+// the Kobra 3 ring stay valid, so no shipped printer loses its exclusion area.
+TEST_CASE("Excluded bed areas require a simple polygon", "[BedExcludeArea][Regression]")
+{
+    SECTION("upstream's crossing strip is invalid and excludes nothing")
+    {
+        const Pointfs pts = parse_points("0x0,6x0,1x220,6x220");
+        CHECK_FALSE(is_valid_bed_exclude_area(pts));
+        CHECK(bed_exclude_area_polygons(pts).empty());
+        CHECK(bed_exclude_area_boxes(pts).empty());
+    }
+    SECTION("upstream's valid strip stays one rectangle")
+    {
+        const Pointfs pts = parse_points("0x0,6x0,6x220,0x220");
+        CHECK(is_valid_bed_exclude_area(pts));
+        const Polygons region = bed_exclude_area_polygons(pts);
+        REQUIRE(region.size() == 1);
+        CHECK(region.front().points.size() == pts.size());
+        CHECK(region_area_mm2(region) == Approx(6. * 220.));
+    }
+    SECTION("four rectangle corners in any order are one rectangle in Edge (upstream: zero area)")
+    {
+        const Pointfs pts = parse_points("0x0,6x0,0x220,6x220");
+        CHECK(is_valid_bed_exclude_area(pts));
+        CHECK(region_area_mm2(bed_exclude_area_polygons(pts)) == Approx(6. * 220.));
+    }
+    SECTION("a zero-area polygon is invalid")
+    {
+        CHECK_FALSE(is_valid_bed_exclude_area(parse_points("0x0,10x10,20x20")));
+        CHECK(bed_exclude_area_polygons(parse_points("0x0,10x10,20x20")).empty());
+    }
+    SECTION("an outline wound twice is invalid")
+    {
+        const Pointfs pts = parse_points("0x0,30x0,0x30,0x0,30x0,0x30");
+        REQUIRE_FALSE(bed_exclude_area_is_rectangles(pts));
+        CHECK_FALSE(is_valid_bed_exclude_area(pts));
+    }
+    SECTION("a non-finite point is invalid")
+    {
+        Pointfs pts = parse_points("0x0,30x0,20x20,0x20");
+        pts[2].x() = std::numeric_limits<double>::quiet_NaN();
+        CHECK_FALSE(is_valid_bed_exclude_area(pts));
+        CHECK(bed_exclude_area_polygons(pts).empty());
+    }
+    SECTION("short lists are invalid, so the GUI and the loader only check two points or more")
+    {
+        CHECK_FALSE(is_valid_bed_exclude_area(parse_points("0x0")));
+        CHECK_FALSE(is_valid_bed_exclude_area(parse_points("0x0,10x10")));
+    }
+    SECTION("simple polygons, rectangle lists and the Kobra 3 ring are valid")
+    {
+        CHECK(is_valid_bed_exclude_area(parse_points("0x0,20x0,20x10,10x10,10x20,0x20")));   // L shape
+        CHECK(is_valid_bed_exclude_area(parse_points("0x20,20x20,30x0,0x0")));               // clockwise quad
+        CHECK(is_valid_bed_exclude_area(parse_points("0x0,30x0,0x30")));                     // triangle
+        CHECK(is_valid_bed_exclude_area(parse_points("0x0,28x0,28x28,0x28,0x28,8x28,8x256,0x256"))); // Bambu cutter + rail
+        CHECK(is_valid_bed_exclude_area(parse_points(KOBRA3_RING)));
+        CHECK(is_valid_bed_exclude_area(parse_points(KOBRA3_STRIP)));
+    }
+    SECTION("every shipped bed_exclude_area is valid")
+    {
+        for (const auto &[value, presets] : shipped_exclude_areas()) {
+            INFO("bed_exclude_area = " << value << " (e.g. " << presets.front() << ")");
+            CHECK(is_valid_bed_exclude_area(parse_points(value)));
         }
     }
 }

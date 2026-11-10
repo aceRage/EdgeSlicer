@@ -14264,6 +14264,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
     bool dlg_cont = true;
     bool is_user_cancel = false;
     bool translate_old = false;
+    bool invalid_bed_exclude_area = false; // OrcaSlicer #17209
     int current_width = 0, current_depth = 0, current_height = 0;
     // Ultra "Keep my printer": the switch back to the preferred printer is deferred until the
     // objects and plates are loaded, so the bed-size change re-centers them like a manual switch.
@@ -14806,6 +14807,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         config.apply(static_cast<const ConfigBase &>(FullPrintConfig::defaults()));
                         // and place the loaded config over the base.
                         config += std::move(config_loaded);
+                        // OrcaSlicer #17209: a project's crossing or zero-area exclusion polygon is dropped
+                        // (and the user told so below) rather than loaded into the printer preset.
+                        if (ConfigOptionPoints *bed_exclude_area = config.option<ConfigOptionPoints>("bed_exclude_area");
+                            bed_exclude_area != nullptr && bed_exclude_area->values.size() > 1 &&
+                            !is_valid_bed_exclude_area(bed_exclude_area->values)) {
+                            bed_exclude_area->values = { Vec2d(0., 0.) }; // the default: nothing excluded
+                            invalid_bed_exclude_area = true;
+                        }
                         std::map<std::string, std::string> validity = config.validate();
                         if (!validity.empty()) {
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format("Param values in 3mf error: ");
@@ -15577,6 +15586,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             MessageDialog msg(wxGetApp().mainframe, _L("The file does not contain any geometry data."), _L("Warning"), wxOK | wxICON_WARNING);
             msg.ShowModal();
         }
+    }
+    if (invalid_bed_exclude_area) {
+        GUI::show_error(q, _L("The excluded bed area is invalid. It must be a simple, non-self-intersecting polygon.") +
+            "\n" + _L("The invalid area has been removed, so please define it again using a valid polygon."));
     }
     return obj_idxs;
 }

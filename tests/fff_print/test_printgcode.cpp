@@ -2966,3 +2966,100 @@ TEST_CASE("Cyclic tool-change ordering: wipe tower plan and G-code export agree"
         CHECK(changes >= 3 * 8 + 2);
     }
 }
+
+// BambuStudio #11965: in spiral vase mode BambuStudio's travel_to() moved in XY only, so a filament change G-code
+// that lifted Z after the raft left the first object layer printing at the lifted Z. Orca's travel_to() always
+// travels with travel_to_xyz() to the layer's nominal Z (its spiral-vase XY-only branch is disabled), so this
+// is already right here; the cases below are the upstream test, adapted, to keep it that way.
+namespace {
+struct SpiralRaftGCodeResult
+{
+    double first_model_extrusion_z { -1. };
+    double highest_z_before_model  { 0. };
+    double nominal_model_layer_z   { 0. };
+    bool   model_z_is_continuous   { true };
+};
+
+SpiralRaftGCodeResult spiral_raft_gcode_result(const std::string &change_filament_gcode)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "spiral_mode",                true },
+        { "layer_height",               0.2 },
+        { "initial_layer_print_height", 0.2 },
+        { "wall_loops",                 1 },
+        { "top_shell_layers",           0 },
+        { "bottom_shell_layers",        1 },
+        { "sparse_infill_density",      "0%" },
+        { "raft_layers",                2 },
+        { "enable_prime_tower",         false },
+        { "support_filament",           2 },
+        { "support_interface_filament", 2 },
+        { "wall_filament",              1 },
+        { "sparse_infill_filament",     1 },
+        { "solid_infill_filament",      1 },
+        { "retraction_length",          "0" },
+        { "skirt_loops",                0 },
+        { "gcode_comments",             true },
+        { "machine_start_gcode",        "T[initial_tool]\n" },
+        { "change_filament_gcode",      change_filament_gcode }
+    });
+
+    Print print;
+    Model model;
+    init_print({ TestMesh::cube_20x20x20 }, print, model, config);
+    const std::string gcode = Test::gcode(print);
+
+    SpiralRaftGCodeResult result;
+    result.nominal_model_layer_z = print.objects().front()->layers().front()->print_z;
+    int    current_tool           = -1;
+    bool   raft_tool_seen         = false;
+    double last_model_extrusion_z = -1.;
+    GCodeReader reader;
+    reader.apply_config(print.config());
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.cmd().size() > 1 && line.cmd().front() == 'T') {
+            current_tool = atoi(line.cmd().data() + 1);
+            raft_tool_seen |= current_tool == 1;
+        }
+        const bool model_extrusion = raft_tool_seen && current_tool == 0 && line.extruding(self) && line.dist_XY(self) > 0.;
+        if (result.first_model_extrusion_z < 0.) {
+            result.highest_z_before_model = std::max(result.highest_z_before_model, double(self.z()));
+            if (model_extrusion)
+                result.first_model_extrusion_z = self.z();
+        }
+        if (model_extrusion) {
+            if (last_model_extrusion_z >= 0.) {
+                const double z_step = self.z() - last_model_extrusion_z;
+                result.model_z_is_continuous &= z_step >= -EPSILON && z_step <= 0.21;
+            }
+            last_model_extrusion_z = self.z();
+        }
+    });
+    return result;
+}
+} // namespace
+
+TEST_CASE("Spiral vase restores object layer Z after a raft tool change", "[PrintGCode][SpiralVase][BBS11965]")
+{
+    SECTION("tool change ends at an elevated clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 X5 F12000\nG1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
+    }
+    SECTION("tool change does not alter Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("T[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.model_z_is_continuous);
+    }
+    SECTION("tool change leaves the XY position unknown at clearance Z") {
+        const SpiralRaftGCodeResult result = spiral_raft_gcode_result("G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n");
+        REQUIRE(result.first_model_extrusion_z >= 0.);
+        CHECK_THAT(result.first_model_extrusion_z, Catch::Matchers::WithinAbs(result.nominal_model_layer_z, 1e-3));
+        CHECK(result.highest_z_before_model >= result.nominal_model_layer_z + 2.);
+    }
+}
