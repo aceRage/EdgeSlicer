@@ -409,6 +409,10 @@ void PartPlate::calc_exclude_triangles(const ExPolygon &poly)
 {
     m_exclude_triangles.reset();
 
+    // A plate with no excluded area (most printers) has nothing to draw: that is the normal state, not a failure.
+    // Only a real polygon that cannot be triangulated is an error.
+    if (poly.empty())
+        return;
     if (!init_model_from_poly(m_exclude_triangles, poly, GROUND_Z))
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":Unable to create exclude triangles\n";
 }
@@ -600,7 +604,9 @@ void PartPlate::calc_vertex_for_plate_name_edit_icon(GLTexture *texture, int ind
     poly.contour.append({ scale_(p(0) + width), scale_(p(1) + height) });
     poly.contour.append({ scale_(p(0)        ), scale_(p(1) + height) });
 
-    if (!init_model_from_poly(model.model, poly, GROUND_Z))
+    // A plate that has no bed shape yet (a new project's Plater before its printer's bed is applied) gives a zero-size
+    // icon that cannot be triangulated; the icon is rebuilt once the shape is set. Only a failure with a shape is an error.
+    if (!init_model_from_poly(model.model, poly, GROUND_Z) && icon_sz > 0.f)
 		BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "Unable to generate geometry buffers for icons\n";
 
     init_raycaster_from_model(model);
@@ -6361,6 +6367,11 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 	for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)
 	{
 		int index = create_plate(false);
+		if (index < 0) {
+			// create_plate() stops at MAX_PLATES_COUNT. The objects of the remaining plates stay in the model, off the plates.
+			BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": the project has %1% plates, only %2% can be loaded") % plate_data_list.size() % MAX_PLATES_COUNT;
+			break;
+		}
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
 		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
@@ -6488,6 +6499,10 @@ void PartPlateList::print() const
 	flush_logs();
 	return;
 }
+
+// ODR-used by boost::format in load_from_3mf_structure(); in-class
+// initialization of a static const integral is not a definition.
+const unsigned int PartPlateList::MAX_PLATES_COUNT;
 
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_cali_texture = false;

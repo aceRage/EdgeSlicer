@@ -690,6 +690,7 @@ set(lisbslic3r_sources
     Support/SupportCommon.hpp
     Support/SupportInterlock.cpp
     Support/SupportInterlock.hpp
+    Support/SupportInterfaceRules.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp

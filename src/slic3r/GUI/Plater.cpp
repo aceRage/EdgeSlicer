@@ -15189,7 +15189,6 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (obj->name.empty()) {
                         obj->name = fs::path(obj->input_file).filename().string();
                     }
-                    obj->rotate(Geometry::deg2rad(config->opt_float("preferred_orientation")), Axis::Z);
                 }
 
                 if (plate_data.size() > 0) {
@@ -15242,6 +15241,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 if (int deleted_objects = model.removed_objects_with_zero_volume(); deleted_objects > 0) {
                     MessageDialog(q, _L("Objects with zero volume removed"), _L("The volume of the object is zero"), wxICON_INFORMATION | wxOK).ShowModal();
                 }
+                // Turn the file's content as one piece by the printer's preferred orientation, once the objects
+                // with no volume are gone. The objects keep their heights for the multi-part check below.
+                if (!type_3mf)
+                    model.rotate_and_center_objects(Geometry::deg2rad(config->opt_float("preferred_orientation")));
                 if (imperial_units)
                     // Convert even if the object is big.
                     convert_from_imperial_units(model, false);
@@ -16095,6 +16098,9 @@ void Plater::priv::reset(bool apply_presets_change, bool reload_presets)
     this->background_process.stop();
 
     clear_warnings();
+    // EdgeSlicer: a new or loaded project asks the per-session setting questions afresh (the
+    // remembered "No" answers to the support top Z distance offer).
+    ConfigManipulation::clear_session_prompts();
     // The nozzle-HRC toast manages its own lifecycle (its type is not part of
     // the slicing warning sweep) and must not outlive the project it described.
     notification_manager->close_notification_of_type(NotificationType::NozzleHrcWarning);
@@ -18294,8 +18300,15 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
         // and current_panel would stay null forever (is_preview_shown(), the do_reslice branch
         // and bind_event_handlers() would all be dead). The panels are Show()n / Hide()n normally
         // either way, so Preview::IsShown() keeps its usual meaning.
-        if (!panel->IsShownOnScreen() && !wxGetApp().is_hub_managed())
+        if (!panel->IsShownOnScreen() && !wxGetApp().is_hub_managed()) {
+            // A project strip slot's new Plater is built hidden, so it stops here with current_panel still null. Its panels
+            // all sit side by side in the 3D area's sizer, and until the first real switch they were all shown: the owner
+            // saw the main canvas next to the assembly view for a moment when the project came on screen. Show only this one.
+            for (wxPanel* other : panels)
+                if (other != panel)
+                    other->Hide();
             return;
+        }
     }
 //#endif
     current_panel = panel;
@@ -22261,7 +22274,10 @@ void Plater::import_model_id(wxString download_info)
 
         auto filesize = 0;
         bool size_limit = false;
+        // Same rule as the Downloader path: the address above was checked, a redirect out of it
+        // was not. MakerWorld's own links are signed storage URLs, so they do redirect.
         auto http = Http::get(download_url.ToStdString());
+        http.restrict_redirects(10);
 
         while (cont && retry_count < max_retries) {
             retry_count++;
@@ -22296,7 +22312,14 @@ void Plater::import_model_id(wxString download_info)
                         http_status,
                         error);
 
-                    if (retry_count == max_retries) {
+                    // A refusal is a decision about where the redirects went, not a flaky transfer:
+                    // re-sending the same request would be refused in exactly the same way, and each
+                    // try is another blind request to a host that already sent us somewhere we would
+                    // not go. So it ends the loop here rather than after max_retries.
+                    // error_is_redirect_refusal() matches REDIRECT_REFUSAL_PREFIX in Http.cpp.
+                    // That exact text is asserted in tests/slic3rutils/http_body_redirect_tests.cpp,
+                    // so rewording the prefix breaks the test rather than silently restoring retries.
+                    if (Http::error_is_redirect_refusal(error) || retry_count == max_retries) {
                         boost::system::error_code ec;
                         fs::remove(tmp_path, ec);
                         msg = _L("Importing to EdgeSlicer failed. Please download the file and manually import it.");
@@ -23790,6 +23813,28 @@ void Plater::load_gcode(const wxString& filename)
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " entry and filename: " << filename;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
+    // A G-code passed on the command line reaches this point from
+    // GUI_App::post_init() on the first idle event, which can run before the
+    // 3D canvas has rendered (and initialized OpenGL) for the first time.
+    // GCodeViewer::init() then calls uninitialized GL function pointers and
+    // crashes. Defer until the canvas is ready; the pending paint event is
+    // already queued ahead of the CallAfter, so this converges immediately.
+    // Bounded: a hub started hidden in the tray may never paint the canvas.
+    static int s_deferred_gcode_attempts = 0;
+    if (p->get_current_canvas3D() == nullptr || !p->get_current_canvas3D()->is_initialized()) {
+        if (++s_deferred_gcode_attempts > 200) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " canvas not initialized after 200 deferred attempts, giving up on " << into_u8(filename);
+            s_deferred_gcode_attempts = 0;
+            return;
+        }
+        wxGetApp().CallAfter([this, filename] {
+            // Do not keep retrying while the app shuts down.
+            if (!wxGetApp().is_closing())
+                this->load_gcode(filename);
+        });
+        return;
+    }
+    s_deferred_gcode_attempts = 0;
     if (! is_gcode_file(into_u8(filename)))
         return;
 

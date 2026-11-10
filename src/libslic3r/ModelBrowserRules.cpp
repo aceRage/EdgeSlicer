@@ -76,7 +76,7 @@ NavDecision decide_web_url(const std::string &url)
     if (u.has_userinfo)
         return block("the address carries a user name or password");
     if (is_blocked_host(u.host))
-        return block("addresses on this computer or the local network are not opened in the model browser");
+        return block("addresses on this computer or a private network are not opened in the model browser");
     return allow();
 }
 
@@ -124,11 +124,9 @@ bool is_blocked_host(const std::string &host_in)
     if (host.empty())
         return true;
     // Localhost names, every IP literal (IPv4 in any of the forms a resolver accepts, IPv6),
-    // single-label names and the local suffixes.
+    // single-label names and the local suffixes in untrusted::local_host_suffixes()
+    // (including Tailscale MagicDNS / ts.net).
     if (untrusted::is_local_or_ip_host(host))
-        return true;
-    // Tailscale MagicDNS / Serve names resolve to tailnet addresses (100.64/10, fd7a:115c:a1e0::/48).
-    if (host_is_or_under(host, "ts.net"))
         return true;
     // "localhost" spelled as a label of a longer name that some resolvers still map to loopback.
     if (host_is_or_under(host, "localhost.localdomain"))
@@ -153,13 +151,15 @@ std::vector<std::string> content_rule_url_filters()
     filters.push_back(authority + "\\[");                        // IPv6 literal
     filters.push_back(authority + "[0-9.]+(:[0-9]*)?/");         // IPv4 literal (any all-numeric host)
     filters.push_back(authority + "[^./:@]+" + host_end);        // single-label host
-    // The local suffixes of untrusted::is_local_or_ip_host(), and Tailscale's ts.net.
-    for (const char *suffix : {"localhost", "local", "lan", "home.arpa", "internal", "intranet", "localdomain", "ts.net"}) {
+    // untrusted::local_host_suffixes() is the authority for which suffixes mean "this host
+    // is on your computer or LAN". The filters are that list, regex-escaped, because a
+    // WebKit content rule cannot call the host-suffix predicate.
+    for (const std::string &suffix : untrusted::local_host_suffixes()) {
         std::string escaped;
-        for (const char *c = suffix; *c != '\0'; ++c) {
-            if (*c == '.')
-                escaped += "\\";
-            escaped += *c;
+        for (char c : suffix) {
+            if (c == '.')
+                escaped += '\\';
+            escaped += c;
         }
         filters.push_back(authority + "([^/:@]*\\.)?" + escaped + host_end);
     }

@@ -8176,7 +8176,8 @@ void PrintConfigDef::init_fff_params()
                       "90 degrees from the layer below. The interface then cannot peel off the body. "
                       "The top interface layer, the one that touches the model, is not changed.\n"
                       "Applies to the top interfaces of normal and tree supports (all tree styles). Needs at least one top "
-                      "interface layer more than the woven layers. Not used when \"Support Filament Matching\" is on.");
+                      "interface layer more than the woven layers.\n"
+                      "Cannot run together with \"Support Filament Matching\": turning one on offers to turn the other off.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -8254,39 +8255,40 @@ void PrintConfigDef::init_fff_params()
                      "wall's color. Reduces color contamination between supports and the "
                      "model. Any support geometry left over after matching keeps the color "
                      "already assigned to it and will not be repainted by Flush into objects' "
-                     "support.");
+                     "support.\n"
+                     "Cannot run together with \"Interlock interface with support body\": turning one on "
+                     "offers to turn the other off.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
-    auto support_interface_top_layers = def = this->add("support_interface_top_layers", coInt);
-    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    // EdgeSlicer: a plain number (spin box) rather than the 0-3 drop-down, so 4, 5 or more
+    // interface layers can be entered (the support interface interlock needs woven layers + 1).
+    def = this->add("support_interface_top_layers", coInt);
     def->label = L("Top interface layers");
     def->category = L("Support");
     def->tooltip = L("Number of top interface layers.");
     def->sidetext = L("layers");
     def->min = 0;
-    def->enum_values.push_back("0");
-    def->enum_values.push_back("1");
-    def->enum_values.push_back("2");
-    def->enum_values.push_back("3");
-    def->enum_labels.push_back("0");
-    def->enum_labels.push_back("1");
-    def->enum_labels.push_back("2");
-    def->enum_labels.push_back("3");
+    def->max = 20;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(3));
 
+    // EdgeSlicer: stays an editable drop-down for its "Same as top" (-1) entry; the list runs to
+    // 10 and any other number up to the maximum can be typed.
     def = this->add("support_interface_bottom_layers", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Bottom interface layers");
     def->category = L("Support");
-    def->tooltip = L("Number of bottom interface layers.");
+    def->tooltip = L("Number of bottom interface layers. \"Same as top\" (-1) uses the top interface layer count.");
     def->sidetext = L("layers");
     def->min = -1;
+    def->max = 20;
     def->enum_values.push_back("-1");
-    append(def->enum_values, support_interface_top_layers->enum_values);
     def->enum_labels.push_back(L("Same as top"));
-    append(def->enum_labels, support_interface_top_layers->enum_labels);
+    for (int i = 0; i <= 10; ++ i) {
+        def->enum_values.push_back(std::to_string(i));
+        def->enum_labels.push_back(std::to_string(i));
+    }
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
 
