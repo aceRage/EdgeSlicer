@@ -255,6 +255,18 @@ bool line_is_legend(const Line& line)
     return !options.empty() && options.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
 }
 
+ConfigOptionMode line_mode(const Line& line)
+{
+    const std::vector<Option>& options = line.get_options();
+    return options.empty() ? comSimple : options.front().opt.mode;
+}
+
+const t_config_option_key* line_first_option_id(const Line& line)
+{
+    const std::vector<Option>& options = line.get_options();
+    return options.empty() ? nullptr : &options.front().opt_id;
+}
+
 void OptionsGroup::activate_line(Line& line)
 {
     if (line.is_separator())

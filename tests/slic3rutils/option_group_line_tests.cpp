@@ -34,3 +34,35 @@ TEST_CASE("A widget-only line is no legend line and reading it needs no option",
     normal.append_option(Option(plain, "nozzle_diameter"));
     CHECK_FALSE(line_is_legend(normal));
 }
+
+// Owner crash 2026-11-10 (Printer settings > Extruder 1, any printer; both local minidumps): OG_CustomCtrl::CtrlLine::
+// update_visibility took front() of the options of the Extruder page's "Nozzles in this project" row (a labelled widget with no
+// option, in the Size group after nozzle_diameter) to read its mode, reading null + 0x180. The paint path did the same for the
+// row's field. line_mode() and line_first_option_id() are what OG_CustomCtrl asks now.
+TEST_CASE("A widget-only line has a mode and no first option", "[OptionsGroup][extcrash]")
+{
+    GUILine widget_only{ "Nozzles in this project", "tooltip" };
+    widget_only.widget = [](wxWindow *) -> wxSizer * { return nullptr; };
+    REQUIRE(widget_only.get_options().empty());
+    // Shown in every mode, the simplest included.
+    CHECK(Slic3r::GUI::line_mode(widget_only) == comSimple);
+    CHECK(Slic3r::GUI::line_first_option_id(widget_only) == nullptr);
+
+    GUILine separator;
+    CHECK(Slic3r::GUI::line_first_option_id(separator) == nullptr);
+
+    ConfigOptionDef advanced;
+    advanced.type = coFloat;
+    advanced.mode = comAdvanced;
+    ConfigOptionDef simple;
+    simple.type = coFloat;
+    simple.mode = comSimple;
+    GUILine normal{ "Nozzle diameter", "" };
+    normal.append_option(Option(advanced, "nozzle_diameter"));
+    normal.append_option(Option(simple, "nozzle_volume"));
+    // The first option decides, as before.
+    CHECK(Slic3r::GUI::line_mode(normal) == comAdvanced);
+    const t_config_option_key *first = Slic3r::GUI::line_first_option_id(normal);
+    REQUIRE(first != nullptr);
+    CHECK(*first == "nozzle_diameter");
+}
