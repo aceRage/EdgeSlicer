@@ -1508,11 +1508,12 @@ void PresetBundle::update_system_preset_setting_ids(std::map<std::string, std::m
             continue;
         }
         PresetCollection *preset_collection = nullptr;
-        if (type_iter->second == PRESET_IOT_PRINTER_TYPE) {
-            preset_collection = &(this->printers);
+        // Bambu Studio #12582: each type goes to its own collection (all three branches tested "printer").
+        if (type_iter->second == PRESET_IOT_PRINT_TYPE) {
+            preset_collection = &(this->prints);
         }
-        else if (type_iter->second == PRESET_IOT_PRINTER_TYPE) {
-            preset_collection = &(this->printers);
+        else if (type_iter->second == PRESET_IOT_FILAMENT_TYPE) {
+            preset_collection = &(this->filaments);
         }
         else if (type_iter->second == PRESET_IOT_PRINTER_TYPE) {
             preset_collection = &(this->printers);
