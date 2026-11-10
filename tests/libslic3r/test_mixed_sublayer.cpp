@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <numeric>
 #include <string>
@@ -30,6 +31,14 @@ using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
 
 namespace {
+
+// MixedFilamentManager's auto-generated pairs are a process-wide switch: off for a test, restored after it.
+struct MixsubAutoGenerateOff
+{
+    bool saved { MixedFilamentManager::auto_generate_enabled() };
+    MixsubAutoGenerateOff() { MixedFilamentManager::set_auto_generate_enabled(false); }
+    ~MixsubAutoGenerateOff() { MixedFilamentManager::set_auto_generate_enabled(saved); }
+};
 
 double pass_sum(const std::vector<MixedRatioPass> &passes)
 {
@@ -323,7 +332,7 @@ BambuMixedSlots bambu_slots()
 
 TEST_CASE("Mixed sublayer: Bambu Studio mixed slots import", "[MixedSublayer][BambuImport]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     DynamicPrintConfig config = bambu_mixed_project_config();
     const auto         result = convert_bambu_mixed_slots(config, bambu_slots());
     REQUIRE(result.converted);
@@ -371,7 +380,7 @@ TEST_CASE("Mixed sublayer: Bambu Studio mixed slots import", "[MixedSublayer][Ba
 
 TEST_CASE("Mixed sublayer: Bambu Studio import keeps the linear gradient, drops the curve", "[MixedSublayer][BambuImport]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     const std::string json = R"({
         "name": "project_settings",
         "filament_is_mixed": ["0", "0", "1", "0"],
@@ -411,7 +420,7 @@ TEST_CASE("Mixed sublayer: Bambu Studio import keeps the linear gradient, drops 
 
 TEST_CASE("Mixed sublayer: Bambu Studio import edge cases", "[MixedSublayer][BambuImport]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     SECTION("no mixed slot leaves the config alone")
     {
         DynamicPrintConfig config = bambu_mixed_project_config();
@@ -579,7 +588,7 @@ void check_same_mixed_keys(const BambuMixedExport &a, const BambuMixedExport &b)
 
 TEST_CASE("Mixed sublayer: Bambu Studio export round trip (D12)", "[MixedSublayer][BambuExport][P3]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     // A Bambu Studio project [P1, P2, M(1,2), P3] as Edge has it after the import: physical 1-3 plus virtual 4.
     DynamicPrintConfig first = bambu_mixed_project_config();
     REQUIRE(convert_bambu_mixed_slots(first, bambu_slots()).converted);
@@ -634,7 +643,7 @@ TEST_CASE("Mixed sublayer: Bambu Studio export round trip (D12)", "[MixedSublaye
 
 TEST_CASE("Mixed sublayer: Bambu Studio export of gradient, three-colour and Subdivide rows", "[MixedSublayer][BambuExport][P3]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_filaments(3);
     const std::vector<std::string> colours { "#FF0000", "#0000FF", "#00FF00" };
@@ -768,7 +777,7 @@ bool mixsub_store(const std::string &path, Model &model, DynamicPrintConfig &cfg
 
 TEST_CASE("Mixed sublayer: a mixed row survives Export Bambu 3MF and its re-import", "[MixedSublayer][BambuExport][3mf][P3]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     Model        model;
     ModelObject *object = model.add_object();
     object->name        = "mixed_cube";
@@ -830,7 +839,7 @@ TEST_CASE("Mixed sublayer: a mixed row survives Export Bambu 3MF and its re-impo
 
 TEST_CASE("Mixed sublayer: Bambu Studio import renumbers filament_self_index", "[MixedSublayer][BambuImport][P3]")
 {
-    MixedFilamentManager::set_auto_generate_enabled(false);
+    const MixsubAutoGenerateOff auto_generate_off;
     SECTION("one entry per filament")
     {
         DynamicPrintConfig config = bambu_mixed_project_config();
@@ -848,4 +857,53 @@ TEST_CASE("Mixed sublayer: Bambu Studio import renumbers filament_self_index", "
         CHECK((config.option<ConfigOptionStrings>("filament_extruder_variant")->values ==
                std::vector<std::string>{ "L1", "R1", "L2", "R2", "L4", "R4" }));
     }
+}
+
+TEST_CASE("Mixed sublayer: Bambu import leaves variant arrays alone without a filament_self_index", "[MixedSublayer][BambuImport][P3]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    DynamicPrintConfig config = bambu_mixed_project_config();
+    config.option<ConfigOptionInts>("filament_self_index", true)->values = { 1, 2, 3, 4 };
+    config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = { "a", "b", "c", "d", "e", "f", "g", "h" };
+    REQUIRE(convert_bambu_mixed_slots(config, bambu_slots()).converted);
+    // Eight entries but no per-entry filament names: nothing says which entries belong to the mixed slot.
+    CHECK(config.option<ConfigOptionStrings>("filament_extruder_variant")->values.size() == 8);
+    CHECK((config.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>{ 1, 2, 3 }));
+}
+
+TEST_CASE("Mixed sublayer: Bambu export writes a three-colour row as the planner sees it", "[MixedSublayer][BambuExport][P3]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_filaments(3);
+    const std::vector<std::string> colours { "#FF0000", "#0000FF", "#00FF00" };
+    config.option<ConfigOptionStrings>("filament_colour", true)->values = colours;
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colours);
+    REQUIRE(mgr.mixed_filaments().size() == 1);
+    // Ids 1, 2, 1 at 50 / 30 / 20 and a zero-weight 3: the planner prints 1 at 70 % and 2 at 30 %.
+    MixedFilament &row             = mgr.mixed_filaments()[0];
+    row.gradient_component_ids     = MixedFilamentManager::encode_gradient_component_ids({ 1, 2, 1, 3 });
+    row.gradient_component_weights = "50/30/20/0";
+    config.set_key_value("mixed_filament_definitions", new ConfigOptionString(mgr.serialize_custom_entries()));
+
+    DynamicPrintConfig     exported = config;
+    const BambuMixedExport e        = expand_bambu_mixed_slots(exported);
+    REQUIRE(e.any);
+    REQUIRE(e.mixed_count == 1);
+    MixedFilamentManager check;
+    check.load_custom_entries(config.opt_string("mixed_filament_definitions"), colours);
+    REQUIRE(check.mixed_filaments().size() == 1);
+    const std::vector<MixedRatioComponent> comps = mixed_ratio_components(check.mixed_filaments()[0], 3);
+    std::string components, ratios;
+    for (size_t i = 0; i < comps.size(); ++i) {
+        components += (i ? "," : "") + std::to_string(comps[i].extruder);
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%g", comps[i].ratio);
+        ratios += (i ? "," : "") + std::string(buf);
+    }
+    CHECK(e.slots.components[3] == components);
+    CHECK(e.slots.ratios[3] == ratios);
+    // No component is written twice.
+    CHECK(e.slots.components[3].find("1,2,1") == std::string::npos);
 }
