@@ -7,6 +7,8 @@
 
 #include "libslic3r/AdaptiveLayerMerge.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedSublayer.hpp"
@@ -25,6 +27,7 @@
 #include <tuple>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace Slic3r;
@@ -758,4 +761,116 @@ TEST_CASE("Mixed sublayer: a Ratio component's heater stays on while its passes 
         if (last_extrusion.count(t))
             CHECK(idx > last_extrusion[t]);
     }
+}
+
+namespace {
+
+// Painted mixed cubes of the given heights side by side, with a Type2 prime tower and precise Z height on.
+// The mixed row's two heads are separate nozzles, so a Ratio layer's pass changes are planned on the tower
+// as Local-Z tool changes (D10 gives them the prime volume).
+std::string slice_mixed_on_tower(Print &print, Model &model, const std::vector<double> &heights)
+{
+    DynamicPrintConfig config = mixed_sublayer_config(true, false);
+    config.option<ConfigOptionBool>("enable_prime_tower")->value = true;
+    config.set_deserialize_strict({
+        { "wipe_tower_type", "type2" },
+        { "precise_z_height", "1" },
+        { "wipe_tower_x", "15" },
+        { "wipe_tower_y", "15" },
+        { "skirt_loops", "0" },
+        { "brim_type", "no_brim" },
+    });
+    double x = 100.;
+    for (double height : heights) {
+        ModelObject *object = model.add_object();
+        object->name        = "mixed_cube";
+        ModelVolume *v      = object->add_volume(TriangleMesh(its_make_cube(10., 10., height)));
+        v->config.set("extruder", 1);
+        TriangleSelector selector(v->mesh());
+        for (int f = 0; f < int(v->mesh().its.indices.size()); ++f)
+            selector.set_facet(f, EnforcerBlockerType(3));
+        REQUIRE(v->mmu_segmentation_facets.set(selector));
+        object->add_instance()->set_offset(Vec3d(x, 100., 0.));
+        object->ensure_on_bed();
+        x += 30.;
+    }
+    // A second apply, as the wipe tower tests do: the first one can still see one filament and drop the tower.
+    print.apply(model, config);
+    print.apply(model, config);
+    print.set_status_silent();
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(print.has_wipe_tower());
+    return gcode;
+}
+
+// Z of every extruding move under the tower's feature tag.
+std::vector<double> mixed_tower_extrusion_z(const std::string &gcode)
+{
+    std::vector<double> zs;
+    bool                in_tower = false;
+    GCodeReader         parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view raw = line.raw();
+        if (raw.rfind(";TYPE:", 0) == 0)
+            in_tower = raw.find("Prime tower") != std::string_view::npos;
+        else if (in_tower && line.extruding(self) && (line.has_x() || line.has_y()))
+            zs.emplace_back(self.z());
+    });
+    return zs;
+}
+
+size_t planned_local_z_tool_changes(const Print &print)
+{
+    size_t count = 0;
+    for (const auto &layer : print.wipe_tower_data().local_z_tool_changes)
+        count += layer.size();
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("Mixed sublayer: Ratio layers on a prime tower print the tower at its own layers", "[MixedSublayer][Slice][WipeTower]")
+{
+    const MixsubAutoGenerateOff auto_generate_off;
+    // A Ratio layer's passes live inside one tool-ordering layer, so they never look like a precise-Z sliver
+    // (Orca #17204) to the tower. With a second cube 3.15 mm tall, precise Z height leaves the 6 mm cube's
+    // layers 0.01 to 0.05 mm above the short one's near its top, under the 0.04 mm minimum for some: those
+    // join the tower layer below, and their Local-Z pass changes must print down on it too.
+    const double short_height = GENERATE(0., 3.15);
+    CAPTURE(short_height);
+    std::vector<double> heights { 6. };
+    if (short_height > 0.)
+        heights.emplace_back(short_height);
+
+    Print             print;
+    Model             model;
+    const std::string gcode = slice_mixed_on_tower(print, model, heights);
+    REQUIRE(!gcode.empty());
+    CHECK(planned_local_z_tool_changes(print) > 0);
+
+    size_t              joined = 0;
+    std::vector<double> tower_layer_z;
+    for (const LayerTools &lt : print.wipe_tower_data().tool_ordering) {
+        if (lt.joins_wipe_tower_layer_below()) {
+            ++joined;
+            CHECK(lt.print_z - lt.wipe_tower_print_z < 0.04);
+        } else if (lt.has_wipe_tower)
+            tower_layer_z.emplace_back(lt.print_z);
+    }
+    if (short_height == 0.)
+        CHECK(joined == 0);
+    else
+        CHECK(joined > 0);
+
+    const std::vector<double> zs = mixed_tower_extrusion_z(gcode);
+    REQUIRE_FALSE(zs.empty());
+    size_t             off_layer = 0;
+    std::ostringstream off_layer_z;
+    for (double z : zs)
+        if (std::none_of(tower_layer_z.begin(), tower_layer_z.end(), [z](double t) { return std::abs(z - t) < 0.002; })) {
+            if (off_layer++ < 10)
+                off_layer_z << z << " ";
+        }
+    INFO("tower extrusions off the tower layers, first Z values: " << off_layer_z.str());
+    CHECK(off_layer == 0);
 }

@@ -1077,7 +1077,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Orca #15441: will_go_down also gates restoring layer Z around change_filament_gcode, so
     // custom toolchange travel cannot sweep through parts taller than the compacted tower.
     const bool will_go_down = !is_approx(z, current_z);
-    const bool defer_compacted_descend = m_sparse_layers_skipped
+    // A layer joined to the tower layer below descends to it the same way, by less than a layer.
+    const bool joined_below_layer      = m_layer_joined && !tcr.priming && (current_z - z) > EPSILON;
+    const bool defer_compacted_descend = (m_sparse_layers_skipped || joined_below_layer)
         && !tcr.priming && !tcr.is_finish_first && (current_z - z) > EPSILON;
     if (will_go_down && !defer_compacted_descend) {
         gcode += gcodegen.writer().retract();
@@ -1086,7 +1088,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     }
     // Tower compacted below the object, so any extrusion emitted without an explicit z has to be
     // pulled back down to it first.
-    const bool compacted_below_object = m_sparse_layers_skipped && z >= 0. && (tcr.print_z - z) > EPSILON;
+    const bool compacted_below_object = (m_sparse_layers_skipped && z >= 0. && (tcr.print_z - z) > EPSILON) || joined_below_layer;
 
     // Process the end filament gcode.
     std::string end_filament_gcode_str;
@@ -1445,6 +1447,14 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     std::string tcr_gcode,
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
+    // A joined layer descends to the tower layer below it. With no change_filament_gcode
+    // nothing has moved the head off the part yet, so travel over the tower before that descent.
+    if (joined_below_layer && change_filament_gcode.empty() && !tcr.is_finish_first) {
+        std::string start_pos_str = gcodegen.travel_to(
+            wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed, "Move to start pos");
+        check_add_eol(start_pos_str);
+        gcode += start_pos_str;
+    }
     gcode += tower_height_tag(gcodegen, tcr, tcr_gcode);
     gcode += tcr_gcode;
     // Bambu Studio 2.9.1: the Type 1 tower sets its own M204 with prime_tower_acceleration, so the writer
@@ -1549,7 +1559,12 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
                                                          || tool_change_on_wipe_tower);
 
     const Point start_wipe_pos      = wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d);
-    const bool  travel_to_tower_now = should_travel_to_tower || gcodegen.m_need_change_layer_lift_z;
+    // The final purge (new_extruder_id == -1) is not a real tool change: need_toolchange(-1)
+    // is true, so !needs_toolchange cannot force this travel. finalize() already pre-travels,
+    // but the lift below is gated on z_hop_when_prime; with that flag off there is no lift.
+    const bool is_final_purge       = new_extruder_id < 0;
+    const bool  travel_to_tower_now = should_travel_to_tower || gcodegen.m_need_change_layer_lift_z || is_final_purge ||
+                                     (m_layer_joined && !tcr.priming);
     if (travel_to_tower_now) {
         // FIXME: It would be better if the wipe tower set the force_travel flag for all toolchanges,
         // then we could simplify the condition and make it more readable.
@@ -1566,7 +1581,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
             lift_type = gcodegen.to_lift_type(type);
         }
 
-        if (gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id())) {
+        if (is_final_purge || gcodegen.m_config.z_hop_when_prime.get_at(gcodegen.m_writer.extruder()->id())) {
             gcode += gcodegen.retract(false, false, lift_type);
         }
 
@@ -1867,7 +1882,14 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         if (extruder_id < 0 || !gcodegen.writer().need_toolchange(extruder_id))
             return "";
         const double current_z          = gcodegen.writer().get_position().z();
-        const double tower_z            = local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
+        // A layer joined to the tower layer below (Orca #17204) prints its Local-Z purges down on that
+        // tower layer, where they were planned, like its nominal tool changes. Type1 changes filament
+        // directly below and keeps the object's z for change_filament_gcode.
+        const bool   joined_tower_layer = m_layer_joined && gcodegen.wipe_tower_type() != WipeTowerType::Type1 &&
+                                        m_layer_idx >= 0 && size_t(m_layer_idx) < m_tool_changes.size() &&
+                                        ! m_tool_changes[size_t(m_layer_idx)].empty();
+        const double tower_z            = joined_tower_layer ? joined_tower_z() :
+                                          local_z_nominal_layer_z >= 0. ? local_z_nominal_layer_z : current_z;
         const double toolchange_print_z = tower_z - gcodegen.config().z_offset.value;
 
         // A Bambu Lab (Type1) tower never takes the WipeTower2 tool changes below: those are planned and laid out
@@ -2120,6 +2142,11 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                     ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;
                     if (m_tool_change_idx == 0 && !ignore_sparse)
                         wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
+                } else if (!m_tool_changes[m_layer_idx].empty()) {
+                    // Type2 generate() writes XY-only moves. -1 reprints them at the current object z,
+                    // so leftover toolchanges of a merged sliver land on the sliver instead of the
+                    // tower layer below. Always print at the planned tower z (the join target).
+                    wipe_tower_z = m_tool_changes[m_layer_idx].front().print_z + m_z_offset;
                 }
 
                 if (!ignore_sparse) {
@@ -2139,7 +2166,8 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
             ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
             if (size_t(m_layer_idx) < m_compacted_tower_z.size())
                 wipe_tower_z = m_compacted_tower_z[m_layer_idx];
-        }
+        } else if (m_layer_joined)
+            wipe_tower_z = joined_tower_z();
 
         if (m_enable_timelapse_print && m_is_first_print) {
             gcode += append_tcr(gcodegen, m_tool_changes[m_layer_idx][0], m_tool_changes[m_layer_idx][0].new_tool, wipe_tower_z);
@@ -5445,8 +5473,13 @@ void GCode::process_layers(const Print&                                         
             const std::pair<coordf_t, std::vector<LayerToPrint>>& layer       = layers_to_print[precomputed.index];
             const LayerTools&                                     layer_tools = tool_ordering.tools_for_layer(layer.first);
             print.set_status(80, Slic3r::format(_(L("Generating G-code: layer %1%")), std::to_string(precomputed.index + 1)));
-            if (m_wipe_tower && layer_tools.has_wipe_tower)
-                m_wipe_tower->next_layer();
+            // A layer that joined the tower layer below continues it.
+            if (m_wipe_tower && layer_tools.has_wipe_tower) {
+                if (layer_tools.joins_wipe_tower_layer_below())
+                    m_wipe_tower->join_layer();
+                else
+                    m_wipe_tower->next_layer();
+            }
             // BBS
             check_placeholder_parser_failed();
             print.throw_if_canceled();
@@ -9063,7 +9096,8 @@ LayerResult GCode::process_layer(const Print& print,
         }
     }
 
-    if (m_wipe_tower)
+    // A joined layer continues a tower layer whose first print is already done.
+    if (m_wipe_tower && ! layer_tools.joins_wipe_tower_layer_below())
         m_wipe_tower->set_is_first_print(true);
 
     struct LocalZPassRef {
@@ -9569,7 +9603,8 @@ LayerResult GCode::process_layer(const Print& print,
         std::string gcode_toolchange;
         has_insert_timelapse_gcode |= m_farthest_point_timelapse.inserted_this_layer;
         if (has_wipe_tower) {
-            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_extruders.back())) {
+            const bool finish_tower_layer = extruder_id == layer_extruders.back() && layer_tools.wipe_tower_layer_ends;
+            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, finish_tower_layer)) {
                 if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode && !farthest_inline_photo() &&
                     (!bbl_dual_nozzle_timelapse || timelapse_head_ok())) {
                     gcode += this->retract(false, false, LiftType::NormalLift);
@@ -9589,7 +9624,7 @@ LayerResult GCode::process_layer(const Print& print,
                     }
                     has_insert_timelapse_gcode = true;
                 }
-                gcode_toolchange = m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_extruders.back());
+                gcode_toolchange = m_wipe_tower->tool_change(*this, extruder_id, finish_tower_layer);
             }
         } else {
             if (bbl_dual_nozzle_timelapse && need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode &&
