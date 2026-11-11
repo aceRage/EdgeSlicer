@@ -65,6 +65,7 @@
 #define BBL_JSON_KEY_FAMILY                     "family"
 #define BBL_JSON_KEY_BED_MODEL                  "bed_model"
 #define BBL_JSON_KEY_BED_TEXTURE                "bed_texture"
+#define BBL_JSON_KEY_DEFAULT_BED_TYPE           "default_bed_type"
 #define BBL_JSON_KEY_HOTEND_MODEL               "hotend_model"
 #define BBL_JSON_KEY_DEFAULT_MATERIALS          "default_materials"
 #define BBL_JSON_KEY_MODEL_ID                   "model_id"
@@ -134,6 +135,9 @@ public:
         // Vendor & Printer Model specific print bed model & texture.
         std::string 			 	bed_model;
         std::string 				bed_texture;
+        // The plate a machine of this model starts on, as Bambu Studio keeps it in the machine model file
+        // ("Textured PEI Plate"). Read by Preset::get_default_bed_type for Bambu machines.
+        std::string                 default_bed_type;
         std::string                 hotend_model;
         // Where a Bambu machine puts the per-bed-type plate art, in mm of the bed ("x,y,w,h"), and the
         // suffix of its own bottom tab art ("n" -> bbl_bed_pte_bottom_n.svg). Empty when the machine
