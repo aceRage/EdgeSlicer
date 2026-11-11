@@ -88,6 +88,14 @@ void FillConcentricInternal::fill_surface_extrusion(const Surface* surface, cons
         Flow new_flow = params.flow.with_spacing(float(this->spacing));
         ExtrusionEntityCollection gap_fill;
         variable_width(thick_polylines_out, params.extrusion_role, new_flow, gap_fill.entities);
+        // Mark them as what they are: the role is the one of the lines the rest of the area is filled with.
+        for (ExtrusionEntity *entity : gap_fill.entities) {
+            if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity)) {
+                for (ExtrusionPath &path : loop->paths)
+                    path.narrow_area_fill = true;
+            } else if (auto *path = dynamic_cast<ExtrusionPath *>(entity))
+                path->narrow_area_fill = true;
+        }
         coll_nosort->append(std::move(gap_fill.entities));
     }
 

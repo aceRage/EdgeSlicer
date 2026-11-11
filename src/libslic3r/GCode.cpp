@@ -11154,6 +11154,8 @@ void GCode::GCodeOutputStream::write_format(const char* format, ...)
 
 bool GCode::_needSAFC(const ExtrusionPath& path)
 {
+    if (path.narrow_area_fill)
+        return false;
     if (!m_small_area_infill_flow_compensator || !m_config.small_area_infill_flow_compensation.value)
         return false;
 

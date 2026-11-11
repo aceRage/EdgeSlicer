@@ -421,3 +421,51 @@ TEST_CASE("The short lines after the first in the corner a cube's lines end in a
     CHECK(layers == 3);
 }
 
+// ---- small area flow compensation ------------------------------------------------------------------------------------
+
+// A tube with a wall of 2.5 mm: between its walls there is room for two loops and no more, so all its solid infill is
+// a narrow area. Small area flow compensation is for short lines of solid infill, and asked what pattern solid infill
+// is set to, not what a path was laid as: every chord of a loop round the tube passed for a short line.
+TEST_CASE("Small area flow compensation leaves the loops of a narrow area their flow", "[NarrowSolidInfill][SmallAreaFlowCompensation]")
+{
+    const TriangleMesh part = tube(10., 7.5, 2.);
+    {
+        // The part is what it is meant to be: solid infill in loops only.
+        Print print;
+        Slic3r::Test::init_and_process_print({part}, print, narrow_config("rectilinear"));
+        const std::vector<SolidArea> areas = solid_areas(print);
+        REQUIRE(areas.size() >= 3);
+        for (const SolidArea& area : areas)
+            CHECK(area.narrow);
+    }
+    for (const char* pattern : {"monotonic", "rectilinear"}) {
+        const Laid off = laid(laid_by_layer(slice_with(part, narrow_config(pattern), false)), SOLID_INFILL);
+        const Laid on  = laid(laid_by_layer(slice_with(part, narrow_config(pattern), true)), SOLID_INFILL);
+        INFO(pattern << ": " << off.length << " mm of loops, " << off.filament << " mm of filament without the compensation, "
+                     << on.filament << " mm with it");
+        REQUIRE(off.length > 300.);
+        CHECK_THAT(on.length, WithinAbs(off.length, 1e-6));
+        CHECK_THAT(on.filament, WithinRel(off.filament, 1e-4));
+    }
+}
+
+TEST_CASE("Small area flow compensation still thins the short lines of solid infill", "[NarrowSolidInfill][SmallAreaFlowCompensation]")
+{
+    // A cube of 8 mm: no line of its solid infill is 10 mm long.
+    const TriangleMesh part = make_cube(8., 8., 2.);
+    for (const char* pattern : {"monotonic", "rectilinear"}) {
+        const Laid off = laid(laid_by_layer(slice_with(part, narrow_config(pattern), false)), SOLID_INFILL);
+        const Laid on  = laid(laid_by_layer(slice_with(part, narrow_config(pattern), true)), SOLID_INFILL);
+        INFO(pattern << ": " << off.filament << " mm of filament without the compensation, " << on.filament << " mm with it");
+        REQUIRE(off.length > 100.);
+        CHECK(on.filament < 0.97 * off.filament);
+    }
+    // With solid infill set to a pattern that is no straight lines nothing is thinned.
+    {
+        const Laid off = laid(laid_by_layer(slice_with(part, narrow_config("concentric"), false)), SOLID_INFILL);
+        const Laid on  = laid(laid_by_layer(slice_with(part, narrow_config("concentric"), true)), SOLID_INFILL);
+        REQUIRE(off.length > 100.);
+        CHECK_THAT(on.filament, WithinRel(off.filament, 1e-4));
+    }
+}
+
