@@ -29,12 +29,21 @@ bool load(const PluginDescriptor&                          descriptor,
 void unload(Plugin& plugin);
 
 // True when `requirement` is a PEP 508 name / extras / version-specifiers / markers requirement.
-// Empty entries, leading dashes (uv/pip installer options), URLs, and other non-requirement forms
-// are refused so PEP 723 / Requires-Dist strings cannot be appended to uv's argv as options.
+// Empty entries, leading dashes (uv/pip installer options), URLs, archive names (.whl, .tar.gz,
+// .zip, …), paths, and other non-requirement forms are refused so PEP 723 / Requires-Dist strings
+// cannot be appended to uv's argv as options or local files.
 bool is_pep508_requirement(const std::string& requirement);
 
 // Validates every entry; a refused dependency writes a clear error and returns false.
 bool validate_pep508_requirements(const std::vector<std::string>& pkgs, std::string& error);
+
+// argv after the uv executable: `pip install --python … --target … -- <pkgs>`.
+std::vector<std::string> uv_install_args(const std::string&              python_executable,
+                                         const std::string&              target_dir,
+                                         const std::vector<std::string>& pkgs);
+
+// True when `key` is on the keep-list copied into uv's child environment.
+bool uv_child_environment_keeps(const char* key);
 
 // Install Python dependencies into the shared packages directory via the bundled uv. Blocks, with
 // a 120 s cap. Each entry must be a valid PEP 508 requirement.

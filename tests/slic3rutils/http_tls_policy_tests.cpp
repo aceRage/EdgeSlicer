@@ -31,6 +31,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -438,6 +439,30 @@ TEST_CASE("SSL_CERT_FILE fallback only when unset", "[Http][TlsPolicy]")
         CHECK(Http::ssl_cert_file_fallback_path(::getenv("SSL_CERT_FILE")).empty());
         CHECK(Http::ensure_ssl_cert_file_if_unset().empty());
         CHECK(std::string(::getenv("SSL_CERT_FILE")) == "/no/such/edgeslicer-ca-bundle.pem");
+    }
+}
+
+TEST_CASE("SSL_CERT_FILE unusable reason for empty and missing paths", "[Http][TlsPolicy]")
+{
+    CHECK(Http::ssl_cert_file_unusable_reason(nullptr).empty());
+
+    const std::string empty_reason = Http::ssl_cert_file_unusable_reason("");
+    CHECK_FALSE(empty_reason.empty());
+    CHECK(empty_reason.find("empty") != std::string::npos);
+
+    const std::string missing_reason =
+        Http::ssl_cert_file_unusable_reason("/no/such/edgeslicer-ca-bundle.pem");
+    CHECK_FALSE(missing_reason.empty());
+    CHECK(missing_reason.find("missing") != std::string::npos);
+
+    SECTION("an existing regular file is usable")
+    {
+        Slic3r::ScopedTemporaryFile pem(".pem");
+        {
+            std::ofstream out(pem.string());
+            out << "# empty pem for the reason helper\n";
+        }
+        CHECK(Http::ssl_cert_file_unusable_reason(pem.string().c_str()).empty());
     }
 }
 #endif
