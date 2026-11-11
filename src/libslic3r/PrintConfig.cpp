@@ -1399,7 +1399,8 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Strength");
     def->tooltip = L("The number of bottom solid layers is increased when slicing if the thickness calculated by bottom shell layers is "
                      "thinner than this value. This can avoid having too thin shell when layer height is small. 0 means that "
-                     "this setting is disabled and thickness of bottom shell is absolutely determined by bottom shell layers.");
+                     "this setting is disabled and thickness of bottom shell is absolutely determined by bottom shell layers. "
+                     "This also applies to the solid bottom of a spiral vase, which begins its spiral only once the bottom is this thick.");
     def->full_label = L("Bottom shell thickness");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
