@@ -582,18 +582,56 @@ boost::process::environment uv_child_environment()
     return env;
 }
 
-// Refuse local files uv would otherwise install: path separators, and archive suffixes on the
-// whole token so `numpy-1.26.0-py3-none-any.whl` is not treated as the identifier `numpy`.
-// URL / direct references (`://`) stay a generic PEP 508 refusal — they are not local files.
-bool is_archive_or_path_requirement(const std::string& trimmed)
+// PEP 508 name, or the URL after `@`. Extras, version specifiers, and environment markers
+// are ignored so `evil.whl; python_version>'3'` is judged as `evil.whl`, not the whole token.
+std::string pep508_name_or_url(const std::string& trimmed)
 {
-    if (trimmed.find("://") != std::string::npos)
-        return false;
+    size_t i = 0;
+    if (!parse_identifier(trimmed, i))
+        return trimmed;
+    const std::string name = trimmed.substr(0, i);
+    skip_ws(trimmed, i);
+    if (!parse_extras(trimmed, i))
+        return name;
+    skip_ws(trimmed, i);
+    if (i < trimmed.size() && trimmed[i] == '@') {
+        ++i;
+        skip_ws(trimmed, i);
+        size_t url_end  = trimmed.size();
+        bool   in_quote = false;
+        char   q        = '\0';
+        for (size_t k = i; k < trimmed.size(); ++k) {
+            const char c = trimmed[k];
+            if (in_quote) {
+                if (c == '\\' && k + 1 < trimmed.size()) {
+                    ++k;
+                    continue;
+                }
+                if (c == q)
+                    in_quote = false;
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                in_quote = true;
+                q        = c;
+                continue;
+            }
+            if (c == ';') {
+                url_end = k;
+                break;
+            }
+        }
+        while (url_end > i && is_ws(trimmed[url_end - 1]))
+            --url_end;
+        if (url_end > i)
+            return trimmed.substr(i, url_end - i);
+    }
+    return name;
+}
 
-    if (trimmed.find('/') != std::string::npos || trimmed.find('\\') != std::string::npos)
-        return true;
-
-    std::string lower = trimmed;
+bool has_archive_suffix(const std::string& token)
+{
+    std::string lower = token;
     boost::algorithm::to_lower(lower);
     static const char* const suffixes[] = {
         ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".whl", ".zip", ".egg", ".tar"};
@@ -603,6 +641,21 @@ bool is_archive_or_path_requirement(const std::string& trimmed)
             return true;
     }
     return false;
+}
+
+// Refuse local files uv would otherwise install: path separators, and archive suffixes on the
+// parsed PEP 508 name/URL so `numpy-1.26.0-py3-none-any.whl` is not treated as `numpy` and
+// `evil.whl; python_version>'3'` is not treated as a named requirement with a marker.
+// URL / direct references (`://`) stay a generic PEP 508 refusal — they are not local files.
+bool is_archive_or_path_requirement(const std::string& trimmed)
+{
+    if (trimmed.find("://") != std::string::npos)
+        return false;
+
+    if (trimmed.find('/') != std::string::npos || trimmed.find('\\') != std::string::npos)
+        return true;
+
+    return has_archive_suffix(pep508_name_or_url(trimmed));
 }
 
 } // namespace
