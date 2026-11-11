@@ -10,6 +10,7 @@
 #include <libslic3r/Preset.hpp>
 #include <libslic3r/PresetBundle.hpp>
 
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -169,7 +170,7 @@ void host_bindings::register_presets(py::module_& host)
             return names;
         });
 
-    py::class_<PresetBundle>(host, "PresetBundle")
+    py::class_<PresetBundle, std::shared_ptr<PresetBundle>>(host, "PresetBundle")
         .def_property_readonly("prints", [](PresetBundle& bundle) -> PresetCollection& {
             return bundle.prints;
         }, py::return_value_policy::reference_internal)

@@ -16,6 +16,7 @@
 #include <slic3r/GUI/Plater.hpp>
 
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <wx/app.h>
@@ -75,25 +76,45 @@ AppInfoSnapshot snapshot_app_info()
     });
 }
 
+struct GlInfoSnapshot
+{
+    bool        available = false;
+    std::string vendor;
+    std::string renderer;
+    std::string version;
+    std::string glsl_version;
+    bool        core_profile = false;
+};
+
 py::object gl_info()
 {
-    // Do not call OpenGLManager::GLInfo getters here: they lazily detect() and would cache "N/A"
-    // for the session if no context exists. Without a live plater the 3D view is not up.
+    // Do not call OpenGLManager::GLInfo getters off the UI thread, and do not call them at all
+    // when there is no plater: they lazily detect() and would cache "N/A" for the session.
     if (wxTheApp == nullptr)
         return py::none();
-    GUI::Plater* plater = GUI::wxGetApp().plater();
-    if (plater == nullptr)
-        return py::none();
-
-    const GUI::OpenGLManager::GLInfo& info = GUI::OpenGLManager::get_gl_info();
-    if (info.get_version().empty() || info.get_version() == "N/A")
+    const GlInfoSnapshot snap = plugin_host::run_on_ui_blocking([] {
+        GlInfoSnapshot out;
+        if (GUI::wxGetApp().plater() == nullptr)
+            return out;
+        const GUI::OpenGLManager::GLInfo& info = GUI::OpenGLManager::get_gl_info();
+        if (info.get_version().empty() || info.get_version() == "N/A")
+            return out;
+        out.available    = true;
+        out.vendor       = info.get_vendor();
+        out.renderer     = info.get_renderer();
+        out.version      = info.get_version();
+        out.glsl_version = info.get_glsl_version();
+        out.core_profile = info.is_core_profile();
+        return out;
+    });
+    if (!snap.available)
         return py::none();
     py::dict out;
-    out["vendor"]       = info.get_vendor();
-    out["renderer"]     = info.get_renderer();
-    out["version"]      = info.get_version();
-    out["glsl_version"] = info.get_glsl_version();
-    out["core_profile"] = info.is_core_profile();
+    out["vendor"]       = snap.vendor;
+    out["renderer"]     = snap.renderer;
+    out["version"]      = snap.version;
+    out["glsl_version"] = snap.glsl_version;
+    out["core_profile"] = snap.core_profile;
     return std::move(out);
 }
 
@@ -143,18 +164,55 @@ std::unique_ptr<Model> snapshot_model()
     });
 }
 
-std::unique_ptr<PresetBundle> snapshot_preset_bundle()
+std::string preset_bundle_fingerprint(const PresetBundle& bundle)
+{
+    std::string fp;
+    fp += bundle.prints.get_selected_preset_name();
+    fp += '\0';
+    fp += bundle.printers.get_selected_preset_name();
+    fp += '\0';
+    for (const std::string& name : bundle.filament_presets) {
+        fp += name;
+        fp += '\0';
+    }
+    fp += bundle.prints.get_edited_preset().is_dirty ? 'D' : 'c';
+    fp += bundle.printers.get_edited_preset().is_dirty ? 'D' : 'c';
+    fp += bundle.filaments.get_edited_preset().is_dirty ? 'D' : 'c';
+    return fp;
+}
+
+struct PresetBundleCache
+{
+    std::mutex                    mutex;
+    std::shared_ptr<PresetBundle> bundle;
+    std::string                   fingerprint;
+};
+
+PresetBundleCache g_preset_bundle_cache;
+
+std::shared_ptr<PresetBundle> snapshot_preset_bundle()
 {
     if (g_live_bundle_for_testing)
-        return std::make_unique<PresetBundle>(*g_live_bundle_for_testing);
+        return std::make_shared<PresetBundle>(*g_live_bundle_for_testing);
     if (wxTheApp == nullptr)
         throw std::runtime_error("OrcaSlicer application is not initialized");
     return plugin_host::run_on_ui_blocking([] {
-        return std::make_unique<PresetBundle>(*current_preset_bundle());
+        PresetBundle* live = current_preset_bundle();
+        const std::string fp = preset_bundle_fingerprint(*live);
+        std::lock_guard<std::mutex> lock(g_preset_bundle_cache.mutex);
+        if (!g_preset_bundle_cache.bundle || g_preset_bundle_cache.fingerprint != fp) {
+            g_preset_bundle_cache.bundle      = std::make_shared<PresetBundle>(*live);
+            g_preset_bundle_cache.fingerprint = fp;
+        }
+        return g_preset_bundle_cache.bundle;
     });
 }
 
-void export_3mf_copy(GUI::Plater&, const std::string&)
+// Token for orca.host.plater(): methods marshal to the UI thread and never store a live Plater*.
+struct PlaterHandle
+{};
+
+void export_3mf_copy(PlaterHandle&, const std::string&)
 {
     throw edge_plugin_api_unavailable("orca.host.Plater.export_3mf_copy");
 }
@@ -170,24 +228,31 @@ void host_bindings::set_live_preset_bundle_for_testing(PresetBundle* bundle)
 
 void host_bindings::register_app(py::module_& host)
 {
-    py::class_<GUI::Plater, std::unique_ptr<GUI::Plater, py::nodelete>>(host, "Plater")
-        .def("model", [](GUI::Plater& plater) {
-            return plugin_host::run_on_ui_blocking([&] {
-                return std::make_unique<Model>(plater.model());
-            });
+    py::class_<PlaterHandle>(host, "Plater")
+        .def("model", [](const PlaterHandle&) { return snapshot_model(); })
+        .def("is_project_dirty", [](const PlaterHandle&) {
+            return plugin_host::run_on_ui_blocking([] { return current_plater()->is_project_dirty(); });
         })
-        .def("is_project_dirty", &GUI::Plater::is_project_dirty)
-        .def("is_presets_dirty", &GUI::Plater::is_presets_dirty)
-        .def("inside_snapshot_capture", &GUI::Plater::inside_snapshot_capture)
-        .def("project_path", [](GUI::Plater& plater) {
-            return plugin_host::run_on_ui_blocking([&] {
-                return GUI::into_u8(plater.get_project_filename(".3mf"));
+        .def("is_presets_dirty", [](const PlaterHandle&) {
+            return plugin_host::run_on_ui_blocking([] { return current_plater()->is_presets_dirty(); });
+        })
+        .def("inside_snapshot_capture", [](const PlaterHandle&) {
+            return plugin_host::run_on_ui_blocking([] { return current_plater()->inside_snapshot_capture(); });
+        })
+        .def("project_path", [](const PlaterHandle&) {
+            return plugin_host::run_on_ui_blocking([] {
+                return GUI::into_u8(current_plater()->get_project_filename(".3mf"));
             });
         })
         .def("export_3mf_copy", &export_3mf_copy, py::arg("path"),
              "Not available in this Edge build (needs the 3D view thumbnail path).");
 
-    host.def("plater", &current_plater, py::return_value_policy::reference);
+    host.def("plater", [] {
+        if (wxTheApp == nullptr)
+            throw std::runtime_error("OrcaSlicer application is not initialized");
+        plugin_host::run_on_ui_blocking([] { (void) current_plater(); });
+        return PlaterHandle{};
+    });
     host.def("model", &snapshot_model);
     host.def("preset_bundle", &snapshot_preset_bundle);
     host.def("app_info", &app_info,

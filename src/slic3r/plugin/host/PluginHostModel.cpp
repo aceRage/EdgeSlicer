@@ -28,6 +28,8 @@ namespace Slic3r {
 // The scene/document graph: Model -> ModelObject -> ModelInstance/ModelVolume.
 // Model is an owned snapshot (unique_ptr). Objects, instances and volumes stay
 // nodelete pointers into that snapshot, never into the live Plater model.
+// List accessors pass the parent py::object into reference_internal so a child
+// kept after the list/parent Python names are dropped still keeps the snapshot.
 void host_bindings::register_model(py::module_& host)
 {
     py::enum_<ModelVolumeType>(host, "ModelVolumeType")
@@ -149,10 +151,11 @@ void host_bindings::register_model(py::module_& host)
         .def("volume_count", [](const ModelObject& object) {
             return object.volumes.size();
         })
-        .def("instances", [](ModelObject& object) {
-            py::list instances;
+        .def("instances", [](py::object self) {
+            ModelObject& object = self.cast<ModelObject&>();
+            py::list     instances;
             for (ModelInstance* instance : object.instances)
-                instances.append(py::cast(instance, py::return_value_policy::reference));
+                instances.append(py::cast(instance, py::return_value_policy::reference_internal, self));
             return instances;
         })
         .def("instance", [](ModelObject& object, size_t index) -> ModelInstance* {
@@ -160,10 +163,11 @@ void host_bindings::register_model(py::module_& host)
                 throw py::index_error("instance index out of range");
             return object.instances[index];
         }, py::return_value_policy::reference_internal)
-        .def("volumes", [](ModelObject& object) {
-            py::list volumes;
+        .def("volumes", [](py::object self) {
+            ModelObject& object = self.cast<ModelObject&>();
+            py::list     volumes;
             for (ModelVolume* volume : object.volumes)
-                volumes.append(py::cast(volume, py::return_value_policy::reference));
+                volumes.append(py::cast(volume, py::return_value_policy::reference_internal, self));
             return volumes;
         })
         .def("volume", [](ModelObject& object, size_t index) -> ModelVolume* {
@@ -205,10 +209,11 @@ void host_bindings::register_model(py::module_& host)
                 throw py::index_error("model object index out of range");
             return model.objects[index];
         }, py::return_value_policy::reference_internal)
-        .def("objects", [](Model& model) {
+        .def("objects", [](py::object self) {
+            Model&   model = self.cast<Model&>();
             py::list objects;
             for (ModelObject* object : model.objects)
-                objects.append(py::cast(object, py::return_value_policy::reference));
+                objects.append(py::cast(object, py::return_value_policy::reference_internal, self));
             return objects;
         })
         // World-space bounding box of the whole model. bounding_box() is exact;

@@ -208,7 +208,8 @@ void ensure_system_ssl_cert_file()
 }
 #endif
 
-bool add_sys_path_entry(const boost::filesystem::path& path, std::string& error, bool* inserted = nullptr)
+bool add_sys_path_entry(const boost::filesystem::path& path, std::string& error, bool* inserted = nullptr,
+                        bool append = false)
 {
     if (inserted)
         *inserted = false;
@@ -233,7 +234,8 @@ bool add_sys_path_entry(const boost::filesystem::path& path, std::string& error,
     if (contains < 0)
         PyErr_Clear();
 
-    if (PyList_Insert(sys_path, 0, py_path.get()) != 0) {
+    const int rc = append ? PyList_Append(sys_path, py_path.get()) : PyList_Insert(sys_path, 0, py_path.get());
+    if (rc != 0) {
         error = "Failed to add path to Python sys.path: " + path_str;
         PyErr_Clear();
         return false;
@@ -685,24 +687,11 @@ bool PythonInterpreter::initialize()
 
         BOOST_LOG_TRIVIAL(info) << "Python " << Py_GetVersion() << " initialized successfully";
 
-        const fs::path shared_packages = shared_packages_dir();
-        boost::system::error_code ec;
-        fs::create_directories(shared_packages, ec);
-        if (ec) {
-            BOOST_LOG_TRIVIAL(warning) << "Failed to create Python shared package directory: " << shared_packages.string() << ": "
-                                       << ec.message();
-        } else {
-            std::string path_error;
-            if (add_sys_path_entry(shared_packages, path_error))
-                BOOST_LOG_TRIVIAL(info) << "Added Python shared package directory to sys.path: " << shared_packages.string();
-            else
-                BOOST_LOG_TRIVIAL(warning) << path_error;
-        }
-
         PluginAuditManager::instance().install_hook();
 
         // Capture the selector loop class before any plugin can patch asyncio.new_event_loop or
-        // the event-loop policy. Script runs construct loops from this class.
+        // the event-loop policy, and before shared_packages is on sys.path (a plugin-installed
+        // asyncio must not shadow the stdlib class). Script runs construct loops from this class.
         try {
             pybind11::object loop_cls;
             try {
@@ -717,6 +706,20 @@ bool PythonInterpreter::initialize()
             err.restore();
             PyErr_Clear();
             BOOST_LOG_TRIVIAL(warning) << "Failed to capture asyncio event loop class at interpreter init";
+        }
+
+        const fs::path shared_packages = shared_packages_dir();
+        boost::system::error_code ec;
+        fs::create_directories(shared_packages, ec);
+        if (ec) {
+            BOOST_LOG_TRIVIAL(warning) << "Failed to create Python shared package directory: " << shared_packages.string() << ": "
+                                       << ec.message();
+        } else {
+            std::string path_error;
+            if (add_sys_path_entry(shared_packages, path_error, nullptr, /*append=*/true))
+                BOOST_LOG_TRIVIAL(info) << "Added Python shared package directory to sys.path: " << shared_packages.string();
+            else
+                BOOST_LOG_TRIVIAL(warning) << path_error;
         }
 
         // Persist Python stderr (plugin tracebacks, including uncaught

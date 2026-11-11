@@ -550,3 +550,38 @@ TEST_CASE("Unload abandons a sleeping script after the wait bound", "[PluginScri
     { std::ofstream out(stop.string()); out << "1"; }
     CHECK(wait_for_file(done, std::chrono::seconds(5)));
 }
+
+TEST_CASE("Event-loop socket permit does not unblock writes or subprocess", "[PluginScripts][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    py::gil_scoped_acquire gil;
+
+    ScopedPluginAuditContext      audit_scope("permit-test-plugin", "cap");
+    ScopedEventLoopSocketPermit   socket_permit;
+    py::dict                      locals;
+    py::exec(R"PY(
+wrote = False
+spawned = False
+write_err = ''
+spawn_err = ''
+try:
+    open('/tmp/edgeslicer-permit-should-not-write', 'w').write('x')
+    wrote = True
+except Exception as e:
+    write_err = type(e).__name__
+try:
+    import subprocess
+    subprocess.Popen(['true'])
+    spawned = True
+except Exception as e:
+    spawn_err = type(e).__name__
+)PY",
+             py::globals(), locals);
+
+    CHECK_FALSE(locals["wrote"].cast<bool>());
+    CHECK_FALSE(locals["spawned"].cast<bool>());
+    CHECK(locals["write_err"].cast<std::string>() == "PermissionError");
+    CHECK(locals["spawn_err"].cast<std::string>() == "PermissionError");
+}

@@ -11,6 +11,7 @@
 #include <slic3r/plugin/PythonInterpreter.hpp>
 #include <slic3r/plugin/PythonPluginBridge.hpp>
 #include <slic3r/plugin/OrcaApiVersion.hpp>
+#include <slic3r/plugin/host/PluginHostBindings.hpp>
 
 #include <pybind11/cast.h>
 #include <pybind11/embed.h>
@@ -300,6 +301,50 @@ TEST_CASE("Plugin host API exposes model geometry and structure to Python", "[Pl
 
     py::object py_modifier = py_object.attr("volume")(1);
     CHECK(py_modifier.attr("is_modifier")().cast<bool>());
+}
+
+TEST_CASE("Plugin host model child accessors keep the snapshot alive after GC", "[PluginHost][Python]")
+{
+    ScopedPluginManager plugin_system;
+    if (!plugin_system.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    py::gil_scoped_acquire gil;
+
+    Model        live;
+    ModelObject* object = live.add_object();
+    object->name        = "kept-alive";
+    ModelVolume* part   = object->add_volume(make_cube(10.0, 20.0, 30.0));
+    part->name          = "kept-volume";
+    object->add_instance();
+    host_bindings::set_live_model_for_testing(&live);
+    struct LiveModelGuard
+    {
+        ~LiveModelGuard() { host_bindings::set_live_model_for_testing(nullptr); }
+    } live_guard;
+
+    py::dict locals;
+    py::exec(R"PY(
+import gc
+import orca
+o = orca.host.model().objects()[0]
+v = o.volumes()[0]
+gc.collect()
+name = o.name
+vname = v.name
+facets = v.facets_count()
+fresh = orca.host.model()
+fresh_name = fresh.objects()[0].name
+fresh_vname = fresh.objects()[0].volumes()[0].name
+fresh_facets = fresh.objects()[0].volumes()[0].facets_count()
+)PY",
+             py::globals(), locals);
+
+    CHECK(locals["name"].cast<std::string>() == "kept-alive");
+    CHECK(locals["vname"].cast<std::string>() == "kept-volume");
+    CHECK(locals["facets"].cast<size_t>() == 12);
+    CHECK(locals["fresh_name"].cast<std::string>() == "kept-alive");
+    CHECK(locals["fresh_vname"].cast<std::string>() == "kept-volume");
+    CHECK(locals["fresh_facets"].cast<size_t>() == 12);
 }
 
 TEST_CASE("Plugin host API exposes TriangleMesh geometry to Python", "[PluginHost][Python]")
