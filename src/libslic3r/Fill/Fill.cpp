@@ -817,25 +817,25 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
                         if (used_segments.find(&(*candidate)) != used_segments.end()) {
                             continue;
                         }
-                        if (connect_extrusions && (traced_poly.lows.back() - candidates_begin->a).cast<double>().squaredNorm() <
+                        if (connect_extrusions && (traced_poly.lows.back() - candidate->a).cast<double>().squaredNorm() <
                                                       squared_distance_limit_reconnection) {
-                            traced_poly.lows.push_back(candidates_begin->a);
+                            traced_poly.lows.push_back(candidate->a);
                         } else {
                             traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, coord_t(0)});
-                            traced_poly.lows.push_back(candidates_begin->a - Point{scaled_spacing / 2, 0});
-                            traced_poly.lows.push_back(candidates_begin->a);
+                            traced_poly.lows.push_back(candidate->a - Point{scaled_spacing / 2, 0});
+                            traced_poly.lows.push_back(candidate->a);
                         }
 
-                        if (connect_extrusions && (traced_poly.highs.back() - candidates_begin->b).cast<double>().squaredNorm() <
+                        if (connect_extrusions && (traced_poly.highs.back() - candidate->b).cast<double>().squaredNorm() <
                                                       squared_distance_limit_reconnection) {
-                            traced_poly.highs.push_back(candidates_begin->b);
+                            traced_poly.highs.push_back(candidate->b);
                         } else {
                             traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b - Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b);
+                            traced_poly.highs.push_back(candidate->b - Point{scaled_spacing / 2, 0});
+                            traced_poly.highs.push_back(candidate->b);
                         }
                         segment_added = true;
-                        used_segments.insert(&(*candidates_begin));
+                        used_segments.insert(&(*candidate));
                     }
 
                     if (!segment_added) {
