@@ -121,6 +121,7 @@ add_executable(${_TEST_NAME}_tests
 	test_cut_connector_surface.cpp
 	test_cut_connectors.cpp
 	test_fuzzy_skin.cpp
+	test_arc_fitting.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp

@@ -2052,6 +2052,23 @@ const Polygons* PrintObject::over_support_below(size_t layer_id) const
     return &m_over_support_below[layer_id];
 }
 
+// A layer is still bottom while its index is below bottom_shell_layers or its underside is less than
+// bottom_shell_thickness above the underside of the first layer. That is the test the bottom shell of any other
+// print follows (discover_vertical_shells() and discover_horizontal_shells() below: "m_layers[n]->bottom_z() -
+// bottom_z < bottom_shell_thickness - EPSILON"), and what makes the bottom at least as thick as asked. As there,
+// the thickness adds to a bottom and does not make one: with no bottom layers there is no bottom.
+size_t PrintObject::spiral_vase_bottom_layers(const PrintRegionConfig &region_config) const
+{
+    const int bottom_shell_layers = region_config.bottom_shell_layers.value;
+    if (bottom_shell_layers <= 0 || m_layers.empty())
+        return 0;
+    size_t         num_layers = std::min(size_t(bottom_shell_layers), m_layers.size());
+    const coordf_t bottom_z   = m_layers.front()->bottom_z();
+    while (num_layers < m_layers.size() && m_layers[num_layers]->bottom_z() - bottom_z < region_config.bottom_shell_thickness.value - EPSILON)
+        ++ num_layers;
+    return num_layers;
+}
+
 void PrintObject::detect_surfaces_type()
 {
     BOOST_LOG_TRIVIAL(info) << "Detecting solid surfaces..." << log_memory_info();
@@ -2071,7 +2088,7 @@ void PrintObject::detect_surfaces_type()
     // for less solid material/time when the forced solid shells cost more than they're worth.
     bool interface_shells = ! spiral_mode && (m_config.interface_shells.value ||
         (this->has_bounded_paint_depth() && m_config.paint_depth_solid_interfaces.value));
-    size_t num_layers     = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
+    size_t num_layers     = spiral_mode ? this->spiral_vase_bottom_layers(this->printing_region(0).config()) : m_layers.size();
 
     // Ultra (over-support surfaces): the slice-time reconstruction of "where will support land",
     // shared with the wall classifier - see PrintObject::over_support_settings().
@@ -2697,7 +2714,7 @@ void PrintObject::discover_vertical_shells()
         Polygons    holes;
     };
     bool     spiral_mode      = this->print()->config().spiral_mode.value;
-    size_t   num_layers       = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
+    size_t   num_layers       = spiral_mode ? this->spiral_vase_bottom_layers(this->printing_region(0).config()) : m_layers.size();
     std::vector<DiscoverVerticalShellsCacheEntry> cache_top_botom_regions(num_layers, DiscoverVerticalShellsCacheEntry());
     // Paint Depth Stage 2 (Task 3 item 1): mirror detect_surfaces_type()'s effective
     // interface_shells value (see PrintObject::has_bounded_paint_depth()) so vertical shell
