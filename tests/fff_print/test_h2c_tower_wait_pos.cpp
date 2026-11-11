@@ -199,7 +199,8 @@ BoundingBoxf shared_bed(const Print &print)
 {
     const ExtruderAreas areas = print.get_extruder_areas();
     REQUIRE(areas.multi());
-    return unscaled<double>(get_extents(areas.shared));
+    const BoundingBox b = get_extents(areas.shared);
+    return BoundingBoxf(unscaled<double>(b.min), unscaled<double>(b.max));
 }
 
 } // namespace

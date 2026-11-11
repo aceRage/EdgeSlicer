@@ -984,8 +984,10 @@ std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Poi
 static BoundingBoxf bambu_shared_printable_bbx(const Print &print)
 {
     const ExtruderAreas areas = print.get_extruder_areas();
-    if (areas.multi() && !areas.shared.empty())
-        return unscaled<double>(get_extents(areas.shared));
+    if (areas.multi() && !areas.shared.empty()) {
+        const BoundingBox b = get_extents(areas.shared);
+        return BoundingBoxf(unscaled<double>(b.min), unscaled<double>(b.max));
+    }
     return BoundingBoxf(print.config().printable_area.values);
 }
 
@@ -997,9 +999,10 @@ static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print)
 {
     const FakeWipeTower &fwt = print.get_fake_wipe_tower();
     BoundingBoxf         local;
-    if (!fwt.outer_wall.empty() && !fwt.outer_wall.begin()->second.empty())
-        local = unscaled<double>(get_extents(fwt.outer_wall.begin()->second));
-    else
+    if (!fwt.outer_wall.empty() && !fwt.outer_wall.begin()->second.empty()) {
+        const BoundingBox b = get_extents(fwt.outer_wall.begin()->second);
+        local               = BoundingBoxf(unscaled<double>(b.min), unscaled<double>(b.max));
+    } else
         local = BoundingBoxf(Vec2d::Zero(), Vec2d(print.wipe_tower_data().width, print.wipe_tower_data().depth));
     const int          plate = print.get_plate_index();
     const Vec2d        pos(print.config().wipe_tower_x.get_at(plate), print.config().wipe_tower_y.get_at(plate));
