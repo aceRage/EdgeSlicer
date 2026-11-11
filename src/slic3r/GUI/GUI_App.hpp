@@ -613,8 +613,7 @@ public:
     const wxFont&   bold_font()             { return m_bold_font; }
     const wxFont&   normal_font()           { return m_normal_font; }
     const wxFont&   code_font()             { return m_code_font; }
-    // Phase 1: no Plugins dialog to refresh. Orca's Home-tab UI calls this after a grant is
-    // persisted; the no-op keeps PluginAuditManager compiling until Phase 2.
+    // After a grant is persisted: redraw Home > Plugins when EDGE_PYTHON_PLUGINS is on.
     void            notify_plugin_permissions_changed(const std::string& plugin_key);
     const wxFont&   link_font()             { return m_link_font; }
     int             em_unit() const         { return m_em_unit; }

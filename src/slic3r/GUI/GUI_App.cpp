@@ -2845,7 +2845,10 @@ GUI_App::~GUI_App()
 
 void GUI_App::notify_plugin_permissions_changed(const std::string&)
 {
-    // Phase 1: no Plugins / Home-tab UI to refresh.
+#ifdef EDGE_PYTHON_PLUGINS
+    if (mainframe != nullptr && mainframe->m_home != nullptr)
+        mainframe->m_home->refresh_plugins();
+#endif
 }
 
 // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.

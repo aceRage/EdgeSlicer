@@ -25,6 +25,11 @@
 //   vendor_thumbs {images: {key: dataUri}} vendor thumbnails (PNG, JPEG, GIF or WebP)
 //   vendor_notice {text, error}            a result to show for a moment
 //   vendor_saved {id} / vendor_invalid {error}  the connector editor's save went through or not
+//   plugins {items: [card], loading, error, catalog:false}
+//                                          HomePlugins.cpp / HomePluginsLogic.cpp: display fields
+//                                          and opaque plugin_keys only (no entry_path / plugin_root).
+//                                          catalog is a Phase 11 slot (always false here).
+//   plugin_notice {text, error}            a result to show for a moment
 // Text from files and printers is only ever set with textContent, never parsed as HTML.
 (function () {
   'use strict';
@@ -39,7 +44,9 @@
     asked: new Set(),
     printer: '',
     search: '',
-    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest', vaults: 'newest' },
+    sort: { recent: 'newest', library: 'newest', history: 'newest', vendors: 'newest', vaults: 'newest', plugins: 'name' },
+    pluginsEnabled: false,
+    plug: null,         // the last 'plugins' message
     lib: null,          // the last 'library' message
     libThumbs: {},
     libAsked: new Set(),
@@ -60,13 +67,15 @@
     vltShown: [],
     vltRendered: 0,
   };
-  const SECTIONS = ['recent', 'library', 'history', 'vendors', 'vaults'];
+  const BASE_SECTIONS = ['recent', 'library', 'history', 'vendors', 'vaults'];
+  function sections() { return state.pluginsEnabled ? BASE_SECTIONS.concat(['plugins']) : BASE_SECTIONS; }
   const SORTS = {
     recent: ['newest', 'oldest', 'name'],
     library: ['newest', 'oldest', 'added', 'name', 'size'],
     history: ['newest', 'oldest', 'name'],
     vendors: ['newest', 'oldest', 'name'],
     vaults: ['newest', 'oldest', 'name'],
+    plugins: ['name', 'newest', 'oldest'],
   };
   const SORT_LABELS = { newest: ['sort_newest', 'Newest first'], oldest: ['sort_oldest', 'Oldest first'],
     added: ['sort_added', 'Recently added'], name: ['sort_name', 'Name'], size: ['sort_size', 'Largest first'] };
@@ -392,6 +401,7 @@
     else if (state.section === 'library') renderLibrary();
     else if (state.section === 'vendors') renderVendors();
     else if (state.section === 'vaults') renderVaults();
+    else if (state.section === 'plugins') renderPlugins();
     else renderRecent();
   }
 
@@ -407,15 +417,18 @@
   }
 
   function showSection(section, persist) {
-    if (SECTIONS.indexOf(section) < 0) section = 'recent';
+    if (sections().indexOf(section) < 0) section = 'recent';
     state.section = section;
     for (const b of document.querySelectorAll('.rail-item')) {
       const on = b.dataset.section === section;
       b.classList.toggle('active', on);
       b.setAttribute('aria-current', on ? 'page' : 'false');
     }
-    for (const id of SECTIONS) $(id).hidden = section !== id;
-    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors', vaults: 'Vaults' }[section]);
+    for (const id of BASE_SECTIONS.concat(['plugins'])) {
+      const node = $(id);
+      if (node) node.hidden = section !== id;
+    }
+    $('title').textContent = t(section, { recent: 'Recent', library: 'Library', history: 'Print History', vendors: 'Vendors', vaults: 'Vaults', plugins: 'Plugins' }[section]);
     fillSort(section);
     $('refresh').classList.toggle('spin', section === 'library' && !!state.lib && state.lib.scanning);
     closeMenu();
@@ -1481,6 +1494,109 @@
     if (!$('vault-editor').hidden) renderVaultSlots();
   }
 
+  // ---- Plugins ----
+  function receivePlugins(msg) {
+    state.plug = {
+      items: Array.isArray(msg.items) ? msg.items : [],
+      loading: !!msg.loading,
+      error: String(msg.error || ''),
+      catalog: !!msg.catalog,
+    };
+    $('plug-catalog').hidden = !state.plug.catalog;
+    if (state.section === 'plugins') renderPlugins();
+    stopSpin();
+  }
+
+  function pluginCard(p) {
+    const badges = [];
+    if (p.trust) badges.push({ text: p.trust, cls: 'plug-trust' }); // Phase 5 slot
+    if (p.error) badges.push({ text: t('plugin_error', 'Error'), cls: 'warn' });
+    else if (p.loading) badges.push({ text: t('loading', 'Loading...') });
+    else if (p.loaded) badges.push({ text: t('loaded', 'Loaded'), cls: 'accent' });
+    else if (p.enabled) badges.push({ text: t('enabled', 'Enabled') });
+    else badges.push({ text: t('not_loaded', 'Not loaded') });
+    if (p.update_available) badges.push({ text: t('update_available', 'Update available'), cls: 'warn' });
+    if (p.in_process_pipeline) badges.push({ text: t('in_process_pipeline', 'Early slicing steps run in-process'), cls: 'warn' });
+    for (const typ of p.types || []) badges.push({ text: typ });
+    badges.push({ text: p.source === 'catalog' ? t('source_catalog', 'Catalog') : t('source_local', 'Local file') });
+
+    const meta = el('div', 'plug-caps');
+    for (const cap of p.capabilities || []) {
+      const lab = el('label', 'plug-cap');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = !!cap.enabled;
+      cb.disabled = !p.loaded;
+      cb.addEventListener('click', (e) => e.stopPropagation());
+      cb.addEventListener('change', () => post('plugin_capability_toggle', {
+        key: p.plugin_key, name: cap.name, type: cap.type, enabled: cb.checked,
+      }));
+      lab.appendChild(cb);
+      lab.appendChild(el('span', '', (cap.type ? cap.type + ': ' : '') + (cap.name || '')));
+      meta.appendChild(lab);
+    }
+
+    const on = !!(p.loaded || p.enabled);
+    const menu = [
+      { label: on ? t('disable', 'Disable') : t('enable', 'Enable'),
+        run: () => post('plugin_toggle', { key: p.plugin_key, enabled: !on }) },
+      { label: t('reload', 'Reload'), run: () => post('plugin_reload', { key: p.plugin_key }) },
+      { label: t('reload_clear', 'Reload (clear dependency cache)'), run: () => post('plugin_reload', { key: p.plugin_key, clear: true }) },
+    ];
+    if (p.can_run) menu.push({ label: t('run_script', 'Run'), run: () => post('plugin_run', { key: p.plugin_key }) });
+    menu.push({ label: t('configure', 'Configure'), run: () => post('plugin_configure', { key: p.plugin_key }) });
+    menu.push({ label: t('permissions', 'Permissions'), run: () => post('plugin_permissions', { key: p.plugin_key }) });
+    if (p.update_available) menu.push({ label: t('update_available', 'Update available'), run: () => post('plugin_update', { key: p.plugin_key }) });
+    menu.push({ label: t('show_in_folder', 'Show in folder'), run: () => post('plugin_reveal', { key: p.plugin_key }) });
+    menu.push('-');
+    menu.push({ label: t('delete', 'Delete'), danger: true, run: () => post('plugin_delete', { key: p.plugin_key }) });
+
+    const author = p.author ? t('by', 'by') + ' ' + p.author : '';
+    const c = card({
+      name: p.name || p.plugin_key,
+      missing: !!p.error,
+      badges: badges,
+      lines: [p.version, author, p.error || p.description || ''],
+      meta: meta.childNodes.length ? meta : null,
+      menu: menu,
+    });
+    c.dataset.id = p.plugin_key;
+    return c;
+  }
+
+  function renderPlugins() {
+    const grid = $('plugins-grid'), empty = $('plugins-empty'), emptyText = $('plugins-empty-text');
+    const err = $('plug-error'), errText = $('plug-error-text');
+    grid.textContent = '';
+    const plug = state.plug;
+    if (plug === null) {
+      emptyText.textContent = t('loading', 'Loading...');
+      empty.hidden = false;
+      $('plug-empty-install').hidden = true;
+      err.hidden = true;
+      $('plug-status').textContent = '';
+      return;
+    }
+    err.hidden = !plug.error;
+    errText.textContent = plug.error || '';
+    if (plug.loading && !plug.items.length) {
+      emptyText.textContent = t('loading', 'Loading...');
+      empty.hidden = false;
+      $('plug-empty-install').hidden = true;
+      $('plug-status').textContent = '';
+      return;
+    }
+    const shown = sortBy(plug.items.filter((p) => matches(
+      [p.name, p.author, p.description, p.plugin_key].concat(p.types || []), state.search)),
+      state.sort.plugins, (p) => p.name || p.plugin_key || '', () => 0);
+    for (const p of shown) grid.appendChild(pluginCard(p));
+    $('plug-status').textContent = plug.items.length ? plug.items.length + ' ' + t('plugins', 'Plugins') : '';
+    empty.hidden = shown.length > 0;
+    emptyText.textContent = plug.items.length ? t('no_match', 'Nothing matches your search.')
+      : t('plugins_empty', 'Install a Python plugin from a .py or .whl file to manage it here.');
+    $('plug-empty-install').hidden = plug.items.length > 0 || plug.loading;
+  }
+
   // ---- Add vault ----
   function openAddVault() {
     closeMenu();
@@ -2061,6 +2177,8 @@
           applyTheme(msg.theme);
           applyStrings();
           $('rail-models').hidden = msg.models !== true;
+          state.pluginsEnabled = msg.plugins === true;
+          $('rail-plugins').hidden = !state.pluginsEnabled;
           showSection(msg.section || state.section, false);
           break;
         case 'models':
@@ -2137,6 +2255,12 @@
         case 'vendor_invalid':
           editorError(String(msg.error || ''));
           break;
+        case 'plugins':
+          receivePlugins(msg);
+          break;
+        case 'plugin_notice':
+          toast(String(msg.text || ''), !!msg.error);
+          break;
       }
     },
   };
@@ -2157,6 +2281,7 @@
     // Vendors' lists are metered: Refresh only redraws them; each connector has its own Fetch Changes.
     if (state.section === 'vendors') { post('vendor_state'); return; }
     if (state.section === 'vaults') { post('vault_state'); post('library_scan'); return; }
+    if (state.section === 'plugins') { post('plugin_state'); return; }
     $('refresh').classList.add('spin'); post('home_refresh'); setTimeout(stopSpin, 3000);
   });
   $('new-project').addEventListener('click', () => post('project_new'));
@@ -2175,6 +2300,9 @@
     ]);
   });
   $('vault-add-btn').addEventListener('click', openAddVault);
+  $('plug-install').addEventListener('click', () => post('plugin_install'));
+  $('plug-empty-install').addEventListener('click', () => post('plugin_install'));
+  $('plug-catalog').addEventListener('click', () => post('plugin_catalog'));
   $('vault-empty-add').addEventListener('click', openAddVault);
   $('vault-add-folder').addEventListener('click', () => { closeAddVault(); post('library_add_folder'); });
   $('vault-add-webdav').addEventListener('click', () => { closeAddVault(); openVaultEditor(null, { kind: 'webdav', title: $('vault-add-webdav').querySelector('b').textContent }); });

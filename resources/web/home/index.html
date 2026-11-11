@@ -31,6 +31,11 @@
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8H5a3 3 0 0 0-3 3v6h4v4h12v-4h4v-6a3 3 0 0 0-3-3zm-3 11H8v-5h8zm3-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-1-9H6v4h12z"/></svg>
       <span data-i18n="history">Print History</span>
     </button>
+    <!-- Plugins: Python packages under orca_plugins. Hidden unless the host sends init.plugins. -->
+    <button class="rail-item" id="rail-plugins" data-section="plugins" type="button" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-2 .9-2 2v3.8h1.5c1.38 0 2.5 1.12 2.5 2.5S5.88 16.4 4.5 16.4H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5S21.88 11 20.5 11z"/></svg>
+      <span data-i18n="plugins">Plugins</span>
+    </button>
     <!-- Models: the in-app model browser, a native panel the slicer shows in place of this page. -->
     <button class="rail-item" id="rail-models" data-action="models" type="button" hidden>
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.93 6h-2.95a15.65 15.65 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.93 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14a8.2 8.2 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4zm.81 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.99 7.99 0 0 1 5.07 16zm2.95-8H5.07a7.99 7.99 0 0 1 4.33-3.56A15.65 15.65 0 0 0 8.02 8zM12 19.96A14.1 14.1 0 0 1 10.09 16h3.82A14.1 14.1 0 0 1 12 19.96zM14.34 14H9.66a14.7 14.7 0 0 1 0-4h4.68a14.7 14.7 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.2 8.2 0 0 1 0 4z"/></svg>
@@ -114,6 +119,21 @@
       <div class="chips" id="printer-chips"></div>
       <div class="grid" id="history-grid"></div>
       <p class="empty" id="history-empty" hidden></p>
+    </section>
+
+    <section id="plugins" class="section" hidden>
+      <div class="lib-top">
+        <div id="plug-status" class="status"></div>
+        <!-- Phase 11: Catalog browse. Hidden until the host sends catalog:true. -->
+        <button id="plug-catalog" class="btn" type="button" hidden data-i18n="browse_catalog">Browse catalog</button>
+        <button id="plug-install" class="btn primary" type="button" data-i18n="install_plugin">Install from file</button>
+      </div>
+      <div id="plug-error" class="notice" hidden><span id="plug-error-text"></span></div>
+      <div class="grid" id="plugins-grid"></div>
+      <div class="empty" id="plugins-empty" hidden>
+        <p id="plugins-empty-text"></p>
+        <button id="plug-empty-install" class="btn primary" type="button" data-i18n="install_plugin">Install from file</button>
+      </div>
     </section>
   </main>
 </div>

@@ -1061,6 +1061,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/DevicePageLoad.hpp
     Utils/HomeTabLogic.cpp
     Utils/HomeTabLogic.hpp
+    Utils/HomePluginsLogic.cpp
+    Utils/HomePluginsLogic.hpp
     Utils/ThemePack.cpp
     Utils/ThemePack.hpp
     Utils/LibraryIndex.cpp
@@ -1249,6 +1251,8 @@ if (EDGE_PYTHON_PLUGINS)
         plugin/pluginTypes/script/ScriptPluginCapability.cpp
         plugin/pluginTypes/script/ScriptPluginCapabilityTrampoline.hpp
         Utils/BoostProcessCompat.hpp
+        GUI/HomePlugins.cpp
+        GUI/HomePlugins.hpp
     )
 endif ()
 
@@ -1341,6 +1345,7 @@ slic3r_unity_build(libslic3r_gui SKIP
     GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
     GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
     GUI/HomeVaults.cpp                            # lower/read_file/write_atomic/LIST_LIMIT also in HomeVendors.cpp
+    GUI/HomePlugins.cpp                           # namespace-scope using json / fs also in HomeVendors.cpp
     GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
     GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
     GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects

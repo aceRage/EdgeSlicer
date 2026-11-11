@@ -338,6 +338,9 @@ TEST_CASE("install_plugin accepts a side-loaded .py with complete PEP 723 metada
     // Positive control: a complete side-loaded .py must still install (guards against over-rejection).
     REQUIRE(installed);
     CHECK(error.empty());
+    PluginInstallState state;
+    REQUIRE(read_install_state(fs::path(descriptor.plugin_root), state));
+    CHECK_FALSE(state.enabled);
 }
 
 TEST_CASE("a .py plugin's PEP 723 dependencies split only at the commas between items", "[PluginInstall][PluginFsUtils]")
@@ -960,4 +963,27 @@ TEST_CASE("extract_zip_to_directory rejects an entry that escapes the destinatio
     CHECK_FALSE(extract_zip_to_directory(wheel, dir.path() / "out", error));
     CHECK_THAT(error, Catch::Matchers::Contains("escapes the plugin package"));
     CHECK_FALSE(fs::exists(dir.path() / "escape.txt"));
+}
+
+TEST_CASE("resolve_allowed_plugin_root refuses a folder outside the allowed dirs", "[PluginInstall][PluginFsUtils]")
+{
+    ScopedDataDir data_dir_guard("reveal-scope");
+    const std::vector<std::string> allowed = get_plugin_directories({});
+
+    PluginDescriptor inside;
+    inside.plugin_root = (fs::path(get_orca_plugins_dir()) / "inside").string();
+    fs::create_directories(inside.plugin_root);
+    fs::path    resolved;
+    std::string error;
+    REQUIRE(resolve_allowed_plugin_root(inside, allowed, "outside the allowed plugin directories", resolved, error));
+    CHECK(error.empty());
+
+    PluginDescriptor outside;
+    outside.plugin_root = (data_dir_guard.dir / "not-plugins").string();
+    fs::create_directories(outside.plugin_root);
+    fs::path    resolved_out;
+    std::string err_out;
+    REQUIRE_FALSE(resolve_allowed_plugin_root(outside, allowed, "outside the allowed plugin directories",
+                                              resolved_out, err_out));
+    CHECK_THAT(err_out, Catch::Matchers::Contains("outside the allowed plugin directories"));
 }

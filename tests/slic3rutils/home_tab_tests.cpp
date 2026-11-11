@@ -17,6 +17,12 @@ TEST_CASE("home tab: sections", "[HomeTab]")
     CHECK(valid_section("library"));
     CHECK(valid_section("vendors"));
     CHECK(valid_section("vaults"));
+    CHECK(valid_section("plugins"));
+    CHECK_FALSE(valid_section("Plugins"));
+    CHECK_FALSE(valid_section("plugin"));
+    CHECK(section_or_default("plugins") == "plugins");
+    CHECK(section_or_default("Plugins") == "recent");
+    CHECK(section_or_default("plugin") == "recent");
     CHECK(section_or_default("vaults") == "vaults");
     CHECK(section_or_default("vendors") == "vendors");
     CHECK_FALSE(valid_section("hub"));
