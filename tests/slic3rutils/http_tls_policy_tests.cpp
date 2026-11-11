@@ -17,6 +17,7 @@
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "plugin_test_utils.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -29,6 +30,7 @@
 #include <openssl/x509v3.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
@@ -333,6 +335,25 @@ TEST_CASE("TLS policy against a local self-signed server", "[Http][TlsPolicy][so
         CHECK(r.status == 0);
         CHECK(r.error.find("[Error 60]") != std::string::npos);
     }
+
+    SECTION("a Verify request with an untrusted CA file does not silently succeed")
+    {
+        const SelfSigned other;
+        const PemFile    ca(other.cert_pem);
+        Result r = fetch(std::move(Http::get(server.url()).tls_policy(Policy::Verify).ca_file(ca.str())));
+        INFO("error: " << r.error);
+        CHECK(r.status == 0);
+        CHECK(r.error.find("[Error 60]") != std::string::npos);
+    }
+
+    SECTION("a Verify request with an empty CA file does not silently succeed")
+    {
+        const PemFile empty("");
+        Result r = fetch(std::move(Http::get(server.url()).tls_policy(Policy::Verify).ca_file(empty.str())));
+        INFO("error: " << r.error);
+        CHECK(r.status == 0);
+        CHECK(r.body.empty());
+    }
 }
 
 // The same, end to end through a physical printer's settings: PrintHost::get_print_host() hands
@@ -386,3 +407,37 @@ TEST_CASE("printhost_cafile reaches the print host", "[Http][TlsPolicy][socket][
         CHECK(server.served == 0);
     }
 }
+
+#ifndef _WIN32
+TEST_CASE("SSL_CERT_FILE fallback only when unset", "[Http][TlsPolicy]")
+{
+    SECTION("unset falls back to a system CA bundle")
+    {
+        Slic3r::ScopedUnsetEnv unset("SSL_CERT_FILE");
+        const std::string      path = Http::ssl_cert_file_fallback_path(nullptr);
+        REQUIRE_FALSE(path.empty());
+        CHECK(boost::filesystem::exists(path));
+        CHECK(Http::ensure_ssl_cert_file_if_unset() == path);
+        REQUIRE(::getenv("SSL_CERT_FILE") != nullptr);
+        CHECK(std::string(::getenv("SSL_CERT_FILE")) == path);
+    }
+
+    SECTION("empty is left alone")
+    {
+        Slic3r::ScopedEnvVar set("SSL_CERT_FILE", "");
+        CHECK(Http::ssl_cert_file_fallback_path("").empty());
+        CHECK(Http::ssl_cert_file_fallback_path(::getenv("SSL_CERT_FILE")).empty());
+        CHECK(Http::ensure_ssl_cert_file_if_unset().empty());
+        REQUIRE(::getenv("SSL_CERT_FILE") != nullptr);
+        CHECK(std::string(::getenv("SSL_CERT_FILE")).empty());
+    }
+
+    SECTION("a missing path is left alone")
+    {
+        Slic3r::ScopedEnvVar set("SSL_CERT_FILE", "/no/such/edgeslicer-ca-bundle.pem");
+        CHECK(Http::ssl_cert_file_fallback_path(::getenv("SSL_CERT_FILE")).empty());
+        CHECK(Http::ensure_ssl_cert_file_if_unset().empty());
+        CHECK(std::string(::getenv("SSL_CERT_FILE")) == "/no/such/edgeslicer-ca-bundle.pem");
+    }
+}
+#endif

@@ -3,6 +3,7 @@
 #include "libslic3r/Utils.hpp"
 #include "PluginAuditManager.hpp"
 #include "PythonPluginBridge.hpp"
+#include "slic3r/Utils/Http.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -194,37 +195,16 @@ std::string executable_name(const char* base)
 #ifndef _WIN32
 // Bundled OpenSSL's OPENSSLDIR is the deps prefix, so cert.pem / certs there do not
 // exist. CPython's ssl.create_default_context() then has zero CAs unless SSL_CERT_FILE
-// names a real bundle. Linux Http::tls_global_init() (OPENSSL_CERT_OVERRIDE) already
-// does this for curl; macOS did not. Leave a user-set SSL_CERT_FILE alone (even if the
-// path is empty or missing). Windows CPython also loads the system store, so it is not
-// at risk of a zero-CA default context.
+// names a real bundle. Leave a user-set SSL_CERT_FILE alone (even if the path is empty
+// or missing); fall back only when the variable is unset. Windows CPython loads the
+// system store, so it is not at risk of a zero-CA default context.
 void ensure_system_ssl_cert_file()
 {
-    if (const char* env = boost::nowide::getenv("SSL_CERT_FILE"); env != nullptr && *env != '\0')
-        return;
-
-    static const char* const candidates[] = {
-        "/etc/ssl/cert.pem",                  // macOS, Alpine, Arch, Fedora (link)
-        "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Gentoo
-        "/etc/pki/tls/certs/ca-bundle.crt",   // Fedora/RHEL
-        "/usr/share/ssl/certs/ca-bundle.crt",
-        "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
-        "/etc/ssl/ca-bundle.pem",             // openSUSE
-        "/usr/local/etc/openssl/cert.pem",    // Homebrew OpenSSL
-        "/opt/homebrew/etc/openssl@3/cert.pem",
-    };
-    boost::system::error_code ec;
-    for (const char* candidate : candidates) {
-        if (!boost::filesystem::exists(boost::filesystem::path(candidate), ec))
-            continue;
-        // overwrite=0: do not replace a user-set SSL_CERT_FILE.
-        if (boost::nowide::setenv("SSL_CERT_FILE", candidate, 0) == 0)
-            BOOST_LOG_TRIVIAL(info) << "Python: using system CA bundle " << candidate;
-        else
-            BOOST_LOG_TRIVIAL(warning) << "Python: failed to set SSL_CERT_FILE to " << candidate;
-        return;
-    }
-    BOOST_LOG_TRIVIAL(warning) << "Python: no system CA bundle found; ssl.create_default_context() may have no CAs";
+    const std::string bundle = Http::ensure_ssl_cert_file_if_unset();
+    if (!bundle.empty())
+        BOOST_LOG_TRIVIAL(info) << "Python: using system CA bundle " << bundle;
+    else if (boost::nowide::getenv("SSL_CERT_FILE") == nullptr)
+        BOOST_LOG_TRIVIAL(warning) << "Python: no system CA bundle found; ssl.create_default_context() may have no CAs";
 }
 #endif
 
@@ -395,22 +375,33 @@ boost::filesystem::path find_bundled_python_home()
 {
     namespace fs = boost::filesystem;
 
+    const fs::path exe_dir = boost::dll::program_location().parent_path();
+
 #ifdef __APPLE__
     fs::path bundle_python = fs::path(resources_dir()).parent_path() / "MacOS" / "python";
     if (valid_python_home(bundle_python))
         return bundle_python;
 #elif !defined(_WIN32)
+    // AppImage: $APPDIR/lib/python (resources live at $APPDIR/resources).
     fs::path linux_python = fs::path(resources_dir()).parent_path() / "lib" / "python";
     if (valid_python_home(linux_python))
         return linux_python;
+    // FHS / Flatpak cmake --install: $prefix/libpython next to $prefix/bin.
+    fs::path fhs_python = exe_dir.parent_path() / "libpython";
+    if (valid_python_home(fhs_python))
+        return fhs_python;
+    // Non-FHS cmake --install: $prefix/python with the binary in $prefix/bin.
+    fs::path prefix_python = exe_dir.parent_path() / "python";
+    if (valid_python_home(prefix_python))
+        return prefix_python;
 #endif
 
-    // Next to the executable: the Windows install layout, and the runtime copied
-    // beside every platform's unit-test binary (tests/slic3rutils/CMakeLists.txt).
-    // The CI test runner only receives the build/tests tree, so the candidates
-    // below -- all of which point into the deps or install trees -- never resolve
-    // there.
-    fs::path exe_python = boost::dll::program_location().parent_path() / "python";
+    // Next to the executable: the Windows install layout, the macOS Contents/MacOS/python
+    // cmake --install layout, and the runtime copied beside every platform's unit-test
+    // binary (tests/slic3rutils/CMakeLists.txt). The CI test runner only receives the
+    // build/tests tree, so the candidates below -- all of which point into the deps or
+    // install trees -- never resolve there.
+    fs::path exe_python = exe_dir / "python";
     if (valid_python_home(exe_python))
         return exe_python;
 

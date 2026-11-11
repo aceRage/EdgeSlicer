@@ -94,6 +94,31 @@ struct ScopedEnvVar
     ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
 };
 
+// Unsets an environment variable for the lifetime of the guard and restores the previous value.
+struct ScopedUnsetEnv
+{
+    std::string                m_name;
+    std::optional<std::string> m_previous;
+
+    explicit ScopedUnsetEnv(std::string name) : m_name(std::move(name))
+    {
+        if (const char* old = boost::nowide::getenv(m_name.c_str()))
+            m_previous = old;
+        boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ~ScopedUnsetEnv()
+    {
+        if (m_previous)
+            boost::nowide::setenv(m_name.c_str(), m_previous->c_str(), 1);
+        else
+            boost::nowide::unsetenv(m_name.c_str());
+    }
+
+    ScopedUnsetEnv(const ScopedUnsetEnv&)            = delete;
+    ScopedUnsetEnv& operator=(const ScopedUnsetEnv&) = delete;
+};
+
 // Point data_dir() at a throwaway directory for the lifetime of a test and
 // restore the previous value afterwards, so code under test writes into a
 // disposable tree and tests don't leak state into each other.

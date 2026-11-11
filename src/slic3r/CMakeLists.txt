@@ -1488,11 +1488,16 @@ if (SPNAV_LIB)
     target_link_libraries(libslic3r_gui ${SPNAV_LIB})
 endif()
 
-if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL AND UNIX)
-    # Linux historically; macOS too so Http::tls_global_init() points the bundled
-    # OpenSSL at /etc/ssl/cert.pem (the deps prefix has no cert.pem). Windows uses
-    # the system store and must not take this path.
-    target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_CURL)
+    if (UNIX AND NOT APPLE)
+        # Linux historically: Http::tls_global_init() points the bundled OpenSSL at a
+        # distro CA bundle (the deps prefix has no cert.pem). Windows uses the system store.
+        target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+    elseif (APPLE AND EDGE_PYTHON_PLUGINS)
+        # macOS only when the plugin runtime is on: the default-OFF Mac static build must
+        # compile Http.cpp exactly as before (no CurlGlobalInit CA override).
+        target_compile_definitions(libslic3r_gui PRIVATE OPENSSL_CERT_OVERRIDE)
+    endif ()
 endif ()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
