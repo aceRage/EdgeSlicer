@@ -23502,6 +23502,8 @@ void Plater::calib_VFA(const Calib_Params& params)
     print_config->set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
+    // One bottom layer: a vase's bottom follows bottom_shell_thickness too, which would add layers below the test.
+    print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
@@ -23565,6 +23567,8 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
+    // One bottom layer: a vase's bottom follows bottom_shell_thickness too, which would add layers below the test.
+    print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
@@ -23626,6 +23630,8 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
+    // One bottom layer: a vase's bottom follows bottom_shell_thickness too, which would add layers below the test.
+    print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
@@ -23695,6 +23701,8 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
     print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
     print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
+    // One bottom layer: a vase's bottom follows bottom_shell_thickness too, which would add layers below the test.
+    print_config->set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
     print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
     print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
     print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
