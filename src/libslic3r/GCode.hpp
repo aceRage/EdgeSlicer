@@ -163,6 +163,13 @@ public:
     // Orca #15035: the WipeTower2 tower's first-layer envelope (brim included) in tower-local
     // coordinates, which the skip-point entry routing goes around.
     void set_wipe_tower_bbx(const BoundingBoxf &bbx) { m_wipe_tower_bbx = bbx; }
+    // BBS (H2C wipe_tower_center_pos_*): the tower's first-layer box on the plate and the bed every
+    // nozzle reaches, for the per-toolchange "point for nozzle heating" (M620.14 X Y).
+    void set_heating_stop_area(const BoundingBoxf &tower_bbx, const BoundingBoxf &printer_bbx)
+    {
+        m_heating_tower_bbx   = tower_bbx;
+        m_heating_printer_bbx = printer_bbx;
+    }
 
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
@@ -218,6 +225,9 @@ private:
     // where the tower's height is not the one process_layer already declared.
     const bool                                                   m_sparse_layers_combined;
     BoundingBoxf                                                 m_wipe_tower_bbx;
+    // See set_heating_stop_area(). Undefined: no heating stop point is published per toolchange.
+    BoundingBoxf                                                 m_heating_tower_bbx;
+    BoundingBoxf                                                 m_heating_printer_bbx;
     // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
     std::vector<float>                                           m_compacted_tower_z;
 };

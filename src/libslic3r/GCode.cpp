@@ -978,6 +978,60 @@ std::string WipeTowerIntegration::travel_to_tower_gap(GCode &gcodegen, const Poi
     return gcode;
 }
 
+// BBS (H2C M620.14 "point for nozzle heating"): Bambu Studio Print::get_extruder_shared_printable_polygon() as
+// a box - printable_area on a single-nozzle printer, else the bed every nozzle reaches (the intersection of
+// extruder_printable_area, ExtruderAreas::shared here). Plate-local, like the G-code.
+static BoundingBoxf bambu_shared_printable_bbx(const Print &print)
+{
+    const ExtruderAreas areas = print.get_extruder_areas();
+    if (areas.multi() && !areas.shared.empty())
+        return unscaled<double>(get_extents(areas.shared));
+    return BoundingBoxf(print.config().printable_area.values);
+}
+
+// BBS: the tower's box on the plate. Bambu Studio takes the extents of the first printed layer's outer wall
+// (WipeTower::get_bbx()) moved by the tower position (and by rib_offset in append_tcr). Edge's outer walls
+// are recorded in the frame the writer emits, rib offset included, so only the tower position (and the
+// rotation, 0 on Bambu printers) is added. A tower with no recorded wall falls back to its width x depth.
+static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print)
+{
+    const FakeWipeTower &fwt = print.get_fake_wipe_tower();
+    BoundingBoxf         local;
+    if (!fwt.outer_wall.empty() && !fwt.outer_wall.begin()->second.empty())
+        local = unscaled<double>(get_extents(fwt.outer_wall.begin()->second));
+    else
+        local = BoundingBoxf(Vec2d::Zero(), Vec2d(print.wipe_tower_data().width, print.wipe_tower_data().depth));
+    const int          plate = print.get_plate_index();
+    const Vec2d        pos(print.config().wipe_tower_x.get_at(plate), print.config().wipe_tower_y.get_at(plate));
+    const double       alpha = print.config().wipe_tower_rotation_angle.value / 180. * M_PI;
+    const Eigen::Rotation2Dd rot(alpha);
+    BoundingBoxf       out;
+    for (const Vec2d &c : { local.min, Vec2d(local.max.x(), local.min.y()), local.max, Vec2d(local.min.x(), local.max.y()) })
+        out.merge(Vec2d(rot * c + pos));
+    return out;
+}
+
+// Bambu Studio GCode.cpp (print start, "point of nozzle heating"): 2 mm beside the tower, on the side that
+// faces the middle of the bed, at the tower's mid Y; X clamped to the bed every nozzle reaches.
+static Vec2d bambu_heating_stop_at_print_start(const BoundingBoxf &tower_bbx, const BoundingBoxf &bed_bbx, const BoundingBoxf &printer_bbx)
+{
+    Vec2d stop_pos = tower_bbx.center().x() < bed_bbx.center().x() ? Vec2d(tower_bbx.max.x() + 2., tower_bbx.center().y()) :
+                                                                      Vec2d(tower_bbx.min.x() - 2., tower_bbx.center().y());
+    stop_pos.x() = std::clamp(stop_pos.x(), printer_bbx.min.x(), std::max(printer_bbx.min.x(), printer_bbx.max.x()));
+    return stop_pos;
+}
+
+// Bambu Studio GCode.cpp append_tcr (per toolchange, "point for nozzle heating"): 2 mm outward from where the
+// toolchange starts on the tower (tool_change_start_pos, which is tcr.start_pos without Bambu's side scrape),
+// away from the tower's middle; same Y; X clamped to the bed every nozzle reaches.
+static Vec2d bambu_heating_stop_at_toolchange(const Vec2d &tool_change_start_pos, const BoundingBoxf &tower_bbx, const BoundingBoxf &printer_bbx)
+{
+    Vec2d stop_pos = tool_change_start_pos;
+    stop_pos.x() += stop_pos.x() < tower_bbx.center().x() ? -2. : 2.;
+    stop_pos.x() = std::clamp(stop_pos.x(), printer_bbx.min.x(), std::max(printer_bbx.min.x(), printer_bbx.max.x()));
+    return stop_pos;
+}
+
 // Orca #15035: the last XY a G-code snippet moves to (absolute G0-G3 words), starting from pos. Stands in
 // for upstream's GCodeProcessor::get_last_position_from_gcode, which Edge does not have.
 static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
@@ -1271,6 +1325,16 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             config.set_key_value("travel_point_3_y", new ConfigOptionFloat(float(travel_point_3.y())));
 
             config.set_key_value("flush_length", new ConfigOptionFloat(purge_length));
+
+            // BBS (Bambu Studio GCode.cpp append_tcr, "point for nozzle heating"): the H2C change_filament
+            // template's M620.14 X[wipe_tower_center_pos_x] Y[wipe_tower_center_pos_y].
+            if (m_heating_tower_bbx.defined && m_heating_printer_bbx.defined && !tcr.priming) {
+                const Vec2d stop_pos = bambu_heating_stop_at_toolchange(start_pos.cast<double>(), m_heating_tower_bbx, m_heating_printer_bbx);
+                config.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(stop_pos.x()));
+                config.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(stop_pos.y()));
+                config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(true));
+            }
+
 
             // At least one chunk, or a flush under half a chunk is dropped from flush_length_1..4.
             int   flush_count = std::clamp((int) std::round(purge_volume / g_purge_volume_one_time), 1, g_max_flush_count);
@@ -4307,7 +4371,6 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("first_non_support_filaments", new ConfigOptionInts(first_non_support_fils));
             // H2C templates also reference these (single-mapped: hotend ids -1, no computed wipe-tower center).
             this->placeholder_parser().set("first_non_support_hotend",    new ConfigOptionInts(std::vector<int>(num_nozzles, -1)));
-            this->placeholder_parser().set("wipe_tower_center_pos_valid", new ConfigOptionBool(false));
 
             // X2D templates additionally reference newer BBS fan/chamber vars the fork lacks. Shim:
             // initial_filament_id = the initial extruder; no first-layer aux-fan ramp (close=0, full from
@@ -4323,14 +4386,24 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("close_additional_fan_first_x_layers",new ConfigOptionInts(std::vector<int>(nf, 0)));
             this->placeholder_parser().set("additional_fan_full_speed_layer",    new ConfigOptionInts(std::vector<int>(nf, 1)));
             this->placeholder_parser().set("first_x_layer_fan_speed",            new ConfigOptionFloats(std::vector<double>(nf, 0.)));
-            // Ultra: wipe-tower center coords used via the [opt_key] placeholder syntax in
-            // change_filament (wipe_tower_center_pos_valid=false gates them).
+            // BBS (Bambu Studio GCode.cpp, print start): the H2C start and change_filament templates send the
+            // "point of nozzle heating" as M620.14 X[wipe_tower_center_pos_x] Y[wipe_tower_center_pos_y], 2 mm
+            // beside the prime tower; without a tower they fall back to their fixed M620.14 X95.5 Y336.
+            // append_tcr overrides the point per toolchange.
+            {
+                Vec2d stop_pos(-1., -1.);
+                if (has_wipe_tower)
+                    stop_pos = bambu_heating_stop_at_print_start(bambu_wipe_tower_plate_bbx(print),
+                                                                 BoundingBoxf(print.config().printable_area.values),
+                                                                 bambu_shared_printable_bbx(print));
+                this->placeholder_parser().set("wipe_tower_center_pos_valid", new ConfigOptionBool(has_wipe_tower));
+                this->placeholder_parser().set("wipe_tower_center_pos_x",     new ConfigOptionFloat(stop_pos.x()));
+                this->placeholder_parser().set("wipe_tower_center_pos_y",     new ConfigOptionFloat(stop_pos.y()));
+            }
             // The per-filament hotend-change (_nc) vars are NOT shimmed any more: the H2C template's
             // M620.15 P[filament_pre_cooling_temperature_nc[next_filament_id]] reads the real config
             // option, and M620.11 O1 T[filament_retract_length_nc] gets the outgoing filament's value
             // per toolchange (outgoing_filament_retract_length_nc), as in BambuStudio.
-            this->placeholder_parser().set("wipe_tower_center_pos_x",             new ConfigOptionFloat(0.));
-            this->placeholder_parser().set("wipe_tower_center_pos_y",             new ConfigOptionFloat(0.));
         }
     }
 
@@ -4864,6 +4937,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                     const BoundingBox envelope = get_extents(print.wipe_tower_data().wipe_tower_mesh_data->bottom);
                     m_wipe_tower->set_wipe_tower_bbx(BoundingBoxf(unscale(envelope.min), unscale(envelope.max)));
                 }
+                // BBS: the H2C per-toolchange M620.14 heating stop point (Bambu-style tower only, as in Bambu Studio).
+                if (!wipe_tower_type2)
+                    m_wipe_tower->set_heating_stop_area(bambu_wipe_tower_plate_bbx(print), bambu_shared_printable_bbx(print));
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 
@@ -13252,6 +13328,11 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // BBS (H2C rack): BambuStudio GCode.cpp:8170/8208/8247 - outgoing filament's value, 0 with none loaded.
     dyn_config.set_key_value("filament_retract_length_nc",
                              new ConfigOptionFloat(previous_extruder_id >= 0 ? outgoing_filament_retract_length_nc(m_config, previous_extruder_id) : 0.));
+    // BBS (Bambu Studio GCode.cpp set_extruder): no tower to wait beside on this path (Bambu Studio sets the same
+    // fixed values here).
+    dyn_config.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(0.));
+    dyn_config.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(0.));
+    dyn_config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(false));
     dyn_config.set_key_value("old_retract_length_toolchange", new ConfigOptionFloat(old_retract_length_toolchange));
     dyn_config.set_key_value("new_retract_length_toolchange", new ConfigOptionFloat(new_retract_length_toolchange));
     dyn_config.set_key_value("old_filament_temp", new ConfigOptionInt(old_filament_temp));
