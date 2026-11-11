@@ -134,3 +134,15 @@ TEST_CASE("home plugins: the page may only name keys the host listed", "[HomePlu
     // A path-shaped key is refused even if the host list were wrong.
     CHECK_FALSE(is_listed_plugin_key("a/b", { "a/b" }));
 }
+
+TEST_CASE("home plugins: capability toggle only names a listed (name, type) triple", "[HomePlugins]")
+{
+    const std::vector<PluginCapabilityView> listed{ { "hello", "script", true }, { "pipe", "slicing-pipeline", false } };
+    CHECK(is_listed_capability("hello", "script", listed));
+    CHECK(is_listed_capability("pipe", "slicing-pipeline", listed));
+    CHECK_FALSE(is_listed_capability("hello", "slicing-pipeline", listed));
+    CHECK_FALSE(is_listed_capability("hello", "", listed));
+    CHECK_FALSE(is_listed_capability("", "script", listed));
+    CHECK_FALSE(is_listed_capability("missing", "script", listed));
+    CHECK_FALSE(is_listed_capability("hello", "script", {}));
+}

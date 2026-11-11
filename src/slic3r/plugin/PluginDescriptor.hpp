@@ -74,7 +74,8 @@ struct PluginDescriptor
     bool install_state_valid = false;
     // Package auto-load flag, read from .install_state.json. Defaults to FALSE: a package with no
     // sidecar has never been installed through Orca and carries no auto-load intent, so it must not
-    // be loaded at startup. Installing a package writes the sidecar with enabled = true.
+    // be loaded at startup. Installing a package writes the sidecar with enabled = false; Enable
+    // from Home is what turns auto-load on.
     bool enabled = false;
     std::string sharing_token;             // Use BASE_URL/p/SHARING_TOKEN to open relevant plugin in browser.
     std::string thumbnail_url;             // Cloud main_image pre-signed (access_url) thumbnail; empty for local plugins. Display-only.
