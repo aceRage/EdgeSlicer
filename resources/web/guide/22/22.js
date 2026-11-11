@@ -420,7 +420,9 @@ function ChooseDefaultFilament()
 	}	
 	
 	//DefaultMaterialList
-	let DefaultMaterialString=new Array();
+	// A string from the start: as an Array it only became one when a model added to it, and with no model in the
+	// list split() below threw.
+	let DefaultMaterialString='';
 	let nMode=m_ProfileItem["model"].length;
 	for(let n=0;n<nMode;n++)
 	{
@@ -446,7 +448,8 @@ function ChooseDefaultFilament()
 		let OneFF=OneNode.getElementsByTagName("input")[0];
 		$(OneFF).prop("checked",false);
 		
-	    let filamentList=GetFilamentShortname(OneFF.getAttribute("filalist")); 
+	    // The whole names, as the models' default materials are whole names ("Generic PLA @U1 0.4 nozzle").
+	    let filamentList=OneFF.getAttribute("filalist"); 
 		//alert(filamentList);
 		let filamentArray=filamentList.split(';')
 		
