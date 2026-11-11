@@ -19,11 +19,19 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#else
+#include <malloc.h> // _msize on Windows, malloc_usable_size on Linux
+#endif
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -587,19 +595,98 @@ AABBTreeLines::LinesDistancer<Linef> comb_outline()
     return AABBTreeLines::LinesDistancer<Linef>(std::move(lines));
 }
 
+// Edge: a scope in which every block the test thread frees is overwritten with 0xFF bytes (a double reads as NaN)
+// and held back from the allocator until the scope ends. A read of freed memory then sees the poison every time,
+// on every platform, instead of whatever the allocator happened to leave there (usually the old bytes, which is
+// why the case below passed before the fix without the address sanitiser). Only this thread, only inside the scope;
+// everywhere else operator delete is the plain free() the default one is.
+thread_local bool   edge_poison_freed_memory = false;
+thread_local void  *edge_quarantine[256];
+thread_local size_t edge_quarantined = 0;
+
+void edge_poison_release(void *ptr, std::size_t size) noexcept
+{
+    if (edge_quarantined < sizeof(edge_quarantine) / sizeof(edge_quarantine[0])) {
+        std::memset(ptr, 0xFF, size);
+        edge_quarantine[edge_quarantined++] = ptr;
+    } else
+        std::free(ptr);
+}
+
+struct PoisonFreedMemory
+{
+    PoisonFreedMemory() { edge_poison_freed_memory = true; }
+    ~PoisonFreedMemory()
+    {
+        edge_poison_freed_memory = false;
+        for (size_t i = 0; i < edge_quarantined; ++i)
+            std::free(edge_quarantine[i]);
+        edge_quarantined = 0;
+    }
+};
+
 } // namespace
+
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define EDGE_TEST_ASAN 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#define EDGE_TEST_ASAN 1
+#endif
+
+#ifndef EDGE_TEST_ASAN
+// Replaces the default operator delete of this test program (the default operator new allocates with malloc on
+// MSVC, libc++ and libstdc++, so free() is its counterpart). Left out under the address sanitiser, which replaces
+// these itself and reports the read on its own.
+void operator delete(void *ptr) noexcept
+{
+    if (ptr == nullptr)
+        return;
+    if (!edge_poison_freed_memory) {
+        std::free(ptr);
+        return;
+    }
+#if defined(_WIN32)
+    edge_poison_release(ptr, _msize(ptr));
+#elif defined(__APPLE__)
+    edge_poison_release(ptr, malloc_size(ptr));
+#else
+    edge_poison_release(ptr, malloc_usable_size(ptr));
+#endif
+}
+
+void operator delete(void *ptr, std::size_t size) noexcept
+{
+    if (ptr == nullptr)
+        return;
+    if (!edge_poison_freed_memory) {
+        std::free(ptr);
+        return;
+    }
+    edge_poison_release(ptr, size);
+}
+#endif // EDGE_TEST_ASAN
 
 // estimate_points_properties held a reference to the last point of the vector it was filling while it pushed the
 // crossings of a line with the previous layer's outline onto it. The vector is reserved for one and a half points
 // per input point, so a two-point line that crosses the outline more than twice makes it grow, and every crossing
 // after that was filtered against the start of the line read from the freed buffer. Under the address sanitiser
 // this case stops with a heap-use-after-free on the sources before the fix.
+// Edge: without the sanitiser the freed buffer usually still held the old point, so the case passed before the fix
+// too. Inside PoisonFreedMemory the freed buffer reads as NaN, so before the fix the crossings at x = 7 and 9 (those
+// tested after the third crossing made the vector grow) fail the spacing filter and are dropped: 3 crossings, not 5.
 TEST_CASE("A line crossing the outline five times keeps every crossing", "[ExtrusionProcessor][Regression]")
 {
     const AABBTreeLines::LinesDistancer<Linef> prev_layer = comb_outline();
     const Points line{Point::new_scale(0., 0.), Point::new_scale(10., 0.)};
 
-    const std::vector<ExtendedPoint> points = estimate_points_properties<true, true, true, true>(line, prev_layer, caged_wall_width);
+    std::vector<ExtendedPoint> points;
+    {
+        PoisonFreedMemory poison;
+        points = estimate_points_properties<true, true, true, true>(line, prev_layer, caged_wall_width);
+    }
 
     // Each crossing is added at the outline, where the reading is the boundary offset of half a line width.
     std::vector<double> crossings;
