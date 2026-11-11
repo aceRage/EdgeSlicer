@@ -303,7 +303,11 @@ static Point find_first_different_vertex(const Polygon &polygon, const size_t po
     if (point != polygon.points[point_idx])
         return polygon.points[point_idx];
 
-    auto line_idx = (int(point_idx) + 1) % int(polygon.points.size());
+    // The search starts at the neighbour on the side it looks to. It started at the next point whichever way it looked:
+    // looking back from the start of an edge it found that edge's far end, which is the point the search forward finds
+    // as well, and the two normals made from them cancel.
+    const int points_cnt = int(polygon.points.size());
+    auto      line_idx   = forward ? (int(point_idx) + 1) % points_cnt : (int(point_idx) + points_cnt - 1) % points_cnt;
     assert(line_idx != int(point_idx));
     if constexpr (forward)
         for (; point == polygon.points[line_idx] && line_idx != int(point_idx); line_idx = line_idx + 1 < int(polygon.points.size()) ? line_idx + 1 : 0);
@@ -338,7 +342,8 @@ static Point get_polygon_vertex_offset(const Polygon &polygon, const size_t poin
 }
 
 // Compute offset (in the direction of inward normal) of the point(passed on "middle") based on the nearest points laying on the polygon (left_idx and right_idx).
-static Point get_middle_point_offset(const Polygon &polygon, const size_t left_idx, const size_t right_idx, const Point &middle, const coord_t offset)
+// Not static: the unit tests call it.
+Point get_middle_point_offset(const Polygon &polygon, const size_t left_idx, const size_t right_idx, const Point &middle, const coord_t offset)
 {
     const Point &left  = find_first_different_vertex<false>(polygon, left_idx, middle);
     const Point &right = find_first_different_vertex<true>(polygon, right_idx, middle);
@@ -394,9 +399,8 @@ static Direction get_shortest_direction(const AvoidCrossingPerimeters::Boundary 
                                         float                                    contour_length)
 {
     assert(intersection_first.border_idx == intersection_second.border_idx);
-    const Polygon &poly        = boundary.boundaries[intersection_first.border_idx];
-    float          dist_first  = intersection_first.distance;
-    float          dist_second = intersection_second.distance;
+    float dist_first  = intersection_first.distance;
+    float dist_second = intersection_second.distance;
 
     assert(dist_first  >= 0.f && dist_first  <= contour_length);
     assert(dist_second >= 0.f && dist_second <= contour_length);
@@ -410,12 +414,9 @@ static Direction get_shortest_direction(const AvoidCrossingPerimeters::Boundary 
     float total_length_backward = dist_first + contour_length - dist_second;
     if (reversed) std::swap(total_length_forward, total_length_backward);
 
-    total_length_forward  -= (intersection_first.point - poly[intersection_first.line_idx]).cast<float>().norm();
-    total_length_backward -= (poly[(intersection_first.line_idx + 1) % poly.size()] - intersection_first.point).cast<float>().norm();
-
-    total_length_forward  -= (poly[(intersection_second.line_idx + 1) % poly.size()] - intersection_second.point).cast<float>().norm();
-    total_length_backward -= (intersection_second.point - poly[intersection_second.line_idx]).cast<float>().norm();
-
+    // Intersection::distance is measured to the point of intersection itself, so these are the two lengths. What lies
+    // between each intersection and the ends of its edge used to be taken off them here, which is left from when the
+    // distance was that of the edge's first point, and sent a detour the longer way by up to the length of the two edges.
     if (total_length_forward < total_length_backward) return Direction::Forward;
     return Direction::Backward;
 }
@@ -688,11 +689,12 @@ static size_t avoid_perimeters_inner(
 }
 
 // Called by AvoidCrossingPerimeters::travel_to()
-static size_t avoid_perimeters(const AvoidCrossingPerimeters::Boundary &boundary,
-                               const Point                             &start,
-                               const Point                             &end,
-                               const Layer                             &layer,
-                               Polyline                                &result_out)
+// Not static: the unit tests call it.
+size_t avoid_perimeters(const AvoidCrossingPerimeters::Boundary &boundary,
+                        const Point                             &start,
+                        const Point                             &end,
+                        const Layer                             &layer,
+                        Polyline                                &result_out)
 {
     // Travel line is completely or partially inside the bounding box.
     std::vector<TravelPoint> path;
@@ -845,7 +847,8 @@ static void resample_expolygons(ExPolygons &ex_polygons, double dist_from_vertex
         resample_expolygon(ex_poly, dist_from_vertex, max_allowed_distance);
 }
 
-static void precompute_polygon_distances(const Polygon &polygon, std::vector<float> &polygon_distances_out)
+// Not static: the unit tests call it.
+void precompute_polygon_distances(const Polygon &polygon, std::vector<float> &polygon_distances_out)
 {
     polygon_distances_out.assign(polygon.size() + 1, 0.f);
     for (size_t point_idx = 1; point_idx < polygon.size(); ++point_idx)
@@ -862,7 +865,8 @@ static void precompute_expolygon_distances(const ExPolygon &ex_polygon, std::vec
 }
 
 // It is highly based on the function contour_distance2 from the ElephantFootCompensation.cpp
-static std::vector<float> contour_distance(const EdgeGrid::Grid     &grid,
+// Not static: the unit tests call it.
+std::vector<float> contour_distance(const EdgeGrid::Grid     &grid,
                                     const std::vector<float> &poly_distances,
                                     const size_t              contour_idx,
                                     const Polygon            &polygon,
@@ -913,12 +917,13 @@ static std::vector<float> contour_distance(const EdgeGrid::Grid     &grid,
                             // Reject the closest point if its distance along the contour is reasonable compared to the current contour bisector
                             // (this->pt, foot).
                             const EdgeGrid::Contour &contour   = grid.contours()[it_contour_and_segment->first];
+                            const size_t             ipt       = it_contour_and_segment->second;
                             double                   param_lo  = boundary_parameters[this->idx_point];
-                            double                   param_hi  = t * sqrt(l2);
+                            // boundary_parameters are measured from the contour's first point (precompute_polygon_distances),
+                            // the closing segment's as well. ElephantFootCompensation.cpp, where this comes from, leaves the
+                            // closing segment's own start out, and so did this.
+                            double                   param_hi  = boundary_parameters[ipt] + t * sqrt(l2);
                             double                   param_end = boundary_parameters.back();
-                            const size_t ipt = it_contour_and_segment->second;
-                            if (contour.begin() + ipt + 1 < contour.end())
-                                param_hi += boundary_parameters[ipt];
                             if (param_lo > param_hi)
                                 std::swap(param_lo, param_hi);
                             assert(param_lo > -SCALED_EPSILON && param_lo <= param_end + SCALED_EPSILON);
@@ -1251,8 +1256,12 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCode &gcodegen, const Point &
     bool                            is_support_layer = (dynamic_cast<const SupportLayer *>(gcodegen.layer()) != nullptr);
     if (!use_external && (is_support_layer || (!m_lslices_offset.empty() && !any_expolygon_contains(m_lslices_offset, m_lslices_offset_bboxes, m_grid_lslice, travel)))) {
         // Initialize m_internal only when it is necessary.
-        if (m_internal.boundaries.empty()) {
+        // It is of the layer it was made from. A layer's supports are printed before its part, and what is made for a
+        // support layer (no top surfaces to leave out, no walls to take the spacing from) is not what the part's own
+        // moves are to be routed by, so it is made again when the layer being printed is another.
+        if (m_internal.boundaries.empty() || m_internal_layer != gcodegen.layer()) {
             init_boundary(&m_internal, to_polygons(get_boundary(*gcodegen.layer(), get_perimeter_spacing(*gcodegen.layer()))), {start, end});
+            m_internal_layer = gcodegen.layer();
         } else if (!(m_internal.bbox.contains(startf) && m_internal.bbox.contains(endf))) {
             // check if start and end are in bbox, if not, merge start and end points to bbox
             m_internal.clear();
@@ -1320,6 +1329,7 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCode &gcodegen, const Point &
 void AvoidCrossingPerimeters::init_layer(const Layer &layer)
 {
     m_internal.clear();
+    m_internal_layer = nullptr;
     m_external.clear();
 
     m_lslices_offset.clear();
