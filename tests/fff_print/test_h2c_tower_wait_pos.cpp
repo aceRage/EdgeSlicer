@@ -125,14 +125,22 @@ std::vector<std::string> lines_of(const std::string &gcode)
 }
 
 // The tower's first-layer box on the plate, as the G-code prints it: the extents of the first wipe tower
-// layer's outer wall (Bambu Studio's WipeTower::get_bbx()) moved by the tower position.
+// layer's outer wall and brim (Bambu Studio's WipeTower::get_bbx()) moved by the tower position. Edge keeps that
+// outline as the tower mesh's bottom, in the frame the G-code prints.
 BoundingBoxf tower_box(const Print &print)
 {
-    const FakeWipeTower &fwt = print.get_fake_wipe_tower();
-    REQUIRE_FALSE(fwt.outer_wall.empty());
-    const BoundingBox local = get_extents(fwt.outer_wall.begin()->second);
-    const Vec2d       pos(print.config().wipe_tower_x.get_at(0), print.config().wipe_tower_y.get_at(0));
-    return BoundingBoxf(unscaled<double>(local.min) + pos, unscaled<double>(local.max) + pos);
+    const auto &mesh = print.wipe_tower_data().wipe_tower_mesh_data;
+    REQUIRE(mesh.has_value());
+    REQUIRE_FALSE(mesh->bottom.empty());
+    const BoundingBox  local = get_extents(mesh->bottom);
+    const Vec2d        pos(print.config().wipe_tower_x.get_at(0), print.config().wipe_tower_y.get_at(0));
+    const BoundingBoxf box(unscaled<double>(local.min) + pos, unscaled<double>(local.max) + pos);
+    // Sanity: the outline covers the tower's width x depth from its position (give or take a perimeter).
+    CHECK(box.min.x() <= pos.x() + 1.);
+    CHECK(box.min.y() <= pos.y() + 1.);
+    CHECK(box.max.x() >= pos.x() + print.wipe_tower_data().width - 1.);
+    CHECK(box.max.y() >= pos.y() + print.wipe_tower_data().depth - 1.);
+    return box;
 }
 
 struct Point2 { double x, y; };

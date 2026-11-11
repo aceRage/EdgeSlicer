@@ -992,15 +992,17 @@ static BoundingBoxf bambu_shared_printable_bbx(const Print &print)
 }
 
 // BBS: the tower's box on the plate. Bambu Studio takes the extents of the first printed layer's outer wall
-// (WipeTower::get_bbx()) moved by the tower position (and by rib_offset in append_tcr). Edge's outer walls
-// are recorded in the frame the writer emits, rib offset included, so only the tower position (and the
-// rotation, 0 on Bambu printers) is added. A tower with no recorded wall falls back to its width x depth.
+// and brim loops (WipeTower::get_bbx()) moved by the tower position (and by rib_offset in append_tcr). Edge
+// keeps that first-layer outline (rib wall or rectangle, brim included) in WipeTowerData::wipe_tower_mesh_data
+// in the frame the writer emits, rib offset included, so only the tower position (and the rotation, 0 on
+// Bambu printers) is added. Edge records outer walls only for rib towers, so they are not used here. Without
+// an outline the box is the tower's width x depth.
 static BoundingBoxf bambu_wipe_tower_plate_bbx(const Print &print)
 {
-    const FakeWipeTower &fwt = print.get_fake_wipe_tower();
-    BoundingBoxf         local;
-    if (!fwt.outer_wall.empty() && !fwt.outer_wall.begin()->second.empty()) {
-        const BoundingBox b = get_extents(fwt.outer_wall.begin()->second);
+    const auto  &mesh = print.wipe_tower_data().wipe_tower_mesh_data;
+    BoundingBoxf local;
+    if (mesh.has_value() && !mesh->bottom.empty()) {
+        const BoundingBox b = get_extents(mesh->bottom);
         local               = BoundingBoxf(unscaled<double>(b.min), unscaled<double>(b.max));
     } else
         local = BoundingBoxf(Vec2d::Zero(), Vec2d(print.wipe_tower_data().width, print.wipe_tower_data().depth));
