@@ -492,17 +492,10 @@ struct LineNode
     State                  state;
 
     // Return true if some initial line is touching some long line and this information was propagated into the current line.
-    bool is_initial_line_touching_long_lines() const {
-        if (prev_section_overlapping_lines.empty())
-            return false;
-
-        for (LineNode *line_node : prev_section_overlapping_lines) {
-            if (line_node->state.initial_touches_long_lines)
-                return true;
-        }
-
-        return false;
-    }
+    // This is what the line itself was last told: by the run that reached it, or of itself where a run began with it.
+    // It used to be read off the lines of the previous section instead, so the line a run begins with was never asked:
+    // a lone short line beside a long one was removed, and of short lines running out into a corner two stayed.
+    bool is_initial_line_touching_long_lines() const { return state.initial_touches_long_lines; }
 
     // Return true if the current line overlaps with some long line in the previous section.
     bool is_touching_long_lines_in_previous_layer() const {
@@ -575,7 +568,8 @@ void propagate_line_node_remove(const LineNode &line_node) {
 }
 
 // Filter out short extrusions that could create vibrations.
-static std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_sections) {
+// Not static: declared in Fill.hpp for the unit tests.
+std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &lines_sections) {
     // Initialize all line nodes.
     std::vector<LineNodes> line_nodes_sections(lines_sections.size());
     for (const Lines &lines_section : lines_sections) {
@@ -657,8 +651,8 @@ static std::vector<Lines> filter_vibrating_extrusions(const std::vector<Lines> &
                     if (neighbour_line->state.initialized) {
                         // When the state of the node was previously filled, then we need to update data in such a way
                         // that will maximize the possibility of removing this node.
-                        neighbour_line->state.min_skips_taken = std::max(neighbour_line->state.min_skips_taken, neighbour_total_short_lines);
-                        neighbour_line->state.min_skips_taken = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
+                        neighbour_line->state.total_short_lines = std::max(neighbour_line->state.total_short_lines, neighbour_total_short_lines);
+                        neighbour_line->state.min_skips_taken   = std::min(neighbour_line->state.min_skips_taken, neighbour_min_skips_taken);
 
                         // We will keep updating neighbor initial_touches_long_lines until it is equal to false.
                         if (neighbour_line->state.initial_touches_long_lines) {
@@ -768,12 +762,6 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
             vertical_lines[i].b = Point{x, y_max};
         }
 
-        if (!vertical_lines.empty()) {
-            vertical_lines.push_back(vertical_lines.back());
-            vertical_lines.back().a = Point{coord_t(bb.min.x() + n_vlines * double(scaled_spacing) + scaled_spacing * 0.5), y_min};
-            vertical_lines.back().b = Point{vertical_lines.back().a.x(), y_max};
-        }
-
         std::vector<Lines> polygon_sections(n_vlines);
 
         for (size_t i = 0; i < n_vlines; i++) {
@@ -823,25 +811,25 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
                         if (used_segments.find(&(*candidate)) != used_segments.end()) {
                             continue;
                         }
-                        if (connect_extrusions && (traced_poly.lows.back() - candidates_begin->a).cast<double>().squaredNorm() <
+                        if (connect_extrusions && (traced_poly.lows.back() - candidate->a).cast<double>().squaredNorm() <
                                                       squared_distance_limit_reconnection) {
-                            traced_poly.lows.push_back(candidates_begin->a);
+                            traced_poly.lows.push_back(candidate->a);
                         } else {
                             traced_poly.lows.push_back(traced_poly.lows.back() + Point{scaled_spacing / 2, coord_t(0)});
-                            traced_poly.lows.push_back(candidates_begin->a - Point{scaled_spacing / 2, 0});
-                            traced_poly.lows.push_back(candidates_begin->a);
+                            traced_poly.lows.push_back(candidate->a - Point{scaled_spacing / 2, 0});
+                            traced_poly.lows.push_back(candidate->a);
                         }
 
-                        if (connect_extrusions && (traced_poly.highs.back() - candidates_begin->b).cast<double>().squaredNorm() <
+                        if (connect_extrusions && (traced_poly.highs.back() - candidate->b).cast<double>().squaredNorm() <
                                                       squared_distance_limit_reconnection) {
-                            traced_poly.highs.push_back(candidates_begin->b);
+                            traced_poly.highs.push_back(candidate->b);
                         } else {
                             traced_poly.highs.push_back(traced_poly.highs.back() + Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b - Point{scaled_spacing / 2, 0});
-                            traced_poly.highs.push_back(candidates_begin->b);
+                            traced_poly.highs.push_back(candidate->b - Point{scaled_spacing / 2, 0});
+                            traced_poly.highs.push_back(candidate->b);
                         }
                         segment_added = true;
-                        used_segments.insert(&(*candidates_begin));
+                        used_segments.insert(&(*candidate));
                     }
 
                     if (!segment_added) {
