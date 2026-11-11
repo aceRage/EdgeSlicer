@@ -1032,6 +1032,21 @@ static Vec2d bambu_heating_stop_at_toolchange(const Vec2d &tool_change_start_pos
     return stop_pos;
 }
 
+// Bambu Studio GCode.cpp get_wipe_avoid_pos_x(): the X the H2C / H2D / H2S change_filament template moves to
+// (G1 X[wipe_avoid_pos_x]) after its move to Y320, beside the tower: 3 mm right of it, else 3 mm left of it, if
+// that lies within X 100..250, else X 110. Bambu's constants, for their 350 mm beds.
+static double bambu_wipe_avoid_pos_x(const BoundingBoxf &tower_bbx, double offset)
+{
+    const double left = 100., right = 250., default_value = 110.;
+    const double a = tower_bbx.max.x() + offset;
+    const double b = tower_bbx.min.x() - offset;
+    if (a > left && a < right)
+        return a;
+    if (b > left && b < right)
+        return b;
+    return default_value;
+}
+
 // Orca #15035: the last XY a G-code snippet moves to (absolute G0-G3 words), starting from pos. Stands in
 // for upstream's GCodeProcessor::get_last_position_from_gcode, which Edge does not have.
 static bool last_xy_of_gcode(const std::string &gcode, Vec2d &pos)
@@ -1335,6 +1350,23 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(true));
             }
 
+            // BBS (Bambu Studio GCode.cpp append_tcr): with skip points (Edge: wipe_tower_wall_gap) the template
+            // keeps the head clear of the tower wall on its way back ({if wipe_avoid_perimeter} move to Y320, then
+            // G1 X[wipe_avoid_pos_x]); not for a nozzle change inside one extruder (H2C rack).
+            {
+                bool avoid_perimeter = gcodegen.config().wipe_tower_wall_gap.value;
+                if (avoid_perimeter && group_result_tc && previous_extruder_id >= 0 && previous_extruder_id != new_extruder_id) {
+                    const int old_nozzle = group_result_tc->get_nozzle_id(previous_extruder_id, gcodegen.m_layer_index);
+                    const int new_nozzle = group_result_tc->get_nozzle_id(new_extruder_id, gcodegen.m_layer_index);
+                    if (old_nozzle >= 0 && new_nozzle >= 0 && old_nozzle != new_nozzle &&
+                        group_result_tc->get_extruder_id(previous_extruder_id, gcodegen.m_layer_index) ==
+                            group_result_tc->get_extruder_id(new_extruder_id, gcodegen.m_layer_index))
+                        avoid_perimeter = false;
+                }
+                config.set_key_value("wipe_avoid_perimeter", new ConfigOptionBool(avoid_perimeter));
+                config.set_key_value("wipe_avoid_pos_x", new ConfigOptionFloat(m_heating_tower_bbx.defined ?
+                                                                                   bambu_wipe_avoid_pos_x(m_heating_tower_bbx, 3.) : 110.));
+            }
 
             // At least one chunk, or a flush under half a chunk is dropped from flush_length_1..4.
             int   flush_count = std::clamp((int) std::round(purge_volume / g_purge_volume_one_time), 1, g_max_flush_count);
@@ -13328,8 +13360,10 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // BBS (H2C rack): BambuStudio GCode.cpp:8170/8208/8247 - outgoing filament's value, 0 with none loaded.
     dyn_config.set_key_value("filament_retract_length_nc",
                              new ConfigOptionFloat(previous_extruder_id >= 0 ? outgoing_filament_retract_length_nc(m_config, previous_extruder_id) : 0.));
-    // BBS (Bambu Studio GCode.cpp set_extruder): no tower to wait beside on this path (Bambu Studio sets the same
-    // fixed values here).
+    // BBS (Bambu Studio GCode.cpp set_extruder): no tower to wait beside or to keep clear of on this path (Bambu
+    // Studio sets the same fixed values here).
+    dyn_config.set_key_value("wipe_avoid_perimeter", new ConfigOptionBool(false));
+    dyn_config.set_key_value("wipe_avoid_pos_x", new ConfigOptionFloat(110.));
     dyn_config.set_key_value("wipe_tower_center_pos_x", new ConfigOptionFloat(0.));
     dyn_config.set_key_value("wipe_tower_center_pos_y", new ConfigOptionFloat(0.));
     dyn_config.set_key_value("wipe_tower_center_pos_valid", new ConfigOptionBool(false));
