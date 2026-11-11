@@ -216,3 +216,7 @@ src/slic3r/GUI/PrintHostDevicesDialog.cpp
 src/slic3r/GUI/PrinterWebView.cpp
 src/slic3r/GUI/RemoteSend.cpp
 src/slic3r/Utils/ElegooLink.cpp
+src/slic3r/GUI/PluginPermissionValidation.cpp
+src/slic3r/GUI/PluginsInspectorLogic.cpp
+src/slic3r/GUI/PluginsInspectorDialog.cpp
+src/slic3r/plugin/PluginAuditManager.cpp

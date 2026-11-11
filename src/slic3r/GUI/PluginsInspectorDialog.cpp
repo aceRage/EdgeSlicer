@@ -219,21 +219,22 @@ void PluginsInspectorDialog::handle_config(const nlohmann::json& payload)
 
 void PluginsInspectorDialog::on_message(wxWebViewEvent& evt)
 {
-    nlohmann::json msg;
     try {
-        msg = nlohmann::json::parse(into_u8(evt.GetString()));
+        const nlohmann::json msg = nlohmann::json::parse(into_u8(evt.GetString()));
+        const std::string    command = msg.value("command", std::string());
+        if (command == "inspector_ready" || command == "plugin_state")
+            send_plugin();
+        else if (command == "mutate_plugin_permission")
+            mutate_permission(msg);
+        else if (command == "plugin_config_get" || command == "plugin_config_save" || command == "plugin_config_restore" ||
+                 command == "capability_config_get" || command == "capability_config_save" ||
+                 command == "capability_config_restore")
+            handle_config(msg);
+    } catch (const nlohmann::json::exception& ex) {
+        BOOST_LOG_TRIVIAL(warning) << "Plugins inspector received a malformed script message: " << ex.what();
     } catch (...) {
         BOOST_LOG_TRIVIAL(warning) << "Plugins inspector received a non-JSON script message";
-        return;
     }
-    const std::string command = msg.value("command", std::string());
-    if (command == "inspector_ready" || command == "plugin_state")
-        send_plugin();
-    else if (command == "mutate_plugin_permission")
-        mutate_permission(msg);
-    else if (command == "plugin_config_get" || command == "plugin_config_save" || command == "plugin_config_restore" ||
-             command == "capability_config_get" || command == "capability_config_save" || command == "capability_config_restore")
-        handle_config(msg);
 }
 
 }} // namespace Slic3r::GUI

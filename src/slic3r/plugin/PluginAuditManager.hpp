@@ -139,6 +139,10 @@ public:
     // UltraNet's native network plug-ins live in {data_dir}/plugins. Python plugin grants and
     // audited filesystem events must never reach that folder, even under full access or a
     // data_dir() allowed root. A trailing "/*" tree marker is stripped before the comparison.
+    // Matching is case-insensitive on every platform (APFS/NTFS aliases and a Linux folder
+    // named Plugins are both denied), NFC-normalizes data_dir spellings, uses equivalent()
+    // from the nearest existing ancestor so a not-yet-existing file is covered, and resolves
+    // dangling symlinks lexically. Fail closed when Unicode normalize or symlink read fails.
     bool is_ultranet_plugins_path(const boost::filesystem::path& candidate) const;
 
     // --- policy checks ---

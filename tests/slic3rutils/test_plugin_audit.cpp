@@ -2485,6 +2485,140 @@ TEST_CASE("Plugin audit denies UltraNet {data_dir}/plugins even inside data_dir"
         CHECK_FALSE(mgr.is_ultranet_plugins_path(orca));
         CHECK(mgr.check_open(orca.string(), "w").allowed);
     }
+
+    SECTION("case variants of plugins are denied on every platform")
+    {
+        for (const char* folder : {"PLUGINS", "Plugins", "pLuGiNs"}) {
+            const fs::path target = fs::path(data_dir()) / folder / "libbambu_networking.dylib";
+            INFO(folder);
+            CHECK(mgr.is_ultranet_plugins_path(target));
+            AuditDecision write = mgr.check_open(target.string(), "wb");
+            CHECK_FALSE(write.allowed);
+            CHECK(write.reason == "denied ultranet path");
+            AuditDecision read = mgr.check_open(target.string(), "r");
+            CHECK_FALSE(read.allowed);
+            CHECK(read.reason == "denied ultranet path");
+        }
+    }
+
+    SECTION("a not-yet-existing file under a case variant is denied")
+    {
+        const fs::path missing = fs::path(data_dir()) / "Plugins" / "not-yet" / "lib.so";
+        CHECK_FALSE(fs::exists(missing));
+        CHECK(mgr.is_ultranet_plugins_path(missing));
+        AuditDecision write = mgr.check_open(missing.string(), "wb");
+        CHECK_FALSE(write.allowed);
+        CHECK(write.reason == "denied ultranet path");
+    }
+
+    SECTION("a dangling symlink into UltraNet is denied")
+    {
+        const fs::path link = fs::path(data_dir()) / "dangling_to_plugins.dylib";
+        boost::system::error_code ec;
+        fs::create_symlink(ultranet / "missing.dylib", link, ec);
+        if (ec)
+            return;
+        CHECK(mgr.is_ultranet_plugins_path(link));
+        CHECK_FALSE(mgr.check_open(link.string(), "wb").allowed);
+    }
+}
+
+TEST_CASE("UltraNet deny matches Unicode-normalized data_dir spellings", "[audit]")
+{
+    ScopedDataDir     data("plugin-audit-ultranet-nfc");
+    const fs::path    nfc_home = data.dir / "caf\xC3\xA9";
+    const fs::path    nfd_home = data.dir / "cafe\xCC\x81";
+    fs::create_directories(nfc_home / "plugins");
+    set_data_dir(nfc_home.string());
+
+    PluginAuditManager& mgr = PluginAuditManager::instance();
+    CHECK(mgr.is_ultranet_plugins_path(nfd_home / "plugins" / "lib.so"));
+    CHECK(mgr.is_ultranet_plugins_path(nfc_home / "Plugins" / "lib.so"));
+    CHECK(mgr.is_ultranet_plugins_path(nfd_home / "PLUGINS" / "*"));
+}
+
+TEST_CASE("A Plugins tree grant is refused by PluginManager and request_permissions", "[audit]")
+{
+    AuditHarness harness;
+    if (!harness.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    harness.add_plugin(PLUGIN);
+    harness.approve = [](const Prompt&) { return true; };
+
+    const std::string tree = (fs::path(data_dir()) / "Plugins" / "*").string();
+
+    PluginPermissionMutation mutation;
+    mutation.add.push_back({PluginPermissionCategory::FsReadWrite, tree});
+    CHECK_FALSE(PluginManager::instance().mutate_plugin_permissions(PLUGIN, mutation));
+    CHECK(harness.saved_permissions(PLUGIN).fs_readwrite.empty());
+
+    PluginPermissions requested;
+    requested.fs_readwrite = {tree};
+    CHECK(PluginAuditManager::instance().request_permissions(PLUGIN, requested));
+    CHECK(harness.saved_permissions(PLUGIN).fs_readwrite.empty());
+}
+
+TEST_CASE("Case-variant UltraNet open and write stay denied from Python", "[audit][Python]")
+{
+    AuditHarness harness;
+    if (!harness.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    seed_denied_names();
+    seed_denied_keywords();
+    harness.add_plugin(PLUGIN);
+    py::gil_scoped_acquire gil;
+    PythonSide             python(harness);
+
+    python.globals["ULTRANET_PLUGINS"] = (fs::path(data_dir()) / "Plugins" / "libbambu_networking.dylib").string();
+    python.globals["ULTRANET_PLUGINS_UPPER"] = (fs::path(data_dir()) / "PLUGINS" / "libbambu_networking.dylib").string();
+    python.globals["ULTRANET_PLUGINS_MIXED"] = (fs::path(data_dir()) / "pLuGiNs" / "libbambu_networking.dylib").string();
+
+    python.run_as(PLUGIN, "write_outcome = attempt(lambda: open(ULTRANET_PLUGINS, 'wb'))");
+    CHECK(python.str("write_outcome") == "denied");
+    python.run_as(PLUGIN, "read_outcome = attempt(lambda: open(ULTRANET_PLUGINS, 'r'))");
+    CHECK(python.str("read_outcome") == "denied");
+    python.run_as(PLUGIN, "upper_outcome = attempt(lambda: open(ULTRANET_PLUGINS_UPPER, 'wb'))");
+    CHECK(python.str("upper_outcome") == "denied");
+    python.run_as(PLUGIN, "mixed_outcome = attempt(lambda: open(ULTRANET_PLUGINS_MIXED, 'wb'))");
+    CHECK(python.str("mixed_outcome") == "denied");
+    CHECK(describe(harness.prompts).empty());
+}
+
+TEST_CASE("request_permissions full_access is keyword-only", "[audit][Python]")
+{
+    AuditHarness harness;
+    if (!harness.initialized)
+        SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    py::gil_scoped_acquire gil;
+
+    PythonPluginBridge::instance().begin_plugin_capture("kwonly-full");
+    py::object orca = py::module_::import("orca");
+    bool       threw = false;
+    try {
+        // 7th positional used to be full_access occupying network's slot.
+        orca.attr("request_permissions")(py::list(), py::list(), py::list(), py::list(), py::list(), false, true);
+    } catch (py::error_already_set& err) {
+        threw = true;
+        err.discard_as_unraisable("request_permissions");
+    }
+    CHECK(threw);
+
+    py::exec("import orca\norca.request_permissions(full_access=True)\n");
+    PythonPluginBridge::instance().cancel_plugin_capture("kwonly-full");
+}
+
+TEST_CASE("interpreter shutdown skips RestoreThread when this thread holds the GIL", "[plugin]")
+{
+    if (!PythonInterpreter::instance().is_initialized()) {
+        if (!PythonInterpreter::instance().initialize())
+            SKIP("Bundled Python interpreter unavailable: " + PythonInterpreter::instance().last_error());
+    }
+    CHECK(PythonInterpreter::instance().shutdown_would_restore_thread_state());
+    {
+        py::gil_scoped_acquire gil;
+        CHECK_FALSE(PythonInterpreter::instance().shutdown_would_restore_thread_state());
+    }
+    CHECK(PythonInterpreter::instance().shutdown_would_restore_thread_state());
 }
 
 TEST_CASE("A full access request during load is prompted and No does not grant it", "[audit]")

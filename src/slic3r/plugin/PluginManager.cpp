@@ -1297,6 +1297,8 @@ bool PluginManager::mutate_plugin_permissions(const std::string& plugin_key, con
     for (const PluginPermissionMutation::Entry& entry : mutation.add) {
         if (entry.value.empty())
             continue;
+        // Case-insensitive, NFC, equivalent()-ancestor, dangling-symlink deny: Plugins/* is
+        // refused the same way as plugins/*.
         if ((entry.category == PluginPermissionCategory::FsRead ||
              entry.category == PluginPermissionCategory::FsReadWrite) &&
             PluginAuditManager::instance().is_ultranet_plugins_path(boost::filesystem::path(entry.value))) {

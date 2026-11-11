@@ -567,8 +567,8 @@ void bind_python_api(pybind11::module_& m)
            const std::vector<std::string>& network_socket,
            const std::vector<std::string>& process,
            bool                            threading,
-           bool                            full_access,
-           const std::vector<std::string>& network) {
+           const std::vector<std::string>& network,
+           bool                            full_access) {
             if (g_active_plugin_key.empty())
                 throw py::value_error("request_permissions() called outside plugin discovery context");
 
@@ -628,15 +628,17 @@ void bind_python_api(pybind11::module_& m)
         py::arg("network_socket") = std::vector<std::string>{},
         py::arg("process") = std::vector<std::string>{},
         py::arg("threading") = false,
-        py::arg("full_access") = false,
         py::arg("network") = std::vector<std::string>{},
+        py::kw_only(),
+        py::arg("full_access") = false,
         R"pbdoc(Request permissions while EdgeSlicer loads your module.
 
 Each bucket takes the target strings the plugin expects the corresponding audit event to
 report: filesystem paths for fs_read and fs_readwrite, URLs for network_http, socket addresses
 for network_socket, and commands for process. threading=True requests permission to start
-threads. full_access=True asks to turn auditing off for this plugin; the confirmation defaults
-to No. Targets already granted to the plugin are not asked for again.
+threads. full_access=True is keyword-only (it cannot occupy network's positional slot) and
+asks to turn auditing off for this plugin; the confirmation defaults to No. Targets already
+granted to the plugin are not asked for again.
 
 A filesystem target may end in "/*" to grant a whole directory tree, for example
 "/path/to/folder/*". That covers the folder itself and every path beneath it, at any depth.

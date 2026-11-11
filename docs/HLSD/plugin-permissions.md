@@ -185,7 +185,13 @@ The following are denied before any allowed root or full-access check:
 
 - `{data_dir}/plugins`, EdgeSlicer's UltraNet / native network plug-in folder. A Python
   plugin grant cannot name that folder, and audited filesystem events to it are denied
-  even under full access or the `data_dir()` allowed root. Python packages live under
+  even under full access or the `data_dir()` allowed root. Matching is case-insensitive
+  on every platform (`Plugins`, `PLUGINS`, `pLuGiNs`), so a Mac APFS alias cannot skip
+  the deny; Unicode-normalization variants of `data_dir` (NFC and NFD) are compared
+  equal, including when Boost.Locale cannot compose combining marks; a
+  not-yet-existing file is judged from its nearest existing ancestor via
+  `equivalent()`; dangling symlinks are resolved lexically. Fail closed when a
+  symlink read cannot decide. Python packages live under
   `{data_dir}/orca_plugins`.
 
 ## Persistence and editing
@@ -247,8 +253,13 @@ entries cover every port, path and query on the host.
 
 The dialog warns before enabling full access. Grants stored
 while full access is on are inert and apply again when full access is off. Turning full access
-on does not delete the stored lists. A permission change affects subsequent audit decisions,
-not operations already authorized.
+on does not delete the stored lists.
+
+Revoking a grant, disabling full access, or any other sidecar edit takes effect on the
+**next** audited call. Each new top-level event re-reads `.install_state.json`. An
+operation already in flight is not re-checked: a recorded root frame still covers its
+nested standard-library events, and a Python call that already passed the hook keeps
+running. There is no attempt to unwind an open file, socket, or subprocess.
 
 ## Full access
 

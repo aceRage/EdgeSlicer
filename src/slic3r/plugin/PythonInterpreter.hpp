@@ -68,7 +68,15 @@ public:
     // Finalize the Python interpreter. A plugin call that is still running, or a plugin thread that
     // does not end, is waited for only briefly; the interpreter is then left unfinalized for the
     // process exit to end, rather than keeping a closing app alive.
+    //
+    // If this thread already holds the GIL (Catch's fatal handler, a nested teardown), RestoreThread
+    // is skipped so it cannot self-deadlock. Tests use shutdown_would_restore_thread_state() instead
+    // of calling shutdown(), which can run only once per process.
     void shutdown();
+
+    // True when shutdown() would call PyEval_RestoreThread. False when this thread already holds
+    // the GIL, or when there is no saved main-thread state.
+    bool shutdown_would_restore_thread_state() const;
 
     // Runs the threading atexit hooks, which end idle worker threads, then waits for Python's
     // non-daemon threads to end, up to timeout in all, and returns how many are still running.

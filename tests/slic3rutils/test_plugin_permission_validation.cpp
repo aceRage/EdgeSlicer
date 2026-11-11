@@ -380,6 +380,22 @@ TEST_CASE("permission mutation refuses a grant covering UltraNet plugins", "[Plu
     CHECK_FALSE(parsed.error.empty());
 }
 
+TEST_CASE("permission mutation refuses a Plugins tree grant", "[PluginPermissions]")
+{
+    ScopedDataDir data("perm-ultranet-case");
+    PluginPermissions stored;
+    const nlohmann::json payload = {
+        {"plugin_key", "hello"},
+        {"request_id", "perm-3b"},
+        {"operation", "add"},
+        {"category", "fs_readwrite"},
+        {"value", (data.dir / "Plugins" / "*").string()},
+    };
+    const auto parsed = Slic3r::GUI::parse_permission_mutation(payload, stored);
+    CHECK_FALSE(parsed.ok);
+    CHECK_FALSE(parsed.error.empty());
+}
+
 TEST_CASE("home inspector commands include Permissions and Configure", "[PluginPermissions]")
 {
     CHECK(Slic3r::GUI::is_inspector_home_command("plugin_permissions"));

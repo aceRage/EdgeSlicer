@@ -747,6 +747,13 @@ bool PythonInterpreter::initialize()
 
 PythonInterpreter::~PythonInterpreter() { shutdown(); }
 
+bool PythonInterpreter::shutdown_would_restore_thread_state() const
+{
+    if (!m_main_thread_state)
+        return false;
+    return !(Py_IsInitialized() && PyGILState_Check());
+}
+
 void PythonInterpreter::shutdown()
 {
     // Checked before waiting for the lock too, so a second call after abandon() returns at once.
@@ -770,11 +777,19 @@ void PythonInterpreter::shutdown()
 
     BOOST_LOG_TRIVIAL(info) << "Python interpreter shutdown enter";
 
-    // Reacquire the GIL using the saved thread state before finalizing.
+    // Reacquire the GIL using the saved thread state before finalizing. Catch's fatal handler
+    // (and any other caller that already holds the GIL) must not RestoreThread: that deadlocks
+    // against the thread state this thread already owns.
     if (m_main_thread_state) {
-        BOOST_LOG_TRIVIAL(debug) << "Restoring Python main thread state before shutdown";
-        PyEval_RestoreThread(m_main_thread_state);
-        m_main_thread_state = nullptr;
+        if (Py_IsInitialized() && PyGILState_Check()) {
+            BOOST_LOG_TRIVIAL(warning)
+                << "Python interpreter shutdown skipped RestoreThread: this thread already holds the GIL";
+            m_main_thread_state = nullptr;
+        } else {
+            BOOST_LOG_TRIVIAL(debug) << "Restoring Python main thread state before shutdown";
+            PyEval_RestoreThread(m_main_thread_state);
+            m_main_thread_state = nullptr;
+        }
     }
 
     // Before the stdio tee is torn down, so tracebacks from threads still ending reach the log.
