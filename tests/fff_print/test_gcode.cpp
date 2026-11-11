@@ -1,7 +1,12 @@
 #include <catch2/catch.hpp>
 
 #include <cctype>
+#include <cfloat>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <limits>
+#include <map>
 #include <regex>
 #include <vector>
 #include <algorithm>
@@ -1119,4 +1124,212 @@ TEST_CASE("Retract after outer wall only invalidates G-code export", "[GCode][Re
     CHECK(print.objects().front()->is_step_done(posPerimeters));
     CHECK(print.objects().front()->is_step_done(posInfill));
     CHECK_FALSE(print.is_step_done(psGCodeExport));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Z contouring (zaa_enabled) in the G-code: errors the Rust port turned up.
+
+namespace {
+
+// A 30 x 20 mm wedge whose top rises 4 degrees along +X, from 2 mm at x = 0 to 4.1 mm at x = 30.
+TriangleMesh contour_wedge()
+{
+    const double len = 30., wid = 20., z0 = 2., z1 = z0 + len * std::tan(4. * M_PI / 180.);
+    indexed_triangle_set its;
+    auto V = [&its](double x, double y, double z) {
+        its.vertices.emplace_back(stl_vertex(float(x), float(y), float(z)));
+        return int(its.vertices.size()) - 1;
+    };
+    const int b00 = V(0, 0, 0), b10 = V(len, 0, 0), b11 = V(len, wid, 0), b01 = V(0, wid, 0);
+    const int t00 = V(0, 0, z0), t10 = V(len, 0, z1), t11 = V(len, wid, z1), t01 = V(0, wid, z0);
+    auto F = [&its](int a, int b, int c) { its.indices.emplace_back(stl_triangle_vertex_indices(a, b, c)); };
+    F(b00, b11, b10); F(b00, b01, b11); // bottom
+    F(t00, t10, t11); F(t00, t11, t01); // sloped top
+    F(b00, b10, t10); F(b00, t10, t00); // y = 0
+    F(b01, t01, t11); F(b01, t11, b11); // y = wid
+    F(b00, t00, t01); F(b00, t01, b01); // x = 0
+    F(b10, b11, t11); F(b10, t11, t10); // x = len
+    return TriangleMesh(its);
+}
+
+std::string slice_contoured_wedge(std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> extra)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"zaa_enabled", "1"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"wall_loops", "2"},
+        {"enable_arc_fitting", "0"},
+        {"use_relative_e_distances", "1"},
+        {"skirt_loops", "0"},
+        {"brim_type", "no_brim"},
+        {"slow_down_for_layer_cooling", "0"},
+    });
+    config.set_deserialize_strict(extra);
+    std::string gcode = Slic3r::Test::slice({contour_wedge()}, config);
+    // With EDGE_TEST_DUMP_GCODE set to a directory, the G-code is written there for inspection.
+    if (const char *dir = std::getenv("EDGE_TEST_DUMP_GCODE"); dir != nullptr && *dir != 0) {
+        std::string name = "contour_wedge";
+        for (const Slic3r::ConfigBase::SetDeserializeItem &item : extra)
+            name += "_" + item.opt_key + "-" + item.opt_value;
+        std::ofstream(std::string(dir) + "/" + name + ".gcode", std::ios::binary) << gcode;
+    }
+    return gcode;
+}
+
+// One extruding or wiping move of the G-code (a wipe may move no filament), with the feature it belongs to and the layer's nominal Z.
+struct WedgeMove
+{
+    std::string type;
+    double      layer_z, x0, y0, z0, x1, y1, z1, e, f;
+    bool        wipe;
+};
+
+std::vector<WedgeMove> wedge_moves(const std::string &gcode)
+{
+    std::vector<WedgeMove> out;
+    std::string            type;
+    double                 layer_z = 0.;
+    bool                   wipe    = false;
+    GCodeReader            parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view raw = line.raw();
+        if (raw.rfind(";TYPE:", 0) == 0)
+            type = std::string(raw.substr(6));
+        else if (raw.rfind(";Z:", 0) == 0)
+            layer_z = std::atof(std::string(raw.substr(3)).c_str());
+        else if (raw.rfind(";WIPE_START", 0) == 0)
+            wipe = true;
+        else if (raw.rfind(";WIPE_END", 0) == 0)
+            wipe = false;
+        if (line.cmd_is("G1") && (line.has_x() || line.has_y()) && (line.has_e() || wipe))
+            out.push_back({type, layer_z, self.x(), self.y(), self.z(), line.new_X(self), line.new_Y(self), line.new_Z(self),
+                           line.has_e() ? line.e() : 0., line.has_f() ? line.f() : self.f(), wipe});
+    });
+    return out;
+}
+
+bool is_wall(const std::string &type) { return type == "Outer wall" || type == "Inner wall" || type == "Overhang wall"; }
+
+// A move laid off the layer's nominal Z, as only a contoured one is here.
+bool contoured(const WedgeMove &m) { return std::abs(m.z1 - m.layer_z) > 0.001 || std::abs(m.z0 - m.layer_z) > 0.001; }
+
+} // namespace
+
+// A scarf seam on a contoured wall was laid twice. _extrude lays a contoured path by its contour before it looks for
+// a slope, and the scarf's sloped paths kept the contour of the wall they were cut from, so both the scarf's way up
+// and its way down were laid flat along the contour at the wall's full flow. A contoured wall now gets no scarf.
+TEST_CASE("Z contouring: a contoured wall gets no scarf seam", "[GCode][ContourZ][Regression]")
+{
+    const std::vector<WedgeMove> scarf = wedge_moves(slice_contoured_wedge({{"seam_slope_type", "all"}}));
+    const std::vector<WedgeMove> plain = wedge_moves(slice_contoured_wedge({{"seam_slope_type", "none"}}));
+
+    // The layers with a contoured wall, found without the scarf (a scarf's way up is laid below the layer's Z too).
+    std::set<double> layers;
+    for (const WedgeMove &m : plain)
+        if (is_wall(m.type) && !m.wipe && m.e > 0. && contoured(m))
+            layers.insert(m.layer_z);
+    // The walls of each of those layers: filament, and XY length.
+    auto walls_of_contoured_layers = [&layers](const std::vector<WedgeMove> &moves) {
+        std::map<double, std::pair<double, double>> out;
+        for (const WedgeMove &m : moves)
+            if (layers.count(m.layer_z) && is_wall(m.type) && !m.wipe && m.e > 0.) {
+                out[m.layer_z].first += m.e;
+                out[m.layer_z].second += std::hypot(m.x1 - m.x0, m.y1 - m.y0);
+            }
+        return out;
+    };
+    const auto with_scarf = walls_of_contoured_layers(scarf);
+    const auto without    = walls_of_contoured_layers(plain);
+    REQUIRE(with_scarf.size() >= 5);
+    REQUIRE(with_scarf.size() == without.size());
+    double extra_length = 0.;
+    for (const auto &[z, scarfed] : with_scarf) {
+        INFO("layer at " << z << ": walls " << scarfed.second << " mm with the scarf asked, " << without.at(z).second << " without");
+        extra_length += scarfed.second - without.at(z).second;
+        CHECK(scarfed.first == Approx(without.at(z).first).epsilon(1e-4));
+        CHECK(scarfed.second == Approx(without.at(z).second).epsilon(1e-4));
+    }
+    INFO(with_scarf.size() << " layers with contoured walls, " << extra_length << " mm more wall with the scarf asked");
+    CHECK(std::abs(extra_length) < 0.1);
+
+    // The flat walls below the slope keep their scarf: its way up is laid below the layer's Z.
+    std::set<double> scarfed_flat_layers;
+    for (const WedgeMove &m : scarf)
+        if (is_wall(m.type) && !m.wipe && m.e > 0. && !layers.count(m.layer_z) && m.layer_z > 0.3 && m.z1 < m.layer_z - 0.001)
+            scarfed_flat_layers.insert(m.layer_z);
+    INFO(scarfed_flat_layers.size() << " layers of flat walls with a scarf");
+    CHECK(scarfed_flat_layers.size() >= 5);
+}
+
+// Ironing's speed was scaled for the local height as if it were a layer: the ratio of the contoured height to
+// path.height, which for ironing is the ironing line's own few thousandths of a mm. Ironing's flow is not scaled for
+// the height, so its speed is not either: it irons at its own speed.
+TEST_CASE("Z contouring: ironing keeps its speed with constant flow speed scaling", "[GCode][ContourZ][Regression]")
+{
+    const std::vector<WedgeMove> moves =
+        wedge_moves(slice_contoured_wedge({{"zaa_speed_scaling", "1"}, {"ironing_type", "top"}, {"ironing_speed", "30"}}));
+    size_t ironing = 0, contoured_ironing = 0, off_speed = 0;
+    double slowest = DBL_MAX;
+    for (const WedgeMove &m : moves)
+        if (m.type == "Ironing" && !m.wipe && m.e > 0.) {
+            ++ironing;
+            if (contoured(m))
+                ++contoured_ironing;
+            if (std::abs(m.f - 30. * 60.) > 0.5)
+                ++off_speed;
+            slowest = std::min(slowest, m.f / 60.);
+        }
+    INFO(ironing << " ironing moves, " << contoured_ironing << " contoured, " << off_speed << " not at 30 mm/s, slowest "
+                 << slowest << " mm/s");
+    REQUIRE(contoured_ironing > 20);
+    CHECK(off_speed == 0);
+}
+
+// A wipe went back along a contoured line in X and Y alone, at the height the line ended at: where the line had been
+// laid higher, the nozzle ploughed back through it. It now keeps to the line's heights.
+TEST_CASE("Z contouring: a wipe over a contoured line keeps to the line's heights", "[GCode][ContourZ][Regression]")
+{
+    const std::vector<WedgeMove> moves = wedge_moves(slice_contoured_wedge({{"wipe", "1"}, {"wipe_distance", "2"}}));
+
+    // The height of the line laid last before `wipe_start` under the point (x, y), or NaN if none passes there.
+    auto line_height = [&moves](size_t wipe_start, double x, double y) {
+        double best = std::numeric_limits<double>::quiet_NaN(), best_d = 0.02;
+        for (size_t i = wipe_start; i > 0; --i) {
+            const WedgeMove &m = moves[i - 1];
+            if (m.wipe || m.e <= 0. || m.layer_z != moves[wipe_start].layer_z)
+                break; // only the path the wipe follows, back to the last travel
+            const Vec2d  a(m.x0, m.y0), b(m.x1, m.y1), p(x, y);
+            const double len2 = (b - a).squaredNorm();
+            const double t    = len2 > 0. ? std::clamp((p - a).dot(b - a) / len2, 0., 1.) : 0.;
+            const double d    = (a + t * (b - a) - p).norm();
+            if (d < best_d)
+                best_d = d, best = m.z0 + t * (m.z1 - m.z0);
+        }
+        return best;
+    };
+
+    size_t wipes_over_contoured = 0, digging = 0;
+    double deepest = 0.;
+    for (size_t i = 0; i < moves.size(); ++i) {
+        if (!moves[i].wipe || (i > 0 && moves[i - 1].wipe))
+            continue;
+        // The path before this wipe: was it contoured?
+        if (i == 0 || !contoured(moves[i - 1]))
+            continue;
+        ++wipes_over_contoured;
+        double depth = 0.;
+        for (size_t j = i; j < moves.size() && moves[j].wipe; ++j) {
+            const double z = line_height(i, moves[j].x1, moves[j].y1);
+            if (!std::isnan(z))
+                depth = std::max(depth, z - moves[j].z1);
+        }
+        if (depth > 0.001)
+            ++digging;
+        deepest = std::max(deepest, depth);
+    }
+    INFO(wipes_over_contoured << " wipes after a contoured line, " << digging << " of them below it, up to " << deepest << " mm");
+    REQUIRE(wipes_over_contoured >= 5);
+    CHECK(digging == 0);
 }
