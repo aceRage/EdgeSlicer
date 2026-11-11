@@ -164,7 +164,10 @@ std::vector<std::reference_wrapper<const PrintRegion>> PrintObject::all_regions(
 Polygons create_polyholes(const Point center, const coord_t radius, const coord_t nozzle_diameter, bool multiple, int max_edges)
 {
     // n = max(round(2 * d), 3); // for 0.4mm nozzle
-    size_t nb_edges = (int)std::min(max_edges, std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter))));
+    // Three edges at the least whatever max_edges says: the setting's minimum of 3 is held by the settings page alone,
+    // and a project or a config file can carry less (2 gives a polygon of two points, 0 none, a negative number
+    // is taken for a very large one).
+    size_t nb_edges = (size_t)std::max(3, std::min(max_edges, std::max(3, (int)std::round(4.0 * unscaled(radius) * 0.4 / unscaled(nozzle_diameter)))));
     // cylinder(h = h, r = d / cos (180 / n), $fn = n);
     //create x polyholes by rotation if multiple
     int nb_polyhole = 1;
@@ -181,12 +184,35 @@ Polygons create_polyholes(const Point center, const coord_t radius, const coord_
         const float new_radius = radius / float(std::cos(PI / nb_edges));
         for (size_t i_edge = 0; i_edge < nb_edges; ++i_edge) {
             float angle = rotation * i_poly + (float(PI) * 2 * (float)i_edge) / nb_edges;
-            pts.points.emplace_back(center.x() + new_radius * cos(angle), center.y() + new_radius * sin(angle));
+            // The corner is worked out in float as it was; the center is added to it as a whole number. Added in
+            // float (which is what coord_t + float is), the center lost its low bits: a float holds every eighth
+            // unit at 100 mm from the object's origin.
+            pts.points.emplace_back(center.x() + coord_t(std::round(new_radius * std::cos(angle))),
+                                    center.y() + coord_t(std::round(new_radius * std::sin(angle))));
         }
         pts.make_clockwise();
     }
     //alternate
     return list;
+}
+
+// Whether a hole, given clockwise as a layer holds it, is convex: gone round clockwise it never turns left.
+// A point that rounding has left a unit or two to the wrong side of the line through its neighbours is no dent
+// (the compensations put points along the flats of a large hole): a left turn counts once the point stands
+// SCALED_EPSILON off that line.
+bool polyhole_is_convex(const Polygon &hole)
+{
+    const Points &pts = hole.points;
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const Point &before = pts[(i + pts.size() - 1) % pts.size()];
+        const Point &at     = pts[i];
+        const Point &after  = pts[(i + 1) % pts.size()];
+        // The cross product is the length of the chord from `before` to `after` times how far `at` stands off it.
+        const double cross = cross2(Vec2d((at - before).cast<double>()), Vec2d((after - at).cast<double>()));
+        if (cross > 0. && cross > SCALED_EPSILON * (after - before).cast<double>().norm())
+            return false;
+    }
+    return true;
 }
 
 // Detect and convert holes to polyholes, implementation is ported from SuperSlicer
@@ -209,7 +235,9 @@ void PrintObject::_transform_hole_to_polyholes()
                     for (Surface& surf : layer->m_regions[region_idx]->slices.surfaces) {
                         for (Polygon& hole : surf.expolygon.holes) {
                             //test if convex (as it's clockwise bc it's a hole, we have to do the opposite)
-                            if (hole.convex_points(PI).empty() && hole.points.size() > 8) {
+                            // convex_points(PI) was asked for here and is always empty: it lists the points that turn
+                            // left by more than the angle given, and no turn is by more than a half circle.
+                            if (hole.points.size() > 8 && polyhole_is_convex(hole)) {
                                 // Computing circle center
                                 Point center = hole.centroid();
                                 double diameter_min = std::numeric_limits<float>::max(), diameter_max = 0;
@@ -248,7 +276,9 @@ void PrintObject::_transform_hole_to_polyholes()
         }
     });
     //sort holes per center-diameter
-    std::map<std::tuple<Point, float, int, coord_t, bool, int>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
+    // A multimap: a hole that stops being round for some layers and is round again further up makes two runs
+    // with one and the same id, and both are to be converted. A map kept the first and dropped the rest.
+    std::multimap<std::tuple<Point, float, int, coord_t, bool, int>, std::vector<std::pair<Polygon*, int>>> id2layerz2hole;
 
     //search & find hole that span at least X layers
     const size_t min_nb_layers = 2;
