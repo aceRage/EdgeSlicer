@@ -5,6 +5,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/ProjectSwapGuard.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -16,7 +17,9 @@
 #include "libslic3r/Zipper.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/nowide/filesystem.hpp>
@@ -2953,4 +2956,167 @@ TEST_CASE("A session snapshot of a project comes back as it was", "[3mf][Project
         close_zip_reader(&archive);
         CHECK(has_object_model);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Errors in the project exporter the Rust port turned up.
+
+namespace {
+
+// The entry names of a zip file.
+std::vector<std::string> zip_entry_names(const std::string &path)
+{
+    std::vector<std::string> names;
+    mz_zip_archive           zip;
+    mz_zip_zero_struct(&zip);
+    REQUIRE(open_zip_reader(&zip, path));
+    const mz_uint n = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < n; ++i) {
+        mz_zip_archive_file_stat st;
+        REQUIRE(mz_zip_reader_file_stat(&zip, i, &st));
+        names.emplace_back(st.m_filename);
+    }
+    close_zip_reader(&zip);
+    return names;
+}
+
+} // namespace
+
+// An object's name went into the name of its file in the package as it was, so a '/' in it made a folder there, and
+// "../" climbed out of 3D/Objects. The name is now made fit for a file name; the object keeps its own.
+TEST_CASE("An object's name with a slash makes no folder in the project 3MF", "[3mf][Regression]")
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "object_name_with_slash.3mf").string();
+
+    const std::string name = "../parts/bracket\\left";
+    Model             src_model;
+    ModelObject      *src_object = src_model.add_object();
+    src_object->name             = name;
+    src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    src_object->add_instance();
+    src_object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    StoreParams store_params;
+    store_params.path     = test_file;
+    store_params.model    = &src_model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary | SaveStrategy::SplitModel;
+    INFO(store_params.error);
+    REQUIRE(store_bbs_3mf(store_params));
+
+    size_t object_files = 0;
+    for (const std::string &entry : zip_entry_names(test_file)) {
+        INFO(entry);
+        // No step up or back in the path, and no other separator.
+        std::vector<std::string> parts;
+        boost::split(parts, entry, boost::is_any_of("/"));
+        for (const std::string &part : parts)
+            CHECK((part != ".." && part != "."));
+        CHECK(entry.find('\\') == std::string::npos);
+        if (boost::starts_with(entry, "3D/Objects/")) {
+            ++object_files;
+            // Straight in 3D/Objects, no folder of its own.
+            CHECK(entry.find('/', std::string("3D/Objects/").size()) == std::string::npos);
+        }
+    }
+    CHECK(object_files == 1);
+
+    Model                     dst_model;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::EnableSilent};
+    PlateDataPtrs             plate_data;
+    std::vector<Preset *>     project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    const bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &plate_data, &project_presets, &is_bbl_3mf,
+                                     &file_version, nullptr,
+                                     LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances |
+                                         LoadStrategy::Silence);
+    release_PlateData_list(plate_data);
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE(loaded);
+    REQUIRE(dst_model.objects.size() == 1);
+    CHECK(dst_model.objects.front()->name == name);
+    CHECK(dst_model.objects.front()->volumes.size() == 1);
+    CHECK(dst_model.objects.front()->volumes.front()->mesh().its.indices.size() == 12);
+}
+
+// The small plate thumbnail is the picture shrunk to 128 x 128 by averaging blocks of it. Its pixel index swapped
+// the block's width and height, which comes out right only for a square picture: of a 512 x 256 picture, the top
+// half of the small one was left empty and the rows of the other half wrapped. (Its write was also checked with the
+// big picture's freed pointer where its own was meant.)
+TEST_CASE("The small plate thumbnail of a picture wider than tall is the picture shrunk", "[3mf][thumbnail][Regression]")
+{
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "small_thumbnail_wide.3mf").string();
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube";
+    object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+    object->add_instance();
+    object->ensure_on_bed();
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+
+    // 512 x 256: red in the left half, green in the bottom half of the rows, opaque.
+    ThumbnailData picture;
+    picture.set(512, 256);
+    for (unsigned int y = 0; y < 256; ++y)
+        for (unsigned int x = 0; x < 512; ++x) {
+            unsigned char *px = &picture.pixels[4 * (y * 512 + x)];
+            px[0] = x < 256 ? 255 : 0;
+            px[1] = y < 128 ? 255 : 0;
+            px[2] = 0;
+            px[3] = 255;
+        }
+    PlateData plate;
+    plate.plate_index = 0;
+    StoreParams sp;
+    sp.path            = test_file;
+    sp.model           = &model;
+    sp.config          = &store_config;
+    sp.plate_data_list = {&plate};
+    sp.thumbnail_data  = {&picture};
+    sp.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+
+    const std::string big   = extract_zip_entry(test_file, "Metadata/plate_1.png");
+    const std::string small = extract_zip_entry(test_file, "Metadata/plate_1_small.png");
+    boost::system::error_code ec;
+    boost::filesystem::remove(test_file, ec);
+    REQUIRE_FALSE(big.empty());
+    REQUIRE_FALSE(small.empty());
+    png::ImageColorscale big_img, small_img;
+    REQUIRE(png::decode_colored_png(png::ReadBuf{big.data(), big.size()}, big_img));
+    REQUIRE(png::decode_colored_png(png::ReadBuf{small.data(), small.size()}, small_img));
+    REQUIRE(big_img.cols == 512);
+    REQUIRE(big_img.rows == 256);
+    REQUIRE(small_img.cols == 128);
+    REQUIRE(small_img.rows == 128);
+    const size_t bb = size_t(big_img.bytes_per_pixel), sb = size_t(small_img.bytes_per_pixel);
+    REQUIRE(bb >= 3);
+    REQUIRE(sb >= 3);
+
+    // Each small pixel is the mean of its 4 x 2 block of the big picture as it is in the file (the rows are written
+    // bottom up, both alike).
+    size_t wrong = 0;
+    for (size_t r = 0; r < 128; ++r)
+        for (size_t c = 0; c < 128; ++c)
+            for (size_t ch = 0; ch < 3; ++ch) {
+                int sum = 0;
+                for (size_t m = 0; m < 2; ++m)
+                    for (size_t n = 0; n < 4; ++n)
+                        sum += big_img.buf[((2 * r + m) * 512 + 4 * c + n) * bb + ch];
+                if (std::abs(int(small_img.buf[(r * 128 + c) * sb + ch]) - sum / 8) > 1)
+                    ++wrong;
+            }
+    INFO(wrong << " of " << 128 * 128 * 3 << " colour values of the small thumbnail are not the mean of their block");
+    CHECK(wrong == 0);
 }

@@ -3296,9 +3296,13 @@ size_t ModelVolume::split(unsigned int max_extruders)
         else
             this->object->volumes.insert(this->object->volumes.begin() + (++ivolume), new ModelVolume(object, *this, std::move(mesh)));
 
-        this->object->volumes[ivolume]->set_offset(Vec3d::Zero());
-        this->object->volumes[ivolume]->center_geometry_after_creation();
-        this->object->volumes[ivolume]->translate(offset);
+        ModelVolume *piece = this->object->volumes[ivolume];
+        piece->set_offset(Vec3d::Zero());
+        piece->center_geometry_after_creation();
+        // center_geometry_after_creation() moved the piece's mesh by -shift in the part's own frame and the part by
+        // +shift in the object's, which only puts it back where it was with no rotation, scale or mirror of the
+        // part's own. Move it by the shift as the part's own transformation turns and sizes it.
+        piece->set_offset(offset + piece->get_matrix_no_offset() * piece->get_offset());
         this->object->volumes[ivolume]->name = name + "_" + std::to_string(idx + 1);
         //BBS: always set the extruder id the same as original
         this->object->volumes[ivolume]->config.set("extruder", this->extruder_id());
