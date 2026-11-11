@@ -209,6 +209,46 @@ TEST_CASE("An instance added from another's scale, rotation and mirror matches i
     CHECK(copy->get_matrix().linear().isApprox(original->get_matrix().linear(), 1e-9));
 }
 
+// ModelVolume::split dropped the pieces whose convex hull came out empty, but looked at every part of the
+// object, so splitting one part deleted any other part with an empty hull: a flat sheet, or a part of one
+// triangle. Only the pieces just made are looked at now.
+TEST_CASE("Splitting one part leaves a flat part of the same object in place", "[Model][Regression]")
+{
+    // A flat 10 x 10 mm sheet: its points all lie in one plane, so its 3D convex hull is empty.
+    indexed_triangle_set sheet;
+    sheet.vertices = { Vec3f(0.f, 0.f, 0.f), Vec3f(10.f, 0.f, 0.f), Vec3f(10.f, 10.f, 0.f), Vec3f(0.f, 10.f, 0.f) };
+    sheet.indices  = { Vec3i32(0, 1, 2), Vec3i32(0, 2, 3) };
+    // Two 4 mm cubes 10 mm apart, as one mesh.
+    indexed_triangle_set cubes = its_make_cube(4., 4., 4.);
+    indexed_triangle_set far   = its_make_cube(4., 4., 4.);
+    its_translate(far, Vec3f(10.f, 0.f, 0.f));
+    its_merge(cubes, far);
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    ModelVolume *flat   = object->add_volume(TriangleMesh(sheet), ModelVolumeType::PARAMETER_MODIFIER);
+    flat->name          = "sheet";
+    ModelVolume *part   = object->add_volume(TriangleMesh(cubes));
+    part->name          = "cubes";
+    object->add_instance();
+
+    const std::shared_ptr<const TriangleMesh> &flat_hull = flat->get_convex_hull_shared_ptr();
+    REQUIRE((flat_hull == nullptr || flat_hull->its.indices.empty()));
+    REQUIRE(object->volumes.size() == 2);
+
+    CHECK(part->split(1) == 2);
+
+    std::vector<std::string> names;
+    for (const ModelVolume *volume : object->volumes)
+        names.push_back(volume->name);
+    CAPTURE(names);
+    REQUIRE(object->volumes.size() == 3);
+    CHECK(object->volumes[0] == flat);
+    CHECK(object->volumes[0]->name == "sheet");
+    CHECK(object->volumes[1]->name == "cubes_1");
+    CHECK(object->volumes[2]->name == "cubes_2");
+}
+
 // Orca #16274 (OD2): raw_indexed_triangle_set() used to leave the triangles of every part after the first
 // pointing at the first part's vertices; the per-body octrees split this mesh into connected components.
 TEST_CASE("An object's raw mesh keeps the triangles of each part on its own vertices", "[Model]")

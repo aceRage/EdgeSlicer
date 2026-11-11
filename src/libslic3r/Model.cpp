@@ -3312,16 +3312,18 @@ size_t ModelVolume::split(unsigned int max_extruders)
         ++ idx;
     }
 
-    // discard volumes for which the convex hull was not generated or is degenerate
-    size_t i = 0;
-    while (i < this->object->volumes.size()) {
-        const std::shared_ptr<const TriangleMesh> &hull = this->object->volumes[i]->get_convex_hull_shared_ptr();
+    // Discard the pieces just made for which the convex hull was not generated or is degenerate. Only the pieces:
+    // the object's other parts are not this split's to delete (a flat part has an empty hull, and was deleted with
+    // the old loop over all volumes). The pieces are volumes [first_piece, ivolume]; go backwards so the indices
+    // stay valid, and keep the object, as this volume may be one of those deleted.
+    ModelObject *const owner       = this->object;
+    const size_t       first_piece = ivolume + 1 - idx;
+    for (size_t i = ivolume + 1; i-- > first_piece;) {
+        const std::shared_ptr<const TriangleMesh> &hull = owner->volumes[i]->get_convex_hull_shared_ptr();
         if (hull == nullptr || hull->its.vertices.empty() || hull->its.indices.empty()) {
-            this->object->delete_volume(i);
+            owner->delete_volume(i);
             --idx;
-            --i;
         }
-        ++i;
     }
 
     return idx;
