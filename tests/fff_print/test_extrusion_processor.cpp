@@ -568,3 +568,148 @@ TEST_CASE("Bridge infill keeps bridge speed with curled perimeter slowdown", "[E
     for (const double feed_rate : feed_rates)
         CHECK_THAT(feed_rate, Catch::Matchers::WithinAbs(45.0, 0.5));
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Errors the Rust port of the overhang passes turned up.
+
+namespace {
+
+// A comb's outline as previous-layer lines, clockwise like the layers above (the inside lies to the right of each
+// line): a bar from x = 1 to 11 and y = 1 to 5, with three teeth hanging down to y = -1 at x = 1..3, 5..7 and 9..11.
+// The line y = 0 from x = 0 to x = 10 crosses it five times, at x = 1, 3, 5, 7 and 9, and ends inside a tooth.
+AABBTreeLines::LinesDistancer<Linef> comb_outline()
+{
+    const std::vector<Vec2d> ccw{{1., -1.}, {3., -1.}, {3., 1.}, {5., 1.}, {5., -1.}, {7., -1.},
+                                 {7., 1.},  {9., 1.},  {9., -1.}, {11., -1.}, {11., 5.}, {1., 5.}};
+    std::vector<Linef> lines;
+    for (size_t i = ccw.size(); i > 0; --i)
+        lines.emplace_back(ccw[i % ccw.size()], ccw[i - 1]);
+    return AABBTreeLines::LinesDistancer<Linef>(std::move(lines));
+}
+
+} // namespace
+
+// estimate_points_properties held a reference to the last point of the vector it was filling while it pushed the
+// crossings of a line with the previous layer's outline onto it. The vector is reserved for one and a half points
+// per input point, so a two-point line that crosses the outline more than twice makes it grow, and every crossing
+// after that was filtered against the start of the line read from the freed buffer. Under the address sanitiser
+// this case stops with a heap-use-after-free on the sources before the fix.
+TEST_CASE("A line crossing the outline five times keeps every crossing", "[ExtrusionProcessor][Regression]")
+{
+    const AABBTreeLines::LinesDistancer<Linef> prev_layer = comb_outline();
+    const Points line{Point::new_scale(0., 0.), Point::new_scale(10., 0.)};
+
+    const std::vector<ExtendedPoint> points = estimate_points_properties<true, true, true, true>(line, prev_layer, caged_wall_width);
+
+    // Each crossing is added at the outline, where the reading is the boundary offset of half a line width.
+    std::vector<double> crossings;
+    for (const ExtendedPoint &point : points)
+        if (std::abs(point.position.y()) < EPSILON && std::abs(point.distance - 0.5 * caged_wall_width) < 1e-4)
+            crossings.push_back(point.position.x());
+    std::sort(crossings.begin(), crossings.end());
+
+    REQUIRE(crossings.size() == 5);
+    for (size_t i = 0; i < crossings.size(); ++i)
+        CHECK_THAT(crossings[i], Catch::Matchers::WithinAbs(1. + 2. * double(i), 1e-6));
+}
+
+// After an overhang the first move back at the wall's own speed was written at the speed the overhang table
+// rounds to whole mm/s (here 162 mm/s, F9720), and only the move after it at the wall's speed (F9744): the test
+// for "the speed changed by more than 1 mm/s" came before the test for "the speed is back within 1 mm/s of the
+// wall's". One F word more per overhang, and a move printed a little slow.
+TEST_CASE("The first move back at the wall speed after an overhang is written at that speed", "[ExtrusionProcessor][Regression]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    INFO("wall generator: " << wall_generator);
+
+    constexpr double wall_speed = 162.4; // mm/s, not a whole number: the overhang table rounds it to 162
+    Print        print;
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "caged_overhang.stl";
+    object->add_volume(caged_overhang_mesh());
+    object->add_instance();
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.apply(caged_overhang_config(wall_generator));
+    config.set_deserialize_strict({{"outer_wall_speed", wall_speed}});
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    const std::string gcode_out = gcode(print);
+
+    const std::vector<double> feed_rates =
+        outer_wall_feed_rates(gcode_out, [](const GCodeReader &, const GCodeReader::GCodeLine &) { return true; });
+    size_t at_wall_speed = 0, slowed = 0, rounded = 0;
+    for (const double f : feed_rates) {
+        if (std::abs(f - wall_speed * MM_PER_MIN) < 0.01)
+            ++at_wall_speed;
+        else if (std::abs(f - wall_speed * MM_PER_MIN) <= MM_PER_MIN)
+            ++rounded; // within 1 mm/s of the wall speed but not it
+        else if (f < wall_speed * MM_PER_MIN)
+            ++slowed;
+    }
+    INFO(feed_rates.size() << " outer wall moves: " << at_wall_speed << " at the wall speed, " << slowed << " slowed, "
+                           << rounded << " within 1 mm/s of the wall speed but not at it");
+    REQUIRE(at_wall_speed > 0);
+    REQUIRE(slowed > 0);
+    CHECK(rounded == 0);
+}
+
+// With "Thick bridges" off an overhang wall is laid with the bridge flow ratio applied to a wall's flow. The classic
+// walls had it; Arachne's lost it, being laid at their own width with the plain wall flow, so "Bridge flow ratio"
+// did nothing to an overhang wall with Arachne walls (the default).
+TEST_CASE("Arachne overhang walls are laid with the bridge flow ratio", "[ExtrusionProcessor][Regression]")
+{
+    const char *wall_generator = GENERATE("classic", "arachne");
+    const char *bridge_flow    = GENERATE("1", "0.8");
+    INFO("wall generator: " << wall_generator << ", bridge flow ratio " << bridge_flow);
+
+    // A 10 x 10 mm pillar 4 mm high carrying a 30 x 10 mm slab 2 mm thick, which runs 20 mm out over air.
+    indexed_triangle_set part = its_make_cube(10., 10., 4.);
+    indexed_triangle_set slab = its_make_cube(30., 10., 2.);
+    for (stl_vertex &v : slab.vertices)
+        v.z() += 4.f;
+    its_merge(part, slab);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"nozzle_diameter", "0.4"},
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"outer_wall_line_width", "0.45"},
+        {"inner_wall_line_width", "0.45"},
+        {"wall_loops", "2"},
+        {"wall_generator", wall_generator},
+        {"bridge_flow", bridge_flow},
+        {"thick_bridges", "0"},
+        {"enable_support", "0"},
+        {"use_relative_e_distances", "1"},
+    });
+    const std::string gcode_out = Slic3r::Test::slice({TriangleMesh(part)}, config);
+
+    // Filament per mm of the outer and the overhang walls of the slab's first layer.
+    double outer_e = 0., outer_length = 0., overhang_e = 0., overhang_length = 0.;
+    std::string type;
+    GCodeReader parser;
+    parser.parse_buffer(gcode_out, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        const std::string_view comment = line.comment();
+        if (comment.find("FEATURE:") != std::string_view::npos || comment.find("TYPE:") != std::string_view::npos)
+            type = std::string(comment);
+        if (line.extruding(self) && std::abs(self.z() - 4.2) < 0.01 && line.dist_XY(self) > 0.5) {
+            if (type.find("Overhang wall") != std::string::npos) {
+                overhang_e += line.dist_E(self);
+                overhang_length += line.dist_XY(self);
+            } else if (type.find("Outer wall") != std::string::npos) {
+                outer_e += line.dist_E(self);
+                outer_length += line.dist_XY(self);
+            }
+        }
+    });
+    INFO("outer wall " << outer_length << " mm, overhang wall " << overhang_length << " mm");
+    REQUIRE(outer_length > 10.);
+    REQUIRE(overhang_length > 40.);
+    // The ratio applies to the cross section, the walls being as wide as each other here.
+    CHECK_THAT((overhang_e / overhang_length) / (outer_e / outer_length), Catch::Matchers::WithinRel(std::stod(bridge_flow), 0.01));
+}

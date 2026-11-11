@@ -12319,16 +12319,19 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 }
             } // ORCA: End of adaptive PA code segment
 
-            // Ignore small speed variations - emit speed change if the delta between current and new is greater than 60mm/min / 1mm/sec
-            // Reset speed to F if delta to F is less than 1mm/sec
-            if ((std::abs(last_set_speed - new_speed) > 60)) {
+            // Reset speed to F if delta to F is less than 1mm/sec. Otherwise ignore small speed variations - emit speed change
+            // if the delta between current and new is greater than 60mm/min / 1mm/sec.
+            // Edge: F first. new_speed is rounded to whole mm/s by the overhang speed table, so the first move back
+            // at the wall's own speed after an overhang was written at the rounded speed (it differs from the
+            // slowed speed by more than 1mm/sec) and only the move after it at F.
+            if ((std::abs(F - new_speed) <= 60)) {
+                m_writer.set_speed(gcode, F, "", comment);
+                last_set_speed = F;
+                zaa_speed_h_ref = 0.;
+            } else if ((std::abs(last_set_speed - new_speed) > 60)) {
                 m_writer.set_speed(gcode, new_speed, "", comment);
                 last_set_speed = new_speed;
                 // ZAA: the base feed rate just changed, so any scaled F in force is stale.
-                zaa_speed_h_ref = 0.;
-            } else if ((std::abs(F - new_speed) <= 60)) {
-                m_writer.set_speed(gcode, F, "", comment);
-                last_set_speed = F;
                 zaa_speed_h_ref = 0.;
             }
             auto dE = e_per_mm * line_length;
