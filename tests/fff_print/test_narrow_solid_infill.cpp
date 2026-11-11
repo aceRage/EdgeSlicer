@@ -304,3 +304,94 @@ const char* const BOTTOM_SURFACE = "Bottom surface";
 
 } // namespace
 
+// ---- which lines are taken out --------------------------------------------------------------------------------------
+
+// A short line with nothing after it goes unless the run of short lines it ends began beside a long line. Where a run
+// began is noted on the line the run begins with and handed on along the run, but it was read off the lines of the
+// section before the line asked about. The line a run begins with was so never asked what was noted of it: the lines
+// before it are the long ones, of which nothing is noted.
+TEST_CASE("A short line that ends the lines beside a long one stays a line", "[NarrowSolidInfill]")
+{
+    // Two long lines and then one of 3 mm: a line that is the last against a round wall.
+    CHECK(kept({{stroke(0, 0., 10.)}, {stroke(1, 0., 10.)}, {stroke(2, 3., 6.)}}) == std::vector<size_t>{1, 1, 1});
+    // The same the other way round: the short line first. This was kept before too.
+    CHECK(kept({{stroke(0, 3., 6.)}, {stroke(1, 0., 10.)}, {stroke(2, 0., 10.)}}) == std::vector<size_t>{1, 1, 1});
+    // And between two long ones.
+    CHECK(kept({{stroke(0, 0., 10.)}, {stroke(1, 3., 6.)}, {stroke(2, 0., 10.)}}) == std::vector<size_t>{1, 1, 1});
+}
+
+TEST_CASE("Of short lines running out after a long one only the one beside it stays", "[NarrowSolidInfill]")
+{
+    // The lines of a corner: 10 mm, then 3.5, 2.5, 1.5 and 0.5 mm. The second short line stayed as well, on what the
+    // first had been told when a run began with it.
+    CHECK(kept({{stroke(0, 0., 10.)}, {stroke(1, 3., 6.5)}, {stroke(2, 3.5, 6.)}, {stroke(3, 4., 5.5)}, {stroke(4, 4.5, 5.)}}) ==
+          std::vector<size_t>{1, 1, 0, 0, 0});
+    // Short lines with no long line anywhere all go, as before.
+    CHECK(kept({{stroke(0, 3., 6.)}, {stroke(1, 3., 6.)}, {stroke(2, 3., 6.)}}) == std::vector<size_t>{0, 0, 0});
+    // And long lines all stay.
+    CHECK(kept({{stroke(0, 0., 10.)}, {stroke(1, 0., 10.)}}) == std::vector<size_t>{1, 1});
+}
+
+// ---- sliced parts ---------------------------------------------------------------------------------------------------
+
+// The lines across a round disc end against its wall in one line shorter than the rest. Where that line came out
+// under 4 mm it was taken from the lines and laid by itself as a narrow area, a pass of 3 to 4 mm against the wall.
+TEST_CASE("A round disc has no narrow area in its solid infill", "[NarrowSolidInfill]")
+{
+    const DynamicPrintConfig config             = narrow_config("rectilinear");
+    size_t                   layers_with_narrow = 0, layers = 0;
+    for (double radius = 8.; radius < 14.01; radius += 0.5) {
+        Print print;
+        Slic3r::Test::init_and_process_print({make_cylinder(radius, 2.)}, print, config);
+        std::map<size_t, size_t> lines, narrow;
+        for (const SolidArea& area : solid_areas(print))
+            if (area.layer == 1 || area.layer == 2 || area.layer == 8)
+                ++(area.narrow ? narrow : lines)[area.layer];
+        INFO("radius " << radius << " mm");
+        // All three layers have lines.
+        CHECK(lines.size() == 3);
+        CHECK(narrow.empty());
+        layers += lines.size();
+        layers_with_narrow += narrow.size();
+    }
+    INFO(layers_with_narrow << " of " << layers << " solid layers have a narrow area");
+    CHECK(layers_with_narrow == 0);
+}
+
+// Over a cube the lines run out into two corners. In the corner the filter comes to last the short lines after the
+// last long one are a run that began beside it: the first of them stays a line and the rest is the narrow area.
+TEST_CASE("The short lines after the first in the corner a cube's lines end in are a narrow area", "[NarrowSolidInfill]")
+{
+    Print print;
+    Slic3r::Test::init_and_process_print({make_cube(20., 20., 2.)}, print, narrow_config("rectilinear"));
+    size_t layers = 0;
+    for (size_t layer : {size_t(1), size_t(2), size_t(8)}) {
+        std::vector<const SolidArea*> lines, narrow;
+        const std::vector<SolidArea>  areas = solid_areas(print);
+        for (const SolidArea& area : areas)
+            if (area.layer == layer)
+                (area.narrow ? narrow : lines).push_back(&area);
+        INFO("layer " << layer);
+        REQUIRE(lines.size() == 1);
+        REQUIRE(narrow.size() == 1);
+        // The lines as they are laid, from one corner to the other: the short ones before the first long one and
+        // after the last.
+        const std::vector<double> strokes = diagonal_strokes(*lines.front());
+        REQUIRE(strokes.size() > 20);
+        size_t at_start = 0, at_end = 0;
+        while (at_start < strokes.size() && strokes[at_start] < 4.)
+            ++at_start;
+        while (at_end < strokes.size() && strokes[strokes.size() - 1 - at_end] < 4.)
+            ++at_end;
+        INFO("short lines at one end " << at_start << ", at the other " << at_end << "; narrow area " << narrow.front()->length()
+                                       << " mm in " << narrow.front()->paths.size() << " paths");
+        // One corner keeps its short lines, which lead into the long ones. In the other one of the filter's lines
+        // is left, which the pattern, laying its own lines half a spacing from where the filter counted them, fills
+        // with two (three were left where the filter kept two).
+        CHECK(std::min(at_start, at_end) == 2);
+        CHECK(std::max(at_start, at_end) >= 3);
+        ++layers;
+    }
+    CHECK(layers == 3);
+}
+

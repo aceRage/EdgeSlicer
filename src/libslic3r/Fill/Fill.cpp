@@ -492,17 +492,10 @@ struct LineNode
     State                  state;
 
     // Return true if some initial line is touching some long line and this information was propagated into the current line.
-    bool is_initial_line_touching_long_lines() const {
-        if (prev_section_overlapping_lines.empty())
-            return false;
-
-        for (LineNode *line_node : prev_section_overlapping_lines) {
-            if (line_node->state.initial_touches_long_lines)
-                return true;
-        }
-
-        return false;
-    }
+    // This is what the line itself was last told: by the run that reached it, or of itself where a run began with it.
+    // It used to be read off the lines of the previous section instead, so the line a run begins with was never asked:
+    // a lone short line beside a long one was removed, and of short lines running out into a corner two stayed.
+    bool is_initial_line_touching_long_lines() const { return state.initial_touches_long_lines; }
 
     // Return true if the current line overlaps with some long line in the previous section.
     bool is_touching_long_lines_in_previous_layer() const {
